@@ -34,12 +34,12 @@ pub(crate) const FSCTL_QUERY_USN_JOURNAL: u32 = ctl_code(
     METHOD_BUFFERED,
     FILE_ANY_ACCESS,
 );
-pub(crate) const FSCTL_CREATE_USN_JOURNAL: u32 = ctl_code(
-    FILE_DEVICE_FILE_SYSTEM,
-    57,
-    METHOD_BUFFERED,
-    FILE_ANY_ACCESS,
-);
+/// `METHOD_NEITHER`, like the other journal controls. It was `METHOD_BUFFERED`
+/// for months: NTFS does not recognise that code at all and answers
+/// `STATUS_INVALID_DEVICE_REQUEST` (Win32 error 1), so every journal create
+/// and grow silently failed. The unit test pins the header value.
+pub(crate) const FSCTL_CREATE_USN_JOURNAL: u32 =
+    ctl_code(FILE_DEVICE_FILE_SYSTEM, 57, METHOD_NEITHER, FILE_ANY_ACCESS);
 pub(crate) const FSCTL_READ_USN_JOURNAL: u32 =
     ctl_code(FILE_DEVICE_FILE_SYSTEM, 46, METHOD_NEITHER, FILE_ANY_ACCESS);
 pub(crate) const FSCTL_QUERY_FILE_LAYOUT: u32 = ctl_code(
@@ -225,7 +225,7 @@ mod tests {
         // Well-known winioctl.h values (verified against the SDK header).
         assert_eq!(FSCTL_ENUM_USN_DATA, 0x0009_00B3);
         assert_eq!(FSCTL_QUERY_USN_JOURNAL, 0x0009_00F4);
-        assert_eq!(FSCTL_CREATE_USN_JOURNAL, 0x0009_00E4);
+        assert_eq!(FSCTL_CREATE_USN_JOURNAL, 0x0009_00E7);
         assert_eq!(FSCTL_READ_USN_JOURNAL, 0x0009_00BB);
         assert_eq!(FSCTL_QUERY_FILE_LAYOUT, 0x0009_0277);
     }
