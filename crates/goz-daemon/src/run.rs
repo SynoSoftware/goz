@@ -120,13 +120,14 @@ pub(crate) fn build_engine() -> Result<Engine> {
     // budget. It takes ownership of the tails; teardown goes through it.
     let supervisor = Supervisor::spawn(tails);
 
-    // Purge THIS thread's allocator heap before handing off. The bootstrap
-    // transients (sparse FRN maps swapped for dense, enumeration buffers,
-    // pre-shrink slack) were freed on this thread, and mimalloc heaps are
-    // per-thread: the post-publish purge in `settle_working_set` runs on a
-    // DIFFERENT thread (the SCM thread in service mode) and cannot reach
-    // them, which left ~100 MB of dead bootstrap memory committed for the
-    // daemon's lifetime.
+    // Purge THIS thread's allocator heap before handing off. The sparse FRN
+    // maps swapped for dense and the pre-shrink slack were freed on this
+    // thread by `optimize_storage`, and mimalloc heaps are per-thread: the
+    // post-publish purge in `settle_working_set` runs on a DIFFERENT thread
+    // (the SCM thread in service mode) and cannot reach them, which left
+    // ~100 MB of dead bootstrap memory committed for the daemon's lifetime.
+    // (The enumeration buffers were freed on the per-volume bootstrap
+    // threads, whose heaps `abandoned_page_purge` returns at thread exit.)
     // SAFETY: mi_collect takes no pointers and is safe from any thread.
     unsafe { libmimalloc_sys::mi_collect(true) };
 
