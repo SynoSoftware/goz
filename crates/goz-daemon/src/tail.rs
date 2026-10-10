@@ -661,7 +661,7 @@ fn rescan(
     // recreated DURING the rebuild invalidates this cursor, the first read
     // from it fails, and the ordinary error arms trigger another rescan. A
     // stale cursor is loud, a late cursor is silent.
-    let cursor = bootstrap::ensure_journal(handle);
+    let cursor = bootstrap::ensure_journal(handle, &state.guid);
 
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full MFT scan.

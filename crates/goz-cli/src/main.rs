@@ -298,6 +298,12 @@ mod win {
                             ""
                         }
                     );
+                    // The journal's size is the replay horizon: everything
+                    // older than what it holds costs a full rescan on restart.
+                    if let Some(bytes) = v.journal_max_bytes {
+                        let _ =
+                            writeln!(out, "           journal max {} MiB", bytes / (1024 * 1024));
+                    }
                     // Drift counters, shown only when non-zero. These are the
                     // only outward sign that the index and the volume have
                     // diverged, so reporting them nowhere made a drifting index

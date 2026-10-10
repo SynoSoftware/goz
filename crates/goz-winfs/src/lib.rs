@@ -50,7 +50,7 @@ pub use working_set::{SelfMemory, pin_working_set, self_memory, trim_working_set
 pub use elevation::{enable_volume_privileges, is_elevated};
 
 #[cfg(windows)]
-pub use volume::{VolumeHandle, VolumeInfo, enumerate_volumes, open_volume};
+pub use volume::{VolumeHandle, VolumeInfo, enumerate_volumes, open_volume, volume_total_bytes};
 
 #[cfg(windows)]
 pub use journal::{

@@ -28,6 +28,11 @@ pub(crate) struct VolumeState {
     pub phase: RwLock<VolumePhase>,
     /// Whether size/date enrichment finished (else `-size`/`-dm` are unknown).
     pub metadata_pending: RwLock<bool>,
+    /// Maximum size of the volume's USN journal at bootstrap, `None` without a
+    /// journal. Surfaced by `--status` because the journal's size bounds how
+    /// long a downtime can be replayed instead of rescanned, and a journal that
+    /// could not be grown was invisible for months when only the log knew.
+    pub journal_max_bytes: Option<u64>,
     /// Memoized `-path` scope resolution (case-insensitive queries only).
     pub scope_cache: Mutex<Option<ScopeCache>>,
 }

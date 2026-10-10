@@ -54,6 +54,7 @@ pub(crate) fn build_engine() -> Result<Engine> {
             )),
             phase: RwLock::new(VolumePhase::Failed { reason: fv.reason }),
             metadata_pending: RwLock::new(false),
+            journal_max_bytes: None,
             scope_cache: parking_lot::Mutex::new(None),
         }));
     }
@@ -70,6 +71,7 @@ pub(crate) fn build_engine() -> Result<Engine> {
             phase: RwLock::new(VolumePhase::Live),
             // Bootstrap enriches synchronously, so metadata is present now.
             metadata_pending: RwLock::new(false),
+            journal_max_bytes: bv.cursor.map(|c| c.maximum_size),
             scope_cache: parking_lot::Mutex::new(None),
         });
 
@@ -104,9 +106,11 @@ pub(crate) fn build_engine() -> Result<Engine> {
                 );
                 // Snapshot, not Offline: nothing is wrong and nothing will
                 // change. Reporting Offline here made `volumes_incomplete` true
-                // forever, so every query on a machine with a recovery partition
-                // (i.e. nearly every Windows machine) printed "results may be
-                // incomplete" for a volume that was fully indexed.
+                // forever, so every query printed "results may be incomplete"
+                // for a volume that was fully indexed. (Recovery partitions
+                // used to land here on every machine; that was a broken
+                // `FSCTL_CREATE_USN_JOURNAL` code, not the filesystem
+                // refusing, and they now get a journal like any other volume.)
                 *state.phase.write() = VolumePhase::Snapshot;
                 // `bv.handle` drops here (CloseHandle); no tail for this volume.
             }

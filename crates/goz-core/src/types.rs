@@ -101,9 +101,9 @@ pub enum VolumePhase {
     Live,
     Rescanning,
     /// Fully indexed from the MFT, but the volume has no USN journal and cannot
-    /// be given one, so the index is a bootstrap snapshot that will never see a
-    /// change. Windows recovery partitions are the common case: the filesystem
-    /// refuses `FSCTL_CREATE_USN_JOURNAL` outright.
+    /// be given one (`FSCTL_CREATE_USN_JOURNAL` failed), so the index is a
+    /// bootstrap snapshot that will never see a change. Rare in practice: even
+    /// recovery partitions accept a journal.
     ///
     /// Distinct from [`VolumePhase::Offline`] because nothing is wrong and
     /// nothing will change. See [`VolumePhase::is_complete`].

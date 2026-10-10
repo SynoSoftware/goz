@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE, FindFirstVolumeW,
-    FindNextVolumeW, FindVolumeClose, GetDriveTypeW, GetVolumeInformationW,
+    FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
     GetVolumePathNamesForVolumeNameW, OPEN_EXISTING,
 };
 
@@ -218,6 +218,22 @@ pub fn open_volume(guid_path: &str) -> Result<VolumeHandle, WinError> {
         return Err(last_error("CreateFileW (open_volume)"));
     }
     Ok(VolumeHandle(handle))
+}
+
+/// Total size of the volume in bytes (`GetDiskFreeSpaceExW` on its GUID path,
+/// which works for letterless volumes too). Used to size the USN journal in
+/// proportion to the volume.
+pub fn volume_total_bytes(guid_path: &str) -> Result<u64, WinError> {
+    let wide = to_wide_nul(guid_path);
+    let mut total: u64 = 0;
+    // SAFETY: `wide` is a NUL-terminated root path; the two unused out-params
+    // are null, which the API permits, and `total` outlives the call.
+    let ok =
+        unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), ptr::null_mut(), &mut total, ptr::null_mut()) };
+    if ok == 0 {
+        return Err(last_error("GetDiskFreeSpaceExW"));
+    }
+    Ok(total)
 }
 
 #[cfg(test)]

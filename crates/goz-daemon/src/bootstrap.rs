@@ -15,12 +15,17 @@ use goz_core::layout::{RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer};
 use goz_core::usn::walk_enum_buffer;
 use goz_winfs::{
     JournalInfo, JournalQuery, VolumeHandle, VolumeInfo, create_usn_journal, enum_usn_data,
-    enumerate_volumes, query_file_layout, query_usn_journal,
+    enumerate_volumes, query_file_layout, query_usn_journal, volume_total_bytes,
 };
 
-/// 64 MiB minimum journal: large enough that routine churn does not wrap it
-/// before we finish bootstrapping (the plan's `journal_min_size`).
+/// Floor for the USN journal: large enough that routine churn does not wrap it
+/// before we finish bootstrapping. [`journal_target_bytes`] may ask for more.
 const JOURNAL_MIN_SIZE: u64 = 64 * 1024 * 1024;
+/// Ceiling for [`journal_target_bytes`]: past 1 GiB the horizon is weeks and
+/// the space stops being free.
+const JOURNAL_MAX_SIZE: u64 = 1024 * 1024 * 1024;
+/// 8 MiB trimmed from the front when the journal is full. Kept small on
+/// purpose: NTFS trims slowly, and a large delta stalls the writer.
 const JOURNAL_ALLOC_DELTA: u64 = 8 * 1024 * 1024;
 /// 1 MiB ioctl buffer: ~100 ENUM round-trips per million files.
 const IO_BUFFER_BYTES: usize = 1024 * 1024;
@@ -156,7 +161,7 @@ fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
 
     // The journal is only needed for the live tail; a one-shot scan reads the
     // MFT directly, so an unavailable journal is not fatal here.
-    let cursor = ensure_journal(&handle);
+    let cursor = ensure_journal(&handle, &vol.guid_path);
     // First-time bootstrap passes no stop flag, so the rebuild can never abort.
     let (index, enum_secs, layout_secs) =
         build_index(&handle, None)?.expect("build_index cannot abort without a stop flag");
@@ -245,32 +250,91 @@ pub(crate) fn build_index(
     Ok(Some((index, enum_secs, layout_secs)))
 }
 
+/// How large the USN journal on a volume should be, given the volume's total
+/// size (`None` when it could not be read).
+///
+/// The journal is the only thing that lets a restart replay instead of
+/// rescan, so its size sets the longest downtime goz can recover from without
+/// a full MFT scan. Measured on a busy development C: (2 TB, ~4M entries):
+/// about 4.5 MB of journal per hour, so Windows' default 32 MB holds roughly
+/// nine hours and a cursor saved at night is purged by morning. The cost is
+/// disk: the journal never shrinks, and its maximum is real space once the
+/// volume has churned that much. Every other journal consumer (Windows Search,
+/// backup tools) shares it and is only helped by a larger one.
+///
+/// Policy: 1/4096 of the volume, clamped to [[`JOURNAL_MIN_SIZE`], 1 GiB].
+/// A 256 GB laptop disk gets 64 MiB, a 2 TB disk 512 MiB (about four days of
+/// the churn above), anything from 4 TB up the 1 GiB cap. Everything leaves
+/// the system's 32 MB in place and makes the user find the setting; its author
+/// runs 128 MiB himself and suggests 256 MiB to 1 GiB for large busy volumes,
+/// so this automates what he does by hand. `FSCTL_CREATE_USN_JOURNAL` treats a
+/// value below the current maximum as a no-op, so no clamp against it is
+/// needed.
+fn journal_target_bytes(volume_bytes: Option<u64>) -> u64 {
+    volume_bytes
+        .map_or(JOURNAL_MIN_SIZE, |bytes| bytes / 4096)
+        .clamp(JOURNAL_MIN_SIZE, JOURNAL_MAX_SIZE)
+}
+
 /// Returns the volume's USN journal info if one is usable, else `None`.
 ///
 /// Never fatal: a one-shot scan reads the MFT directly and does not need the
-/// journal. An active journal is used as-is (and grown to
-/// [`JOURNAL_MIN_SIZE`] on a best-effort basis: a read-only handle cannot
-/// modify it, and a smaller journal only wraps sooner). An absent journal is
-/// created on the spot on a best-effort basis and used if creation succeeds; if
-/// it cannot be created, or a deletion is in progress, this yields `None`
-/// (usually with a note) and live updates are unavailable.
-pub(crate) fn ensure_journal(handle: &VolumeHandle) -> Option<JournalInfo> {
+/// journal. An active journal smaller than [`journal_target_bytes`] is grown
+/// in place; a failure to grow is an error (not a warning: it went unread as a
+/// warning for months while every restart fell back to a full scan) but the
+/// journal is still used at its current size. An absent journal is created on
+/// the spot and used if creation succeeds; if it cannot be created, or a
+/// deletion is in progress, this yields `None` (usually with a note) and live
+/// updates are unavailable.
+pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> Option<JournalInfo> {
+    let target = journal_target_bytes(volume_total_bytes(guid_path).ok());
     match query_usn_journal(handle) {
         Ok(JournalQuery::Active(info)) => {
-            if info.maximum_size < JOURNAL_MIN_SIZE
-                && let Err(e) = create_usn_journal(handle, JOURNAL_MIN_SIZE, JOURNAL_ALLOC_DELTA)
-            {
-                tracing::warn!(
-                    error = %e,
-                    wanted_mib = JOURNAL_MIN_SIZE / (1024 * 1024),
-                    actual_mib = info.maximum_size / (1024 * 1024),
-                    "could not grow the USN journal; a smaller journal wraps sooner"
-                );
+            if info.maximum_size >= target {
+                return Some(info);
             }
-            Some(info)
+            let wanted_mib = target / (1024 * 1024);
+            let actual_mib = info.maximum_size / (1024 * 1024);
+            if let Err(e) = create_usn_journal(handle, target, JOURNAL_ALLOC_DELTA) {
+                tracing::error!(
+                    error = %e,
+                    wanted_mib,
+                    actual_mib,
+                    "could not grow the USN journal; at this size a restart after more than a few hours of changes must rescan the whole volume"
+                );
+                return Some(info);
+            }
+            // Growing keeps the journal ID and every record, so the pre-grow
+            // cursor stays valid; re-query only so the reported size is the
+            // new one, and keep the old info if the re-query misbehaves.
+            match query_usn_journal(handle) {
+                Ok(JournalQuery::Active(grown)) => {
+                    let to_mib = grown.maximum_size / (1024 * 1024);
+                    if grown.maximum_size > info.maximum_size {
+                        tracing::info!(from_mib = actual_mib, to_mib, "grew the USN journal");
+                    } else {
+                        // NTFS accepted the call but kept its own ceiling: a
+                        // tiny volume (recovery partitions sit at 1 MiB) or
+                        // a size that only applies at the next trim.
+                        tracing::debug!(
+                            wanted_mib,
+                            actual_mib,
+                            "USN journal size unchanged; the filesystem capped it"
+                        );
+                    }
+                    Some(grown)
+                }
+                other => {
+                    tracing::error!(
+                        state = ?other,
+                        "journal state changed right after growing it; keeping the earlier cursor"
+                    );
+                    Some(info)
+                }
+            }
         }
         Ok(JournalQuery::NotActive) => {
-            match create_usn_journal(handle, JOURNAL_MIN_SIZE, JOURNAL_ALLOC_DELTA) {
+            match create_usn_journal(handle, target, JOURNAL_ALLOC_DELTA) {
                 Ok(()) => match query_usn_journal(handle) {
                     Ok(JournalQuery::Active(info)) => Some(info),
                     // We just created a journal and it is not active. Rare, but
@@ -309,5 +373,23 @@ pub(crate) fn ensure_journal(handle: &VolumeHandle) -> Option<JournalInfo> {
             tracing::warn!(error = %e, "could not query the USN journal; live updates unavailable");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn journal_target_scales_with_the_volume_between_the_clamps() {
+        assert_eq!(journal_target_bytes(None), JOURNAL_MIN_SIZE);
+        assert_eq!(journal_target_bytes(Some(0)), JOURNAL_MIN_SIZE);
+        assert_eq!(journal_target_bytes(Some(256 * GIB)), 64 * MIB);
+        assert_eq!(journal_target_bytes(Some(2048 * GIB)), 512 * MIB);
+        assert_eq!(journal_target_bytes(Some(4096 * GIB)), GIB);
+        assert_eq!(journal_target_bytes(Some(16 * 1024 * GIB)), GIB);
     }
 }
