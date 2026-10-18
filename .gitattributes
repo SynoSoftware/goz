@@ -2,3 +2,5 @@
 # any OS is consistent and diffs never churn on CRLF/LF alone. Git still checks
 # out with native endings on Windows working copies.
 * text=auto eol=lf
+# cmd.exe misreads batch files without CRLF line endings.
+*.cmd text eol=crlf
