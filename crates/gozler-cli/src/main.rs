@@ -80,6 +80,7 @@ mod win {
     use super::client::Client;
     use super::failure::{Failure, output};
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
+    use gozler_core::output::table::grouped;
     use gozler_core::output::{TableWriter, filetime_to_unix_ms};
     use gozler_core::proto::{DaemonStatus, QueryResults, VolumeStatus};
     use gozler_core::query::QueryStart;
@@ -333,74 +334,127 @@ mod win {
         warnings
     }
 
-    /// Writes the `--status` report.
+    /// Writes the `--status` report: whether every volume is ready first, then
+    /// each volume with its details under labels.
     fn write_status(s: &DaemonStatus, out: &mut impl Write) -> std::io::Result<()> {
-        writeln!(out, "gozlerd status: {} volume(s)", s.volumes.len())?;
-        for v in &s.volumes {
-            let mount = v.mounted().display_prefix();
-            writeln!(
-                out,
-                "  {mount:<8} {:>12} entries  phase={}{}",
-                v.entries,
-                v.phase, // user-facing Display, not Debug
-                if v.metadata_pending {
-                    "  (some sizes and dates unknown)"
-                } else {
-                    ""
-                }
-            )?;
-            // The journal's size is the replay horizon: everything
-            // older than what it holds costs a full rescan on restart.
-            if let Some(bytes) = v.journal_max_bytes {
-                writeln!(out, "           journal max {} MiB", bytes / (1024 * 1024))?;
-            }
-            // Drift counters, shown only when non-zero. These are the
-            // only outward sign that the index and the volume have
-            // diverged, so reporting them nowhere made a drifting index
-            // indistinguishable from a healthy one.
-            if v.link_reconciles_dropped > 0 {
-                writeln!(
-                    out,
-                    "           {} hard-link change(s) not reconciled: some names may be stale",
-                    v.link_reconciles_dropped
-                )?;
-            }
-            if v.stale_slots > 0 || v.delete_of_unknown > 0 || v.placeholders_created > 0 {
-                writeln!(
-                    out,
-                    "           drift: {} stale slot(s), {} unknown delete(s), {} placeholder(s)",
-                    v.stale_slots, v.delete_of_unknown, v.placeholders_created
-                )?;
-            }
-            // Index memory, component by component. `alloc` differing
-            // from `used` is capacity slack held by that component.
-            if let Some(m) = &v.memory {
-                let mb = |p: &gozler_core::proto::MemPair| {
-                    format!("{:.1}/{:.1}", p.used as f64 / 1e6, p.alloc as f64 / 1e6)
-                };
-                writeln!(
-                    out,
-                    "           mem MB used/alloc: total {}  entries {}  names {}  folded {}  frn[{}] {}  ntables {}  dirs {}",
-                    mb(&m.total()),
-                    mb(&m.entries),
-                    mb(&m.arena_raw),
-                    mb(&m.arena_folded),
-                    m.frn_map_kind,
-                    mb(&m.frn_map),
-                    mb(&m.name_tables),
-                    mb(&m.dir_children),
-                )?;
-            }
-        }
+        let ready = s.volumes.iter().filter(|v| v.phase.is_complete()).count();
+        let entries: u64 = s.volumes.iter().map(|v| v.entries).sum();
+        writeln!(
+            out,
+            "gozlerd: {ready} of {} ready, {}",
+            plural(s.volumes.len() as u64, "volume", "volumes"),
+            plural(entries, "entry", "entries"),
+        )?;
         if s.process_private_bytes > 0 {
             writeln!(
                 out,
-                "  daemon: {:.1} MB private, {:.1} MB working set",
-                s.process_private_bytes as f64 / 1e6,
-                s.process_working_set as f64 / 1e6,
+                "Memory: {} private, {} working set",
+                bytes(s.process_private_bytes),
+                bytes(s.process_working_set),
             )?;
         }
+        for v in &s.volumes {
+            writeln!(
+                out,
+                "\n{}  {}, {}",
+                v.mounted().display_prefix(),
+                v.phase,
+                plural(v.entries, "entry", "entries"),
+            )?;
+            if v.metadata_pending {
+                detail(
+                    out,
+                    "Sizes, dates",
+                    "some unknown: the size and date pass did not finish",
+                )?;
+            }
+            // The journal's size is the replay horizon: everything older
+            // than what it holds costs a full rescan on restart.
+            if let Some(max) = v.journal_max_bytes {
+                detail(out, "Journal", &format!("{} MiB", max / (1024 * 1024)))?;
+            }
+            // `allocated` above `used` is capacity slack.
+            if let Some(m) = &v.memory {
+                let total = m.total();
+                detail(
+                    out,
+                    "Index memory",
+                    &format!("{} of {} allocated", bytes(total.used), bytes(total.alloc)),
+                )?;
+                if total.used > 0 {
+                    let part = |name: &str, p: &gozler_core::proto::MemPair| {
+                        format!("{name} {}", bytes(p.used))
+                    };
+                    detail(
+                        out,
+                        "",
+                        &format!(
+                            "{}, {}, {}",
+                            part("entries", &m.entries),
+                            part("names", &m.arena_raw),
+                            part("folded names", &m.arena_folded)
+                        ),
+                    )?;
+                    detail(
+                        out,
+                        "",
+                        &format!(
+                            "{} ({}), {}, {}",
+                            part("file IDs", &m.frn_map),
+                            m.frn_map_kind,
+                            part("name tables", &m.name_tables),
+                            part("folders", &m.dir_children)
+                        ),
+                    )?;
+                }
+            }
+            // The drift counters are the only outward sign that the index and
+            // the volume have diverged, so each shows whenever it is not zero.
+            if v.link_reconciles_dropped > 0 {
+                detail(
+                    out,
+                    "Hard links",
+                    &format!(
+                        "{} not reconciled; some names may be stale",
+                        plural(v.link_reconciles_dropped, "change", "changes")
+                    ),
+                )?;
+            }
+            let drift: Vec<String> = [
+                (v.stale_slots, "stale slot", "stale slots"),
+                (v.delete_of_unknown, "unknown delete", "unknown deletes"),
+                (v.placeholders_created, "placeholder", "placeholders"),
+            ]
+            .into_iter()
+            .filter(|&(n, _, _)| n > 0)
+            .map(|(n, one, many)| plural(n, one, many))
+            .collect();
+            if !drift.is_empty() {
+                detail(out, "Drift", &drift.join(", "))?;
+            }
+        }
         Ok(())
+    }
+
+    /// One labelled line under a volume in the `--status` report.
+    fn detail(out: &mut impl Write, label: &str, value: &str) -> std::io::Result<()> {
+        writeln!(out, "  {label:<14}{value}")
+    }
+
+    /// `n` and its noun, with thousands grouped: `1 entry`, `2,004,613 entries`.
+    fn plural(n: u64, one: &str, many: &str) -> String {
+        format!("{} {}", grouped(n), if n == 1 { one } else { many })
+    }
+
+    /// A byte count in the largest decimal unit that keeps it at least 1:
+    /// `950 B`, `4.2 KB`, `192.0 MB`, `1.3 GB`.
+    fn bytes(n: u64) -> String {
+        match n {
+            0..1_000 => format!("{n} B"),
+            1_000..1_000_000 => format!("{:.1} KB", n as f64 / 1e3),
+            1_000_000..1_000_000_000 => format!("{:.1} MB", n as f64 / 1e6),
+            _ => format!("{:.1} GB", n as f64 / 1e9),
+        }
     }
 
     #[cfg(test)]

@@ -244,7 +244,7 @@ fn write_quoted(field: &str, out: &mut Vec<u8>) {
 }
 
 /// `n` with a comma between each group of three digits, as `1,234,567`.
-pub(crate) fn grouped(n: u64) -> String {
+pub fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, digit) in digits.chars().enumerate() {
