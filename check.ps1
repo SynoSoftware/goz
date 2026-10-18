@@ -1,0 +1,60 @@
+#Requires -Version 7
+# Runs the Windows half of CI's test job, cheapest check first, and stops at
+# the first failing step. Cargo runs at below-normal priority, which every
+# rustc and linker process inherits, so a build does not slow interactive work
+# on the machine. Warnings are denied through clippy and RUSTDOCFLAGS, not
+# RUSTFLAGS, because a RUSTFLAGS change rebuilds every dependency and drops the
+# static CRT link set in .cargo/config.toml.
+# Every mode builds with --workspace, because a narrower -p resolves dependency
+# features differently and rebuilds much of the dependency graph.
+param(
+    # Runs only the tests whose names contain this filter, to recheck a fix.
+    [string] $Test,
+    # Runs only the criterion benchmarks whose names match this filter, such as
+    # query_2M. --bench '*' selects the bench targets alone; plain cargo bench
+    # would also build every library under the fat-LTO bench profile.
+    [string] $Bench
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Invoke-Cargo {
+    Write-Host "cargo $args"
+    & cargo @args
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
+$process = Get-Process -Id $PID
+$priority = $process.PriorityClass
+$rustdocFlags = $env:RUSTDOCFLAGS
+Push-Location $PSScriptRoot
+try {
+    $process.PriorityClass = 'BelowNormal'
+    if ($Test) {
+        Invoke-Cargo test --workspace --no-fail-fast $Test
+    }
+    elseif ($Bench) {
+        Invoke-Cargo bench --workspace --bench '*' --no-run
+        # Measured at the caller's priority: below normal, any other load on
+        # the machine would take the CPU first and decide the timings.
+        $process.PriorityClass = $priority
+        Invoke-Cargo bench --workspace --bench '*' $Bench
+    }
+    else {
+        Invoke-Cargo fmt --all --check
+        # A bare -- never reaches a PowerShell function, so it is quoted.
+        Invoke-Cargo clippy --workspace --all-targets '--' -D warnings
+        # --no-fail-fast runs every test binary, so one run reports every
+        # failing test instead of only the first failing binary's.
+        Invoke-Cargo test --workspace --no-fail-fast
+        # Set only for the doc step, as CI does, so doctests run as in CI.
+        $env:RUSTDOCFLAGS = '-D warnings'
+        Invoke-Cargo doc --workspace --no-deps --document-private-items
+    }
+}
+finally {
+    # Restored because a caller in the same session keeps this process.
+    $process.PriorityClass = $priority
+    $env:RUSTDOCFLAGS = $rustdocFlags
+    Pop-Location
+}
