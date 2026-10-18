@@ -26,7 +26,7 @@ stage starts is done.
   and its parse-everything test cover it. Each new difference from es gets
   its row in the differences table.
 - Stages 1 to 3 change only what the client does; stage 2 also moves one
-  daemon rule into `goz-core` without changing it. The installed daemon already sends
+  daemon rule into `gozler-core` without changing it. The installed daemon already sends
   what they need: every results page carries the full match count (`total`)
   and the `volumes_incomplete` flag. Their live checks run the built
   `target\release\gozler.exe` against the running daemon, which only reads.
@@ -57,7 +57,7 @@ on any machine.
 
 ## Stage 1: exit codes, tables and help
 
-- The exit-code enum in `goz-core` ([specs: Exit codes](es-superset-specs.md#exit-codes)),
+- The exit-code enum in `gozler-core` ([specs: Exit codes](es-superset-specs.md#exit-codes)),
   with one mapping from every client failure to one code. This fixes issue
   #40 (three error paths in `main.rs`) and issue #30 (`--json` and `--status`
   ignore write errors; they become exit 5).
@@ -84,7 +84,7 @@ on any machine.
   `metadata_pending` (set since #5).
 - `-timeout MS`: the client polls the status until the volumes in scope are
   complete or the time runs out. The rule that maps a scope to its volumes
-  moves from the daemon's `targets()` into `goz-core`, and both call it.
+  moves from the daemon's `targets()` into `gozler-core`, and both call it.
 
 **Done when:** against the running daemon, with `-path C:\` on each command
 so a rescan elsewhere cannot turn the answer into exit 2,
@@ -122,17 +122,17 @@ columns; and `-get-result-count` equals the `total` in `--json` output.
   prefilter rule from the specs. The client parses and sends the query; every
   query keeps the meaning it had before this stage.
 - The request builder (`build_query`, from `EsPlan` to `QueryRequest`) moves
-  from `goz-cli`'s `main.rs` into `goz-core`, taking the working directory as
+  from `gozler-cli`'s `main.rs` into `gozler-core`, taking the working directory as
   a parameter, because a test can reach it there and stage 6 needs that
   parameter for relative paths. The builder joins paths against that
   directory with Windows separator rules of its own and never calls
-  `std::path::absolute`, which on Ubuntu, where `goz-core` is tested, turns
+  `std::path::absolute`, which on Ubuntu, where `gozler-core` is tested, turns
   `C:\repo` into a Unix path. After the join it removes `.` and `..`
   components, as `GetFullPathNameW` does today, because the daemon's
   `resolve_scope` looks each component up as a child folder; the corpus gets
   a `-path .` row and a `-path ..\x` row. A rooted `\foo` takes the drive of
   the given directory. Only a drive-relative value such as `-path D:foo` is resolved by
-  `goz-cli` with `std::path::absolute` before it calls the builder, because
+  `gozler-cli` with `std::path::absolute` before it calls the builder, because
   only Windows knows each drive's current directory. The corpus then runs
   each row, in
   `server.rs`'s tests, from its command line through that builder into
@@ -177,14 +177,14 @@ bugs 1 and 11 still pass.
 ## Stage 7: matching
 
 - `ww:` and `-ww`, `regex:` and `-r` with the `regex` crate added to the
-  goz-core allowlist in `ci.yml`, and `-i` as the alias of `-case`.
+  gozler-core allowlist in `ci.yml`, and `-i` as the alias of `-case`.
 
 **Done when:** a regex test covers `\\` in a path, and the help states the
 regex dialect.
 
 ## Stage 8: sizes, dates and order
 
-- `dm:` and the date resolver, with `jiff` added to the goz-core allowlist
+- `dm:` and the date resolver, with `jiff` added to the gozler-core allowlist
   ([specs: Dates](es-superset-specs.md#dates)).
 - The size and date rule, with exit 2 for queries that test or total size or
   date on a volume with `metadata_pending` set.
@@ -202,7 +202,7 @@ or each remaining difference has a named cause (bug 12).
 ## Stage 9: the attribute column
 
 - Measure the memory cost on the owner's `C:` first, with
-  `crates/goz-daemon/examples/memsim.rs`; the owner decides from the
+  `crates/gozler-daemon/examples/memsim.rs`; the owner decides from the
   measurement whether the column goes in.
 - The column, the `iflags` request bit, the remaining `/a` letters, `attrib:`
   and the attributes output column.

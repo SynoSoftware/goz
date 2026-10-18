@@ -36,7 +36,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets
 
-      # The ubuntu leg is the load-bearing half of the purity contract: goz-core
+      # The ubuntu leg is the load-bearing half of the purity contract: gozler-core
       # is 9.8k of the workspace's 14.3k lines and green here means none of it
       # *calls* a Windows API. (Only *calls*: an unused platform dep would still
       # link. The declared-dep half is the allowlist below.)
@@ -51,25 +51,25 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --document-private-items
 
-      # goz-core's direct deps are a closed set, so assert the set itself: an
+      # gozler-core's direct deps are a closed set, so assert the set itself: an
       # allowlist fails on anything unforeseen, where the denylist this replaces
       # named four crates and would have waved through `windows`, `winapi`,
       # `libc` and `nix`. `--target all` so the ubuntu leg still sees a
       # cfg(windows)-gated entry; `set -euo pipefail` so a cargo failure fails
       # the step rather than matching nothing and passing.
       #
-      # The other direction (goz-winfs must not depend on goz-core) is a
+      # The other direction (gozler-winfs must not depend on gozler-core) is a
       # `wrappers` ban in deny.toml, enforced by the `deny` job below.
-      - name: "goz-core purity: direct deps are the allowed set"
+      - name: "gozler-core purity: direct deps are the allowed set"
         shell: bash
         run: |
           set -euo pipefail
           expected="hashbrown memchr rayon rustc-hash serde serde_json smallvec thiserror unicode-normalization zerocopy"
-          actual="$(cargo tree -p goz-core --edges normal --target all --depth 1 --prefix none \
-            | awk 'NF && $1 != "goz-core" { print $1 }' \
+          actual="$(cargo tree -p gozler-core --edges normal --target all --depth 1 --prefix none \
+            | awk 'NF && $1 != "gozler-core" { print $1 }' \
             | sort -u | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
-            echo "::error::goz-core direct dependencies changed; keep goz-core pure or update this allowlist deliberately"
+            echo "::error::gozler-core direct dependencies changed; keep gozler-core pure or update this allowlist deliberately"
             echo "expected: $expected"
             echo "actual:   $actual"
             exit 1

@@ -399,18 +399,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "goz-cli"
+name = "gozler-cli"
 version = "0.2.0"
 dependencies = [
- "goz-core",
- "goz-winfs",
+ "gozler-core",
+ "gozler-winfs",
  "jiff",
  "mimalloc",
  "serde_json",
 ]
 
 [[package]]
-name = "goz-core"
+name = "gozler-core"
 version = "0.2.0"
 dependencies = [
  "criterion",
@@ -429,13 +429,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "goz-daemon"
+name = "gozler-daemon"
 version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
- "goz-core",
- "goz-winfs",
+ "gozler-core",
+ "gozler-winfs",
  "libmimalloc-sys",
  "mimalloc",
  "parking_lot",
@@ -446,7 +446,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "goz-winfs"
+name = "gozler-winfs"
 version = "0.2.0"
 dependencies = [
  "windows-sys",

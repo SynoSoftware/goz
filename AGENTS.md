@@ -35,7 +35,7 @@ Use the vocabulary in `CONTEXT.md`.
 - **Give errors types.** Library crates return their own error types, with a
   separate variant for each failure a caller handles differently. `anyhow` is
   for the daemon binary.
-- **Keep Win32 `unsafe` in `goz-winfs`,** in the smallest block that needs it,
+- **Keep Win32 `unsafe` in `gozler-winfs`,** in the smallest block that needs it,
   behind a safe function. The daemon's few allocator and pipe-constructor calls
   are the only `unsafe` elsewhere.
 - **Keep the async runtime free.** Tokio serves the pipe. Blocking calls and
@@ -45,7 +45,7 @@ Use the vocabulary in `CONTEXT.md`.
 - **Count allocations.** The index holds millions of entries, so a byte per
   entry or an allocation per hit is a real cost. Borrow instead of cloning on
   hot paths and size buffers up front. Measure with the criterion benches in
-  `crates/goz-core/benches` before you claim a speed-up: run
+  `crates/gozler-core/benches` before you claim a speed-up: run
   `pwsh ./check.ps1 -Bench <name filter>` once before your change and once
   after, because criterion compares each run against the run before it, which
   may be another agent's.
@@ -81,25 +81,25 @@ change must keep passing, so a test earns its place by the failure it watches.
 
 ## Contracts
 
-- **`goz-core` runs on any OS.** Everything that interprets bytes lives there.
+- **`gozler-core` runs on any OS.** Everything that interprets bytes lives there.
   CI tests it on Ubuntu and pins its direct dependencies to the allowlist in
-  the `goz-core purity` step of `ci.yml`, so a new dependency there is a
+  the `gozler-core purity` step of `ci.yml`, so a new dependency there is a
   deliberate choice, and the same change adds it to that list. Platform code
-  stays out of it, and Win32 calls go through `goz-winfs`, which depends on no
+  stays out of it, and Win32 calls go through `gozler-winfs`, which depends on no
   other workspace crate (`deny.toml`).
 - **The command line.** Scripts written for Everything or for goz v0.2.0 change
   only the program name, to `gozler`: every switch keeps its name and purpose,
   and gozler's own options start with `--`. `docs/plans/es-superset-specs.md`
   decides where gozler departs from `es.exe`, such as the exit codes, the CSV
   columns and the default result limit. The rules live in
-  `goz_core::escompat` (arguments), `goz_core::output::csv` (CSV),
-  `goz_core::query::parse` (query syntax) and `goz-cli`'s `main.rs` (runtime
+  `gozler_core::escompat` (arguments), `gozler_core::output::csv` (CSV),
+  `gozler_core::query::parse` (query syntax) and `gozler-cli`'s `main.rs` (runtime
   exit codes).
 - **Truthful volume state.** A client must always be able to tell whether its
   results are complete. Read the coherence section of `docs/DESIGN.md` before
   you change how the index tracks a volume.
 - **The wire protocol.** An installed daemon and a newer client must still
-  talk. Read `goz_core::proto::types` and `goz_core::proto::binary` before you
+  talk. Read `gozler_core::proto::types` and `gozler_core::proto::binary` before you
   change a payload. Results pages are positional binary, so any change to the
   item layout breaks older clients. A new JSON field gets `#[serde(default)]`,
   so messages from older peers still parse, and its default means what an
@@ -136,8 +136,8 @@ before you fix it, or the first of two `-Bench` runs. Build only through
 
 `check.ps1` runs the Windows half of CI's test job. CI runs on pushes to
 `main` and on pull requests: it also compiles on Ubuntu, where the
-`cfg(not(windows))` code in `goz-cli` and `goz-daemon` is checked, asserts
-`goz-core`'s dependency allowlist, builds with the minimum Rust version and
+`cfg(not(windows))` code in `gozler-cli` and `gozler-daemon` is checked, asserts
+`gozler-core`'s dependency allowlist, builds with the minimum Rust version and
 runs cargo-deny. Locally, the full CI set passes when `check.ps1` is green and
 each of those checks that your change can affect is run or reported as left to
 CI. When you add a dependency and `cargo deny --version` answers, also run

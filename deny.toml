@@ -1,11 +1,11 @@
 # cargo-deny configuration.
 #
-# The goz-winfs → goz-core direction ban lives here, not in CI: `wrappers`
+# The gozler-winfs → gozler-core direction ban lives here, not in CI: `wrappers`
 # scopes a deny to a named set of dependents, which is precisely a direction
 # rule, and it fails closed with no shell plumbing to get right.
 #
-# goz-core's own purity is the other half of the contract and is NOT expressible
-# here: it is an allowlist over goz-core's direct deps, and a `wrappers` ban on
+# gozler-core's own purity is the other half of the contract and is NOT expressible
+# here: it is an allowlist over gozler-core's direct deps, and a `wrappers` ban on
 # windows-sys would fire on the legitimate clap/criterion/proptest paths that
 # reach it. That check stays in .github/workflows/ci.yml, where it compares the
 # direct-dep set for equality under `set -euo pipefail`, so a cargo failure
@@ -30,12 +30,12 @@ allow = [
 multiple-versions = "warn"
 
 # The Win32 layer produces and consumes raw bytes and opaque handles; every
-# interpretation of them lives in goz-core, where it is testable from fixtures
-# on any OS (see goz-winfs/src/lib.rs). Naming goz-core's only two legitimate
-# dependents turns a goz-winfs → goz-core edge into a hard error.
+# interpretation of them lives in gozler-core, where it is testable from fixtures
+# on any OS (see gozler-winfs/src/lib.rs). Naming gozler-core's only two legitimate
+# dependents turns a gozler-winfs → gozler-core edge into a hard error.
 [[bans.deny]]
-crate = "goz-core"
-wrappers = ["goz-cli", "goz-daemon"]
+crate = "gozler-core"
+wrappers = ["gozler-cli", "gozler-daemon"]
 
 [advisories]
 yanked = "deny"

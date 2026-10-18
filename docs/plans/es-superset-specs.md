@@ -45,7 +45,7 @@ mustafaahci/goz).
 ### Differences from es
 
 Scripts written for es need to know where gozler answers differently. The help's
-NOTES print this list from one table in `goz-core`, so it cannot fall behind:
+NOTES print this list from one table in `gozler-core`, so it cannot fall behind:
 
 | es | gozler | Why |
 | --- | --- | --- |
@@ -117,7 +117,7 @@ When several apply, the more serious wins: 1 and 3 to 8 first, then 2, then 9
 and 10, then 0. An empty answer from an indexing volume is 2, not 9.
 
 Each failure writes one `gozler: ` line to stderr that says what failed and, where
-it helps, what to do next. The codes live in one enum in `goz-core`, with each
+it helps, what to do next. The codes live in one enum in `gozler-core`, with each
 variant's meaning beside it, so the help lists them from the same source.
 
 ## New commands
@@ -175,7 +175,7 @@ es (`/ad`, `/on`), so the help says to write a relative path without a leading
 ### Dates
 
 `dm:` resolves once, from one query-start instant and a time zone, to UTC
-bounds. One resolver in `goz-core` takes (now, time zone): the client passes
+bounds. One resolver in `gozler-core` takes (now, time zone): the client passes
 its own, and the daemon's text path (below) passes the daemon's.
 
 - `today`, `yesterday` and an ISO date are local calendar days, from midnight
@@ -292,7 +292,7 @@ EXIT CODES
 
 ## Design
 
-- **The client parses; the daemon evaluates.** The client runs the goz-core
+- **The client parses; the daemon evaluates.** The client runs the gozler-core
   parser, resolves the working directory, time zone and query-start instant,
   and sends the parsed query with its scope, sort, limit and wanted columns,
   or asks for the count and size total only, which the daemon sums so no row
@@ -345,7 +345,7 @@ EXIT CODES
   successful pass could not read is left out without exit 2; after bug 12 is
   fixed such files should be rare, and the help says so.
 - **Vocabulary tables.** Switches, sort keys, search functions and exit codes
-  each live in one table in `goz-core`, in the style of `SIMPLE_SWITCHES`. A
+  each live in one table in `gozler-core`, in the style of `SIMPLE_SWITCHES`. A
   row carries its aliases, its help group and its one-line description, so
   `-n N, -count N` prints on one line. `/a` and `/o` are prefix families with
   their own small parsers, because the dash-optional matcher makes `/ad` and
@@ -362,7 +362,7 @@ EXIT CODES
   case-sensitive folder whose names differ only in case. The same query over the same index then prints the same list, and
   no path is rebuilt under the index lock. Unknown sizes and dates sort last.
 - **Dependencies.** `regex` (linear time, so a pattern cannot hang the daemon)
-  and `jiff` (the date resolver) join goz-core; add both to the allowlist in
+  and `jiff` (the date resolver) join gozler-core; add both to the allowlist in
   `ci.yml` on purpose. Document the regex dialect in the help; it is not es's.
 - **An attribute column** in the index is needed for `/aH`, `/aS`, `attrib:`
   and an attributes output column: about 4 bytes per entry (7.4 MiB on a
@@ -372,8 +372,8 @@ EXIT CODES
   otherwise older clients misread every item.
 - **Crate boundaries stay as `AGENTS.md` describes them:** parsing, tables,
   help text, date resolution, building the request from a working directory
-  it is given, and evaluation in `goz-core`; reading argv, the working
-  directory and the clock, and writing output in `goz-cli`.
+  it is given, and evaluation in `gozler-core`; reading argv, the working
+  directory and the clock, and writing output in `gozler-cli`.
 
 ## Not planned
 

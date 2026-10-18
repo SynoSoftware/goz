@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/goz-core",
-    "crates/goz-winfs",
-    "crates/goz-daemon",
-    "crates/goz-cli",
+    "crates/gozler-core",
+    "crates/gozler-winfs",
+    "crates/gozler-daemon",
+    "crates/gozler-cli",
 ]
 
 [workspace.package]
@@ -72,13 +72,13 @@ criterion = "0.5"
 # comments in one commit. It is also the wrong norm to borrow here, since it
 # exists for published crates with an external contract.
 [workspace.lints.rust]
-# goz-winfs exists to hold the unsafe, so make each unsafe op state its own
+# gozler-winfs exists to hold the unsafe, so make each unsafe op state its own
 # scope instead of inheriting a blanket one from the fn signature.
 unsafe_op_in_unsafe_fn = "deny"
 unreachable_pub = "warn"
 
 [workspace.lints.clippy]
-# Every unsafe block in goz-winfs already carries a SAFETY comment. This is what
+# Every unsafe block in gozler-winfs already carries a SAFETY comment. This is what
 # keeps the next one from skipping it.
 undocumented_unsafe_blocks = "deny"
 
