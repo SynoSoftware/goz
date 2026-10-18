@@ -32,7 +32,7 @@ unicode-normalization = "0.1"
 # regex: and -r; linear time, so a pattern from any local user cannot hang
 # the daemon.
 regex = "1"
-# cli
+# dm: and local dates: calendar days and daylight saving in a time zone.
 jiff = "0.2"
 # winfs
 windows-sys = { version = "0.61", features = [

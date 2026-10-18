@@ -11,9 +11,11 @@ pub enum ExitCode {
     Complete = 0,
     /// A failure no other code describes.
     Internal = 1,
-    /// A volume in scope is indexing, rescanning or offline, so the answer may
-    /// be incomplete; the results that exist are printed. For `--status`, also
-    /// a volume whose size and date pass failed or stopped.
+    /// A volume in scope is indexing, rescanning or offline, or the query
+    /// tests or totals sizes or dates on a volume whose size and date pass
+    /// failed or stopped, so the answer may be incomplete; the results that
+    /// exist are printed. For `--status`, any volume whose size and date pass
+    /// failed or stopped.
     Incomplete = 2,
     /// The pipe server is not the trusted daemon.
     Untrusted = 3,
@@ -61,9 +63,11 @@ impl ExitCode {
             ExitCode::Complete => "complete answer, including no matches",
             ExitCode::Internal => "internal failure",
             ExitCode::Incomplete => {
-                "incomplete: a volume in scope is indexing, rescanning or offline; \
-                 the results that exist are printed. --status also exits 2 when the \
-                 sizes and dates of a volume could not be read"
+                "incomplete: a volume in scope is indexing, rescanning or offline, or \
+                 the query tests or totals sizes or dates on a volume whose sizes and \
+                 dates could not be read; the results that exist are printed. \
+                 --status also exits 2 when the sizes and dates of any volume could \
+                 not be read"
             }
             ExitCode::Untrusted => {
                 "the pipe server is not the trusted gozlerd \

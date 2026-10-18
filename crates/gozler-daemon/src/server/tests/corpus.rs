@@ -14,10 +14,11 @@
 
 use super::{decode_frames, dir_record, reply_bytes, set, volume};
 use crate::volume_state::VolumeSet;
-use gozler_core::escompat::{Answer, Command, EsPlan, build_search, parse_argv};
+use gozler_core::escompat::{Answer, Command, Count, EsPlan, build_search, parse_argv};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::layout::{LayoutFile, LayoutName};
-use gozler_core::proto::{ProtoError, QueryRequest, Request, Response};
+use gozler_core::proto::{ProtoError, QueryRequest, Request, Response, SearchRequest};
+use gozler_core::query::{QueryError, QueryStart};
 use gozler_core::types::{Frn, VolumePhase};
 use std::collections::HashMap;
 
@@ -490,8 +491,44 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             ]),
         ),
         (&["dir:docs"], prints(&[r"C:\docs", r"C:\repo\docs"])),
-        // Bug 2: fixed, an unknown function is refused; stage 8 adds `dm:`.
-        (&["dm:today"], query_error("unknown search function: dm:")),
+        // Bug 2: stage 8 adds `dm:`. Each day of the fixture is a day after
+        // 1601-01-01, and every row starts at noon UTC on day 7, 1601-01-08.
+        (&["dm:today"], prints(&[r"C:\repo\src\argv.rs"])),
+        // The last 3 days end at the query start, so day 8 is in the future
+        // and left out.
+        (
+            &["dm:3days"],
+            prints(&[
+                r"C:\repo\src\argv.rs",
+                r"C:\repo\DESIGN.md",
+                r"C:\repo\Report 2026.txt",
+            ]),
+        ),
+        (&["dm:>today"], prints(&[r"D:\backup\report.txt"])),
+        (
+            &["dm:1601-01-02..1601-01-03"],
+            prints(&[
+                r"C:\Program Files\app.exe",
+                r"C:\Program Files (x86)\Microsoft\edge.manifest",
+                r"C:\repo\node_modules\lib.cs",
+                r"C:\repo\src\main.cs",
+                r"C:\repo\notes.md.bak",
+                r"C:\docs\readme.txt",
+            ]),
+        ),
+        // Folders and the unread file have no known date, so the negation
+        // does not report them as recent.
+        (
+            &["!dm:<1601-01-08"],
+            prints(&[r"C:\repo\src\argv.rs", r"D:\backup\report.txt"]),
+        ),
+        (
+            &["dm:1601-01-03..1601-01-02"],
+            query_error(
+                "malformed dm:: 1601-01-03..1601-01-02 is a reversed range; write the \
+                 earlier date first",
+            ),
+        ),
         // Scope: -path searches below a folder, never the folder itself.
         (&["-path", r"C:\tmp"], prints(&[r"C:\tmp\unread.bin"])),
         (
@@ -579,6 +616,38 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"D:\backup\report.txt",
                 r"C:\repo\Report 2026.txt",
                 r"C:\repo\report.txt",
+            ]),
+        ),
+        // Stage 8 adds /oe: no extension first, then by extension, and ties
+        // by name.
+        (
+            &["/oe", "-path", r"C:\repo"],
+            prints(&[
+                r"C:\repo\docs\agents",
+                r"C:\repo\docs",
+                r"C:\repo\node_modules",
+                r"C:\repo\src",
+                r"C:\repo\notes.md.bak",
+                r"C:\repo\node_modules\lib.cs",
+                r"C:\repo\src\main.cs",
+                r"C:\repo\DESIGN.md",
+                r"C:\repo\docs\link.md",
+                r"C:\repo\src\link.md",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+                r"C:\repo\src\argv.rs",
+                r"C:\repo\Report 2026.txt",
+                r"C:\repo\report.txt",
+            ]),
+        ),
+        // Stage 8 adds /o-e, which reverses the extensions, not the ties.
+        (
+            &["/o-e", "-path", r"C:\repo\docs"],
+            prints(&[
+                r"C:\repo\docs\link.md",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+                r"C:\repo\docs\agents",
             ]),
         ),
         (
@@ -714,6 +783,20 @@ fn place<'p>(mount: &str, folders: &HashMap<&str, Frn>, path: &'p str) -> (Frn, 
 /// The working directory every row runs in.
 const WORKING_DIR: &str = r"C:\repo\src";
 
+/// When every row starts: noon UTC on the fixture's day 7, so `dm:` rows do
+/// not depend on the machine's clock or time zone.
+fn query_start() -> QueryStart {
+    QueryStart {
+        now: "1601-01-08T12:00:00Z".parse().expect("an RFC 3339 instant"),
+        time_zone: jiff::tz::TimeZone::UTC,
+    }
+}
+
+/// The request gozler sends for `plan`.
+fn search(plan: &EsPlan) -> Result<SearchRequest, QueryError> {
+    build_search(plan, WORKING_DIR, &query_start())
+}
+
 /// The two ways a client sends a search.
 #[derive(Clone, Copy)]
 enum Protocol {
@@ -731,20 +814,30 @@ fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
         Ok(Command::Version) => panic!("{args:?}: no row asks for the version"),
         Err(fatal) => return Printed::ArgvError(fatal.exit_code.code(), fatal.message),
     };
+    let search = match search(&plan) {
+        Ok(search) => search,
+        Err(e) => return Printed::QueryError(e.to_string()),
+    };
+    let mut answer = Answer::new(&plan, &search.query);
     let request = match protocol {
-        Protocol::Parsed => match build_search(&plan, WORKING_DIR) {
-            Ok(search) => Request::Search(search),
-            Err(e) => return Printed::QueryError(e.to_string()),
-        },
-        Protocol::Text => Request::Query(text_request(&plan)),
+        Protocol::Parsed => Request::Search(search),
+        Protocol::Text => Request::Query(text_request(&plan, search.scope)),
     };
     let mut paths = Vec::new();
-    let mut answer = Answer::default();
     for frame in decode_frames(&reply_bytes(volumes, &request)) {
         match frame {
             Response::Results(page) => {
                 answer.add_page(&page);
                 paths.extend(page.items.into_iter().map(|i| i.path));
+            }
+            // A count prints its one number instead of the rows.
+            Response::Totals(totals) => {
+                answer.add_totals(&totals);
+                let value = match plan.count {
+                    Some(Count::TotalSize) => totals.size,
+                    _ => totals.count,
+                };
+                paths.push(value.to_string());
             }
             Response::Error { message, .. } => return Printed::QueryError(message),
             other => panic!("unexpected reply to a query: {other:?}"),
@@ -757,14 +850,12 @@ fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
     }
 }
 
-/// The request protocol 1's client sends for `plan`, its scope made absolute
-/// as gozler makes it.
-fn text_request(plan: &EsPlan) -> QueryRequest {
+/// The request protocol 1's client sends for `plan`, with `scope` made
+/// absolute as gozler makes it.
+fn text_request(plan: &EsPlan, scope: Option<String>) -> QueryRequest {
     QueryRequest {
         query: plan.query.clone(),
-        scope: build_search(plan, WORKING_DIR)
-            .expect("the text row parses")
-            .scope,
+        scope,
         sort: plan.sort,
         offset: 0,
         limit: plan.row_limit(),
@@ -815,6 +906,22 @@ fn the_text_path_prints_what_its_row_recorded() {
     assert_eq!(print(&fixture(), args, Protocol::Text), recorded);
 }
 
+/// The daemon resolves a `dm:` in a protocol 1 query with its own clock and
+/// time zone, instead of refusing it for want of the client's. Every date in
+/// the fixture is before 9999 in any time zone, so the row does not depend on
+/// the machine.
+#[test]
+fn the_text_path_resolves_dates_with_the_daemons_clock() {
+    assert_eq!(
+        print(&fixture(), &["report", "dm:<9999-01-01"], Protocol::Text),
+        prints(&[
+            r"C:\repo\Report 2026.txt",
+            r"C:\repo\report.txt",
+            r"D:\backup\report.txt",
+        ])
+    );
+}
+
 /// The totals of a query, which the daemon sums so that no row crosses the
 /// pipe, against the count and the sizes of every row of the same query. The
 /// fixture holds folders, a file whose size is unknown and one file under
@@ -835,7 +942,7 @@ fn a_total_counts_and_adds_up_every_row_of_the_same_query() {
             let Ok(Command::Run(plan)) = parse_argv(&args) else {
                 panic!("{args:?} is a search");
             };
-            Request::Search(build_search(&plan, WORKING_DIR).expect("parses"))
+            Request::Search(search(&plan).expect("parses"))
         };
         let rows: Vec<_> = decode_frames(&reply_bytes(&volumes, &search(&["-n", "all"])))
             .into_iter()
@@ -871,7 +978,7 @@ fn a_total_too_large_for_64_bits_is_refused() {
     let Ok(Command::Run(plan)) = parse_argv(&["-get-total-size".to_string()]) else {
         panic!("a search");
     };
-    let request = Request::Search(build_search(&plan, WORKING_DIR).expect("parses"));
+    let request = Request::Search(search(&plan).expect("parses"));
     assert!(matches!(
         decode_frames(&reply_bytes(&volumes, &request))[..],
         [Response::Error {
@@ -879,4 +986,32 @@ fn a_total_too_large_for_64_bits_is_refused() {
             ..
         }]
     ));
+}
+
+/// A size or date test never matches a file whose size or date is unknown,
+/// and a size total adds nothing for it, so when the size and date pass
+/// failed or stopped on a volume in scope, such a query warns and exits 2,
+/// where its answer would otherwise look complete. A query that reads no
+/// size or date, a count included, is unaffected.
+#[test]
+fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
+    let volumes = fixture();
+    *volumes[0].metadata_pending.write() = true;
+    let warning = "the size and date pass failed or stopped on a volume in scope, so files \
+                   whose size or date is unknown are left out of size and date tests and \
+                   size totals";
+    let outcome = |args: &[&str]| match print(&volumes, args, Protocol::Parsed) {
+        Printed::Paths { warnings, exit, .. } => (warnings, exit),
+        other => panic!("{args:?}: {other:?}"),
+    };
+    for args in [
+        &["size:>1kb", "-n", "all"][..],
+        &["dm:today"],
+        &["-get-total-size"],
+    ] {
+        assert_eq!(outcome(args), (vec![warning.to_string()], 2), "{args:?}");
+    }
+    for args in [&["report"][..], &["-get-result-count"]] {
+        assert_eq!(outcome(args), (vec![], 0), "{args:?}");
+    }
 }

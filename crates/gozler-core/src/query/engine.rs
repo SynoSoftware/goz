@@ -3,18 +3,19 @@
 //! totals of every match.
 //!
 //! The scan matches each candidate against the index's precomputed folded name
-//! (case-insensitive queries) and tests the cheapest clauses first: kind and
-//! size, then name substrings and wildcards, then ext, then regular
+//! (case-insensitive queries) and tests the cheapest clauses first: kind,
+//! size and date, then name substrings and wildcards, then ext, then regular
 //! expressions of the name, then (only for survivors) scope ancestry and the
 //! clauses that test the full path. Full paths come from the `paths` module,
 //! which builds each folder's path once per query, so a path term costs one
 //! copy per candidate instead of a walk to the root.
 
+use super::dates::DateRange;
 use super::order::{OrderFields, compare};
 use super::parse::{CodePointBuf, Kind, ParsedQuery, QueryError, SizeRange, Test, Wildcard};
 use super::paths::{DirPaths, NameForm};
 use crate::fold::fold;
-use crate::index::VolumeIndex;
+use crate::index::{EntryView, VolumeIndex};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
@@ -146,6 +147,7 @@ struct CompiledTerm {
 enum Check {
     Kind(Kind),
     Size(SizeRange),
+    DateModified(DateRange),
     Name(memmem::Finder<'static>),
     NameWildcard(Wildcard),
     /// Folded whatever the query's case, as es compares extensions.
@@ -241,6 +243,7 @@ impl CompiledQuery {
                             ),
                             Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
                             Test::Size(range) => Check::Size(*range),
+                            Test::DateModified(range) => Check::DateModified(*range),
                             Test::Kind(kind) => Check::Kind(*kind),
                         };
                         Ok(CompiledTerm {
@@ -327,6 +330,9 @@ impl CompiledClause {
 struct Subject<'a> {
     is_dir: bool,
     size: Option<u64>,
+    /// The entry, for a value only a rare check reads, such as the date
+    /// modified, which most queries never load.
+    entry: EntryView<'a>,
     /// The name as the query compares it: folded unless it matches case.
     name: &'a [u8],
     /// The name as stored, which an extension check folds itself.
@@ -349,7 +355,7 @@ impl Check {
     fn cost(&self) -> u8 {
         match self {
             Check::Kind(_) => 0,
-            Check::Size(_) => 1,
+            Check::Size(_) | Check::DateModified(_) => 1,
             Check::Name(_) | Check::Path(_) | Check::Parent(_) => 2,
             Check::NameWholeWord(_) | Check::PathWholeWord(_) => 2,
             Check::NameWildcard(_) | Check::PathWildcard(_) => 3,
@@ -371,6 +377,7 @@ impl Check {
             Check::Kind(Kind::Folder) => subject.is_dir,
             // A folder's size is always unknown, so a size test skips folders.
             Check::Size(range) => range.contains(subject.size?),
+            Check::DateModified(range) => range.contains(subject.entry.mtime()?),
             Check::Name(finder) => finder.find(subject.name).is_some(),
             Check::NameWildcard(wildcard) => {
                 wildcard.matches_into(subject.name, &mut scratch.code_points)
@@ -779,6 +786,7 @@ impl<'q, 'i> Scan<'q, 'i> {
         let mut subject = Subject {
             is_dir: entry.is_dir(),
             size: entry.size(),
+            entry: index.entry(idx),
             // The precomputed folded name serves a case-insensitive query.
             name: if query.match_case {
                 entry.name()
@@ -901,6 +909,9 @@ struct Ranked<'a> {
 }
 
 impl OrderFields for Ranked<'_> {
+    fn is_dir(&self) -> bool {
+        self.candidate.is_dir
+    }
     fn folded_parent(&self) -> &[u8] {
         let (start, end) = self.candidate.folded_parent;
         &self.folded_parents[start..end]
@@ -1660,7 +1671,13 @@ mod tests {
             [main]
         );
 
-        // Every size in the fixture is unknown.
+        // Every size and date in the fixture is unknown, so neither a date
+        // test nor its negation matches.
+        let any_date = Test::DateModified(DateRange {
+            min: i64::MIN,
+            max: i64::MAX,
+        });
+        assert!(paths_of(&idx, query_of(vec![vec![term(true, any_date)]])).is_empty());
         let big = || {
             Test::Size(SizeRange {
                 min: 2,
@@ -1757,6 +1774,8 @@ mod tests {
                 (any::<u64>(), any::<u64>())
                     .prop_map(|(min, max)| Test::Size(SizeRange { min, max })),
                 prop_oneof![Just(Kind::File), Just(Kind::Folder)].prop_map(Test::Kind),
+                (any::<i64>(), any::<i64>())
+                    .prop_map(|(min, max)| Test::DateModified(DateRange { min, max })),
             ]
         }
 
@@ -1910,6 +1929,7 @@ mod tests {
             SortKey::Path,
             SortKey::Size,
             SortKey::DateModified,
+            SortKey::Extension,
         ] {
             for dir in [SortDir::Asc, SortDir::Desc] {
                 sorts.push(SortSpec { key, dir });

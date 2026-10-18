@@ -17,8 +17,8 @@ use gozler_core::proto::{
     SearchRequest, VolumeMemory, VolumeStatus, encode_response_frame,
 };
 use gozler_core::query::{
-    CompiledQuery, QueryError, SizeOverflow, Totals, VolumeRun, order_hits, parse_query_with_case,
-    resolve_scope, run_query_deferrable, run_totals,
+    CompiledQuery, ParseOptions, QueryError, QueryStart, SizeOverflow, Totals, VolumeRun,
+    order_hits, parse_query_with, resolve_scope, run_query_deferrable, run_totals,
 };
 use gozler_core::scope::Scope;
 use gozler_core::types::EntryIdx;
@@ -277,10 +277,21 @@ fn refusal(message: String) -> Response {
 }
 
 /// The search a protocol 1 request asks for: its text parsed by the parser
-/// the client runs from protocol 2 on, so both protocols match alike.
+/// the client runs from protocol 2 on, so both protocols match alike. Its
+/// `dm:` values resolve against the daemon's clock and time zone, the only
+/// ones it has; it has no working directory, so a relative path is refused.
 fn text_search(query: QueryRequest) -> Result<SearchRequest, QueryError> {
+    let start = QueryStart {
+        now: jiff::Timestamp::now(),
+        time_zone: jiff::tz::TimeZone::system(),
+    };
+    let options = ParseOptions {
+        match_case: query.match_case,
+        query_start: Some(&start),
+        ..ParseOptions::default()
+    };
     Ok(SearchRequest {
-        query: parse_query_with_case(&query.query, query.match_case)?,
+        query: parse_query_with(&query.query, options)?,
         scope: query.scope,
         returns: Returns::Rows(Rows {
             sort: query.sort,
@@ -1207,6 +1218,7 @@ mod tests {
             ((1, PROTO_VERSION), PROTO_VERSION),
             ((2, 2), 2),
             ((3, 3), 3),
+            ((4, 4), 4),
         ] {
             match answer(&vols, hello_request(range.0, range.1)) {
                 Response::Hello { proto, .. } => assert_eq!(proto, agreed, "{range:?}"),

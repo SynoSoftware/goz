@@ -76,6 +76,12 @@ A path term with `*` or `?`; it must match the whole full path, as `*\docs\*`
 does.
 _Avoid_: wildcard path term
 
+**Query start**:
+The instant a search starts, with the time zone of the program that parses
+it. A `dm:` date counts from it: `today` is the calendar day that holds it, in
+that time zone, and `7days` is the 7 times 24 hours that end at it.
+_Avoid_: now (in prose)
+
 **Result order**:
 The order gozler prints matches in: by the sort key, then folded name, volume,
 file ID, parent file ID and raw name, so the same query over the same index

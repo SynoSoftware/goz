@@ -56,6 +56,9 @@ pub enum SortKey {
     Path,
     Size,
     DateModified,
+    /// The extension, case-insensitive; an entry without one, a folder
+    /// included, sorts before every extension. From protocol 5.
+    Extension,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,11 +74,11 @@ pub struct SortSpec {
 }
 
 impl SortSpec {
-    /// es.exe's default direction per sort key: name/path ascending,
-    /// size/date descending.
+    /// es.exe's default direction per sort key: name, path and extension
+    /// ascending, size and date descending.
     pub fn default_for(key: SortKey) -> Self {
         let dir = match key {
-            SortKey::Name | SortKey::Path => SortDir::Asc,
+            SortKey::Name | SortKey::Path | SortKey::Extension => SortDir::Asc,
             SortKey::Size | SortKey::DateModified => SortDir::Desc,
         };
         Self { key, dir }

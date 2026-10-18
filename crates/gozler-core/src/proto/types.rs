@@ -20,7 +20,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// meet, rather than agreeing on a version one side cannot actually speak.
 /// The client asks for this version alone, so a daemon older than the client
 /// refuses it.
-pub const PROTO_VERSION: u16 = 4;
+pub const PROTO_VERSION: u16 = 5;
 
 /// The oldest protocol version a daemon of this build serves: protocol 1's
 /// clients send [`Request::Query`] without a `Hello`.
@@ -67,7 +67,8 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueryRequest {
     /// The search string, which the daemon parses with
-    /// [`parse_query_with_case`](crate::query::parse_query_with_case).
+    /// [`parse_query_with`](crate::query::parse_query_with), its own clock
+    /// and time zone, and no working directory.
     pub query: String,
     /// Optional scope folder (es `-path`), already absolutized by the client.
     pub scope: Option<String>,
@@ -551,6 +552,46 @@ mod tests {
             r#"{"negated":false,"test":{"NameRegex":"^d|e$"}},"#,
             r#"{"negated":false,"test":{"PathRegex":"f\\\\g"}}]}],"match_case":false},"#,
             r#""scope":null,"returns":"Totals"}"#,
+        );
+        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<Request>(json).expect("deserialize"),
+            search
+        );
+    }
+
+    /// Protocol 5 adds the date test, whose bounds are UTC FILETIMEs, and
+    /// the extension sort key; a later daemon must still read them as this
+    /// client writes them.
+    #[test]
+    fn protocol_5_date_test_and_extension_sort_keep_their_json() {
+        use crate::query::{Clause, DateRange, Test};
+        let search = Request::Search(SearchRequest {
+            query: ParsedQuery {
+                clauses: vec![Clause::single(Test::DateModified(DateRange {
+                    min: 134_000_000_000_000_000,
+                    max: i64::MAX,
+                }))],
+                match_case: false,
+            },
+            scope: None,
+            returns: Returns::Rows(Rows {
+                sort: SortSpec {
+                    key: SortKey::Extension,
+                    dir: SortDir::Desc,
+                },
+                offset: 0,
+                limit: None,
+                want_size: false,
+                want_mtime: true,
+            }),
+        });
+        let json = concat!(
+            r#"{"t":"Search","query":{"clauses":[{"terms":[{"negated":false,"test":"#,
+            r#"{"DateModified":{"min":134000000000000000,"max":9223372036854775807}}}]}],"#,
+            r#""match_case":false},"scope":null,"returns":{"Rows":{"#,
+            r#""sort":{"key":"Extension","dir":"Desc"},"offset":0,"limit":null,"#,
+            r#""want_size":false,"want_mtime":true}}}"#,
         );
         assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
         assert_eq!(

@@ -7,18 +7,21 @@
 //!
 //! The sort key decides first. `Path` is es's `(parent folder, name)` order,
 //! folded, not a byte compare of the whole path; an unknown size or date
-//! sorts last in either direction. Ties then break, always ascending, on the
-//! folded name, the volume, the file ID, the parent folder's file ID and the
-//! raw name. Each key comes from the hit itself, so no path is rebuilt to
-//! break a tie.
+//! sorts last in either direction; `Extension` compares the folded extension,
+//! and an entry without one sorts first ascending. Ties then break, always
+//! ascending, on the folded name, the volume, the file ID, the parent folder's
+//! file ID and the raw name. Each key comes from the hit itself, so no path is
+//! rebuilt to break a tie.
 
-use super::engine::QueryHit;
+use super::engine::{QueryHit, extension};
 use crate::types::{Frn, SortDir, SortKey, SortSpec};
 use core::cmp::Ordering;
 
 /// What the result order reads from one hit. The engine reads it from the
 /// index, [`order_hits`] from keys computed once per hit.
 pub(crate) trait OrderFields {
+    /// Read only by [`SortKey::Extension`]: a folder has no extension.
+    fn is_dir(&self) -> bool;
     /// The folded full path of the hit's parent folder. Read only by
     /// [`SortKey::Path`].
     fn folded_parent(&self) -> &[u8];
@@ -47,6 +50,12 @@ pub(crate) fn compare<T: OrderFields>(sort: SortSpec, a: &T, b: &T) -> Ordering 
         ),
         SortKey::Size => unknown_last(sort.dir, a.size(), b.size()),
         SortKey::DateModified => unknown_last(sort.dir, a.mtime(), b.mtime()),
+        // Folding keeps every `.` where it is, so the extension of the folded
+        // name is the folded extension.
+        SortKey::Extension => directed(
+            sort.dir,
+            extension(a.folded_name(), a.is_dir()).cmp(&extension(b.folded_name(), b.is_dir())),
+        ),
     };
     primary
         .then_with(|| a.folded_name().cmp(b.folded_name()))
@@ -169,6 +178,9 @@ impl Keyed<'_> {
 }
 
 impl OrderFields for Keyed<'_> {
+    fn is_dir(&self) -> bool {
+        self.hit.is_dir
+    }
     fn folded_parent(&self) -> &[u8] {
         self.bytes(self.key.folded_parent)
     }

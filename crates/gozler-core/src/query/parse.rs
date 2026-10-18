@@ -15,8 +15,11 @@
 //! `parent:` folder, are joined to the working directory
 //! ([`ParseOptions::working_dir`]). A regular expression is never rewritten.
 //!
+//! A `dm:` value is resolved to UTC bounds here, from the query start
+//! ([`ParseOptions::query_start`]), by the date resolver in `dates`.
+//!
 //! Refused as invalid input, because each would otherwise search text that
-//! no name contains: an unknown function such as `dm:`, an unquoted `<` or
+//! no name contains: an unknown function such as `dc:`, an unquoted `<` or
 //! `>` outside a function value (es groups terms with them), an operator
 //! without its term, and a relative path when there is no working directory.
 //!
@@ -25,6 +28,7 @@
 //! paths, terms keep the text as typed; the daemon folds them when it
 //! compiles the query ([`super::CompiledQuery`]).
 
+use super::dates::{DateRange, QueryStart, date_range};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -202,8 +206,9 @@ impl Clause {
 }
 
 /// One test, or with `negated` its opposite. A size test never matches an
-/// entry whose size is unknown or a folder, negated or not, so a negated
-/// size test does not report an unread file as small.
+/// entry whose size is unknown or a folder, and a date test an entry whose
+/// date is unknown, negated or not, so a negated size test does not report an
+/// unread file as small.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Term {
     pub negated: bool,
@@ -244,9 +249,21 @@ pub enum Test {
     /// The file's size is in this range.
     Size(SizeRange),
     Kind(Kind),
+    /// The date modified is in this range, resolved by the client from its
+    /// clock and time zone. From protocol 5.
+    DateModified(DateRange),
 }
 
 impl ParsedQuery {
+    /// Whether a term tests the size or the date modified, so an answer from
+    /// a volume whose sizes and dates could not be read may leave files out.
+    pub fn tests_size_or_date(&self) -> bool {
+        self.clauses
+            .iter()
+            .flat_map(|c| &c.terms)
+            .any(|t| matches!(t.test, Test::Size(_) | Test::DateModified(_)))
+    }
+
     /// `true` when no term tests text: the query matches everything its
     /// other tests let through.
     #[cfg(test)]
@@ -285,6 +302,9 @@ pub enum QueryError {
         "{0} is a relative path, and this query has no working directory to resolve it; give the full path"
     )]
     RelativePath(String),
+    /// A `dm:` term in a query parsed without a query start to resolve it.
+    #[error("dm: needs the time the search starts, and this query was parsed without one")]
+    NoQueryStart,
     /// More terms than a query may hold; carries the query's count.
     #[error("the query has {0} terms; a query may have at most {max}", max = super::engine::MAX_QUERY_TERMS)]
     TooManyTerms(usize),
@@ -313,6 +333,7 @@ pub(crate) struct SearchFunction {
 enum Function {
     Ext,
     Size,
+    DateModified,
     Path,
     Parent,
     NoPath,
@@ -339,6 +360,15 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::Size,
         example: ">1mb",
         help: "file size; also <, >=, <=, =, 1mb..10mb, empty, tiny, small, medium, large, huge, gigantic",
+    },
+    SearchFunction {
+        names: &["dm", "datemodified", "date-modified"],
+        function: Function::DateModified,
+        example: "today",
+        help: "date modified: today, yesterday, a YYYY-MM-DD day, or 7days for the last \
+               7 times 24 hours; also <, <=, >, >= and ranges such as \
+               2026-01-01..2026-03-31. A comparison compares times, so dm:<30days is \
+               older than 30 days",
     },
     SearchFunction {
         names: &["path"],
@@ -426,25 +456,16 @@ pub struct ParseOptions<'a> {
     /// [`QueryError::RelativePath`]: the daemon parses a protocol 1 query
     /// without the client's working directory.
     pub working_dir: Option<&'a str>,
+    /// What `dm:` values resolve against. `None` refuses them with
+    /// [`QueryError::NoQueryStart`].
+    pub query_start: Option<&'a QueryStart>,
 }
 
-/// Parses a case-insensitive query string into a [`ParsedQuery`]; a `case:`
-/// directive in the query makes it case-sensitive.
+/// Parses a case-insensitive query string, without a working directory or a
+/// query start, into a [`ParsedQuery`]; a `case:` directive in the query makes
+/// it case-sensitive.
 pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
-    parse_query_with_case(input, false)
-}
-
-/// Parses a query string, without a working directory, into a
-/// [`ParsedQuery`] whose case sensitivity defaults to `match_case`; see
-/// [`parse_query_with`].
-pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuery, QueryError> {
-    parse_query_with(
-        input,
-        ParseOptions {
-            match_case,
-            ..ParseOptions::default()
-        },
-    )
+    parse_query_with(input, ParseOptions::default())
 }
 
 /// Parses a query string into a [`ParsedQuery`], read as `options` say. A
@@ -574,7 +595,7 @@ fn any_of(alternatives: Vec<Vec<Clause>>) -> Result<Vec<Clause>, QueryError> {
 
 /// What one term of the query stands for.
 enum Operand {
-    /// A name or path test.
+    /// A test that is a clause of its own: a name, path or date test.
     Text(Test),
     /// `file:` or `folder:`, and the text after it.
     Kind(Kind, Option<Test>),
@@ -651,6 +672,10 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
         match function_named(name) {
             Some(Function::Ext) => return Ok(Operand::Extensions(extensions(value))),
             Some(Function::Size) => return Ok(Operand::Size(parse_size(value)?)),
+            Some(Function::DateModified) => {
+                let start = options.query_start.ok_or(QueryError::NoQueryStart)?;
+                return Ok(Operand::Text(Test::DateModified(date_range(value, start)?)));
+            }
             Some(Function::Path) => {
                 let path = path_text(value, options.working_dir)?;
                 let form = Form::of(has_wildcard(value), options);
@@ -1195,7 +1220,13 @@ mod tests {
     /// `-case` sets the default; a `case:` directive overrides it either way.
     #[test]
     fn the_case_switch_is_the_default_a_directive_overrides() {
-        let case = |text, default| parse_query_with_case(text, default).unwrap().match_case;
+        let case = |text, match_case| {
+            let options = ParseOptions {
+                match_case,
+                ..ParseOptions::default()
+            };
+            parse_query_with(text, options).unwrap().match_case
+        };
         assert!(case("Report", true));
         assert!(!case("Report case:0", true));
         assert!(case("Report case:", false));
@@ -1390,8 +1421,8 @@ mod tests {
     #[test]
     fn an_unknown_function_is_refused() {
         assert_eq!(
-            parse_query("x !DM:today"),
-            Err(QueryError::UnknownFunction("DM".to_string()))
+            parse_query("x !DC:today"),
+            Err(QueryError::UnknownFunction("DC".to_string()))
         );
         assert_eq!(tests(r"C:\repo"), [Test::Path(r"C:\repo".to_string())]);
     }
@@ -1599,7 +1630,7 @@ mod tests {
                 prop::sample::select(vec![
                     "size:", "ext:", "path:", "parent:", "nopath:", "ww:", "regex:", "file:",
                     "folder:", "case:", "case:0", "dm:", "..", ">=", "<", ">", "=", "*", "?", ";",
-                    ".", "\"", " ", "\\", "/", "!", "|", "kb", "gb", "tiny",
+                    ".", "\"", " ", "\\", "/", "!", "|", "kb", "gb", "tiny", "today", "days", "-",
                 ])
                 .prop_map(str::to_string),
                 "[0-9]{1,24}",
@@ -1611,13 +1642,24 @@ mod tests {
         proptest! {
             /// The daemon parses the query text of a protocol 1 request, so
             /// any text can arrive, and a panic would fail the query instead
-            /// of reporting it.
+            /// of reporting it. The query start is the earliest and the
+            /// latest one jiff holds, so date arithmetic leaves its range.
             #[test]
             fn arbitrary_text_errors_instead_of_panicking(
                 input in arb_query(),
                 match_case in any::<bool>(),
+                latest in any::<bool>(),
             ) {
-                let _ = parse_query_with_case(&input, match_case);
+                let start = QueryStart {
+                    now: if latest { jiff::Timestamp::MAX } else { jiff::Timestamp::MIN },
+                    time_zone: jiff::tz::TimeZone::UTC,
+                };
+                let options = ParseOptions {
+                    match_case,
+                    query_start: Some(&start),
+                    ..ParseOptions::default()
+                };
+                let _ = parse_query_with(&input, options);
             }
         }
     }

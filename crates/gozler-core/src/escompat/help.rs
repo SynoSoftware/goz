@@ -47,8 +47,8 @@ pub fn help() -> String {
     out
 }
 
-const INTRO: &str = "Finds files and folders by name, path and size. Terms combine with \
-     AND. Paths accept \\ or /. Shows 20 results unless -n says otherwise. Results: \
+const INTRO: &str = "Finds files and folders by name, path, size and date. Terms combine \
+     with AND. Paths accept \\ or /. Shows 20 results unless -n says otherwise. Results: \
      one full path per line on stdout; diagnostics on stderr. A switch starts with \
      - or /, and each dash inside its name is optional.";
 
@@ -91,6 +91,7 @@ const EXAMPLES: &[&str] = &[
     "gozler C:/repo/*.cs",
     r"gozler -parent C:\repo -n all",
     "gozler *.log -sort dm -n 10",
+    "gozler *.log dm:7days /a-d",
     r#"gozler -r "^test[0-9]+\.cs$" -path C:\repo"#,
     "gozler -n all ext:cs",
     "gozler -timeout 5000 -no-result-error report",
@@ -105,8 +106,14 @@ const NOTES: &[&str] = &[
     "A volume in scope that is indexing, rescanning or offline makes the \
      answer incomplete: gozler prints the results it has, warns on stderr and \
      exits 2. With -path, only the volume of that folder is in scope.",
-    "Files whose size Windows did not report never match size: and add \
-     nothing to -get-total-size or -get-folder-size.",
+    "Files whose size or date Windows did not report never match size: or \
+     dm:, negated or not, and add nothing to -get-total-size or \
+     -get-folder-size. When the size and date pass failed on a volume in \
+     scope, a query that tests or totals sizes or dates warns and exits 2. \
+     After a pass that succeeded, a file it could not read is rare and is \
+     left out without a warning.",
+    "dm: days are calendar days in the local time zone, and 7days is the 7 \
+     times 24 hours before the search starts.",
     "A token that starts with / and names a switch is that switch, as /p is \
      -p, so write a relative path without a leading /: docs/agents.",
 ];
@@ -142,9 +149,17 @@ const DIFFERENCES: &[Difference] = &[
         why: "v0.2.0's default",
     },
     Difference {
-        gozler: "/a letters other than d, and /oe, are refused with exit 4",
-        es: "every attribute letter and sort by extension work",
-        why: "the index holds no attributes, and gozler has no extension sort yet",
+        gozler: "/a letters other than d are refused with exit 4",
+        es: "every attribute letter works",
+        why: "the index holds no attributes",
+    },
+    Difference {
+        gozler: "dm: takes today, yesterday, Ndays and YYYY-MM-DD, alone, compared \
+                 or as a range",
+        es: "dm: also takes years, months, weekday and month names, other \
+             durations, and slash dates in the locale's order",
+        why: "these are the dates scripts and agents write, and a slash date means \
+              a different day in another locale",
     },
     Difference {
         gozler: "One argument with a space splits into terms; write a phrase as \"two words\"",
@@ -350,10 +365,25 @@ fn wrap_into(out: &mut String, start: &str, text: &str, indent: usize) {
 mod tests {
     use super::*;
     use crate::escompat::{Command, parse_argv};
-    use crate::query::{ParseOptions, Test, parse_query, parse_query_with};
+    use crate::query::{ParseOptions, ParsedQuery, QueryError, QueryStart, Test, parse_query_with};
 
     fn argv(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(ToString::to_string).collect()
+    }
+
+    /// `query` parsed in `C:\repo`, as gozler parses it, so relative paths
+    /// and `dm:` values resolve.
+    fn parse(query: &str) -> Result<ParsedQuery, QueryError> {
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        let options = ParseOptions {
+            working_dir: Some(r"C:\repo"),
+            query_start: Some(&start),
+            ..ParseOptions::default()
+        };
+        parse_query_with(query, options)
     }
 
     fn entries(title: &str) -> Vec<String> {
@@ -373,7 +403,7 @@ mod tests {
     fn assert_switch_parses(tokens: &[&str]) {
         match parse_argv(&argv(tokens)) {
             Ok(Command::Run(plan)) => {
-                let parsed = parse_query(&plan.query).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
+                let parsed = parse(&plan.query).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
                 assert!(
                     parsed.is_text_empty(),
                     "{tokens:?} searches {:?}",
@@ -430,7 +460,7 @@ mod tests {
 
         for usage in entries("SEARCH FUNCTIONS") {
             for form in usage.split(", ") {
-                let parsed = parse_query(form).unwrap_or_else(|e| panic!("{form}: {e}"));
+                let parsed = parse(form).unwrap_or_else(|e| panic!("{form}: {e}"));
                 let searched_as_text = parsed
                     .clauses
                     .iter()
@@ -444,11 +474,7 @@ mod tests {
         }
 
         for term in entries("SEARCH TERMS") {
-            let options = ParseOptions {
-                working_dir: Some(r"C:\repo"),
-                ..ParseOptions::default()
-            };
-            let parsed = parse_query_with(&term, options).unwrap_or_else(|e| panic!("{term}: {e}"));
+            let parsed = parse(&term).unwrap_or_else(|e| panic!("{term}: {e}"));
             assert!(!parsed.is_text_empty(), "{term} searches for nothing");
         }
 
@@ -457,7 +483,7 @@ mod tests {
             assert_eq!(tokens[0], "gozler", "{example}");
             match parse_argv(&argv(&tokens[1..])) {
                 Ok(Command::Run(plan)) => {
-                    parse_query(&plan.query).unwrap_or_else(|e| panic!("{example}: {e}"));
+                    parse(&plan.query).unwrap_or_else(|e| panic!("{example}: {e}"));
                 }
                 other => panic!("{example}: {other:?}"),
             }

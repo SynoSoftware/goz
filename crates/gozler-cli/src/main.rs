@@ -82,6 +82,7 @@ mod win {
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
     use gozler_core::output::{TableWriter, filetime_to_unix_ms};
     use gozler_core::proto::{DaemonStatus, QueryResults, VolumeStatus};
+    use gozler_core::query::QueryStart;
     use gozler_core::scope::Scope;
     use gozler_core::winpath::is_drive_relative;
     use std::io::Write;
@@ -101,7 +102,12 @@ mod win {
 
     fn search(mut plan: EsPlan) -> Result<ExitCode, Failure> {
         resolve_drive_relative(&mut plan)?;
-        let request = build_search(&plan, &working_dir()?).map_err(Failure::Query)?;
+        let time_zone = jiff::tz::TimeZone::system();
+        let start = QueryStart {
+            now: jiff::Timestamp::now(),
+            time_zone: time_zone.clone(),
+        };
+        let request = build_search(&plan, &working_dir()?, &start).map_err(Failure::Query)?;
 
         // Create the export file up front (es semantics): a later daemon-unreachable
         // failure then leaves the observable artifact, a 0-byte file + exit 8.
@@ -121,7 +127,7 @@ mod win {
             wait_for_scope(&mut connection, request.scope.as_deref(), timeout)?;
         }
 
-        let mut answer = Answer::default();
+        let mut answer = Answer::new(&plan, &request.query);
         if let Some(count) = plan.count {
             let totals = connection.totals(request)?;
             answer.add_totals(&totals);
@@ -140,7 +146,7 @@ mod win {
                 // writes.
                 None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
             };
-            let mut writer = ResultWriter::new(&plan, jiff::tz::TimeZone::system(), out);
+            let mut writer = ResultWriter::new(&plan, time_zone, out);
             connection.query(request, |page| {
                 answer.add_page(&page);
                 writer.page(page)

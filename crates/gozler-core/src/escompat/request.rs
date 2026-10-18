@@ -3,12 +3,13 @@
 use super::{EsPlan, ScopeFolder};
 use crate::proto::{Returns, Rows, SearchRequest};
 use crate::query::parse::regex_test;
-use crate::query::{Clause, ParseOptions, QueryError, Test, parse_query_with};
+use crate::query::{Clause, ParseOptions, QueryError, QueryStart, Test, parse_query_with};
 use crate::winpath::{absolute, parent_of};
 
 /// The request for `plan`: its query parsed, its folders made absolute
-/// against `working_dir`, an absolute path such as `C:\repo`, and either the
-/// rows to show or, for a count, the totals.
+/// against `working_dir`, an absolute path such as `C:\repo`, its `dm:`
+/// values resolved against `query_start`, and either the rows to show or,
+/// for a count, the totals.
 ///
 /// The folders of `-path`, `-parent-path` and `-parent`, and the relative
 /// paths in the query, are joined to `working_dir` by
@@ -22,7 +23,11 @@ use crate::winpath::{absolute, parent_of};
 /// the query, and without `-path` or `-parent-path` it is also the scope, so
 /// the daemon walks DIR instead of every volume and refuses a DIR on no
 /// indexed volume.
-pub fn build_search(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, QueryError> {
+pub fn build_search(
+    plan: &EsPlan,
+    working_dir: &str,
+    query_start: &QueryStart,
+) -> Result<SearchRequest, QueryError> {
     let returns = match plan.count {
         Some(_) => Returns::Totals,
         None => Returns::Rows(Rows {
@@ -41,6 +46,7 @@ pub fn build_search(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, Q
             match_path: plan.match_path,
             whole_word: plan.whole_word,
             working_dir: Some(working_dir),
+            query_start: Some(query_start),
         },
     )?;
     let regexes = plan
@@ -70,6 +76,15 @@ mod tests {
     use crate::escompat::{Command, parse_argv};
     use crate::winpath::is_drive_relative;
 
+    /// The request for `plan` in `working_dir`, at an arbitrary query start.
+    fn search_in(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, QueryError> {
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        build_search(plan, working_dir, &start)
+    }
+
     fn plan(tokens: &[&str]) -> EsPlan {
         let args: Vec<String> = tokens.iter().map(ToString::to_string).collect();
         match parse_argv(&args) {
@@ -97,7 +112,7 @@ mod tests {
             ("D:x", r"C:\repo", r"D:\x"),
         ];
         for (scope, working_dir, absolute) in cases {
-            let request = build_search(&plan(&["-path", scope]), working_dir).expect("parses");
+            let request = search_in(&plan(&["-path", scope]), working_dir).expect("parses");
             assert_eq!(
                 request.scope.as_deref(),
                 Some(absolute),
@@ -113,7 +128,7 @@ mod tests {
     /// no other switch names one, so `-path` still decides the volumes.
     #[test]
     fn the_parent_switches_name_their_folders() {
-        let search = |tokens: &[&str]| build_search(&plan(tokens), r"C:\repo\src").expect("parses");
+        let search = |tokens: &[&str]| search_in(&plan(tokens), r"C:\repo\src").expect("parses");
         let scope = |tokens: &[&str]| search(tokens).scope;
         assert_eq!(
             scope(&["-parent-path", "main.rs"]).as_deref(),
@@ -139,7 +154,7 @@ mod tests {
     #[test]
     fn the_matching_switches_shape_the_query() {
         let tests = |tokens: &[&str]| -> Vec<Test> {
-            build_search(&plan(tokens), r"C:\repo")
+            search_in(&plan(tokens), r"C:\repo")
                 .expect("parses")
                 .query
                 .clauses
@@ -169,8 +184,7 @@ mod tests {
     /// reaches it; rows carry the limit.
     #[test]
     fn a_count_asks_for_the_totals_and_rows_carry_the_limit() {
-        let returns =
-            |tokens: &[&str]| build_search(&plan(tokens), r"C:\").expect("parses").returns;
+        let returns = |tokens: &[&str]| search_in(&plan(tokens), r"C:\").expect("parses").returns;
         assert_eq!(returns(&["-get-result-count", "-n", "5"]), Returns::Totals);
         assert_eq!(returns(&["-get-folder-size", r"C:\x"]), Returns::Totals);
         assert!(matches!(

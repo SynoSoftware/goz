@@ -455,11 +455,11 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Family {
-            usage: "/on, /o-n, /os, /o-s, /od, /o-d",
+            usage: "/on, /o-n, /os, /o-s, /od, /o-d, /oe, /o-e",
             parse: parse_order_switch,
         },
-        help: "order by name, size or date modified as dir does: A to Z, smallest \
-               or oldest first; - reverses the order",
+        help: "order by name, size, date modified or extension as dir does: A to Z, \
+               smallest or oldest first; - reverses the order",
     },
     Switch {
         spelling: Spelling::Es {
@@ -722,6 +722,11 @@ pub(super) const SORT_KEYS: &[SortKeyName] = &[
         key: SortKey::DateModified,
         help: "date modified, newest first",
     },
+    SortKeyName {
+        names: &["extension"],
+        key: SortKey::Extension,
+        help: "extension, A to Z; folders and names without one first",
+    },
 ];
 
 /// Parses an argv slice (excluding `argv[0]`) into a [`Command`].
@@ -825,8 +830,8 @@ fn parse_sort_switch(name: &str) -> Option<SwitchAction> {
     })
 }
 
-/// Parses the `/o` family, es's dir-style sorts: `/on`, `/os` and `/od`
-/// ascending, and with `-` after the `o` descending.
+/// Parses the `/o` family, es's dir-style sorts: `/on`, `/os`, `/od` and
+/// `/oe` ascending, and with `-` after the `o` descending.
 fn parse_order_switch(name: &str) -> Option<SwitchAction> {
     let rest = name.strip_prefix('o')?;
     let (dir, letter) = match rest.strip_prefix('-') {
@@ -837,14 +842,11 @@ fn parse_order_switch(name: &str) -> Option<SwitchAction> {
         "n" => SortKey::Name,
         "s" => SortKey::Size,
         "d" => SortKey::DateModified,
-        "e" => {
-            return Some(SwitchAction::Refused(
-                "sorts by extension, which this release does not have",
-            ));
-        }
+        "e" => SortKey::Extension,
         _ => {
             return Some(SwitchAction::Refused(
-                "is not a sort; use /on, /os or /od, or /o-n, /o-s or /o-d to reverse",
+                "is not a sort; use /on, /os, /od or /oe, or /o-n, /o-s, /o-d or /o-e \
+                 to reverse",
             ));
         }
     };
@@ -1206,8 +1208,8 @@ mod tests {
     }
 
     /// es's `/o` sorts run ascending, smallest and oldest first, unlike
-    /// `-sort size` and `-sort dm`; `-` reverses them. `/oe` waits for the
-    /// extension sort key, and every other `/o` token exits 4.
+    /// `-sort size` and `-sort dm`; `-` reverses them, and every other `/o`
+    /// token exits 4.
     #[test]
     fn order_switches_map_to_sort_keys() {
         assert_eq!(
@@ -1224,7 +1226,14 @@ mod tests {
                 dir: SortDir::Desc,
             }
         );
-        for refused in ["/oe", "/o-e", "/ox", "/o"] {
+        assert_eq!(
+            plan(&["/o-e"]).sort,
+            SortSpec {
+                key: SortKey::Extension,
+                dir: SortDir::Desc,
+            }
+        );
+        for refused in ["/ox", "/o"] {
             assert_eq!(
                 fatal(&[refused]).exit_code,
                 ExitCode::InvalidInput,
