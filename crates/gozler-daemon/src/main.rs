@@ -1,10 +1,10 @@
 //! gozlerd: the gozler indexing daemon.
 //!
-//! Bootstraps per-volume indexes from the NTFS MFT, tails the USN change
-//! journal, and serves queries over `\\.\pipe\gozler-v1`. `run` starts the live
-//! daemon (console by default; `--service` under the SCM); `scan` does a
-//! one-shot bootstrap and prints stats; `install`/`uninstall` register the
-//! auto-start Windows service.
+//! Bootstraps per-volume indexes from the NTFS MFT or a ReFS folder walk,
+//! tails the USN change journal, and serves queries over
+//! `\\.\pipe\gozler-v1`. `run` starts the live daemon (console by default;
+//! `--service` under the SCM); `scan` does a one-shot bootstrap and prints
+//! stats; `install`/`uninstall` register the auto-start Windows service.
 
 // Thread-caching allocator: the query path allocates a path buffer per hit, so a
 // broad query is millions of small allocations that the Windows default heap
@@ -36,7 +36,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "gozlerd",
     version,
-    about = "Keeps an index of every fixed NTFS volume and answers gozler's searches"
+    about = "Keeps an index of every fixed NTFS and ReFS volume and answers gozler's searches"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -45,7 +45,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Index every fixed NTFS volume once, print the statistics and exit.
+    /// Index every fixed NTFS and ReFS volume once, print the statistics and exit.
     ///
     /// No daemon runs. With a query, also search each new index with it.
     Scan {
@@ -125,7 +125,9 @@ fn main() -> std::process::ExitCode {
 #[cfg(not(windows))]
 fn main() -> anyhow::Result<()> {
     let _ = Cli::parse();
-    anyhow::bail!("gozlerd requires Windows (it reads the NTFS MFT and USN journal)")
+    anyhow::bail!(
+        "gozlerd requires Windows (it reads NTFS and ReFS volumes and their USN journals)"
+    )
 }
 
 #[cfg(windows)]
@@ -148,7 +150,11 @@ fn run_scan(query: Option<String>) -> anyhow::Result<()> {
         println!("volume {}", s.mounted().display_prefix());
         println!("  guid          {}", s.guid_path);
         println!("  entries       {}", s.entries());
-        println!("  file_layout   {:.2}s", s.layout_secs);
+        let pass = match s.filesystem {
+            bootstrap::Filesystem::Ntfs => "file_layout",
+            bootstrap::Filesystem::Refs => "folder_walk",
+        };
+        println!("  {pass:<13} {:.2}s", s.read_secs);
         if let Some(enum_secs) = s.enum_secs {
             println!("  enum          {enum_secs:.2}s (the file-layout pass stopped)");
         }

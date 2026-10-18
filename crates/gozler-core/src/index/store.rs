@@ -56,7 +56,6 @@ const _: () = assert!(size_of::<NameRef>() == 8);
 const _: () = assert!(size_of::<NamePair>() == 16);
 const _: () = assert!(size_of::<EntryFlags>() == 1);
 const _: () = assert!(size_of::<PackedAttributes>() == 2);
-const _: () = assert!(size_of::<Frn>() == 8);
 const _: () = assert!(size_of::<EntryIdx>() == 4);
 const _: () = assert!(size_of::<NameId>() == 4);
 
@@ -500,6 +499,81 @@ pub(crate) const SIZE_UNKNOWN: u64 = u64::MAX;
 /// Sentinel mtime meaning "unknown".
 pub(crate) const MTIME_UNKNOWN: i64 = i64::MIN;
 
+/// The entries' file IDs. NTFS IDs fit in 64 bits, so the column holds `u64`s
+/// until it stores its first wide ID, as a ReFS volume's root is, and holds
+/// `u128`s from then on: an NTFS index keeps 8 bytes per entry.
+#[derive(Debug)]
+enum FrnColumn {
+    Narrow(Vec<u64>),
+    Wide(Vec<u128>),
+}
+
+impl Default for FrnColumn {
+    fn default() -> Self {
+        FrnColumn::Narrow(Vec::new())
+    }
+}
+
+impl FrnColumn {
+    fn len(&self) -> usize {
+        match self {
+            FrnColumn::Narrow(v) => v.len(),
+            FrnColumn::Wide(v) => v.len(),
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> Frn {
+        match self {
+            FrnColumn::Narrow(v) => Frn(v[i].into()),
+            FrnColumn::Wide(v) => Frn(v[i]),
+        }
+    }
+
+    fn set(&mut self, i: usize, frn: Frn) {
+        self.widen_for(frn);
+        match self {
+            FrnColumn::Narrow(v) => v[i] = narrow(frn),
+            FrnColumn::Wide(v) => v[i] = frn.0,
+        }
+    }
+
+    fn push(&mut self, frn: Frn) {
+        self.widen_for(frn);
+        match self {
+            FrnColumn::Narrow(v) => push_eighth(v, narrow(frn)),
+            FrnColumn::Wide(v) => push_eighth(v, frn.0),
+        }
+    }
+
+    fn widen_for(&mut self, frn: Frn) {
+        if let FrnColumn::Narrow(v) = self
+            && frn.is_wide()
+        {
+            *self = FrnColumn::Wide(v.iter().map(|&id| id.into()).collect());
+        }
+    }
+
+    fn memory(&self) -> ComponentBytes {
+        match self {
+            FrnColumn::Narrow(v) => ComponentBytes::of_vec(v),
+            FrnColumn::Wide(v) => ComponentBytes::of_vec(v),
+        }
+    }
+
+    fn shrink_with_headroom(&mut self) {
+        match self {
+            FrnColumn::Narrow(v) => shrink_vec(v),
+            FrnColumn::Wide(v) => shrink_vec(v),
+        }
+    }
+}
+
+/// `frn` as a narrow column stores it.
+fn narrow(frn: Frn) -> u64 {
+    u64::try_from(frn.0).expect("widen_for widens the column before it stores a wide ID")
+}
+
 /// Struct-of-arrays entry storage. Every column is indexed by [`EntryIdx`];
 /// one entry exists per link name, so a hard-linked file has several entries
 /// sharing an [`Frn`], chained through `next_link`. Entries sharing an
@@ -507,7 +581,7 @@ pub(crate) const MTIME_UNKNOWN: i64 = i64::MIN;
 /// [`NameStore`]); [`super::volume`] keeps those chains exact.
 #[derive(Debug, Default)]
 pub(crate) struct EntryTable {
-    frn: Vec<Frn>,
+    frn: FrnColumn,
     parent: Vec<EntryIdx>,
     name_id: Vec<NameId>,
     flags: Vec<EntryFlags>,
@@ -553,7 +627,7 @@ impl EntryTable {
         self.live += 1;
         if let Some(idx) = self.free.pop() {
             let i = idx as usize;
-            self.frn[i] = frn;
+            self.frn.set(i, frn);
             self.parent[i] = parent;
             self.name_id[i] = name_id;
             self.flags[i] = flags;
@@ -569,7 +643,7 @@ impl EntryTable {
             idx
         } else {
             let idx = self.frn.len() as EntryIdx;
-            push_eighth(&mut self.frn, frn);
+            self.frn.push(frn);
             push_eighth(&mut self.parent, parent);
             push_eighth(&mut self.name_id, name_id);
             push_eighth(&mut self.flags, flags);
@@ -629,7 +703,7 @@ impl EntryTable {
 
     #[inline]
     pub(crate) fn frn(&self, idx: EntryIdx) -> Frn {
-        self.frn[idx as usize]
+        self.frn.get(idx as usize)
     }
     #[inline]
     pub(crate) fn parent(&self, idx: EntryIdx) -> EntryIdx {
@@ -734,7 +808,7 @@ impl EntryTable {
     }
 
     pub(crate) fn memory(&self) -> ComponentBytes {
-        ComponentBytes::of_vec(&self.frn)
+        self.frn.memory()
             + ComponentBytes::of_vec(&self.parent)
             + ComponentBytes::of_vec(&self.name_id)
             + ComponentBytes::of_vec(&self.flags)
@@ -754,7 +828,7 @@ impl EntryTable {
     /// does not reallocate every column at once (see
     /// `NameStore::shrink_with_headroom`). Called once post-bootstrap.
     pub(crate) fn shrink_with_headroom(&mut self) {
-        shrink_vec(&mut self.frn);
+        self.frn.shrink_with_headroom();
         shrink_vec(&mut self.parent);
         shrink_vec(&mut self.name_id);
         shrink_vec(&mut self.flags);
@@ -775,42 +849,57 @@ impl EntryTable {
 /// before [`FrnMap::set`] switches it to the sparse backing.
 const DENSE_GROWTH_SLACK: u64 = 1 << 16;
 
-/// Maps a 48-bit MFT record number to its chain-head [`EntryIdx`].
+/// Maps a file ID to its chain-head [`EntryIdx`].
 ///
-/// Keyed by record number (not the full FRN) so slot reuse is detectable:
-/// the caller re-checks the stored entry's full FRN and, on a sequence
-/// mismatch, treats the slot as free. Bootstrap builds the `Sparse` variant
-/// (record numbers arrive before their density is known);
-/// [`FrnMap::densify_if_smaller`] swaps to `Dense` at publish when the record
-/// space is compact, which on a real NTFS volume it essentially always is.
+/// On NTFS the map is keyed by the 48-bit MFT record number, not the full
+/// ID, so slot reuse is detectable: the caller re-checks the stored entry's
+/// full ID and, on a sequence mismatch, treats the slot as free. Bootstrap
+/// builds the `Sparse` variant (record numbers arrive before their density is
+/// known); [`FrnMap::densify_if_smaller`] swaps to `Dense` at publish when the
+/// record space is compact, which on a real NTFS volume it essentially always
+/// is. A ReFS ID has no record number, so a ReFS volume's map is `Wide`,
+/// keyed by the whole ID, and the re-check always finds the same ID.
 #[derive(Debug)]
 pub(crate) enum FrnMap {
     /// `Vec` indexed by record number; [`NIL`] marks an empty slot.
     Dense(Vec<EntryIdx>),
     /// Fallback for sparse / arbitrary record-number spaces.
     Sparse(FxHashMap<u64, EntryIdx>),
+    /// Keyed by the whole 128-bit ID.
+    Wide(FxHashMap<u128, EntryIdx>),
 }
 
 impl FrnMap {
-    /// A hash-backed map (the default; safe for any record-number space).
-    pub(crate) fn sparse() -> Self {
-        FrnMap::Sparse(FxHashMap::default())
-    }
-
-    #[inline]
-    pub(crate) fn get(&self, record: u64) -> Option<EntryIdx> {
-        match self {
-            FrnMap::Dense(v) => v.get(record as usize).copied().filter(|&i| i != NIL),
-            FrnMap::Sparse(m) => m.get(&record).copied(),
+    /// An empty map for a volume whose root folder has the ID `root`: `Wide`
+    /// for a wide root, as ReFS has, and otherwise a record-number map, which
+    /// starts sparse because it is safe for any record-number space.
+    pub(crate) fn for_root(root: Frn) -> Self {
+        if root.is_wide() {
+            FrnMap::Wide(FxHashMap::default())
+        } else {
+            FrnMap::Sparse(FxHashMap::default())
         }
     }
 
-    /// Maps `record` to `idx`. A dense map switches to the sparse backing for
+    #[inline]
+    pub(crate) fn get(&self, frn: Frn) -> Option<EntryIdx> {
+        match self {
+            FrnMap::Dense(v) => v
+                .get(frn.record_number() as usize)
+                .copied()
+                .filter(|&i| i != NIL),
+            FrnMap::Sparse(m) => m.get(&frn.record_number()).copied(),
+            FrnMap::Wide(m) => m.get(&frn.0).copied(),
+        }
+    }
+
+    /// Maps `frn` to `idx`. A dense map switches to the sparse backing for
     /// a record number far past its end: a real MFT grows a little at a time,
     /// but a corrupt journal record can carry any 48-bit number, and growing
     /// the `Vec` to it would abort the daemon on a failed allocation.
     #[inline]
-    pub(crate) fn set(&mut self, record: u64, idx: EntryIdx) {
+    pub(crate) fn set(&mut self, frn: Frn, idx: EntryIdx) {
+        let record = frn.record_number();
         if let FrnMap::Dense(v) = self
             && record > v.len() as u64 * 2 + DENSE_GROWTH_SLACK
         {
@@ -829,19 +918,25 @@ impl FrnMap {
             FrnMap::Sparse(m) => {
                 m.insert(record, idx);
             }
+            FrnMap::Wide(m) => {
+                m.insert(frn.0, idx);
+            }
         }
     }
 
     #[inline]
-    pub(crate) fn remove(&mut self, record: u64) {
+    pub(crate) fn remove(&mut self, frn: Frn) {
         match self {
             FrnMap::Dense(v) => {
-                if let Some(slot) = v.get_mut(record as usize) {
+                if let Some(slot) = v.get_mut(frn.record_number() as usize) {
                     *slot = NIL;
                 }
             }
             FrnMap::Sparse(m) => {
-                m.remove(&record);
+                m.remove(&frn.record_number());
+            }
+            FrnMap::Wide(m) => {
+                m.remove(&frn.0);
             }
         }
     }
@@ -874,31 +969,34 @@ impl FrnMap {
         }
     }
 
-    /// A short label for diagnostics ("dense" / "sparse").
+    /// A short label for diagnostics ("dense" / "sparse" / "wide").
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             FrnMap::Dense(_) => "dense",
             FrnMap::Sparse(_) => "sparse",
+            FrnMap::Wide(_) => "wide",
         }
     }
 
     pub(crate) fn memory(&self) -> ComponentBytes {
         match self {
             FrnMap::Dense(v) => ComponentBytes::of_vec(v),
-            FrnMap::Sparse(m) => {
-                // hashbrown allocates power-of-two bucket arrays at 7/8 max
-                // load; estimate from the usable capacity it reports. Each
-                // bucket holds a (u64, u32) pair (padded to 16) + 1 control
-                // byte. An estimate, but within ~2x of truth is enough to
-                // rank this map against the other components.
-                let buckets = ((m.capacity() as u64 * 8) / 7).next_power_of_two();
-                let per_bucket = (size_of::<(u64, EntryIdx)>() + 1) as u64;
-                let used = m.len() as u64 * per_bucket;
-                ComponentBytes {
-                    used,
-                    allocated: buckets * per_bucket,
-                }
-            }
+            FrnMap::Sparse(m) => hash_map_memory(m),
+            FrnMap::Wide(m) => hash_map_memory(m),
         }
+    }
+}
+
+/// Estimates a hash map's bytes. hashbrown allocates power-of-two bucket
+/// arrays at 7/8 max load; estimate from the usable capacity it reports. Each
+/// bucket holds a (key, value) pair, padded, plus 1 control byte. An estimate,
+/// but within ~2x of truth is enough to rank the map against the other
+/// components.
+fn hash_map_memory<K>(m: &FxHashMap<K, EntryIdx>) -> ComponentBytes {
+    let buckets = ((m.capacity() as u64 * 8) / 7).next_power_of_two();
+    let per_bucket = (size_of::<(K, EntryIdx)>() + 1) as u64;
+    ComponentBytes {
+        used: m.len() as u64 * per_bucket,
+        allocated: buckets * per_bucket,
     }
 }

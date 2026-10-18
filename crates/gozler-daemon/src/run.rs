@@ -18,7 +18,7 @@ pub(crate) struct Engine {
     pub supervisor: Supervisor,
 }
 
-/// Starts indexing every fixed NTFS volume and returns before any is indexed.
+/// Starts indexing every fixed NTFS and ReFS volume and returns before any is indexed.
 ///
 /// The pipe opens right after this, so a client asking during the first
 /// bootstrap gets results flagged incomplete, not "the daemon is not running".

@@ -8,19 +8,16 @@
 //! little-endian field types): valid at any offset, zero `unsafe`.
 //!
 //! Version handling:
-//! - V2: parsed (the NTFS default).
-//! - V3: parsed. NTFS emits V3 when USN range tracking is enabled, so
-//!   even an NTFS-only indexer must handle it. The 128-bit `FILE_ID_128` ids
-//!   are truncated to their low 64 bits: on NTFS the 64-bit FRN sits in the
-//!   first 8 bytes (little-endian) and the high half is zero-extension. A
-//!   nonzero high half is silently dropped at runtime (never a hard failure);
-//!   fixture tests assert the zero-extension invariant instead.
+//! - V2: parsed (the NTFS default). Its 64-bit ids are zero-extended.
+//! - V3: parsed, with its 128-bit `FILE_ID_128` ids whole. ReFS writes V3,
+//!   and its ids use all 128 bits; NTFS writes V3 when USN range tracking is
+//!   enabled, with the 64-bit FRN zero-extended.
 //! - V4: extent-range records with no file name; skipped via
 //!   `RecordLength`.
 //! - Unknown major version: skipped via `RecordLength` (forward
 //!   compatibility).
 
-use zerocopy::byteorder::little_endian::{I64, U16, U32, U64};
+use zerocopy::byteorder::little_endian::{I64, U16, U32, U64, U128};
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 use crate::types::{Frn, MAX_NAME_UTF16_BYTES};
@@ -69,8 +66,7 @@ const LEADING_VALUE_LEN: usize = 8;
 pub struct ParsedUsnRecord {
     /// `MajorVersion` of the wire record this was parsed from (2 or 3).
     pub major_version: u16,
-    /// File reference number. For V3 records this is the low 64 bits of the
-    /// `FILE_ID_128` (see module docs on the truncation).
+    /// The file's ID.
     pub frn: Frn,
     /// FRN of the directory containing the name in this record.
     pub parent_frn: Frn,
@@ -207,18 +203,15 @@ struct RawV2 {
 }
 
 /// `USN_RECORD_V3` fixed header (76 bytes): identical to V2 except the two
-/// ids are 16-byte `FILE_ID_128`s, modeled as low/high `u64` halves (layout
-/// is the same). Only the low halves are consumed; see module docs.
+/// ids are 16-byte `FILE_ID_128`s.
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawV3 {
     _record_length: U32,
     _major_version: U16,
     _minor_version: U16,
-    frn_low: U64,
-    _frn_high: U64,
-    parent_frn_low: U64,
-    _parent_frn_high: U64,
+    frn: U128,
+    parent_frn: U128,
     usn: I64,
     timestamp: I64,
     reason: U32,
@@ -288,8 +281,8 @@ fn parse_v2(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
     )?;
     Ok(ParsedUsnRecord {
         major_version: 2,
-        frn: Frn(hdr.frn.get()),
-        parent_frn: Frn(hdr.parent_frn.get()),
+        frn: Frn(hdr.frn.get().into()),
+        parent_frn: Frn(hdr.parent_frn.get().into()),
         usn: hdr.usn.get(),
         timestamp_ft: hdr.timestamp.get(),
         reason: hdr.reason.get(),
@@ -299,8 +292,7 @@ fn parse_v2(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
     })
 }
 
-/// Parses one `USN_RECORD_V3` from its exact record slice, truncating the
-/// `FILE_ID_128` ids to their low 64 bits (see module docs).
+/// Parses one `USN_RECORD_V3` from its exact record slice.
 fn parse_v3(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
     let (hdr, _) =
         RawV3::ref_from_prefix(rec).map_err(|_| WalkError::TruncatedHeader { offset })?;
@@ -313,8 +305,8 @@ fn parse_v3(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
     )?;
     Ok(ParsedUsnRecord {
         major_version: 3,
-        frn: Frn(hdr.frn_low.get()),
-        parent_frn: Frn(hdr.parent_frn_low.get()),
+        frn: Frn(hdr.frn.get()),
+        parent_frn: Frn(hdr.parent_frn.get()),
         usn: hdr.usn.get(),
         timestamp_ft: hdr.timestamp.get(),
         reason: hdr.reason.get(),
@@ -423,25 +415,17 @@ mod tests {
     }
 
     #[test]
-    fn v3_fixture_high_halves_are_zero_extension() {
-        // Structural invariant of NTFS-shaped V3 records: the FILE_ID_128
-        // high halves are zero. The fixture builder must uphold it.
-        let fx = RecordFixture::file(u64::MAX, u64::MAX - 1, "x").with_version(3);
-        let rb = record_bytes(&fx);
-        assert_eq!(&rb[16..24], &[0u8; 8], "FRN high half");
-        assert_eq!(&rb[32..40], &[0u8; 8], "parent FRN high half");
-    }
-
-    #[test]
-    fn v3_nonzero_high_half_is_truncated_not_fatal() {
-        let fx = RecordFixture::file(0x1111, 0x2222, "hi").with_version(3);
-        let mut buf = build_enum_buffer(0, &[fx]);
-        // Record starts at 8; FRN high half occupies record bytes 16..24.
-        buf[8 + 16] = 0xFF;
-        let walk = walk_enum_buffer(&buf).unwrap();
+    fn v3_keeps_the_whole_refs_file_id() {
+        // A ReFS file ID as V: gives it: bytes 8..15 hold the folder's number
+        // and bytes 0..7 the file's number within it, which is 0 for every
+        // folder. Keeping only bytes 0..7 gave every ReFS folder the ID 0.
+        let folder = 0x702u128 << 64;
+        let fx = RecordFixture::file(folder | 0x84, folder, "hi").with_version(3);
+        let buf = build_journal_buffer(0, &[fx]);
+        let walk = walk_journal_buffer(&buf).unwrap();
         assert_eq!(walk.records.len(), 1);
-        assert_eq!(walk.records[0].frn, Frn(0x1111));
-        assert_eq!(walk.records[0].parent_frn, Frn(0x2222));
+        assert_eq!(walk.records[0].frn, Frn(folder | 0x84));
+        assert_eq!(walk.records[0].parent_frn, Frn(folder));
     }
 
     #[test]
@@ -730,8 +714,8 @@ mod tests {
                 .prop_map(
                     |(frn, parent, usn, timestamp, reason, attributes, name_units)| RecordFixture {
                         version: 2,
-                        frn,
-                        parent,
+                        frn: frn.into(),
+                        parent: parent.into(),
                         usn,
                         timestamp,
                         reason,

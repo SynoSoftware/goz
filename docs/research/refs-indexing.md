@@ -1,6 +1,7 @@
 # How to index and track a ReFS volume
 
-Read on 2026-10-18 for `docs/plans/refs.md`. The sources are Microsoft Learn
+Read on 2026-10-18 for gozler's ReFS indexing, which `docs/DESIGN.md`
+("Index coherence") now describes. The sources are Microsoft Learn
 (Win32, driver and open-spec pages) and the voidtools site and forum. Nothing
 was run against a volume.
 
@@ -88,8 +89,8 @@ individual FSCTLs.
 **Measured, 2026-10-18, Windows build 26200:** on the ReFS volume V:,
 `FSCTL_ENUM_USN_DATA` fails with error 1 (`ERROR_INVALID_FUNCTION`) for
 `MFT_ENUM_DATA_V0` and for `MFT_ENUM_DATA_V1` with record versions 2 to 3 or
-3 only, despite the documentation below. `docs/plans/refs.md`, "Stage 0",
-has the probe and the rest of its results.
+3 only, despite the documentation below. So a ReFS index is built by
+walking its folders.
 
 ### Documented
 

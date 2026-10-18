@@ -15,6 +15,10 @@
 //! cannot be resolved is skipped, never applied as an empty set (which would
 //! delete a live file), and counted as `IndexStats::link_reconciles_dropped` so
 //! `--status` shows it rather than hiding it.
+//!
+//! A rename can also bring in a folder the index lacks, because a folder walk
+//! is not a snapshot (see `ApplyOutcome::needs_walk`). The tail lists such a
+//! folder and everything under it; a listing that fails starts a rescan.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +40,7 @@ use gozler_winfs::{
     JournalInfo, VolumeHandle, read_usn_journal, stat_file,
 };
 
-use crate::bootstrap::{self, JournalSetup};
+use crate::bootstrap::{self, Filesystem, JournalSetup};
 use crate::pulse::TailPulse;
 use crate::volume_state::VolumeState;
 
@@ -77,6 +81,9 @@ enum RescanReason {
     /// whose journal was deleted mid-read); whatever the cause, a journal that
     /// will not stop failing cannot be trusted.
     ReadsKeptFailing,
+    /// A folder the index missed could not be listed, so its contents stay
+    /// missing.
+    WalkFailed,
 }
 
 /// 512 KiB journal read buffer (~5k records per fill).
@@ -218,14 +225,20 @@ struct ReadPosition {
     journal_id: u64,
     /// `None` while reads succeed.
     failures: Option<ReadFailures>,
+    /// The reads are still replaying the changes made while a folder walk
+    /// built the index: from the build's cursor until the first read that
+    /// finds nothing new.
+    replaying_walk: bool,
 }
 
 impl ReadPosition {
-    fn at(cursor: JournalInfo) -> Self {
+    /// Where the tail reads after a build of `filesystem` that took `cursor`.
+    fn at(cursor: JournalInfo, filesystem: Filesystem) -> Self {
         Self {
             start_usn: cursor.next_usn,
             journal_id: cursor.journal_id,
             failures: None,
+            replaying_walk: filesystem == Filesystem::Refs,
         }
     }
 }
@@ -268,7 +281,7 @@ fn tail_loop(
             None => return,
         },
     };
-    let mut pos = ReadPosition::at(cursor);
+    let mut pos = ReadPosition::at(cursor, state.filesystem);
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
 
     while !stop.load(Ordering::Relaxed) {
@@ -277,6 +290,7 @@ fn tail_loop(
         pulse.beat();
         match read_usn_journal(
             handle,
+            state.filesystem.journal_records(),
             pos.start_usn,
             pos.journal_id,
             REASON_MASK,
@@ -306,7 +320,7 @@ fn tail_loop(
                             stop,
                         ) {
                             Some(c) => {
-                                pos = ReadPosition::at(c);
+                                pos = ReadPosition::at(c, state.filesystem);
                                 continue;
                             }
                             None => return,
@@ -315,6 +329,11 @@ fn tail_loop(
                 };
                 if walk.records.is_empty() {
                     // Caught up (or only filtered-out records): advance and idle.
+                    if bytes <= size_of::<i64>() {
+                        // Nothing past the next USN: the reads have passed
+                        // every change made during the build.
+                        pos.replaying_walk = false;
+                    }
                     pos.start_usn = walk.next_usn;
                     std::thread::sleep(IDLE_POLL);
                     continue;
@@ -332,19 +351,53 @@ fn tail_loop(
                 // the one thing here that used to run long (~184 ms on a large
                 // index), is no longer inline: `apply_batch` reports it and
                 // `compact_index` does the copying off the exclusive lock.
-                let outcome = {
+                let mut outcome = {
                     let mut index = state.index.write();
                     index.apply_batch(&walk.records)
                 };
                 for anomaly in &outcome.anomalies {
                     tracing::debug!(volume = %state.mount_prefix(), ?anomaly, "index anomaly");
                 }
+                if pos.replaying_walk {
+                    // A walk lists one folder at a time, so a hard link
+                    // renamed during it from a folder not yet listed into one
+                    // already listed was never listed, and its rename record
+                    // replaced the file's other name. The link reconcile
+                    // restores the file's real names.
+                    outcome.needs_link_reconcile.extend(
+                        walk.records
+                            .iter()
+                            .filter(|r| r.reason & USN_REASON_RENAME_NEW_NAME != 0 && !r.is_dir())
+                            .map(|r| r.frn),
+                    );
+                    outcome.needs_link_reconcile.sort_unstable();
+                    outcome.needs_link_reconcile.dedup();
+                }
 
-                let mut dirty: Vec<u64> = outcome
+                // Before the link reconcile, which finds each link's folder by
+                // its path: that folder may be one this walk adds.
+                if let Err(e) = walk_missed(state, handle, &outcome.needs_walk, stop, pulse) {
+                    match bounded_rescan(
+                        state,
+                        handle,
+                        pulse,
+                        RescanReason::WalkFailed,
+                        &format!("{e:#}"),
+                        &mut rescans,
+                        stop,
+                    ) {
+                        Some(c) => {
+                            pos = ReadPosition::at(c, state.filesystem);
+                            continue;
+                        }
+                        None => return,
+                    }
+                }
+                let mut dirty: Vec<Frn> = outcome
                     .needs_stat
                     .iter()
                     .chain(&outcome.needs_link_reconcile)
-                    .map(|f| f.0)
+                    .copied()
                     .collect();
                 dirty.sort_unstable();
                 dirty.dedup();
@@ -372,7 +425,7 @@ fn tail_loop(
                     &mut rescans,
                     stop,
                 ) {
-                    Some(c) => pos = ReadPosition::at(c),
+                    Some(c) => pos = ReadPosition::at(c, state.filesystem),
                     None => return,
                 }
             }
@@ -397,7 +450,7 @@ fn tail_loop(
                     &mut rescans,
                     stop,
                 ) {
-                    Some(c) => pos = ReadPosition::at(c),
+                    Some(c) => pos = ReadPosition::at(c, state.filesystem),
                     None => return,
                 }
             }
@@ -438,7 +491,7 @@ fn tail_loop(
                         &mut rescans,
                         stop,
                     ) {
-                        Some(c) => pos = ReadPosition::at(c),
+                        Some(c) => pos = ReadPosition::at(c, state.filesystem),
                         None => return,
                     }
                     continue;
@@ -545,7 +598,7 @@ fn reconcile_links(
             // removes it.
             Ok(_) => continue,
             Err(e) => {
-                tracing::debug!(volume = %state.mount_prefix(), frn = frn.0, error = %e, "link walk failed");
+                tracing::debug!(volume = %state.mount_prefix(), ?frn, error = %e, "link walk failed");
                 dropped += 1;
                 continue;
             }
@@ -614,7 +667,7 @@ fn split_parent(path: &[u8]) -> (&[u8], &[u8]) {
 fn enrich_stats(
     state: &VolumeState,
     handle: &VolumeHandle,
-    frns: &[u64],
+    frns: &[Frn],
     stop: &AtomicBool,
     pulse: &TailPulse,
 ) {
@@ -630,11 +683,11 @@ fn enrich_stats(
         }
         // Per-file liveness stamp, same reason as `reconcile_links`.
         pulse.beat();
-        match stat_file(handle, frn) {
-            Ok(Some(s)) => stats.push((Frn(frn), s.size, s.mtime_ft)),
+        match stat_file(handle, frn.0) {
+            Ok(Some(s)) => stats.push((frn, s.size, s.mtime_ft)),
             Ok(None) => {} // gone or locked: nothing to refresh
             Err(e) => {
-                tracing::debug!(volume = %state.mount_prefix(), frn, error = %e, "live stat failed")
+                tracing::debug!(volume = %state.mount_prefix(), ?frn, error = %e, "live stat failed")
             }
         }
     }
@@ -645,6 +698,46 @@ fn enrich_stats(
     for (frn, size, mtime) in stats {
         index.set_stat(frn, size, mtime);
     }
+}
+
+/// Lists each folder in `folders`, which the index lacked until a rename
+/// brought it in, and everything under it, and inserts what it lists.
+///
+/// Mirrors [`reconcile_links`]'s lock discipline: the folder opens run with
+/// the index lock released, beating the pulse for each folder, and the whole
+/// listing is applied under one short lock. A stop ends the walk and applies
+/// nothing, because the daemon is exiting.
+fn walk_missed(
+    state: &VolumeState,
+    handle: &VolumeHandle,
+    folders: &[Frn],
+    stop: &AtomicBool,
+    pulse: &TailPulse,
+) -> anyhow::Result<()> {
+    if folders.is_empty() {
+        return Ok(());
+    }
+    let mut listed = Vec::new();
+    let cancelled = || {
+        pulse.beat();
+        stop.load(Ordering::Relaxed)
+    };
+    if !bootstrap::walk_folders(handle, folders, cancelled, |files| {
+        listed.extend_from_slice(files);
+    })? {
+        return Ok(());
+    }
+    tracing::debug!(
+        volume = %state.mount_prefix(),
+        folders = folders.len(),
+        entries = listed.len(),
+        "listed folders the index missed"
+    );
+    let mut index = state.index.write();
+    for file in &listed {
+        index.insert_listed(file);
+    }
+    Ok(())
 }
 
 /// Rescan with a storm guard: rebuilds the index, capping consecutive attempts
@@ -674,7 +767,7 @@ fn bounded_rescan(
 }
 
 /// Builds this volume's index in place: its first build, or a rebuild after a
-/// journal loss (wrap, deletion, or parse anomaly). Enumerates the MFT on the
+/// journal loss (wrap, deletion, or parse anomaly). Reads the volume on the
 /// handle the tail already owns, swaps the fresh index in under the write lock,
 /// and acquires a journal cursor. Queries keep serving (flagged incomplete)
 /// during the build.
@@ -685,7 +778,7 @@ fn rescan(
     reason: RescanReason,
     stop: &AtomicBool,
 ) -> Option<JournalInfo> {
-    // The rebuild rereads the whole MFT without stamping the pulse.
+    // The rebuild rereads the whole volume without stamping the pulse.
     // `Busy` tells the supervisor this silence is legitimate; the guard
     // restores a fresh beat on every way out of this function.
     let _busy = pulse.busy_scope();
@@ -698,8 +791,8 @@ fn rescan(
         *state.phase.write() = VolumePhase::Rescanning;
     }
 
-    // Capture the cursor BEFORE reading the MFT. A change landing after its MFT
-    // region was read but before a late cursor capture would be in
+    // Capture the cursor BEFORE reading the volume. A change landing after its
+    // MFT region or folder was read but before a late cursor capture would be in
     // neither the snapshot nor the replay, and nothing would ever notice;
     // captured first, such changes replay from the journal. The other race is
     // safe: a journal deleted or recreated DURING the rebuild invalidates this
@@ -708,8 +801,8 @@ fn rescan(
     let journal = bootstrap::ensure_journal(handle, &state.guid);
 
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
-    // instead of blocking `TailHandle::shutdown`'s join for the full MFT scan.
-    let built = match bootstrap::build_index(handle, Some(stop)) {
+    // instead of blocking `TailHandle::shutdown`'s join for the full read.
+    let built = match bootstrap::build_index(handle, &state.guid, state.filesystem, Some(stop)) {
         Ok(Some(built)) => built,
         // Aborted by shutdown: leave the old index in place and stop cleanly;
         // this is NOT a failure, so do not mark the volume Failed.

@@ -12,8 +12,9 @@
 //!   applying it once.
 //! - Orphans are never dropped. An unknown parent becomes a placeholder under
 //!   lost+found, filled in when the parent's real record arrives.
-//! - Slot reuse can never alias. The FRN map is keyed by record number and
-//!   every hit is re-checked against the full FRN (sequence included).
+//! - Slot reuse can never alias. On NTFS the FRN map is keyed by record
+//!   number and every hit is re-checked against the full FRN (sequence
+//!   included); on ReFS it is keyed by the whole file ID.
 
 use super::store::{
     ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId, NamePair, NameStore,
@@ -22,12 +23,14 @@ use super::store::{
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::layout::LayoutFile;
 use crate::types::{EntryIdx, Frn, NIL};
-use crate::usn::record::FILE_ATTRIBUTE_DIRECTORY;
+use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, USN_REASON_RENAME_NEW_NAME};
 use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-/// NTFS reserves MFT record 5 for the volume root directory.
+/// NTFS reserves MFT record 5 for the volume root directory. The daemon reads
+/// each volume's root ID from the volume; tests and benches build NTFS-shaped
+/// indexes with this one.
 pub const NTFS_ROOT_FRN: Frn = Frn(0x0005_0000_0000_0005);
 
 /// Synthetic name for the lost+found root (never collides: `$` names are NTFS
@@ -37,7 +40,7 @@ const LOST_FOUND_NAME: &[u8] = b"$LostFound";
 const PLACEHOLDER_NAME: &[u8] = b"$Placeholder";
 /// FRN for the synthetic lost+found root (record number above any real MFT
 /// record; never appears in a USN record).
-const LOST_FOUND_FRN: Frn = Frn(u64::MAX);
+const LOST_FOUND_FRN: Frn = Frn(u64::MAX as u128);
 
 /// Maximum parent hops before [`VolumeIndex::path_of`] declares a cycle. Deep
 /// but bounded; real NTFS trees are far shallower.
@@ -149,7 +152,7 @@ pub struct IndexMemory {
     /// The `(parent, folded name) → dir` scope index (bucket estimate + exact
     /// key-heap bytes).
     pub dir_children: ComponentBytes,
-    /// "dense" / "sparse" (which `FrnMap` backing is in use).
+    /// "dense" / "sparse" / "wide" (which `FrnMap` backing is in use).
     pub frn_map_kind: &'static str,
 }
 
@@ -177,6 +180,15 @@ pub struct ApplyOutcome {
     /// complete is skipped and counted in `IndexStats::link_reconciles_dropped`
     /// rather than applied as a partial set.
     pub needs_link_reconcile: Vec<Frn>,
+    /// Folders the index did not hold until a rename brought them in, so
+    /// their contents are missing, each once.
+    ///
+    /// A folder walk lists one folder at a time, so a folder moved during the
+    /// walk from a part not yet listed into one already listed is never
+    /// listed, and the journal records no change to its contents. The daemon
+    /// walks each of these folders and inserts what it lists with
+    /// [`VolumeIndex::insert_listed`].
+    pub needs_walk: Vec<Frn>,
     /// Irregularities worth logging.
     pub anomalies: Vec<Anomaly>,
     /// The name arenas are dirty enough to be worth compacting. The caller
@@ -221,24 +233,20 @@ pub struct VolumeIndex {
     dir_children: FxHashMap<(EntryIdx, u64), SmallVec<[EntryIdx; 1]>>,
 }
 
-impl Default for VolumeIndex {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl VolumeIndex {
-    /// Builds an empty index with the NTFS root folder ([`NTFS_ROOT_FRN`]) and
-    /// a lost+found root. The FRN map starts sparse;
+    /// Builds an empty index with the volume's root folder, whose file ID is
+    /// `root`, and a lost+found root. A wide root, as ReFS has, makes the FRN
+    /// map key on whole IDs; otherwise it starts sparse, and
     /// [`Self::optimize_storage`] makes it dense when that is smaller.
-    pub fn new() -> Self {
+    pub fn new(root: Frn) -> Self {
         let mut entries = EntryTable::new();
         let mut names = NameStore::new();
-        let mut by_frn = FrnMap::sparse();
+        let mut by_frn = FrnMap::for_root(root);
+        let root_frn = root;
 
         let root_name = names.intern(b"");
         let root = entries.alloc(
-            NTFS_ROOT_FRN,
+            root_frn,
             NIL,
             root_name,
             EntryFlags::DIR,
@@ -247,7 +255,7 @@ impl VolumeIndex {
             PackedAttributes::default(),
             NIL,
         );
-        by_frn.set(NTFS_ROOT_FRN.record_number(), root);
+        by_frn.set(root_frn, root);
 
         // Lost+found: synthetic, not in the FRN map (never a USN target).
         let lf_name = names.intern(LOST_FOUND_NAME);
@@ -399,6 +407,31 @@ impl VolumeIndex {
         self.enrich(file);
     }
 
+    /// Ingests one name a folder walk listed: `file` has that single name.
+    ///
+    /// A walk is not a snapshot, so it can meet an entry again. A file met in
+    /// a second folder is a hard link, so its name is added beside the
+    /// others; a folder met again moved during the walk, and the journal's
+    /// rename record for it, replayed after the build, moves it. So a known
+    /// entry is only enriched, never renamed. An entry the index holds as a
+    /// placeholder takes the listed name and folder, because its own record
+    /// never reached the index.
+    pub fn insert_listed(&mut self, file: &LayoutFile) {
+        if self.head_of(file.frn).is_none_or(|h| self.is_synthetic(h))
+            && let Some(name) = file.names.first()
+        {
+            let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            self.upsert_link(
+                file.frn,
+                name.parent_frn,
+                &name.name,
+                name.name_lossy,
+                is_dir,
+            );
+        }
+        self.enrich(file);
+    }
+
     // -- live apply -------------------------------------------------------
 
     /// Applies a batch of journal records, returning the side effects the
@@ -417,10 +450,24 @@ impl VolumeIndex {
                         name_lossy,
                         is_dir,
                     } => {
+                        // A rename of an entry the index lacks: the build
+                        // missed it, so its size, its date and, for a folder,
+                        // its contents are missing too. Reason bits
+                        // accumulate while a handle stays open, so the rename
+                        // of an entry created before the build can carry
+                        // FILE_CREATE too; only the rename bit tells.
+                        let missed = rec.reason & USN_REASON_RENAME_NEW_NAME != 0
+                            && self.head_of(frn).is_none_or(|h| self.is_synthetic(h));
                         if let UpsertResult::NeedsReconcile =
                             self.upsert_link(frn, parent, &name, name_lossy, is_dir)
                         {
                             outcome.needs_link_reconcile.push(frn);
+                        }
+                        if missed {
+                            outcome.needs_stat.push(frn);
+                            if is_dir {
+                                outcome.needs_walk.push(frn);
+                            }
                         }
                     }
                     UsnOp::Delete { frn } => {
@@ -443,6 +490,8 @@ impl VolumeIndex {
         // records, and each FRN reported costs the daemon a link walk.
         outcome.needs_link_reconcile.sort_unstable();
         outcome.needs_link_reconcile.dedup();
+        outcome.needs_walk.sort_unstable();
+        outcome.needs_walk.dedup();
         self.generation += 1;
         // Compaction is NOT performed here: it is reported so the caller can do
         // the expensive part off the write lock. Doing it inline made a single
@@ -569,7 +618,7 @@ impl VolumeIndex {
 
     /// The chain-head entry for `frn`, if present and not stale.
     pub fn head_of(&self, frn: Frn) -> Option<EntryIdx> {
-        let head = self.by_frn.get(frn.record_number())?;
+        let head = self.by_frn.get(frn)?;
         (self.entries.frn(head) == frn).then_some(head)
     }
 
@@ -858,10 +907,9 @@ impl VolumeIndex {
         name_lossy: bool,
         is_dir: bool,
     ) -> UpsertResult {
-        let record = frn.record_number();
         let parent_idx = self.resolve_or_placeholder_parent(parent_frn);
 
-        if let Some(head) = self.by_frn.get(record) {
+        if let Some(head) = self.by_frn.get(frn) {
             if self.entries.frn(head) == frn {
                 if self.entries.next_link(head) == NIL {
                     self.rewrite_entry(head, parent_idx, name, name_lossy, is_dir);
@@ -870,7 +918,7 @@ impl VolumeIndex {
                 return UpsertResult::NeedsReconcile;
             }
             // Record number reused by a different FRN: reclaim the stale chain.
-            self.reclaim_stale_slot(record, head);
+            self.reclaim_stale_slot(head);
         }
 
         let flags = EntryFlags::EMPTY
@@ -885,7 +933,7 @@ impl VolumeIndex {
             MTIME_UNKNOWN,
             PackedAttributes::default(),
         );
-        self.by_frn.set(record, idx);
+        self.by_frn.set(frn, idx);
         UpsertResult::Ok
     }
 
@@ -937,17 +985,17 @@ impl VolumeIndex {
     /// `ApplyOutcome`, and buffering per-event anomalies on the index would grow
     /// unbounded across a multi-million-entry bootstrap. The counter reaches
     /// `Status` either way.
-    fn reclaim_stale_slot(&mut self, record: u64, head: EntryIdx) {
+    fn reclaim_stale_slot(&mut self, head: EntryIdx) {
+        let stale = self.entries.frn(head);
         self.tombstone_chain(head);
-        self.by_frn.remove(record);
+        self.by_frn.remove(stale);
         self.stats.stale_slots += 1;
     }
 
     /// Resolves a parent FRN to its entry, synthesizing a placeholder under
     /// lost+found if the parent has not been seen yet.
     fn resolve_or_placeholder_parent(&mut self, parent_frn: Frn) -> EntryIdx {
-        let record = parent_frn.record_number();
-        if let Some(idx) = self.by_frn.get(record) {
+        if let Some(idx) = self.by_frn.get(parent_frn) {
             if self.entries.frn(idx) == parent_frn {
                 return idx;
             }
@@ -956,7 +1004,7 @@ impl VolumeIndex {
             // below: skipping this leaves the stale chain live in the entry
             // table but unreachable from `by_frn`, so its names keep matching
             // queries and its slots never return to the free list.
-            self.reclaim_stale_slot(record, idx);
+            self.reclaim_stale_slot(idx);
         }
         let idx = self.alloc_entry(
             parent_frn,
@@ -967,21 +1015,20 @@ impl VolumeIndex {
             MTIME_UNKNOWN,
             PackedAttributes::default(),
         );
-        self.by_frn.set(record, idx);
+        self.by_frn.set(parent_frn, idx);
         self.stats.placeholders_created += 1;
         idx
     }
 
     fn delete_frn(&mut self, frn: Frn) -> bool {
-        let record = frn.record_number();
-        let Some(head) = self.by_frn.get(record) else {
+        let Some(head) = self.by_frn.get(frn) else {
             return false;
         };
         if self.entries.frn(head) != frn {
             return false;
         }
         self.tombstone_chain(head);
-        self.by_frn.remove(record);
+        self.by_frn.remove(frn);
         true
     }
 
@@ -1024,15 +1071,14 @@ impl VolumeIndex {
             MTIME_UNKNOWN,
             PackedAttributes::default(),
         );
-        let record = frn.record_number();
-        if let Some(head) = self.by_frn.get(record) {
+        if let Some(head) = self.by_frn.get(frn) {
             let mut tail = head;
             while self.entries.next_link(tail) != NIL {
                 tail = self.entries.next_link(tail);
             }
             self.entries.set_next_link(tail, idx);
         } else {
-            self.by_frn.set(record, idx);
+            self.by_frn.set(frn, idx);
         }
     }
 
@@ -1043,11 +1089,10 @@ impl VolumeIndex {
     /// has no children) and by the ENUM-missed branch of [`Self::enrich`]
     /// (nothing exists yet to orphan).
     fn set_chain_links(&mut self, frn: Frn, is_dir: bool, desired: &[LinkTarget]) {
-        let record = frn.record_number();
         // Collect the current chain if it is really this FRN's; a chain of the
         // record's previous tenant is reclaimed before the map is overwritten.
         let mut current: SmallVec<[EntryIdx; 4]> = SmallVec::new();
-        if let Some(head) = self.by_frn.get(record) {
+        if let Some(head) = self.by_frn.get(frn) {
             if self.entries.frn(head) == frn {
                 let mut cur = head;
                 while cur != NIL {
@@ -1055,7 +1100,7 @@ impl VolumeIndex {
                     cur = self.entries.next_link(cur);
                 }
             } else {
-                self.reclaim_stale_slot(record, head);
+                self.reclaim_stale_slot(head);
             }
         }
 
@@ -1115,7 +1160,7 @@ impl VolumeIndex {
             let next = if w + 1 < kept.len() { kept[w + 1] } else { NIL };
             self.entries.set_next_link(kept[w], next);
         }
-        self.by_frn.set(record, kept[0]);
+        self.by_frn.set(frn, kept[0]);
     }
 
     /// Builds a compaction WITHOUT mutating the index, or `None` if the arenas

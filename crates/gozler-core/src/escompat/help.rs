@@ -28,7 +28,7 @@ pub fn help(screen: HelpScreen, color: bool) -> String {
         color,
     );
     out.push_str(
-        " - Instant file search for Windows NTFS\nUsage: gozler [options] [search terms]\n",
+        " - Instant file search for Windows NTFS and ReFS\nUsage: gozler [options] [search terms]\n",
     );
     match screen {
         HelpScreen::Quick => {

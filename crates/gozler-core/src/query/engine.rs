@@ -1079,7 +1079,7 @@ mod tests {
     }
 
     fn frn(rec: u64) -> Frn {
-        Frn(rec | (1u64 << 48))
+        Frn(u128::from(rec) | (1 << 48))
     }
 
     fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
@@ -1099,7 +1099,7 @@ mod tests {
     /// Builds: docs/ (100), docs/sub/ (101), docs/sub/Report.PDF (102, 4KB),
     /// docs/notes.txt (103, 200B), photo.JPG (104, 2MB) at root.
     fn sample_index() -> VolumeIndex {
-        let mut idx = VolumeIndex::new();
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
         let root = NTFS_ROOT_FRN;
         for r in [
             enum_rec(frn(100), root, "docs", true),
@@ -1123,7 +1123,7 @@ mod tests {
     /// record, FRN sequence mismatch), and densest during bootstrap and rescan,
     /// which are exactly the windows the server still queries.
     fn index_with_orphans() -> VolumeIndex {
-        let mut idx = VolumeIndex::new();
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
         let root = NTFS_ROOT_FRN;
         // Two presentable hits.
         idx.insert_enum(&enum_rec(frn(100), root, "real1.log", false));
@@ -1240,7 +1240,7 @@ mod tests {
     /// and `|` take it as one term.
     #[test]
     fn ext_alone_finds_files_without_an_extension() {
-        let mut idx = VolumeIndex::new();
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
         for r in [
             enum_rec(frn(100), NTFS_ROOT_FRN, "src", true),
             enum_rec(frn(101), NTFS_ROOT_FRN, "LICENSE", false),
@@ -1431,7 +1431,7 @@ mod tests {
     /// `readme.md` repeats at every level, so a name term drives the arena
     /// scan to every one of them and the path wildcard must pick.
     fn docs_index() -> VolumeIndex {
-        let mut idx = VolumeIndex::new();
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
         let root = NTFS_ROOT_FRN;
         for r in [
             enum_rec(frn(100), root, "docs", true),
@@ -1902,7 +1902,7 @@ mod tests {
     /// dates, an unknown size, names equal after folding, and one file with
     /// two links of the same name.
     fn order_index() -> VolumeIndex {
-        let mut idx = VolumeIndex::new();
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
         let root = NTFS_ROOT_FRN;
         for r in [
             enum_rec(frn(100), root, "P", true),
@@ -2091,7 +2091,7 @@ mod tests {
 
     /// A flat index of random-named files at the root.
     fn flat_index(names: &[String]) -> VolumeIndex {
-        let mut idx = VolumeIndex::new();
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
         for (i, n) in names.iter().enumerate() {
             idx.insert_enum(&enum_rec(frn(1000 + i as u64), NTFS_ROOT_FRN, n, false));
         }
@@ -2153,7 +2153,7 @@ mod tests {
             before in "[a-cA-C]{0,2}",
             after in "[a-cA-C]{0,2}",
         ) {
-            let mut idx = VolumeIndex::new();
+            let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
             for (i, &p) in parents.iter().enumerate() {
                 let parent = match p {
                     p if p < i => frn(1000 + p as u64),

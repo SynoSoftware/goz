@@ -34,7 +34,7 @@ const L3: u64 = 12;
 const FILES_PER_LEAF: u64 = 60; // ~200k files, enough to make the copy real
 
 fn frn(rec: u64) -> Frn {
-    Frn(rec | (1u64 << 48))
+    Frn(u128::from(rec) | (1 << 48))
 }
 
 fn rec(f: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> ParsedUsnRecord {
@@ -55,7 +55,7 @@ fn rec(f: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> ParsedUsnR
 /// actually warranted: every third file is renamed (leaving its old name dead)
 /// and every seventh is deleted.
 fn dirty_index() -> VolumeIndex {
-    let mut idx = VolumeIndex::new();
+    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let mut next: u64 = 1000;
     let mut files: Vec<Frn> = Vec::new();
 

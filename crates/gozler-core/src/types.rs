@@ -7,33 +7,45 @@
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
-/// NTFS 64-bit file reference number: a 48-bit MFT record index plus a 16-bit
-/// sequence number. The sequence number increments when an MFT slot is
-/// reused, so a map keyed on the full `u64` can never confuse a dead file
-/// with its slot's next tenant.
+/// A file ID: the `FILE_ID_128` that names a file on its volume, read as a
+/// little-endian `u128`.
 ///
-/// ReFS uses 128-bit ids; v1 indexes NTFS only, and the newtype leaves the
-/// door open to widen later without touching call sites.
+/// On NTFS it is the 64-bit file reference number, zero-extended: a 48-bit
+/// MFT record index plus a 16-bit sequence number. The sequence number
+/// increments when an MFT slot is reused, so a map keyed on the full ID can
+/// never confuse a dead file with its slot's next tenant. On ReFS all 128 bits
+/// carry the ID, and [`Self::record_number`] and [`Self::sequence`] mean
+/// nothing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct Frn(pub u64);
+pub struct Frn(pub u128);
 
 impl Frn {
     /// The 48-bit MFT record number. Dense and reused by NTFS.
     #[inline]
     pub fn record_number(self) -> u64 {
-        self.0 & 0x0000_FFFF_FFFF_FFFF
+        self.0 as u64 & 0x0000_FFFF_FFFF_FFFF
     }
 
     /// The 16-bit sequence number, bumped each time the MFT slot is reused.
     #[inline]
     pub fn sequence(self) -> u16 {
-        (self.0 >> 48) as u16
+        (self.0 as u64 >> 48) as u16
+    }
+
+    /// Whether the ID needs more than 64 bits, as a ReFS ID does.
+    #[inline]
+    pub fn is_wide(self) -> bool {
+        self.0 > u128::from(u64::MAX)
     }
 }
 
 impl fmt::Debug for Frn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Frn({}#{})", self.record_number(), self.sequence())
+        if self.is_wide() {
+            write!(f, "Frn({:#x})", self.0)
+        } else {
+            write!(f, "Frn({}#{})", self.record_number(), self.sequence())
+        }
     }
 }
 
@@ -176,8 +188,8 @@ mod tests {
 
     #[test]
     fn frn_slot_reuse_yields_distinct_values() {
-        let dead = Frn((3u64 << 48) | 42);
-        let next_tenant = Frn((4u64 << 48) | 42);
+        let dead = Frn((3 << 48) | 42);
+        let next_tenant = Frn((4 << 48) | 42);
         assert_eq!(dead.record_number(), next_tenant.record_number());
         assert_ne!(dead, next_tenant);
     }

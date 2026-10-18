@@ -8,14 +8,14 @@ fn interned_shared_names_are_found() {
     use gozler_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
     };
-    let mut idx = VolumeIndex::new();
+    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
         major_version: 3,
-        frn: Frn(frn | (1u64 << 48)),
+        frn: Frn(u128::from(frn) | (1 << 48)),
         parent_frn: Frn(if parent < 100 {
             NTFS_ROOT_FRN.0
         } else {
-            parent | (1u64 << 48)
+            u128::from(parent) | (1 << 48)
         }),
         usn: 0,
         timestamp_ft: 0,
@@ -63,14 +63,14 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
     };
 
-    let mut idx = VolumeIndex::new();
+    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
         major_version: 3,
-        frn: Frn(frn | (1u64 << 48)),
+        frn: Frn(u128::from(frn) | (1 << 48)),
         parent_frn: Frn(if parent < 100 {
             NTFS_ROOT_FRN.0
         } else {
-            parent | (1u64 << 48)
+            u128::from(parent) | (1 << 48)
         }),
         usn: 0,
         timestamp_ft: 0,

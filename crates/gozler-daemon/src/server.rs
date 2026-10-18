@@ -250,7 +250,7 @@ fn serve(volumes: &VolumeSet, frame: &[u8], emit: &mut dyn FnMut(Vec<u8>) -> boo
         return reply(
             emit,
             refusal(format!(
-                "{scope} is not on an indexed volume; gozlerd indexes fixed NTFS volumes"
+                "{scope} is not on an indexed volume; gozlerd indexes fixed NTFS and ReFS volumes"
             )),
         );
     };
@@ -593,7 +593,7 @@ mod tests {
 
     mod corpus;
 
-    fn dir_record(frn: u64, parent: u64, name: &str) -> ParsedUsnRecord {
+    fn dir_record(frn: u128, parent: u128, name: &str) -> ParsedUsnRecord {
         ParsedUsnRecord {
             major_version: 2,
             frn: Frn(frn),
@@ -609,7 +609,7 @@ mod tests {
 
     /// `C:\Windows\System32` as an index, built through the public API only.
     fn windows_index() -> VolumeIndex {
-        let mut index = VolumeIndex::new();
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "Windows"));
         index.insert_enum(&dir_record(101, 100, "System32"));
         index
@@ -619,6 +619,7 @@ mod tests {
         Arc::new(VolumeState {
             guid: r"\\?\Volume{00000000-0000-0000-0000-000000000000}\".to_string(),
             mounts: vec![mount.to_string()],
+            filesystem: crate::bootstrap::Filesystem::Ntfs,
             index: RwLock::new(index),
             phase: RwLock::new(phase),
             metadata_pending: RwLock::new(false),
@@ -634,7 +635,7 @@ mod tests {
     /// sorts after `z\a.log` by name but before it by path. A fixture where the
     /// two agree would pass even with the name key computed wrongly.
     fn merge_index() -> VolumeIndex {
-        let mut index = VolumeIndex::new();
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "a"));
         index.insert_enum(&dir_record(101, NTFS_ROOT_FRN.0, "z"));
         for (frn, parent, name) in [(102, 100, "z.log"), (103, 101, "a.log")] {
@@ -814,11 +815,11 @@ mod tests {
     #[test]
     fn pages_carry_more_until_the_last_and_a_stable_total() {
         // One directory holding PAGE_ROWS + 1 matches, so the encoder pages.
-        let mut index = VolumeIndex::new();
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "many"));
         let n = PAGE_ROWS as u64 + 1;
         for i in 0..n {
-            let mut rec = dir_record(1000 + i, 100, &format!("hit{i:05}.log"));
+            let mut rec = dir_record(1000 + u128::from(i), 100, &format!("hit{i:05}.log"));
             rec.attributes = 0;
             index.insert_enum(&rec);
         }
@@ -839,7 +840,7 @@ mod tests {
     /// paths of about 4 KB pass that cap, and any local user can create them.
     #[test]
     fn pages_of_long_paths_fit_the_clients_frame_cap() {
-        let mut index = VolumeIndex::new();
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
         // 17 nested folders with 250-character names make every full path
         // below them 4,282 bytes, so PAGE_ROWS rows would need 17.6 MB.
         let mut parent = NTFS_ROOT_FRN.0;
@@ -848,7 +849,7 @@ mod tests {
             parent = 100 + level;
         }
         for i in 0..PAGE_ROWS as u64 {
-            let mut rec = dir_record(1000 + i, parent, &format!("hit{i:05}.log"));
+            let mut rec = dir_record(1000 + u128::from(i), parent, &format!("hit{i:05}.log"));
             rec.attributes = 0;
             index.insert_enum(&rec);
         }
@@ -887,10 +888,10 @@ mod tests {
     /// instead of encoding every remaining page into the void.
     #[test]
     fn streaming_stops_when_the_consumer_goes_away() {
-        let mut index = VolumeIndex::new();
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "many"));
         for i in 0..(PAGE_ROWS as u64 * 3) {
-            let mut rec = dir_record(1000 + i, 100, &format!("hit{i:05}.log"));
+            let mut rec = dir_record(1000 + u128::from(i), 100, &format!("hit{i:05}.log"));
             rec.attributes = 0;
             index.insert_enum(&rec);
         }
@@ -1179,7 +1180,7 @@ mod tests {
     /// same name.
     fn order_index() -> VolumeIndex {
         use gozler_core::layout::{LayoutFile, LayoutName};
-        let mut index = VolumeIndex::new();
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "P"));
         index.insert_enum(&dir_record(101, 100, "a"));
         index.insert_enum(&dir_record(102, 100, "a b"));

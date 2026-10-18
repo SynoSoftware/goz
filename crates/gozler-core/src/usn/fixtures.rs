@@ -24,11 +24,10 @@ pub struct RecordFixture {
     /// Wire `MajorVersion` to emit: 2 or 3 (builders panic on anything
     /// else; V4/unknown records are hand-built where needed).
     pub version: u16,
-    /// 64-bit FRN. For V3 it becomes the low half of the `FILE_ID_128`,
-    /// high half zeroed (the NTFS zero-extension invariant).
-    pub frn: u64,
-    /// 64-bit parent FRN (same V3 treatment).
-    pub parent: u64,
+    /// File ID. V2 holds 64 bits; V3 holds the whole `FILE_ID_128`.
+    pub frn: u128,
+    /// Parent file ID (same treatment).
+    pub parent: u128,
     pub usn: i64,
     /// `TimeStamp` (FILETIME).
     pub timestamp: i64,
@@ -41,7 +40,7 @@ pub struct RecordFixture {
 impl RecordFixture {
     /// A plain file record (V2, archive attribute, reason/usn/timestamp
     /// zeroed).
-    pub fn file(frn: u64, parent: u64, name: &str) -> Self {
+    pub fn file(frn: u128, parent: u128, name: &str) -> Self {
         Self {
             version: 2,
             frn,
@@ -55,7 +54,7 @@ impl RecordFixture {
     }
 
     /// A directory record (V2, directory attribute).
-    pub fn dir(frn: u64, parent: u64, name: &str) -> Self {
+    pub fn dir(frn: u128, parent: u128, name: &str) -> Self {
         Self {
             attributes: FILE_ATTRIBUTE_DIRECTORY,
             ..Self::file(frn, parent, name)
@@ -113,15 +112,13 @@ pub fn record_bytes(fx: &RecordFixture) -> Vec<u8> {
     b.extend_from_slice(&0u16.to_le_bytes()); // MinorVersion
     match fx.version {
         2 => {
-            b.extend_from_slice(&fx.frn.to_le_bytes());
-            b.extend_from_slice(&fx.parent.to_le_bytes());
+            let narrow = |id: u128| u64::try_from(id).expect("a V2 record holds a 64-bit FRN");
+            b.extend_from_slice(&narrow(fx.frn).to_le_bytes());
+            b.extend_from_slice(&narrow(fx.parent).to_le_bytes());
         }
         3 => {
-            // FILE_ID_128: 64-bit FRN in the low 8 bytes, high half zero.
             b.extend_from_slice(&fx.frn.to_le_bytes());
-            b.extend_from_slice(&[0u8; 8]);
             b.extend_from_slice(&fx.parent.to_le_bytes());
-            b.extend_from_slice(&[0u8; 8]);
         }
         _ => unreachable!(),
     }

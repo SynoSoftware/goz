@@ -31,8 +31,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use crate::{run, server};
 
 const DISPLAY_NAME: &str = "gozler file index";
-const DESCRIPTION: &str =
-    "Indexes NTFS volumes (MFT + USN journal) for instant file search with gozler.";
+const DESCRIPTION: &str = "Indexes NTFS and ReFS volumes for instant file search with gozler.";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 // Win32 error codes we treat as non-fatal for idempotent install/uninstall.

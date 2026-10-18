@@ -1,12 +1,12 @@
 # gozler
 
-gozler finds files and folders on NTFS volumes by name, path, size and date,
-from an index of each volume that a daemon keeps current.
+gozler finds files and folders on NTFS and ReFS volumes by name, path, size and
+date, from an index of each volume that a daemon keeps current.
 
 ## Index
 
 **Indexed volume**:
-A fixed NTFS volume that is attached. gozler indexes it from when it appears
+A fixed NTFS or ReFS volume that is attached. gozler indexes it from when it appears
 until it is removed; removable drives, network drives and other filesystems are
 not indexed.
 
@@ -20,8 +20,8 @@ file's file ID, size, date and attributes.
 _Avoid_: alias
 
 **File ID**:
-The NTFS number that identifies a file on its volume, shared by every hard link
-of the file.
+The number that identifies a file on its volume, shared by every hard link of
+the file: 64 bits on NTFS, 128 bits on ReFS.
 _Avoid_: FRN (outside code), inode
 
 **Mount prefix**:

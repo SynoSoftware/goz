@@ -28,7 +28,7 @@ pub(crate) enum Service<'a> {
     NotRunning(&'a NotRunning),
 }
 
-const TAGLINE: &str = "Find any file on your NTFS drives by name, in milliseconds.";
+const TAGLINE: &str = "Find any file on your NTFS and ReFS drives by name, in milliseconds.";
 
 /// The width of the label column, so every value starts at one column.
 const LABEL: usize = 11;

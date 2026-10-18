@@ -135,10 +135,10 @@ pub struct LayoutName {
 }
 
 /// One file record parsed from a `FILE_LAYOUT_ENTRY` and its satellite
-/// name/info/stream chains.
+/// name/info/stream chains, or one name of a folder listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutFile {
-    /// 64-bit NTFS file reference number.
+    /// The file's ID.
     pub frn: Frn,
     /// `FILE_LAYOUT_ENTRY.FileAttributes` (`FILE_ATTRIBUTE_*` bits).
     pub attributes: u32,
@@ -450,7 +450,7 @@ fn parse_file(
             let name_lossy = wtf8::from_utf16(&units, &mut name);
             let flags = raw.flags.get();
             names.push(LayoutName {
-                parent_frn: Frn(raw.parent_file_reference_number.get()),
+                parent_frn: Frn(raw.parent_file_reference_number.get().into()),
                 name,
                 name_lossy,
                 dos_only: flags & FILE_LAYOUT_NAME_ENTRY_DOS != 0
@@ -541,7 +541,7 @@ fn parse_file(
     }
 
     Ok(LayoutFile {
-        frn: Frn(entry.file_reference_number.get()),
+        frn: Frn(entry.file_reference_number.get().into()),
         attributes,
         size,
         mtime_ft,
@@ -561,7 +561,7 @@ fn is_unnamed_data_identifier(identifier: &[u8]) -> bool {
 /// the cycle/overlap guard, so every hop strictly advances and the walk
 /// terminates in at most `buf.len() / min_rel` steps), and the resolved
 /// absolute offset must land inside the buffer.
-fn follow_offset(
+pub(super) fn follow_offset(
     buf: &[u8],
     base: usize,
     rel: u32,
@@ -595,7 +595,7 @@ fn follow_offset(
 
 /// Borrows `need` bytes at `offset`, distinguishing "offset itself is outside
 /// the buffer" from "starts inside but is cut short".
-fn read_bytes<'b>(
+pub(super) fn read_bytes<'b>(
     buf: &'b [u8],
     offset: usize,
     need: usize,
@@ -629,7 +629,7 @@ fn read_bytes<'b>(
 }
 
 /// Copies one fixed-size little-endian view out of the buffer.
-fn read_struct<T: FromBytes>(
+pub(super) fn read_struct<T: FromBytes>(
     buf: &[u8],
     offset: usize,
     what: &'static str,

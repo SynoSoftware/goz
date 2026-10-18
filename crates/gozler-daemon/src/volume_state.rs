@@ -8,16 +8,19 @@
 
 use std::sync::Arc;
 
-use gozler_core::index::VolumeIndex;
+use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::VolumePhase;
 use parking_lot::RwLock;
+
+use crate::bootstrap::Filesystem;
 
 /// Live state for one indexed volume, shared between its tail thread and the
 /// query server.
 pub(crate) struct VolumeState {
     pub guid: String,
     pub mounts: Vec<String>,
+    pub filesystem: Filesystem,
     pub index: RwLock<VolumeIndex>,
     pub phase: RwLock<VolumePhase>,
     /// The size and date pass of the index's last build failed or stopped, so
@@ -33,11 +36,14 @@ pub(crate) struct VolumeState {
 
 impl VolumeState {
     /// A volume that is not indexed yet: an empty index, phase `Bootstrapping`.
-    pub(crate) fn new(guid: String, mounts: Vec<String>) -> Self {
+    /// The empty index's root ID is never read; the first build replaces the
+    /// index with one rooted at the volume's own root.
+    pub(crate) fn new(guid: String, mounts: Vec<String>, filesystem: Filesystem) -> Self {
         Self {
             guid,
             mounts,
-            index: RwLock::new(VolumeIndex::new()),
+            filesystem,
+            index: RwLock::new(VolumeIndex::new(NTFS_ROOT_FRN)),
             phase: RwLock::new(VolumePhase::Bootstrapping),
             metadata_pending: RwLock::new(false),
             journal_max_bytes: RwLock::new(None),

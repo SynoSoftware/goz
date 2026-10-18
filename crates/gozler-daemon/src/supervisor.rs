@@ -6,8 +6,9 @@
 //! serves a volume found at startup, a volume that appears later, a volume
 //! whose start failed (a disk still spinning up at boot), and a tail that
 //! exited. Each scan the supervisor also lists the machine's volumes, adds the
-//! fixed NTFS volumes it does not index yet, and removes the indexed volumes
-//! that are gone, so a query never silently leaves out an attached volume.
+//! fixed NTFS and ReFS volumes it does not index yet, and removes the indexed
+//! volumes that are gone, so a query never silently leaves out an attached
+//! volume.
 //!
 //! For each tail it reads the [`Pulse`] and gives one of three verdicts, one
 //! per pulse state:
@@ -172,9 +173,9 @@ pub(crate) struct Supervisor {
 }
 
 impl Supervisor {
-    /// Starts indexing every fixed NTFS volume in `enumerated`, the machine's
-    /// volumes at startup, and starts the supervision thread. Returns as soon
-    /// as each of those volumes is in [`Supervisor::volumes`] as
+    /// Starts indexing every fixed NTFS and ReFS volume in `enumerated`, the
+    /// machine's volumes at startup, and starts the supervision thread. Returns
+    /// as soon as each of those volumes is in [`Supervisor::volumes`] as
     /// `Bootstrapping`, so queries are answered, flagged incomplete, while the
     /// volumes index. Fails only when the OS refuses the thread; nothing would
     /// index the volumes then.
@@ -268,8 +269,8 @@ struct Fleet {
 
 impl Fleet {
     /// Brings the indexed volumes in step with `enumerated`, the volumes on
-    /// the machine now: starts indexing each fixed NTFS volume that is not
-    /// indexed, and removes each indexed volume that is no longer listed.
+    /// the machine now: starts indexing each fixed NTFS and ReFS volume that is
+    /// not indexed, and removes each indexed volume that is no longer listed.
     ///
     /// Only a volume that is no longer listed is removed. A listed volume
     /// that now classifies differently stays: a filesystem query that fails
@@ -288,8 +289,8 @@ impl Fleet {
             if indexed.iter().any(|v| v.guid == vol.guid_path) {
                 continue;
             }
-            match bootstrap::skip_reason(&vol) {
-                Some(reason) => {
+            match bootstrap::indexed_filesystem(&vol) {
+                Err(reason) => {
                     if self.skipped.insert(vol.guid_path.clone()) {
                         tracing::info!(
                             volume = %vol.guid_path,
@@ -299,9 +300,9 @@ impl Fleet {
                         );
                     }
                 }
-                None => {
+                Ok(filesystem) => {
                     self.skipped.remove(&vol.guid_path);
-                    let state = Arc::new(VolumeState::new(vol.guid_path, vol.mounts));
+                    let state = Arc::new(VolumeState::new(vol.guid_path, vol.mounts, filesystem));
                     tracing::info!(volume = %state.mount_prefix(), "volume found; indexing it");
                     self.volumes.add(state.clone());
                     self.supervised.push(Supervised::start(state));
@@ -1005,6 +1006,7 @@ mod tests {
         volumes.add(Arc::new(VolumeState::new(
             indexed.into(),
             vec![r"E:\".into()],
+            bootstrap::Filesystem::Ntfs,
         )));
         let mut fleet = Fleet {
             volumes: volumes.clone(),

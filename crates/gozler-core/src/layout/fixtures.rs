@@ -55,7 +55,7 @@ impl LayoutNameFixture {
         let mut name = Vec::new();
         let name_lossy = wtf8::from_utf16(&self.units, &mut name);
         LayoutName {
-            parent_frn: Frn(self.parent_frn),
+            parent_frn: Frn(self.parent_frn.into()),
             name,
             name_lossy,
             dos_only: self.dos_only_flag(),
@@ -152,7 +152,7 @@ impl LayoutFileFixture {
                 .map(|s| s.eof.max(0) as u64)
         };
         LayoutFile {
-            frn: Frn(self.frn),
+            frn: Frn(self.frn.into()),
             attributes: self.attributes,
             size,
             mtime_ft,

@@ -8,8 +8,8 @@ use windows_sys::Win32::Foundation::ERROR_HANDLE_EOF;
 use crate::error::WinError;
 use crate::ioctl::{
     CreateUsnJournalData, FSCTL_CREATE_USN_JOURNAL, FSCTL_ENUM_USN_DATA, FSCTL_QUERY_USN_JOURNAL,
-    FSCTL_READ_USN_JOURNAL, MftEnumDataV0, ReadUsnJournalDataV0, UsnJournalDataV0, ioctl_in,
-    ioctl_in_bytes, ioctl_out,
+    FSCTL_READ_USN_JOURNAL, MftEnumDataV0, ReadUsnJournalDataV0, ReadUsnJournalDataV1,
+    UsnJournalDataV0, ioctl_in, ioctl_in_bytes, ioctl_out,
 };
 use crate::volume::VolumeHandle;
 
@@ -114,13 +114,14 @@ pub fn enum_usn_data(
 /// surfaces as a [`WinError`] with `code == ERROR_JOURNAL_ENTRY_DELETED`.
 pub fn read_usn_journal(
     h: &VolumeHandle,
+    records: JournalRecords,
     start_usn: i64,
     journal_id: u64,
     reason_mask: u32,
     bytes_to_wait_for: u64,
     out: &mut [u8],
 ) -> Result<usize, WinError> {
-    let input = ReadUsnJournalDataV0 {
+    let v0 = ReadUsnJournalDataV0 {
         start_usn,
         reason_mask,
         return_only_on_close: 0,
@@ -128,10 +129,31 @@ pub fn read_usn_journal(
         bytes_to_wait_for,
         usn_journal_id: journal_id,
     };
-    ioctl_in_bytes(h.as_handle(), FSCTL_READ_USN_JOURNAL, &input, out)
-        .map(|bytes| bytes as usize)
-        .map_err(|code| WinError {
-            code,
-            context: "FSCTL_READ_USN_JOURNAL",
-        })
+    let read = match records {
+        JournalRecords::V2 => ioctl_in_bytes(h.as_handle(), FSCTL_READ_USN_JOURNAL, &v0, out),
+        JournalRecords::V3 => {
+            let v1 = ReadUsnJournalDataV1 {
+                v0,
+                min_major_version: 2,
+                max_major_version: 3,
+            };
+            ioctl_in_bytes(h.as_handle(), FSCTL_READ_USN_JOURNAL, &v1, out)
+        }
+    };
+    read.map(|bytes| bytes as usize).map_err(|code| WinError {
+        code,
+        context: "FSCTL_READ_USN_JOURNAL",
+    })
+}
+
+/// Which journal records [`read_usn_journal`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalRecords {
+    /// V2 records, with 64-bit file IDs: `READ_USN_JOURNAL_DATA_V0`. NTFS
+    /// uses these, because asking it for versions 2 to 3 switches it to V3.
+    V2,
+    /// V3 records, with 128-bit file IDs: `READ_USN_JOURNAL_DATA_V1` with
+    /// versions 2 to 3. ReFS needs these, because it maps only some of its
+    /// file IDs to 64 bits and gives -1 for the others.
+    V3,
 }

@@ -1,6 +1,7 @@
-//! Tests for the index core: targeted unit cases plus two property tests that
-//! carry most of the correctness weight: a model-based op tape and the
-//! bootstrap race (shuffled ENUM snapshot + forward journal replay).
+//! Tests for the index core: targeted unit cases plus three property tests
+//! that carry most of the correctness weight: a model-based op tape, the
+//! bootstrap race (shuffled ENUM snapshot + forward journal replay) and the
+//! walk race (a folder walk that changes run through + the same replay).
 
 use super::*;
 use crate::types::Frn;
@@ -14,11 +15,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// FRN with sequence 1 for record number `rec`.
 fn frn(rec: u64) -> Frn {
-    Frn(rec | (1u64 << 48))
+    Frn(u128::from(rec) | (1 << 48))
 }
 /// FRN with an explicit sequence, for slot-reuse tests.
 fn frn_seq(rec: u64, seq: u16) -> Frn {
-    Frn(rec | ((seq as u64) << 48))
+    Frn(u128::from(rec) | (u128::from(seq) << 48))
 }
 
 fn root_frn() -> Frn {
@@ -56,7 +57,7 @@ fn delete(frn: Frn) -> ParsedUsnRecord {
 }
 
 fn new_index() -> VolumeIndex {
-    VolumeIndex::new()
+    VolumeIndex::new(NTFS_ROOT_FRN)
 }
 
 /// Builds an index from ENUM records (bootstrap ingest) in the given order.
@@ -81,13 +82,48 @@ fn path_of_frn(idx: &VolumeIndex, f: Frn) -> Option<String> {
     }
 }
 
-/// Maps a model FRN to the real root FRN or a sequence-1 FRN.
-fn frn_or_root(f: u64) -> Frn {
-    if f == root_frn().0 {
-        root_frn()
-    } else {
-        frn(f)
+/// The model's number for the root folder; model entries start at 1000.
+const MODEL_ROOT: u64 = 0;
+
+/// How the model's numbers become file IDs.
+#[derive(Clone, Copy, Debug)]
+enum Ids {
+    /// Sequence-1 NTFS file IDs, and the NTFS root.
+    Ntfs,
+    /// ReFS-shaped IDs that use both halves, as ReFS gives them: the number
+    /// in bytes 8..15, and in bytes 0..7 one of three values that many
+    /// entries share, so an index that keys on less than the whole ID mixes
+    /// entries up.
+    Refs,
+}
+
+impl Ids {
+    fn root(self) -> Frn {
+        match self {
+            Ids::Ntfs => root_frn(),
+            Ids::Refs => Frn(0x600 << 64),
+        }
     }
+
+    fn id(self, f: u64) -> Frn {
+        match self {
+            _ if f == MODEL_ROOT => self.root(),
+            Ids::Ntfs => frn(f),
+            Ids::Refs => Frn((u128::from(f) << 64) | u128::from(f % 3)),
+        }
+    }
+
+    fn model(self, id: Frn) -> u64 {
+        match self {
+            _ if id == self.root() => MODEL_ROOT,
+            Ids::Ntfs => id.record_number(),
+            Ids::Refs => (id.0 >> 64) as u64,
+        }
+    }
+}
+
+fn arb_ids() -> impl Strategy<Value = Ids> {
+    prop_oneof![Just(Ids::Ntfs), Just(Ids::Refs)]
 }
 
 // -- targeted unit tests -------------------------------------------------
@@ -416,10 +452,34 @@ fn a_hard_link_change_is_reported_once_per_batch() {
     assert_eq!(outcome.needs_link_reconcile, vec![frn(100)]);
 }
 
+/// A folder the index lacks that a rename brings in must be walked, even
+/// when it was created through the same handle: reason bits accumulate, so
+/// that rename record carries FILE_CREATE too. A record of the create alone
+/// is a new folder and needs no walk.
+#[test]
+fn a_renamed_folder_the_index_lacks_is_reported_for_a_walk() {
+    let mut idx = new_index();
+    let created = idx.apply_batch(&[create(frn(100), root_frn(), "new", true)]);
+    assert!(created.needs_walk.is_empty());
+    let moved_in = idx.apply_batch(&[record(
+        frn(200),
+        root_frn(),
+        "moved",
+        true,
+        USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME,
+    )]);
+    assert_eq!(moved_in.needs_walk, vec![frn(200)]);
+}
+
 // -- hard links ----------------------------------------------------------
 
 use crate::layout::LayoutFile;
 use crate::layout::fixtures::{LayoutFileFixture, LayoutNameFixture, LayoutStreamFixture};
+
+/// `f` as a FILE_LAYOUT record holds it: NTFS file IDs are 64 bits.
+fn layout_id(f: Frn) -> u64 {
+    u64::try_from(f.0).expect("an NTFS file ID fits in 64 bits")
+}
 
 fn enrich_links(idx: &mut VolumeIndex, fixture: &LayoutFileFixture) {
     let file: LayoutFile = fixture.expected();
@@ -431,7 +491,7 @@ fn enrich_links(idx: &mut VolumeIndex, fixture: &LayoutFileFixture) {
 /// left no entry a path.
 #[test]
 fn layout_pass_builds_every_path_with_the_roots_own_record_and_hard_links() {
-    let root = root_frn().0;
+    let root = layout_id(root_frn());
     let records = [
         LayoutFileFixture {
             frn: root,
@@ -443,18 +503,18 @@ fn layout_pass_builds_every_path_with_the_roots_own_record_and_hard_links() {
         // Listed before the folder of its second name, which starts as a
         // placeholder.
         LayoutFileFixture {
-            frn: frn(100).0,
+            frn: layout_id(frn(100)),
             attributes: 0x20,
             names: vec![
                 LayoutNameFixture::primary(root, "report.txt"),
                 LayoutNameFixture::dos_only(root, "REPORT~1.TXT"),
-                LayoutNameFixture::primary(frn(10).0, "copy.txt"),
+                LayoutNameFixture::primary(layout_id(frn(10)), "copy.txt"),
             ],
             info: None,
             streams: vec![LayoutStreamFixture::unnamed_data(4096)],
         },
         LayoutFileFixture {
-            frn: frn(10).0,
+            frn: layout_id(frn(10)),
             attributes: FILE_ATTRIBUTE_DIRECTORY,
             names: vec![LayoutNameFixture::primary(root, "docs")],
             info: None,
@@ -483,12 +543,12 @@ fn enrich_builds_hard_link_chain_findable_under_every_name() {
     enrich_links(
         &mut idx,
         &LayoutFileFixture {
-            frn: frn(100).0,
+            frn: layout_id(frn(100)),
             attributes: 0x20,
             names: vec![
-                LayoutNameFixture::primary(frn(10).0, "link1.bin"),
+                LayoutNameFixture::primary(layout_id(frn(10)), "link1.bin"),
                 LayoutNameFixture {
-                    parent_frn: frn(11).0,
+                    parent_frn: layout_id(frn(11)),
                     units: "link2.bin".encode_utf16().collect(),
                     flags: 0,
                 },
@@ -539,12 +599,12 @@ fn file_delete_removes_the_whole_link_chain() {
     enrich_links(
         &mut idx,
         &LayoutFileFixture {
-            frn: frn(100).0,
+            frn: layout_id(frn(100)),
             attributes: 0x20,
             names: vec![
-                LayoutNameFixture::primary(frn(10).0, "l1"),
+                LayoutNameFixture::primary(layout_id(frn(10)), "l1"),
                 LayoutNameFixture {
-                    parent_frn: frn(11).0,
+                    parent_frn: layout_id(frn(11)),
                     units: "l2".encode_utf16().collect(),
                     flags: 0,
                 },
@@ -785,7 +845,7 @@ impl Model {
             .filter(|(_, (_, _, d))| *d)
             .map(|(f, _)| *f)
             .collect();
-        v.push(root_frn().0);
+        v.push(MODEL_ROOT);
         v.sort_unstable();
         v
     }
@@ -822,6 +882,73 @@ impl Model {
     }
     fn path_set(&self) -> BTreeSet<String> {
         self.entries.keys().map(|f| self.path_of(*f)).collect()
+    }
+    fn exists(&self, node: u64) -> bool {
+        node == MODEL_ROOT || self.entries.contains_key(&node)
+    }
+    /// What a folder walk lists for `folder` now: one single-name entry per
+    /// name in it.
+    fn listing(&self, ids: Ids, folder: u64) -> Vec<LayoutFile> {
+        let mut children: Vec<(&u64, &(u64, String, bool))> = self
+            .entries
+            .iter()
+            .filter(|(_, (p, _, _))| *p == folder)
+            .collect();
+        children.sort_unstable_by_key(|(f, _)| **f);
+        children
+            .into_iter()
+            .map(|(f, (_, name, is_dir))| listed(ids.id(*f), ids.id(folder), name, *is_dir))
+            .collect()
+    }
+}
+
+/// One name a folder walk lists.
+fn listed(f: Frn, folder: Frn, name: &str, is_dir: bool) -> LayoutFile {
+    LayoutFile {
+        frn: f,
+        attributes: if is_dir {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            0x20
+        },
+        size: (!is_dir).then_some(0),
+        mtime_ft: Some(0),
+        names: vec![crate::layout::LayoutName {
+            parent_frn: folder,
+            name: name.as_bytes().to_vec(),
+            name_lossy: false,
+            dos_only: false,
+        }],
+    }
+}
+
+/// Lists `tops` and every folder under them, one folder at a time, as the
+/// daemon's walk does. `states[t]` is the model after `t` changes, and
+/// `listing_time` says when each folder is listed; a folder that is gone by
+/// then is skipped.
+fn walk_model(
+    idx: &mut VolumeIndex,
+    ids: Ids,
+    states: &[Model],
+    tops: &[u64],
+    mut listing_time: impl FnMut() -> usize,
+) {
+    let mut folders: std::collections::VecDeque<u64> = tops.iter().copied().collect();
+    let mut listed = HashSet::new();
+    while let Some(folder) = folders.pop_front() {
+        if !listed.insert(folder) {
+            continue;
+        }
+        let model = &states[listing_time()];
+        if !model.exists(folder) {
+            continue;
+        }
+        for file in model.listing(ids, folder) {
+            if file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                folders.push_back(ids.model(file.frn));
+            }
+            idx.insert_listed(&file);
+        }
     }
 }
 
@@ -876,6 +1003,7 @@ fn raw_action_strategy() -> impl Strategy<Value = RawAction> {
 fn step_model(
     model: &mut Model,
     next_frn: &mut u64,
+    ids: Ids,
     action: &RawAction,
 ) -> Option<ParsedUsnRecord> {
     match action {
@@ -890,7 +1018,7 @@ fn step_model(
             *next_frn += 1;
             let name = model_name(*name_sel, f);
             model.entries.insert(f, (parent, name.clone(), *is_dir));
-            Some(create(frn(f), frn_or_root(parent), &name, *is_dir))
+            Some(create(ids.id(f), ids.id(parent), &name, *is_dir))
         }
         RawAction::Rename {
             target_sel,
@@ -916,7 +1044,7 @@ fn step_model(
             let e = model.entries.get_mut(&target).unwrap();
             e.0 = new_parent;
             e.1 = name.clone();
-            Some(rename(frn(target), frn_or_root(new_parent), &name, is_dir))
+            Some(rename(ids.id(target), ids.id(new_parent), &name, is_dir))
         }
         RawAction::Delete { target_sel } => {
             let leaves: Vec<u64> = model
@@ -929,7 +1057,7 @@ fn step_model(
             }
             let target = leaves[target_sel % leaves.len()];
             model.entries.remove(&target);
-            Some(delete(frn(target)))
+            Some(delete(ids.id(target)))
         }
     }
 }
@@ -953,12 +1081,15 @@ proptest! {
     /// delete tapes, including O(1) directory renames, orphan resolution, and
     /// idempotent replays (each record applied twice).
     #[test]
-    fn model_op_tape_convergence(actions in prop::collection::vec(raw_action_strategy(), 0..80)) {
+    fn model_op_tape_convergence(
+        actions in prop::collection::vec(raw_action_strategy(), 0..80),
+        ids in arb_ids(),
+    ) {
         let mut model = Model::default();
-        let mut idx = new_index();
+        let mut idx = VolumeIndex::new(ids.root());
         let mut next_frn: u64 = 1000;
         for action in &actions {
-            if let Some(rec) = step_model(&mut model, &mut next_frn, action) {
+            if let Some(rec) = step_model(&mut model, &mut next_frn, ids, action) {
                 idx.apply_batch(std::slice::from_ref(&rec));
                 prop_assert_eq!(path_set(&idx), model.path_set());
                 prop_assert!(idx.dir_index_matches_rebuild(), "dir index drifted after apply");
@@ -977,7 +1108,9 @@ proptest! {
     /// children → placeholder synthesis), then replay the journal tape from
     /// that point. The result must equal the final model regardless of the
     /// order, and whether the FILE_LAYOUT pass completed or stopped part way
-    /// and left the enumeration to name the rest, as the bootstrap does.
+    /// and left the enumeration to name the rest, as the bootstrap does. ReFS
+    /// IDs run through the same build and replay, so a lookup that keys on
+    /// less than the whole ID fails here too.
     #[test]
     fn bootstrap_race_converges(
         actions in prop::collection::vec(raw_action_strategy(), 0..70),
@@ -986,6 +1119,7 @@ proptest! {
         // `None`: the FILE_LAYOUT pass completed. `Some`: it stopped after
         // that fraction of the snapshot, and the enumeration read all of it.
         layout_stop in prop::option::of(0.0f64..1.0),
+        ids in arb_ids(),
     ) {
         let mut model = Model::default();
         let mut next_frn: u64 = 1000;
@@ -997,7 +1131,7 @@ proptest! {
             if i == split_at {
                 snapshot = Some(model.clone());
             }
-            if let Some(rec) = step_model(&mut model, &mut next_frn, action)
+            if let Some(rec) = step_model(&mut model, &mut next_frn, ids, action)
                 && i >= split_at
             {
                 journal.push(rec);
@@ -1009,13 +1143,13 @@ proptest! {
         let mut enum_recs: Vec<ParsedUsnRecord> = snapshot
             .entries
             .iter()
-            .map(|(f, (p, name, is_dir))| create(frn(*f), frn_or_root(*p), name, *is_dir))
+            .map(|(f, (p, name, is_dir))| create(ids.id(*f), ids.id(*p), name, *is_dir))
             .collect();
         shuffle(&mut enum_recs, shuffle_seed);
 
         let layout_count = layout_stop
             .map_or(enum_recs.len(), |stop| (enum_recs.len() as f64 * stop) as usize);
-        let mut idx = new_index();
+        let mut idx = VolumeIndex::new(ids.root());
         for r in &enum_recs[..layout_count] {
             idx.insert_layout(&LayoutFile {
                 frn: r.frn,
@@ -1042,6 +1176,111 @@ proptest! {
         prop_assert!(idx.name_chains_match_rebuild(), "name chains drifted after bootstrap race");
         prop_assert!(idx.child_chains_match_rebuild(), "child chains drifted after bootstrap race");
     }
+
+    /// Walk race: a folder walk is not a snapshot, so the model keeps changing
+    /// between the folders it lists. The journal then replays from the cursor
+    /// taken before the walk, in batches, and after each batch the folders the
+    /// index missed are listed, at that moment or later, as the tail does. The
+    /// result must equal the final model. Without the missed-folder rule a
+    /// folder renamed into an already listed part loses its contents, and a
+    /// folder listed twice must not duplicate them.
+    #[test]
+    fn walk_race_converges(
+        actions in prop::collection::vec(raw_action_strategy(), 20..120),
+        // Where the cursor falls: late enough that a tree exists for the
+        // walk, early enough that changes run through it.
+        cursor in 0.4f64..0.8,
+        // Changes made before each listing, cycled.
+        changes_per_listing in prop::collection::vec(0usize..6, 1..8),
+        // Whether a replay batch ends after each record, cycled.
+        batch_ends in prop::collection::vec(any::<bool>(), 1..8),
+        // How many changes later than its batch a missed-folder walk lists.
+        walk_delays in prop::collection::vec(0usize..4, 1..8),
+        ids in arb_ids(),
+    ) {
+        // states[t] is the model after t changes; a record is tagged with
+        // the state its change produced.
+        let mut model = Model::default();
+        let mut next_frn: u64 = 1000;
+        let mut states = vec![model.clone()];
+        let mut records: Vec<(usize, ParsedUsnRecord)> = Vec::new();
+        for action in &actions {
+            if let Some(rec) = step_model(&mut model, &mut next_frn, ids, action) {
+                states.push(model.clone());
+                records.push((states.len() - 1, rec));
+            }
+        }
+        let last = states.len() - 1;
+        let start = (last as f64 * cursor) as usize;
+
+        let mut idx = VolumeIndex::new(ids.root());
+        let mut now = start;
+        let mut listings = changes_per_listing.iter().cycle();
+        walk_model(&mut idx, ids, &states, &[MODEL_ROOT], || {
+            now = (now + listings.next().expect("cycled")).min(last);
+            now
+        });
+
+        let mut delays = walk_delays.iter().cycle();
+        let mut ends = batch_ends.iter().cycle();
+        let mut batch = Vec::new();
+        let mut walked_at = now;
+        let journal = records.iter().filter(|(t, _)| *t > start);
+        let count = journal.clone().count();
+        for (i, (t, rec)) in journal.enumerate() {
+            batch.push(rec.clone());
+            if !*ends.next().expect("cycled") && i + 1 < count {
+                continue;
+            }
+            let outcome = idx.apply_batch(&batch);
+            batch.clear();
+            walked_at = (walked_at.max(*t) + delays.next().expect("cycled")).min(last);
+            let missed: Vec<u64> = outcome.needs_walk.iter().map(|&f| ids.model(f)).collect();
+            walk_model(&mut idx, ids, &states, &missed, || walked_at);
+            // The hard-link reconcile: a file the walk met in two folders
+            // has two names until the filesystem's one name replaces them.
+            for &f in &outcome.needs_link_reconcile {
+                let Some((parent, name, _)) = states[walked_at].entries.get(&ids.model(f)) else {
+                    continue; // gone: its delete record removes it
+                };
+                if let Some(parent) = idx.head_of(ids.id(*parent)) {
+                    let name = WtfName::new(name.clone().into_bytes(), false);
+                    idx.reconcile_links(f, &[LinkTarget { parent, name }]);
+                }
+            }
+        }
+
+        prop_assert_eq!(path_set(&idx), model.path_set());
+        prop_assert!(idx.dir_index_matches_rebuild(), "dir index drifted after walk race");
+        prop_assert!(idx.name_chains_match_rebuild(), "name chains drifted after walk race");
+        prop_assert!(idx.child_chains_match_rebuild(), "child chains drifted after walk race");
+    }
+}
+
+/// A folder walk meets a hard-linked file once in each of its folders, and a
+/// folder that moved during the walk can be listed twice. The model above has
+/// no hard links, so this pins both: the file keeps every name, and the
+/// second listing of a folder adds nothing.
+#[test]
+fn a_walk_keeps_hard_links_and_adds_a_folder_listed_twice_once() {
+    let ids = Ids::Refs;
+    let root = ids.root();
+    let mut idx = VolumeIndex::new(root);
+    let (a, b, file) = (ids.id(1000), ids.id(1001), ids.id(1002));
+    for listing in [
+        listed(a, root, "a", true),
+        listed(b, root, "b", true),
+        listed(file, a, "one.txt", false),
+        listed(file, b, "two.txt", false),
+        listed(b, a, "b", true),
+    ] {
+        idx.insert_listed(&listing);
+    }
+    assert_eq!(
+        path_set(&idx),
+        BTreeSet::from(["a", "a\\one.txt", "b", "b\\two.txt"].map(String::from))
+    );
+    assert_eq!(idx.len(), 2 + 4, "root, lost+found and four entries");
 }
 
 #[test]

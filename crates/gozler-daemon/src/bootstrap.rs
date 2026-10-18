@@ -1,22 +1,28 @@
-//! Per-volume bootstrap: read the MFT through FILE_LAYOUT, and enumerate it
-//! only when that pass stops, wiring the raw Win32 buffers from `gozler-winfs`
-//! through the pure parsers in `gozler-core` into a `VolumeIndex`.
+//! Per-volume bootstrap: on NTFS, read the MFT through FILE_LAYOUT, and
+//! enumerate it only when that pass stops; on ReFS, which has no MFT, walk the
+//! folders. It wires the raw Win32 buffers from `gozler-winfs` through the
+//! pure parsers in `gozler-core` into a `VolumeIndex`.
 //!
 //! This is the bridge the whole design turns on: `gozler-winfs` hands us bytes,
 //! `gozler-core` interprets them, and neither knows about the other. The daemon
 //! (here) owns the buffers and the loop.
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use gozler_core::index::VolumeIndex;
-use gozler_core::layout::{RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer};
+use gozler_core::layout::{
+    LayoutFile, RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer, walk_listing_buffer,
+};
+use gozler_core::types::Frn;
+use gozler_core::usn::record::FILE_ATTRIBUTE_DIRECTORY;
 use gozler_core::usn::walk_enum_buffer;
 use gozler_winfs::{
-    ERROR_ACCESS_DENIED, JournalInfo, JournalQuery, VolumeHandle, VolumeInfo, WinError,
-    create_usn_journal, enum_usn_data, enumerate_volumes, query_file_layout, query_usn_journal,
-    volume_total_bytes,
+    ERROR_ACCESS_DENIED, JournalInfo, JournalQuery, JournalRecords, VolumeHandle, VolumeInfo,
+    WinError, create_usn_journal, enum_usn_data, enumerate_volumes, open_folder, query_file_layout,
+    query_usn_journal, root_folder_id, volume_total_bytes,
 };
 
 /// Floor for the USN journal: large enough that routine churn does not wrap it
@@ -30,12 +36,38 @@ const JOURNAL_MAX_SIZE: u64 = 1024 * 1024 * 1024;
 const JOURNAL_ALLOC_DELTA: u64 = 8 * 1024 * 1024;
 /// 1 MiB ioctl buffer: ~100 ENUM round-trips per million files.
 const IO_BUFFER_BYTES: usize = 1024 * 1024;
+/// 64 KiB listing buffer, as `u64`s because the entries are 8-byte aligned.
+/// It holds several hundred names, so one read lists most folders.
+const LISTING_BUFFER_WORDS: usize = 8 * 1024;
+/// `FILE_ATTRIBUTE_REPARSE_POINT`: a folder with it, such as a junction, is
+/// indexed but not entered, so the walk cannot loop or leave the volume.
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// The filesystems gozler indexes. They build the index differently and ask
+/// the journal for different records; the index, the journal tail and the
+/// coherence rules are shared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Filesystem {
+    Ntfs,
+    Refs,
+}
+
+impl Filesystem {
+    /// The journal records that hold this filesystem's file IDs whole.
+    pub(crate) fn journal_records(self) -> JournalRecords {
+        match self {
+            Self::Ntfs => JournalRecords::V2,
+            Self::Refs => JournalRecords::V3,
+        }
+    }
+}
 
 /// A freshly bootstrapped volume, as `gozlerd scan` reports it.
 pub(crate) struct BootstrappedVolume {
     pub guid_path: String,
     pub mounts: Vec<String>,
-    pub layout_secs: f64,
+    pub filesystem: Filesystem,
+    pub read_secs: f64,
     pub enum_secs: Option<f64>,
     pub journal: JournalSetup,
     pub index: VolumeIndex,
@@ -66,28 +98,30 @@ pub(crate) fn enumerate_all() -> Result<Vec<VolumeInfo>> {
     enumerate_volumes().context("enumerating volumes")
 }
 
-/// Why gozler does not index `vol`, or `None` when it does: gozler indexes
-/// fixed NTFS volumes.
-pub(crate) fn skip_reason(vol: &VolumeInfo) -> Option<String> {
+/// The filesystem gozler indexes `vol` as, or why it does not index it:
+/// gozler indexes fixed NTFS and ReFS volumes.
+pub(crate) fn indexed_filesystem(vol: &VolumeInfo) -> Result<Filesystem, String> {
     if !vol.is_fixed {
-        return Some("not a fixed disk".into());
+        return Err("not a fixed disk".into());
     }
     match vol.filesystem.as_deref() {
-        Some("NTFS") => None,
-        Some(other) => Some(format!("{other}, not NTFS")),
-        None => Some("its filesystem could not be read, as on a locked BitLocker volume".into()),
+        Some("NTFS") => Ok(Filesystem::Ntfs),
+        Some("ReFS") => Ok(Filesystem::Refs),
+        Some(other) => Err(format!("{other}, not NTFS or ReFS")),
+        None => Err("its filesystem could not be read, as on a locked BitLocker volume".into()),
     }
 }
 
-/// Bootstraps every fixed NTFS volume once, for `gozlerd scan`. A volume that
-/// fails is logged and left out rather than aborting the whole run.
+/// Bootstraps every fixed NTFS and ReFS volume once, for `gozlerd scan`. A
+/// volume that fails is logged and left out rather than aborting the whole
+/// run.
 pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
-    let targets: Vec<VolumeInfo> = enumerate_all()?
+    let targets: Vec<(VolumeInfo, Filesystem)> = enumerate_all()?
         .into_iter()
-        .filter(|v| skip_reason(v).is_none())
+        .filter_map(|v| indexed_filesystem(&v).ok().map(|fs| (v, fs)))
         .collect();
     if targets.is_empty() {
-        bail!("no fixed NTFS volumes found");
+        bail!("no fixed NTFS or ReFS volumes found");
     }
 
     // One thread per volume. The MFT scans are independent, so a USB disk
@@ -101,7 +135,7 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
     let results: Vec<Result<BootstrappedVolume>> = std::thread::scope(|s| {
         let threads: Vec<_> = targets
             .iter()
-            .map(|vol| {
+            .map(|(vol, filesystem)| {
                 let label = gozler_core::scope::VolumeMounts {
                     mounts: &vol.mounts,
                     guid: &vol.guid_path,
@@ -109,7 +143,7 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
                 .display_prefix();
                 std::thread::Builder::new()
                     .name(format!("gozler-bootstrap-{label}"))
-                    .spawn_scoped(s, move || bootstrap_volume(vol))
+                    .spawn_scoped(s, move || bootstrap_volume(vol, *filesystem))
             })
             .collect();
         threads
@@ -124,7 +158,7 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
     });
 
     let mut ok = Vec::new();
-    for (vol, result) in targets.iter().zip(results) {
+    for ((vol, _), result) in targets.iter().zip(results) {
         match result {
             Ok(scan) => ok.push(scan),
             Err(e) => tracing::error!(
@@ -155,19 +189,21 @@ pub(crate) fn open_volume(guid_path: &str) -> Result<VolumeHandle> {
 }
 
 /// Bootstraps a single volume: journal setup, then [`build_index`].
-fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
+fn bootstrap_volume(vol: &VolumeInfo, filesystem: Filesystem) -> Result<BootstrappedVolume> {
     let handle = open_volume(&vol.guid_path)?;
 
     // The journal is only needed for the live tail; a one-shot scan reads the
-    // MFT directly, so an unavailable journal is not fatal here.
+    // volume directly, so an unavailable journal is not fatal here.
     let journal = ensure_journal(&handle, &vol.guid_path);
     // First-time bootstrap passes no stop flag, so the rebuild can never abort.
-    let built = build_index(&handle, None)?.expect("build_index cannot abort without a stop flag");
+    let built = build_index(&handle, &vol.guid_path, filesystem, None)?
+        .expect("build_index cannot abort without a stop flag");
 
     Ok(BootstrappedVolume {
         guid_path: vol.guid_path.clone(),
         mounts: vol.mounts.clone(),
-        layout_secs: built.layout_secs,
+        filesystem,
+        read_secs: built.read_secs,
         enum_secs: built.enum_secs,
         journal,
         index: built.index,
@@ -177,9 +213,11 @@ fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
 /// A freshly built index and how its passes went.
 pub(crate) struct BuiltIndex {
     pub index: VolumeIndex,
-    pub layout_secs: f64,
-    /// How long the enumeration took, or `None` when the FILE_LAYOUT pass
-    /// completed and the enumeration did not run.
+    /// How long the first pass took: the FILE_LAYOUT pass on NTFS, the
+    /// folder walk on ReFS.
+    pub read_secs: f64,
+    /// How long the enumeration took, or `None` when it did not run because
+    /// the first pass completed.
     pub enum_secs: Option<f64>,
     /// The FILE_LAYOUT pass stopped, so some files' sizes and dates are
     /// unknown. The volume stores it as
@@ -201,24 +239,50 @@ enum LayoutPass {
 /// index on the handle it already owns. Returns `None` when `stop` aborts the
 /// build. The journal is the caller's concern.
 ///
-/// One FILE_LAYOUT pass gives every file its names, size and date, so the MFT
-/// is read once. When that pass stops part way, the MFT enumeration runs into
-/// the same index and names the files the pass did not reach, which keeps
-/// their sizes and dates unknown. Without it a failed read would drop every
-/// file after it from the index.
+/// On NTFS, one FILE_LAYOUT pass gives every file its names, size and date,
+/// so the MFT is read once. When that pass stops part way, the MFT enumeration
+/// runs into the same index and names the files the pass did not reach, which
+/// keeps their sizes and dates unknown. Without it a failed read would drop
+/// every file after it from the index.
+///
+/// ReFS answers neither request, so its build walks every folder from the
+/// root with [`walk_folders`], which gives names, sizes and dates in one pass.
 pub(crate) fn build_index(
     handle: &VolumeHandle,
+    guid_path: &str,
+    filesystem: Filesystem,
     stop: Option<&AtomicBool>,
 ) -> Result<Option<BuiltIndex>> {
     let cancelled = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
-    let mut index = VolumeIndex::new();
-    let mut buf = vec![0u8; IO_BUFFER_BYTES];
+    // Read from the volume on every filesystem: NTFS gives record 5, and
+    // ReFS gives its own, so neither root is assumed.
+    let root = Frn(root_folder_id(guid_path).context("reading the root folder's file ID")?);
+    let mut index = VolumeIndex::new(root);
 
-    let layout_start = Instant::now();
+    let read_start = Instant::now();
+    if filesystem == Filesystem::Refs {
+        let walked = walk_folders(handle, &[root], cancelled, |files| {
+            for f in files {
+                index.insert_listed(f);
+            }
+        })?;
+        if !walked {
+            return Ok(None);
+        }
+        index.optimize_storage();
+        return Ok(Some(BuiltIndex {
+            index,
+            read_secs: read_start.elapsed().as_secs_f64(),
+            enum_secs: None,
+            metadata_pending: false,
+        }));
+    }
+
+    let mut buf = vec![0u8; IO_BUFFER_BYTES];
     let pass = layout_pass(&mut index, &mut buf, cancelled, |restart, buf| {
         query_file_layout(handle, RECOMMENDED_LAYOUT_FLAGS, restart, buf)
     })?;
-    let layout_secs = layout_start.elapsed().as_secs_f64();
+    let read_secs = read_start.elapsed().as_secs_f64();
 
     let enum_secs = match pass {
         LayoutPass::Complete => None,
@@ -256,10 +320,59 @@ pub(crate) fn build_index(
 
     Ok(Some(BuiltIndex {
         index,
-        layout_secs,
+        read_secs,
         enum_secs,
         metadata_pending: pass == LayoutPass::Stopped,
     }))
+}
+
+/// Lists every folder in `tops` and every folder under them, and hands each
+/// page of listed names to `insert`. Returns `false` when `cancelled`, asked
+/// before each folder, stopped the walk.
+///
+/// A folder that is gone when the walk opens it is skipped: the journal's
+/// delete record removes it. Any other failure fails the walk, because the
+/// index cannot tell which names it missed. A folder reparse point, such as a
+/// junction, is listed but not entered.
+///
+/// Each folder is listed once. A folder that moved during the walk can be met
+/// again, and the journal records every change after its first listing; a
+/// listing that names a folder inside itself, which only corrupt data can
+/// do, would otherwise make the walk endless.
+pub(crate) fn walk_folders(
+    handle: &VolumeHandle,
+    tops: &[Frn],
+    mut cancelled: impl FnMut() -> bool,
+    mut insert: impl FnMut(&[LayoutFile]),
+) -> Result<bool> {
+    let mut buf = vec![0u64; LISTING_BUFFER_WORDS];
+    let mut folders: VecDeque<Frn> = tops.iter().copied().collect();
+    let mut listed: HashSet<Frn> = HashSet::new();
+    while let Some(folder) = folders.pop_front() {
+        if !listed.insert(folder) {
+            continue;
+        }
+        if cancelled() {
+            return Ok(false);
+        }
+        let Some(listing) = open_folder(handle, folder.0).context("opening a folder by ID")? else {
+            continue;
+        };
+        while let Some(page) = listing.read_listing(&mut buf).context("listing a folder")? {
+            let files = walk_listing_buffer(folder, page).context("parsing a folder listing")?;
+            folders.extend(
+                files
+                    .iter()
+                    .filter(|f| {
+                        f.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                            && f.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                    })
+                    .map(|f| f.frn),
+            );
+            insert(&files);
+        }
+    }
+    Ok(true)
 }
 
 /// The FILE_LAYOUT pass: hands each file of each page that `read_page` writes
@@ -457,7 +570,7 @@ mod tests {
     #[test]
     fn layout_pass_reports_a_failed_read_as_stopped() {
         let pass = |result: Result<Option<usize>, WinError>| {
-            let mut index = VolumeIndex::new();
+            let mut index = VolumeIndex::new(gozler_core::index::NTFS_ROOT_FRN);
             layout_pass(&mut index, &mut [0u8; 16], || false, |_, _| result.clone())
                 .expect("no page is parsed")
         };

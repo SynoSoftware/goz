@@ -77,6 +77,16 @@ pub(crate) struct ReadUsnJournalDataV0 {
     pub usn_journal_id: u64,
 }
 
+/// Win32 `READ_USN_JOURNAL_DATA_V1`, input to `FSCTL_READ_USN_JOURNAL`: the
+/// V0 fields, then the range of record versions the caller accepts.
+#[repr(C)]
+#[allow(dead_code)] // fields are consumed by the kernel via the ioctl pointer
+pub(crate) struct ReadUsnJournalDataV1 {
+    pub v0: ReadUsnJournalDataV0,
+    pub min_major_version: u16,
+    pub max_major_version: u16,
+}
+
 /// Win32 `CREATE_USN_JOURNAL_DATA`, input to `FSCTL_CREATE_USN_JOURNAL`.
 #[repr(C)]
 #[allow(dead_code)] // fields are consumed by the kernel via the ioctl pointer

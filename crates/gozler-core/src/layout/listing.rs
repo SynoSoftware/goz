@@ -1,0 +1,266 @@
+//! Parser for one folder listing: the output buffer of
+//! `GetFileInformationByHandleEx` with `FileIdExtdDirectoryInfo`, a chain of
+//! `FILE_ID_EXTD_DIR_INFO` entries.
+//!
+//! <https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_extd_dir_info>
+//!
+//! `NextEntryOffset` is relative to the entry that holds it, and 0 ends the
+//! chain. The call does not report how many bytes it wrote, so the chain is
+//! the only end marker.
+
+use super::parse::{
+    LayoutFile, LayoutName, LayoutWalkError, follow_offset, read_bytes, read_struct,
+};
+use crate::types::{Frn, MAX_NAME_UTF16_BYTES};
+use crate::wtf8;
+use zerocopy::little_endian::{I64, U32, U128};
+use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
+
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+
+/// `FILE_ID_EXTD_DIR_INFO` fixed part (88 bytes); `FileName` (UTF-16LE,
+/// `FileNameLength` bytes, not null-terminated) follows.
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct RawDirEntry {
+    next_entry_offset: U32,
+    // Layout-bearing only; never read individually.
+    #[allow(dead_code)]
+    file_index: U32,
+    #[allow(dead_code)]
+    creation_time: I64,
+    #[allow(dead_code)]
+    last_access_time: I64,
+    last_write_time: I64,
+    #[allow(dead_code)]
+    change_time: I64,
+    end_of_file: I64,
+    #[allow(dead_code)]
+    allocation_size: I64,
+    file_attributes: U32,
+    file_name_length: U32,
+    #[allow(dead_code)]
+    ea_size: U32,
+    #[allow(dead_code)]
+    reparse_point_tag: U32,
+    file_id: U128,
+}
+
+/// Parses one listing page of `folder` into one [`LayoutFile`] per name, each
+/// with that single name in `folder`, its size (`None` for a folder) and its
+/// last-write time. The `.` and `..` entries are skipped. An empty buffer
+/// yields no entries.
+pub fn walk_listing_buffer(folder: Frn, buf: &[u8]) -> Result<Vec<LayoutFile>, LayoutWalkError> {
+    let mut files = Vec::new();
+    if buf.is_empty() {
+        return Ok(files);
+    }
+    let mut entry_off = 0;
+    loop {
+        let raw: RawDirEntry = read_struct(buf, entry_off, "FILE_ID_EXTD_DIR_INFO")?;
+        let name_len = raw.file_name_length.get();
+        // Cap before allocating, as the layout parser does.
+        if name_len as usize > MAX_NAME_UTF16_BYTES {
+            return Err(LayoutWalkError::NameTooLong {
+                what: "FILE_ID_EXTD_DIR_INFO.FileName",
+                offset: entry_off,
+                len: name_len,
+                max: MAX_NAME_UTF16_BYTES as u32,
+            });
+        }
+        if !name_len.is_multiple_of(2) {
+            return Err(LayoutWalkError::OddUtf16Length {
+                what: "FILE_ID_EXTD_DIR_INFO.FileNameLength",
+                offset: entry_off,
+                len: name_len,
+            });
+        }
+        let name_bytes = read_bytes(
+            buf,
+            entry_off + size_of::<RawDirEntry>(),
+            name_len as usize,
+            "FILE_ID_EXTD_DIR_INFO.FileName",
+        )?;
+        let units: Vec<u16> = name_bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
+            .collect();
+        if units != [u16::from(b'.')] && units != [u16::from(b'.'), u16::from(b'.')] {
+            let attributes = raw.file_attributes.get();
+            let mut name = Vec::with_capacity(name_bytes.len());
+            let name_lossy = wtf8::from_utf16(&units, &mut name);
+            files.push(LayoutFile {
+                frn: Frn(raw.file_id.get()),
+                attributes,
+                // EndOfFile is a byte count; a negative one is impossible
+                // from the filesystem, so clamp it as the layout parser does.
+                size: (attributes & FILE_ATTRIBUTE_DIRECTORY == 0)
+                    .then(|| raw.end_of_file.get().max(0) as u64),
+                mtime_ft: Some(raw.last_write_time.get()),
+                names: vec![LayoutName {
+                    parent_frn: folder,
+                    name,
+                    name_lossy,
+                    dos_only: false,
+                }],
+            });
+        }
+        let next = raw.next_entry_offset.get();
+        if next == 0 {
+            return Ok(files);
+        }
+        // Each hop clears its own entry and name, so the names parsed never
+        // add up to more bytes than the buffer holds.
+        entry_off = follow_offset(
+            buf,
+            entry_off,
+            next,
+            size_of::<RawDirEntry>() + name_len as usize,
+            "FILE_ID_EXTD_DIR_INFO.NextEntryOffset",
+        )?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// One `FILE_ID_EXTD_DIR_INFO` entry, as the fixture builder writes it.
+    #[derive(Clone, Debug)]
+    struct EntryFixture {
+        id: u128,
+        attributes: u32,
+        size: i64,
+        mtime: i64,
+        units: Vec<u16>,
+    }
+
+    fn entry(id: u128, attributes: u32, size: i64, name: &str) -> EntryFixture {
+        EntryFixture {
+            id,
+            attributes,
+            size,
+            mtime: 133_800_000_000_000_000,
+            units: name.encode_utf16().collect(),
+        }
+    }
+
+    /// Lays the entries out back to back on 8-byte boundaries, as Windows
+    /// does, with the last entry's `NextEntryOffset` 0.
+    fn build_listing(entries: &[EntryFixture]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (i, e) in entries.iter().enumerate() {
+            let start = buf.len();
+            let len = (88 + 2 * e.units.len()).next_multiple_of(8);
+            let next = if i + 1 == entries.len() {
+                0
+            } else {
+                len as u32
+            };
+            buf.extend_from_slice(&next.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            for time in [0, 0, e.mtime, 0] {
+                buf.extend_from_slice(&time.to_le_bytes());
+            }
+            buf.extend_from_slice(&e.size.to_le_bytes());
+            buf.extend_from_slice(&e.size.to_le_bytes());
+            buf.extend_from_slice(&e.attributes.to_le_bytes());
+            buf.extend_from_slice(&(2 * e.units.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&[0; 8]);
+            buf.extend_from_slice(&e.id.to_le_bytes());
+            for unit in &e.units {
+                buf.extend_from_slice(&unit.to_le_bytes());
+            }
+            buf.resize(start + len, 0);
+        }
+        buf
+    }
+
+    #[test]
+    fn raw_view_matches_on_wire_size() {
+        assert_eq!(size_of::<RawDirEntry>(), 88);
+    }
+
+    /// A ReFS listing as V: returns it: the folder's own `.` and `..`, a
+    /// folder and a file, with 128-bit IDs that use both halves.
+    #[test]
+    fn listing_gives_names_ids_sizes_and_dates() {
+        let folder = Frn(0x702 << 64);
+        let buf = build_listing(&[
+            entry(0x702 << 64, 0x10, 0, "."),
+            entry(0x600 << 64, 0x10, 0, ".."),
+            entry(0x7c4 << 64, 0x10, 0, "src"),
+            entry((0x702 << 64) | 0x84, 0x20, 4096, "a.txt"),
+        ]);
+        let files = walk_listing_buffer(folder, &buf).expect("valid listing");
+        let name = |name: &str| LayoutName {
+            parent_frn: folder,
+            name: name.as_bytes().to_vec(),
+            name_lossy: false,
+            dos_only: false,
+        };
+        assert_eq!(
+            files,
+            [
+                LayoutFile {
+                    frn: Frn(0x7c4 << 64),
+                    attributes: 0x10,
+                    size: None,
+                    mtime_ft: Some(133_800_000_000_000_000),
+                    names: vec![name("src")],
+                },
+                LayoutFile {
+                    frn: Frn((0x702 << 64) | 0x84),
+                    attributes: 0x20,
+                    size: Some(4096),
+                    mtime_ft: Some(133_800_000_000_000_000),
+                    names: vec![name("a.txt")],
+                },
+            ]
+        );
+    }
+
+    fn arb_entry() -> impl Strategy<Value = EntryFixture> {
+        (
+            any::<u128>(),
+            prop_oneof![Just(0x10u32), Just(0x20), Just(0x410)],
+            any::<i64>(),
+            any::<i64>(),
+            prop::collection::vec(any::<u16>(), 0..12),
+        )
+            .prop_map(|(id, attributes, size, mtime, units)| EntryFixture {
+                id,
+                attributes,
+                size,
+                mtime,
+                units,
+            })
+    }
+
+    proptest! {
+        /// A listing comes from the filesystem, so any bytes can arrive. A
+        /// corrupt one must give an error, not a panic that ends the walk,
+        /// and never more name bytes than the buffer holds.
+        #[test]
+        fn corrupted_listings_error_instead_of_panicking(
+            entries in prop::collection::vec(arb_entry(), 1..5),
+            patches in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let mut buf = build_listing(&entries);
+            let len = buf.len();
+            for (at, byte) in &patches {
+                buf[at.index(len)] = *byte;
+            }
+            buf.truncate(cut.index(len + 1));
+            if let Ok(files) = walk_listing_buffer(Frn(0x600 << 64), &buf) {
+                let bytes: usize = files.iter().map(|f| f.names[0].name.len()).sum();
+                // WTF-8 takes at most 3 bytes per UTF-16 code unit.
+                prop_assert!(bytes <= buf.len() * 3 / 2, "{bytes} name bytes in {} bytes", buf.len());
+            }
+        }
+    }
+}

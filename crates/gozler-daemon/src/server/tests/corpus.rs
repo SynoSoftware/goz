@@ -599,7 +599,9 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         // A scope on no indexed volume is refused, not answered with nothing.
         (
             &["-path", r"E:\", "report"],
-            query_error(r"E:\ is not on an indexed volume; gozlerd indexes fixed NTFS volumes"),
+            query_error(
+                r"E:\ is not on an indexed volume; gozlerd indexes fixed NTFS and ReFS volumes",
+            ),
         ),
         (&["-case", "-path", r"C:\Repo", "testing"], prints(&[])),
         // Sort and limit.
@@ -769,7 +771,7 @@ const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 /// The index of the volume mounted at `mount`, built from `entries` in order,
 /// so a folder comes before what it holds.
 fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
-    let mut index = VolumeIndex::new();
+    let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
     let mut folders: HashMap<&str, Frn> = HashMap::new();
     for (frn, entry) in (100..).map(Frn).zip(entries) {
         let (links, size, day, attributes) = match entry {

@@ -27,7 +27,7 @@ const L4: u64 = 10;
 const FILES_PER_LEAF: u64 = 52; // 24*14*12*10*52 ~= 2.1M files at depth 5+
 
 fn frn(rec: u64) -> Frn {
-    Frn(rec | (1u64 << 48))
+    Frn(u128::from(rec) | (1 << 48))
 }
 
 fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
@@ -48,7 +48,7 @@ fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
 /// names). Every 10,000th file's name contains the rare token "kernel32" so a
 /// rare query returns a realistic ~200 hits.
 fn build_index() -> (VolumeIndex, usize) {
-    let mut idx = VolumeIndex::new();
+    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let mut next: u64 = 1000;
     let mut count = 0usize;
 

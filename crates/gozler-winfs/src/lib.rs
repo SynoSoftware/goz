@@ -26,6 +26,8 @@ mod console;
 #[cfg(windows)]
 mod elevation;
 #[cfg(windows)]
+mod file_id;
+#[cfg(windows)]
 mod file_layout;
 #[cfg(windows)]
 mod file_stat;
@@ -68,9 +70,12 @@ pub use volume::{
 #[cfg(windows)]
 pub use journal::{
     ERROR_JOURNAL_DELETE_IN_PROGRESS, ERROR_JOURNAL_ENTRY_DELETED, ERROR_JOURNAL_NOT_ACTIVE,
-    JournalInfo, JournalQuery, create_usn_journal, enum_usn_data, query_usn_journal,
-    read_usn_journal,
+    JournalInfo, JournalQuery, JournalRecords, create_usn_journal, enum_usn_data,
+    query_usn_journal, read_usn_journal,
 };
+
+#[cfg(windows)]
+pub use file_id::{Folder, open_folder, root_folder_id};
 
 #[cfg(windows)]
 pub use file_layout::query_file_layout;

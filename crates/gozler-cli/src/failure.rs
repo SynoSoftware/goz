@@ -98,7 +98,9 @@ impl Failure {
                 eprintln!("gozler: the {SERVICE_NAME} service is not ready; try again shortly")
             }
             Failure::NotWindows => {
-                eprintln!("gozler: gozler runs only on Windows, because it searches the NTFS index")
+                eprintln!(
+                    "gozler: gozler runs only on Windows, because it searches NTFS and ReFS volumes"
+                )
             }
             Failure::Untrusted => eprintln!(
                 "gozler: the pipe server is not the trusted gozlerd daemon (owner is not \

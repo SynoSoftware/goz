@@ -50,7 +50,7 @@ fn purge() {
 /// One entry to insert: parent record, name, is_dir.
 #[cfg(windows)]
 struct Row {
-    parent_rec: u64,
+    parent_rec: u128,
     name: Vec<u8>,
     is_dir: bool,
 }
@@ -84,7 +84,7 @@ fn main() {
     // Assign record numbers; resolve parents. Roots ("C:", "D:", ...) map to
     // the volume root record.
     let root_rec = NTFS_ROOT_FRN.0;
-    let mut rec_of: HashMap<String, u64> = HashMap::new();
+    let mut rec_of: HashMap<String, u128> = HashMap::new();
     let mut next_rec: u64 = 1000;
     let mut rows: Vec<Row> = Vec::with_capacity(paths.len());
     let mut dirs: HashSet<String> = HashSet::new();
@@ -108,7 +108,7 @@ fn main() {
             }
         };
         let is_dir = dirs.contains(p.as_str());
-        let my_rec = next_rec | (1u64 << 48);
+        let my_rec = u128::from(next_rec) | (1 << 48);
         next_rec += 1;
         if is_dir {
             rec_of.insert(p.clone(), my_rec);
@@ -129,11 +129,11 @@ fn main() {
 
     // Insert everything, exactly as bootstrap ENUM would.
     let t1 = std::time::Instant::now();
-    let mut idx = VolumeIndex::new();
+    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     for (rec_no, row) in (1000_u64..).zip(rows.iter()) {
         let r = ParsedUsnRecord {
             major_version: 3,
-            frn: Frn(rec_no | (1u64 << 48)),
+            frn: Frn(u128::from(rec_no) | (1 << 48)),
             parent_frn: Frn(row.parent_rec),
             usn: 0,
             timestamp_ft: 0,
@@ -163,7 +163,7 @@ fn main() {
         name.push(b'~');
         let r = ParsedUsnRecord {
             major_version: 3,
-            frn: Frn(rec_no | (1u64 << 48)),
+            frn: Frn(u128::from(rec_no) | (1 << 48)),
             parent_frn: Frn(row.parent_rec),
             usn: 0,
             timestamp_ft: 0,

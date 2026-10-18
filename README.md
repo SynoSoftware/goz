@@ -5,23 +5,23 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#requirements)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](rust-toolchain.toml)
 
-**gozler** *(gözler, Turkish for "eyes")* is an instant file-search engine for Windows NTFS, written in Rust. A fast, open-source alternative to voidtools Everything.
+**gozler** *(gözler, Turkish for "eyes")* is an instant file-search engine for Windows NTFS and ReFS, written in Rust. A fast, open-source alternative to voidtools Everything.
 
 gozler is a fork of [goz](https://github.com/mustafaahci/goz) *(göz, "eye")*, created by [Mustafa Ahci](https://github.com/mustafaahci). synapse.sr develops gozler at [SynoSoftware/goz](https://github.com/SynoSoftware/goz), building on goz's index, daemon and speed the way vim built on vi.
 
-gozler indexes every filename on your fixed NTFS volumes and answers substring queries in single-digit milliseconds, from the command line or from your own tools over a named pipe.
+gozler indexes every filename on your fixed NTFS and ReFS volumes, Dev Drives included, and answers substring queries in single-digit milliseconds, from the command line or from your own tools over a named pipe.
 
 ## Highlights
 
 - **Fast.** 1.8x to 6.1x quicker than Everything across every query in our [benchmarks](docs/BENCHMARKS.md), on the same machine with the same result sets.
 - **Light.** ~215 MB resident under heavy querying and ~12 MB idle, against a ~3.97M-entry index.
-- **Live.** Tails the NTFS USN journal, so the index stays in sync as files change, including hard-link renames that Everything 1.4 misses. The journal is sized to the volume automatically (a 2 TB disk gets about four days of changes, not the 32 MB Windows default that Everything leaves you to raise by hand), and a tail thread that wedges on a sick disk or dies outright is cancelled or revived automatically.
+- **Live.** Tails the USN journal, so the index stays in sync as files change, including hard-link renames that Everything 1.4 misses. The journal is sized to the volume automatically (a 2 TB disk gets about four days of changes, not the 32 MB Windows default that Everything leaves you to raise by hand), and a tail thread that wedges on a sick disk or dies outright is cancelled or revived automatically.
 - **Scriptable.** Native `--json` output and a subset of `es.exe`-compatible options with matching exit codes, so it drops into existing Everything workflows.
 - **Honest about state.** Every volume reports whether it is provably in sync, rescanning, or offline. It never serves stale results silently.
 
 ## Requirements
 
-- Windows 10 / 11 (reads the NTFS MFT and USN journal; NTFS volumes only)
+- Windows 10 / 11 (reads the NTFS MFT, or walks the folders of a ReFS volume, and follows the USN journal; NTFS and ReFS volumes only)
 - Rust 1.94 or newer, only if you build from source
 
 ## Install
@@ -109,7 +109,7 @@ gozler is a small workspace of four crates: a pure, OS-agnostic core (parsing, i
 
 ## Security
 
-The daemon runs elevated and indexes filenames from a raw MFT read, which bypasses per-file NTFS ACLs. Any authenticated local user can query the resulting index (filenames, sizes, and timestamps; not file contents), the same trust model as Everything. See [docs/SECURITY.md](docs/SECURITY.md) for the full model and how to report a vulnerability.
+The daemon runs elevated and indexes filenames from a raw MFT read, or a ReFS folder walk with backup semantics, which both bypass per-file ACLs. Any authenticated local user can query the resulting index (filenames, sizes, and timestamps; not file contents), the same trust model as Everything. See [docs/SECURITY.md](docs/SECURITY.md) for the full model and how to report a vulnerability.
 
 ## Contributing
 

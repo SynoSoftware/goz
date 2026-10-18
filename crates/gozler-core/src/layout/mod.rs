@@ -9,10 +9,17 @@
 //! [`LayoutFile`] entries; the daemon pages the ioctl and feeds each buffer in
 //! turn.
 //!
+//! ReFS has no MFT and no file layout, so its bootstrap walks the folders
+//! instead, and [`walk_listing_buffer`] turns one folder listing into the
+//! same [`LayoutFile`] entries, one name each.
+//!
 //! All parsing is little-endian [`zerocopy`] views over `&[u8]` with no
 //! `unsafe`; the Win32 layer only ever hands this module raw bytes.
 
+mod listing;
 mod parse;
+
+pub use listing::walk_listing_buffer;
 
 pub use parse::{
     FILE_LAYOUT_NAME_ENTRY_DOS, FILE_LAYOUT_NAME_ENTRY_PRIMARY,

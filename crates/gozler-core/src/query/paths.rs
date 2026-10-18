@@ -209,12 +209,12 @@ mod tests {
     /// One chain of folders, deeper than [`MAX_PATH_HOPS`], with a file at
     /// every level.
     fn deep_index() -> (VolumeIndex, Vec<EntryIdx>) {
-        let mut index = VolumeIndex::new();
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
         let mut parent = NTFS_ROOT_FRN;
         let mut entries = Vec::new();
         let rec = |frn: u64, parent: Frn, name: String, dir: bool| ParsedUsnRecord {
             major_version: 2,
-            frn: Frn(frn | (1 << 48)),
+            frn: Frn(u128::from(frn) | (1 << 48)),
             parent_frn: parent,
             usn: 0,
             timestamp_ft: 0,
