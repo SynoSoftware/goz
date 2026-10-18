@@ -79,9 +79,9 @@ use win::execute;
 mod win {
     use super::client::Client;
     use super::failure::{Failure, output};
-    use gozler_core::escompat::{Answer, EsPlan, ExitCode};
+    use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, build_search, is_drive_relative};
     use gozler_core::output::{TableWriter, filetime_to_unix_ms};
-    use gozler_core::proto::{DaemonStatus, QueryRequest, QueryResults, VolumeStatus};
+    use gozler_core::proto::{DaemonStatus, QueryResults, VolumeStatus};
     use gozler_core::scope::Scope;
     use std::io::Write;
     use std::time::{Duration, Instant};
@@ -91,11 +91,22 @@ mod win {
     const STATUS_POLL: Duration = Duration::from_millis(250);
 
     pub(crate) fn execute(plan: EsPlan) -> Result<ExitCode, Failure> {
+        if plan.status {
+            let mut connection = Client::connect(plan.insecure_no_server_check)?;
+            return status(&mut connection, plan.json);
+        }
+        search(plan)
+    }
+
+    fn search(mut plan: EsPlan) -> Result<ExitCode, Failure> {
+        resolve_drive_relative(&mut plan)?;
+        let request = build_search(&plan, &working_dir()?).map_err(Failure::Query)?;
+
         // Create the export file up front (es semantics): a later daemon-unreachable
         // failure then leaves the observable artifact, a 0-byte file + exit 8.
-        // -get-result-count prints the count, never results, so it writes none.
+        // A count prints the count, never results, so it writes none.
         let export_file = match &plan.export {
-            Some(path) if !plan.result_count => Some(std::fs::File::create(path).map_err(
+            Some(path) if plan.count.is_none() => Some(std::fs::File::create(path).map_err(
                 |error| Failure::ExportCreate {
                     path: path.clone(),
                     error,
@@ -105,24 +116,20 @@ mod win {
         };
 
         let mut connection = Client::connect(plan.insecure_no_server_check)?;
-
-        if plan.status {
-            return status(&mut connection, plan.json);
-        }
-
-        let request = build_query(&plan);
         if let Some(timeout) = plan.timeout {
             wait_for_scope(&mut connection, request.scope.as_deref(), timeout)?;
         }
 
         let mut answer = Answer::default();
-        if plan.result_count {
-            connection.query(request, |page| {
-                answer.add_count_page(&page);
-                Ok(())
-            })?;
+        if let Some(count) = plan.count {
+            let totals = connection.totals(request)?;
+            answer.add_totals(&totals);
+            let value = match count {
+                Count::Results => totals.count,
+                Count::TotalSize => totals.size,
+            };
             let mut out = std::io::stdout().lock();
-            let written = writeln!(out, "{}", answer.total).and_then(|()| out.flush());
+            let written = writeln!(out, "{value}").and_then(|()| out.flush());
             output(written, "stdout")?;
         } else {
             let out: Box<dyn Write> = match export_file {
@@ -145,38 +152,27 @@ mod win {
         Ok(answer.exit_code(plan.no_result_error))
     }
 
-    fn build_query(plan: &EsPlan) -> QueryRequest {
-        QueryRequest {
-            query: plan.query.clone(),
-            scope: plan.scope.as_ref().map(|s| absolutize(s)),
-            sort: plan.sort,
-            offset: 0,
-            limit: plan.row_limit(),
-            // Always fetch metadata; output decides what to show.
-            want_size: true,
-            want_mtime: true,
-            match_case: plan.match_case,
-        }
+    /// The working directory, which a relative `-path` is below. A folder
+    /// name that is not valid Unicode is replaced lossily, so a relative
+    /// `-path` below it names no indexed folder; other searches are
+    /// unaffected.
+    fn working_dir() -> Result<String, Failure> {
+        let dir = std::env::current_dir()
+            .map_err(|e| Failure::Internal(format!("cannot read the working directory: {e}")))?;
+        Ok(dir.to_string_lossy().into_owned())
     }
 
-    /// Resolves a `-path` value against the CWD without touching the filesystem, so
-    /// the daemon receives an absolute `X:\...` path to match a mount prefix. On
-    /// failure the original value is forwarded, but with a warning: a non-absolute
-    /// scope will not match any mount prefix and yields no results, so a silent
-    /// fallback would look like "the folder is empty".
-    fn absolutize(path: &str) -> String {
-        match std::path::absolute(path)
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_owned))
-        {
-            Some(abs) => abs,
-            None => {
-                eprintln!(
-                    "gozler: warning: could not resolve '{path}' to an absolute path; scope may not match"
-                );
-                path.to_owned()
-            }
-        }
+    /// Resolves a drive-relative `-path` such as `D:x` against the current
+    /// folder of that drive, which only Windows knows; [`build_search`]
+    /// resolves every other form.
+    fn resolve_drive_relative(plan: &mut EsPlan) -> Result<(), Failure> {
+        let Some(scope) = plan.scope.as_mut().filter(|s| is_drive_relative(s)) else {
+            return Ok(());
+        };
+        let absolute = std::path::absolute(&*scope)
+            .map_err(|e| Failure::Internal(format!("cannot resolve {scope}: {e}")))?;
+        *scope = absolute.to_string_lossy().into_owned();
+        Ok(())
     }
 
     /// Waits up to `timeout` for every volume that `scope` selects to become

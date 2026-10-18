@@ -194,6 +194,7 @@ fn main() {
 
     // Sanity: a couple of queries against the built index.
     let parsed = gozler_core::query::parse_query("index.js").expect("parse");
+    let parsed = gozler_core::query::CompiledQuery::new(&parsed).expect("compiles");
     let t2 = std::time::Instant::now();
     let out = gozler_core::query::run_query(
         &idx,

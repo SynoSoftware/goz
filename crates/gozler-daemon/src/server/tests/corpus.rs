@@ -1,8 +1,10 @@
 //! The golden corpus: command lines run over one fixture index, each with what
 //! gozler prints for it, as the code behaves today. A row runs its command line
-//! through `parse_argv` into the request gozler sends, and that request through
-//! [`encode_query_binary`], the daemon's query path; the rows printed, the
-//! warnings and the exit code then come from [`Answer`], as in gozler.
+//! through `parse_argv` and [`build_search`] into the request gozler sends, and
+//! that request through [`serve`](crate::server::serve), the daemon's request
+//! path; the rows printed, the warnings and the exit code then come from
+//! [`Answer`], as in gozler. One row also runs as protocol 1's text query,
+//! which the daemon parses itself.
 //!
 //! A row records today's behavior, right or wrong. A row that a planned fix
 //! changes on purpose carries a comment with its number in the bug table of
@@ -10,13 +12,12 @@
 //! `-export-csv`, columns) are in `gozler-cli`'s corpus, which prints a fixed
 //! result set.
 
-use super::{decode_frames, dir_record, set, volume};
-use crate::server::encode_query_binary;
+use super::{decode_frames, dir_record, reply_bytes, set, volume};
 use crate::volume_state::VolumeSet;
-use gozler_core::escompat::{Answer, Command, EsPlan, parse_argv};
+use gozler_core::escompat::{Answer, Command, EsPlan, build_search, parse_argv};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::layout::{LayoutFile, LayoutName};
-use gozler_core::proto::{QueryRequest, Response};
+use gozler_core::proto::{ProtoError, QueryRequest, Request, Response};
 use gozler_core::types::{Frn, VolumePhase};
 use std::collections::HashMap;
 
@@ -76,7 +77,8 @@ enum Printed {
     ArgvError(u8, String),
     /// The command line asks for the help: gozler prints it and exits 0.
     Help,
-    /// The daemon refuses the query: gozler prints the message and exits 4.
+    /// gozler or the daemon refuses the query: gozler prints the message and
+    /// exits 4.
     QueryError(String),
 }
 
@@ -330,6 +332,15 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             &["-path", r"c:\REPO\SRC", "link"],
             prints(&[r"C:\repo\src\link.md"]),
         ),
+        // A relative scope is below the working directory, `WORKING_DIR`.
+        (&["-path", ".", "link"], prints(&[r"C:\repo\src\link.md"])),
+        (
+            &["-path", r"..\docs", "testing"],
+            prints(&[
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+            ]),
+        ),
         (
             &["-path", r"D:\", "report"],
             prints(&[r"D:\backup\report.txt"]),
@@ -520,23 +531,19 @@ fn place<'p>(mount: &str, folders: &HashMap<&str, Frn>, path: &'p str) -> (Frn, 
     }
 }
 
-/// The request gozler sends for `plan`, as gozler-cli's `build_query` builds it.
-/// A `-path` value goes as given, so rows give it absolute; gozler resolves a
-/// relative one against its working directory.
-fn request(plan: &EsPlan) -> QueryRequest {
-    QueryRequest {
-        query: plan.query.clone(),
-        scope: plan.scope.clone(),
-        sort: plan.sort,
-        offset: 0,
-        limit: plan.row_limit(),
-        want_size: true,
-        want_mtime: true,
-        match_case: plan.match_case,
-    }
+/// The working directory every row runs in.
+const WORKING_DIR: &str = r"C:\repo\src";
+
+/// The two ways a client sends a search.
+#[derive(Clone, Copy)]
+enum Protocol {
+    /// From protocol 2: the query parsed by gozler.
+    Parsed,
+    /// Protocol 1: the query text, which the daemon parses.
+    Text,
 }
 
-fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
+fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
     let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let plan = match parse_argv(&args) {
         Ok(Command::Run(plan)) => plan,
@@ -544,9 +551,16 @@ fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
         Ok(Command::Version) => panic!("{args:?}: no row asks for the version"),
         Err(fatal) => return Printed::ArgvError(fatal.exit_code.code(), fatal.message),
     };
+    let request = match protocol {
+        Protocol::Parsed => match build_search(&plan, WORKING_DIR) {
+            Ok(search) => Request::Search(search),
+            Err(e) => return Printed::QueryError(e.to_string()),
+        },
+        Protocol::Text => Request::Query(text_request(&plan)),
+    };
     let mut paths = Vec::new();
     let mut answer = Answer::default();
-    for frame in decode_frames(&encode_query_binary(volumes, request(&plan))) {
+    for frame in decode_frames(&reply_bytes(volumes, &request)) {
         match frame {
             Response::Results(page) => {
                 answer.add_page(&page);
@@ -563,17 +577,36 @@ fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
     }
 }
 
+/// The request protocol 1's client sends for `plan`, its scope already
+/// absolute.
+fn text_request(plan: &EsPlan) -> QueryRequest {
+    QueryRequest {
+        query: plan.query.clone(),
+        scope: plan.scope.clone(),
+        sort: plan.sort,
+        offset: 0,
+        limit: plan.row_limit(),
+        want_size: true,
+        want_mtime: true,
+        match_case: plan.match_case,
+    }
+}
+
+fn fixture() -> VolumeSet {
+    set(&[
+        volume(r"C:\", index(r"C:\", C_DRIVE), VolumePhase::Live),
+        volume(r"D:\", index(r"D:\", D_DRIVE), VolumePhase::Live),
+    ])
+}
+
 /// Every row prints what it recorded. All changed rows are listed at once, so
 /// a change shows every row it moves.
 #[test]
 fn every_row_prints_what_it_recorded() {
-    let volumes = set(&[
-        volume(r"C:\", index(r"C:\", C_DRIVE), VolumePhase::Live),
-        volume(r"D:\", index(r"D:\", D_DRIVE), VolumePhase::Live),
-    ]);
+    let volumes = fixture();
     let mut changed = Vec::new();
     for (args, recorded) in rows() {
-        let printed = print(&volumes, args);
+        let printed = print(&volumes, args, Protocol::Parsed);
         if printed != recorded {
             changed.push(format!(
                 "{args:?}\n  recorded: {recorded:?}\n  printed:  {printed:?}"
@@ -586,4 +619,82 @@ fn every_row_prints_what_it_recorded() {
         changed.len(),
         changed.join("\n")
     );
+}
+
+/// The daemon still parses the text of a protocol 1 query, with the parser
+/// gozler runs, so the row prints the same through either protocol.
+#[test]
+fn the_text_path_prints_what_its_row_recorded() {
+    let args: &[&str] = &["report", "-n", "1"];
+    let (_, recorded) = rows()
+        .into_iter()
+        .find(|(row, _)| *row == args)
+        .expect("the row exists");
+    assert_eq!(print(&fixture(), args, Protocol::Text), recorded);
+}
+
+/// The totals of a query, which the daemon sums so that no row crosses the
+/// pipe, against the count and the sizes of every row of the same query. The
+/// fixture holds folders, a file whose size is unknown and one file under
+/// two names.
+#[test]
+fn a_total_counts_and_adds_up_every_row_of_the_same_query() {
+    let volumes = fixture();
+    let queries: [&[&str]; 5] = [
+        &[],
+        &["report"],
+        &["*.md"],
+        &["-path", ".."],
+        &["-path", r"..\..\tmp"],
+    ];
+    for args in queries {
+        let search = |extra: &[&str]| {
+            let args: Vec<String> = args.iter().chain(extra).map(ToString::to_string).collect();
+            let Ok(Command::Run(plan)) = parse_argv(&args) else {
+                panic!("{args:?} is a search");
+            };
+            Request::Search(build_search(&plan, WORKING_DIR).expect("parses"))
+        };
+        let rows: Vec<_> = decode_frames(&reply_bytes(&volumes, &search(&["-n", "all"])))
+            .into_iter()
+            .flat_map(|frame| match frame {
+                Response::Results(page) => page.items,
+                other => panic!("{args:?}: {other:?}"),
+            })
+            .collect();
+        let size: u64 = rows
+            .iter()
+            .filter(|row| !row.is_dir)
+            .filter_map(|row| row.size)
+            .sum();
+        match decode_frames(&reply_bytes(&volumes, &search(&["-get-total-size"])))[..] {
+            [Response::Totals(ref totals)] => {
+                assert_eq!(
+                    (totals.count, totals.size),
+                    (rows.len() as u64, size),
+                    "{args:?}"
+                )
+            }
+            ref other => panic!("{args:?}: {other:?}"),
+        }
+    }
+}
+
+/// A total that passes `u64::MAX`, which only a corrupt size in the index can
+/// cause, is refused rather than wrapped to a small number that looks valid.
+#[test]
+fn a_total_too_large_for_64_bits_is_refused() {
+    const HUGE: &[Entry] = &[File(r"C:\a.bin", u64::MAX - 1, 1), File(r"C:\b.bin", 2, 1)];
+    let volumes = set(&[volume(r"C:\", index(r"C:\", HUGE), VolumePhase::Live)]);
+    let Ok(Command::Run(plan)) = parse_argv(&["-get-total-size".to_string()]) else {
+        panic!("a search");
+    };
+    let request = Request::Search(build_search(&plan, WORKING_DIR).expect("parses"));
+    assert!(matches!(
+        decode_frames(&reply_bytes(&volumes, &request))[..],
+        [Response::Error {
+            code: ProtoError::Overflow,
+            ..
+        }]
+    ));
 }

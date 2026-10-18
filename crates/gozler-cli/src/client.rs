@@ -8,8 +8,9 @@ use std::os::windows::io::AsHandle;
 use std::time::{Duration, Instant};
 
 use gozler_core::proto::{
-    DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PIPE_NAME, QueryRequest, QueryResults, Request,
-    Response, decode_response_frame, encode_request,
+    DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PIPE_NAME, PROTO_VERSION, ProtoError,
+    QueryResults, QueryTotals, Request, Response, SearchRequest, decode_response_frame,
+    encode_request,
 };
 
 use crate::failure::Failure;
@@ -38,12 +39,14 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    /// Connects to the running daemon and, unless `insecure`, verifies the pipe
-    /// server's identity before returning.
+    /// Connects to the running daemon, unless `insecure` verifies the pipe
+    /// server's identity, and agrees on [`PROTO_VERSION`] with the daemon
+    /// before returning.
     ///
     /// Returns [`Failure::DaemonNotRunning`] if no pipe exists (daemon absent),
     /// [`Failure::Untrusted`] if a server is present but not owned by the
-    /// elevated daemon, or [`Failure::Communication`] for other open errors.
+    /// elevated daemon, or [`Failure::Communication`] for other open errors
+    /// and for a daemon older than this client.
     pub(crate) fn connect(insecure: bool) -> Result<Self, Failure> {
         use std::os::windows::fs::OpenOptionsExt;
 
@@ -100,14 +103,38 @@ impl Client {
             }
         }
 
-        Ok(Self {
+        let mut client = Self {
             pipe,
             decoder: FrameDecoder::new(MAX_SERVER_FRAME),
             // Heap, and larger than one 64 KiB pipe read: a broad query
             // streams hundreds of MB, so fewer, bigger reads cut syscall
             // overhead, and the main thread's 1 MiB stack stays safe.
             buf: vec![0u8; 256 * 1024],
-        })
+        };
+        client.hello()?;
+        Ok(client)
+    }
+
+    /// Asks the daemon for this client's protocol version alone. A daemon
+    /// older than the client refuses it; without the question, an old daemon
+    /// would refuse each request as malformed, which reads as invalid input.
+    fn hello(&mut self) -> Result<(), Failure> {
+        self.send(&Request::Hello {
+            proto_min: PROTO_VERSION,
+            proto_max: PROTO_VERSION,
+            client: concat!("gozler ", env!("CARGO_PKG_VERSION")).to_string(),
+        })?;
+        match self.next_response()? {
+            Response::Hello { .. } => Ok(()),
+            Response::Error {
+                code: ProtoError::Unsupported,
+                ..
+            } => Err(Failure::Communication(
+                "the running gozlerd is older than this client; install the matching gozlerd"
+                    .into(),
+            )),
+            _ => Err(Failure::Communication("unexpected reply to hello".into())),
+        }
     }
 
     /// Asks for the daemon's state. Fails only with
@@ -128,10 +155,10 @@ impl Client {
     /// with [`Failure::Communication`] when its reply breaks off.
     pub(crate) fn query(
         &mut self,
-        request: QueryRequest,
+        request: SearchRequest,
         mut page: impl FnMut(QueryResults) -> Result<(), Failure>,
     ) -> Result<(), Failure> {
-        self.send(&Request::Query(request))?;
+        self.send(&Request::Search(request))?;
         loop {
             match self.next_response()? {
                 Response::Results(results) => {
@@ -150,6 +177,21 @@ impl Client {
                     ));
                 }
             }
+        }
+    }
+
+    /// Runs a search that asks for [`Returns::Totals`], with the failures of
+    /// [`Self::query`].
+    ///
+    /// [`Returns::Totals`]: gozler_core::proto::Returns::Totals
+    pub(crate) fn totals(&mut self, request: SearchRequest) -> Result<QueryTotals, Failure> {
+        self.send(&Request::Search(request))?;
+        match self.next_response()? {
+            Response::Totals(totals) => Ok(totals),
+            Response::Error { code, message } => Err(Failure::Daemon { code, message }),
+            _ => Err(Failure::Communication(
+                "unexpected reply from daemon".into(),
+            )),
         }
     }
 

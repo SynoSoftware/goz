@@ -3,7 +3,7 @@
 
 use super::ExitCode;
 use crate::output::table::grouped;
-use crate::proto::QueryResults;
+use crate::proto::{QueryResults, QueryTotals};
 use std::fmt;
 
 /// What the pages of one result set say beyond their rows.
@@ -25,12 +25,12 @@ impl Answer {
         self.volumes_incomplete |= page.volumes_incomplete;
     }
 
-    /// Counts in the page of a `-get-result-count` search, whose output, the
-    /// number of matches, shows every match, so the limit leaves none out.
-    pub fn add_count_page(&mut self, page: &QueryResults) {
-        self.total = page.total;
-        self.shown = page.total;
-        self.volumes_incomplete |= page.volumes_incomplete;
+    /// Counts in the totals of a counting search, whose output covers every
+    /// match, so the limit leaves none out.
+    pub fn add_totals(&mut self, totals: &QueryTotals) {
+        self.total = totals.count;
+        self.shown = totals.count;
+        self.volumes_incomplete |= totals.volumes_incomplete;
     }
 
     /// The warnings to write after the rows, in order.
@@ -131,18 +131,16 @@ mod tests {
         assert_eq!(answer(300, 20, true).exit_code(false).code(), 2);
     }
 
-    /// `-get-result-count` asks for no rows, yet its count shows every match,
-    /// so it never warns that the limit cut the list or exits 10.
+    /// A count asks for no rows, yet it covers every match, so it never warns
+    /// that the limit cut the list or exits 10.
     #[test]
-    fn a_result_count_is_never_cut() {
+    fn a_count_is_never_cut() {
         let mut count = Answer::default();
-        count.add_count_page(&QueryResults {
-            total: 3,
-            items: Vec::new(),
-            more: false,
+        count.add_totals(&QueryTotals {
+            count: 3,
+            size: 0,
             volumes_incomplete: false,
             metadata_pending: false,
-            generation: 0,
         });
         assert!(count.warnings().is_empty());
         assert_eq!(count.exit_code(false).code(), 0);

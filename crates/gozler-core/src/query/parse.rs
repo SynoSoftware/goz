@@ -9,11 +9,12 @@
 //! for them is undocumented, so guessing it would be a compatibility trap.
 //! Unknown `func:` prefixes are treated as literal text, matching es.
 //!
-//! Terms are folded at parse time when the query is case-insensitive, so the
-//! engine compares candidate data (folded iff `!match_case`) against
-//! ready-to-use needles.
+//! The parser turns the text into a [`ParsedQuery`], which the client sends to
+//! the daemon as it is: AND-ed clauses, each an OR of terms. Terms keep the
+//! text as typed; the daemon folds them when it compiles the query
+//! ([`super::CompiledQuery`]).
 
-use crate::fold::fold;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 /// Scratch buffer of decoded code points, reused across candidates so a
@@ -40,7 +41,7 @@ enum GlobTok {
 impl Wildcard {
     /// Compiles a pattern whose bytes are already folded iff the query is
     /// case-insensitive.
-    fn compile(pattern: &[u8]) -> Self {
+    pub(crate) fn compile(pattern: &[u8]) -> Self {
         let mut tokens = Vec::new();
         for cp in crate::wtf8::CodePoints::new(pattern) {
             match cp {
@@ -70,7 +71,7 @@ impl Wildcard {
     /// Matches the whole of `name` (WTF-8, folded iff the query is
     /// case-insensitive) against the pattern, with a one-off buffer.
     #[cfg(test)]
-    fn matches(&self, name: &[u8]) -> bool {
+    pub(crate) fn matches(&self, name: &[u8]) -> bool {
         let mut buf = CodePointBuf::new();
         self.matches_into(name, &mut buf)
     }
@@ -137,14 +138,14 @@ fn glob_match(pat: &[GlobTok], text: &[u32]) -> bool {
     pi == pat.len()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     File,
     Folder,
 }
 
 /// An inclusive byte-size range.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SizeRange {
     pub min: u64,
     pub max: u64,
@@ -156,41 +157,79 @@ impl SizeRange {
     }
 }
 
-/// Non-text filters extracted from functions.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Filters {
-    /// Extensions to accept (folded, no leading dot). Empty `Vec` never
-    /// occurs: absence is `None`.
-    pub ext: Option<Vec<Vec<u8>>>,
-    pub size: Option<SizeRange>,
-    pub kind: Option<Kind>,
-}
-
-/// A fully parsed query.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A parsed query: the entries that match every clause.
+///
+/// The client sends it to the daemon as part of a
+/// [`SearchRequest`](crate::proto::SearchRequest), so it is a wire type: it
+/// only grows, by new [`Test`] variants and new fields, and each such change
+/// raises [`PROTO_VERSION`](crate::proto::PROTO_VERSION), so a daemon that
+/// cannot read the new form refuses the client's `Hello` instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedQuery {
-    /// Filename substrings (all must match, AND). Folded iff `!match_case`.
-    pub name_terms: Vec<Vec<u8>>,
-    /// Full-path substrings (all must match). Folded iff `!match_case`.
-    pub path_terms: Vec<Vec<u8>>,
-    /// Whole-name wildcard patterns (all must match).
-    pub wildcards: Vec<Wildcard>,
-    /// Whole-full-path wildcard patterns (all must match): a wildcard that
-    /// contains a separator, or a `path:` value with a wildcard.
-    pub path_wildcards: Vec<Wildcard>,
-    pub filters: Filters,
+    pub clauses: Vec<Clause>,
+    /// Whether text terms match case-sensitively, after any `case:` directive.
     pub match_case: bool,
 }
 
+/// Terms of which at least one must match; a clause with no terms matches
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Clause {
+    pub terms: Vec<Term>,
+}
+
+impl Clause {
+    /// A clause of one term that must match.
+    pub(crate) fn single(test: Test) -> Self {
+        Clause {
+            terms: vec![Term {
+                negated: false,
+                test,
+            }],
+        }
+    }
+}
+
+/// One test, or with `negated` its opposite. A size test never matches an
+/// entry whose size is unknown or a folder, negated or not, so a negated
+/// size test does not report an unread file as small.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Term {
+    pub negated: bool,
+    pub test: Test,
+}
+
+/// What a [`Term`] tests. Text is as typed; the daemon folds it unless the
+/// query matches case.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Test {
+    /// The name contains this text.
+    Name(String),
+    /// The full path contains this text.
+    Path(String),
+    /// The whole name matches this pattern of `*` and `?`.
+    NameWildcard(String),
+    /// The whole full path matches this pattern of `*` and `?`.
+    PathWildcard(String),
+    /// The extension is one of these, without the dot, compared ignoring case
+    /// whatever the query's case.
+    Extension(Vec<String>),
+    /// The file's size is in this range.
+    Size(SizeRange),
+    Kind(Kind),
+}
+
 impl ParsedQuery {
-    /// `true` when there are no positive text constraints: the query matches
-    /// everything subject to `filters`.
+    /// `true` when no term tests text: the query matches everything its
+    /// other tests let through.
     #[cfg(test)]
     pub(crate) fn is_text_empty(&self) -> bool {
-        self.name_terms.is_empty()
-            && self.path_terms.is_empty()
-            && self.wildcards.is_empty()
-            && self.path_wildcards.is_empty()
+        !self.clauses.iter().flat_map(|c| &c.terms).any(|t| {
+            matches!(
+                t.test,
+                Test::Name(_) | Test::Path(_) | Test::NameWildcard(_) | Test::PathWildcard(_)
+            )
+        })
     }
 }
 
@@ -204,17 +243,9 @@ pub enum QueryError {
     #[error("malformed {what}: {detail}")]
     Malformed { what: &'static str, detail: String },
     /// More terms than a query may hold; carries the query's count.
-    #[error("the query has {0} terms; a query may have at most {max}", max = MAX_QUERY_TERMS)]
+    #[error("the query has {0} terms; a query may have at most {max}", max = super::engine::MAX_QUERY_TERMS)]
     TooManyTerms(usize),
 }
-
-/// The most terms one query may hold, counting name and path terms, both
-/// kinds of wildcard and `ext:` values. The engine tests each candidate
-/// against every term under the volume's index read lock, so the cost of a
-/// query grows with its term count; without a cap, one query from any local
-/// user holds that lock, and the journal tail waiting behind it, for minutes.
-/// Real queries use a few terms, and 256 still fits a long `ext:` list.
-const MAX_QUERY_TERMS: usize = 256;
 
 /// One search function: its names, what it does, and its line in the help.
 pub(crate) struct SearchFunction {
@@ -302,11 +333,13 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
 /// defaults to `match_case` (es `-case`). A `case:` directive in the query
 /// overrides the default, so [`ParsedQuery::match_case`] is the one value that
 /// both matching and the `-path` scope lookup follow.
+///
+/// Each text term is a clause of its own, so the terms are AND-ed. A later
+/// `ext:`, `size:`, `file:` or `folder:` replaces an earlier one.
 pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuery, QueryError> {
     let tokens = tokenize(input)?;
 
-    // First pass: detect case-sensitivity so text folding is correct. The
-    // last `case:` directive wins.
+    // The last `case:` directive wins.
     let match_case = tokens
         .iter()
         .filter(|t| !t.quoted)
@@ -314,21 +347,14 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
         .next_back()
         .unwrap_or(match_case);
 
-    let fold_term = |s: &[u8]| -> Vec<u8> { if match_case { s.to_vec() } else { fold(s) } };
-
-    let mut q = ParsedQuery {
-        name_terms: Vec::new(),
-        path_terms: Vec::new(),
-        wildcards: Vec::new(),
-        path_wildcards: Vec::new(),
-        filters: Filters::default(),
-        match_case,
-    };
-
+    let mut clauses = Vec::new();
+    let mut ext = None;
+    let mut size = None;
+    let mut kind = None;
     for tok in &tokens {
         if tok.quoted {
             // Quoted phrases are literal filename substrings.
-            q.name_terms.push(fold_term(tok.text.as_bytes()));
+            clauses.push(Clause::single(Test::Name(tok.text.clone())));
             continue;
         }
         let text = &tok.text;
@@ -337,61 +363,59 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
         }
 
         // Function tokens: prefix before the first ':'.
+        let mut text_term = text.as_str();
         if let Some(colon) = text.find(':') {
             let value = &text[colon + 1..];
             match function_named(&text[..colon]) {
                 Some(Function::Ext) => {
-                    let exts: Vec<Vec<u8>> = value
+                    let exts: Vec<String> = value
                         .split(';')
                         .filter(|s| !s.is_empty())
-                        .map(|s| fold(s.trim_start_matches('.').as_bytes()))
+                        .map(|s| s.trim_start_matches('.').to_string())
                         .collect();
                     if !exts.is_empty() {
-                        q.filters.ext = Some(exts);
+                        ext = Some(exts);
                     }
                     continue;
                 }
                 Some(Function::Size) => {
-                    q.filters.size = Some(parse_size(value)?);
+                    size = Some(parse_size(value)?);
                     continue;
                 }
                 Some(Function::Path) => {
                     if has_wildcard(value) {
-                        q.path_wildcards
-                            .push(Wildcard::compile(&fold_term(value.as_bytes())));
+                        clauses.push(Clause::single(Test::PathWildcard(value.to_string())));
                     } else if !value.is_empty() {
-                        q.path_terms.push(fold_term(value.as_bytes()));
+                        clauses.push(Clause::single(Test::Path(value.to_string())));
                     }
                     continue;
                 }
                 Some(Function::File) => {
-                    q.filters.kind = Some(Kind::File);
-                    push_text_term(&mut q, value, &fold_term);
-                    continue;
+                    kind = Some(Kind::File);
+                    text_term = value;
                 }
                 Some(Function::Folder) => {
-                    q.filters.kind = Some(Kind::Folder);
-                    push_text_term(&mut q, value, &fold_term);
-                    continue;
+                    kind = Some(Kind::Folder);
+                    text_term = value;
                 }
                 // A `case:` value that is not a directive, and an unknown
                 // function, are literal text (es behavior).
                 Some(Function::Case) | None => {}
             }
         }
-
-        push_text_term(&mut q, text, &fold_term);
+        clauses.extend(text_test(text_term).map(Clause::single));
     }
 
-    let terms = q.name_terms.len()
-        + q.path_terms.len()
-        + q.wildcards.len()
-        + q.path_wildcards.len()
-        + q.filters.ext.as_ref().map_or(0, Vec::len);
-    if terms > MAX_QUERY_TERMS {
-        return Err(QueryError::TooManyTerms(terms));
-    }
-    Ok(q)
+    let filters = [
+        kind.map(Test::Kind),
+        size.map(Test::Size),
+        ext.map(Test::Extension),
+    ];
+    clauses.extend(filters.into_iter().flatten().map(Clause::single));
+    Ok(ParsedQuery {
+        clauses,
+        match_case,
+    })
 }
 
 /// The search function `name` names, compared case-insensitively.
@@ -402,24 +426,21 @@ fn function_named(name: &str) -> Option<Function> {
         .map(|row| row.function)
 }
 
-/// Routes an unquoted text token to its bucket: a term with a separator
-/// matches the full path, any other term the name, and a wildcard in either
-/// anchors it to the whole of what it matches.
-fn push_text_term(q: &mut ParsedQuery, text: &str, fold_term: &impl Fn(&[u8]) -> Vec<u8>) {
+/// The test of an unquoted text token, `None` for an empty one: a term with a
+/// separator matches the full path, any other term the name, and a wildcard
+/// in either anchors it to the whole of what it matches.
+fn text_test(text: &str) -> Option<Test> {
     if text.is_empty() {
-        return;
+        return None;
     }
+    let text = text.to_string();
     let is_path = text.contains('\\') || text.contains('/');
-    match (has_wildcard(text), is_path) {
-        (true, true) => q
-            .path_wildcards
-            .push(Wildcard::compile(&fold_term(text.as_bytes()))),
-        (true, false) => q
-            .wildcards
-            .push(Wildcard::compile(&fold_term(text.as_bytes()))),
-        (false, true) => q.path_terms.push(fold_term(text.as_bytes())),
-        (false, false) => q.name_terms.push(fold_term(text.as_bytes())),
-    }
+    Some(match (has_wildcard(&text), is_path) {
+        (true, true) => Test::PathWildcard(text),
+        (true, false) => Test::NameWildcard(text),
+        (false, true) => Test::Path(text),
+        (false, false) => Test::Name(text),
+    })
 }
 
 fn has_wildcard(text: &str) -> bool {
@@ -613,38 +634,54 @@ fn parse_bytes(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fold::fold;
 
     fn q(s: &str) -> ParsedQuery {
         parse_query(s).unwrap()
     }
 
+    /// The tests of a query whose clauses each hold one positive term, as
+    /// every query does until the parser reads `!` and `|`.
+    fn tests(s: &str) -> Vec<Test> {
+        q(s).clauses
+            .into_iter()
+            .map(|clause| match <[Term; 1]>::try_from(clause.terms) {
+                Ok(
+                    [
+                        Term {
+                            negated: false,
+                            test,
+                        },
+                    ],
+                ) => test,
+                Ok([term]) => panic!("{s}: a negated {term:?}"),
+                Err(terms) => panic!("{s}: a clause of {terms:?}"),
+            })
+            .collect()
+    }
+
+    fn name(s: &str) -> Test {
+        Test::Name(s.to_string())
+    }
+
     #[test]
-    fn space_separated_terms_are_anded_and_folded() {
-        let p = q("Report Invoice");
-        assert_eq!(p.name_terms, vec![b"report".to_vec(), b"invoice".to_vec()]);
-        assert!(!p.match_case);
+    fn space_separated_terms_are_anded_as_typed() {
+        assert_eq!(tests("Report Invoice"), [name("Report"), name("Invoice")]);
+        assert!(!q("Report Invoice").match_case);
     }
 
     #[test]
     fn quoted_phrase_keeps_spaces() {
-        let p = q("\"quarterly report\"");
-        assert_eq!(p.name_terms, vec![b"quarterly report".to_vec()]);
-    }
-
-    #[test]
-    fn case_function_disables_folding() {
-        let p = q("Report case:");
-        assert!(p.match_case);
-        assert_eq!(p.name_terms, vec![b"Report".to_vec()]);
+        assert_eq!(tests("\"quarterly report\""), [name("quarterly report")]);
     }
 
     #[test]
     fn case_directive_variants_are_consumed_not_searched() {
         // Regression: `case:0` must be recognized (and disable case
         // sensitivity), never leak as a literal "case:0" search term.
-        let p = q("Report case:0");
-        assert!(!p.match_case);
-        assert_eq!(p.name_terms, vec![b"report".to_vec()]); // folded, no "case:0"
+        assert!(q("Report case:").match_case);
+        assert!(!q("Report case:0").match_case);
+        assert_eq!(tests("Report case:0"), [name("Report")]);
         assert!(q("Report case:1").match_case);
         // Last directive wins.
         assert!(!q("case:1 foo case:0").match_case);
@@ -653,9 +690,10 @@ mod tests {
 
     #[test]
     fn path_term_detected_by_separator() {
-        let p = q("projects\\src");
-        assert_eq!(p.path_terms, vec![b"projects\\src".to_vec()]);
-        assert!(p.name_terms.is_empty());
+        assert_eq!(
+            tests("projects\\src"),
+            [Test::Path("projects\\src".to_string())]
+        );
     }
 
     /// A wildcard with a separator, and a `path:` value with a wildcard, match
@@ -663,115 +701,117 @@ mod tests {
     /// separator could ever match.
     #[test]
     fn a_wildcard_with_a_separator_is_a_path_wildcard() {
-        for query in [r"*\docs\*.md", "*/docs/*.md", "path:*.md", r"file:*\docs\*"] {
-            let p = q(query);
-            assert_eq!(p.path_wildcards.len(), 1, "{query}");
-            assert!(p.wildcards.is_empty() && p.path_terms.is_empty(), "{query}");
+        for query in [r"*\docs\*.md", "*/docs/*.md", "path:*.md"] {
+            assert!(
+                matches!(tests(query)[..], [Test::PathWildcard(_)]),
+                "{query}"
+            );
         }
-        assert!(q(r"*\DOCS\*").path_wildcards[0].matches(br"c:\repo\docs\x"));
-        assert_eq!(q("path:docs").path_terms, vec![b"docs".to_vec()]);
+        assert_eq!(
+            tests(r"file:*\docs\*"),
+            [
+                Test::PathWildcard(r"*\docs\*".to_string()),
+                Test::Kind(Kind::File)
+            ]
+        );
+        assert_eq!(tests("path:docs"), [Test::Path("docs".to_string())]);
+        assert_eq!(tests("*.rs"), [Test::NameWildcard("*.rs".to_string())]);
     }
 
     /// `-case` sets the default; a `case:` directive overrides it either way.
     #[test]
     fn the_case_switch_is_the_default_a_directive_overrides() {
-        let p = parse_query_with_case("Report", true).unwrap();
-        assert!(p.match_case);
-        assert_eq!(p.name_terms, vec![b"Report".to_vec()]);
-        assert!(
-            !parse_query_with_case("Report case:0", true)
-                .unwrap()
-                .match_case
-        );
-        assert!(
-            parse_query_with_case("Report case:", false)
-                .unwrap()
-                .match_case
-        );
-        assert!(!parse_query_with_case("Report", false).unwrap().match_case);
+        let case = |text, default| parse_query_with_case(text, default).unwrap().match_case;
+        assert!(case("Report", true));
+        assert!(!case("Report case:0", true));
+        assert!(case("Report case:", false));
+        assert!(!case("Report", false));
+    }
+
+    fn wildcard(pattern: &str) -> Wildcard {
+        Wildcard::compile(&fold(pattern.as_bytes()))
     }
 
     #[test]
-    fn wildcards_bucketed_and_matched_whole_name() {
-        let p = q("*.rs");
-        assert_eq!(p.wildcards.len(), 1);
-        assert!(p.wildcards[0].matches(&fold(b"main.rs")));
-        assert!(!p.wildcards[0].matches(&fold(b"main.rs.bak")));
-        let star = q("re*rt");
-        assert!(star.wildcards[0].matches(&fold(b"report")));
-        assert!(star.wildcards[0].matches(&fold(b"rert"))); // "re" + empty + "rt"
-        assert!(!star.wildcards[0].matches(&fold(b"rt"))); // missing the "re" prefix
-        assert!(!star.wildcards[0].matches(&fold(b"reprtx")));
+    fn wildcards_match_the_whole_name() {
+        let rs = wildcard("*.rs");
+        assert!(rs.matches(&fold(b"main.rs")));
+        assert!(!rs.matches(&fold(b"main.rs.bak")));
+        let star = wildcard("re*rt");
+        assert!(star.matches(&fold(b"report")));
+        assert!(star.matches(&fold(b"rert"))); // "re" + empty + "rt"
+        assert!(!star.matches(&fold(b"rt"))); // missing the "re" prefix
+        assert!(!star.matches(&fold(b"reprtx")));
     }
 
     #[test]
     fn question_mark_matches_one_code_point() {
-        let p = q("f?o");
-        assert!(p.wildcards[0].matches(&fold(b"foo")));
-        assert!(p.wildcards[0].matches(&fold(b"fao")));
-        assert!(!p.wildcards[0].matches(&fold(b"fo")));
-        assert!(!p.wildcards[0].matches(&fold(b"fooo")));
+        let p = wildcard("f?o");
+        assert!(p.matches(&fold(b"foo")));
+        assert!(p.matches(&fold(b"fao")));
+        assert!(!p.matches(&fold(b"fo")));
+        assert!(!p.matches(&fold(b"fooo")));
     }
 
     #[test]
-    fn ext_function_splits_and_folds() {
-        let p = q("ext:JPG;png;.Gif");
+    fn ext_function_splits_and_drops_the_dot() {
         assert_eq!(
-            p.filters.ext,
-            Some(vec![b"jpg".to_vec(), b"png".to_vec(), b"gif".to_vec()])
+            tests("ext:JPG;png;.Gif"),
+            [Test::Extension(vec![
+                "JPG".to_string(),
+                "png".to_string(),
+                "Gif".to_string()
+            ])]
         );
     }
 
     #[test]
     fn file_and_folder_kinds() {
-        assert_eq!(q("file:").filters.kind, Some(Kind::File));
-        assert_eq!(q("folder:").filters.kind, Some(Kind::Folder));
-        let p = q("file:report");
-        assert_eq!(p.filters.kind, Some(Kind::File));
-        assert_eq!(p.name_terms, vec![b"report".to_vec()]);
+        assert_eq!(tests("file:"), [Test::Kind(Kind::File)]);
+        assert_eq!(tests("folder:"), [Test::Kind(Kind::Folder)]);
+        assert_eq!(
+            tests("file:report"),
+            [name("report"), Test::Kind(Kind::File)]
+        );
+    }
+
+    /// A later `ext:`, `size:` or kind replaces an earlier one, as before the
+    /// query had clauses; AND-ing them would make `ext:cs ext:txt` match
+    /// nothing.
+    #[test]
+    fn a_later_filter_replaces_an_earlier_one() {
+        assert_eq!(
+            tests("ext:cs size:1 file: a ext:txt size:2 folder:"),
+            [
+                name("a"),
+                Test::Kind(Kind::Folder),
+                Test::Size(SizeRange { min: 2, max: 2 }),
+                Test::Extension(vec!["txt".to_string()]),
+            ]
+        );
+        // An empty list replaces nothing.
+        assert_eq!(
+            tests("ext:cs ext:;"),
+            [Test::Extension(vec!["cs".to_string()])]
+        );
+    }
+
+    fn size(query: &str) -> SizeRange {
+        match tests(query)[..] {
+            [Test::Size(range)] => range,
+            ref other => panic!("{query}: {other:?}"),
+        }
     }
 
     #[test]
     fn size_operators_ranges_and_constants() {
-        assert_eq!(
-            q("size:>1mb").filters.size,
-            Some(SizeRange {
-                min: MB + 1,
-                max: u64::MAX
-            })
-        );
-        assert_eq!(
-            q("size:>=1mb").filters.size,
-            Some(SizeRange {
-                min: MB,
-                max: u64::MAX
-            })
-        );
-        assert_eq!(
-            q("size:1mb..10mb").filters.size,
-            Some(SizeRange {
-                min: MB,
-                max: 10 * MB
-            })
-        );
-        assert_eq!(
-            q("size:tiny").filters.size,
-            Some(SizeRange {
-                min: 0,
-                max: 10 * KB
-            })
-        );
-        assert_eq!(
-            q("size:1024").filters.size,
-            Some(SizeRange {
-                min: 1024,
-                max: 1024
-            })
-        );
-        assert_eq!(
-            q("size:..500").filters.size,
-            Some(SizeRange { min: 0, max: 500 })
-        );
+        let range = |min, max| SizeRange { min, max };
+        assert_eq!(size("size:>1mb"), range(MB + 1, u64::MAX));
+        assert_eq!(size("size:>=1mb"), range(MB, u64::MAX));
+        assert_eq!(size("size:1mb..10mb"), range(MB, 10 * MB));
+        assert_eq!(size("size:tiny"), range(0, 10 * KB));
+        assert_eq!(size("size:1024"), range(1024, 1024));
+        assert_eq!(size("size:..500"), range(0, 500));
     }
 
     #[test]
@@ -785,16 +825,15 @@ mod tests {
             Err(QueryError::UnsupportedOperator('!'))
         );
         // `<`/`>` are allowed (comparison operators); "a<b" is literal text.
-        assert_eq!(q("a<b").name_terms, vec![b"a<b".to_vec()]);
+        assert_eq!(tests("a<b"), [name("a<b")]);
         // Quoted → literal, no rejection.
-        assert_eq!(q("\"a|b\"").name_terms, vec![b"a|b".to_vec()]);
+        assert_eq!(tests("\"a|b\""), [name("a|b")]);
     }
 
     #[test]
     fn unknown_function_is_literal_text() {
         // `parent:` is not supported in v1 → treated as literal name text.
-        let p = q("parent:foo");
-        assert_eq!(p.name_terms, vec![b"parent:foo".to_vec()]);
+        assert_eq!(tests("parent:foo"), [name("parent:foo")]);
     }
 
     #[test]
@@ -803,26 +842,6 @@ mod tests {
             parse_query("size:abc"),
             Err(QueryError::Malformed { what: "size:", .. })
         ));
-    }
-
-    /// Every term costs each candidate a test under the index read lock, so a
-    /// query past the cap is refused rather than holding the lock for
-    /// minutes. `ext:` values count too: a long list costs the same per
-    /// candidate.
-    #[test]
-    fn a_query_with_more_than_the_maximum_terms_is_refused() {
-        let query = |name_terms: usize, exts: usize| {
-            let exts: Vec<String> = (0..exts).map(|i| format!("e{i}")).collect();
-            format!("{} ext:{}", vec!["a"; name_terms].join(" "), exts.join(";"))
-        };
-        assert!(
-            parse_query(&query(200, 56)).is_ok(),
-            "256 terms are allowed"
-        );
-        assert_eq!(
-            parse_query(&query(200, 57)),
-            Err(QueryError::TooManyTerms(257))
-        );
     }
 
     #[test]
@@ -851,8 +870,9 @@ mod tests {
         }
 
         proptest! {
-            /// The query text arrives from the pipe, so any text can arrive,
-            /// and a panic would fail the query instead of reporting it.
+            /// The daemon parses the query text of a protocol 1 request, so
+            /// any text can arrive, and a panic would fail the query instead
+            /// of reporting it.
             #[test]
             fn arbitrary_text_errors_instead_of_panicking(
                 input in arb_query(),

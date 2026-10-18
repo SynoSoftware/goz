@@ -10,13 +10,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
-    DaemonStatus, MemPair, PIPE_NAME, PROTO_VERSION, ProtoError, Request, Response, VolumeMemory,
-    VolumeStatus,
+    DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
+    ProtoError, QueryRequest, QueryTotals, Request, Response, ResultsPage, Returns, Rows,
+    SearchRequest, VolumeMemory, VolumeStatus, encode_response_frame,
 };
-use gozler_core::proto::{MAX_CLIENT_FRAME, QueryRequest, ResultsPage, encode_response_frame};
 use gozler_core::query::{
-    VolumeRun, order_hits, parse_query_with_case, resolve_scope, run_query_deferrable,
+    CompiledQuery, QueryError, SizeOverflow, Totals, VolumeRun, order_hits, parse_query_with_case,
+    resolve_scope, run_query_deferrable, run_totals,
 };
 use gozler_core::scope::Scope;
 use gozler_core::types::EntryIdx;
@@ -175,58 +177,35 @@ async fn handle_connection(
                 Ok(None) => break,
                 Err(e) => return Err(anyhow::anyhow!("frame error: {e}")),
             };
-            let out = match gozler_core::proto::decode_request(&frame) {
-                // Query execution plus result serialization is the heaviest CPU
-                // work in the process and holds a read lock, so run it on the
-                // blocking pool rather than stalling an async worker (and thus
-                // the accept loop). Pages STREAM through a bounded channel: a
-                // multi-million-row export never exists as one buffer (it
-                // peaked at ~600 MB of response bytes), at most
-                // QUERY_PAGE_BACKLOG pages are in flight, and encoding
-                // overlaps the pipe writes instead of preceding them.
-                Ok(Request::Query(q)) => {
-                    let vols = volumes.current();
-                    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
-                    let encoder = tokio::task::spawn_blocking(move || {
-                        // A failed send means the receiver is gone (client
-                        // vanished or write error): stop encoding.
-                        stream_query_binary(&vols, q, &mut |page| tx.blocking_send(page).is_ok());
-                    });
-                    let mut write_err: Option<std::io::Error> = None;
-                    while let Some(page) = rx.recv().await {
-                        if let Err(e) = write_reply(&mut server, &page).await {
-                            write_err = Some(e);
-                            break;
-                        }
-                    }
-                    // Closing the channel unblocks a still-encoding task; it
-                    // aborts at its next emit.
-                    drop(rx);
-                    encoder.await.context("query task panicked")?;
-                    if let Some(e) = write_err {
-                        return Err(e.into());
-                    }
-                    continue;
+            // Query execution plus result serialization is the heaviest CPU
+            // work in the process and holds a read lock, so every request runs
+            // on the blocking pool rather than stalling an async worker (and
+            // thus the accept loop). Replies STREAM through a bounded channel:
+            // a multi-million-row export never exists as one buffer (it peaked
+            // at ~600 MB of response bytes), at most QUERY_PAGE_BACKLOG pages
+            // are in flight, and encoding overlaps the pipe writes instead of
+            // preceding them.
+            let vols = volumes.current();
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
+            let encoder = tokio::task::spawn_blocking(move || {
+                // A failed send means the receiver is gone (client vanished or
+                // write error): stop encoding.
+                serve(&vols, &frame, &mut |reply| tx.blocking_send(reply).is_ok());
+            });
+            let mut write_err: Option<std::io::Error> = None;
+            while let Some(reply) = rx.recv().await {
+                if let Err(e) = write_reply(&mut server, &reply).await {
+                    write_err = Some(e);
+                    break;
                 }
-                // Hello / Status are trivial; encode inline as a tagged JSON frame.
-                Ok(req) => {
-                    let mut out = Vec::new();
-                    encode_response_frame(&handle_request(&volumes.current(), req), &mut out);
-                    out
-                }
-                Err(e) => {
-                    let mut out = Vec::new();
-                    encode_response_frame(
-                        &Response::Error {
-                            code: ProtoError::BadQuery,
-                            message: format!("malformed request: {e}"),
-                        },
-                        &mut out,
-                    );
-                    out
-                }
-            };
-            write_reply(&mut server, &out).await?;
+            }
+            // Closing the channel unblocks a still-encoding task; it aborts at
+            // its next emit.
+            drop(rx);
+            encoder.await.context("request task panicked")?;
+            if let Some(e) = write_err {
+                return Err(e.into());
+            }
         }
     }
 }
@@ -239,27 +218,123 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client stopped reading"))?
 }
 
-/// Collects every streamed page into one buffer: the tests' view of
-/// [`stream_query_binary`] (production writes each page to the pipe as it is
-/// encoded and never holds the whole response).
-#[cfg(test)]
-fn encode_query_binary(volumes: &VolumeSet, q: QueryRequest) -> Vec<u8> {
-    let mut out = Vec::new();
-    stream_query_binary(volumes, q, &mut |page| {
-        out.extend_from_slice(&page);
-        true
-    });
-    out
+/// Answers one request frame, handing each framed reply to `emit` as soon as
+/// it is encoded. `emit` returning `false` means the client is gone; encoding
+/// stops.
+fn serve(volumes: &VolumeSet, frame: &[u8], emit: &mut dyn FnMut(Vec<u8>) -> bool) {
+    let search = match gozler_core::proto::decode_request(frame) {
+        Ok(Request::Search(search)) => search,
+        Ok(Request::Query(query)) => match text_search(query) {
+            Ok(search) => search,
+            Err(e) => return reply(emit, refusal(e.to_string())),
+        },
+        Ok(Request::Hello {
+            proto_min,
+            proto_max,
+            ..
+        }) => return reply(emit, hello(volumes, proto_min, proto_max)),
+        Ok(Request::Status) => return reply(emit, Response::Status(build_status(volumes))),
+        Err(e) => return reply(emit, refusal(format!("malformed request: {e}"))),
+    };
+    let query = match CompiledQuery::new(&search.query) {
+        Ok(query) => query,
+        Err(e) => return reply(emit, refusal(e.to_string())),
+    };
+    // A scope on no indexed volume (a network drive, a drive letter that does
+    // not exist) is refused: an empty page would read as "no such file".
+    let Some(targets) = targets(volumes, search.scope.as_deref()) else {
+        let scope = search
+            .scope
+            .as_deref()
+            .expect("only a scope can miss every volume");
+        return reply(
+            emit,
+            refusal(format!(
+                "{scope} is not on an indexed volume; gozlerd indexes fixed NTFS volumes"
+            )),
+        );
+    };
+    let match_case = search.query.match_case;
+    match search.returns {
+        Returns::Rows(rows) => stream_rows(&targets, &query, match_case, rows, emit),
+        Returns::Totals => reply(emit, totals(&targets, &query, match_case)),
+    }
 }
 
-/// Runs a query and emits the framed response as it is produced: one or more
-/// binary results-page frames (paged by [`ResultsPage::push`], `more` set on
-/// all but the last), or a single tagged JSON error frame if the query failed
-/// to parse. An empty result set still emits one `more: false` page so the client always sees
-/// a terminal frame. Each framed page is handed to `emit` as soon as it is
-/// encoded, and the matched hits are consumed as it goes, so a full export holds
-/// neither the whole response nor the already-emitted hits' path bytes. `emit`
-/// returning `false` means the consumer is gone; encoding stops.
+/// Encodes one tagged reply frame and hands it to `emit`.
+fn reply(emit: &mut dyn FnMut(Vec<u8>) -> bool, response: Response) {
+    let mut out = Vec::new();
+    encode_response_frame(&response, &mut out);
+    let _ = emit(out);
+}
+
+/// The reply that refuses a request the daemon cannot run as sent.
+fn refusal(message: String) -> Response {
+    Response::Error {
+        code: ProtoError::BadQuery,
+        message,
+    }
+}
+
+/// The search a protocol 1 request asks for: its text parsed by the parser
+/// the client runs from protocol 2 on, so both protocols match alike.
+fn text_search(query: QueryRequest) -> Result<SearchRequest, QueryError> {
+    Ok(SearchRequest {
+        query: parse_query_with_case(&query.query, query.match_case)?,
+        scope: query.scope,
+        returns: Returns::Rows(Rows {
+            sort: query.sort,
+            offset: query.offset,
+            limit: query.limit,
+            want_size: query.want_size,
+            want_mtime: query.want_mtime,
+        }),
+    })
+}
+
+/// Whether the answer from the volumes a search ran on may be short.
+#[derive(Default)]
+struct Coverage {
+    /// A volume searched is indexing, rescanning or offline.
+    volumes_incomplete: bool,
+    /// The size and date pass failed or stopped on a volume.
+    metadata_pending: bool,
+}
+
+/// Runs `run` on each volume of `targets` with its scope folder resolved, and
+/// collects what it returns; a volume without the scope folder holds no
+/// match and is skipped.
+fn run_on_volumes<'t, T>(
+    targets: &'t [(Arc<VolumeState>, VolScope)],
+    match_case: bool,
+    mut run: impl FnMut(&'t VolumeState, &VolumeIndex, Option<EntryIdx>) -> T,
+) -> (Vec<T>, Coverage) {
+    let mut coverage = Coverage::default();
+    let mut results = Vec::new();
+    for (vol, scope) in targets {
+        coverage.volumes_incomplete |= !vol.phase.read().is_complete();
+        coverage.metadata_pending |= *vol.metadata_pending.read();
+        // Resolve the scope and run the query under ONE read guard, so a
+        // concurrent rescan cannot swap the index between the two steps.
+        let index = vol.index.read();
+        let scope_entry = match scope {
+            VolScope::All => None,
+            VolScope::Rel(rel) => match resolve_scope_cached(vol, &index, rel, match_case) {
+                Some(e) => Some(e),
+                None => continue, // scope folder absent on this volume: no hits
+            },
+        };
+        results.push(run(vol, &index, scope_entry));
+    }
+    (results, coverage)
+}
+
+/// Streams the rows of a search as one or more binary results-page frames
+/// (paged by [`ResultsPage::push`], `more` set on all but the last). An empty
+/// result set still emits one `more: false` page so the client always sees a
+/// terminal frame. The matched hits are consumed as the pages are encoded, so
+/// a full export holds neither the whole response nor the already-emitted
+/// hits' path bytes.
 ///
 /// Pages are encoded straight from each matched hit's full path bytes by
 /// [`ResultsPage`], so a match never allocates an intermediate
@@ -267,101 +342,54 @@ fn encode_query_binary(volumes: &VolumeSet, q: QueryRequest) -> Vec<u8> {
 /// re-serialized as JSON. This is the whole point of the binary wire: on a
 /// multi-million-path result set it is ~12x less serialization work than the old
 /// JSON path.
-fn stream_query_binary(
-    volumes: &VolumeSet,
-    q: QueryRequest,
+fn stream_rows(
+    targets: &[(Arc<VolumeState>, VolScope)],
+    query: &CompiledQuery,
+    match_case: bool,
+    rows: Rows,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let mut refuse = |message: String| {
-        let mut out = Vec::new();
-        encode_response_frame(
-            &Response::Error {
-                code: ProtoError::BadQuery,
-                message,
-            },
-            &mut out,
-        );
-        let _ = emit(out);
-    };
-    let parsed = match parse_query_with_case(&q.query, q.match_case) {
-        Ok(p) => p,
-        Err(e) => return refuse(e.to_string()),
-    };
-    // A scope on no indexed volume (a network drive, a drive letter that does
-    // not exist) is refused: an empty page would read as "no such file".
-    let Some(targets) = targets(volumes, q.scope.as_deref()) else {
-        let scope = q
-            .scope
-            .as_deref()
-            .expect("only a scope can miss every volume");
-        return refuse(format!(
-            "{scope} is not on an indexed volume; gozlerd indexes fixed NTFS volumes"
-        ));
-    };
+    let per_vol_limit = rows.limit.map(|l| rows.offset.saturating_add(l));
 
-    let per_vol_limit = q.limit.map(|l| q.offset.saturating_add(l));
-
-    // One run per volume, ordered into one list by `order_hits` below.
-    let mut runs: Vec<VolumeRun> = Vec::new();
+    // A limited query orders INSIDE the lock only when the limit actually
+    // slices the match set: picking which `per_vol_limit` matches survive
+    // needs the index, and only that many paths are then reconstructed.
+    //
+    // When the page covers every match there is nothing to pick, so ordering
+    // is pure post-processing over owned rows and every sort key comes from
+    // the hit itself (`order_hits` touches no index). Sorting a million
+    // rows under the read lock blocked this volume's tail thread from
+    // applying a single journal record for the whole sort; doing it after
+    // the guard drops blocks nobody.
+    //
+    // Which case applies depends on the match count, which is not known
+    // until the scan has run, so the executor decides and reports back via
+    // `outcome.sorted`. Testing `limit.is_none()` here instead meant a
+    // client asking for everything as a NUMBER (`-n 4294967295`, or any
+    // limit at or above the match count) took the in-lock path and
+    // re-introduced the very stall the deferral exists to prevent.
     let mut total: u64 = 0;
-    let mut volumes_incomplete = false;
-    let mut metadata_pending = false;
-
-    for (vol, scope) in &targets {
-        if !vol.phase.read().is_complete() {
-            volumes_incomplete = true;
-        }
-        if *vol.metadata_pending.read() {
-            metadata_pending = true;
-        }
-        // Resolve the scope and run the query under ONE read guard, so a
-        // concurrent rescan cannot swap the index between the two steps.
-        let index = vol.index.read();
-        let scope_entry = match scope {
-            VolScope::All => None,
-            VolScope::Rel(rel) => match resolve_scope_cached(vol, &index, rel, parsed.match_case) {
-                Some(e) => Some(e),
-                None => continue, // scope folder absent on this volume: no hits
-            },
-        };
-        // A limited query orders INSIDE the lock only when the limit actually
-        // slices the match set: picking which `per_vol_limit` matches survive
-        // needs the index, and only that many paths are then reconstructed.
-        //
-        // When the page covers every match there is nothing to pick, so ordering
-        // is pure post-processing over owned rows and every sort key comes from
-        // the hit itself (`order_hits` touches no index). Sorting a million
-        // rows under the read lock blocked this volume's tail thread from
-        // applying a single journal record for the whole sort; doing it after
-        // the guard drops blocks nobody.
-        //
-        // Which case applies depends on the match count, which is not known
-        // until the scan has run, so the executor decides and reports back via
-        // `outcome.sorted`. Testing `limit.is_none()` here instead meant a
-        // client asking for everything as a NUMBER (`-n 4294967295`, or any
-        // limit at or above the match count) took the in-lock path and
-        // re-introduced the very stall the deferral exists to prevent.
+    let (runs, coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
         let outcome = run_query_deferrable(
-            &index,
+            index,
             vol.mount_prefix(),
-            &parsed,
-            scope_entry,
-            q.sort,
+            query,
+            scope,
+            rows.sort,
             per_vol_limit,
         );
-        drop(index); // hits own their bytes; release the read lock early
         total += outcome.total;
-        runs.push(VolumeRun {
+        VolumeRun {
             mount_prefix: vol.mount_prefix(),
             hits: outcome.hits,
             sorted: outcome.sorted,
-        });
-    }
+        }
+    });
 
     // Off every lock: sort the deferred runs and merge the volumes.
-    let collected = order_hits(q.sort, runs);
-    let start = (q.offset as usize).min(collected.len());
-    let end = q
+    let collected = order_hits(rows.sort, runs);
+    let start = (rows.offset as usize).min(collected.len());
+    let end = rows
         .limit
         .map(|l| (start + l as usize).min(collected.len()))
         .unwrap_or(collected.len());
@@ -371,61 +399,81 @@ fn stream_query_binary(
     // encoding, so the held path bytes drain with export progress instead of
     // peaking all together (skipped offset rows and beyond-limit rows drop
     // with the iterator).
-    let mut rows = collected.into_iter().skip(start).take(n_rows).peekable();
+    let mut hits = collected.into_iter().skip(start).take(n_rows).peekable();
     loop {
         let mut page = ResultsPage::new(
             total,
             0, // generation: unused by the CLI, matches the prior wire
-            volumes_incomplete,
-            metadata_pending,
-            rows.len(),
+            coverage.volumes_incomplete,
+            coverage.metadata_pending,
+            hits.len(),
         );
-        while let Some(hit) = rows.peek() {
-            let size = q.want_size.then_some(hit.size).flatten();
-            let mtime = q.want_mtime.then_some(hit.mtime).flatten();
+        while let Some(hit) = hits.peek() {
+            let size = rows.want_size.then_some(hit.size).flatten();
+            let mtime = rows.want_mtime.then_some(hit.mtime).flatten();
             if !page.push(&hit.path, hit.is_dir, size, mtime) {
                 break;
             }
-            rows.next();
+            hits.next();
         }
-        let more = rows.peek().is_some();
+        let more = hits.peek().is_some();
         if !emit(page.finish(more)) || !more {
             return;
         }
     }
 }
 
-fn handle_request(volumes: &VolumeSet, req: Request) -> Response {
-    match req {
-        Request::Hello {
-            proto_min,
-            proto_max,
-            ..
-        } => hello(volumes, proto_min, proto_max),
-        Request::Status => Response::Status(build_status(volumes)),
-        // Queries are streamed directly to binary frames by stream_query_binary
-        // and never routed through here.
-        Request::Query(_) => unreachable!("Query is handled by stream_query_binary"),
+/// The totals of a search, summed on each volume from the sizes the index
+/// already holds, so no row crosses the pipe: `-get-folder-size C:\` covers
+/// the whole volume.
+fn totals(
+    targets: &[(Arc<VolumeState>, VolScope)],
+    query: &CompiledQuery,
+    match_case: bool,
+) -> Response {
+    let (per_volume, coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
+        run_totals(index, vol.mount_prefix(), query, scope)
+    });
+    let sum = per_volume
+        .into_iter()
+        .try_fold(Totals::default(), |mut sum, volume| {
+            sum.add(volume?)?;
+            Ok::<_, SizeOverflow>(sum)
+        });
+    match sum {
+        Ok(sum) => Response::Totals(QueryTotals {
+            count: sum.count,
+            size: sum.size,
+            volumes_incomplete: coverage.volumes_incomplete,
+            metadata_pending: coverage.metadata_pending,
+        }),
+        Err(overflow) => Response::Error {
+            code: ProtoError::Overflow,
+            message: overflow.to_string(),
+        },
     }
 }
 
-/// Answers version negotiation.
+/// Answers version negotiation with the highest version both sides speak.
 ///
-/// This daemon speaks exactly [`PROTO_VERSION`], so a client whose supported
-/// range does not cover it is refused. Reporting `PROTO_VERSION.min(proto_max)`
-/// without the range check would answer `proto: 0` to a `proto_max: 0` client,
-/// agreeing on a version neither side implements.
+/// This daemon serves every version from [`OLDEST_PROTO_VERSION`] to
+/// [`PROTO_VERSION`], so a client whose range misses all of them is refused.
+/// Answering `PROTO_VERSION.min(proto_max)` without that check would answer
+/// `proto: 0` to a `proto_max: 0` client, agreeing on a version neither side
+/// implements.
 fn hello(volumes: &VolumeSet, proto_min: u16, proto_max: u16) -> Response {
-    if proto_min > PROTO_VERSION || proto_max < PROTO_VERSION {
+    let proto = PROTO_VERSION.min(proto_max);
+    if proto < proto_min || proto < OLDEST_PROTO_VERSION {
         return Response::Error {
             code: ProtoError::Unsupported,
             message: format!(
-                "client speaks protocol {proto_min}..={proto_max}; this daemon speaks {PROTO_VERSION}"
+                "client speaks protocol {proto_min}..={proto_max}; this daemon speaks \
+                 {OLDEST_PROTO_VERSION}..={PROTO_VERSION}"
             ),
         };
     }
     Response::Hello {
-        proto: PROTO_VERSION,
+        proto,
         server: concat!("gozlerd ", env!("CARGO_PKG_VERSION")).to_string(),
         ready: all_volumes_live(volumes),
     }
@@ -490,8 +538,8 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
 
 /// A query's per-volume scope: the whole volume, or a relative folder path not
 /// yet resolved to an `EntryIdx`. Resolution is deferred into
-/// `stream_query_binary`'s per-volume loop so it shares the SAME index read
-/// guard as `run_query`. Otherwise a
+/// [`run_on_volumes`] so it shares the SAME index read guard as the query.
+/// Otherwise a
 /// concurrent rescan between resolving the scope and running the query could
 /// swap the index and leave the resolved `EntryIdx` stale (wrong/empty results
 /// or an out-of-bounds panic).
@@ -524,7 +572,7 @@ fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Option<Vec<(Arc<VolumeSt
 /// falls back to a fresh directory walk.
 fn resolve_scope_cached(
     vol: &Arc<VolumeState>,
-    index: &gozler_core::index::VolumeIndex,
+    index: &VolumeIndex,
     rel: &[u8],
     match_case: bool,
 ) -> Option<EntryIdx> {
@@ -550,7 +598,7 @@ fn resolve_scope_cached(
 
 /// Confirms a cached scope entry still reconstructs to the same folded path
 /// (cheap O(depth) walk), so a stale cache after a rename never mis-scopes.
-fn scope_entry_valid(index: &gozler_core::index::VolumeIndex, entry: EntryIdx, rel: &[u8]) -> bool {
+fn scope_entry_valid(index: &VolumeIndex, entry: EntryIdx, rel: &[u8]) -> bool {
     let mut buf = Vec::new();
     if !matches!(
         index.path_of(entry, &mut buf),
@@ -563,15 +611,12 @@ fn scope_entry_valid(index: &gozler_core::index::VolumeIndex, entry: EntryIdx, r
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        VolScope, build_status, encode_query_binary, handle_request, resolve_scope_cached,
-        scope_entry_valid, targets,
-    };
+    use super::{VolScope, build_status, resolve_scope_cached, scope_entry_valid, serve, targets};
     use crate::volume_state::{VolumeSet, VolumeState};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
-        FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response,
-        decode_response_frame,
+        FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, QueryRequest,
+        Request, Response, decode_response_frame, encode_request,
     };
     use gozler_core::query::resolve_scope;
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
@@ -735,7 +780,7 @@ mod tests {
             !results(&encode_query_binary(&vols, query("System32")))[0].volumes_incomplete,
             "and no query page may flag it either"
         );
-        let Response::Hello { ready, .. } = handle_request(&vols, hello_request(1, 1)) else {
+        let Response::Hello { ready, .. } = answer(&vols, hello_request(1, 1)) else {
             panic!("must negotiate")
         };
         assert!(ready, "a snapshot volume is ready to serve");
@@ -763,8 +808,38 @@ mod tests {
         }
     }
 
-    fn query(q: &str) -> gozler_core::proto::QueryRequest {
-        gozler_core::proto::QueryRequest {
+    /// The payload of the frame a client sends for `request`.
+    fn request_frame(request: &Request) -> Vec<u8> {
+        let mut frame = Vec::new();
+        encode_request(request, &mut frame);
+        frame.split_off(4)
+    }
+
+    /// Every frame the daemon replies to `request` with, back to back as the
+    /// pipe carries them.
+    fn reply_bytes(volumes: &VolumeSet, request: &Request) -> Vec<u8> {
+        let mut out = Vec::new();
+        serve(volumes, &request_frame(request), &mut |reply| {
+            out.extend_from_slice(&reply);
+            true
+        });
+        out
+    }
+
+    /// The reply to a protocol 1 query, which the daemon parses itself.
+    fn encode_query_binary(volumes: &VolumeSet, q: QueryRequest) -> Vec<u8> {
+        reply_bytes(volumes, &Request::Query(q))
+    }
+
+    /// The one frame the daemon replies to `request` with.
+    fn answer(volumes: &VolumeSet, request: Request) -> Response {
+        let mut frames = decode_frames(&reply_bytes(volumes, &request));
+        assert_eq!(frames.len(), 1, "one reply");
+        frames.remove(0)
+    }
+
+    fn query(q: &str) -> QueryRequest {
+        QueryRequest {
             query: q.to_string(),
             scope: None,
             sort: SortSpec::default_for(SortKey::Name),
@@ -918,10 +993,14 @@ mod tests {
         let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
 
         let mut emitted = 0usize;
-        super::stream_query_binary(&vols, query("hit"), &mut |_page| {
-            emitted += 1;
-            false // consumer gone after the first page
-        });
+        serve(
+            &vols,
+            &request_frame(&Request::Query(query("hit"))),
+            &mut |_page| {
+                emitted += 1;
+                false // consumer gone after the first page
+            },
+        );
         assert_eq!(
             emitted, 1,
             "a dead consumer must stop the encoder after the rejected page"
@@ -1060,6 +1139,40 @@ mod tests {
         }
     }
 
+    /// A client of protocol 1 sends its text query without a `Hello`, and
+    /// reads the binary results page it always has; an installed client of
+    /// stage 3 must keep working against this daemon. The request is the
+    /// exact JSON that client writes.
+    #[test]
+    fn a_protocol_1_text_query_without_hello_is_answered_as_before() {
+        let vols = set(&[live_volume(r"C:\")]);
+        let request = concat!(
+            r#"{"t":"Query","query":"system32","scope":null,"#,
+            r#""sort":{"key":"Name","dir":"Asc"},"offset":0,"limit":20,"#,
+            r#""want_size":true,"want_mtime":true,"match_case":false}"#,
+        );
+        let mut replies = Vec::new();
+        serve(&vols, request.as_bytes(), &mut |reply| {
+            replies.extend_from_slice(&reply);
+            true
+        });
+        let mut decoder = FrameDecoder::new(MAX_SERVER_FRAME);
+        decoder.feed(&replies);
+        let frame = decoder.next_frame().expect("fits").expect("one frame");
+        let Response::Results(page) = decode_response_frame(&frame).expect("decodes") else {
+            panic!("a results page");
+        };
+        assert_eq!(page.total, 1);
+        assert!(!page.more);
+        let paths: Vec<&str> = page.items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(paths, [r"C:\Windows\System32"]);
+        assert_eq!(
+            decoder.next_frame(),
+            Ok(None),
+            "nothing after the last page"
+        );
+    }
+
     fn hello_request(proto_min: u16, proto_max: u16) -> Request {
         Request::Hello {
             proto_min,
@@ -1068,27 +1181,30 @@ mod tests {
         }
     }
 
-    /// Negotiation must refuse a client it cannot actually serve rather than
-    /// answer a cheerful `ready: true` and let the mismatch surface as garbled
-    /// frames later.
+    /// Negotiation answers the highest version both sides speak, so a client
+    /// of every protocol from 1 on is served, and refuses a client it cannot
+    /// actually serve rather than answer a cheerful `ready: true` and let the
+    /// mismatch surface as garbled frames later.
     #[test]
-    fn hello_refuses_clients_whose_range_excludes_this_version() {
+    fn hello_answers_the_highest_shared_version_or_refuses() {
         let vols = set(&[live_volume(r"C:\")]);
 
-        match handle_request(&vols, hello_request(1, 3)) {
-            Response::Hello { proto, .. } => assert_eq!(proto, PROTO_VERSION),
-            other => panic!("a range covering v1 must negotiate, got {other:?}"),
+        for (range, agreed) in [((1, 1), 1), ((1, 3), PROTO_VERSION), ((2, 2), 2)] {
+            match answer(&vols, hello_request(range.0, range.1)) {
+                Response::Hello { proto, .. } => assert_eq!(proto, agreed, "{range:?}"),
+                other => panic!("{range:?} must negotiate, got {other:?}"),
+            }
         }
 
         // Floor above us: the client needs a protocol this build cannot speak.
-        match handle_request(&vols, hello_request(2, 4)) {
+        match answer(&vols, hello_request(PROTO_VERSION + 1, PROTO_VERSION + 2)) {
             Response::Error { code, .. } => assert_eq!(code, ProtoError::Unsupported),
-            other => panic!("proto_min: 2 must be refused, got {other:?}"),
+            other => panic!("a floor above this version must be refused, got {other:?}"),
         }
 
         // Ceiling below us: no overlap either. Without the check this answered
         // `proto: 0`, a version neither side implements.
-        match handle_request(&vols, hello_request(0, 0)) {
+        match answer(&vols, hello_request(0, 0)) {
             Response::Error { code, .. } => assert_eq!(code, ProtoError::Unsupported),
             other => panic!("proto_max: 0 must be refused, got {other:?}"),
         }
@@ -1105,7 +1221,7 @@ mod tests {
                 volume(r"D:\", windows_index(), VolumePhase::Bootstrapping),
             ]),
         ] {
-            let Response::Hello { ready, .. } = handle_request(&vols, hello_request(1, 1)) else {
+            let Response::Hello { ready, .. } = answer(&vols, hello_request(1, 1)) else {
                 panic!("a v1 client must negotiate")
             };
             assert_eq!(

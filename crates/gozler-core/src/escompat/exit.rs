@@ -23,7 +23,8 @@ pub enum ExitCode {
     OutputFailed = 5,
     /// A switch gozler does not know.
     UnknownSwitch = 6,
-    /// The daemon's reply was malformed, late or refused.
+    /// The daemon's reply was malformed, late or refused, or the daemon is
+    /// older than the client.
     Communication = 7,
     /// The daemon is not running.
     DaemonNotRunning = 8,
@@ -73,7 +74,10 @@ impl ExitCode {
             }
             ExitCode::OutputFailed => "writing the output or the export file failed",
             ExitCode::UnknownSwitch => "unknown switch",
-            ExitCode::Communication => "communication with gozlerd failed, or no reply in time",
+            ExitCode::Communication => {
+                "communication with gozlerd failed, no reply in time, or gozlerd is \
+                 older than gozler"
+            }
             ExitCode::DaemonNotRunning => "gozlerd is not running",
             ExitCode::NoMatches => "no matches, with -no-result-error",
             ExitCode::Truncated => {

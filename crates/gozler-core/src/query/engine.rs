@@ -1,22 +1,24 @@
-//! The query executor: compile a [`ParsedQuery`] into finders, scan the
-//! index, apply scope and sort, and return a page of hits.
+//! The query executor: compile a [`ParsedQuery`] into a [`CompiledQuery`],
+//! scan the index, apply scope and sort, and return a page of hits or the
+//! totals of every match.
 //!
 //! The scan matches each candidate against the index's precomputed folded name
-//! (case-insensitive queries) and tests the cheapest predicates first: kind and
+//! (case-insensitive queries) and tests the cheapest clauses first: kind and
 //! size, then name substrings and wildcards, then ext, then (only for
-//! survivors) scope ancestry and the full path. Full paths come from the
-//! `paths` module, which builds each folder's path once per query, so a path
-//! term costs one copy per candidate instead of a walk to the root.
+//! survivors) scope ancestry and the clauses that test the full path. Full
+//! paths come from the `paths` module, which builds each folder's path once
+//! per query, so a path term costs one copy per candidate instead of a walk to
+//! the root.
 
 use super::order::{OrderFields, compare};
-use super::parse::{CodePointBuf, Filters, Kind, ParsedQuery, SizeRange};
-use super::paths::{DirPaths, NameForm, PathMatcher};
+use super::parse::{CodePointBuf, Kind, ParsedQuery, QueryError, SizeRange, Test, Wildcard};
+use super::paths::{DirPaths, NameForm};
+use crate::fold::fold;
 use crate::index::VolumeIndex;
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use std::borrow::Cow;
 
 /// One matched entry. The daemon formats `mtime` for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,68 +51,273 @@ pub struct QueryOutcome {
     pub sorted: bool,
 }
 
-/// A [`ParsedQuery`]'s name needles prebuilt into finders once (rather than
-/// per candidate). The remaining name predicates (wildcards, filters) are read
-/// straight off the `ParsedQuery` in the scan loop.
-pub struct CompiledQuery<'a> {
-    name_finders: Vec<memmem::Finder<'a>>,
-    /// The longest literal substring guaranteed present in any match's name,
-    /// drawn from the name terms, from name wildcard literals (e.g. `.dll` of
-    /// `*.dll`), and from a single `ext:` value (`.ext`). Drives the
-    /// folded-arena prefilter scan. `None` when nothing offers a usable
-    /// literal (then the query iterates every entry).
+/// The number of matches and the summed size of the matching files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Totals {
+    pub count: u64,
+    /// Bytes. A file whose size is unknown adds nothing, and a folder has no
+    /// size.
+    pub size: u64,
+}
+
+impl Totals {
+    /// Adds `other`, failing rather than wrapping when the size passes
+    /// `u64::MAX`, which only a corrupt size in the index can make it do.
+    pub fn add(&mut self, other: Totals) -> Result<(), SizeOverflow> {
+        self.size = self.size.checked_add(other.size).ok_or(SizeOverflow)?;
+        self.count += other.count;
+        Ok(())
+    }
+}
+
+/// The summed size of the matching files does not fit in a `u64`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the total size of the matches does not fit in 64 bits")]
+pub struct SizeOverflow;
+
+/// The most terms one query may hold, counting each `ext:` value, and a
+/// clause without terms as one. The engine tests each candidate against every
+/// term under the volume's index read lock, so the cost of a query grows with
+/// its term count; without a cap, one query from any local user holds that
+/// lock, and the journal tail waiting behind it, for minutes. Real queries use
+/// a few terms, and 256 still fits a long `ext:` list.
+pub(crate) const MAX_QUERY_TERMS: usize = 256;
+
+/// A [`ParsedQuery`] ready to test entries: its text folded unless it matches
+/// case, its wildcards compiled and its needles built into finders, once per
+/// query instead of once per candidate.
+///
+/// The daemon compiles the query, not the client, because the index's folded
+/// names come from the daemon's fold, and a client from another release can
+/// fold some text differently. Compiling also refuses a query with too many
+/// terms ([`QueryError::TooManyTerms`]), which arrives from any local user.
+pub struct CompiledQuery {
+    match_case: bool,
+    /// Every clause, cheapest first. The clauses from `path_clauses` on test
+    /// the full path, so they run last, after the scope check.
+    clauses: Vec<CompiledClause>,
+    path_clauses: usize,
+    /// The longest literal that every matching name contains, from a clause
+    /// of one positive name term, name wildcard (`.dll` of `*.dll`) or
+    /// single `ext:` value (`.ext`). Drives the folded-arena prefilter scan;
+    /// `None` when no clause offers one (then the query iterates every entry).
     ///
-    /// Path terms and path wildcards never supply it: their text can lie in
-    /// any folder of the path, and the literal of `*\docs\*` is `\docs\`,
-    /// which no name contains.
+    /// No other clause supplies it: a clause of several terms or a negated
+    /// term lets through names without the literal, the text of a path term
+    /// can lie in any folder of the path, and the literal of `*\docs\*` is
+    /// `\docs\`, which no name contains.
     prefilter: Option<Vec<u8>>,
 }
 
-impl<'a> CompiledQuery<'a> {
-    pub fn new(parsed: &'a ParsedQuery) -> Self {
-        // The prefilter is the longest literal from any name term, wildcard, or
-        // single `ext:` value;
-        // every match must contain it, so scanning for it yields a superset of
-        // matches that `evaluate` then verifies.
-        // Borrow name terms and move owned wildcard/ext literals, materializing
-        // exactly one owned Vec at the end instead of cloning every name term
-        // and discarding all but the longest.
-        let mut prefilter: Option<Cow<'a, [u8]>> = None;
-        let mut consider = |cand: Cow<'a, [u8]>| {
-            if cand.len() > prefilter.as_ref().map_or(0, |c| c.len()) {
-                prefilter = Some(cand);
-            }
-        };
-        for term in &parsed.name_terms {
-            consider(Cow::Borrowed(term.as_slice()));
-        }
-        for w in &parsed.wildcards {
-            if let Some(lit) = w.longest_literal() {
-                consider(Cow::Owned(lit));
-            }
-        }
-        // A single `ext:` value contributes `.ext`, which every match's name
-        // contains, so an ext-only query scans the folded arena for `.ext`
-        // instead of iterating every entry. Multiple extensions share no single
-        // literal, so they keep the slow path.
-        if let Some(exts) = &parsed.filters.ext
-            && exts.len() == 1
-            && !exts[0].is_empty()
-        {
-            let mut lit = Vec::with_capacity(exts[0].len() + 1);
-            lit.push(b'.');
-            lit.extend_from_slice(&exts[0]);
-            consider(Cow::Owned(lit));
+/// Terms of which at least one must pass.
+struct CompiledClause {
+    terms: Vec<CompiledTerm>,
+}
+
+struct CompiledTerm {
+    negated: bool,
+    check: Check,
+}
+
+/// A [`Test`] with its text folded unless the query matches case, its
+/// wildcards compiled and its substrings built into finders.
+enum Check {
+    Kind(Kind),
+    Size(SizeRange),
+    Name(memmem::Finder<'static>),
+    NameWildcard(Wildcard),
+    /// Folded whatever the query's case, as es compares extensions.
+    Extension(Vec<Vec<u8>>),
+    Path(memmem::Finder<'static>),
+    PathWildcard(Wildcard),
+}
+
+impl CompiledQuery {
+    /// Compiles `parsed`, or refuses it with [`QueryError::TooManyTerms`].
+    pub fn new(parsed: &ParsedQuery) -> Result<Self, QueryError> {
+        let terms: usize = parsed
+            .clauses
+            .iter()
+            .map(|clause| {
+                let terms: usize = clause
+                    .terms
+                    .iter()
+                    .map(|term| match &term.test {
+                        Test::Extension(exts) => exts.len().max(1),
+                        _ => 1,
+                    })
+                    .sum();
+                terms.max(1)
+            })
+            .sum();
+        if terms > MAX_QUERY_TERMS {
+            return Err(QueryError::TooManyTerms(terms));
         }
 
-        Self {
-            name_finders: parsed
-                .name_terms
-                .iter()
-                .map(|t| memmem::Finder::new(t.as_slice()))
-                .collect(),
-            prefilter: prefilter.map(Cow::into_owned),
+        let match_case = parsed.match_case;
+        let text = |s: &str| {
+            if match_case {
+                s.as_bytes().to_vec()
+            } else {
+                fold(s.as_bytes())
+            }
+        };
+        let finder = |s: &str| memmem::Finder::new(&text(s)).into_owned();
+        let mut clauses: Vec<CompiledClause> = parsed
+            .clauses
+            .iter()
+            .map(|clause| CompiledClause {
+                terms: clause
+                    .terms
+                    .iter()
+                    .map(|term| CompiledTerm {
+                        negated: term.negated,
+                        check: match &term.test {
+                            Test::Name(s) => Check::Name(finder(s)),
+                            Test::Path(s) => Check::Path(finder(s)),
+                            Test::NameWildcard(s) => {
+                                Check::NameWildcard(Wildcard::compile(&text(s)))
+                            }
+                            Test::PathWildcard(s) => {
+                                Check::PathWildcard(Wildcard::compile(&text(s)))
+                            }
+                            Test::Extension(exts) => Check::Extension(
+                                exts.iter().map(|ext| fold(ext.as_bytes())).collect(),
+                            ),
+                            Test::Size(range) => Check::Size(*range),
+                            Test::Kind(kind) => Check::Kind(*kind),
+                        },
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        // Every match contains the prefilter, so scanning for it yields a
+        // superset of the matches that the clauses then verify. The first of
+        // equally long literals wins.
+        let mut prefilter: Option<Vec<u8>> = None;
+        for literal in clauses.iter().filter_map(CompiledClause::name_literal) {
+            if literal.len() > prefilter.as_ref().map_or(0, Vec::len) {
+                prefilter = Some(literal);
+            }
         }
+
+        // A stable sort keeps the query's order among clauses of one cost.
+        clauses.sort_by_key(CompiledClause::cost);
+        let path_clauses = clauses.partition_point(|clause| !clause.cost().0);
+        Ok(Self {
+            match_case,
+            clauses,
+            path_clauses,
+            prefilter,
+        })
+    }
+}
+
+impl CompiledClause {
+    /// The literal every name that passes this clause contains, when the
+    /// clause is one positive name term, name wildcard or single extension.
+    fn name_literal(&self) -> Option<Vec<u8>> {
+        let [term] = self.terms.as_slice() else {
+            return None;
+        };
+        if term.negated {
+            return None;
+        }
+        match &term.check {
+            Check::Name(finder) => Some(finder.needle().to_vec()),
+            Check::NameWildcard(wildcard) => wildcard.longest_literal(),
+            Check::Extension(exts) => match exts.as_slice() {
+                [ext] if !ext.is_empty() => Some([b".", ext.as_slice()].concat()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether the clause tests the full path, then the cost of its dearest
+    /// term: the order the scan tests clauses in.
+    fn cost(&self) -> (bool, u8) {
+        let needs_path = self
+            .terms
+            .iter()
+            .any(|term| matches!(term.check, Check::Path(_) | Check::PathWildcard(_)));
+        let cost = self.terms.iter().map(|term| term.check.cost()).max();
+        (needs_path, cost.unwrap_or(0))
+    }
+
+    fn passes(&self, subject: &Subject, scratch: &mut Scratch) -> bool {
+        self.terms.iter().any(|term| {
+            term.check
+                .test(subject, scratch)
+                .is_some_and(|pass| pass != term.negated)
+        })
+    }
+}
+
+/// What the checks read of one entry.
+struct Subject<'a> {
+    is_dir: bool,
+    size: Option<u64>,
+    /// The name as the query compares it: folded unless it matches case.
+    name: &'a [u8],
+    /// The name as stored, which an extension check folds itself.
+    raw_name: &'a [u8],
+    /// The full path in the same form as `name`; set before the path
+    /// clauses run.
+    path: Option<&'a [u8]>,
+}
+
+/// Buffers the checks reuse from one entry to the next.
+#[derive(Default)]
+struct Scratch {
+    code_points: CodePointBuf,
+    extension: Vec<u8>,
+}
+
+impl Check {
+    /// Relative cost of testing one entry, cheapest first: the allocation-free
+    /// checks reject most entries before the extension check folds anything.
+    fn cost(&self) -> u8 {
+        match self {
+            Check::Kind(_) => 0,
+            Check::Size(_) => 1,
+            Check::Name(_) | Check::Path(_) => 2,
+            Check::NameWildcard(_) | Check::PathWildcard(_) => 3,
+            Check::Extension(_) => 4,
+        }
+    }
+
+    /// Whether `subject` passes, or `None` when the value the check reads is
+    /// unknown, which fails the term whether or not it is negated.
+    fn test(&self, subject: &Subject, scratch: &mut Scratch) -> Option<bool> {
+        let path = || {
+            subject
+                .path
+                .expect("path clauses run after the path is set")
+        };
+        Some(match self {
+            Check::Kind(Kind::File) => !subject.is_dir,
+            Check::Kind(Kind::Folder) => subject.is_dir,
+            // A folder's size is always unknown, so a size test skips folders.
+            Check::Size(range) => range.contains(subject.size?),
+            Check::Name(finder) => finder.find(subject.name).is_some(),
+            Check::NameWildcard(wildcard) => {
+                wildcard.matches_into(subject.name, &mut scratch.code_points)
+            }
+            Check::Extension(exts) => match extension(subject.raw_name) {
+                Some(ext) => {
+                    scratch.extension.clear();
+                    crate::fold::fold_into(ext, &mut scratch.extension);
+                    exts.contains(&scratch.extension)
+                }
+                None => false,
+            },
+            Check::Path(finder) => finder.find(path()).is_some(),
+            Check::PathWildcard(wildcard) => {
+                wildcard.matches_into(path(), &mut scratch.code_points)
+            }
+        })
     }
 }
 
@@ -134,20 +341,20 @@ struct Candidate {
 /// offset after it merges the volumes, so an offset here would page each
 /// volume on its own.
 ///
-/// The common case, a case-insensitive query with at least one substring
-/// term, scans the index's contiguous folded-name arena with a single
-/// prebuilt `memmem` finder (SIMD over the whole buffer), maps each hit back to
-/// its entry, and defers path reconstruction to the final page. That keeps the
-/// hot path off per-query folding and off per-match path building.
+/// The common case, a case-insensitive query with a name literal, scans the
+/// index's contiguous folded-name arena with a single prebuilt `memmem`
+/// finder (SIMD over the whole buffer), maps each hit back to its entry, and
+/// defers path reconstruction to the final page. That keeps the hot path off
+/// per-query folding and off per-match path building.
 pub fn run_query(
     index: &VolumeIndex,
     mount_prefix: &str,
-    parsed: &ParsedQuery,
+    query: &CompiledQuery,
     scope: Option<EntryIdx>,
     sort: SortSpec,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(index, mount_prefix, parsed, scope, sort, limit, false)
+    run_query_impl(index, mount_prefix, query, scope, sort, limit, false)
 }
 
 /// Like [`run_query`], but allowed to hand back an UNSORTED page when ordering
@@ -175,12 +382,35 @@ pub fn run_query(
 pub fn run_query_deferrable(
     index: &VolumeIndex,
     mount_prefix: &str,
-    parsed: &ParsedQuery,
+    query: &CompiledQuery,
     scope: Option<EntryIdx>,
     sort: SortSpec,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(index, mount_prefix, parsed, scope, sort, limit, true)
+    run_query_impl(index, mount_prefix, query, scope, sort, limit, true)
+}
+
+/// The [`Totals`] of every match of `query` over `index`, with `scope` as in
+/// [`run_query`]. No path is built and nothing is ordered.
+pub fn run_totals(
+    index: &VolumeIndex,
+    mount_prefix: &str,
+    query: &CompiledQuery,
+    scope: Option<EntryIdx>,
+) -> Result<Totals, SizeOverflow> {
+    let candidates = scan(index, mount_prefix, query, scope).candidates;
+    let mut totals = Totals {
+        count: candidates.len() as u64,
+        size: 0,
+    };
+    for size in candidates
+        .iter()
+        .filter(|c| !c.is_dir)
+        .filter_map(|c| c.size)
+    {
+        totals.add(Totals { count: 0, size })?;
+    }
+    Ok(totals)
 }
 
 /// A folder-scoped query walks the scope's subtree instead of scanning the
@@ -193,29 +423,23 @@ pub fn run_query_deferrable(
 /// the folder.
 const SUBTREE_WALK_MAX: usize = 200_000;
 
-/// `allow_defer` lets the executor drop the ordering when the page turns out to
-/// cover every match (see [`run_query_deferrable`]); the reported
-/// [`QueryOutcome::sorted`] says which happened.
-fn run_query_impl(
-    index: &VolumeIndex,
+/// Finds every match of `query` over `index`, as unordered candidates.
+fn scan<'q, 'i>(
+    index: &'i VolumeIndex,
     mount_prefix: &str,
-    parsed: &ParsedQuery,
+    query: &'q CompiledQuery,
     scope: Option<EntryIdx>,
-    sort: SortSpec,
-    limit: Option<u32>,
-    allow_defer: bool,
-) -> QueryOutcome {
-    let mut scan = Scan::new(index, mount_prefix, parsed);
+) -> Scan<'q, 'i> {
+    let mut scan = Scan::new(index, mount_prefix, query);
 
     // Folder scope: walk the scope subtree via the child chains, so cost
     // tracks the folder, not the volume. Membership is by construction, so
     // the candidates are tested without the scope (its ancestry walk is the
     // expensive part this path exists to avoid); every other predicate is
     // identical to the scan paths below. Oversized scopes abort to those paths.
-    let mut subtree_done = false;
     if let Some(root) = scope {
         let mut visited = 0usize;
-        subtree_done = true;
+        let mut subtree_done = true;
         for idx in index.subtree_entries(root) {
             visited += 1;
             if visited > SUBTREE_WALK_MAX {
@@ -228,15 +452,15 @@ fn run_query_impl(
             }
             scan.visit(idx, None);
         }
+        if subtree_done {
+            return scan;
+        }
     }
 
     // Fast path: case-insensitive query with a usable literal → scan the
     // folded arena for the prefilter literal and verify the rest per hit.
-    let prefilter = scan.compiled.prefilter.take();
-    if subtree_done {
-        // Scoped walk answered the query; the scan paths are skipped.
-    } else if !parsed.match_case
-        && let Some(needle) = prefilter.as_deref()
+    if !query.match_case
+        && let Some(needle) = query.prefilter.as_deref()
     {
         let driver = memmem::Finder::new(needle);
         // The haystack holds each distinct name ONCE (names are interned), so
@@ -285,8 +509,8 @@ fn run_query_impl(
             }
         }
     } else {
-        // Slow path: case-sensitive, or no positive substring term (only
-        // wildcards / filters / path terms). Iterate every live entry.
+        // Slow path: case-sensitive, or no name literal (only filters, path
+        // terms or all-wildcard patterns). Iterate every live entry.
         for idx in index.live_entries() {
             if index.is_synthetic(idx) {
                 continue;
@@ -294,12 +518,26 @@ fn run_query_impl(
             scan.visit(idx, scope);
         }
     }
+    scan
+}
 
+/// `allow_defer` lets the executor drop the ordering when the page turns out to
+/// cover every match (see [`run_query_deferrable`]); the reported
+/// [`QueryOutcome::sorted`] says which happened.
+fn run_query_impl(
+    index: &VolumeIndex,
+    mount_prefix: &str,
+    query: &CompiledQuery,
+    scope: Option<EntryIdx>,
+    sort: SortSpec,
+    limit: Option<u32>,
+    allow_defer: bool,
+) -> QueryOutcome {
     let Scan {
         mut candidates,
         mut dirs,
         ..
-    } = scan;
+    } = scan(index, mount_prefix, query, scope);
     let total = candidates.len() as u64;
 
     let end = match limit {
@@ -374,39 +612,44 @@ fn run_query_impl(
     }
 }
 
-/// The state one scan shares across its candidates: finders, memos and scratch
+/// The state one scan shares across its candidates: memos and scratch
 /// buffers, built once per query instead of once per candidate.
 struct Scan<'q, 'i> {
     index: &'i VolumeIndex,
-    parsed: &'q ParsedQuery,
-    compiled: CompiledQuery<'q>,
-    /// `None` when the query has no path term.
-    paths: Option<PathMatcher<'q>>,
+    query: &'q CompiledQuery,
+    /// Full paths in the form the query compares, folded unless it matches
+    /// case; `None` when no clause tests the path.
+    query_paths: Option<DirPaths>,
+    path: Vec<u8>,
     /// Raw folder paths. ONE memo, shared by the presentability check and the
     /// page builder: both need exactly these paths.
     dirs: DirPaths,
     scope_memo: FxHashMap<EntryIdx, bool>,
-    code_points: CodePointBuf,
-    ext_scratch: Vec<u8>,
+    scratch: Scratch,
     candidates: Vec<Candidate>,
 }
 
 impl<'q, 'i> Scan<'q, 'i> {
-    fn new(index: &'i VolumeIndex, mount_prefix: &str, parsed: &'q ParsedQuery) -> Self {
+    fn new(index: &'i VolumeIndex, mount_prefix: &str, query: &'q CompiledQuery) -> Self {
+        let form = if query.match_case {
+            NameForm::Raw
+        } else {
+            NameForm::Folded
+        };
         Self {
             index,
-            parsed,
-            compiled: CompiledQuery::new(parsed),
-            paths: PathMatcher::new(index, parsed, mount_prefix),
+            query,
+            query_paths: (query.path_clauses < query.clauses.len())
+                .then(|| DirPaths::new(index, form, mount_prefix)),
+            path: Vec::new(),
             dirs: DirPaths::new(index, NameForm::Raw, mount_prefix),
             scope_memo: FxHashMap::default(),
-            code_points: CodePointBuf::new(),
-            ext_scratch: Vec::new(),
+            scratch: Scratch::default(),
             candidates: Vec::new(),
         }
     }
 
-    /// Keeps entry `idx` as a candidate if it passes every predicate.
+    /// Keeps entry `idx` as a candidate if it passes every clause.
     fn visit(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) {
         if let Some(c) = self.evaluate(idx, scope) {
             self.candidates.push(c);
@@ -415,41 +658,25 @@ impl<'q, 'i> Scan<'q, 'i> {
 
     fn evaluate(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> Option<Candidate> {
         let index = self.index;
-        let parsed = self.parsed;
+        let query = self.query;
+        let (entry_clauses, path_clauses) = query.clauses.split_at(query.path_clauses);
         let entry = index.entry(idx);
-        if !kind_matches(parsed.filters.kind, entry.is_dir()) {
-            return None;
-        }
-        if !size_matches(parsed.filters.size, entry.size()) {
-            return None;
-        }
-
-        // Name/wildcard predicates run against the precomputed folded name
-        // (case-insensitive) or the raw name (case-sensitive), matching how the
-        // needles were folded at parse time.
-        let hay_name = if parsed.match_case {
-            entry.name()
-        } else {
-            index.folded_name(idx)
+        let mut subject = Subject {
+            is_dir: entry.is_dir(),
+            size: entry.size(),
+            // The precomputed folded name serves a case-insensitive query.
+            name: if query.match_case {
+                entry.name()
+            } else {
+                index.folded_name(idx)
+            },
+            raw_name: entry.name(),
+            path: None,
         };
-        if !self
-            .compiled
-            .name_finders
+        if !entry_clauses
             .iter()
-            .all(|f| f.find(hay_name).is_some())
+            .all(|clause| clause.passes(&subject, &mut self.scratch))
         {
-            return None;
-        }
-        if !parsed
-            .wildcards
-            .iter()
-            .all(|w| w.matches_into(hay_name, &mut self.code_points))
-        {
-            return None;
-        }
-        // The ext check folds the candidate extension, so it runs after the
-        // allocation-free name/wildcard predicates that reject most candidates.
-        if !ext_matches(&parsed.filters, entry.name(), &mut self.ext_scratch) {
             return None;
         }
 
@@ -477,10 +704,17 @@ impl<'q, 'i> Scan<'q, 'i> {
             return None;
         }
 
-        if let Some(paths) = &mut self.paths
-            && !paths.matches(index, idx)
-        {
-            return None;
+        if let Some(paths) = &mut self.query_paths {
+            if !paths.full_path_into(index, idx, &mut self.path) {
+                return None;
+            }
+            subject.path = Some(&self.path);
+            if !path_clauses
+                .iter()
+                .all(|clause| clause.passes(&subject, &mut self.scratch))
+            {
+                return None;
+            }
         }
 
         Some(Candidate {
@@ -491,38 +725,6 @@ impl<'q, 'i> Scan<'q, 'i> {
             folded_parent: (0, 0),
         })
     }
-}
-
-fn kind_matches(kind: Option<Kind>, is_dir: bool) -> bool {
-    match kind {
-        None => true,
-        Some(Kind::File) => !is_dir,
-        Some(Kind::Folder) => is_dir,
-    }
-}
-
-/// A size filter excludes entries whose size is unknown (not yet enriched):
-/// we cannot confirm the predicate, so we do not claim a match.
-fn size_matches(filter: Option<SizeRange>, size: Option<u64>) -> bool {
-    match filter {
-        None => true,
-        Some(range) => size.is_some_and(|s| range.contains(s)),
-    }
-}
-
-/// Extension matching is always case-insensitive (es semantics): the filter
-/// values are folded at parse time, so the candidate extension is folded here
-/// unconditionally, even under a case-sensitive query.
-fn ext_matches(filters: &Filters, name: &[u8], scratch: &mut Vec<u8>) -> bool {
-    let Some(exts) = &filters.ext else {
-        return true;
-    };
-    let Some(ext) = extension(name) else {
-        return false; // no extension → cannot match an ext: filter
-    };
-    scratch.clear();
-    crate::fold::fold_into(ext, scratch);
-    exts.iter().any(|e| e.as_slice() == scratch.as_slice())
 }
 
 /// The extension of an entry's name, folder or file: what follows its last
@@ -712,9 +914,13 @@ mod tests {
     use super::*;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::query::order::{VolumeRun, order_hits};
-    use crate::query::parse::parse_query;
+    use crate::query::parse::{Clause, Term, parse_query};
     use crate::types::{Frn, SortDir};
     use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
+
+    fn compiled(query: &str) -> CompiledQuery {
+        CompiledQuery::new(&parse_query(query).unwrap()).unwrap()
+    }
 
     fn frn(rec: u64) -> Frn {
         Frn(rec | (1u64 << 48))
@@ -788,7 +994,7 @@ mod tests {
     #[test]
     fn orphans_are_excluded_from_total_and_never_eat_the_page() {
         let idx = index_with_orphans();
-        let parsed = parse_query("log").unwrap();
+        let parsed = compiled("log");
 
         let all = run_query(
             &idx,
@@ -841,7 +1047,7 @@ mod tests {
     }
 
     fn run(idx: &VolumeIndex, query: &str) -> Vec<String> {
-        let parsed = parse_query(query).unwrap();
+        let parsed = compiled(query);
         let out = run_query(idx, "", &parsed, None, SortSpec::default(), None);
         out.hits
             .iter()
@@ -911,7 +1117,7 @@ mod tests {
     #[test]
     fn scope_restricts_to_descendants() {
         let idx = sample_index();
-        let parsed = parse_query("").unwrap();
+        let parsed = compiled("");
         let scope = resolve_scope(&idx, b"docs\\sub", false).unwrap();
         let out = run_query(&idx, "", &parsed, Some(scope), SortSpec::default(), None);
         let paths: Vec<String> = out
@@ -925,7 +1131,7 @@ mod tests {
     #[test]
     fn sort_path_orders_by_parent_then_name() {
         let idx = sample_index();
-        let parsed = parse_query("").unwrap();
+        let parsed = compiled("");
         let out = run_query(
             &idx,
             "",
@@ -958,7 +1164,7 @@ mod tests {
     #[test]
     fn limit_cuts_the_page_but_total_is_full_count() {
         let idx = sample_index();
-        let parsed = parse_query("").unwrap();
+        let parsed = compiled("");
         let out = run_query(
             &idx,
             "",
@@ -988,7 +1194,7 @@ mod tests {
     #[test]
     fn a_page_covering_every_match_defers_the_sort() {
         let idx = sample_index();
-        let parsed = parse_query("").unwrap();
+        let parsed = compiled("");
         let sort = SortSpec::default_for(SortKey::Name);
         let total = run_query(&idx, "", &parsed, None, sort, None).total as u32;
         assert!(total > 1, "fixture must have several matches to slice");
@@ -1073,7 +1279,7 @@ mod tests {
         query: &str,
         scope: Option<&[u8]>,
     ) -> Vec<String> {
-        let parsed = parse_query(query).unwrap();
+        let parsed = compiled(query);
         let scope = scope.map(|s| resolve_scope(idx, s, false).expect("scope exists"));
         let out = run_query(
             idx,
@@ -1162,6 +1368,193 @@ mod tests {
                 r"C:\repo\src\readme.md"
             ]
         );
+    }
+
+    // -- clauses ------------------------------------------------------------
+
+    fn query_of(clauses: Vec<Vec<Term>>) -> ParsedQuery {
+        ParsedQuery {
+            clauses: clauses.into_iter().map(|terms| Clause { terms }).collect(),
+            match_case: false,
+        }
+    }
+
+    fn term(negated: bool, test: Test) -> Term {
+        Term { negated, test }
+    }
+
+    fn name(text: &str) -> Test {
+        Test::Name(text.to_string())
+    }
+
+    fn paths_of(idx: &VolumeIndex, query: ParsedQuery) -> Vec<String> {
+        let query = CompiledQuery::new(&query).unwrap();
+        let out = run_query(
+            idx,
+            r"C:\",
+            &query,
+            None,
+            SortSpec::default_for(SortKey::Path),
+            None,
+        );
+        texts(&out.hits)
+    }
+
+    /// The evaluator already reads what the parser will write for `!` and
+    /// `|`: a clause passes when any of its terms does, and a negated term
+    /// when its test fails, except that a size test of an unknown size fails
+    /// either way. Only a clause of one positive name term may drive the
+    /// folded-arena scan: `guide|main` driven by `guide` would never reach
+    /// `main.cs`, and `!readme` driven by `readme` would find nothing.
+    #[test]
+    fn clauses_are_ors_of_possibly_negated_terms() {
+        let idx = docs_index();
+        let guide = r"C:\repo\docs\guide.MD";
+        let main = r"C:\repo\src\main.cs";
+        let file = || term(false, Test::Kind(Kind::File));
+        assert_eq!(
+            paths_of(
+                &idx,
+                query_of(vec![vec![
+                    term(false, name("guide")),
+                    term(false, name("main"))
+                ]])
+            ),
+            [guide, main]
+        );
+        assert_eq!(
+            paths_of(
+                &idx,
+                query_of(vec![vec![term(true, name("readme"))], vec![file()]])
+            ),
+            [guide, main]
+        );
+        assert_eq!(
+            paths_of(
+                &idx,
+                query_of(vec![
+                    vec![term(true, Test::Extension(vec!["MD".to_string()]))],
+                    vec![file()]
+                ])
+            ),
+            [main]
+        );
+
+        // Every size in the fixture is unknown.
+        let big = || {
+            Test::Size(SizeRange {
+                min: 2,
+                max: u64::MAX,
+            })
+        };
+        assert!(paths_of(&idx, query_of(vec![vec![term(true, big())]])).is_empty());
+        assert_eq!(
+            paths_of(
+                &idx,
+                query_of(vec![vec![term(false, big()), term(false, name("guide"))]])
+            ),
+            [guide]
+        );
+    }
+
+    /// Every term costs each candidate a test under the index read lock, so
+    /// compiling refuses a query past the cap rather than holding the lock
+    /// for minutes. It counts each `ext:` value, and a clause without terms
+    /// as one, because a query from the pipe can hold any number of either.
+    #[test]
+    fn a_query_with_more_than_the_maximum_terms_is_refused() {
+        let text = |names: usize, exts: usize| {
+            let exts: Vec<String> = (0..exts).map(|i| format!("e{i}")).collect();
+            format!("{} ext:{}", vec!["a"; names].join(" "), exts.join(";"))
+        };
+        let compile = |query: &ParsedQuery| CompiledQuery::new(query).err();
+        assert_eq!(compile(&parse_query(&text(200, 56)).unwrap()), None);
+        assert_eq!(
+            compile(&parse_query(&text(200, 57)).unwrap()),
+            Some(QueryError::TooManyTerms(257))
+        );
+        assert_eq!(
+            compile(&query_of(vec![Vec::new(); 257])),
+            Some(QueryError::TooManyTerms(257))
+        );
+    }
+
+    mod untrusted {
+        use super::*;
+        use crate::proto::{Request, Returns, SearchRequest, decode_request};
+        use proptest::prelude::*;
+
+        fn arb_test() -> impl Strategy<Value = Test> {
+            let text = || "[a-zA-Z.*?\\\\/ ]{0,6}";
+            prop_oneof![
+                text().prop_map(Test::Name),
+                text().prop_map(Test::Path),
+                text().prop_map(Test::NameWildcard),
+                text().prop_map(Test::PathWildcard),
+                prop::collection::vec(text(), 0..3).prop_map(Test::Extension),
+                (any::<u64>(), any::<u64>())
+                    .prop_map(|(min, max)| Test::Size(SizeRange { min, max })),
+                prop_oneof![Just(Kind::File), Just(Kind::Folder)].prop_map(Test::Kind),
+            ]
+        }
+
+        /// Up to 5 clauses of up to 4 terms, so every query is under the cap.
+        fn arb_query() -> impl Strategy<Value = ParsedQuery> {
+            let term =
+                (any::<bool>(), arb_test()).prop_map(|(negated, test)| Term { negated, test });
+            let clause = prop::collection::vec(term, 0..4).prop_map(|terms| Clause { terms });
+            (prop::collection::vec(clause, 0..5), any::<bool>()).prop_map(
+                |(clauses, match_case)| ParsedQuery {
+                    clauses,
+                    match_case,
+                },
+            )
+        }
+
+        proptest! {
+            /// A query arrives from any local user, so the daemon runs every
+            /// combination of clauses, terms, negations and scope; a panic
+            /// would end the query. The totals count what a page counts.
+            #[test]
+            fn any_query_runs_and_its_totals_count_its_matches(
+                query in arb_query(),
+                scoped in any::<bool>(),
+            ) {
+                let idx = docs_index();
+                let query = CompiledQuery::new(&query).expect("under the cap");
+                let scope = scoped.then(|| resolve_scope(&idx, b"repo", false).expect("repo exists"));
+                let page = run_query(&idx, r"C:\", &query, scope, SortSpec::default(), None);
+                let totals = run_totals(&idx, r"C:\", &query, scope).expect("no size is known");
+                prop_assert_eq!(totals.count, page.total);
+            }
+
+            /// A search request arrives as JSON from the pipe, so any bytes
+            /// can arrive; they must decode to a refusal or a query the
+            /// daemon compiles and runs, never a panic.
+            #[test]
+            fn a_corrupted_search_request_errors_instead_of_panicking(
+                query in arb_query(),
+                patches in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
+                cut in any::<prop::sample::Index>(),
+            ) {
+                let request = Request::Search(SearchRequest {
+                    query,
+                    scope: None,
+                    returns: Returns::Totals,
+                });
+                let mut json = serde_json::to_vec(&request).expect("serializes");
+                let len = json.len();
+                for (at, byte) in &patches {
+                    json[at.index(len)] = *byte;
+                }
+                json.truncate(cut.index(len + 1));
+                if let Ok(Request::Search(search)) = decode_request(&json)
+                    && let Ok(query) = CompiledQuery::new(&search.query)
+                {
+                    let _ = run_totals(&docs_index(), r"C:\", &query, None);
+                }
+            }
+        }
     }
 
     // -- result order -------------------------------------------------------
@@ -1273,7 +1666,7 @@ mod tests {
     #[test]
     fn path_order_is_parent_folder_then_name() {
         let idx = order_index();
-        let parsed = parse_query("qx7zv").unwrap();
+        let parsed = compiled("qx7zv");
         let out = run_query(
             &idx,
             r"C:\",
@@ -1300,7 +1693,7 @@ mod tests {
     #[test]
     fn unknown_sizes_and_dates_sort_last() {
         let idx = order_index();
-        let parsed = parse_query("qx7zv").unwrap();
+        let parsed = compiled("qx7zv");
         for sort in all_sorts() {
             if matches!(sort.key, SortKey::Size | SortKey::DateModified) {
                 let out = run_query(&idx, r"C:\", &parsed, None, sort, None);
@@ -1320,7 +1713,7 @@ mod tests {
     fn a_limited_query_is_a_prefix_of_the_unlimited_one() {
         let idx = order_index();
         for query in ["qx7zv", ""] {
-            let parsed = parse_query(query).unwrap();
+            let parsed = compiled(query);
             for sort in all_sorts() {
                 let deferred = run_query_deferrable(&idx, r"C:\", &parsed, None, sort, None);
                 let unlimited = order_hits(
@@ -1352,7 +1745,7 @@ mod tests {
     #[test]
     fn a_limited_query_is_a_prefix_across_volumes() {
         let volumes = [(r"C:\", order_index()), (r"C:\mnt\", order_index())];
-        let parsed = parse_query("qx7zv").unwrap();
+        let parsed = compiled("qx7zv");
         for sort in all_sorts() {
             let merged = |limit: Option<u32>| {
                 let runs = volumes
@@ -1426,7 +1819,7 @@ mod tests {
             }
             let idx = flat_index(&uniq);
             let query = terms.join(" ");
-            let parsed = parse_query(&query).unwrap();
+            let parsed = compiled(&query);
             let out = run_query(&idx, "", &parsed, None, SortSpec::default(), None);
             let engine: BTreeSet<String> = out
                 .hits
@@ -1456,7 +1849,7 @@ mod tests {
                 idx.insert_enum(&enum_rec(frn(1000 + i as u64), parent, &names[i], i % 3 != 0));
             }
             let term = format!("{before}\\{after}");
-            let parsed = parse_query(&term).unwrap();
+            let parsed = compiled(&term);
             let out = run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), None);
             let engine: BTreeSet<String> = out
                 .hits

@@ -2,6 +2,7 @@
 
 use gozler_core::escompat::{EsFatal, ExitCode};
 use gozler_core::proto::ProtoError;
+use gozler_core::query::QueryError;
 use std::io;
 
 /// A failure that ends a gozler run. [`Failure::exit_code`] is the one place
@@ -17,6 +18,8 @@ pub(crate) enum Failure {
     /// An argument is not valid Unicode, so it could never match a name as
     /// typed; it carries the argument with the invalid part replaced.
     ArgumentNotUnicode(String),
+    /// The query cannot run as written.
+    Query(QueryError),
     /// The `-export-*` file cannot be created.
     ExportCreate { path: String, error: io::Error },
     /// Writing the results, the status or the help failed; `to` is the export
@@ -40,7 +43,7 @@ impl Failure {
     pub(crate) fn exit_code(&self) -> ExitCode {
         match self {
             Failure::Argv(fatal) => fatal.exit_code,
-            Failure::ArgumentNotUnicode(_) => ExitCode::InvalidInput,
+            Failure::ArgumentNotUnicode(_) | Failure::Query(_) => ExitCode::InvalidInput,
             Failure::ExportCreate { .. } | Failure::Output { .. } => ExitCode::OutputFailed,
             Failure::DaemonNotRunning => ExitCode::DaemonNotRunning,
             Failure::Untrusted => ExitCode::Untrusted,
@@ -48,6 +51,7 @@ impl Failure {
             Failure::Daemon { code, .. } => match code {
                 ProtoError::BadQuery => ExitCode::InvalidInput,
                 ProtoError::Unsupported => ExitCode::Communication,
+                ProtoError::Overflow => ExitCode::Internal,
             },
             Failure::Internal(_) => ExitCode::Internal,
         }
@@ -65,6 +69,7 @@ impl Failure {
             Failure::ArgumentNotUnicode(arg) => {
                 eprintln!("gozler: an argument is not valid Unicode: {arg}");
             }
+            Failure::Query(error) => eprintln!("gozler: {error}"),
             Failure::ExportCreate { path, error } => {
                 eprintln!("gozler: cannot create {path}: {error}")
             }
@@ -132,6 +137,7 @@ mod tests {
             (argv_failure(&["-n"]), 4),
             (argv_failure(&["-n", "x"]), 4),
             (Failure::ArgumentNotUnicode("a\u{FFFD}".into()), 4),
+            (Failure::Query(QueryError::UnsupportedOperator('!')), 4),
             (
                 Failure::ExportCreate {
                     path: "out.csv".into(),
@@ -151,6 +157,7 @@ mod tests {
             ),
             (daemon(ProtoError::BadQuery), 4),
             (daemon(ProtoError::Unsupported), 7),
+            (daemon(ProtoError::Overflow), 1),
             (Failure::Internal(String::new()), 1),
         ];
         for (failure, code) in cases {

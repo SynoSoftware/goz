@@ -30,7 +30,7 @@ fn interned_shared_names_are_found() {
     idx.insert_enum(&rec(1002, 1000, "index.js", false));
     idx.insert_enum(&rec(1003, 1001, "index.js", false));
     idx.insert_enum(&rec(1004, 1001, "other.txt", false));
-    let parsed = gozler_core::query::parse_query("index.js").unwrap();
+    let parsed = compiled("index.js");
     let out = gozler_core::query::run_query(
         &idx,
         "",
@@ -96,7 +96,7 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
     }
     idx.insert_enum(&rec(frn, 0, "report-root.txt", false));
 
-    let parsed = gozler_core::query::parse_query("report").unwrap();
+    let parsed = compiled("report");
     let scope =
         gozler_core::query::resolve_scope(&idx, b"downloads", false).expect("scope resolves");
 
@@ -136,4 +136,9 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
         "scoped hits must equal prefix-filtered unscoped hits"
     );
     assert_eq!(got.len(), 50, "fixture sanity: 2 subdirs x 25 reports");
+}
+
+fn compiled(query: &str) -> gozler_core::query::CompiledQuery {
+    let parsed = gozler_core::query::parse_query(query).unwrap();
+    gozler_core::query::CompiledQuery::new(&parsed).unwrap()
 }

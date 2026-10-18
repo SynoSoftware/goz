@@ -11,7 +11,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::query::{parse_query, run_query, run_query_deferrable};
+use gozler_core::query::{CompiledQuery, parse_query, run_query, run_query_deferrable};
 use gozler_core::types::{Frn, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::hint::black_box;
@@ -90,6 +90,10 @@ fn build_index() -> (VolumeIndex, usize) {
     (idx, count)
 }
 
+fn compiled(query: &str) -> CompiledQuery {
+    CompiledQuery::new(&parse_query(query).unwrap()).unwrap()
+}
+
 fn bench_query(c: &mut Criterion) {
     let (idx, count) = build_index();
     let total = idx.len();
@@ -111,7 +115,7 @@ fn bench_query(c: &mut Criterion) {
             r"module_group_007\bin_x64_03",
         ),
     ] {
-        let parsed = parse_query(query).unwrap();
+        let parsed = compiled(query);
         group.bench_function(label, |b| {
             b.iter(|| {
                 let out = run_query(
@@ -137,7 +141,7 @@ fn bench_query(c: &mut Criterion) {
         ("common(document)", "document"),
         ("wildcard(*.txt)", "*.txt"),
     ] {
-        let parsed = parse_query(query).unwrap();
+        let parsed = compiled(query);
         broad.bench_function(label, |b| {
             b.iter(|| {
                 let out = run_query(
@@ -164,7 +168,7 @@ fn bench_query(c: &mut Criterion) {
     // The difference is the stall removed from live updates. The sort still
     // happens, just after the guard drops.
     {
-        let parsed = parse_query("document").unwrap();
+        let parsed = compiled("document");
         broad.bench_function("common(document) LOCKED: sort inside (old)", |b| {
             b.iter(|| {
                 let out = run_query(

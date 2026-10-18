@@ -2,21 +2,29 @@
 //!
 //! Plain serde data: JSON on the wire, no I/O anywhere. Both enums are
 //! internally tagged (`"t"`) so a reader can dispatch on one field, and every
-//! struct tolerates unknown JSON fields (serde default), so additive protocol
-//! evolution needs no version bump.
+//! struct tolerates unknown JSON fields (serde default), so a new field with a
+//! default needs no version bump. A request an older daemon cannot serve, such
+//! as a new kind of term in a [`ParsedQuery`], raises [`PROTO_VERSION`].
 
 use serde::{Deserialize, Serialize};
 
+use crate::query::ParsedQuery;
 use crate::scope::VolumeMounts;
 use crate::types::{SortSpec, VolumePhase};
 
 /// Protocol version spoken by this build.
 ///
-/// A daemon speaks exactly this version: it answers a [`Request::Hello`] whose
-/// `proto_min..=proto_max` range covers it, and otherwise refuses with
-/// [`ProtoError::Unsupported`] rather than agreeing on a version one side
-/// cannot actually speak.
-pub const PROTO_VERSION: u16 = 1;
+/// A daemon serves every version from [`OLDEST_PROTO_VERSION`] up to this
+/// one: it answers a [`Request::Hello`] with the highest version both sides
+/// speak, and refuses with [`ProtoError::Unsupported`] when the ranges do not
+/// meet, rather than agreeing on a version one side cannot actually speak.
+/// The client asks for this version alone, so a daemon older than the client
+/// refuses it.
+pub const PROTO_VERSION: u16 = 2;
+
+/// The oldest protocol version a daemon of this build serves: protocol 1's
+/// clients send [`Request::Query`] without a `Hello`.
+pub const OLDEST_PROTO_VERSION: u16 = 1;
 
 /// The daemon's named pipe.
 pub const PIPE_NAME: &str = r"\\.\pipe\goz-v1";
@@ -36,12 +44,9 @@ pub const PAGE_ROWS: u32 = 4096;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t")]
 pub enum Request {
-    /// Version negotiation.
-    ///
-    /// Optional, and the v1 CLI does not send it: it ships in lockstep with the
-    /// daemon, so there is no version to discover, and the daemon serves
-    /// `Query`/`Status` without one. A client built separately from the daemon
-    /// should send it first and honor a refusal.
+    /// Version negotiation. The client sends it first, so a daemon that
+    /// cannot serve its requests refuses here instead of misreading them. The
+    /// daemon serves requests without one, as protocol 1's client sends none.
     Hello {
         /// Lowest protocol version the client can speak.
         proto_min: u16,
@@ -50,16 +55,19 @@ pub enum Request {
         /// Human-readable client identifier (name/version), for logs.
         client: String,
     },
-    /// Run a search query.
+    /// Protocol 1's search: query text that the daemon parses.
     Query(QueryRequest),
     /// Ask for per-volume index status.
     Status,
+    /// From protocol 2: a search whose query the client parsed.
+    Search(SearchRequest),
 }
 
-/// Parameters of one search query.
+/// Parameters of one protocol 1 search, which the daemon still serves.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueryRequest {
-    /// The search string, in the query language's syntax.
+    /// The search string, which the daemon parses with
+    /// [`parse_query_with_case`](crate::query::parse_query_with_case).
     pub query: String,
     /// Optional scope folder (es `-path`), already absolutized by the client.
     pub scope: Option<String>,
@@ -73,6 +81,42 @@ pub struct QueryRequest {
     /// Populate [`ResultItem::mtime_ft`] (skip the lookup otherwise).
     pub want_mtime: bool,
     pub match_case: bool,
+}
+
+/// One search, from protocol 2 on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchRequest {
+    pub query: ParsedQuery,
+    /// Optional scope folder (es `-path`): an absolute path with `.` and `..`
+    /// already removed, as [`build_search`](crate::escompat::build_search)
+    /// writes it.
+    pub scope: Option<String>,
+    pub returns: Returns,
+}
+
+/// What a [`SearchRequest`] asks for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Returns {
+    /// The matches, as [`Response::Results`] pages.
+    Rows(Rows),
+    /// Only how many entries match and the summed size of the matching files,
+    /// as one [`Response::Totals`], so no row crosses the pipe.
+    Totals,
+}
+
+/// Which matches a [`Returns::Rows`] search returns, in what order, and with
+/// which values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Rows {
+    pub sort: SortSpec,
+    /// Number of leading matches to skip (pagination).
+    pub offset: u32,
+    /// Maximum matches to return; `None` = all.
+    pub limit: Option<u32>,
+    /// Populate [`ResultItem::size`] (skip the lookup otherwise).
+    pub want_size: bool,
+    /// Populate [`ResultItem::mtime_ft`] (skip the lookup otherwise).
+    pub want_mtime: bool,
 }
 
 /// A server→client message.
@@ -92,6 +136,8 @@ pub enum Response {
     Results(QueryResults),
     /// Reply to [`Request::Status`].
     Status(DaemonStatus),
+    /// Reply to a [`Returns::Totals`] search.
+    Totals(QueryTotals),
     /// The request failed.
     Error {
         /// Machine-readable failure class.
@@ -118,6 +164,20 @@ pub struct QueryResults {
     pub metadata_pending: bool,
     /// Index generation the results were computed against.
     pub generation: u64,
+}
+
+/// The totals of every match of a [`Returns::Totals`] search.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueryTotals {
+    /// Every match, files and folders.
+    pub count: u64,
+    /// The summed size of the matching files in bytes. A folder has no size,
+    /// and a file whose size is unknown adds nothing.
+    pub size: u64,
+    /// As [`QueryResults::volumes_incomplete`].
+    pub volumes_incomplete: bool,
+    /// As [`QueryResults::metadata_pending`]: some sizes may be unknown.
+    pub metadata_pending: bool,
 }
 
 /// One matched file or directory.
@@ -257,6 +317,9 @@ pub enum ProtoError {
     BadQuery,
     /// The client requested an unsupported protocol version or feature.
     Unsupported,
+    /// The summed size of the matches does not fit in 64 bits, which only a
+    /// corrupt size in the index can cause.
+    Overflow,
 }
 
 #[cfg(test)]
@@ -342,6 +405,96 @@ mod tests {
         rt_request(&Request::Status);
     }
 
+    /// A daemon of a later protocol must still read the requests of this
+    /// one, and this client must read the daemon's totals, so the JSON of
+    /// every protocol 2 shape is pinned here as a peer writes it.
+    #[test]
+    fn protocol_2_payloads_keep_their_json() {
+        use crate::query::{Clause, Kind, SizeRange, Term, Test};
+        let term = |negated, test| Term { negated, test };
+        let search = Request::Search(SearchRequest {
+            query: ParsedQuery {
+                clauses: vec![
+                    Clause {
+                        terms: vec![
+                            term(false, Test::Name("a".into())),
+                            term(true, Test::Path("b/c".into())),
+                        ],
+                    },
+                    Clause {
+                        terms: vec![
+                            term(false, Test::NameWildcard("*.d".into())),
+                            term(false, Test::PathWildcard("*/e/*".into())),
+                            term(false, Test::Extension(vec!["f".into()])),
+                            term(false, Test::Size(SizeRange { min: 1, max: 2 })),
+                            term(false, Test::Kind(Kind::Folder)),
+                        ],
+                    },
+                ],
+                match_case: true,
+            },
+            scope: Some("C:/x".into()),
+            returns: Returns::Rows(Rows {
+                sort: SortSpec::default(),
+                offset: 0,
+                limit: Some(20),
+                want_size: true,
+                want_mtime: false,
+            }),
+        });
+        let search_json = concat!(
+            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
+            r#"{"negated":false,"test":{"Name":"a"}},"#,
+            r#"{"negated":true,"test":{"Path":"b/c"}}]},{"terms":["#,
+            r#"{"negated":false,"test":{"NameWildcard":"*.d"}},"#,
+            r#"{"negated":false,"test":{"PathWildcard":"*/e/*"}},"#,
+            r#"{"negated":false,"test":{"Extension":["f"]}},"#,
+            r#"{"negated":false,"test":{"Size":{"min":1,"max":2}}},"#,
+            r#"{"negated":false,"test":{"Kind":"Folder"}}]}],"match_case":true},"#,
+            r#""scope":"C:/x","returns":{"Rows":{"sort":{"key":"Name","dir":"Asc"},"#,
+            r#""offset":0,"limit":20,"want_size":true,"want_mtime":false}}}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&search).expect("serialize"),
+            search_json
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(search_json).expect("deserialize"),
+            search
+        );
+
+        let totals = concat!(
+            r#"{"t":"Search","query":{"clauses":[],"match_case":false},"#,
+            r#""scope":null,"returns":"Totals"}"#,
+        );
+        assert!(matches!(
+            serde_json::from_str::<Request>(totals).expect("deserialize"),
+            Request::Search(SearchRequest {
+                returns: Returns::Totals,
+                ..
+            })
+        ));
+
+        let reply = Response::Totals(QueryTotals {
+            count: 3,
+            size: 4,
+            volumes_incomplete: true,
+            metadata_pending: false,
+        });
+        let reply_json = concat!(
+            r#"{"t":"Totals","count":3,"size":4,"#,
+            r#""volumes_incomplete":true,"metadata_pending":false}"#,
+        );
+        assert_eq!(
+            serde_json::to_string(&reply).expect("serialize"),
+            reply_json
+        );
+        assert_eq!(
+            serde_json::from_str::<Response>(reply_json).expect("deserialize"),
+            reply
+        );
+    }
+
     #[test]
     fn response_hello_round_trips() {
         rt_response(&Response::Hello {
@@ -418,7 +571,11 @@ mod tests {
 
     #[test]
     fn response_error_round_trips_every_code() {
-        for code in [ProtoError::BadQuery, ProtoError::Unsupported] {
+        for code in [
+            ProtoError::BadQuery,
+            ProtoError::Unsupported,
+            ProtoError::Overflow,
+        ] {
             rt_response(&Response::Error {
                 code,
                 message: format!("{code:?} happened"),

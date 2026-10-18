@@ -79,6 +79,7 @@ const EXAMPLES: &[&str] = &[
     "gozler -export-csv files.csv -size -dm ext:cs",
     "gozler /a-d report -size -dm",
     "gozler -get-result-count ext:cs",
+    r"gozler -get-folder-size C:\repo",
     "gozler --json report",
 ];
 
@@ -86,7 +87,8 @@ const NOTES: &[&str] = &[
     "A volume in scope that is indexing, rescanning or offline makes the \
      answer incomplete: gozler prints the results it has, warns on stderr and \
      exits 2. With -path, only the volume of that folder is in scope.",
-    "Files whose size Windows did not report never match size:.",
+    "Files whose size Windows did not report never match size: and add \
+     nothing to -get-total-size or -get-folder-size.",
 ];
 
 /// One way gozler answers differently from es. The help's NOTES print every
@@ -152,8 +154,9 @@ const DIFFERENCES: &[Difference] = &[
         why: "a script needs one code per outcome",
     },
     Difference {
-        gozler: "size: never matches a folder",
-        es: "folder sizes can be indexed and matched",
+        gozler: "size: never matches a folder, and -get-total-size and \
+                 -get-folder-size add up the sizes of files only",
+        es: "folder sizes can be indexed, matched and added up",
         why: "the index holds no folder sizes",
     },
 ];
@@ -304,7 +307,7 @@ fn wrap_into(out: &mut String, start: &str, text: &str, indent: usize) {
 mod tests {
     use super::*;
     use crate::escompat::{Command, parse_argv};
-    use crate::query::parse_query;
+    use crate::query::{Test, parse_query};
 
     fn argv(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(ToString::to_string).collect()
@@ -383,8 +386,13 @@ mod tests {
         for usage in entries("SEARCH FUNCTIONS") {
             for form in usage.split(", ") {
                 let parsed = parse_query(form).unwrap_or_else(|e| panic!("{form}: {e}"));
+                let searched_as_text = parsed
+                    .clauses
+                    .iter()
+                    .flat_map(|clause| &clause.terms)
+                    .any(|term| matches!(&term.test, Test::Name(name) if name.contains(':')));
                 assert!(
-                    !parsed.name_terms.iter().any(|term| term.contains(&b':')),
+                    !searched_as_text,
                     "{form} is searched as text, not as a function"
                 );
             }

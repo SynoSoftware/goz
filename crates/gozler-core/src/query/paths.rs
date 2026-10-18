@@ -1,5 +1,4 @@
-//! Full paths for one query: building them and matching path terms against
-//! them.
+//! Full paths for one query.
 //!
 //! The index stores no paths, so a full path is the mount prefix plus the
 //! names on the walk up to the root. Walking to the root for every candidate
@@ -9,11 +8,9 @@
 //! a separator and its name. Its cache is bounded, because the folders a local
 //! user creates decide how large it would grow.
 
-use super::parse::{CodePointBuf, ParsedQuery, Wildcard};
 use crate::index::VolumeIndex;
 use crate::index::volume::MAX_PATH_HOPS;
 use crate::types::{EntryIdx, NIL};
-use memchr::memmem;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -199,56 +196,6 @@ impl DirPaths {
             NameForm::Raw => index.entry(idx).name(),
             NameForm::Folded => index.folded_name(idx),
         }
-    }
-}
-
-/// A query's path terms and path wildcards, tested against full paths.
-pub(crate) struct PathMatcher<'q> {
-    finders: Vec<memmem::Finder<'q>>,
-    wildcards: &'q [Wildcard],
-    dirs: DirPaths,
-    path: Vec<u8>,
-    code_points: CodePointBuf,
-}
-
-impl<'q> PathMatcher<'q> {
-    /// `None` when the query has no path term.
-    pub(crate) fn new(
-        index: &VolumeIndex,
-        parsed: &'q ParsedQuery,
-        mount_prefix: &str,
-    ) -> Option<Self> {
-        if parsed.path_terms.is_empty() && parsed.path_wildcards.is_empty() {
-            return None;
-        }
-        // The terms were folded at parse time iff the query ignores case.
-        let form = if parsed.match_case {
-            NameForm::Raw
-        } else {
-            NameForm::Folded
-        };
-        Some(Self {
-            finders: parsed
-                .path_terms
-                .iter()
-                .map(|t| memmem::Finder::new(t.as_slice()))
-                .collect(),
-            wildcards: &parsed.path_wildcards,
-            dirs: DirPaths::new(index, form, mount_prefix),
-            path: Vec::new(),
-            code_points: CodePointBuf::new(),
-        })
-    }
-
-    /// Whether entry `idx`'s full path contains every path term and matches
-    /// every path wildcard. `false` for an entry with no path.
-    pub(crate) fn matches(&mut self, index: &VolumeIndex, idx: EntryIdx) -> bool {
-        self.dirs.full_path_into(index, idx, &mut self.path)
-            && self.finders.iter().all(|f| f.find(&self.path).is_some())
-            && self
-                .wildcards
-                .iter()
-                .all(|w| w.matches_into(&self.path, &mut self.code_points))
     }
 }
 

@@ -62,8 +62,8 @@ pub struct EsPlan {
     /// Search text: every non-switch token, joined with single spaces in
     /// command-line order, each token preserved as received.
     pub query: String,
-    /// `-path` value, verbatim. The CLI absolutizes it (GetFullPathName
-    /// semantics, no existence check); the core stays path-API-free.
+    /// `-path` or `-get-folder-size` value, verbatim, from whichever comes
+    /// last. [`build_search`](super::build_search) makes it absolute.
     pub scope: Option<String>,
     /// How many results to show, from `-n`; [`EsPlan::row_limit`] applies it.
     pub limit: Limit,
@@ -89,9 +89,9 @@ pub struct EsPlan {
     /// Whether CSV text columns are always double-quoted (es default).
     /// `-no-double-quote` downgrades to quote-only-when-needed.
     pub double_quote: bool,
-    /// `-get-result-count`: print the number of matches instead of the
-    /// results.
-    pub result_count: bool,
+    /// `-get-result-count`, `-get-total-size` or `-get-folder-size`, the last
+    /// of them: print a count instead of the results.
+    pub count: Option<Count>,
     /// Case-sensitive matching, from `-case` / `-match-case`. Default off.
     pub match_case: bool,
     /// `-no-result-error`: exit 9 when nothing matches.
@@ -125,7 +125,7 @@ impl Default for EsPlan {
             bom: true,
             header: true,
             double_quote: true,
-            result_count: false,
+            count: None,
             match_case: false,
             no_result_error: false,
             timeout: None,
@@ -142,12 +142,8 @@ impl EsPlan {
     /// Without `-n`, stdout gets [`DEFAULT_LIMIT`] rows, so a query that
     /// forgets `-n` on a volume of a million files cannot flood a console or
     /// an agent's context, while an export file, which floods nothing, gets
-    /// every match. `-get-result-count` needs no rows: every page carries the
-    /// number of matches.
+    /// every match.
     pub fn row_limit(&self) -> Option<u32> {
-        if self.result_count {
-            return Some(0);
-        }
         match self.limit {
             Limit::Default if self.export.is_some() => None,
             Limit::Default => Some(DEFAULT_LIMIT),
@@ -172,6 +168,17 @@ impl EsPlan {
 
 /// The rows gozler shows without `-n`.
 pub const DEFAULT_LIMIT: u32 = 20;
+
+/// The count a command line prints instead of the results. Each covers every
+/// match, whatever `-n` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Count {
+    /// `-get-result-count`: how many entries match.
+    Results,
+    /// `-get-total-size` or `-get-folder-size`: the summed size of the
+    /// matching files in bytes.
+    TotalSize,
+}
 
 /// How many results a command line asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,8 +285,11 @@ pub(super) enum SwitchAction {
     /// `-export-csv`, `-export-tsv`, `-export-txt`: consume the next token as
     /// the file to write the rows to in this format, verbatim.
     Export(Format),
-    /// `-get-result-count`: print the number of matches.
-    ResultCount,
+    /// `-get-result-count` or `-get-total-size`: print this count.
+    Count(Count),
+    /// `-get-folder-size`: consume the next token as the scope, verbatim,
+    /// and print the total size.
+    FolderSize,
     /// `/ad`, `/a-d`: add this text to the query.
     SearchText(&'static str),
     /// A family's token gozler does not support; the text says why, after
@@ -321,12 +331,12 @@ impl SwitchAction {
         match self {
             SwitchAction::Limit => Some("N"),
             SwitchAction::Timeout => Some("MS"),
-            SwitchAction::Scope => Some("DIR"),
+            SwitchAction::Scope | SwitchAction::FolderSize => Some("DIR"),
             SwitchAction::Export(_) => Some("FILE"),
             SwitchAction::SortParam => Some("KEY"),
             SwitchAction::Column(_)
             | SwitchAction::Format(_)
-            | SwitchAction::ResultCount
+            | SwitchAction::Count(_)
             | SwitchAction::SearchText(_)
             | SwitchAction::Refused(_)
             | SwitchAction::SortFixed(_)
@@ -488,10 +498,26 @@ pub(super) const SWITCHES: &[Switch] = &[
     Switch {
         spelling: Spelling::Es {
             names: &["get-result-count"],
-            action: SwitchAction::ResultCount,
+            action: SwitchAction::Count(Count::Results),
         },
         help: "print only the number of matches, which counts every match \
                whatever -n says",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["get-total-size"],
+            action: SwitchAction::Count(Count::TotalSize),
+        },
+        help: "print only the summed size in bytes of every matching file; \
+               folders have no size",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["get-folder-size"],
+            action: SwitchAction::FolderSize,
+        },
+        help: "print only the summed size in bytes of every file below DIR: \
+               the same as -path DIR -get-total-size",
     },
     Switch {
         spelling: Spelling::Es {
@@ -803,7 +829,11 @@ fn apply_switch(
             plan.export = Some(take_param(rest, token)?.to_owned());
             plan.format = format;
         }
-        SwitchAction::ResultCount => plan.result_count = true,
+        SwitchAction::Count(count) => plan.count = Some(count),
+        SwitchAction::FolderSize => {
+            plan.scope = Some(take_param(rest, token)?.to_owned());
+            plan.count = Some(Count::TotalSize);
+        }
         SwitchAction::Refused(reason) => return Err(EsFatal::refused(token, reason)),
         SwitchAction::SortParam => {
             let value = take_param(rest, token)?;
@@ -980,7 +1010,7 @@ mod tests {
                 bom: true,
                 header: true,
                 double_quote: true,
-                result_count: false,
+                count: None,
                 match_case: false,
                 no_result_error: false,
                 timeout: None,
@@ -1119,13 +1149,19 @@ mod tests {
         assert!(!csv_stdout.table_options().bom);
     }
 
-    /// `-get-result-count` asks for no rows, whatever `-n` says: every page
-    /// carries the number of matches.
+    /// `-get-folder-size DIR` is `-path DIR -get-total-size`, and the last
+    /// scope and the last count switch win, as with the other switches.
     #[test]
-    fn the_result_count_asks_for_no_rows() {
+    fn the_folder_size_is_the_total_size_below_a_folder() {
+        let folder = plan(&["-get-folder-size", r"C:\repo"]);
         assert_eq!(
-            plan(&["-get-result-count", "-n", "all"]).row_limit(),
-            Some(0)
+            (folder.scope.as_deref(), folder.count),
+            (Some(r"C:\repo"), Some(Count::TotalSize))
+        );
+        let last = plan(&["-get-folder-size", "a", "-path", "b", "-get-result-count"]);
+        assert_eq!(
+            (last.scope.as_deref(), last.count),
+            (Some("b"), Some(Count::Results))
         );
     }
 

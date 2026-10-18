@@ -22,7 +22,7 @@ pub use frame::{
     encode_request, encode_response_frame,
 };
 pub use types::{
-    DaemonStatus, MAX_CLIENT_FRAME, MAX_SERVER_FRAME, MemPair, PAGE_ROWS, PIPE_NAME, PROTO_VERSION,
-    ProtoError, QueryRequest, QueryResults, Request, Response, ResultItem, VolumeMemory,
-    VolumeStatus,
+    DaemonStatus, MAX_CLIENT_FRAME, MAX_SERVER_FRAME, MemPair, OLDEST_PROTO_VERSION, PAGE_ROWS,
+    PIPE_NAME, PROTO_VERSION, ProtoError, QueryRequest, QueryResults, QueryTotals, Request,
+    Response, ResultItem, Returns, Rows, SearchRequest, VolumeMemory, VolumeStatus,
 };

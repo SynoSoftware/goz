@@ -163,11 +163,13 @@ fn run_scan(query: Option<String>) -> anyhow::Result<()> {
 /// results: the end-to-end smoke test (bootstrap → search).
 #[cfg(windows)]
 fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyhow::Result<()> {
-    use gozler_core::query::{parse_query, run_query};
+    use gozler_core::query::{CompiledQuery, parse_query, run_query};
     use gozler_core::types::SortSpec;
     use std::time::Instant;
 
-    let parsed = parse_query(query).map_err(|e| anyhow::anyhow!("bad query: {e}"))?;
+    let parsed = parse_query(query)
+        .and_then(|parsed| CompiledQuery::new(&parsed))
+        .map_err(|e| anyhow::anyhow!("bad query: {e}"))?;
     println!("\nquery: {query:?}");
     for s in scans {
         let mount = s.mounted().display_prefix();
