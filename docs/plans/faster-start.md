@@ -1,17 +1,23 @@
-# Plan: a faster start by saving the index
+# Plan: a faster start by saving the index (dropped)
 
 How to make an index complete sooner after gozlerd starts, beyond what one
 MFT pass gives. Every start builds each index from the MFT, and until the
 build ends the volume is `bootstrapping`: every answer exits 2, "may be
 incomplete" (`docs/DESIGN.md`, "Index coherence"). Saving each index with
-its journal cursor would let a start replay the journal instead. This plan
-keeps the requirements for that, for the day it is needed.
+its journal cursor would let a start replay the journal instead.
 
 ## Schedule
 
-Deferred. It starts only when a user with an HDD or with many millions of
-entries reports that a start is still too slow, and then only after the
-review that "Expert reviews" names.
+**Dropped** (owner ruling, 2026-10-18). gozler does not save the index to
+disk, because saving it is insecure: the file would keep the name of every
+file on the volume on disk after gozlerd stops, where backups and disk
+images copy it, and a damaged or planted file could be served as `live`.
+Today the names exist only in memory while the service runs. The gain does
+not justify that risk: one MFT pass already builds C: in about 10 s cold,
+and a saved index would save at most that, only after a stop shorter than
+the journal horizon. The sections below record what was known and what
+the work would have needed. When the reason is in `docs/DESIGN.md`, "Not
+planned", this file is deleted.
 
 ## What we know
 
@@ -33,10 +39,6 @@ review that "Expert reviews" names.
   from 2026-10-17 20:36, read on 2026-10-18 17:05: about 20.5 hours on a
   development day. A saved index would cover a night off, but not a
   weekend, after which a start builds from the MFT anyway.
-- **Why stage 2 is deferred.** A saved index would save at most the build,
-  about 10 s cold on the owner's machine, and only after a downtime shorter
-  than the journal horizon. It costs a security boundary and a new way to
-  serve a stale index as `live` (the requirements below).
 - **Upstream proposal.** mustafaahci/goz#1 (ZJHSteven, 2026-08-28) proposes
   to save each volume's index with its journal cursor (the journal position
   the index is current to), check both at start, replay the journal from
@@ -52,15 +54,14 @@ review that "Expert reviews" names.
 
 ## What we do not know
 
-- **The start time after a boot with one pass.** Read it from `gozlerd.log`
-  after the owner's next ordinary reboot. If it is far from 10 s, the
-  decision above is reassessed.
+- **The start time after a boot with one pass.** The experiment measured
+  the cold pass at 10.1 s; `gozlerd.log` shows it after the next reboot.
 - **Whether gozlerd survives a Fast Startup boot.** Windows Fast Startup
   normally hibernates services with the kernel at shutdown. On the owner's
   machine most boots are full starts anyway.
 - **How long a journal replay takes** on a saved index.
 
-## Requirements
+## What the work would have needed
 
 Each requirement names the failure a user would see without it.
 
@@ -102,21 +103,3 @@ journal ID, a purged cursor, a bad CRC, an unknown version, drift past the
 limit, a replay too long) ends in a full build and never in `live` with a
 stale index; the proptest passes; the file's folder refuses a standard user;
 and a restart of C: is measured against the one-pass build.
-
-## Expert reviews
-
-An independent review is worth its cost only where evidence cannot settle
-the question, so the plan asks for one at these points:
-
-1. **Before this work starts.** An independent plan review, with a second
-   reviewer who challenges the first, of how the work meets the seven
-   requirements, because it adds a security boundary and a way to serve a
-   stale index as `live`.
-2. **When a measurement contradicts this plan.** For example, if a start
-   after a boot is far from 10 s, or the journal horizon is much longer than
-   20.5 hours, the deferral is reassessed with a review.
-
-## When the plan is done
-
-When the work is built, or the owner drops it, its rules move into
-`docs/DESIGN.md` as the reason, and this file is deleted.
