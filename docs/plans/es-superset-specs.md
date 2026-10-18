@@ -1,4 +1,10 @@
-# Plan: goz as a compatible superset, modeled on Everything
+# Specs: es superset
+
+goz as a compatible superset of goz v0.2.0, with the Everything commands we
+need on top.
+
+The schedule and the order of work are in
+[the es superset plan](es-superset-plan.md).
 
 ## Goal
 
@@ -55,12 +61,13 @@ NOTES print this list from one table in `goz-core`, so it cannot fall behind:
 | Regex in es's dialect | Rust `regex` dialect | linear time, so a pattern cannot hang the daemon |
 | Folder sizes can be indexed | `size:` and `-get-total-size` skip folders | the index holds no folder sizes |
 
-`-timeout` on expiry joins the table if the es run under "Not verified" shows
-that es does not run the query anyway.
+`-timeout` on expiry joins the table if Everything's documentation (see "Not
+verified") shows that es does not run the query anyway.
 
 **Proof:** a golden corpus that records behavior, not v0.2.0's types: each row
 is a command line, the entries it matches in a fixture `VolumeIndex`, and the
-printed output. Capture it from v0.2.0 through the seams that already run
+printed output. Capture it, from the code as it is when the plan starts,
+through the seams that already run
 without a pipe: `parse_argv`, `parse_query`, the daemon's `encode_query_binary`
 over the fixture index (as `server.rs` tests do), and the CLI's `emit` and
 `render_csv` over synthetic `QueryResults`, once `emit` writes to a `Write`
@@ -117,9 +124,10 @@ variant's meaning beside it, so the help lists them from the same source.
 
 All names come from Everything's command-line and search-syntax
 documentation, and every one exists in `es.exe -help` 1.1.0.37 on this
-machine. Before building one, check its behavior against `es.exe`. Copy that
-behavior when it is right, fix it when it is not, and write the test for the
-behavior goz chose.
+machine. Before building one, check its behavior in Everything's
+documentation; never run `es.exe` (owner ruling). Copy that behavior when it
+is right, fix it when it is not, and write the test for the behavior goz
+chose.
 
 ### Switches
 
@@ -180,8 +188,9 @@ its own, and the daemon's text path (below) passes the daemon's.
 ## Target help screen
 
 `goz -help` is generated from the tables (see Design), so the real text follows
-the implementation. This sketch is the target it should read like. The es
-comparison tests settle the details it guesses, such as the column layout.
+the implementation. This sketch is the target it should read like.
+Everything's documentation settles the details it guesses, such as the column
+layout.
 
 ```text
 goz 0.3.0 - instant file search for Windows NTFS
@@ -285,7 +294,9 @@ EXIT CODES
 
 - **The client parses; the daemon evaluates.** The client runs the goz-core
   parser, resolves the working directory, time zone and query-start instant,
-  and sends the parsed query with its scope, sort, limit and wanted columns.
+  and sends the parsed query with its scope, sort, limit and wanted columns,
+  or asks for the count and size total only, which the daemon sums so no row
+  crosses the pipe.
   Arguments are joined and split into terms as in v0.2.0 (bug 10). The
   daemon still accepts `QueryRequest.query` as text from other pipe clients and
   parses it with the same parser and its own clock; a relative path there is
@@ -294,9 +305,10 @@ EXIT CODES
   ones, the rule the JSON structs already follow.
 - **Version gate.** Raise `PROTO_VERSION` to 2 and send `Request::Hello` first,
   as `proto/types.rs` already asks of a client built apart from the daemon.
-  The new daemon speaks 1 and 2: it answers a `Hello` range that covers either
-  with the highest it covers, and serves a version-1 client the text queries
-  version 1 promised. An older daemon answers the new client `Unsupported`;
+  Each later change that grows the parsed query raises it by one. The daemon
+  serves every version from 1 up to its own: it answers a `Hello` range with
+  the highest version it covers, and serves a version-1 client the text
+  queries version 1 promised. An older daemon answers the new client `Unsupported`;
   the client prints
   `goz: the running gozd is older than this client; install the matching gozd`
   and exits 7. Without the gate, an old daemon searches new functions as text
@@ -344,9 +356,10 @@ EXIT CODES
   lists. The unknown-switch and unknown-function errors add
   `goz: run goz -help for the supported switches`.
 - **Order is deterministic.** Ties break on folded name, then volume, then
-  file ID, then parent file ID. Hard links need the last key: each link name
-  is its own entry, and all of them share one file ID (`notepad.exe` has
-  three). The same query over the same index then prints the same list, and
+  file ID, then parent file ID, then raw name. Hard links need the last two
+  keys: each link name is its own entry, and all of them share one file ID
+  (`notepad.exe` has three). The raw name separates two links in one
+  case-sensitive folder whose names differ only in case. The same query over the same index then prints the same list, and
   no path is rebuilt under the index lock. Unknown sizes and dates sort last.
 - **Dependencies.** `regex` (linear time, so a pattern cannot hang the daemon)
   and `jiff` (the date resolver) join goz-core; add both to the allowlist in
@@ -358,28 +371,9 @@ EXIT CODES
   field travels only when the request asks for it through a free `iflags` bit;
   otherwise older clients misread every item.
 - **Crate boundaries stay as `AGENTS.md` describes them:** parsing, tables,
-  help text, date resolution and evaluation in `goz-core`; argv handling,
-  working-directory resolution and output in `goz-cli`.
-
-## Order
-
-1. Install the Rust toolchain. Capture the golden corpus at the four seams.
-2. The wire contract: the parsed query, `PROTO_VERSION` 2 and the `Hello`
-   gate.
-3. The parser and evaluator: path terms (bugs 1, 9, 10, 11), unknown functions (bug 2),
-   `!` and `|`, `dm:`, `parent:`, `ww:`, `regex:`, `nopath:`, `-p`, sizes and
-   dates with `FLAG_METADATA_PENDING` and the missing metadata (bug 12), sort
-   key `extension` and the tie-break.
-4. One daemon swap, timed with the owner, because every search on the machine
-   depends on the running daemon.
-5. The attribute column after a measurement, then the remaining `/a` letters,
-   `attrib:` and the attributes column, with a second swap.
-
-The client-only work needs no evaluator change and can be built and
-unit-tested in any order: the tables and help, the exit-code enum and bugs 3
-to 8, `-count` and the default limit, the `/o` forms, columns, output formats,
-counts, `-no-result-error`, `-timeout` and `--status --json`. It reaches users
-with the daemon swap in step 4, because the new client requires protocol 2.
+  help text, date resolution, building the request from a working directory
+  it is given, and evaluation in `goz-core`; reading argv, the working
+  directory and the clock, and writing output in `goz-cli`.
 
 ## Not planned
 
@@ -401,12 +395,12 @@ failure).
 `-get-folder-size` returns "Error 8: Everything IPC not found" in the
 installed es, so its test comes from Everything's documentation. es's
 `-timeout` expiry, the case of `/a` letters and `-get-total-size` on folders
-still need an es run.
+are settled from that documentation too, because `es.exe` is no longer run.
 
 ## Done when
 
 - The golden corpus passes unchanged, apart from the default limit, the bug
-  rows and the `a<b` row.
+  rows, the `a<b` row, and the `!` and `|` rows.
 - The twelve bug commands give the fixed results in the table, and every exit
   path maps to one code in the exit-code table.
 - A new `goz` against the old daemon exits 7 with the version message.
@@ -415,5 +409,4 @@ still need an es run.
 - Every new command has a test for the behavior goz chose, each difference
   from es is a row of the differences table and a line of the help, and the
   full CI set from `AGENTS.md` passes.
-- `C:\Users\user\.claude\goz.md` drops its warnings and lists the new syntax,
-  and CLAUDE.md drops its "every query carries `-n 20`" rule.
+- `C:\Users\user\.claude\goz.md` drops its warnings and lists the new syntax.
