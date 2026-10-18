@@ -130,6 +130,9 @@ enum Check {
     Extension(Vec<Vec<u8>>),
     Path(memmem::Finder<'static>),
     PathWildcard(Wildcard),
+    /// The folder's full path, without a trailing separator, which the full
+    /// path of the folder that holds the entry must equal.
+    Parent(Vec<u8>),
 }
 
 impl CompiledQuery {
@@ -184,6 +187,7 @@ impl CompiledQuery {
                             Test::Extension(exts) => Check::Extension(
                                 exts.iter().map(|ext| fold(ext.as_bytes())).collect(),
                             ),
+                            Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
                             Test::Size(range) => Check::Size(*range),
                             Test::Kind(kind) => Check::Kind(*kind),
                         },
@@ -238,10 +242,12 @@ impl CompiledClause {
     /// Whether the clause tests the full path, then the cost of its dearest
     /// term: the order the scan tests clauses in.
     fn cost(&self) -> (bool, u8) {
-        let needs_path = self
-            .terms
-            .iter()
-            .any(|term| matches!(term.check, Check::Path(_) | Check::PathWildcard(_)));
+        let needs_path = self.terms.iter().any(|term| {
+            matches!(
+                term.check,
+                Check::Path(_) | Check::PathWildcard(_) | Check::Parent(_)
+            )
+        });
         let cost = self.terms.iter().map(|term| term.check.cost()).max();
         (needs_path, cost.unwrap_or(0))
     }
@@ -282,7 +288,7 @@ impl Check {
         match self {
             Check::Kind(_) => 0,
             Check::Size(_) => 1,
-            Check::Name(_) | Check::Path(_) => 2,
+            Check::Name(_) | Check::Path(_) | Check::Parent(_) => 2,
             Check::NameWildcard(_) | Check::PathWildcard(_) => 3,
             Check::Extension(_) => 4,
         }
@@ -316,6 +322,14 @@ impl Check {
             Check::Path(finder) => finder.find(path()).is_some(),
             Check::PathWildcard(wildcard) => {
                 wildcard.matches_into(path(), &mut scratch.code_points)
+            }
+            Check::Parent(folder) => {
+                // The path ends with the name in the same form, after the
+                // folder's path and, unless that is empty, a separator.
+                let parent = path()
+                    .strip_suffix(subject.name)
+                    .expect("a full path ends with its name");
+                parent.strip_suffix(b"\\").unwrap_or(parent) == folder.as_slice()
             }
         })
     }
@@ -1395,6 +1409,33 @@ mod tests {
         );
     }
 
+    /// `parent:` finds the entries directly in a folder, on the full scan,
+    /// the folded-arena scan and the scoped walk, in either case form. A
+    /// trailing separator, a root's included, is ignored.
+    #[test]
+    fn parent_finds_the_entries_directly_in_a_folder() {
+        let idx = docs_index();
+        let repo = [r"C:\repo\docs", r"C:\repo\readme.md", r"C:\repo\src"];
+        assert_eq!(paths_under(&idx, r"C:\", r"parent:C:\repo", None), repo);
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"parent:c:\REPO\", Some(b"repo")),
+            repo
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"parent:C:\repo readme", None),
+            [r"C:\repo\readme.md"]
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"parent:C:\", None),
+            [r"C:\docs", r"C:\repo"]
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"parent:C:\repo case:", None),
+            repo
+        );
+        assert!(paths_under(&idx, r"C:\", r"parent:C:\Repo case:", None).is_empty());
+    }
+
     // -- clauses ------------------------------------------------------------
 
     fn query_of(clauses: Vec<Vec<Term>>) -> ParsedQuery {
@@ -1516,6 +1557,7 @@ mod tests {
                 text().prop_map(Test::Path),
                 text().prop_map(Test::NameWildcard),
                 text().prop_map(Test::PathWildcard),
+                text().prop_map(Test::Parent),
                 prop::collection::vec(text(), 0..3).prop_map(Test::Extension),
                 (any::<u64>(), any::<u64>())
                     .prop_map(|(min, max)| Test::Size(SizeRange { min, max })),

@@ -18,6 +18,6 @@ pub use engine::{
 };
 pub use order::{VolumeRun, order_hits};
 pub use parse::{
-    Clause, Kind, ParsedQuery, QueryError, SizeRange, Term, Test, parse_query,
-    parse_query_with_case,
+    Clause, Kind, ParseOptions, ParsedQuery, QueryError, SizeRange, Term, Test, parse_query,
+    parse_query_with, parse_query_with_case,
 };

@@ -19,4 +19,5 @@ pub mod query;
 pub mod scope;
 pub mod types;
 pub mod usn;
+pub mod winpath;
 pub mod wtf8;

@@ -905,6 +905,19 @@ mod tests {
         );
     }
 
+    /// A text query carries no working directory, so a relative path in it is
+    /// refused as a bad query, never searched as text that matches nothing.
+    #[test]
+    fn a_relative_path_in_a_text_query_is_a_bad_query() {
+        let vols = set(&[live_volume(r"C:\")]);
+        for text in [r".\System32", "parent:Windows"] {
+            match answer(&vols, Request::Query(query(text))) {
+                Response::Error { code, .. } => assert_eq!(code, ProtoError::BadQuery, "{text}"),
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+    }
+
     /// Paging must set `more` on every frame but the last, and `total` must be
     /// the whole match count on every page, not the page's own length.
     #[test]

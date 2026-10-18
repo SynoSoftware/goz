@@ -48,9 +48,9 @@ pub fn help() -> String {
 }
 
 const INTRO: &str = "Finds files and folders by name, path and size. Terms combine with \
-     AND. Shows 20 results unless -n says otherwise. Results: one full path per \
-     line on stdout; diagnostics on stderr. A switch starts with - or /, and each \
-     dash inside its name is optional.";
+     AND. Paths accept \\ or /. Shows 20 results unless -n says otherwise. Results: \
+     one full path per line on stdout; diagnostics on stderr. A switch starts with \
+     - or /, and each dash inside its name is optional.";
 
 /// Search terms that use no function, with what each finds.
 const SEARCH_TERMS: &[(&str, &str)] = &[
@@ -61,8 +61,17 @@ const SEARCH_TERMS: &[(&str, &str)] = &[
         "a phrase; the shell must pass the double quotes",
     ),
     (r"docs\agents", r"full paths containing docs\agents"),
+    ("docs/agents", r"the same: / works as \"),
     (r"C:\repo\", "everything below that folder"),
     (r"C:\repo\*.cs", ".cs files below that folder"),
+    (
+        r".\src\",
+        "everything below src in the current folder; also ..\\",
+    ),
+    (
+        r#""C:\Program Files (x86)\Microsoft""#,
+        "a quoted path keeps its spaces and is still a path",
+    ),
     (
         r"*\node_modules\*",
         r"a wildcard with \ matches the whole full path",
@@ -79,6 +88,8 @@ const SEARCH_TERMS: &[(&str, &str)] = &[
 const EXAMPLES: &[&str] = &[
     "gozler readme",
     r"gozler -path C:\repo ext:cs",
+    "gozler C:/repo/*.cs",
+    r"gozler -parent C:\repo -n all",
     "gozler *.log -sort dm -n 10",
     "gozler -n all ext:cs",
     "gozler -timeout 5000 -no-result-error report",
@@ -95,6 +106,8 @@ const NOTES: &[&str] = &[
      exits 2. With -path, only the volume of that folder is in scope.",
     "Files whose size Windows did not report never match size: and add \
      nothing to -get-total-size or -get-folder-size.",
+    "A token that starts with / and names a switch is that switch, as /p is \
+     -p, so write a relative path without a leading /: docs/agents.",
 ];
 
 /// One way gozler answers differently from es. The help's NOTES print every
@@ -147,6 +160,17 @@ const DIFFERENCES: &[Difference] = &[
         es: "< > groups terms",
         why: "Windows names cannot contain < or >, so the text never matched, and \
               grouping is not planned",
+    },
+    Difference {
+        gozler: "/ and \\ both separate folders: docs/agents finds docs\\agents",
+        es: "/ is not a separator, so docs/agents finds nothing",
+        why: "agents and Unix habits write /",
+    },
+    Difference {
+        gozler: "A path term that starts with .\\ or ..\\, and a parent: folder that is \
+                 not absolute, are below the current folder",
+        es: "parent: needs an absolute folder, and the search syntax has no current folder",
+        why: "a command line runs in a folder, and a relative -path is below it too",
     },
     Difference {
         gozler: "Shows 20 results unless -n says otherwise, and exits 10 with a warning \
@@ -319,7 +343,7 @@ fn wrap_into(out: &mut String, start: &str, text: &str, indent: usize) {
 mod tests {
     use super::*;
     use crate::escompat::{Command, parse_argv};
-    use crate::query::{Test, parse_query};
+    use crate::query::{ParseOptions, Test, parse_query, parse_query_with};
 
     fn argv(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(ToString::to_string).collect()
@@ -388,6 +412,7 @@ mod tests {
                 Some("N") => tokens[1] = "5",
                 Some("MS") => tokens[1] = "1000",
                 Some("DIR") => tokens[1] = r"C:\repo",
+                Some("PATH") => tokens[1] = r"C:\repo\x",
                 Some("FILE") => tokens[1] = "out.csv",
                 Some("KEY") => tokens[1] = "name",
                 Some(param) => panic!("{form}: the test has no value for {param}"),
@@ -411,7 +436,11 @@ mod tests {
         }
 
         for term in entries("SEARCH TERMS") {
-            let parsed = parse_query(&term).unwrap_or_else(|e| panic!("{term}: {e}"));
+            let options = ParseOptions {
+                working_dir: Some(r"C:\repo"),
+                ..ParseOptions::default()
+            };
+            let parsed = parse_query_with(&term, options).unwrap_or_else(|e| panic!("{term}: {e}"));
             assert!(!parsed.is_text_empty(), "{term} searches for nothing");
         }
 

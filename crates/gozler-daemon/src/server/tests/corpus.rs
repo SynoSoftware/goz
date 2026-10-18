@@ -228,12 +228,98 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 10,
             ),
         ),
-        // Bug 9.
-        (&["docs/agents/testing"], prints(&[])),
-        // Bug 9.
-        (&["path:docs/agents"], prints(&[])),
-        // Bug 9.
-        (&["C:/repo/docs/testing.md"], prints(&[])),
+        // Bug 9: fixed, `/` is a separator, as `\` is.
+        (
+            &["docs/agents/testing"],
+            prints(&[r"C:\repo\docs\agents\testing.md"]),
+        ),
+        // Bug 9: fixed.
+        (
+            &["path:docs/agents"],
+            prints(&[r"C:\repo\docs\agents", r"C:\repo\docs\agents\testing.md"]),
+        ),
+        // Bug 9: fixed.
+        (
+            &["C:/repo/docs/testing.md"],
+            prints(&[r"C:\repo\docs\testing.md"]),
+        ),
+        // An unknown `/` token is search text, as in es, and now a path term.
+        (
+            &["/docs"],
+            prints(&[
+                r"C:\repo\docs\agents",
+                r"C:\docs",
+                r"C:\repo\docs",
+                r"C:\repo\docs\link.md",
+                r"C:\docs\readme.txt",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+            ]),
+        ),
+        // A path term that starts with `.\` or `..\` is below the working
+        // directory, `WORKING_DIR`.
+        (
+            &[r".\"],
+            prints(&[
+                r"C:\repo\src\argv.rs",
+                r"C:\repo\src\link.md",
+                r"C:\repo\src\main.cs",
+            ]),
+        ),
+        (
+            &["../docs/*.md"],
+            prints(&[
+                r"C:\repo\docs\link.md",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+            ]),
+        ),
+        // -p matches text terms against the full path, and nopath: the name.
+        (&["src", "rs"], prints(&[])),
+        (&["-p", "src", "rs"], prints(&[r"C:\repo\src\argv.rs"])),
+        (
+            &["-p", "src", "nopath:link"],
+            prints(&[r"C:\repo\src\link.md"]),
+        ),
+        // parent: and -parent find the entries directly in a folder;
+        // -parent-path searches below the folder that holds a path.
+        (
+            &[r"parent:C:\repo\docs"],
+            prints(&[
+                r"C:\repo\docs\agents",
+                r"C:\repo\docs\link.md",
+                r"C:\repo\docs\testing.md",
+            ]),
+        ),
+        (
+            &["parent:.."],
+            prints(&[
+                r"C:\repo\DESIGN.md",
+                r"C:\repo\docs",
+                r"C:\repo\node_modules",
+                r"C:\repo\notes.md.bak",
+                r"C:\repo\Report 2026.txt",
+                r"C:\repo\report.txt",
+                r"C:\repo\src",
+            ]),
+        ),
+        (
+            &["-parent", r"..\docs"],
+            prints(&[
+                r"C:\repo\docs\agents",
+                r"C:\repo\docs\link.md",
+                r"C:\repo\docs\testing.md",
+            ]),
+        ),
+        (
+            &["-parent-path", "C:/repo/docs/testing.md"],
+            prints(&[
+                r"C:\repo\docs\agents",
+                r"C:\repo\docs\link.md",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+            ]),
+        ),
         // Bug 10: fixed, quotes delimit a function's value, which matches as
         // a substring, so `Program Files (x86)` matches too.
         (
@@ -246,8 +332,19 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\Program Files (x86)",
             ]),
         ),
-        // Bug 10: a quoted path term, which stage 6 fixes.
-        (&[r#""C:\Program Files (x86)\Microsoft""#], prints(&[])),
+        // Bug 10: fixed, a quoted term with a separator is a path term.
+        (
+            &[r#""C:\Program Files (x86)\Microsoft""#],
+            prints(&[
+                r"C:\Program Files (x86)\Microsoft\edge.manifest",
+                r"C:\Program Files (x86)\Microsoft",
+            ]),
+        ),
+        // Bug 10: a wildcard in a quoted path term is still a wildcard.
+        (
+            &[r#""C:\Program Files\*.exe""#],
+            prints(&[r"C:\Program Files\app.exe"]),
+        ),
         // Bug 10: a query in one argument splits into terms.
         (&["ext:rs size:>1kb"], prints(&[r"C:\repo\src\argv.rs"])),
         // Bug 3: fixed, /a-d is file: and /ad is folder:.
@@ -624,12 +721,14 @@ fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
     }
 }
 
-/// The request protocol 1's client sends for `plan`, its scope already
-/// absolute.
+/// The request protocol 1's client sends for `plan`, its scope made absolute
+/// as gozler makes it.
 fn text_request(plan: &EsPlan) -> QueryRequest {
     QueryRequest {
         query: plan.query.clone(),
-        scope: plan.scope.clone(),
+        scope: build_search(plan, WORKING_DIR)
+            .expect("the text row parses")
+            .scope,
         sort: plan.sort,
         offset: 0,
         limit: plan.row_limit(),

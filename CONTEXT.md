@@ -57,6 +57,11 @@ as a substring.
 The folder `-path` names. A search finds the entries below it, on the volume
 whose mount prefix is the longest that starts it.
 
+**Relative path**:
+A path that starts at gozler's working directory instead of a root: a path
+term that starts with `.\` or `..\`, or a folder for `-path` or `parent:`
+without a drive or share.
+
 **Path wildcard**:
 A path term with `*` or `?`; it must match the whole full path, as `*\docs\*`
 does.

@@ -20,7 +20,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// meet, rather than agreeing on a version one side cannot actually speak.
 /// The client asks for this version alone, so a daemon older than the client
 /// refuses it.
-pub const PROTO_VERSION: u16 = 2;
+pub const PROTO_VERSION: u16 = 3;
 
 /// The oldest protocol version a daemon of this build serves: protocol 1's
 /// clients send [`Request::Query`] without a `Hello`.
@@ -492,6 +492,31 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Response>(reply_json).expect("deserialize"),
             reply
+        );
+    }
+
+    /// Protocol 3 adds the `parent:` test; a later daemon must still read it
+    /// as this client writes it.
+    #[test]
+    fn protocol_3_parent_test_keeps_its_json() {
+        use crate::query::{Clause, Test};
+        let search = Request::Search(SearchRequest {
+            query: ParsedQuery {
+                clauses: vec![Clause::single(Test::Parent(r"C:\repo".into()))],
+                match_case: false,
+            },
+            scope: None,
+            returns: Returns::Totals,
+        });
+        let json = concat!(
+            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
+            r#"{"negated":false,"test":{"Parent":"C:\\repo"}}]}],"match_case":false},"#,
+            r#""scope":null,"returns":"Totals"}"#,
+        );
+        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<Request>(json).expect("deserialize"),
+            search
         );
     }
 

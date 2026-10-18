@@ -55,16 +55,19 @@ pub enum Command {
 /// The fully-resolved plan for one es-compatible invocation.
 ///
 /// Produced by [`parse_argv`]; consumed by the CLI, which resolves
-/// process-level concerns (absolutizing `scope`, creating the export file,
-/// talking to the daemon).
+/// process-level concerns (the working directory that
+/// [`build_search`](super::build_search) makes folders absolute against,
+/// creating the export file, talking to the daemon).
 #[derive(Clone, Debug, PartialEq)]
 pub struct EsPlan {
     /// Search text: every non-switch token, joined with single spaces in
     /// command-line order, each token preserved as received.
     pub query: String,
-    /// `-path` or `-get-folder-size` value, verbatim, from whichever comes
-    /// last. [`build_search`](super::build_search) makes it absolute.
-    pub scope: Option<String>,
+    /// The folder of `-path`, `-get-folder-size` or `-parent-path`, from
+    /// whichever comes last.
+    pub scope: Option<ScopeFolder>,
+    /// `-parent DIR`, verbatim: only the entries directly in DIR.
+    pub parent: Option<String>,
     /// How many results to show, from `-n`; [`EsPlan::row_limit`] applies it.
     pub limit: Limit,
     /// The columns the column switches ask for, in their order with es dedupe
@@ -94,6 +97,8 @@ pub struct EsPlan {
     pub count: Option<Count>,
     /// Case-sensitive matching, from `-case` / `-match-case`. Default off.
     pub match_case: bool,
+    /// `-p` / `-match-path`: text terms match the full path. Default off.
+    pub match_path: bool,
     /// `-no-result-error`: exit 9 when nothing matches.
     pub no_result_error: bool,
     /// `-timeout MS`: how long to wait for the volumes in scope to become
@@ -117,6 +122,7 @@ impl Default for EsPlan {
         Self {
             query: String::new(),
             scope: None,
+            parent: None,
             limit: Limit::Default,
             columns: Vec::new(),
             sort: SortSpec::default(),
@@ -127,6 +133,7 @@ impl Default for EsPlan {
             double_quote: true,
             count: None,
             match_case: false,
+            match_path: false,
             no_result_error: false,
             timeout: None,
             json: false,
@@ -162,6 +169,26 @@ impl EsPlan {
             bom: self.bom && self.export.is_some(),
             header: self.header,
             double_quote: self.double_quote,
+        }
+    }
+}
+
+/// The folder a search is below, as the command line names it, verbatim.
+/// [`build_search`](super::build_search) makes it absolute.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopeFolder {
+    /// `-path DIR` or `-get-folder-size DIR`: below DIR.
+    Dir(String),
+    /// `-parent-path PATH`: below the folder that holds PATH.
+    ParentOf(String),
+}
+
+impl ScopeFolder {
+    /// The path as the command line gave it, for the CLI to resolve a
+    /// drive-relative one.
+    pub fn path_mut(&mut self) -> &mut String {
+        match self {
+            ScopeFolder::Dir(path) | ScopeFolder::ParentOf(path) => path,
         }
     }
 }
@@ -280,6 +307,12 @@ pub(super) enum SwitchAction {
     NoResultError,
     /// `-path`: consume the next token as the scope, verbatim.
     Scope,
+    /// `-parent-path`: consume the next token as the path whose folder is
+    /// the scope, verbatim.
+    ParentPath,
+    /// `-parent`: consume the next token as the folder whose direct entries
+    /// match, verbatim.
+    Parent,
     /// `-csv`, `-tsv`, `-txt`: write the rows in this format.
     Format(Format),
     /// `-export-csv`, `-export-tsv`, `-export-txt`: consume the next token as
@@ -312,6 +345,8 @@ pub(super) enum SwitchAction {
     NoDoubleQuote,
     /// `-case` / `-match-case`: case-sensitive matching.
     MatchCase,
+    /// `-p` / `-match-path`: text terms match the full path.
+    MatchPath,
     /// `--json`: print results as JSON.
     Json,
     /// `--status`: report the daemon's state instead of searching.
@@ -331,7 +366,8 @@ impl SwitchAction {
         match self {
             SwitchAction::Limit => Some("N"),
             SwitchAction::Timeout => Some("MS"),
-            SwitchAction::Scope | SwitchAction::FolderSize => Some("DIR"),
+            SwitchAction::Scope | SwitchAction::Parent | SwitchAction::FolderSize => Some("DIR"),
+            SwitchAction::ParentPath => Some("PATH"),
             SwitchAction::Export(_) => Some("FILE"),
             SwitchAction::SortParam => Some("KEY"),
             SwitchAction::Column(_)
@@ -345,6 +381,7 @@ impl SwitchAction {
             | SwitchAction::NoHeader
             | SwitchAction::NoDoubleQuote
             | SwitchAction::MatchCase
+            | SwitchAction::MatchPath
             | SwitchAction::NoResultError
             | SwitchAction::Json
             | SwitchAction::Status
@@ -375,6 +412,20 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Es {
+            names: &["parent-path"],
+            action: SwitchAction::ParentPath,
+        },
+        help: "search below the folder that holds PATH",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["parent"],
+            action: SwitchAction::Parent,
+        },
+        help: "only the files and folders directly in DIR, as parent:DIR finds",
+    },
+    Switch {
+        spelling: Spelling::Es {
             names: &["sort"],
             action: SwitchAction::SortParam,
         },
@@ -401,6 +452,14 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::MatchCase,
         },
         help: "match case",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["p", "match-path"],
+            action: SwitchAction::MatchPath,
+        },
+        help: "match every text term against the full path, as path: does; \
+               nopath: still matches the name",
     },
     Switch {
         spelling: Spelling::Family {
@@ -823,7 +882,13 @@ fn apply_switch(
             plan.timeout = Some(Duration::from_millis(ms.into()));
         }
         SwitchAction::NoResultError => plan.no_result_error = true,
-        SwitchAction::Scope => plan.scope = Some(take_param(rest, token)?.to_owned()),
+        SwitchAction::Scope => {
+            plan.scope = Some(ScopeFolder::Dir(take_param(rest, token)?.to_owned()));
+        }
+        SwitchAction::ParentPath => {
+            plan.scope = Some(ScopeFolder::ParentOf(take_param(rest, token)?.to_owned()));
+        }
+        SwitchAction::Parent => plan.parent = Some(take_param(rest, token)?.to_owned()),
         SwitchAction::Format(format) => plan.format = format,
         SwitchAction::Export(format) => {
             plan.export = Some(take_param(rest, token)?.to_owned());
@@ -831,7 +896,7 @@ fn apply_switch(
         }
         SwitchAction::Count(count) => plan.count = Some(count),
         SwitchAction::FolderSize => {
-            plan.scope = Some(take_param(rest, token)?.to_owned());
+            plan.scope = Some(ScopeFolder::Dir(take_param(rest, token)?.to_owned()));
             plan.count = Some(Count::TotalSize);
         }
         SwitchAction::Refused(reason) => return Err(EsFatal::refused(token, reason)),
@@ -852,6 +917,7 @@ fn apply_switch(
         SwitchAction::NoHeader => plan.header = false,
         SwitchAction::NoDoubleQuote => plan.double_quote = false,
         SwitchAction::MatchCase => plan.match_case = true,
+        SwitchAction::MatchPath => plan.match_path = true,
         SwitchAction::Json => plan.json = true,
         SwitchAction::Status => plan.status = true,
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
@@ -998,7 +1064,8 @@ mod tests {
             parsed,
             EsPlan {
                 query: "report".to_string(),
-                scope: Some("C:\\some dir".to_string()),
+                scope: Some(ScopeFolder::Dir("C:\\some dir".to_string())),
+                parent: None,
                 limit: Limit::Rows(200),
                 columns: vec![EsColumn::Size, EsColumn::DateModified],
                 sort: SortSpec {
@@ -1012,6 +1079,7 @@ mod tests {
                 double_quote: true,
                 count: None,
                 match_case: false,
+                match_path: false,
                 no_result_error: false,
                 timeout: None,
                 json: false,
@@ -1155,13 +1223,19 @@ mod tests {
     fn the_folder_size_is_the_total_size_below_a_folder() {
         let folder = plan(&["-get-folder-size", r"C:\repo"]);
         assert_eq!(
-            (folder.scope.as_deref(), folder.count),
-            (Some(r"C:\repo"), Some(Count::TotalSize))
+            (folder.scope, folder.count),
+            (
+                Some(ScopeFolder::Dir(r"C:\repo".to_string())),
+                Some(Count::TotalSize)
+            )
         );
         let last = plan(&["-get-folder-size", "a", "-path", "b", "-get-result-count"]);
         assert_eq!(
-            (last.scope.as_deref(), last.count),
-            (Some("b"), Some(Count::Results))
+            (last.scope, last.count),
+            (
+                Some(ScopeFolder::Dir("b".to_string())),
+                Some(Count::Results)
+            )
         );
     }
 
@@ -1445,12 +1519,19 @@ mod tests {
         assert!(plan(&["-matchcase"]).match_case);
     }
 
+    /// The folder switches keep their values as typed, for
+    /// [`build_search`](crate::escompat::build_search) to make absolute; the
+    /// last of `-path` and `-parent-path` is the scope.
     #[test]
-    fn scope_is_taken_verbatim() {
-        // Absolutization is the CLI's job; the core keeps the raw value.
+    fn folder_switches_are_taken_verbatim() {
         assert_eq!(
             plan(&["-path", "rel\\dir"]).scope,
-            Some("rel\\dir".to_string())
+            Some(ScopeFolder::Dir("rel\\dir".to_string()))
+        );
+        let parents = plan(&["-path", "a", "-parent-path", "b/c", "-parent", "d"]);
+        assert_eq!(
+            (parents.scope, parents.parent.as_deref()),
+            (Some(ScopeFolder::ParentOf("b/c".to_string())), Some("d"))
         );
     }
 

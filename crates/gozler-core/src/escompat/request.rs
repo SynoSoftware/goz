@@ -1,23 +1,24 @@
 //! The request gozler sends for a command line.
 
-use super::EsPlan;
+use super::{EsPlan, ScopeFolder};
 use crate::proto::{Returns, Rows, SearchRequest};
-use crate::query::{QueryError, parse_query_with_case};
+use crate::query::{Clause, ParseOptions, QueryError, Test, parse_query_with};
+use crate::winpath::{absolute, parent_of};
 
-/// The request for `plan`: its query parsed, its scope made absolute against
-/// `working_dir`, an absolute path such as `C:\repo`, and either the rows to
-/// show or, for a count, the totals.
+/// The request for `plan`: its query parsed, its folders made absolute
+/// against `working_dir`, an absolute path such as `C:\repo`, and either the
+/// rows to show or, for a count, the totals.
 ///
-/// The scope is joined with Windows' rules, without asking the operating
-/// system, so a command line builds the same request on any machine: `C:\x`
-/// and `\\server\share\x` stay as they are, `\x` is on the working
-/// directory's drive, and anything else is below the working directory. `.`
-/// and `..` components are then removed, as `GetFullPathNameW` removes them,
-/// because the daemon looks each component up as a folder. A drive-relative
-/// scope such as `D:x` depends on the current folder of each drive, which
-/// only Windows knows, so the caller resolves it first (see
-/// [`is_drive_relative`]); given one, this joins it below the working
-/// directory on that drive, and below the root of any other drive.
+/// The folders of `-path`, `-parent-path` and `-parent`, and the relative
+/// paths in the query, are joined to `working_dir` by
+/// [`absolute`]. A drive-relative folder such as
+/// `D:x` depends on the current folder of each drive, which only Windows
+/// knows, so the caller resolves it first (see
+/// [`is_drive_relative`](crate::winpath::is_drive_relative)).
+///
+/// `-parent DIR` adds a `parent:` test for DIR to the query, and without
+/// `-path` or `-parent-path` it is also the scope, so the daemon walks DIR
+/// instead of every volume and refuses a DIR on no indexed volume.
 pub fn build_search(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, QueryError> {
     let returns = match plan.count {
         Some(_) => Returns::Totals,
@@ -30,105 +31,35 @@ pub fn build_search(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, Q
             want_mtime: true,
         }),
     };
+    let mut query = parse_query_with(
+        &plan.query,
+        ParseOptions {
+            match_case: plan.match_case,
+            match_path: plan.match_path,
+            working_dir: Some(working_dir),
+        },
+    )?;
+    let parent = plan.parent.as_deref().map(|dir| absolute(dir, working_dir));
+    query
+        .clauses
+        .extend(parent.clone().map(|dir| Clause::single(Test::Parent(dir))));
+    let scope = match &plan.scope {
+        Some(ScopeFolder::Dir(dir)) => Some(absolute(dir, working_dir)),
+        Some(ScopeFolder::ParentOf(path)) => Some(parent_of(&absolute(path, working_dir))),
+        None => parent,
+    };
     Ok(SearchRequest {
-        query: parse_query_with_case(&plan.query, plan.match_case)?,
-        scope: plan
-            .scope
-            .as_deref()
-            .map(|scope| absolute(scope, working_dir)),
+        query,
+        scope,
         returns,
     })
-}
-
-/// Whether `path` names a drive but not its root, such as `D:x` or `D:`.
-pub fn is_drive_relative(path: &str) -> bool {
-    match path.as_bytes() {
-        [letter, b':', rest @ ..] => {
-            letter.is_ascii_alphabetic() && rest.first().is_none_or(|&c| !is_separator(c))
-        }
-        _ => false,
-    }
-}
-
-fn is_separator(c: u8) -> bool {
-    c == b'\\' || c == b'/'
-}
-
-/// `path` joined to `working_dir` and without `.` and `..` components, every
-/// separator a `\`. A `\\?\` or `\\.\` path names a path verbatim or a device,
-/// so it stays as it is, as `GetFullPathNameW` leaves it.
-fn absolute(path: &str, working_dir: &str) -> String {
-    if path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
-        return path.to_string();
-    }
-    let (wd_root, wd_rest) = root(working_dir).unwrap_or((working_dir, ""));
-    let (root, base, rest) = if let Some((root, rest)) = root(path) {
-        (root, "", rest)
-    } else if path.starts_with(['\\', '/']) {
-        (wd_root, "", path)
-    } else if is_drive_relative(path) {
-        let (drive, rest) = path.split_at(2);
-        if drive.eq_ignore_ascii_case(wd_root) {
-            (wd_root, wd_rest, rest)
-        } else {
-            (drive, "", rest)
-        }
-    } else {
-        (wd_root, wd_rest, path)
-    };
-
-    let mut components: Vec<&str> = Vec::new();
-    for component in base.split(['\\', '/']).chain(rest.split(['\\', '/'])) {
-        match component {
-            "" | "." => {}
-            // `..` at the root stays at the root.
-            ".." => {
-                components.pop();
-            }
-            name => components.push(name),
-        }
-    }
-    let mut out = root.replace('/', r"\");
-    for name in &components {
-        out.push('\\');
-        out.push_str(name);
-    }
-    if components.is_empty() {
-        out.push('\\');
-    }
-    out
-}
-
-/// An absolute path split into its root and the rest: `C:` and `\x` for
-/// `C:\x`, `\\server\share` and `\x` for `\\server\share\x`. `None` when the
-/// path is not absolute.
-fn root(path: &str) -> Option<(&str, &str)> {
-    let bytes = path.as_bytes();
-    match bytes {
-        [a, b, ..] if is_separator(*a) && is_separator(*b) => {
-            // The root ends at the separator after the share name.
-            let end = bytes
-                .iter()
-                .enumerate()
-                .skip(2)
-                .filter(|&(_, &c)| is_separator(c))
-                .nth(1)
-                .map_or(path.len(), |(at, _)| at);
-            Some(path.split_at(end))
-        }
-        [letter, b':', separator, ..]
-            if letter.is_ascii_alphabetic() && is_separator(*separator) =>
-        {
-            Some(path.split_at(2))
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::escompat::{Command, parse_argv};
+    use crate::winpath::is_drive_relative;
 
     fn plan(tokens: &[&str]) -> EsPlan {
         let args: Vec<String> = tokens.iter().map(ToString::to_string).collect();
@@ -166,6 +97,31 @@ mod tests {
         }
         assert!(is_drive_relative("D:x") && is_drive_relative("D:"));
         assert!(!is_drive_relative(r"D:\x") && !is_drive_relative("x"));
+    }
+
+    /// `-parent-path` searches below the folder that holds its path, and a
+    /// root holds itself. `-parent` adds its test and is the scope only when
+    /// no other switch names one, so `-path` still decides the volumes.
+    #[test]
+    fn the_parent_switches_name_their_folders() {
+        let search = |tokens: &[&str]| build_search(&plan(tokens), r"C:\repo\src").expect("parses");
+        let scope = |tokens: &[&str]| search(tokens).scope;
+        assert_eq!(
+            scope(&["-parent-path", "main.rs"]).as_deref(),
+            Some(r"C:\repo\src")
+        );
+        assert_eq!(scope(&["-parent-path", "C:/"]).as_deref(), Some(r"C:\"));
+
+        let parent = search(&["-parent", ".."]);
+        assert_eq!(parent.scope.as_deref(), Some(r"C:\repo"));
+        assert_eq!(
+            parent.query.clauses,
+            [Clause::single(Test::Parent(r"C:\repo".to_string()))]
+        );
+        assert_eq!(
+            scope(&["-parent", "..", "-path", r"D:\x"]).as_deref(),
+            Some(r"D:\x")
+        );
     }
 
     /// A count asks for the totals, which cover every match, so `-n` never

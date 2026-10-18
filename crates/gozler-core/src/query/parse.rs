@@ -2,22 +2,27 @@
 //!
 //! Supported: space-separated terms (implicit AND), `"quoted phrases"`,
 //! `*`/`?` wildcards (anchored to the whole name), path terms (a term
-//! containing `\` or `/`, or a `path:` value; a path term with a wildcard is
-//! anchored to the whole full path), the functions in `SEARCH_FUNCTIONS`,
-//! `!` before a term to exclude it, and `|` between terms to match either.
-//! As in es, `|` binds tighter than the space, so `a|b c` is `(a or b) and c`,
-//! and quotes make operators and spaces plain text, also in a function's
-//! value: `path:"C:\Program Files"`.
+//! containing `\` or `/`, quoted or not, or a `path:` value; a path term with
+//! a wildcard is anchored to the whole full path), the functions in
+//! `SEARCH_FUNCTIONS`, `!` before a term to exclude it, and `|` between terms
+//! to match either. As in es, `|` binds tighter than the space, so `a|b c` is
+//! `(a or b) and c`, and quotes make operators and spaces plain text, also in
+//! a function's value: `path:"C:\Program Files"`.
+//!
+//! The parser writes every path the way the daemon compares it: `/` becomes
+//! `\`, and a path term that starts with `.\` or `..\`, and a relative
+//! `parent:` folder, are joined to the working directory
+//! ([`ParseOptions::working_dir`]).
 //!
 //! Refused as invalid input, because each would otherwise search text that
 //! no name contains: an unknown function such as `dm:`, an unquoted `<` or
-//! `>` outside a function value (es groups terms with them), and an operator
-//! without its term.
+//! `>` outside a function value (es groups terms with them), an operator
+//! without its term, and a relative path when there is no working directory.
 //!
 //! The parser turns the text into a [`ParsedQuery`], which the client sends to
-//! the daemon as it is: AND-ed clauses, each an OR of terms. Terms keep the
-//! text as typed; the daemon folds them when it compiles the query
-//! ([`super::CompiledQuery`]).
+//! the daemon as it is: AND-ed clauses, each an OR of terms. Apart from those
+//! paths, terms keep the text as typed; the daemon folds them when it
+//! compiles the query ([`super::CompiledQuery`]).
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -204,8 +209,9 @@ pub struct Term {
     pub test: Test,
 }
 
-/// What a [`Term`] tests. Text is as typed; the daemon folds it unless the
-/// query matches case.
+/// What a [`Term`] tests. Text is as typed, apart from paths, which hold `\`
+/// separators and no relative form; the daemon folds it unless the query
+/// matches case.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Test {
     /// The name contains this text.
@@ -216,6 +222,10 @@ pub enum Test {
     NameWildcard(String),
     /// The whole full path matches this pattern of `*` and `?`.
     PathWildcard(String),
+    /// The entry is directly in this folder: its full path without its last
+    /// separator and name equals this absolute path, a trailing separator
+    /// ignored. From protocol 3.
+    Parent(String),
     /// The extension is one of these, without the dot, compared ignoring case
     /// whatever the query's case.
     Extension(Vec<String>),
@@ -250,6 +260,12 @@ pub enum QueryError {
     UnknownFunction(String),
     #[error("malformed {what}: {detail}")]
     Malformed { what: &'static str, detail: String },
+    /// A relative path, which only a working directory can resolve, in a
+    /// query parsed without one; carries the path.
+    #[error(
+        "{0} is a relative path, and this query has no working directory to resolve it; give the full path"
+    )]
+    RelativePath(String),
     /// More terms than a query may hold; carries the query's count.
     #[error("the query has {0} terms; a query may have at most {max}", max = super::engine::MAX_QUERY_TERMS)]
     TooManyTerms(usize),
@@ -272,6 +288,8 @@ enum Function {
     Ext,
     Size,
     Path,
+    Parent,
+    NoPath,
     File,
     Folder,
     /// Handled by [`case_directive`] before the other functions; a `case:`
@@ -299,6 +317,19 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::Path,
         example: "text",
         help: "the full path contains text; with * or ? the whole full path matches",
+    },
+    SearchFunction {
+        names: &["parent"],
+        function: Function::Parent,
+        example: r"C:\repo",
+        help: "only the files and folders directly in this folder; a relative \
+               folder is below the current folder",
+    },
+    SearchFunction {
+        names: &["nopath"],
+        function: Function::NoPath,
+        example: "text",
+        help: "the name contains text, also with -p; with * or ? the whole name matches",
     },
     SearchFunction {
         names: &["file"],
@@ -331,21 +362,52 @@ fn case_directive(text: &str) -> Option<bool> {
     }
 }
 
+/// How [`parse_query_with`] reads a query, beyond its text: what the command
+/// line's switches and working directory say.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ParseOptions<'a> {
+    /// es `-case`: whether text terms match case unless a `case:` directive
+    /// says otherwise.
+    pub match_case: bool,
+    /// es `-p`: whether text terms without a separator match the full path,
+    /// as `path:` values do, instead of the name. `nopath:` still matches the
+    /// name.
+    pub match_path: bool,
+    /// The absolute folder that a path term starting with `.\` or `..\`, and
+    /// a relative `parent:` folder, are below. `None` refuses them with
+    /// [`QueryError::RelativePath`]: the daemon parses a protocol 1 query
+    /// without the client's working directory.
+    pub working_dir: Option<&'a str>,
+}
+
 /// Parses a case-insensitive query string into a [`ParsedQuery`]; a `case:`
 /// directive in the query makes it case-sensitive.
 pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
     parse_query_with_case(input, false)
 }
 
-/// Parses a query string into a [`ParsedQuery`] whose case sensitivity
-/// defaults to `match_case` (es `-case`). A `case:` directive in the query
-/// overrides the default, so [`ParsedQuery::match_case`] is the one value that
-/// both matching and the `-path` scope lookup follow.
+/// Parses a query string, without a working directory, into a
+/// [`ParsedQuery`] whose case sensitivity defaults to `match_case`; see
+/// [`parse_query_with`].
+pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuery, QueryError> {
+    parse_query_with(
+        input,
+        ParseOptions {
+            match_case,
+            ..ParseOptions::default()
+        },
+    )
+}
+
+/// Parses a query string into a [`ParsedQuery`], read as `options` say. A
+/// `case:` directive in the query overrides [`ParseOptions::match_case`], so
+/// [`ParsedQuery::match_case`] is the one value that both matching and the
+/// `-path` scope lookup follow.
 ///
 /// Each group of terms joined by `|` is a clause, so the groups are AND-ed.
 /// A later `ext:`, `size:`, `file:` or `folder:` that stands alone, without
 /// `!` or `|`, replaces an earlier one.
-pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuery, QueryError> {
+pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuery, QueryError> {
     let groups = groups(lex(input)?)?;
 
     // The last `case:` directive wins.
@@ -355,7 +417,7 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
         .filter(|item| item.word.quote_at.is_none())
         .filter_map(|item| case_directive(&item.word.text))
         .next_back()
-        .unwrap_or(match_case);
+        .unwrap_or(options.match_case);
 
     let mut clauses = Vec::new();
     let mut kind = None;
@@ -369,7 +431,7 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
             },
         ] = group.as_slice()
         {
-            match operand(word)? {
+            match operand(word, &options)? {
                 Operand::Text(test) => clauses.push(Clause::single(test)),
                 Operand::Kind(new_kind, text) => {
                     kind = Some(new_kind);
@@ -384,7 +446,7 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
         let alternatives = group
             .iter()
             .map(|item| {
-                let terms = operand(&item.word)?.terms();
+                let terms = operand(&item.word, &options)?.terms();
                 if terms.is_empty() {
                     return Err(malformed_expression(&format!(
                         "{} tests nothing, so ! and | cannot apply to it",
@@ -470,7 +532,8 @@ enum Operand {
     Kind(Kind, Option<Test>),
     Size(SizeRange),
     Extensions(Extensions),
-    /// A `case:` directive or an empty `path:`, which test nothing.
+    /// A `case:` directive or an empty `path:` or `nopath:`, which test
+    /// nothing.
     Nothing,
 }
 
@@ -528,27 +591,41 @@ impl Extensions {
 }
 
 /// What `word` stands for, or why it cannot be searched.
-fn operand(word: &Word) -> Result<Operand, QueryError> {
+fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
     let text = word.text.as_str();
     if word.quote_at.is_none() && case_directive(text).is_some() {
         return Ok(Operand::Nothing);
     }
     if let Some((name, value)) = function_parts(word) {
-        // A function value may hold `<` and `>`, as `size:<1mb` does.
+        // A function value may hold `<` and `>`, as `size:<1mb` does, and its
+        // quotes only delimit it, so `*` and `?` in it stay wildcards.
+        let text_operand = |test: Option<Test>| test.map_or(Operand::Nothing, Operand::Text);
         match function_named(name) {
             Some(Function::Ext) => return Ok(Operand::Extensions(extensions(value))),
             Some(Function::Size) => return Ok(Operand::Size(parse_size(value)?)),
             Some(Function::Path) => {
-                return Ok(if has_wildcard(value) {
-                    Operand::Text(Test::PathWildcard(value.to_string()))
-                } else if value.is_empty() {
-                    Operand::Nothing
-                } else {
-                    Operand::Text(Test::Path(value.to_string()))
-                });
+                let path = path_text(value, options.working_dir)?;
+                return Ok(text_operand(text_of(path, true, has_wildcard(value))));
             }
-            Some(Function::File) => return Ok(Operand::Kind(Kind::File, text_test(value))),
-            Some(Function::Folder) => return Ok(Operand::Kind(Kind::Folder, text_test(value))),
+            Some(Function::NoPath) => {
+                let name = value.replace('/', r"\");
+                return Ok(text_operand(text_of(name, false, has_wildcard(value))));
+            }
+            Some(Function::Parent) => {
+                return Ok(Operand::Text(Test::Parent(parent_folder(
+                    value,
+                    options.working_dir,
+                )?)));
+            }
+            Some(Function::File) => {
+                return Ok(Operand::Kind(Kind::File, text_test(value, false, options)?));
+            }
+            Some(Function::Folder) => {
+                return Ok(Operand::Kind(
+                    Kind::Folder,
+                    text_test(value, false, options)?,
+                ));
+            }
             // A `case:` value that is not a directive is searched as text.
             Some(Function::Case) => {}
             None => return Err(QueryError::UnknownFunction(name.to_string())),
@@ -557,12 +634,10 @@ fn operand(word: &Word) -> Result<Operand, QueryError> {
     if let Some(angle) = word.angle {
         return Err(QueryError::UnsupportedOperator(angle));
     }
-    Ok(Operand::Text(if word.quote_at.is_some() {
-        // Quoted phrases are literal filename substrings.
-        Test::Name(word.text.clone())
-    } else {
-        text_test(text).expect("a word without quotes holds a character")
-    }))
+    // Only `""` is an empty word; it searches for the empty phrase, which
+    // every name contains.
+    let test = text_test(text, word.quote_at.is_some(), options)?;
+    Ok(Operand::Text(test.unwrap_or(Test::Name(String::new()))))
 }
 
 /// The name and the value of a function term. The text before the word's
@@ -605,21 +680,68 @@ fn extensions(value: &str) -> Extensions {
     }
 }
 
-/// The test of an unquoted text token, `None` for an empty one: a term with a
-/// separator matches the full path, any other term the name, and a wildcard
-/// in either anchors it to the whole of what it matches.
-fn text_test(text: &str) -> Option<Test> {
+/// The test of a text term, `None` for an empty one. A term with a separator
+/// matches the full path, any other term the name, or with -p the full path
+/// too, and a wildcard anchors either to the whole of what it matches. A
+/// `quoted` term without a separator is a phrase, whose `*` and `?` are text;
+/// with a separator it is a path term like any other, because a literal `*`
+/// can never match a path.
+fn text_test(text: &str, quoted: bool, options: &ParseOptions) -> Result<Option<Test>, QueryError> {
+    let is_path = text.contains(['\\', '/']);
+    let wildcard = has_wildcard(text) && (is_path || !quoted);
+    let text = if is_path {
+        path_text(text, options.working_dir)?
+    } else {
+        text.to_string()
+    };
+    Ok(text_of(text, is_path || options.match_path, wildcard))
+}
+
+/// A test of the full path, or else of the name, for `text`, as a pattern of
+/// `*` and `?` when `wildcard`; `None` when `text` is empty.
+fn text_of(text: String, full_path: bool, wildcard: bool) -> Option<Test> {
     if text.is_empty() {
         return None;
     }
-    let text = text.to_string();
-    let is_path = text.contains('\\') || text.contains('/');
-    Some(match (has_wildcard(&text), is_path) {
+    Some(match (wildcard, full_path) {
         (true, true) => Test::PathWildcard(text),
         (true, false) => Test::NameWildcard(text),
         (false, true) => Test::Path(text),
         (false, false) => Test::Name(text),
     })
+}
+
+/// A path term's text as the daemon compares it: every `/` a `\`, and one
+/// that starts with `.\` or `..\` joined to `working_dir`, keeping a trailing
+/// separator, which limits a path term to what is below the folder.
+fn path_text(text: &str, working_dir: Option<&str>) -> Result<String, QueryError> {
+    let text = text.replace('/', r"\");
+    if !(text.starts_with(r".\") || text.starts_with(r"..\")) {
+        return Ok(text);
+    }
+    let working_dir = working_dir.ok_or_else(|| QueryError::RelativePath(text.clone()))?;
+    let mut path = crate::winpath::absolute(&text, working_dir);
+    if text.ends_with('\\') && !path.ends_with('\\') {
+        path.push('\\');
+    }
+    Ok(path)
+}
+
+/// A `parent:` folder as the daemon compares it: absolute, joined to
+/// `working_dir` when it is not, and every `/` a `\`.
+fn parent_folder(value: &str, working_dir: Option<&str>) -> Result<String, QueryError> {
+    let value = value.replace('/', r"\");
+    if value.is_empty() {
+        return Err(QueryError::Malformed {
+            what: "parent:",
+            detail: "no folder".to_string(),
+        });
+    }
+    match working_dir {
+        Some(working_dir) => Ok(crate::winpath::absolute(&value, working_dir)),
+        None if crate::winpath::is_absolute(&value) => Ok(value),
+        None => Err(QueryError::RelativePath(value)),
+    }
 }
 
 fn has_wildcard(text: &str) -> bool {
@@ -858,7 +980,14 @@ mod tests {
 
     /// The tests of a query whose clauses each hold one positive term.
     fn tests(s: &str) -> Vec<Test> {
-        q(s).clauses
+        tests_with(s, ParseOptions::default())
+    }
+
+    /// [`tests`] of a query read as `options` say.
+    fn tests_with(s: &str, options: ParseOptions) -> Vec<Test> {
+        parse_query_with(s, options)
+            .unwrap_or_else(|e| panic!("{s}: {e}"))
+            .clauses
             .into_iter()
             .map(|clause| match <[Term; 1]>::try_from(clause.terms) {
                 Ok(
@@ -1148,6 +1277,109 @@ mod tests {
         assert_eq!(tests(r#""path:x""#), [name("path:x")]);
     }
 
+    fn path(s: &str) -> Test {
+        Test::Path(s.to_string())
+    }
+
+    fn path_wildcard(s: &str) -> Test {
+        Test::PathWildcard(s.to_string())
+    }
+
+    fn parent(s: &str) -> Test {
+        Test::Parent(s.to_string())
+    }
+
+    /// Full paths hold `\`, so a `/` in a path term, a path wildcard or a
+    /// `path:` or `parent:` value would never match (bug 9).
+    #[test]
+    fn a_slash_in_a_path_is_a_backslash() {
+        assert_eq!(
+            tests("docs/agents C:/repo/*.cs path:a/b parent:C:/repo"),
+            [
+                path(r"docs\agents"),
+                path_wildcard(r"C:\repo\*.cs"),
+                path(r"a\b"),
+                parent(r"C:\repo"),
+            ]
+        );
+    }
+
+    /// A path term that starts with `.\` or `..\`, and a `parent:` folder
+    /// that is not absolute, are below the working directory; a path term
+    /// keeps its trailing separator, which limits it to what is below the
+    /// folder. Without a working directory, as on the daemon's text path,
+    /// each is refused, never searched as text that matches nothing.
+    #[test]
+    fn a_relative_path_is_below_the_working_directory() {
+        let in_src = ParseOptions {
+            working_dir: Some(r"C:\repo\src"),
+            ..ParseOptions::default()
+        };
+        assert_eq!(
+            tests_with(r"./ ..\docs\*.md docs\.\x parent:.. parent:sub", in_src),
+            [
+                path(r"C:\repo\src\"),
+                path_wildcard(r"C:\repo\docs\*.md"),
+                path(r"docs\.\x"),
+                parent(r"C:\repo"),
+                parent(r"C:\repo\src\sub"),
+            ]
+        );
+        assert_eq!(
+            parse_query(r"x .\src"),
+            Err(QueryError::RelativePath(r".\src".to_string()))
+        );
+        assert_eq!(
+            parse_query("parent:src"),
+            Err(QueryError::RelativePath("src".to_string()))
+        );
+        assert!(matches!(
+            parse_query("parent:"),
+            Err(QueryError::Malformed {
+                what: "parent:",
+                ..
+            })
+        ));
+    }
+
+    /// A quoted term with a separator is a path term, wildcards included,
+    /// because a literal `*` can never match a path; without one it is a
+    /// phrase of the name, whose `*` is text (bug 10).
+    #[test]
+    fn a_quoted_term_with_a_separator_is_a_path_term() {
+        assert_eq!(
+            tests(r#""C:\Program Files (x86)\Microsoft" "C:\Program Files\*.cs" "a*b""#),
+            [
+                path(r"C:\Program Files (x86)\Microsoft"),
+                path_wildcard(r"C:\Program Files\*.cs"),
+                name("a*b"),
+            ]
+        );
+    }
+
+    /// `-p` makes every text term a path term, as es's Match Path does, and
+    /// `nopath:` still matches the name.
+    #[test]
+    fn match_path_makes_text_terms_path_terms_except_nopath() {
+        let match_path = ParseOptions {
+            match_path: true,
+            ..ParseOptions::default()
+        };
+        assert_eq!(
+            tests_with(
+                r#"report *.cs "two words" nopath:readme nopath:*.md"#,
+                match_path
+            ),
+            [
+                path("report"),
+                path_wildcard("*.cs"),
+                path("two words"),
+                name("readme"),
+                Test::NameWildcard("*.md".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn malformed_size_is_reported() {
         assert!(matches!(
@@ -1171,9 +1403,9 @@ mod tests {
         fn arb_query() -> impl Strategy<Value = String> {
             let fragment = prop_oneof![
                 prop::sample::select(vec![
-                    "size:", "ext:", "path:", "file:", "folder:", "case:", "case:0", "dm:", "..",
-                    ">=", "<", ">", "=", "*", "?", ";", ".", "\"", " ", "\\", "/", "!", "|", "kb",
-                    "gb", "tiny",
+                    "size:", "ext:", "path:", "parent:", "nopath:", "file:", "folder:", "case:",
+                    "case:0", "dm:", "..", ">=", "<", ">", "=", "*", "?", ";", ".", "\"", " ",
+                    "\\", "/", "!", "|", "kb", "gb", "tiny",
                 ])
                 .prop_map(str::to_string),
                 "[0-9]{1,24}",

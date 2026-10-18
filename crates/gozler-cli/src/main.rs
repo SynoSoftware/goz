@@ -79,10 +79,11 @@ use win::execute;
 mod win {
     use super::client::Client;
     use super::failure::{Failure, output};
-    use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, build_search, is_drive_relative};
+    use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
     use gozler_core::output::{TableWriter, filetime_to_unix_ms};
     use gozler_core::proto::{DaemonStatus, QueryResults, VolumeStatus};
     use gozler_core::scope::Scope;
+    use gozler_core::winpath::is_drive_relative;
     use std::io::Write;
     use std::time::{Duration, Instant};
 
@@ -152,9 +153,9 @@ mod win {
         Ok(answer.exit_code(plan.no_result_error))
     }
 
-    /// The working directory, which a relative `-path` is below. A folder
-    /// name that is not valid Unicode is replaced lossily, so a relative
-    /// `-path` below it names no indexed folder; other searches are
+    /// The working directory, which a relative `-path` or path term is below.
+    /// A folder name that is not valid Unicode is replaced lossily, so a
+    /// relative path below it names no indexed folder; other searches are
     /// unaffected.
     fn working_dir() -> Result<String, Failure> {
         let dir = std::env::current_dir()
@@ -162,16 +163,21 @@ mod win {
         Ok(dir.to_string_lossy().into_owned())
     }
 
-    /// Resolves a drive-relative `-path` such as `D:x` against the current
-    /// folder of that drive, which only Windows knows; [`build_search`]
-    /// resolves every other form.
+    /// Resolves a drive-relative folder switch such as `-path D:x` against
+    /// the current folder of that drive, which only Windows knows;
+    /// [`build_search`] resolves every other form.
     fn resolve_drive_relative(plan: &mut EsPlan) -> Result<(), Failure> {
-        let Some(scope) = plan.scope.as_mut().filter(|s| is_drive_relative(s)) else {
-            return Ok(());
-        };
-        let absolute = std::path::absolute(&*scope)
-            .map_err(|e| Failure::Internal(format!("cannot resolve {scope}: {e}")))?;
-        *scope = absolute.to_string_lossy().into_owned();
+        let folders = plan
+            .scope
+            .as_mut()
+            .map(ScopeFolder::path_mut)
+            .into_iter()
+            .chain(plan.parent.as_mut());
+        for folder in folders.filter(|folder| is_drive_relative(folder)) {
+            let absolute = std::path::absolute(&*folder)
+                .map_err(|e| Failure::Internal(format!("cannot resolve {folder}: {e}")))?;
+            *folder = absolute.to_string_lossy().into_owned();
+        }
         Ok(())
     }
 
