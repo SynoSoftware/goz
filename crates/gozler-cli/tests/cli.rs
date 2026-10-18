@@ -23,13 +23,13 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// es exit code 6. Parsing rejects the switch before any daemon contact.
+/// es exit code 6. Parsing rejects the option before any daemon contact.
 #[test]
-fn unknown_switch_exits_6() {
-    let out = gozler(["-bogus-switch", "foo"]);
+fn unknown_option_exits_6() {
+    let out = gozler(["-bogus-option", "foo"]);
     assert_eq!(out.status.code(), Some(6), "stderr: {}", stderr(&out));
     assert!(
-        stderr(&out).contains("unknown switch: -bogus-switch"),
+        stderr(&out).contains("unknown option: -bogus-option"),
         "stderr: {}",
         stderr(&out)
     );
@@ -37,11 +37,11 @@ fn unknown_switch_exits_6() {
 
 /// es exit code 4. `-path` consumes a following value; there is none here.
 #[test]
-fn missing_switch_parameter_exits_4() {
+fn missing_option_value_exits_4() {
     let out = gozler(["-path"]);
     assert_eq!(out.status.code(), Some(4), "stderr: {}", stderr(&out));
     assert!(
-        stderr(&out).contains("expected an additional parameter after -path"),
+        stderr(&out).contains("-path needs DIR after it"),
         "stderr: {}",
         stderr(&out)
     );

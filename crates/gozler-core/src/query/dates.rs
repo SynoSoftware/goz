@@ -135,7 +135,7 @@ fn period(value: &str, start: &QueryStart) -> Result<Period, QueryError> {
                     .parse::<u32>()
                     .ok()
                     .filter(|&days| days > 0)
-                    .ok_or_else(|| malformed(format!("{value}: give a number of days above 0")))?;
+                    .ok_or_else(|| malformed(format!("{value} needs a number of days above 0")))?;
                 let length = SignedDuration::from_secs(i64::from(days) * 24 * 60 * 60);
                 let first = start.now.checked_sub(length).map_err(out_of_range)?;
                 return Ok(Period {

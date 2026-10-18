@@ -1,236 +1,250 @@
-//! The help screen, generated from the vocabulary tables: [`SWITCHES`],
-//! [`SORT_KEYS`], [`SEARCH_FUNCTIONS`], the attribute [`LETTERS`],
-//! [`ExitCode::ALL`] and [`DIFFERENCES`].
-//! A row added to a table is a line of the help.
+//! The quick help and the full reference, generated from the vocabulary
+//! tables: [`SWITCHES`], [`SORT_KEYS`], [`SEARCH_FUNCTIONS`], the attribute
+//! [`LETTERS`] and [`ExitCode::ALL`], and from this module's examples, search
+//! terms and notes. A row added to a table is a line of the full reference;
+//! a row marked quick is also a line of the quick help.
 
 use super::ExitCode;
-use super::argv::{SORT_KEYS, SWITCHES, Spelling};
+use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling};
 use crate::attributes::LETTERS;
 use crate::query::parse::SEARCH_FUNCTIONS;
 
-/// gozler's version, as `-version` prints it.
+/// gozler's version, as `-version` prints it; `build.rs` appends the build
+/// date unless the build is a release.
 pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    env!("GOZLER_VERSION")
 }
 
-/// The help screen `-h` and `-help` print.
-pub fn help() -> String {
+/// The help screen a [`Command::Help`](super::Command::Help) asks for.
+pub fn help(screen: HelpScreen) -> String {
     let mut out = format!(
-        "gozler {} - instant file search for Windows NTFS\n\n\
-         Usage: gozler [switches] [search terms]\n\n",
+        "gozler {} - Instant file search for Windows NTFS\n\n\
+         Usage: gozler [options] [search terms]\n\n",
         version()
     );
     wrap_into(&mut out, "  ", INTRO, 2);
-    for section in sections() {
-        out.push('\n');
-        out.push_str(section.title);
-        out.push('\n');
-        render(&mut out, &section.entries);
+    match screen {
+        HelpScreen::Quick => {
+            for section in quick_sections() {
+                render_section(&mut out, &section);
+            }
+            render_section(&mut out, &exit_codes(&QUICK_EXIT_CODES));
+            wrap_into(&mut out, "  ", QUICK_EXIT_NOTE, 2);
+            out.push('\n');
+            wrap_into(&mut out, "", QUICK_FOOTER, 0);
+        }
+        HelpScreen::Full => {
+            for section in full_sections() {
+                render_section(&mut out, &section);
+            }
+            out.push_str("\nNotes:\n");
+            for note in NOTES {
+                wrap_into(&mut out, "  - ", note, 4);
+            }
+            render_section(&mut out, &exit_codes(&ExitCode::ALL));
+        }
     }
-    out.push_str("\nNOTES\n");
-    for note in NOTES {
-        wrap_into(&mut out, "  ", note, 2);
-    }
-    out.push_str("  Differences from es:\n");
-    for row in DIFFERENCES {
-        wrap_into(&mut out, "  - ", &format!("{}.", row.gozler), 4);
-        wrap_into(&mut out, "    es: ", &format!("{}.", row.es), 4);
-        wrap_into(&mut out, "    Why: ", &format!("{}.", row.why), 4);
-    }
-    out.push_str("\nEXIT CODES\n");
-    let codes: Vec<Entry> = ExitCode::ALL
-        .iter()
-        .map(|code| Entry {
-            usage: code.code().to_string(),
-            text: code.meaning(),
-        })
-        .collect();
-    render(&mut out, &codes);
     out
 }
 
-const INTRO: &str = "Finds files and folders by name, path, size, date and attributes. \
-     Terms combine with AND. Paths accept \\ or /. Shows 20 results unless -n says \
-     otherwise. Results: one full path per line on stdout; diagnostics on stderr. A \
-     switch starts with - or /, and each dash inside its name is optional.";
+/// The quick help lists no precedence rule, so a script that sees 2 must
+/// still learn from stderr that the list was also cut.
+const QUICK_EXIT_NOTE: &str = "When 2 and 10 both apply, gozler exits 2; stderr still \
+     reports every warning, including the shown and total counts.";
 
-/// Search terms that use no function, with what each finds.
-const SEARCH_TERMS: &[(&str, &str)] = &[
-    ("report", "names containing \"report\""),
-    ("*.cs", "whole names matching a wildcard (* and ?)"),
-    (
-        "\"two words\"",
-        "a phrase; the shell must pass the double quotes",
+const INTRO: &str = "Find files and folders by name, path, size, date or attribute. \
+     Search terms combine with AND. By default gozler prints one full path per line, \
+     at most 20 unless -n says otherwise, and writes warnings and errors to stderr.";
+
+const QUICK_FOOTER: &str = "Run gozler --help-full for every option, search function, \
+     attribute letter, note and exit code.";
+
+/// The exit codes the quick help lists: the ones a script checks after a
+/// search that ran.
+const QUICK_EXIT_CODES: [ExitCode; 3] = [
+    ExitCode::Complete,
+    ExitCode::Incomplete,
+    ExitCode::Truncated,
+];
+
+/// One line of the examples, the search syntax or the quoting.
+struct Line {
+    usage: &'static str,
+    text: &'static str,
+    /// Whether the quick help lists it too.
+    quick: bool,
+}
+
+const fn quick(usage: &'static str, text: &'static str) -> Line {
+    Line {
+        usage,
+        text,
+        quick: true,
+    }
+}
+
+const fn full_only(usage: &'static str, text: &'static str) -> Line {
+    Line {
+        usage,
+        text,
+        quick: false,
+    }
+}
+
+/// Complete command lines that work as typed in cmd and in PowerShell.
+const EXAMPLES: &[Line] = &[
+    quick("gozler report", "Find names that contain report"),
+    quick("gozler *.cs", "Find .cs files"),
+    quick(
+        r"gozler -path C:\repo ext:cs",
+        r"Find .cs files below C:\repo",
     ),
-    (r"docs\agents", r"full paths containing docs\agents"),
-    ("docs/agents", r"the same: / works as \"),
-    (r"C:\repo\", "everything below that folder"),
-    (r"C:\repo\*.cs", ".cs files below that folder"),
-    (
-        r".\src\",
-        "everything below src in the current folder; also ..\\",
+    quick(
+        "gozler *.log dm:7days",
+        "Find .log files modified in the last 7 days",
     ),
-    (
-        r#""C:\Program Files (x86)\Microsoft""#,
-        "a quoted path keeps its spaces and is still a path",
+    quick(r#"gozler "size:>1gb""#, "Find files larger than 1 GB"),
+    quick(
+        "gozler *.iso -sort size -n 10",
+        "Show the 10 largest .iso files",
     ),
-    (
-        r"*\node_modules\*",
-        r"a wildcard with \ matches the whole full path",
+    quick(
+        "gozler -n all report",
+        "Show every match, not only the first 20",
     ),
-    ("!test", "exclude names containing \"test\""),
-    ("a|b", "either term; | binds tighter than the space"),
-    (
-        r#"path:"C:\Program Files""#,
-        "quotes around a function's value keep its spaces",
+    full_only(
+        "gozler /a-d report",
+        "Find only files whose names contain report",
+    ),
+    full_only(
+        r"gozler -parent C:\repo -n all",
+        r"List everything directly in C:\repo",
+    ),
+    full_only(
+        r#"gozler -r "^test[0-9]+\.cs$" -path C:\repo"#,
+        "Find names that match a regular expression",
+    ),
+    full_only(
+        r"gozler /ah -attributes -path C:\repo",
+        r"Find hidden items below C:\repo, with their attributes",
+    ),
+    full_only(
+        "gozler -export-csv files.csv -size -dm ext:cs",
+        "Write every .cs file to files.csv, with sizes and dates",
+    ),
+    full_only("gozler -get-result-count ext:cs", "Count the .cs files"),
+    full_only(
+        r"gozler -get-folder-size C:\repo",
+        r"Show the total size of the files below C:\repo",
+    ),
+    full_only("gozler --json report", "Print the matches as JSON"),
+    full_only(
+        "gozler -timeout 5000 -no-result-error report",
+        "Wait up to 5 seconds for indexing, and exit 9 if nothing matches",
     ),
 ];
 
-/// Complete command lines, each of which parses.
-const EXAMPLES: &[&str] = &[
-    "gozler readme",
-    r"gozler -path C:\repo ext:cs",
-    "gozler C:/repo/*.cs",
-    r"gozler -parent C:\repo -n all",
-    "gozler *.log -sort dm -n 10",
-    "gozler *.log dm:7days /a-d",
-    r#"gozler -r "^test[0-9]+\.cs$" -path C:\repo"#,
-    "gozler -n all ext:cs",
-    "gozler -timeout 5000 -no-result-error report",
-    "gozler -export-csv files.csv -size -dm ext:cs",
-    "gozler /a-d report -size -dm",
-    r"gozler /ah -attributes -path C:\repo",
-    "gozler -get-result-count ext:cs",
-    r"gozler -get-folder-size C:\repo",
-    "gozler --json report",
+/// Search terms as gozler receives them, after the shell removes its quotes.
+const SEARCH_TERMS: &[Line] = &[
+    quick("report", "Name contains report"),
+    quick("*.cs", "Whole name matches a wildcard (* and ?)"),
+    quick("\"two words\"", "Name contains the phrase"),
+    quick("!test", "Exclude names that contain test"),
+    quick("a|b", "Either term; | binds tighter than a space"),
+    quick(r"C:\repo\", "Everything below that folder"),
+    quick("ext:cs;txt", "Extension is cs or txt"),
+    quick("dm:7days", "Modified in the last 7 days"),
+    quick("size:>1mb", "Larger than 1 MB"),
+    full_only(
+        r"docs\agents",
+        r"Full path contains docs\agents; / works as \ too",
+    ),
+    full_only(r"C:\repo\*.cs", ".cs files below that folder"),
+    full_only(
+        r".\src\",
+        r"Everything below src in the current folder; ..\ works too",
+    ),
+    full_only(
+        r#""C:\Program Files (x86)\Microsoft""#,
+        "A quoted path keeps its spaces",
+    ),
+    full_only(
+        r"*\node_modules\*",
+        r"A wildcard with \ matches the whole full path",
+    ),
+    full_only(
+        r#"path:"C:\Program Files""#,
+        "Quotes keep the spaces in a function's value",
+    ),
+];
+
+/// How to type in cmd and PowerShell the search terms that a shell would
+/// otherwise change.
+const QUOTING: &[Line] = &[
+    quick(
+        r#"gozler "a|b""#,
+        "Quote a term with |, < or > in cmd and PowerShell",
+    ),
+    quick(
+        r#"gozler \"two words\""#,
+        "Search for a phrase in cmd or Windows PowerShell 5.1",
+    ),
+    quick(
+        r#"gozler '"two words"'"#,
+        "Search for a phrase in PowerShell 7.3 or later",
+    ),
 ];
 
 const NOTES: &[&str] = &[
-    "A volume in scope that is indexing, rescanning or offline makes the \
-     answer incomplete: gozler prints the results it has, warns on stderr and \
-     exits 2. With -path, only the volume of that folder is in scope.",
-    "Files whose size or date Windows did not report never match size: or \
-     dm:, negated or not, and add nothing to -get-total-size or \
-     -get-folder-size. When the size and date pass failed on a volume in \
-     scope, a query that tests or totals sizes or dates warns and exits 2. \
-     After a pass that succeeded, a file it could not read is rare and is \
-     left out without a warning.",
-    "dm: days are calendar days in the local time zone, and 7days is the 7 \
-     times 24 hours before the search starts.",
-    "A token that starts with / and names a switch is that switch, as /p is \
-     -p, so write a relative path without a leading /: docs/agents.",
+    "Options start with - or /, and dashes inside an option name are \
+     optional. A token that starts with / and names an option is that \
+     option, as /p is -p, so write a relative path without a leading /: \
+     docs/agents.",
+    "gozler joins its arguments with spaces and splits them into terms again, \
+     so the single argument \"ext:cs report\" is two terms.",
+    "Without -n, gozler shows 20 results. When the limit hides matches, gozler \
+     writes the shown and total counts to stderr and exits 10. -export-* writes \
+     every match unless -n is given, and -get-result-count and the size totals \
+     count every match.",
+    "When a volume in scope is not ready (indexing, rescanning, offline or \
+     failed), gozler prints the results it has, warns on stderr and exits 2. With -path, only the \
+     volume of that folder is in scope. --status exits 2 when any volume is not \
+     ready or its sizes and dates could not be read.",
+    "When several exit codes apply, the most serious wins: a failure, then 2, \
+     then 9 or 10, then 0. So no matches while a volume in scope is indexing \
+     exits 2, because the matches may still appear.",
+    "Files whose size or date Windows did not report never match size: or dm:, \
+     even negated, and add nothing to the size totals. When reading sizes and \
+     dates failed on a volume in scope, a search that uses them warns and exits \
+     2. When the read succeeded, a file it could not read is rare and is left \
+     out without a warning.",
+    "dm:today, dm:yesterday and dm:YYYY-MM-DD are calendar days in the local \
+     time zone. 7days is the 7 times 24 hours before the search starts, and dm:<30days finds files older than 30 \
+     days.",
+    r"regex: and -r use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with -p, or when it contains \\, it matches the full path, whose separators are \, so write \\ or [\\/] for a separator. | and ! inside a pattern belong to the expression.",
+    "Dates print as ISO 8601 in local time, whatever the locale. Plain output \
+     groups the digits of a size with commas; CSV and TSV print plain bytes. \
+     Attributes print as letters, such as HA, and in CSV and TSV as their \
+     FILE_ATTRIBUTE_* number, such as 34.",
+    "An unknown search function, such as dc:, and an unquoted < or > outside a \
+     function value are invalid input and exit 4.",
 ];
 
-/// One way gozler answers differently from es. The help's NOTES print every
-/// row, so a script written for es can find each difference.
-struct Difference {
-    gozler: &'static str,
-    es: &'static str,
-    why: &'static str,
-}
-
-const DIFFERENCES: &[Difference] = &[
-    Difference {
-        gozler: "In CSV and TSV, Filename comes after the other columns",
-        es: "an export puts Filename first",
-        why: "v0.2.0's CSV layout",
-    },
-    Difference {
-        gozler: "Dates are ISO 8601 in local time, and plain output groups digits with \
-                 commas, whatever the locale",
-        es: "dates and digit grouping follow the locale",
-        why: "scripts parse ISO dates without knowing the locale",
-    },
-    Difference {
-        gozler: "Plain output pads only the Size, Date Modified and Attributes columns",
-        es: "every column is padded to a fixed width",
-        why: "a name or folder has no fixed width",
-    },
-    Difference {
-        gozler: "An export file starts with a UTF-8 byte order mark; -no-utf8-bom leaves it out",
-        es: "a byte order mark only with -utf8-bom",
-        why: "v0.2.0's default",
-    },
-    Difference {
-        gozler: "/a-h-s leaves out hidden files and system files",
-        es: "/a-h-s becomes !attrib:hs, which leaves out only files that are both",
-        why: "dir's /a-h-s leaves out each, and a script that writes it means that",
-    },
-    Difference {
-        gozler: "attrib: takes attribute letters only",
-        es: "attrib: also takes a FILE_ATTRIBUTE_* number, such as 0x200 for sparse files",
-        why: "the index holds only the attributes that have a letter",
-    },
-    Difference {
-        gozler: "dm: takes today, yesterday, Ndays and YYYY-MM-DD, alone, compared \
-                 or as a range",
-        es: "dm: also takes years, months, weekday and month names, other \
-             durations, and slash dates in the locale's order",
-        why: "these are the dates scripts and agents write, and a slash date means \
-              a different day in another locale",
-    },
-    Difference {
-        gozler: "One argument with a space splits into terms; write a phrase as \"two words\"",
-        es: "one argument with a space is a phrase",
-        why: "scripts build a query in one string",
-    },
-    Difference {
-        gozler: "An unknown search function, such as dc:, is refused with exit 4",
-        es: "an unknown function is searched as text and matches nothing",
-        why: "a silent empty answer looks valid",
-    },
-    Difference {
-        gozler: "An unquoted < or > outside a function value is refused with exit 4",
-        es: "< > groups terms",
-        why: "Windows names cannot contain < or >, so the text never matched, and \
-              grouping is not planned",
-    },
-    Difference {
-        gozler: "/ and \\ both separate folders: docs/agents finds docs\\agents",
-        es: "/ is not a separator, so docs/agents finds nothing",
-        why: "agents and Unix habits write /",
-    },
-    Difference {
-        gozler: "A path term that starts with .\\ or ..\\, and a parent: folder that is \
-                 not absolute, are below the current folder",
-        es: "parent: needs an absolute folder, and the search syntax has no current folder",
-        why: "a command line runs in a folder, and a relative -path is below it too",
-    },
-    Difference {
-        gozler: "regex: and -r use Rust's regex syntax, without look-around or \
-                 backreferences",
-        es: "regular expressions use PCRE",
-        why: "Rust's regex runs in linear time, so a pattern cannot hang gozlerd",
-    },
-    Difference {
-        gozler: "Shows 20 results unless -n says otherwise, and exits 10 with a warning \
-                 when the limit leaves out matches, -n 0 included",
-        es: "prints every match, and -n cuts the list silently with exit 0",
-        why: "a query that forgets -n on a volume of a million files floods a \
-              console or an agent's context",
-    },
-    Difference {
-        gozler: "-n all shows every result",
-        es: "-n all is invalid input",
-        why: "it is the way to lift the default limit",
-    },
-    Difference {
-        gozler: "Each outcome has its own exit code, listed below",
-        es: "exit codes are undocumented",
-        why: "a script needs one code per outcome",
-    },
-    Difference {
-        gozler: "size: never matches a folder, and -get-total-size and \
-                 -get-folder-size add up the sizes of files only",
-        es: "folder sizes can be indexed, matched and added up",
-        why: "the index holds no folder sizes",
-    },
+/// The full reference's option sections, in the order it lists them.
+const GROUPS: [(Group, &str); 5] = [
+    (Group::Search, "Search options:"),
+    (Group::LimitAndSort, "Limit and sort:"),
+    (Group::Output, "Output:"),
+    (Group::Totals, "Totals:"),
+    (Group::Other, "Other options:"),
 ];
 
 /// A titled list of help entries, generated from one table.
 struct Section {
     title: &'static str,
     entries: Vec<Entry>,
+    /// A usage longer than this puts its text on the next line.
+    usage_column: usize,
 }
 
 /// One help line: what to type, and what it does.
@@ -239,75 +253,131 @@ struct Entry {
     text: &'static str,
 }
 
-fn sections() -> Vec<Section> {
-    let entry = |usage: String, text| Entry { usage, text };
-    let switches = |native: bool| -> Vec<Entry> {
-        SWITCHES
+/// The examples, the search syntax and the quoting, which open both screens;
+/// the quick help lists only their quick lines.
+fn opening_sections(screen: HelpScreen) -> Vec<Section> {
+    let listed = |table: &[Line]| -> Vec<Entry> {
+        table
             .iter()
-            .filter(|switch| matches!(switch.spelling, Spelling::Native { .. }) == native)
-            .map(|switch| entry(switch_usage(&switch.spelling), switch.help))
+            .filter(|line| screen == HelpScreen::Full || line.quick)
+            .map(|line| entry(line.usage.to_string(), line.text))
             .collect()
     };
     vec![
         Section {
-            title: "SEARCH TERMS",
-            entries: SEARCH_TERMS
-                .iter()
-                .map(|(term, text)| entry((*term).to_string(), *text))
-                .collect(),
+            usage_column: EXAMPLE_COLUMN,
+            ..section("Examples:", listed(EXAMPLES))
         },
+        section(
+            "Search syntax (what gozler receives; quote it for the shell as shown below):",
+            listed(SEARCH_TERMS),
+        ),
         Section {
-            title: "SEARCH FUNCTIONS",
-            entries: SEARCH_FUNCTIONS
-                .iter()
-                .map(|function| {
-                    let forms: Vec<String> = function
-                        .names
-                        .iter()
-                        .map(|name| format!("{name}:{}", function.example))
-                        .collect();
-                    entry(forms.join(", "), function.help)
-                })
-                .collect(),
-        },
-        Section {
-            title: "ATTRIBUTES (for attrib: and /a)",
-            entries: LETTERS
-                .iter()
-                .map(|row| entry(row.letter.to_string(), row.meaning))
-                .collect(),
-        },
-        Section {
-            title: "SWITCHES",
-            entries: switches(false),
-        },
-        Section {
-            title: "SORT KEYS (for -sort KEY and -sort-KEY)",
-            entries: SORT_KEYS
-                .iter()
-                .map(|row| entry(row.names.join(", "), row.help))
-                .collect(),
-        },
-        Section {
-            title: "GOZLER OPTIONS",
-            entries: switches(true),
-        },
-        Section {
-            title: "EXAMPLES",
-            entries: EXAMPLES
-                .iter()
-                .map(|example| entry((*example).to_string(), ""))
-                .collect(),
+            usage_column: EXAMPLE_COLUMN,
+            ..section("Quoting in the shell:", listed(QUOTING))
         },
     ]
 }
 
-/// Every form of a switch as the help lists it, such as `-n N, -max-results N`.
-fn switch_usage(spelling: &Spelling) -> String {
+/// The quick help's sections above its exit codes.
+fn quick_sections() -> Vec<Section> {
+    let options = SWITCHES
+        .iter()
+        .filter(|switch| switch.quick)
+        .map(|switch| {
+            entry(
+                switch_usage(&switch.spelling, HelpScreen::Quick),
+                switch.help,
+            )
+        })
+        .collect();
+    let mut sections = opening_sections(HelpScreen::Quick);
+    sections.push(section("Common options:", options));
+    sections
+}
+
+/// The full reference's sections above its notes and exit codes.
+fn full_sections() -> Vec<Section> {
+    let mut sections = opening_sections(HelpScreen::Full);
+    sections.push(section(
+        "Search functions:",
+        SEARCH_FUNCTIONS
+            .iter()
+            .map(|function| {
+                let forms: Vec<String> = function
+                    .names
+                    .iter()
+                    .map(|name| format!("{name}:{}", function.example))
+                    .collect();
+                entry(forms.join(", "), function.help)
+            })
+            .collect(),
+    ));
+    sections.push(section(
+        "Attribute letters (for attrib: and /a):",
+        LETTERS
+            .iter()
+            .map(|row| entry(row.letter.to_string(), row.meaning))
+            .collect(),
+    ));
+    for (group, title) in GROUPS {
+        let options = SWITCHES
+            .iter()
+            .filter(|switch| switch.group == group)
+            .map(|switch| {
+                entry(
+                    switch_usage(&switch.spelling, HelpScreen::Full),
+                    switch.help,
+                )
+            })
+            .collect();
+        sections.push(section(title, options));
+        if group == Group::LimitAndSort {
+            sections.push(section(
+                "Sort keys (for -sort KEY and -sort-KEY):",
+                SORT_KEYS
+                    .iter()
+                    .map(|row| entry(row.names.join(", "), row.help))
+                    .collect(),
+            ));
+        }
+    }
+    sections
+}
+
+fn exit_codes(codes: &[ExitCode]) -> Section {
+    section(
+        "Exit codes:",
+        codes
+            .iter()
+            .map(|code| entry(code.code().to_string(), code.meaning()))
+            .collect(),
+    )
+}
+
+fn entry(usage: String, text: &'static str) -> Entry {
+    Entry { usage, text }
+}
+
+fn section(title: &'static str, entries: Vec<Entry>) -> Section {
+    Section {
+        title,
+        entries,
+        usage_column: USAGE_COLUMN,
+    }
+}
+
+/// The forms of a switch the help lists, such as `-n N, -max-results N`; the
+/// quick help lists only the first.
+fn switch_usage(spelling: &Spelling, screen: HelpScreen) -> String {
     match spelling {
         Spelling::Es { names, action } => {
             let param = action.param().map(|p| format!(" {p}")).unwrap_or_default();
-            let forms: Vec<String> = names.iter().map(|n| format!("-{n}{param}")).collect();
+            let listed = match screen {
+                HelpScreen::Quick => &names[..1],
+                HelpScreen::Full => &names[..],
+            };
+            let forms: Vec<String> = listed.iter().map(|n| format!("-{n}{param}")).collect();
             forms.join(", ")
         }
         Spelling::Family { usage, .. } => (*usage).to_string(),
@@ -320,24 +390,31 @@ fn switch_usage(spelling: &Spelling) -> String {
 
 /// A usage longer than this puts its text on the next line.
 const USAGE_COLUMN: usize = 24;
+/// [`USAGE_COLUMN`] for the examples, whose usage is a whole command line.
+const EXAMPLE_COLUMN: usize = 30;
 /// The width the help wraps text to, so it fits an 80-column console.
 const LINE_WIDTH: usize = 79;
 
+/// Writes the section's title and its entries, after a blank line.
+fn render_section(out: &mut String, section: &Section) {
+    out.push('\n');
+    out.push_str(section.title);
+    out.push('\n');
+    render(out, &section.entries, section.usage_column);
+}
+
 /// Writes `entries` as two columns: the usage, and its text wrapped beside it.
-fn render(out: &mut String, entries: &[Entry]) {
+fn render(out: &mut String, entries: &[Entry], usage_column: usize) {
     let width = entries
         .iter()
         .map(|e| e.usage.len())
-        .filter(|&len| len <= USAGE_COLUMN)
+        .filter(|&len| len <= usage_column)
         .max()
         .unwrap_or(0)
         + 2;
     for entry in entries {
         let usage = format!("  {}", entry.usage);
-        if entry.text.is_empty() {
-            out.push_str(&usage);
-            out.push('\n');
-        } else if entry.usage.len() < width {
+        if entry.usage.len() < width {
             wrap_into(
                 out,
                 &format!("{usage:<w$}", w = 2 + width),
@@ -386,6 +463,33 @@ mod tests {
         tokens.iter().map(ToString::to_string).collect()
     }
 
+    /// Splits a command line into arguments as Windows does for a program,
+    /// for the quoting the examples use: `"` groups spaces and is removed,
+    /// and `\"` is a literal `"`.
+    fn command_line_args(line: &str) -> Vec<String> {
+        let (mut args, mut arg, mut quoted) = (Vec::new(), String::new(), false);
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if chars.peek() == Some(&'"') => {
+                    chars.next();
+                    arg.push('"');
+                }
+                '"' => quoted = !quoted,
+                ' ' if !quoted => {
+                    if !arg.is_empty() {
+                        args.push(std::mem::take(&mut arg));
+                    }
+                }
+                c => arg.push(c),
+            }
+        }
+        if !arg.is_empty() {
+            args.push(arg);
+        }
+        args
+    }
+
     /// `query` parsed in `C:\repo`, as gozler parses it, so relative paths
     /// and `dm:` values resolve.
     fn parse(query: &str) -> Result<ParsedQuery, QueryError> {
@@ -401,11 +505,13 @@ mod tests {
         parse_query_with(query, options)
     }
 
+    /// The usages of the full reference's section whose title starts with
+    /// `title`.
     fn entries(title: &str) -> Vec<String> {
-        sections()
+        full_sections()
             .into_iter()
             .find(|section| section.title.starts_with(title))
-            .unwrap_or_else(|| panic!("the help has a {title} section"))
+            .unwrap_or_else(|| panic!("the full reference has a {title} section"))
             .entries
             .into_iter()
             .map(|entry| entry.usage)
@@ -425,17 +531,18 @@ mod tests {
                     plan.query
                 );
             }
-            Ok(Command::Help | Command::Version) => {}
+            Ok(Command::Help(_) | Command::Version) => {}
             Err(fatal) => panic!("{tokens:?}: {fatal}"),
         }
     }
 
     /// Every switch, sort key, search function, search term and example the
-    /// help lists parses as the help describes it, so the help cannot list
-    /// something gozler refuses or searches as text.
+    /// full reference lists parses as the help describes it, so the help
+    /// cannot list something gozler refuses or searches as text. The quick
+    /// help lists a subset of the same rows.
     #[test]
     fn everything_the_help_lists_parses() {
-        let sort_keys: Vec<String> = entries("SORT KEYS")
+        let sort_keys: Vec<String> = entries("Sort keys")
             .iter()
             .flat_map(|names| names.split(", ").map(str::to_string).collect::<Vec<_>>())
             .collect();
@@ -446,12 +553,20 @@ mod tests {
             }
         }
 
-        let switch_forms: Vec<String> = [entries("SWITCHES"), entries("GOZLER OPTIONS")]
-            .concat()
+        let options: Vec<String> = GROUPS
+            .iter()
+            .flat_map(|(_, title)| entries(title))
+            .collect();
+        assert_eq!(
+            options.len(),
+            SWITCHES.len(),
+            "every switch is in a group the full reference lists"
+        );
+        let switch_forms: Vec<String> = options
             .iter()
             .flat_map(|usage| usage.split(", ").map(str::to_string).collect::<Vec<_>>())
             .collect();
-        let letters = entries("ATTRIBUTES");
+        let letters = entries("Attribute letters");
         for form in &switch_forms {
             let mut tokens: Vec<&str> = form.split(' ').collect();
             match tokens.get(1).copied() {
@@ -480,30 +595,36 @@ mod tests {
             assert_switch_parses(&tokens);
         }
 
-        for usage in entries("SEARCH FUNCTIONS") {
+        let searched_as_text = |parsed: &ParsedQuery| {
+            parsed
+                .clauses
+                .iter()
+                .flat_map(|clause| &clause.terms)
+                .any(|term| matches!(&term.test, Test::Name(name) if name.contains(':')))
+        };
+        for usage in entries("Search functions") {
             for form in usage.split(", ") {
                 let parsed = parse(form).unwrap_or_else(|e| panic!("{form}: {e}"));
-                let searched_as_text = parsed
-                    .clauses
-                    .iter()
-                    .flat_map(|clause| &clause.terms)
-                    .any(|term| matches!(&term.test, Test::Name(name) if name.contains(':')));
                 assert!(
-                    !searched_as_text,
+                    !searched_as_text(&parsed),
                     "{form} is searched as text, not as a function"
                 );
             }
         }
 
-        for term in entries("SEARCH TERMS") {
+        for term in entries("Search syntax") {
             let parsed = parse(&term).unwrap_or_else(|e| panic!("{term}: {e}"));
-            assert!(!parsed.is_text_empty(), "{term} searches for nothing");
+            assert!(!parsed.clauses.is_empty(), "{term} searches for nothing");
+            assert!(
+                !searched_as_text(&parsed),
+                "{term} searches a function as text"
+            );
         }
 
-        for example in entries("EXAMPLES") {
-            let tokens: Vec<&str> = example.split(' ').collect();
-            assert_eq!(tokens[0], "gozler", "{example}");
-            match parse_argv(&argv(&tokens[1..])) {
+        for example in entries("Examples") {
+            let args = command_line_args(&example);
+            assert_eq!(args[0], "gozler", "{example}");
+            match parse_argv(&args[1..]) {
                 Ok(Command::Run(plan)) => {
                     parse(&plan.query).unwrap_or_else(|e| panic!("{example}: {e}"));
                 }

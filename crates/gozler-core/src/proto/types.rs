@@ -30,6 +30,10 @@ pub const OLDEST_PROTO_VERSION: u16 = 1;
 /// The daemon's named pipe.
 pub const PIPE_NAME: &str = r"\\.\pipe\gozler-v1";
 
+/// The Windows service that runs the daemon, which is also its registry key,
+/// so it stays the same across versions.
+pub const SERVICE_NAME: &str = "gozler";
+
 /// Server-side decoder cap for client→server frames (1 MiB). A length prefix
 /// is a DoS lever; oversize frames poison the connection.
 pub const MAX_CLIENT_FRAME: u32 = 1 << 20;

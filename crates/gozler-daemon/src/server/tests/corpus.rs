@@ -317,7 +317,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         (
             &["regex:("],
             query_error(
-                "malformed regular expression: regex parse error:\n    (\n    ^\nerror: unclosed group",
+                "regular expression: regex parse error:\n    (\n    ^\nerror: unclosed group",
             ),
         ),
         // parent: and -parent find the entries directly in a folder;
@@ -426,15 +426,15 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             &["/ab", "report"],
             argv_error(
                 4,
-                "/ab is not an attribute switch: write /a and attribute letters, with - \
+                "/ab is not an attribute option: write /a and attribute letters, with - \
                  before a letter to leave that attribute out, such as /ah or /a-h; gozler \
-                 -help lists the letters",
+                 --help-full lists the letters",
             ),
         ),
         (
             &["attrib:0x2"],
             query_error(
-                "malformed attrib:: 0 is not an attribute letter; the letters are \
+                "attrib: 0 is not an attribute letter; the letters are \
                  RHSDAVXNTLCOIEUPM",
             ),
         ),
@@ -487,7 +487,12 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\docs\readme.txt",
             ]),
         ),
-        (&["size:abc"], query_error("malformed size:: abc")),
+        (
+            &["size:abc"],
+            query_error(
+                "size: abc is not a size; write a number with kb, mb, gb or tb, such as 10mb",
+            ),
+        ),
         // Bug 12 shows as this difference: `file:` finds a file with an
         // unknown size, and `size:0..` does not.
         (
@@ -554,7 +559,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         (
             &["dm:1601-01-03..1601-01-02"],
             query_error(
-                "malformed dm:: 1601-01-03..1601-01-02 is a reversed range; write the \
+                "dm: 1601-01-03..1601-01-02 is a reversed range; write the \
                  earlier date first",
             ),
         ),
@@ -739,18 +744,18 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         // Bug 7.
         (&["-help"], Printed::Help),
         // Command lines parse_argv refuses.
-        (&["--bogus"], argv_error(6, "unknown switch: --bogus")),
+        (&["--bogus"], argv_error(6, "unknown option: --bogus")),
         (
             &["-n", "abc"],
-            argv_error(4, "expected a number or all after -n, got: abc"),
+            argv_error(4, "-n needs a number or all, not abc"),
         ),
-        (
-            &["-path"],
-            argv_error(4, "expected an additional parameter after -path"),
-        ),
+        (&["-path"], argv_error(4, "-path needs DIR after it")),
         (
             &["-sort", "bogus"],
-            argv_error(4, "expected a sort key after -sort, got: bogus"),
+            argv_error(
+                4,
+                "-sort needs a sort key such as name, size or dm, not bogus",
+            ),
         ),
     ]
 }
@@ -858,7 +863,7 @@ fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
     let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let plan = match parse_argv(&args) {
         Ok(Command::Run(plan)) => plan,
-        Ok(Command::Help) => return Printed::Help,
+        Ok(Command::Help(_)) => return Printed::Help,
         Ok(Command::Version) => panic!("{args:?}: no row asks for the version"),
         Err(fatal) => return Printed::ArgvError(fatal.exit_code.code(), fatal.message),
     };
@@ -1045,9 +1050,9 @@ fn a_total_too_large_for_64_bits_is_refused() {
 fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
     let volumes = fixture();
     *volumes[0].metadata_pending.write() = true;
-    let warning = "the size and date pass failed or stopped on a volume in scope, so files \
-                   whose size or date is unknown are left out of size and date tests and \
-                   size totals";
+    let warning = "results may be incomplete: gozler could not read the sizes and dates on a \
+                   volume in scope, so size and date tests and size totals leave those files \
+                   out";
     let outcome = |args: &[&str]| match print(&volumes, args, Protocol::Parsed) {
         Printed::Paths { warnings, exit, .. } => (warnings, exit),
         other => panic!("{args:?}: {other:?}"),

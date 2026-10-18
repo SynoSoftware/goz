@@ -50,6 +50,14 @@ A file's size or date that gozler did not read, because the size and date pass
 failed or stopped, or could not read that file. A folder has no size, which is
 not the same as an unknown size.
 
+## Command line
+
+**Option**:
+A command-line argument that starts with `-`, `/` or `--` and changes how
+gozler searches or prints, such as `-n 5`, `/ad` or `--json`. Some options
+take a value, the next argument. Every other argument is a search term.
+_Avoid_: switch, flag, parameter (for the value)
+
 ## Search
 
 **Name term**:

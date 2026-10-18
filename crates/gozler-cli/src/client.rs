@@ -9,11 +9,12 @@ use std::time::{Duration, Instant};
 
 use gozler_core::proto::{
     DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PIPE_NAME, PROTO_VERSION, ProtoError,
-    QueryResults, QueryTotals, Request, Response, SearchRequest, decode_response_frame,
-    encode_request,
+    QueryResults, QueryTotals, Request, Response, SERVICE_NAME, SearchRequest,
+    decode_response_frame, encode_request,
 };
+use gozler_winfs::ServiceState;
 
-use crate::failure::Failure;
+use crate::failure::{Failure, NotRunning};
 
 /// Opening the pipe with an anonymous impersonation level (`SECURITY_ANONYMOUS`,
 /// value 0, so only the SQOS-present bit is set) prevents a rogue server that
@@ -30,6 +31,29 @@ const READ_DEADLINE: Duration = Duration::from_secs(30);
 /// Poll interval while waiting for a reply (see [`Client::next_response`]).
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// The failure for a pipe that does not exist, from the state of the gozler
+/// service: a service that is running or changing state may open the pipe
+/// soon, so only a service that is not running means gozlerd is not running.
+fn missing_pipe() -> Failure {
+    let why = match gozler_winfs::service_state(SERVICE_NAME) {
+        Ok(ServiceState::Running | ServiceState::Changing) => return Failure::DaemonNotReady,
+        Ok(ServiceState::Stopped) => NotRunning::Stopped,
+        Ok(ServiceState::Disabled) => NotRunning::Disabled,
+        Ok(ServiceState::NotInstalled) => match std::env::current_exe() {
+            Ok(exe) => NotRunning::NotInstalled {
+                gozlerd_beside: exe.with_file_name("gozlerd.exe").is_file(),
+                folder: exe
+                    .parent()
+                    .expect("the path of an executable names its folder")
+                    .to_path_buf(),
+            },
+            Err(error) => NotRunning::Unknown(format!("cannot find gozler.exe: {error}")),
+        },
+        Err(error) => NotRunning::Unknown(error.to_string()),
+    };
+    Failure::DaemonNotRunning(why)
+}
+
 /// One connection to the daemon, which serves its requests one at a time.
 pub(crate) struct Client {
     pipe: File,
@@ -43,7 +67,7 @@ impl Client {
     /// server's identity, and agrees on [`PROTO_VERSION`] with the daemon
     /// before returning.
     ///
-    /// Returns [`Failure::DaemonNotRunning`] if no pipe exists (daemon absent),
+    /// Returns the failure [`missing_pipe`] chooses if no pipe exists,
     /// [`Failure::Untrusted`] if a server is present but not owned by the
     /// elevated daemon, or [`Failure::Communication`] for other open errors
     /// and for a daemon older than this client.
@@ -70,9 +94,8 @@ impl Client {
             {
                 Ok(pipe) => break pipe,
                 Err(e) => match e.raw_os_error() {
-                    // Pipe does not exist: the daemon really is not running.
                     Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
-                        return Err(Failure::DaemonNotRunning);
+                        return Err(missing_pipe());
                     }
                     // All instances momentarily busy: brief backoff and retry
                     // (~500 ms budget) before giving up.

@@ -22,6 +22,9 @@ unicode-normalization.workspace = true
 regex.workspace = true
 jiff.workspace = true
 
+[build-dependencies]
+jiff.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true

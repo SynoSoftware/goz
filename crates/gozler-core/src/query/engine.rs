@@ -221,7 +221,7 @@ impl CompiledQuery {
                 .dfa_size_limit(REGEX_CACHE_LIMIT)
                 .build()
                 .map_err(|e| QueryError::Malformed {
-                    what: "regular expression",
+                    what: "regular expression:",
                     detail: e.to_string(),
                 })
         };
@@ -1762,7 +1762,7 @@ mod tests {
                 matches!(
                     refusal(&[pattern]),
                     Some(QueryError::Malformed {
-                        what: "regular expression",
+                        what: "regular expression:",
                         ..
                     })
                 ),

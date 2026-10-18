@@ -24,7 +24,9 @@ mod help;
 mod request;
 
 pub use answer::{Answer, Warning};
-pub use argv::{Command, Count, DEFAULT_LIMIT, EsFatal, EsPlan, Limit, ScopeFolder, parse_argv};
+pub use argv::{
+    Command, Count, DEFAULT_LIMIT, EsFatal, EsPlan, HelpScreen, Limit, ScopeFolder, parse_argv,
+};
 pub use exit::ExitCode;
 pub use help::{help, version};
 pub use request::build_search;

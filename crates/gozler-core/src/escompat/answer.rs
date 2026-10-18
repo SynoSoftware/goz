@@ -14,7 +14,7 @@ pub struct Answer {
     pub total: u64,
     /// The rows the pages carried.
     pub shown: u64,
-    /// A volume in scope is indexing, rescanning or offline.
+    /// A volume in scope is not ready: indexing, rescanning, offline or failed.
     pub volumes_incomplete: bool,
     /// The query tests the size or the date modified, or totals the size.
     pub reads_size_or_date: bool,
@@ -75,16 +75,24 @@ impl Answer {
     }
 
     /// The code the search exits with; `no_result_error` is
-    /// `-no-result-error`.
+    /// `-no-result-error`. The first code that applies wins. 2 comes before
+    /// 10 because 10 promises that the rows shown are correct, and before 9
+    /// because the missing matches may exist.
     pub fn exit_code(&self, no_result_error: bool) -> ExitCode {
-        let base = if no_result_error && self.total == 0 {
+        let codes: Vec<ExitCode> = self
+            .warnings()
+            .into_iter()
+            .map(Warning::exit_code)
+            .collect();
+        if codes.contains(&ExitCode::Incomplete) {
+            ExitCode::Incomplete
+        } else if codes.contains(&ExitCode::Truncated) {
+            ExitCode::Truncated
+        } else if no_result_error && self.total == 0 {
             ExitCode::NoMatches
         } else {
             ExitCode::Complete
-        };
-        self.warnings()
-            .iter()
-            .fold(base, |code, warning| code.most_serious(warning.exit_code()))
+        }
     }
 }
 
@@ -92,7 +100,7 @@ impl Answer {
 /// `gozler: warning: {warning}`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
-    /// A volume in scope is indexing, rescanning or offline.
+    /// A volume in scope is not ready: indexing, rescanning, offline or failed.
     Incomplete,
     /// The query tests or totals sizes or dates, and some of them on a volume
     /// in scope are unknown.
@@ -115,12 +123,13 @@ impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Warning::Incomplete => f.write_str(
-                "some volumes are still indexing or unavailable; results may be incomplete",
+                "results may be incomplete: a volume in scope is not ready; gozler --status \
+                 shows why",
             ),
             Warning::SizesOrDatesUnknown => f.write_str(
-                "the size and date pass failed or stopped on a volume in scope, so \
-                 files whose size or date is unknown are left out of size and date \
-                 tests and size totals",
+                "results may be incomplete: gozler could not read the sizes and dates on a \
+                 volume in scope, so size and date tests and size totals leave those files \
+                 out",
             ),
             Warning::Truncated { shown, total } => write!(
                 f,

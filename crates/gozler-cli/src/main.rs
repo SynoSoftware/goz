@@ -50,7 +50,7 @@ fn run() -> Result<ExitCode, Failure> {
         })
         .collect::<Result<Vec<String>, Failure>>()?;
     match parse_argv(&args).map_err(Failure::Argv)? {
-        Command::Help => print(&help()),
+        Command::Help(screen) => print(&help(screen)),
         Command::Version => print(&format!("{}\n", version())),
         Command::Run(plan) => execute(plan),
     }
@@ -69,7 +69,7 @@ fn print(text: &str) -> Result<ExitCode, Failure> {
 #[cfg(not(windows))]
 fn execute(_plan: gozler_core::escompat::EsPlan) -> Result<ExitCode, Failure> {
     // gozlerd runs only on Windows, so there is never a daemon to talk to.
-    Err(Failure::DaemonNotRunning)
+    Err(Failure::NotWindows)
 }
 
 #[cfg(windows)]
@@ -323,13 +323,10 @@ mod win {
     fn status_warnings(status: &DaemonStatus) -> Vec<&'static str> {
         let mut warnings = Vec::new();
         if status.volumes.iter().any(|v| !v.phase.is_complete()) {
-            warnings.push("some volumes are not fully live");
+            warnings.push("some volumes are not ready; the phase above shows why");
         }
         if status.volumes.iter().any(|v| v.metadata_pending) {
-            warnings.push(
-                "the size and date pass failed or stopped on some volumes, \
-                 so some sizes and dates are unknown",
-            );
+            warnings.push("gozler could not read the sizes and dates on some volumes");
         }
         warnings
     }

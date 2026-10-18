@@ -297,7 +297,9 @@ pub enum QueryError {
     /// A `name:` term whose name is no search function; carries the name.
     #[error("unknown search function: {0}:")]
     UnknownFunction(String),
-    #[error("malformed {what}: {detail}")]
+    /// A value or part of the query that does not parse; `what` names it,
+    /// ending in a colon, and `detail` says what is wrong and how to fix it.
+    #[error("{what} {detail}")]
     Malformed { what: &'static str, detail: String },
     /// A relative path, which only a working directory can resolve, in a
     /// query parsed without one; carries the path.
@@ -357,84 +359,78 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["ext"],
         function: Function::Ext,
         example: "cs;txt",
-        help: "extension, one of a list; ext: alone finds files without one",
+        help: "Extension is one in the list; ext: alone finds files without one",
     },
     SearchFunction {
         names: &["size"],
         function: Function::Size,
         example: ">1mb",
-        help: "file size; also <, >=, <=, =, 1mb..10mb, empty, tiny, small, medium, large, huge, gigantic",
+        help: "File size; also <, <=, >=, =, ranges such as 1mb..10mb, and empty, \
+               tiny, small, medium, large, huge or gigantic",
     },
     SearchFunction {
         names: &["dm", "datemodified", "date-modified"],
         function: Function::DateModified,
         example: "today",
-        help: "date modified: today, yesterday, a YYYY-MM-DD day, or 7days for the last \
-               7 times 24 hours; also <, <=, >, >= and ranges such as \
-               2026-01-01..2026-03-31. A comparison compares times, so dm:<30days is \
-               older than 30 days",
+        help: "Date modified: today, yesterday, YYYY-MM-DD or Ndays; also <, <=, >, \
+               >= and ranges such as 2026-01-01..2026-03-31",
     },
     SearchFunction {
         names: &["path"],
         function: Function::Path,
         example: "text",
-        help: "the full path contains text; with * or ? the whole full path matches",
+        help: "Full path contains text; with * or ?, the whole full path must match",
     },
     SearchFunction {
         names: &["parent"],
         function: Function::Parent,
         example: r"C:\repo",
-        help: "only the files and folders directly in this folder; a relative \
-               folder is below the current folder",
+        help: "Only the files and folders directly in this folder; a relative folder \
+               starts from the current folder",
     },
     SearchFunction {
         names: &["nopath"],
         function: Function::NoPath,
         example: "text",
-        help: "the name contains text, also with -p; with * or ? the whole name matches",
+        help: "Name contains text, even with -p; with * or ?, the whole name must match",
     },
     SearchFunction {
         names: &["ww"],
         function: Function::WholeWord,
         example: "word",
-        help: "the name contains word as a whole word: no letter or digit is right \
-               before or after it, so _ and punctuation end a word; with a separator, \
-               the full path; a wildcard already matches a whole name",
+        help: "Name contains word, with no letter or digit right before or after it; \
+               with \\ or / in the value, the full path must contain it",
     },
     SearchFunction {
         names: &["regex"],
         function: Function::Regex,
         example: r"^test\d+\.cs$",
-        help: "a regular expression in Rust's regex syntax, not es's: no look-around \
-               or backreferences. It matches the name, or with -p or a \\\\ in it the \
-               full path, whose separators are \\, so write \\\\ or [\\\\/]. Its | and ! \
-               belong to the expression",
+        help: "Name matches a regular expression in Rust syntax; Notes has the details",
     },
     SearchFunction {
         names: &["attrib", "attributes", "attr"],
         function: Function::Attributes,
         example: "hs",
-        help: "every one of these attribute letters, in either case: hidden and \
-               system here. ATTRIBUTES lists the letters; !attrib:h excludes hidden \
-               files and folders",
+        help: "Has every attribute in the value, here hidden and system; letters in \
+               either case; !attrib:h excludes hidden items",
     },
     SearchFunction {
         names: &["file"],
         function: Function::File,
         example: "",
-        help: "files only; file:text also matches text",
+        help: "Files only; file:text also matches text",
     },
     SearchFunction {
         names: &["folder", "dir"],
         function: Function::Folder,
         example: "",
-        help: "folders only; folder:text also matches text",
+        help: "Folders only; folder:text also matches text",
     },
     SearchFunction {
         names: &["case"],
         function: Function::Case,
         example: "",
-        help: "match case; case:0 turns it off",
+        help: "Match case; case:0 turns it off",
     },
 ];
 
@@ -903,7 +899,7 @@ fn parent_folder(value: &str, working_dir: Option<&str>) -> Result<String, Query
     if value.is_empty() {
         return Err(QueryError::Malformed {
             what: "parent:",
-            detail: "no folder".to_string(),
+            detail: "needs a folder".to_string(),
         });
     }
     match working_dir {
@@ -1045,7 +1041,7 @@ fn groups(lexemes: Vec<Lexeme>) -> Result<Vec<Vec<Item>>, QueryError> {
 
 fn malformed_expression(detail: &str) -> QueryError {
     QueryError::Malformed {
-        what: "expression",
+        what: "query:",
         detail: detail.to_string(),
     }
 }
@@ -1061,9 +1057,9 @@ const TB: u64 = 1024 * GB;
 /// (1024-based) suffixes.
 fn parse_size(value: &str) -> Result<SizeRange, QueryError> {
     let v = value.trim();
-    let malformed = |detail: &str| QueryError::Malformed {
+    let malformed = |bad: &str| QueryError::Malformed {
         what: "size:",
-        detail: detail.to_string(),
+        detail: format!("{bad} is not a size; write a number with kb, mb, gb or tb, such as 10mb"),
     };
 
     // Named constants, as Everything defines them: each above the previous
@@ -1411,10 +1407,7 @@ mod tests {
             assert!(
                 matches!(
                     parse_query(query),
-                    Err(QueryError::Malformed {
-                        what: "expression",
-                        ..
-                    })
+                    Err(QueryError::Malformed { what: "query:", .. })
                 ),
                 "{query}"
             );

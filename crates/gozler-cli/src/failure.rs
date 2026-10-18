@@ -1,9 +1,10 @@
 //! Every way a gozler run fails, each with its one exit code and its message.
 
 use gozler_core::escompat::{EsFatal, ExitCode};
-use gozler_core::proto::ProtoError;
+use gozler_core::proto::{ProtoError, SERVICE_NAME};
 use gozler_core::query::QueryError;
 use std::io;
+use std::path::PathBuf;
 
 /// A failure that ends a gozler run. [`Failure::exit_code`] is the one place
 /// that maps a failure to its code, and [`Failure::report`] the one place that
@@ -25,8 +26,14 @@ pub(crate) enum Failure {
     /// Writing the results, the status or the help failed; `to` is the export
     /// file or `stdout`.
     Output { to: String, error: io::Error },
-    /// No pipe server exists.
-    DaemonNotRunning,
+    /// No pipe server exists, and the gozler service is not running.
+    DaemonNotRunning(NotRunning),
+    /// No pipe server exists, but the gozler service is running, starting,
+    /// stopping or paused, so the pipe may open soon.
+    DaemonNotReady,
+    /// gozler was built for a platform that has no gozlerd.
+    #[cfg_attr(windows, allow(dead_code))]
+    NotWindows,
     /// A pipe server exists but is not owned by SYSTEM or Administrators, so
     /// it may be another user's program posing as the daemon.
     Untrusted,
@@ -45,7 +52,8 @@ impl Failure {
             Failure::Argv(fatal) => fatal.exit_code,
             Failure::ArgumentNotUnicode(_) | Failure::Query(_) => ExitCode::InvalidInput,
             Failure::ExportCreate { .. } | Failure::Output { .. } => ExitCode::OutputFailed,
-            Failure::DaemonNotRunning => ExitCode::DaemonNotRunning,
+            Failure::DaemonNotRunning(_) | Failure::NotWindows => ExitCode::DaemonNotRunning,
+            Failure::DaemonNotReady => ExitCode::Communication,
             Failure::Untrusted => ExitCode::Untrusted,
             Failure::Communication(_) => ExitCode::Communication,
             Failure::Daemon { code, .. } => match code {
@@ -63,7 +71,7 @@ impl Failure {
             Failure::Argv(fatal) => {
                 eprintln!("gozler: {fatal}");
                 if fatal.exit_code == ExitCode::UnknownSwitch {
-                    eprintln!("gozler: run gozler -help for the supported switches");
+                    eprintln!("gozler: run gozler --help-full for every option");
                 }
             }
             Failure::ArgumentNotUnicode(arg) => {
@@ -72,21 +80,19 @@ impl Failure {
             Failure::Query(error) => {
                 eprintln!("gozler: {error}");
                 if matches!(error, QueryError::UnknownFunction(_)) {
-                    eprintln!("gozler: run gozler -help for the supported switches");
+                    eprintln!("gozler: run gozler --help-full for every search function");
                 }
             }
             Failure::ExportCreate { path, error } => {
                 eprintln!("gozler: cannot create {path}: {error}")
             }
-            Failure::Output { to, error } => eprintln!("gozler: writing to {to} failed: {error}"),
-            Failure::DaemonNotRunning => {
-                // es-verbatim line for consumers that grep stderr, plus our hint.
-                eprintln!(
-                    "Error 8: Everything IPC window not found. Please make sure Everything is running."
-                );
-                eprintln!(
-                    "gozler: the gozlerd daemon is not running (start it with `gozlerd run`)."
-                );
+            Failure::Output { to, error } => eprintln!("gozler: could not write to {to}: {error}"),
+            Failure::DaemonNotRunning(why) => why.report(),
+            Failure::DaemonNotReady => {
+                eprintln!("gozler: the {SERVICE_NAME} service is not ready; try again shortly")
+            }
+            Failure::NotWindows => {
+                eprintln!("gozler: gozler runs only on Windows, because it searches the NTFS index")
             }
             Failure::Untrusted => eprintln!(
                 "gozler: the pipe server is not the trusted gozlerd daemon (owner is not \
@@ -96,6 +102,73 @@ impl Failure {
             Failure::Communication(message)
             | Failure::Daemon { message, .. }
             | Failure::Internal(message) => eprintln!("gozler: {message}"),
+        }
+    }
+}
+
+/// Why the gozler service is not running, as Windows reports it.
+#[derive(Debug)]
+// Outside Windows the client never asks the Service Control Manager.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) enum NotRunning {
+    Stopped,
+    Disabled,
+    /// No gozler service exists. `folder` holds the running gozler.exe, and
+    /// `gozlerd_beside` says whether gozlerd.exe is there too.
+    NotInstalled {
+        folder: PathBuf,
+        gozlerd_beside: bool,
+    },
+    /// The service state or the folder of gozler.exe could not be read.
+    Unknown(String),
+}
+
+/// Where the gozler setup is published.
+const RELEASES: &str = "https://github.com/SynoSoftware/goz/releases";
+
+impl NotRunning {
+    /// Writes what is wrong to stderr, and below it the commands that fix it,
+    /// each alone on its line so that it can be copied.
+    fn report(&self) {
+        match self {
+            NotRunning::Stopped => eprintln!(
+                "gozler: the {SERVICE_NAME} service is stopped\n\
+                 To start it, open a terminal as administrator and run:\n  \
+                 net start {SERVICE_NAME}"
+            ),
+            // `sc.exe`, because PowerShell reads `sc` as Set-Content, and two
+            // lines, because Windows PowerShell 5.1 has no `&&`.
+            NotRunning::Disabled => eprintln!(
+                "gozler: the {SERVICE_NAME} service is disabled\n\
+                 To turn it on, open a terminal as administrator and run:\n  \
+                 sc.exe config {SERVICE_NAME} start= auto\n  \
+                 net start {SERVICE_NAME}"
+            ),
+            // An administrator terminal opens in System32, and the folder is
+            // not always on PATH. pushd also changes the drive in cmd.
+            NotRunning::NotInstalled {
+                folder,
+                gozlerd_beside: true,
+            } => eprintln!(
+                "gozler: the {SERVICE_NAME} service is not installed\n\
+                 To install it, open a terminal as administrator and run:\n  \
+                 pushd \"{}\"\n  \
+                 .\\gozlerd.exe install",
+                folder.display()
+            ),
+            NotRunning::NotInstalled {
+                folder,
+                gozlerd_beside: false,
+            } => eprintln!(
+                "gozler: could not find gozlerd.exe in {}\n\
+                 To install gozler, run its setup from {RELEASES}",
+                folder.display()
+            ),
+            NotRunning::Unknown(error) => {
+                eprintln!(
+                    "gozler: gozlerd is not running, and gozler could not find out why: {error}"
+                )
+            }
         }
     }
 }
@@ -154,7 +227,9 @@ mod tests {
                 output(Err(io_error()), "stdout").expect_err("a failed write"),
                 5,
             ),
-            (Failure::DaemonNotRunning, 8),
+            (Failure::DaemonNotRunning(NotRunning::Stopped), 8),
+            (Failure::DaemonNotReady, 7),
+            (Failure::NotWindows, 8),
             (Failure::Untrusted, 3),
             (
                 Failure::Communication("daemon did not reply in time".into()),

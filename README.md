@@ -16,7 +16,7 @@ gozler indexes every filename on your fixed NTFS volumes and answers substring q
 - **Fast.** 1.8x to 6.1x quicker than Everything across every query in our [benchmarks](docs/BENCHMARKS.md), on the same machine with the same result sets.
 - **Light.** ~215 MB resident under heavy querying and ~12 MB idle, against a ~3.97M-entry index.
 - **Live.** Tails the NTFS USN journal, so the index stays in sync as files change, including hard-link renames that Everything 1.4 misses. The journal is sized to the volume automatically (a 2 TB disk gets about four days of changes, not the 32 MB Windows default that Everything leaves you to raise by hand), and a tail thread that wedges on a sick disk or dies outright is cancelled or revived automatically.
-- **Scriptable.** Native `--json` output and a subset of `es.exe`-compatible flags with matching exit codes, so it drops into existing Everything workflows.
+- **Scriptable.** Native `--json` output and a subset of `es.exe`-compatible options with matching exit codes, so it drops into existing Everything workflows.
 - **Honest about state.** Every volume reports whether it is provably in sync, rescanning, or offline. It never serves stale results silently.
 
 ## Requirements
@@ -71,7 +71,7 @@ gozler --json kernel32.dll
 gozler --status
 ```
 
-`gozler` accepts a subset of `es.exe` flags (`-path`, `-n` / `-max-results`, the `-sort` family, `-size`, `-dm`, `-export-csv`, and the CSV-shape switches) and matches `es.exe`'s exit codes. Unsupported switches exit `6`, the same as `es.exe`.
+`gozler` accepts a subset of `es.exe` options (`-path`, `-n` / `-max-results`, the `-sort` family, `-size`, `-dm`, `-export-csv`, and the CSV-shape options) and keeps `es.exe`'s exit codes 4 to 9; codes 1, 2, 3 and 10 are its own, and `gozler --help-full` lists them all. Unsupported options exit `6`, the same as `es.exe`.
 
 ## Performance
 

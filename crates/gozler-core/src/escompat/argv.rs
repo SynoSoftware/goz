@@ -19,8 +19,9 @@
 //!   (case-sensitive, dashes required). Anything else is fatal (exit 6).
 //! - A parameter-taking switch consumes the next token; a missing or
 //!   unparseable parameter is fatal (exit 4).
-//! - `-h`, `-help` and `-version` end parsing where they appear, as in es, so
-//!   a token before them can still fail and a token after them is ignored.
+//! - The help switches and `-version` end parsing where they appear, as in
+//!   es, so a token before them can still fail and a token after them is
+//!   ignored.
 //! - Non-switch tokens become the query: joined with single spaces, in
 //!   command-line order, each token preserved as received. Flags may
 //!   interleave with query tokens freely.
@@ -46,12 +47,23 @@ use std::time::Duration;
 /// What a command line asks gozler to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// `-h` or `-help`: print the help.
-    Help,
+    /// Print a help screen.
+    Help(HelpScreen),
     /// `-version`: print the version.
     Version,
     /// Search, or with `--status` report the daemon's state.
     Run(EsPlan),
+}
+
+/// Which help screen a command line asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelpScreen {
+    /// `-h`, `-help`, `-?` or `--help`: common tasks, with one spelling of
+    /// each common option.
+    Quick,
+    /// `--help-full`: every option and alias, search function, attribute
+    /// letter, note and exit code.
+    Full,
 }
 
 /// The fully-resolved plan for one es-compatible invocation.
@@ -246,15 +258,16 @@ impl EsFatal {
     fn unknown_switch(token: &str) -> Self {
         Self {
             exit_code: ExitCode::UnknownSwitch,
-            message: format!("unknown switch: {token}"),
+            message: format!("unknown option: {token}"),
         }
     }
 
-    /// The switch requires a parameter and none followed.
-    fn missing_param(token: &str) -> Self {
+    /// The switch requires a parameter and none followed; `param` is the
+    /// help's name for it, such as `DIR`.
+    fn missing_param(token: &str, param: &str) -> Self {
         Self {
             exit_code: ExitCode::InvalidInput,
-            message: format!("expected an additional parameter after {token}"),
+            message: format!("{token} needs {param} after it"),
         }
     }
 
@@ -262,7 +275,7 @@ impl EsFatal {
     fn bad_param(token: &str, value: &str, expected: &str) -> Self {
         Self {
             exit_code: ExitCode::InvalidInput,
-            message: format!("expected {expected} after {token}, got: {value}"),
+            message: format!("{token} needs {expected}, not {value}"),
         }
     }
 
@@ -280,13 +293,27 @@ impl EsFatal {
 /// and its line in the help.
 pub(super) struct Switch {
     pub(super) spelling: Spelling,
+    pub(super) group: Group,
+    /// Whether the quick help lists the switch, by its first name only.
+    pub(super) quick: bool,
     pub(super) help: &'static str,
 }
 
-/// How a [`Switch`] is spelled, which also decides its section of the help.
+/// The section of the full help that lists a [`Switch`], by what the user
+/// wants to do.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Group {
+    Search,
+    LimitAndSort,
+    Output,
+    Totals,
+    Other,
+}
+
+/// How a [`Switch`] is spelled.
 pub(super) enum Spelling {
     /// `-name` or `/name`, each dash inside a name optional. The first name is
-    /// the one the help lists first.
+    /// the one the help lists first, and the only one the quick help lists.
     Es {
         names: &'static [&'static str],
         action: SwitchAction,
@@ -368,8 +395,9 @@ pub(super) enum SwitchAction {
     Status,
     /// `--insecure-no-server-check`: skip the pipe server's trust check.
     InsecureNoServerCheck,
-    /// `-h` / `-help`: stop parsing and print the help.
-    Help,
+    /// `-h` / `-help` / `-?` / `--help` / `--help-full`: stop parsing and
+    /// print that help screen.
+    Help(HelpScreen),
     /// `-version`: stop parsing and print the version.
     Version,
 }
@@ -403,302 +431,389 @@ impl SwitchAction {
             | SwitchAction::Json
             | SwitchAction::Status
             | SwitchAction::InsecureNoServerCheck
-            | SwitchAction::Help
+            | SwitchAction::Help(_)
             | SwitchAction::Version => None,
         }
     }
 }
 
-/// Every switch gozler accepts, in the order the help lists them.
+/// Every switch gozler accepts, in the order the help lists them within
+/// each [`Group`].
 pub(super) const SWITCHES: &[Switch] = &[
-    Switch {
-        spelling: Spelling::Es {
-            names: &["n", "max-results", "count"],
-            action: SwitchAction::Limit,
-        },
-        help: "show at most N results, or every result with -n all. Without -n, \
-               gozler shows 20, and -export-* writes every result. Exit 10 when \
-               the limit leaves out matches",
-    },
     Switch {
         spelling: Spelling::Es {
             names: &["path"],
             action: SwitchAction::Scope,
         },
-        help: "search below a folder",
+        group: Group::Search,
+        quick: true,
+        help: "Search only below DIR",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["parent-path"],
             action: SwitchAction::ParentPath,
         },
-        help: "search below the folder that holds PATH",
+        group: Group::Search,
+        quick: false,
+        help: "Search below the folder that contains PATH",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["parent"],
             action: SwitchAction::Parent,
         },
-        help: "only the files and folders directly in DIR, as parent:DIR finds",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["sort"],
-            action: SwitchAction::SortParam,
-        },
-        help: "order by a sort key; KEY-ascending or KEY-descending sets the direction",
-    },
-    Switch {
-        spelling: Spelling::Family {
-            usage: "-sort-KEY",
-            parse: parse_sort_switch,
-        },
-        help: "the same as -sort KEY, also with -ascending or -descending",
-    },
-    Switch {
-        spelling: Spelling::Family {
-            usage: "/on, /o-n, /os, /o-s, /od, /o-d, /oe, /o-e",
-            parse: parse_order_switch,
-        },
-        help: "order by name, size, date modified or extension as dir does: A to Z, \
-               smallest or oldest first; - reverses the order",
+        group: Group::Search,
+        quick: false,
+        help: "Find only the files and folders directly in DIR",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["i", "case", "match-case"],
             action: SwitchAction::MatchCase,
         },
-        help: "match case",
+        group: Group::Search,
+        quick: true,
+        help: "Match case",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["p", "match-path"],
             action: SwitchAction::MatchPath,
         },
-        help: "match every text term against the full path, as path: does; \
-               nopath: still matches the name",
+        group: Group::Search,
+        quick: true,
+        help: "Match text against the full path, not only the name",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["ww", "whole-word", "whole-words"],
             action: SwitchAction::WholeWord,
         },
-        help: "match every text term as a whole word, as ww: does",
+        group: Group::Search,
+        quick: false,
+        help: "Match whole words only",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["r", "regex"],
             action: SwitchAction::Regex,
         },
-        help: "also match this regular expression, as regex:PATTERN does; the whole \
-               argument is the pattern, its spaces and quotes included",
+        group: Group::Search,
+        quick: false,
+        help: "Also match PATTERN as a regular expression, as regex: does; spaces \
+               and quotes in PATTERN are part of it",
     },
     Switch {
         spelling: Spelling::Family {
             usage: "/aLETTERS, /a-LETTERS",
             parse: parse_attribute_switch,
         },
-        help: "only results with every attribute LETTERS lists, as attrib:LETTERS \
-               finds; - before a letter leaves out results with that attribute. \
-               /ad is folders only and /a-d files only, and /ah-s hidden but not \
-               system. ATTRIBUTES lists the letters, in either case",
+        group: Group::Search,
+        quick: false,
+        help: "Find results that have every attribute in LETTERS and none of the \
+               attributes after a -; /ad finds folders, /a-d files",
     },
     Switch {
         spelling: Spelling::Es {
-            names: &["name"],
-            action: SwitchAction::Column(EsColumn::Name),
+            names: &["n", "max-results", "count"],
+            action: SwitchAction::Limit,
         },
-        help: "add a Name column: the name without its folder",
+        group: Group::LimitAndSort,
+        quick: true,
+        help: "Show at most N results (default 20); -n all shows every result",
     },
     Switch {
         spelling: Spelling::Es {
-            names: &["path-column"],
-            action: SwitchAction::Column(EsColumn::Path),
+            names: &["sort"],
+            action: SwitchAction::SortParam,
         },
-        help: "add a Path column: the folder that holds the result",
+        group: Group::LimitAndSort,
+        quick: true,
+        help: "Sort by KEY: name, path, size, dm or extension; add -ascending \
+               or -descending to KEY to set the order, as in size-ascending",
     },
     Switch {
-        spelling: Spelling::Es {
-            names: &["full-path-and-name", "filename-column"],
-            action: SwitchAction::Column(EsColumn::FullPath),
+        spelling: Spelling::Family {
+            usage: "-sort-KEY",
+            parse: parse_sort_switch,
         },
-        help: "add the Filename column, the full path, here; without it or -name or \
-               -path-column, Filename comes last",
+        group: Group::LimitAndSort,
+        quick: false,
+        help: "Same as -sort KEY, as in -sort-size-ascending",
     },
     Switch {
-        spelling: Spelling::Es {
-            names: &["extension", "ext"],
-            action: SwitchAction::Column(EsColumn::Extension),
+        spelling: Spelling::Family {
+            usage: "/on, /o-n, /os, /o-s, /od, /o-d, /oe, /o-e",
+            parse: parse_order_switch,
         },
-        help: "add an Extension column: what follows the name's last dot",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["size"],
-            action: SwitchAction::Column(EsColumn::Size),
-        },
-        help: "add a Size column, empty for a folder",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["dm", "date-modified"],
-            action: SwitchAction::Column(EsColumn::DateModified),
-        },
-        help: "add a Date Modified column, in local time",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["attributes", "attribs", "attrib"],
-            action: SwitchAction::Column(EsColumn::Attributes),
-        },
-        help: "add an Attributes column: the attribute letters, such as HA, or in CSV \
-               and TSV their FILE_ATTRIBUTE_* number, such as 34",
+        group: Group::LimitAndSort,
+        quick: false,
+        help: "Sort as dir does by name, size, date or extension: A to Z, smallest \
+               or oldest first; /o- reverses the order",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["csv"],
             action: SwitchAction::Format(Format::Csv),
         },
-        help: "print the results as CSV",
+        group: Group::Output,
+        quick: true,
+        help: "Print the results as CSV",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["tsv"],
             action: SwitchAction::Format(Format::Tsv),
         },
-        help: "print the results as tab-separated values",
+        group: Group::Output,
+        quick: false,
+        help: "Print the results as tab-separated values",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["txt"],
             action: SwitchAction::Format(Format::Txt),
         },
-        help: "print only the full paths, with CRLF line ends",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["export-csv"],
-            action: SwitchAction::Export(Format::Csv),
-        },
-        help: "write the results to FILE as CSV instead of to stdout",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["export-tsv"],
-            action: SwitchAction::Export(Format::Tsv),
-        },
-        help: "write the results to FILE as tab-separated values",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["export-txt"],
-            action: SwitchAction::Export(Format::Txt),
-        },
-        help: "write the full paths to FILE",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["get-result-count"],
-            action: SwitchAction::Count(Count::Results),
-        },
-        help: "print only the number of matches, which counts every match \
-               whatever -n says",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["get-total-size"],
-            action: SwitchAction::Count(Count::TotalSize),
-        },
-        help: "print only the summed size in bytes of every matching file; \
-               folders have no size",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["get-folder-size"],
-            action: SwitchAction::FolderSize,
-        },
-        help: "print only the summed size in bytes of every file below DIR: \
-               the same as -path DIR -get-total-size",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["utf8-bom"],
-            action: SwitchAction::Utf8Bom,
-        },
-        help: "start an export file with a UTF-8 byte order mark (the default)",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["no-utf8-bom"],
-            action: SwitchAction::NoUtf8Bom,
-        },
-        help: "leave out the byte order mark",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["no-header"],
-            action: SwitchAction::NoHeader,
-        },
-        help: "leave out the CSV or TSV header row",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["no-double-quote"],
-            action: SwitchAction::NoDoubleQuote,
-        },
-        help: "quote a CSV text column only when it needs quotes",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["no-result-error"],
-            action: SwitchAction::NoResultError,
-        },
-        help: "exit 9 when nothing matches",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["timeout"],
-            action: SwitchAction::Timeout,
-        },
-        help: "wait up to MS milliseconds for the volumes in scope to finish \
-               indexing, then search; a volume still indexing makes the answer exit 2",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["h", "help"],
-            action: SwitchAction::Help,
-        },
-        help: "show this help",
-    },
-    Switch {
-        spelling: Spelling::Es {
-            names: &["version"],
-            action: SwitchAction::Version,
-        },
-        help: "print the version",
+        group: Group::Output,
+        quick: false,
+        help: "Print only the full paths, with CRLF line endings",
     },
     Switch {
         spelling: Spelling::Native {
             name: "json",
             action: SwitchAction::Json,
         },
-        help: "print the results, or with --status the state, as JSON; -export-* \
-               still writes its file in its format",
+        group: Group::Output,
+        quick: true,
+        help: "Print the results, or the --status report, as JSON",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["export-csv"],
+            action: SwitchAction::Export(Format::Csv),
+        },
+        group: Group::Output,
+        quick: true,
+        help: "Write all results to FILE as CSV, or the first N with -n",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["export-tsv"],
+            action: SwitchAction::Export(Format::Tsv),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Write all results to FILE as tab-separated values, or the first \
+               N with -n",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["export-txt"],
+            action: SwitchAction::Export(Format::Txt),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Write all full paths to FILE, or the first N with -n",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["name"],
+            action: SwitchAction::Column(EsColumn::Name),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Add a Name column: the name without its folder",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["path-column"],
+            action: SwitchAction::Column(EsColumn::Path),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Add a Path column: the folder that contains the result",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["full-path-and-name", "filename-column"],
+            action: SwitchAction::Column(EsColumn::FullPath),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Put the Filename column (the full path) here; without this option, \
+               gozler adds it last unless -name or -path-column is given",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["extension", "ext"],
+            action: SwitchAction::Column(EsColumn::Extension),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Add an Extension column",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["size"],
+            action: SwitchAction::Column(EsColumn::Size),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Add a Size column, in bytes; empty for a folder",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["dm", "date-modified"],
+            action: SwitchAction::Column(EsColumn::DateModified),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Add a Date Modified column",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["attributes", "attribs", "attrib"],
+            action: SwitchAction::Column(EsColumn::Attributes),
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Add an Attributes column",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["utf8-bom"],
+            action: SwitchAction::Utf8Bom,
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Start an export file with a UTF-8 byte order mark (default)",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["no-utf8-bom"],
+            action: SwitchAction::NoUtf8Bom,
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Leave out the byte order mark",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["no-header"],
+            action: SwitchAction::NoHeader,
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Leave out the CSV or TSV header row",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["no-double-quote"],
+            action: SwitchAction::NoDoubleQuote,
+        },
+        group: Group::Output,
+        quick: false,
+        help: "Quote CSV text only when it needs quotes",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["get-result-count"],
+            action: SwitchAction::Count(Count::Results),
+        },
+        group: Group::Totals,
+        quick: false,
+        help: "Print only the number of matches",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["get-total-size"],
+            action: SwitchAction::Count(Count::TotalSize),
+        },
+        group: Group::Totals,
+        quick: false,
+        help: "Print only the total size of the matching files, in bytes",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["get-folder-size"],
+            action: SwitchAction::FolderSize,
+        },
+        group: Group::Totals,
+        quick: false,
+        help: "Print only the total size of the files below DIR, in bytes",
     },
     Switch {
         spelling: Spelling::Native {
             name: "status",
             action: SwitchAction::Status,
         },
-        help: "show the state of gozlerd and each volume instead of searching; exit 2 \
-               when a volume is not live or its sizes and dates could not be read",
+        group: Group::Other,
+        quick: true,
+        help: "Show whether gozlerd and each volume are ready, instead of searching",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["timeout"],
+            action: SwitchAction::Timeout,
+        },
+        group: Group::Other,
+        quick: false,
+        help: "Wait up to MS milliseconds for indexing to finish, then search",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["no-result-error"],
+            action: SwitchAction::NoResultError,
+        },
+        group: Group::Other,
+        quick: false,
+        help: "Exit 9 when nothing matches",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["h", "help", "?"],
+            action: SwitchAction::Help(HelpScreen::Quick),
+        },
+        group: Group::Other,
+        quick: true,
+        help: "Show the quick help",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "help",
+            action: SwitchAction::Help(HelpScreen::Quick),
+        },
+        group: Group::Other,
+        quick: false,
+        help: "Same as -h",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "help-full",
+            action: SwitchAction::Help(HelpScreen::Full),
+        },
+        group: Group::Other,
+        quick: true,
+        help: "Show the full reference",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["version"],
+            action: SwitchAction::Version,
+        },
+        group: Group::Other,
+        quick: true,
+        help: "Show the version",
     },
     Switch {
         spelling: Spelling::Native {
             name: "insecure-no-server-check",
             action: SwitchAction::InsecureNoServerCheck,
         },
-        help: "skip the check that the pipe server is gozlerd (testing only)",
+        group: Group::Other,
+        quick: false,
+        help: "Skip the check that the pipe server is gozlerd (testing only)",
     },
 ];
 
@@ -717,27 +832,27 @@ pub(super) const SORT_KEYS: &[SortKeyName] = &[
     SortKeyName {
         names: &["name"],
         key: SortKey::Name,
-        help: "name, A to Z (the default)",
+        help: "Name, A to Z (default)",
     },
     SortKeyName {
         names: &["path"],
         key: SortKey::Path,
-        help: "folder, then name, A to Z",
+        help: "Folder, then name, A to Z",
     },
     SortKeyName {
         names: &["size"],
         key: SortKey::Size,
-        help: "size, largest first",
+        help: "Size, largest first",
     },
     SortKeyName {
         names: &["dm", "date-modified"],
         key: SortKey::DateModified,
-        help: "date modified, newest first",
+        help: "Date modified, newest first",
     },
     SortKeyName {
         names: &["extension"],
         key: SortKey::Extension,
-        help: "extension, A to Z; folders and names without one first",
+        help: "Extension, A to Z; folders and names without one come first",
     },
 ];
 
@@ -792,7 +907,7 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
         };
 
         match action {
-            SwitchAction::Help => return Ok(Command::Help),
+            SwitchAction::Help(screen) => return Ok(Command::Help(screen)),
             SwitchAction::Version => return Ok(Command::Version),
             SwitchAction::Attributes(switch) => query.push(switch.query_text().into()),
             action => apply_switch(action, token, &mut rest, &mut plan)?,
@@ -870,9 +985,9 @@ fn parse_order_switch(name: &str) -> Option<SwitchAction> {
 /// result has.
 fn parse_attribute_switch(name: &str) -> Option<SwitchAction> {
     const NOT_ATTRIBUTES: SwitchAction = SwitchAction::Refused(
-        "is not an attribute switch: write /a and attribute letters, with - before a \
-         letter to leave that attribute out, such as /ah or /a-h; gozler -help lists \
-         the letters",
+        "is not an attribute option: write /a and attribute letters, with - before a \
+         letter to leave that attribute out, such as /ah or /a-h; gozler --help-full \
+         lists the letters",
     );
     let mut chars = name.strip_prefix('a')?.chars();
     let (mut required, mut excluded) = (String::new(), String::new());
@@ -946,7 +1061,7 @@ fn apply_switch(
 ) -> Result<(), EsFatal> {
     match action {
         SwitchAction::Limit => {
-            let value = take_param(rest, token)?;
+            let value = take_param(rest, token, action)?;
             plan.limit = match value {
                 "all" => Limit::All,
                 _ => Limit::Rows(
@@ -957,7 +1072,7 @@ fn apply_switch(
             };
         }
         SwitchAction::Timeout => {
-            let value = take_param(rest, token)?;
+            let value = take_param(rest, token, action)?;
             let ms: u32 = value
                 .parse()
                 .map_err(|_| EsFatal::bad_param(token, value, "milliseconds"))?;
@@ -965,27 +1080,34 @@ fn apply_switch(
         }
         SwitchAction::NoResultError => plan.no_result_error = true,
         SwitchAction::Scope => {
-            plan.scope = Some(ScopeFolder::Dir(take_param(rest, token)?.to_owned()));
+            plan.scope = Some(ScopeFolder::Dir(
+                take_param(rest, token, action)?.to_owned(),
+            ));
         }
         SwitchAction::ParentPath => {
-            plan.scope = Some(ScopeFolder::ParentOf(take_param(rest, token)?.to_owned()));
+            plan.scope = Some(ScopeFolder::ParentOf(
+                take_param(rest, token, action)?.to_owned(),
+            ));
         }
-        SwitchAction::Parent => plan.parent = Some(take_param(rest, token)?.to_owned()),
+        SwitchAction::Parent => plan.parent = Some(take_param(rest, token, action)?.to_owned()),
         SwitchAction::Format(format) => plan.format = format,
         SwitchAction::Export(format) => {
-            plan.export = Some(take_param(rest, token)?.to_owned());
+            plan.export = Some(take_param(rest, token, action)?.to_owned());
             plan.format = format;
         }
         SwitchAction::Count(count) => plan.count = Some(count),
         SwitchAction::FolderSize => {
-            plan.scope = Some(ScopeFolder::Dir(take_param(rest, token)?.to_owned()));
+            plan.scope = Some(ScopeFolder::Dir(
+                take_param(rest, token, action)?.to_owned(),
+            ));
             plan.count = Some(Count::TotalSize);
         }
         SwitchAction::Refused(reason) => return Err(EsFatal::refused(token, reason)),
         SwitchAction::SortParam => {
-            let value = take_param(rest, token)?;
-            plan.sort = parse_sort_param(value)
-                .ok_or_else(|| EsFatal::bad_param(token, value, "a sort key"))?;
+            let value = take_param(rest, token, action)?;
+            plan.sort = parse_sort_param(value).ok_or_else(|| {
+                EsFatal::bad_param(token, value, "a sort key such as name, size or dm")
+            })?;
         }
         SwitchAction::Column(column) => {
             // es `es_add_column`: remove an existing instance, then append,
@@ -1001,26 +1123,32 @@ fn apply_switch(
         SwitchAction::MatchCase => plan.match_case = true,
         SwitchAction::MatchPath => plan.match_path = true,
         SwitchAction::WholeWord => plan.whole_word = true,
-        SwitchAction::Regex => plan.regexes.push(take_param(rest, token)?.to_owned()),
+        SwitchAction::Regex => plan
+            .regexes
+            .push(take_param(rest, token, action)?.to_owned()),
         SwitchAction::Json => plan.json = true,
         SwitchAction::Status => plan.status = true,
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
-        SwitchAction::Help | SwitchAction::Version | SwitchAction::Attributes(_) => {
+        SwitchAction::Help(_) | SwitchAction::Version | SwitchAction::Attributes(_) => {
             unreachable!("parse_argv handles -help, -version and search text")
         }
     }
     Ok(())
 }
 
-/// Consumes the next token as a switch parameter, or fails with exit 4
-/// naming the switch as the user typed it.
+/// Consumes the next token as the parameter of `action`, or fails with exit
+/// 4 naming the switch as the user typed it.
 fn take_param<'a>(
     rest: &mut core::slice::Iter<'a, String>,
     token: &str,
+    action: SwitchAction,
 ) -> Result<&'a str, EsFatal> {
-    rest.next()
-        .map(String::as_str)
-        .ok_or_else(|| EsFatal::missing_param(token))
+    rest.next().map(String::as_str).ok_or_else(|| {
+        let param = action
+            .param()
+            .expect("a switch that takes a parameter names it");
+        EsFatal::missing_param(token, param)
+    })
 }
 
 /// Resolves a `-sort` parameter value (`name`, `dm`, `date-modified`, ...
@@ -1578,8 +1706,10 @@ mod tests {
     /// token before them still fails, and one after them is never read.
     #[test]
     fn help_and_version_end_parsing_where_they_appear() {
-        assert_eq!(parse(&["report", "-help", "-bogus"]), Ok(Command::Help));
-        assert_eq!(parse(&["/h", "-n"]), Ok(Command::Help));
+        let quick = Ok(Command::Help(HelpScreen::Quick));
+        assert_eq!(parse(&["report", "-help", "-bogus"]), quick);
+        assert_eq!(parse(&["/h", "-n"]), quick);
+        assert_eq!(parse(&["/?"]), quick);
         assert_eq!(parse(&["-version", "-path"]), Ok(Command::Version));
         assert_eq!(fatal(&["-bogus", "-h"]).exit_code, ExitCode::UnknownSwitch);
     }

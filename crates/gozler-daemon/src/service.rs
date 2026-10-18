@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use gozler_core::proto::SERVICE_NAME;
 use tokio::sync::watch;
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
@@ -29,9 +30,6 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::{run, server};
 
-/// Service key name (the SCM/registry key). Keep stable across versions.
-/// (The pipe name is independent: `gozler_core::proto::PIPE_NAME`.)
-pub(crate) const SERVICE_NAME: &str = "gozler";
 const DISPLAY_NAME: &str = "gozler file index";
 const DESCRIPTION: &str =
     "Indexes NTFS volumes (MFT + USN journal) for instant file search with gozler.";

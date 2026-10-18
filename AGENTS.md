@@ -93,13 +93,13 @@ change must keep passing, so a test earns its place by the failure it watches.
   stays out of it, and Win32 calls go through `gozler-winfs`, which depends on no
   other workspace crate (`deny.toml`).
 - **The command line.** Scripts written for Everything or for goz v0.2.0 change
-  only the program name, to `gozler`: every switch keeps its name and purpose,
+  only the program name, to `gozler`: every option keeps its name and purpose,
   and gozler's own options start with `--`. The "Command line" and "Exit
   codes" sections of `docs/DESIGN.md` say where gozler departs from `es.exe`
   and why, such as the exit codes, the CSV columns and the default result
   limit. The rules live in `gozler_core::escompat` (arguments, exit codes and
-  the differences from es that the help prints), `gozler_core::output::table`
-  (output rows), `gozler_core::query::parse` (query syntax) and `gozler-cli`'s
+  the help), `gozler_core::output::table` (output rows),
+  `gozler_core::query::parse` (query syntax) and `gozler-cli`'s
   `failure.rs` (which failure exits with which code) and `main.rs` (the
   `--status` code).
 - **Truthful volume state.** A client must always be able to tell whether its
