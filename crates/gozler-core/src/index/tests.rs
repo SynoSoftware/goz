@@ -224,6 +224,40 @@ fn parent_slot_reuse_never_leaks_the_stale_chain() {
     );
 }
 
+/// The same reuse, reached through the FILE_LAYOUT pass (issue #48).
+///
+/// A file the MFT enumeration saw is deleted, and NTFS gives its record to a
+/// new file before the layout pass reaches it. The layout pass used to build
+/// the new tenant's chain over the map entry without removing the old one, so
+/// the deleted file stayed live but unreachable by FRN: the replayed delete
+/// could not find it, and it stayed in results until the next rescan.
+#[test]
+fn layout_pass_never_leaks_a_retenanted_record() {
+    let gone = frn_seq(100, 3);
+    let tenant = frn_seq(100, 4);
+    let mut idx = index_from_enum(&[create(gone, root_frn(), "gone.tmp", false)]);
+
+    idx.enrich(&LayoutFile {
+        frn: tenant,
+        attributes: 0x20,
+        size: Some(10),
+        mtime_ft: Some(555),
+        names: vec![crate::layout::LayoutName {
+            parent_frn: root_frn(),
+            name: b"tenant.txt".to_vec(),
+            name_lossy: false,
+            dos_only: false,
+        }],
+    });
+    // The journal replay from the cursor captured before the build.
+    idx.apply_batch(&[
+        delete(gone),
+        create(tenant, root_frn(), "tenant.txt", false),
+    ]);
+
+    assert_eq!(path_set(&idx), BTreeSet::from(["tenant.txt".to_string()]));
+}
+
 /// The daemon caches the entry of the last `-path` folder and checks it with
 /// `path_of` on the next query. A removed entry kept its old name id, which a
 /// compaction gives to another name or to none, so the check built a wrong

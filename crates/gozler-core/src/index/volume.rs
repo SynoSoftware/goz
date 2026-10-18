@@ -341,8 +341,9 @@ impl VolumeIndex {
         // because a rename landed between the ENUM and LAYOUT passes. Tombstone
         // + realloc here would orphan those children under a reused slot.
         if self.head_of(file.frn).is_none() {
-            // ENUM missed this FRN entirely; build the chain from LAYOUT.
-            // No existing entry means nothing to orphan.
+            // ENUM missed this FRN, or saw a previous tenant of its record that
+            // was deleted before this pass; build the chain from LAYOUT.
+            // No entry of this FRN exists, so nothing of it is orphaned.
             let desired: Vec<LinkTarget> = file
                 .names
                 .iter()
@@ -908,9 +909,9 @@ impl VolumeIndex {
     ///
     /// Every site that finds a live `by_frn` entry whose FRN does not match must
     /// call this before overwriting the map. It exists as one function precisely
-    /// so the two callers cannot drift apart again.
+    /// so the callers cannot drift apart again.
     /// Reported through `IndexStats::stale_slots` rather than an `Anomaly`: the
-    /// two callers are deep helpers with no access to the batch's
+    /// callers are deep helpers with no access to the batch's
     /// `ApplyOutcome`, and buffering per-event anomalies on the index would grow
     /// unbounded across a multi-million-entry bootstrap. The counter reaches
     /// `Status` either way.
@@ -1021,15 +1022,18 @@ impl VolumeIndex {
     /// (nothing exists yet to orphan).
     fn set_chain_links(&mut self, frn: Frn, is_dir: bool, desired: &[LinkTarget]) {
         let record = frn.record_number();
-        // Collect the current chain (only if it is really this FRN's).
+        // Collect the current chain if it is really this FRN's; a chain of the
+        // record's previous tenant is reclaimed before the map is overwritten.
         let mut current: SmallVec<[EntryIdx; 4]> = SmallVec::new();
-        if let Some(head) = self.by_frn.get(record)
-            && self.entries.frn(head) == frn
-        {
-            let mut cur = head;
-            while cur != NIL {
-                current.push(cur);
-                cur = self.entries.next_link(cur);
+        if let Some(head) = self.by_frn.get(record) {
+            if self.entries.frn(head) == frn {
+                let mut cur = head;
+                while cur != NIL {
+                    current.push(cur);
+                    cur = self.entries.next_link(cur);
+                }
+            } else {
+                self.reclaim_stale_slot(record, head);
             }
         }
 
