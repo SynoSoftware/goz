@@ -676,9 +676,8 @@ fn bounded_rescan(
 /// Builds this volume's index in place: its first build, or a rebuild after a
 /// journal loss (wrap, deletion, or parse anomaly). Enumerates the MFT on the
 /// handle the tail already owns, swaps the fresh index in under the write lock,
-/// invalidates the scope cache (its `EntryIdx`s belonged to the old index), and
-/// acquires a journal cursor. Queries keep serving (flagged incomplete) during
-/// the build.
+/// and acquires a journal cursor. Queries keep serving (flagged incomplete)
+/// during the build.
 fn rescan(
     state: &VolumeState,
     handle: &VolumeHandle,
@@ -732,12 +731,6 @@ fn rescan(
             JournalSetup::Active(c) => Some(c.maximum_size),
             JournalSetup::Refused | JournalSetup::Unavailable => None,
         };
-        // Invalidate the scope cache while the index write lock is held: its
-        // EntryIdx values belong to the old generation. Clearing it here (rather
-        // than after the lock drops) guarantees a reader never sees the new,
-        // possibly smaller index alongside a stale EntryIdx, which would index
-        // out of bounds in VolumeIndex::path_of during scope validation.
-        *state.scope_cache.lock() = None;
     }
 
     match journal {

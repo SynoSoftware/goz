@@ -331,7 +331,7 @@ fn run_on_volumes<'t, T>(
         let index = vol.index.read();
         let scope_entry = match scope {
             VolScope::All => None,
-            VolScope::Rel(rel) => match resolve_scope_cached(vol, &index, rel, match_case) {
+            VolScope::Rel(rel) => match resolve_scope(&index, rel, match_case) {
                 Some(e) => Some(e),
                 None => continue, // scope folder absent on this volume: no hits
             },
@@ -567,10 +567,6 @@ enum VolScope {
 fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Option<Vec<(Arc<VolumeState>, VolScope)>> {
     match Scope::of(scope, volumes.iter().map(|v| v.mounted())) {
         Scope::Everywhere => Some(volumes.iter().map(|v| (v.clone(), VolScope::All)).collect()),
-        // The folder comes without a trailing separator, so it can equal the
-        // path `VolumeIndex::path_of` rebuilds: an untrimmed `Windows\` (shell
-        // tab-completion's spelling) resolves fine but never validates, so the
-        // scope cache would miss and re-walk the tree on every keystroke.
         Scope::Folder { volume, folder } => Some(vec![(
             volumes[volume].clone(),
             VolScope::Rel(folder.as_bytes().to_vec()),
@@ -579,64 +575,20 @@ fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Option<Vec<(Arc<VolumeSt
     }
 }
 
-/// Resolves a `-path` scope, reusing the volume's cached resolution when the
-/// same folder is searched again (every keystroke). The cache is validated
-/// against the entry's current path, so a moved/deleted folder transparently
-/// falls back to a fresh directory walk.
-fn resolve_scope_cached(
-    vol: &Arc<VolumeState>,
-    index: &VolumeIndex,
-    rel: &[u8],
-    match_case: bool,
-) -> Option<EntryIdx> {
-    // Case-sensitive scopes are rare; skip the cache for them.
-    if !match_case {
-        let cached = vol.scope_cache.lock();
-        if let Some(sc) = cached.as_ref()
-            && sc.rel == rel
-            && scope_entry_valid(index, sc.entry, rel)
-        {
-            return Some(sc.entry);
-        }
-    }
-    let entry = resolve_scope(index, rel, match_case)?;
-    if !match_case {
-        *vol.scope_cache.lock() = Some(crate::volume_state::ScopeCache {
-            rel: rel.to_vec(),
-            entry,
-        });
-    }
-    Some(entry)
-}
-
-/// Confirms a cached scope entry still reconstructs to the same folded path
-/// (cheap O(depth) walk), so a stale cache after a rename never mis-scopes.
-fn scope_entry_valid(index: &VolumeIndex, entry: EntryIdx, rel: &[u8]) -> bool {
-    let mut buf = Vec::new();
-    if !matches!(
-        index.path_of(entry, &mut buf),
-        gozler_core::index::PathStatus::Ok
-    ) {
-        return false;
-    }
-    gozler_core::fold::fold(&buf) == gozler_core::fold::fold(rel)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{VolScope, build_status, resolve_scope_cached, scope_entry_valid, serve, targets};
+    use super::{build_status, serve};
     use crate::volume_state::{VolumeSet, VolumeState};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
         FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, QueryRequest,
         Request, Response, decode_response_frame, encode_request,
     };
-    use gozler_core::query::resolve_scope;
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
     use gozler_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
     };
-    use parking_lot::{Mutex, RwLock};
+    use parking_lot::RwLock;
     use std::sync::Arc;
 
     mod corpus;
@@ -671,7 +623,6 @@ mod tests {
             phase: RwLock::new(phase),
             metadata_pending: RwLock::new(false),
             journal_max_bytes: RwLock::new(None),
-            scope_cache: Mutex::new(None),
         })
     }
 
@@ -692,79 +643,6 @@ mod tests {
             index.insert_enum(&rec);
         }
         index
-    }
-
-    /// The scope cache only pays off when a resolved entry validates on the next
-    /// keystroke, and `scope_entry_valid` is the predicate that decides that.
-    #[test]
-    fn resolved_scope_validates_against_the_path_it_came_from() {
-        let index = windows_index();
-        for rel in [&b"Windows"[..], b"Windows\\System32"] {
-            let entry = resolve_scope(&index, rel, false).expect("scope resolves");
-            assert!(
-                scope_entry_valid(&index, entry, rel),
-                "{} resolved but did not validate",
-                String::from_utf8_lossy(rel)
-            );
-        }
-    }
-
-    /// A trailing separator is the common spelling: shell tab-completion emits
-    /// `C:\Windows\`, and `std::path::absolute` in the CLI preserves it.
-    ///
-    /// `resolve_scope` filters empty components so it resolves fine, but
-    /// `path_of` never emits a trailing separator, so an untrimmed `Windows\`
-    /// could never match it: the entry failed validation on every query, the
-    /// cache missed forever, and the tree walk silently ran every keystroke.
-    /// Results stayed correct, which is exactly why nothing caught it.
-    #[test]
-    fn trailing_separator_scope_still_validates() {
-        let index = windows_index();
-        let entry = resolve_scope(&index, b"Windows\\", false).expect("resolves today");
-        let plain = resolve_scope(&index, b"Windows", false).unwrap();
-        assert_eq!(entry, plain, "both spellings name the same directory");
-
-        let vol = live_volume(r"C:\");
-        let (_, scope) = targets(&set(&[vol]), Some(r"C:\Windows\"))
-            .and_then(|mut t| t.pop())
-            .expect("C: matches");
-        let VolScope::Rel(rel) = scope else {
-            panic!("a -path scope must produce Rel")
-        };
-        assert!(
-            scope_entry_valid(&index, entry, &rel),
-            "scope {:?} never validates, so the cache misses on every query",
-            String::from_utf8_lossy(&rel)
-        );
-    }
-
-    /// A second identical query must reuse the cached entry, and a cached entry
-    /// must survive only while it still names the same path.
-    #[test]
-    fn scope_cache_stores_then_reuses() {
-        let vol = live_volume(r"C:\");
-        let index = vol.index.read();
-
-        let first = resolve_scope_cached(&vol, &index, b"Windows", false).expect("resolves");
-        assert!(vol.scope_cache.lock().is_some(), "first call must populate");
-
-        let second = resolve_scope_cached(&vol, &index, b"Windows", false).expect("resolves");
-        assert_eq!(first, second);
-
-        // A cached entry whose path no longer matches must not be handed back.
-        assert!(!scope_entry_valid(&index, first, b"Somewhere\\Else"));
-    }
-
-    /// Case-sensitive scopes are documented as bypassing the cache entirely.
-    #[test]
-    fn case_sensitive_scope_never_touches_the_cache() {
-        let vol = live_volume(r"C:\");
-        let index = vol.index.read();
-        resolve_scope_cached(&vol, &index, b"Windows", true).expect("resolves");
-        assert!(
-            vol.scope_cache.lock().is_none(),
-            "match_case must neither read nor write the cache"
-        );
     }
 
     fn set(vols: &[Arc<VolumeState>]) -> VolumeSet {

@@ -14,7 +14,7 @@ mod measure;
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::query::{CompiledQuery, parse_query, run_query, run_query_deferrable};
-use gozler_core::types::{Frn, SortSpec};
+use gozler_core::types::{Frn, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::hint::black_box;
 
@@ -83,6 +83,10 @@ fn build_index() -> (VolumeIndex, usize) {
                             format!("document_{seq}_report_v{fidx}.txt")
                         };
                         idx.insert_enum(&enum_rec(file, d4, &name, false));
+                        // Scattered sizes and dates, so a size or date sort
+                        // compares real keys.
+                        let mix = seq.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        idx.set_stat(file, mix % 10_000_000, (mix >> 24) as i64);
                         count += 1;
                     }
                 }
@@ -132,6 +136,36 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
             })
         });
     }
+
+    // A volume root as the `-path` scope does the same work as no scope.
+    let parsed = compiled("document");
+    group.bench_function("common(document) scope=root", |b| {
+        b.iter(|| {
+            let out = run_query(
+                black_box(&idx),
+                r"C:\",
+                black_box(&parsed),
+                Some(idx.root()),
+                SortSpec::default(),
+                Some(100),
+            );
+            black_box(out.total)
+        })
+    });
+    // Ordering reads each compared candidate's size from the index.
+    group.bench_function("common(document) sort=size", |b| {
+        b.iter(|| {
+            let out = run_query(
+                black_box(&idx),
+                r"C:\",
+                black_box(&parsed),
+                None,
+                SortSpec::default_for(SortKey::Size),
+                Some(100),
+            );
+            black_box(out.total)
+        })
+    });
     group.finish();
 
     // Broad limit=None: reconstructs and sorts the ENTIRE match set (~2M paths),

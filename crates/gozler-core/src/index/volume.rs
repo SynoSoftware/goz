@@ -95,7 +95,7 @@ pub enum PathStatus {
     /// no trustworthy path.
     CycleDetected,
     /// The entry was removed from the index. Only an entry index held across
-    /// index changes, such as the daemon's cached `-path` scope, can name one.
+    /// index changes can name one.
     Removed,
 }
 
@@ -169,7 +169,8 @@ impl IndexMemory {
 pub struct ApplyOutcome {
     /// FRNs whose size/mtime changed and need an external stat.
     pub needs_stat: Vec<Frn>,
-    /// FRNs whose hard links changed and need an external link-set walk.
+    /// FRNs whose hard links changed and need an external link-set walk, each
+    /// once.
     ///
     /// The daemon resolves each FRN's real link set with a Win32 link walk and
     /// applies it through [`VolumeIndex::reconcile_links`]. A walk that cannot
@@ -415,6 +416,10 @@ impl VolumeIndex {
             // change and a reparse point change each write one.
             self.set_attributes(rec.frn, rec.attributes);
         }
+        // Reason bits accumulate, so one change reaches a batch in several
+        // records, and each FRN reported costs the daemon a link walk.
+        outcome.needs_link_reconcile.sort_unstable();
+        outcome.needs_link_reconcile.dedup();
         self.generation += 1;
         // Compaction is NOT performed here: it is reported so the caller can do
         // the expensive part off the write lock. Doing it inline made a single
@@ -1113,8 +1118,8 @@ impl VolumeIndex {
     /// zero, and each live entry holds a reference), so the remap lookup
     /// always yields a live new id.
     ///
-    /// This is the half that must hold the exclusive lock: column writes plus
-    /// one intern-table rebuild, no byte-buffer copying.
+    /// This is the half that must hold the exclusive lock: buffer swaps and
+    /// column writes, no copying or hashing of names.
     pub fn apply_compaction(&mut self, plan: CompactPlan) {
         let remap = self.names.install_compacted(plan.0);
         for idx in 0..self.entries.capacity() as EntryIdx {
@@ -1152,10 +1157,10 @@ impl VolumeIndex {
         }
     }
 
-    /// Returns growth slack (Vec doubling, hash-map overshoot) to the
+    /// Returns growth slack (column growth, hash-map overshoot) to the
     /// allocator, keeping ~1.6% headroom so post-publish journal churn does
-    /// not immediately re-double every column. Called once when a volume goes
-    /// live: bootstrap grows every component by doubling, so up to half the
+    /// not immediately reallocate every column. Called once when a volume
+    /// goes live: the hash maps grow by doubling, so up to half their
     /// allocation at that moment is slack that would otherwise be pinned for
     /// the daemon's lifetime.
     pub fn shrink_to_fit(&mut self) {
@@ -1164,8 +1169,8 @@ impl VolumeIndex {
         self.dir_children.shrink_to_fit();
         if let FrnMap::Dense(v) = &mut self.by_frn {
             // The dense map grows only when the journal brings a record number
-            // past its end, which the MFT does rarely, so an exact fit costs at
-            // most one reallocation then.
+            // past its end, which the MFT does rarely, and then by an eighth,
+            // so an exact fit costs one reallocation per eighth of growth.
             v.shrink_to_fit();
         }
     }

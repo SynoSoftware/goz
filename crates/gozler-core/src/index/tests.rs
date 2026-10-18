@@ -282,6 +282,29 @@ fn children_of_a_removed_folder_move_to_lost_found() {
     assert!(!idx.has_orphans());
 }
 
+/// `optimize_storage` trims the columns to their length plus a small headroom.
+/// Growth past it reallocated each column at twice its size, so a few percent
+/// of new files pinned up to twice the index's memory for the daemon's
+/// lifetime.
+#[test]
+fn growth_after_the_trim_keeps_little_slack() {
+    let file = |i: u64| create(frn(100 + i), root_frn(), &format!("{i}.txt"), false);
+    let mut idx = index_from_enum(&(0..10_000).map(file).collect::<Vec<_>>());
+    idx.optimize_storage();
+    idx.apply_batch(&(10_000..10_500).map(file).collect::<Vec<_>>());
+    let memory = idx.memory();
+    for (column, bytes) in [
+        ("entries", memory.entries),
+        ("folded names", memory.arena_folded),
+        ("frn map", memory.frn_map),
+    ] {
+        assert!(
+            bytes.allocated * 4 < bytes.used * 5,
+            "{column}: {bytes:?} holds more than a quarter of slack"
+        );
+    }
+}
+
 /// After `optimize_storage` the FRN map is a `Vec` indexed by record number. A
 /// journal record with a record number near 2^48 grew it to petabytes, and the
 /// failed allocation aborted the daemon.
@@ -341,6 +364,22 @@ fn created_and_deleted_in_same_batch_nets_to_nothing() {
         delete(frn(101)),
     ]);
     assert_eq!(path_set(&idx), BTreeSet::from(["dir".to_string()]));
+}
+
+/// USN reason bits accumulate, so one hard-link creation writes a
+/// `HARD_LINK_CHANGE` record and then a `HARD_LINK_CHANGE | CLOSE` one. Each
+/// FRN the batch reports costs the tail a file open and a link walk, so a
+/// file is reported once however many of its records the batch holds.
+#[test]
+fn a_hard_link_change_is_reported_once_per_batch() {
+    use crate::usn::record::{USN_REASON_CLOSE, USN_REASON_HARD_LINK_CHANGE};
+    let mut idx = index_from_enum(&[create(frn(100), root_frn(), "a.txt", false)]);
+    let change = |reason| record(frn(100), root_frn(), "b.txt", false, reason);
+    let outcome = idx.apply_batch(&[
+        change(USN_REASON_HARD_LINK_CHANGE),
+        change(USN_REASON_HARD_LINK_CHANGE | USN_REASON_CLOSE),
+    ]);
+    assert_eq!(outcome.needs_link_reconcile, vec![frn(100)]);
 }
 
 // -- hard links ----------------------------------------------------------

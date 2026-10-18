@@ -60,15 +60,17 @@ const _: () = assert!(size_of::<Frn>() == 8);
 const _: () = assert!(size_of::<EntryIdx>() == 4);
 const _: () = assert!(size_of::<NameId>() == 4);
 
-/// Freshly compacted name storage plus the id remap for every kept name, built
-/// WITHOUT touching the index so the expensive copy runs off the exclusive
-/// lock. Apply with [`NameStore::install_compacted`].
+/// Freshly compacted name storage, with its intern table, plus the id remap
+/// for every kept name, built WITHOUT touching the index so the expensive copy
+/// and hashing run off the exclusive lock. Apply with
+/// [`NameStore::install_compacted`].
 pub(crate) struct CompactedNames {
     raw: Vec<u8>,
     folded: Vec<u8>,
     pairs: Vec<NamePair>,
     refcount: Vec<u32>,
     head: Vec<EntryIdx>,
+    by_bytes: hashbrown::HashTable<NameId>,
     /// `remap[old_id]` = new id, or [`NIL`] for a dropped (refcount-0) name.
     remap: Vec<NameId>,
 }
@@ -115,6 +117,22 @@ fn hash_bytes(b: &[u8]) -> u64 {
 /// `NameStore::shrink_with_headroom` for why never to exact-fit).
 fn shrink_vec<T>(v: &mut Vec<T>) {
     v.shrink_to(v.len() + v.len() / 64 + 64);
+}
+
+/// Makes room for `additional` more elements, growing by an eighth instead of
+/// `Vec`'s doubling: once live growth passes the headroom
+/// [`shrink_vec`] leaves, doubling would pin up to twice the column's size for
+/// the daemon's lifetime. Growth stays amortized O(1).
+fn reserve_eighth<T>(v: &mut Vec<T>, additional: usize) {
+    if v.capacity() - v.len() < additional {
+        v.reserve_exact(additional.max(v.len() / 8 + 64));
+    }
+}
+
+/// [`Vec::push`] that grows by [`reserve_eighth`].
+fn push_eighth<T>(v: &mut Vec<T>, value: T) {
+    reserve_eighth(v, 1);
+    v.push(value);
 }
 
 /// `NameStore::raw_bytes` over explicit tables: the intern table's rehash
@@ -170,9 +188,9 @@ impl NameStore {
         };
 
         let id = self.pairs.len() as NameId;
-        self.pairs.push(NamePair { raw, folded });
-        self.refcount.push(1);
-        self.head.push(NIL);
+        push_eighth(&mut self.pairs, NamePair { raw, folded });
+        push_eighth(&mut self.refcount, 1);
+        push_eighth(&mut self.head, NIL);
         let Self {
             by_bytes,
             pairs,
@@ -190,6 +208,7 @@ impl NameStore {
         let len = u16::try_from(bytes.len())
             .expect("every name source caps a name at 255 UTF-16 units, far below 64 KiB");
         let off = buf.len() as u32;
+        reserve_eighth(buf, bytes.len() + 1);
         buf.extend_from_slice(bytes);
         buf.push(0);
         NameRef { off, len }
@@ -287,9 +306,10 @@ impl NameStore {
     }
 
     /// Builds compacted storage keeping only live (refcount > 0) names, in id
-    /// order, WITHOUT mutating `self`: the copy is the whole cost of a
-    /// compaction and must not run while queries are blocked. The caller
-    /// applies with [`Self::install_compacted`] under a brief exclusive lock.
+    /// order, WITHOUT mutating `self`: the copy and the intern table are the
+    /// whole cost of a compaction and must not run while queries are blocked.
+    /// The caller applies with [`Self::install_compacted`] under a brief
+    /// exclusive lock.
     pub(crate) fn plan_compact(&self) -> CompactedNames {
         let live = self.refcount.iter().filter(|&&c| c > 0).count();
         let mut c = CompactedNames {
@@ -298,6 +318,7 @@ impl NameStore {
             pairs: Vec::with_capacity(live),
             refcount: Vec::with_capacity(live),
             head: Vec::with_capacity(live),
+            by_bytes: hashbrown::HashTable::with_capacity(live),
             remap: vec![NIL; self.pairs.len()],
         };
         for (i, &rc) in self.refcount.iter().enumerate() {
@@ -314,18 +335,24 @@ impl NameStore {
             } else {
                 Self::push(&mut c.raw, self.raw_bytes_of(pair))
             };
-            c.remap[i] = c.pairs.len() as NameId;
+            let id = c.pairs.len() as NameId;
+            c.remap[i] = id;
             c.pairs.push(NamePair { raw, folded });
             c.refcount.push(rc);
             c.head.push(self.head[i]);
+            let hash = hash_bytes(self.raw_bytes_of(pair));
+            let (pairs, raw, folded) = (&c.pairs, &c.raw, &c.folded);
+            c.by_bytes.insert_unique(hash, id, |&i| {
+                hash_bytes(raw_bytes_in(pairs, raw, folded, i))
+            });
         }
         c
     }
 
     /// Installs storage built by [`Self::plan_compact`], returning the id
     /// remap (`remap[old_id]` = new id or [`NIL`]). The caller must rewrite
-    /// every entry's name id through it. Buffer swaps plus one intern-table
-    /// rebuild; this is the half that runs under the exclusive lock.
+    /// every entry's name id through it. Only buffer swaps; this is the half
+    /// that runs under the exclusive lock.
     ///
     /// The plan is only valid if the index has not changed since it was
     /// built; the volume's single-writer discipline (one tail thread, which
@@ -336,16 +363,8 @@ impl NameStore {
         self.pairs = c.pairs;
         self.refcount = c.refcount;
         self.head = c.head;
+        self.by_bytes = c.by_bytes;
         self.garbage = 0;
-        let mut table = hashbrown::HashTable::with_capacity(self.pairs.len());
-        let (pairs, raw, folded) = (&self.pairs, &self.raw, &self.folded);
-        for id in 0..pairs.len() as NameId {
-            let hash = hash_bytes(raw_bytes_in(pairs, raw, folded, id));
-            table.insert_unique(hash, id, |&i| {
-                hash_bytes(raw_bytes_in(pairs, raw, folded, i))
-            });
-        }
-        self.by_bytes = table;
         c.remap
     }
 
@@ -371,12 +390,12 @@ impl NameStore {
     }
 
     /// Returns growth slack to the OS, keeping ~1.6% headroom. Called once
-    /// post-bootstrap: the buffers grew by doubling, so up to half their
-    /// allocation can be slack. NOT an exact-fit shrink: a Vec shrunk to
-    /// exactly its length doubles its whole allocation on the very next
-    /// journal append, which un-does the shrink for the daemon's lifetime.
-    /// The headroom absorbs live churn instead (tens of thousands of new
-    /// names on a large volume before any buffer regrows).
+    /// post-bootstrap: the buffers grew by [`reserve_eighth`], so up to a
+    /// ninth of their allocation, and all of the intern table's power-of-two
+    /// overshoot, can be slack. NOT an exact-fit shrink: a Vec shrunk to
+    /// exactly its length reallocates, copying the whole buffer, on the very
+    /// next journal append. The headroom absorbs live churn instead (tens of
+    /// thousands of new names on a large volume before any buffer regrows).
     pub(crate) fn shrink_with_headroom(&mut self) {
         shrink_vec(&mut self.raw);
         shrink_vec(&mut self.folded);
@@ -550,19 +569,19 @@ impl EntryTable {
             idx
         } else {
             let idx = self.frn.len() as EntryIdx;
-            self.frn.push(frn);
-            self.parent.push(parent);
-            self.name_id.push(name_id);
-            self.flags.push(flags);
-            self.size.push(size);
-            self.mtime.push(mtime);
-            self.attributes.push(attributes);
-            self.next_link.push(next_link);
-            self.next_same.push(NIL);
-            self.prev_same.push(NIL);
-            self.first_child.push(NIL);
-            self.next_child.push(NIL);
-            self.prev_child.push(NIL);
+            push_eighth(&mut self.frn, frn);
+            push_eighth(&mut self.parent, parent);
+            push_eighth(&mut self.name_id, name_id);
+            push_eighth(&mut self.flags, flags);
+            push_eighth(&mut self.size, size);
+            push_eighth(&mut self.mtime, mtime);
+            push_eighth(&mut self.attributes, attributes);
+            push_eighth(&mut self.next_link, next_link);
+            push_eighth(&mut self.next_same, NIL);
+            push_eighth(&mut self.prev_same, NIL);
+            push_eighth(&mut self.first_child, NIL);
+            push_eighth(&mut self.next_child, NIL);
+            push_eighth(&mut self.prev_child, NIL);
             idx
         }
     }
@@ -731,8 +750,8 @@ impl EntryTable {
             + ComponentBytes::of_vec(&self.free)
     }
 
-    /// Returns Vec-doubling slack to the OS, keeping ~1.6% headroom so live
-    /// churn does not re-double every column (see
+    /// Returns growth slack to the OS, keeping ~1.6% headroom so live churn
+    /// does not reallocate every column at once (see
     /// `NameStore::shrink_with_headroom`). Called once post-bootstrap.
     pub(crate) fn shrink_with_headroom(&mut self) {
         shrink_vec(&mut self.frn);
@@ -802,6 +821,7 @@ impl FrnMap {
             FrnMap::Dense(v) => {
                 let r = record as usize;
                 if r >= v.len() {
+                    reserve_eighth(v, r + 1 - v.len());
                     v.resize(r + 1, NIL);
                 }
                 v[r] = idx;

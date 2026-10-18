@@ -10,17 +10,8 @@ use std::sync::Arc;
 
 use gozler_core::index::VolumeIndex;
 use gozler_core::scope::VolumeMounts;
-use gozler_core::types::{EntryIdx, VolumePhase};
-use parking_lot::{Mutex, RwLock};
-
-/// The last-resolved `-path` scope for this volume: its volume-relative folded
-/// path and the entry it maps to. Repeated searches in one folder (every
-/// keystroke) reuse it instead of re-walking the directory tree; each query
-/// validates it cheaply against the entry's current path.
-pub(crate) struct ScopeCache {
-    pub rel: Vec<u8>,
-    pub entry: EntryIdx,
-}
+use gozler_core::types::VolumePhase;
+use parking_lot::RwLock;
 
 /// Live state for one indexed volume, shared between its tail thread and the
 /// query server.
@@ -38,8 +29,6 @@ pub(crate) struct VolumeState {
     /// downtime can be replayed instead of rescanned, and a journal that could
     /// not be grown was invisible for months when only the log knew.
     pub journal_max_bytes: RwLock<Option<u64>>,
-    /// Memoized `-path` scope resolution (case-insensitive queries only).
-    pub scope_cache: Mutex<Option<ScopeCache>>,
 }
 
 impl VolumeState {
@@ -52,7 +41,6 @@ impl VolumeState {
             phase: RwLock::new(VolumePhase::Bootstrapping),
             metadata_pending: RwLock::new(false),
             journal_max_bytes: RwLock::new(None),
-            scope_cache: Mutex::new(None),
         }
     }
 

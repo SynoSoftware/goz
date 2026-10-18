@@ -459,14 +459,13 @@ fn contains_whole_word(finder: &memmem::Finder, text: &[u8]) -> bool {
 }
 
 /// A matched entry before its path is built (deferred to the final page).
+/// Every other field is read from the index when needed: a broad query holds
+/// millions of candidates.
 struct Candidate {
     idx: EntryIdx,
-    is_dir: bool,
-    size: Option<u64>,
-    mtime: Option<i64>,
-    /// Where the folded path of the parent folder lies in the path sort's
-    /// buffer; filled only for a path sort.
-    folded_parent: (usize, usize),
+    /// The parent folder's position in the path sort's folder list; filled
+    /// only for a path sort.
+    folder: u32,
 }
 
 /// Runs a query over `index`, the volume mounted at `mount_prefix` (`C:\`).
@@ -542,8 +541,9 @@ pub fn run_totals(
     };
     for size in candidates
         .iter()
-        .filter(|c| !c.is_dir)
-        .filter_map(|c| c.size)
+        .map(|c| index.entry(c.idx))
+        .filter(|e| !e.is_dir())
+        .filter_map(|e| e.size())
     {
         totals.add(Totals { count: 0, size })?;
     }
@@ -568,6 +568,10 @@ fn scan<'q, 'i>(
     scope: Option<EntryIdx>,
 ) -> Scan<'q, 'i> {
     let mut scan = Scan::new(index, mount_prefix, query);
+    // The volume root (`-path C:\`) holds the whole volume, so it is no scope;
+    // as one it would walk the capped subtree and then pay an ancestry walk
+    // per match for nothing.
+    let scope = scope.filter(|&root| root != index.root());
 
     // Folder scope: walk the scope subtree via the child chains, so cost
     // tracks the folder, not the volume. Membership is by construction, so
@@ -696,20 +700,22 @@ fn run_query_impl(
 
     // Sort-by-path compares each candidate's folded parent path. Siblings share
     // it, so each parent folder's path is built and stored once.
-    let mut folded_parents = Vec::new();
+    let mut folders = FolderPaths::default();
     if sort.is_some_and(|s| matches!(s.key, SortKey::Path)) {
         let mut folded_dirs = DirPaths::new(index, NameForm::Folded, mount_prefix);
-        let mut stored: FxHashMap<EntryIdx, (usize, usize)> = FxHashMap::default();
+        let mut stored: FxHashMap<EntryIdx, u32> = FxHashMap::default();
         let mut path = Vec::new();
         for c in &mut candidates {
             let parent = index.entry(c.idx).parent();
-            c.folded_parent = *stored.entry(parent).or_insert_with(|| {
+            c.folder = *stored.entry(parent).or_insert_with(|| {
                 // A parent with no path leaves the key empty; the page drops
                 // the candidate.
                 folded_dirs.folder_path_into(index, parent, &mut path);
-                let start = folded_parents.len();
-                folded_parents.extend_from_slice(&path);
-                (start, folded_parents.len())
+                let start = folders.bytes.len();
+                folders.bytes.extend_from_slice(&path);
+                folders.spans.push((start, folders.bytes.len()));
+                // Fewer folders than entries, and an `EntryIdx` is a u32.
+                (folders.spans.len() - 1) as u32
             });
         }
     }
@@ -718,7 +724,7 @@ fn run_query_impl(
     // result order (O(M)), then sort just that prefix (O(end log end)). This
     // avoids an O(M log M) sort of the entire match set on common queries.
     if let Some(sort) = sort {
-        order_top(index, &folded_parents, &mut candidates, sort, end);
+        order_top(index, &folders, &mut candidates, sort, end);
     }
 
     // Build paths only for the requested page. A broad result set holds
@@ -736,9 +742,9 @@ fn run_query_impl(
             path,
             frn: entry.frn(),
             parent_frn: index.entry(entry.parent()).frn(),
-            is_dir: c.is_dir,
-            size: c.size,
-            mtime: c.mtime,
+            is_dir: entry.is_dir(),
+            size: entry.size(),
+            mtime: entry.mtime(),
             attributes: entry.attributes(),
         });
     }
@@ -856,13 +862,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             }
         }
 
-        Some(Candidate {
-            idx,
-            is_dir: entry.is_dir(),
-            size: entry.size(),
-            mtime: entry.mtime(),
-            folded_parent: (0, 0),
-        })
+        Some(Candidate { idx, folder: 0 })
     }
 }
 
@@ -892,20 +892,22 @@ fn in_scope(
     // Mirrors `VolumeIndex::path_of`: directory depths under 32 stay on the
     // stack, so the per-candidate ancestry walk doesn't heap-allocate.
     let mut chain: SmallVec<[EntryIdx; 32]> = SmallVec::new();
-    let mut cur = node;
+    // The walk starts at the parent, so only folders are memoized: each entry
+    // is asked about once, and memoizing it too would grow the memo by every
+    // match.
+    let mut cur = index.entry(node).parent();
     let verdict = loop {
         if cur == root {
             break true;
         }
+        if cur == crate::types::NIL {
+            break false;
+        }
         if let Some(&v) = memo.get(&cur) {
             break v;
         }
-        let parent = index.entry(cur).parent();
-        if parent == crate::types::NIL {
-            break false;
-        }
         chain.push(cur);
-        cur = parent;
+        cur = index.entry(cur).parent();
         if chain.len() > 4096 {
             break false; // cycle guard
         }
@@ -916,30 +918,38 @@ fn in_scope(
     verdict
 }
 
+/// The folded paths of the path sort's parent folders, each stored once.
+#[derive(Default)]
+struct FolderPaths {
+    bytes: Vec<u8>,
+    /// Where each folder's path lies in `bytes`, by [`Candidate::folder`].
+    spans: Vec<(usize, usize)>,
+}
+
 /// A candidate as the result order reads it: straight from the index, so a
 /// tie-break key is loaded only when a comparison reaches it.
 struct Ranked<'a> {
     index: &'a VolumeIndex,
-    folded_parents: &'a [u8],
+    folders: &'a FolderPaths,
     candidate: &'a Candidate,
 }
 
 impl OrderFields for Ranked<'_> {
     fn is_dir(&self) -> bool {
-        self.candidate.is_dir
+        self.index.entry(self.candidate.idx).is_dir()
     }
     fn folded_parent(&self) -> &[u8] {
-        let (start, end) = self.candidate.folded_parent;
-        &self.folded_parents[start..end]
+        let (start, end) = self.folders.spans[self.candidate.folder as usize];
+        &self.folders.bytes[start..end]
     }
     fn folded_name(&self) -> &[u8] {
         self.index.folded_name(self.candidate.idx)
     }
     fn size(&self) -> Option<u64> {
-        self.candidate.size
+        self.index.entry(self.candidate.idx).size()
     }
     fn mtime(&self) -> Option<i64> {
-        self.candidate.mtime
+        self.index.entry(self.candidate.idx).mtime()
     }
     fn volume(&self) -> &[u8] {
         b"" // one volume per query run
@@ -960,7 +970,7 @@ impl OrderFields for Ranked<'_> {
 /// quickselect to partition when `end` is a small slice of a large match set.
 fn order_top(
     index: &VolumeIndex,
-    folded_parents: &[u8],
+    folders: &FolderPaths,
     cands: &mut [Candidate],
     sort: SortSpec,
     end: usize,
@@ -971,7 +981,7 @@ fn order_top(
     let cmp = |a: &Candidate, b: &Candidate| {
         let ranked = |candidate| Ranked {
             index,
-            folded_parents,
+            folders,
             candidate,
         };
         compare(sort, &ranked(a), &ranked(b))

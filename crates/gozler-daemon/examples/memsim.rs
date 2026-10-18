@@ -154,6 +154,28 @@ fn main() {
     idx.optimize_storage();
     let after = idx.memory();
 
+    // Live churn after the trim: 3% more entries with new names (one npm
+    // install or Windows update on a large volume), past the trim's headroom.
+    let first_rec = 1000 + rows.len() as u64;
+    let growth = rows.len() / 32;
+    for (rec_no, row) in (first_rec..).zip(rows.iter().take(growth)) {
+        let mut name = row.name.clone();
+        name.push(b'~');
+        let r = ParsedUsnRecord {
+            major_version: 3,
+            frn: Frn(rec_no | (1u64 << 48)),
+            parent_frn: Frn(row.parent_rec),
+            usn: 0,
+            timestamp_ft: 0,
+            reason: USN_REASON_FILE_CREATE,
+            attributes: 0,
+            name,
+            name_lossy: false,
+        };
+        idx.insert_enum(&r);
+    }
+    let grown = idx.memory();
+
     drop(rows);
     purge();
     let settled = private_mb();
@@ -181,6 +203,7 @@ fn main() {
     };
     dump("pre-optimize ", &before);
     dump("post-optimize", &after);
+    dump(&format!("post-growth +{growth}"), &grown);
     eprintln!("process private with ONLY the index alive: {settled:.1} MB");
 
     // Where does the residue live? mimalloc's own accounting.
