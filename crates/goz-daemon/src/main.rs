@@ -216,7 +216,15 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
     for s in scans {
         let mount = s.mounts.first().cloned().unwrap_or_default();
         let t = Instant::now();
-        let out = run_query(&s.index, &parsed, None, SortSpec::default(), 0, Some(20));
+        let out = run_query(
+            &s.index,
+            &mount,
+            &parsed,
+            None,
+            SortSpec::default(),
+            0,
+            Some(20),
+        );
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         println!(
             "  {}: {} match(es) in {:.1} ms (showing up to 20)",
@@ -237,7 +245,7 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
                 }
                 None => "?".to_string(),
             };
-            println!("    [{size:>12}] [{date:>15}] {mount}{path}");
+            println!("    [{size:>12}] [{date:>15}] {path}");
         }
     }
     Ok(())

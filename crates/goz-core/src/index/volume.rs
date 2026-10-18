@@ -40,7 +40,7 @@ const LOST_FOUND_FRN: Frn = Frn(u64::MAX);
 
 /// Maximum parent hops before [`VolumeIndex::path_of`] declares a cycle. Deep
 /// but bounded; real NTFS trees are far shallower.
-const MAX_PATH_HOPS: usize = 4096;
+pub(crate) const MAX_PATH_HOPS: usize = 4096;
 
 /// The `dir_children` key hash of a folded name. One fixed function for
 /// insert, remove, and lookup: the three must agree or the scope index
@@ -983,6 +983,14 @@ impl VolumeIndex {
             }
         }
 
+        // Every link names the same file record, so a new link starts with the
+        // size and date the chain already knows. Nothing stats a link that
+        // reconciliation adds, so without this a new hard link, or the new
+        // name of a renamed link, has no size or date.
+        let (size, mtime) = current.first().map_or((SIZE_UNKNOWN, MTIME_UNKNOWN), |&e| {
+            (self.entries.size(e), self.entries.mtime(e))
+        });
+
         // Match each desired link to an existing entry, else allocate.
         let mut kept: SmallVec<[EntryIdx; 4]> = SmallVec::new();
         let mut used: SmallVec<[bool; 4]> = SmallVec::from_elem(false, current.len());
@@ -1000,15 +1008,9 @@ impl VolumeIndex {
                 let flags = EntryFlags::EMPTY
                     .with(EntryFlags::DIR, is_dir)
                     .with(EntryFlags::NON_UNICODE_NAME, target.name.lossy);
-                let idx = self.entries.alloc(
-                    frn,
-                    target.parent,
-                    id,
-                    flags,
-                    SIZE_UNKNOWN,
-                    MTIME_UNKNOWN,
-                    NIL,
-                );
+                let idx = self
+                    .entries
+                    .alloc(frn, target.parent, id, flags, size, mtime, NIL);
                 self.link_same_name(idx, id);
                 self.link_child(idx);
                 self.dir_index_insert(idx);
@@ -1298,11 +1300,11 @@ pub struct EntryView<'a> {
     idx: EntryIdx,
 }
 
-impl EntryView<'_> {
+impl<'a> EntryView<'a> {
     pub fn frn(&self) -> Frn {
         self.index.entries.frn(self.idx)
     }
-    pub fn name(&self) -> &[u8] {
+    pub fn name(&self) -> &'a [u8] {
         self.index
             .names
             .raw_bytes(self.index.entries.name_id(self.idx))

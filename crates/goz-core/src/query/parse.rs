@@ -2,8 +2,9 @@
 //!
 //! Supported: space-separated terms (implicit AND), `"quoted phrases"`,
 //! `*`/`?` wildcards (anchored to the whole name), path terms (a term
-//! containing `\` or `/`), and the functions `ext:`, `size:`, `path:`,
-//! `file:`, `folder:`, `case:`. The boolean operators `|` and `!` are
+//! containing `\` or `/`, or a `path:` value; a path term with a wildcard is
+//! anchored to the whole full path), and the functions `ext:`, `size:`,
+//! `path:`, `file:`, `folder:`, `case:`. The boolean operators `|` and `!` are
 //! rejected loudly rather than silently mis-executed: es's own precedence
 //! for them is undocumented, so guessing it would be a compatibility trap.
 //! Unknown `func:` prefixes are treated as literal text, matching es.
@@ -20,7 +21,8 @@ use smallvec::SmallVec;
 /// code points, so the inline capacity never spills.
 pub type CodePointBuf = SmallVec<[u32; 256]>;
 
-/// A compiled wildcard pattern (whole-name match).
+/// A compiled wildcard pattern, matched against a whole name or, for a path
+/// wildcard, a whole full path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wildcard {
     tokens: Vec<GlobTok>,
@@ -57,7 +59,8 @@ impl Wildcard {
 
     /// Matches the whole of `name`, decoding its code points into the caller's
     /// reusable `buf` (cleared first) instead of allocating one per candidate.
-    /// NTFS names are <= 255 code points, so the inline capacity never spills.
+    /// NTFS names are <= 255 code points, so a name never spills the inline
+    /// capacity; a full path can, and the spilled buffer is then reused.
     pub fn matches_into(&self, name: &[u8], buf: &mut CodePointBuf) -> bool {
         buf.clear();
         buf.extend(crate::wtf8::CodePoints::new(name));
@@ -191,6 +194,9 @@ pub struct ParsedQuery {
     pub path_terms: Vec<Vec<u8>>,
     /// Whole-name wildcard patterns (all must match).
     pub wildcards: Vec<Wildcard>,
+    /// Whole-full-path wildcard patterns (all must match): a wildcard that
+    /// contains a separator, or a `path:` value with a wildcard.
+    pub path_wildcards: Vec<Wildcard>,
     pub filters: Filters,
     pub match_case: bool,
 }
@@ -199,7 +205,10 @@ impl ParsedQuery {
     /// `true` when there are no positive text constraints: the query matches
     /// everything subject to `filters`.
     pub fn is_text_empty(&self) -> bool {
-        self.name_terms.is_empty() && self.path_terms.is_empty() && self.wildcards.is_empty()
+        self.name_terms.is_empty()
+            && self.path_terms.is_empty()
+            && self.wildcards.is_empty()
+            && self.path_wildcards.is_empty()
     }
 }
 
@@ -225,18 +234,27 @@ fn case_directive(text: &str) -> Option<bool> {
     }
 }
 
-/// Parses a query string into a [`ParsedQuery`].
+/// Parses a case-insensitive query string into a [`ParsedQuery`]; a `case:`
+/// directive in the query makes it case-sensitive.
 pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
+    parse_query_with_case(input, false)
+}
+
+/// Parses a query string into a [`ParsedQuery`] whose case sensitivity
+/// defaults to `match_case` (es `-case`). A `case:` directive in the query
+/// overrides the default, so [`ParsedQuery::match_case`] is the one value that
+/// both matching and the `-path` scope lookup follow.
+pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuery, QueryError> {
     let tokens = tokenize(input)?;
 
     // First pass: detect case-sensitivity so text folding is correct. The
-    // last `case:` directive wins; default is case-insensitive.
+    // last `case:` directive wins.
     let match_case = tokens
         .iter()
         .filter(|t| !t.quoted)
         .filter_map(|t| case_directive(&t.text))
         .next_back()
-        .unwrap_or(false);
+        .unwrap_or(match_case);
 
     let fold_term = |s: &[u8]| -> Vec<u8> { if match_case { s.to_vec() } else { fold(s) } };
 
@@ -244,6 +262,7 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
         name_terms: Vec::new(),
         path_terms: Vec::new(),
         wildcards: Vec::new(),
+        path_wildcards: Vec::new(),
         filters: Filters::default(),
         match_case,
     };
@@ -280,7 +299,10 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
                     continue;
                 }
                 "path" => {
-                    if !value.is_empty() {
+                    if has_wildcard(value) {
+                        q.path_wildcards
+                            .push(Wildcard::compile(&fold_term(value.as_bytes())));
+                    } else if !value.is_empty() {
                         q.path_terms.push(fold_term(value.as_bytes()));
                     }
                     continue;
@@ -307,19 +329,28 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
     Ok(q)
 }
 
-/// Routes an unquoted text token to the wildcard, path, or name bucket.
+/// Routes an unquoted text token to its bucket: a term with a separator
+/// matches the full path, any other term the name, and a wildcard in either
+/// anchors it to the whole of what it matches.
 fn push_text_term(q: &mut ParsedQuery, text: &str, fold_term: &impl Fn(&[u8]) -> Vec<u8>) {
     if text.is_empty() {
         return;
     }
-    if text.contains('*') || text.contains('?') {
-        q.wildcards
-            .push(Wildcard::compile(&fold_term(text.as_bytes())));
-    } else if text.contains('\\') || text.contains('/') {
-        q.path_terms.push(fold_term(text.as_bytes()));
-    } else {
-        q.name_terms.push(fold_term(text.as_bytes()));
+    let is_path = text.contains('\\') || text.contains('/');
+    match (has_wildcard(text), is_path) {
+        (true, true) => q
+            .path_wildcards
+            .push(Wildcard::compile(&fold_term(text.as_bytes()))),
+        (true, false) => q
+            .wildcards
+            .push(Wildcard::compile(&fold_term(text.as_bytes()))),
+        (false, true) => q.path_terms.push(fold_term(text.as_bytes())),
+        (false, false) => q.name_terms.push(fold_term(text.as_bytes())),
     }
+}
+
+fn has_wildcard(text: &str) -> bool {
+    text.contains('*') || text.contains('?')
 }
 
 struct Token {
@@ -552,6 +583,39 @@ mod tests {
         let p = q("projects\\src");
         assert_eq!(p.path_terms, vec![b"projects\\src".to_vec()]);
         assert!(p.name_terms.is_empty());
+    }
+
+    /// A wildcard with a separator, and a `path:` value with a wildcard, match
+    /// the full path; neither is a name wildcard, which no name with a
+    /// separator could ever match.
+    #[test]
+    fn a_wildcard_with_a_separator_is_a_path_wildcard() {
+        for query in [r"*\docs\*.md", "*/docs/*.md", "path:*.md", r"file:*\docs\*"] {
+            let p = q(query);
+            assert_eq!(p.path_wildcards.len(), 1, "{query}");
+            assert!(p.wildcards.is_empty() && p.path_terms.is_empty(), "{query}");
+        }
+        assert!(q(r"*\DOCS\*").path_wildcards[0].matches(br"c:\repo\docs\x"));
+        assert_eq!(q("path:docs").path_terms, vec![b"docs".to_vec()]);
+    }
+
+    /// `-case` sets the default; a `case:` directive overrides it either way.
+    #[test]
+    fn the_case_switch_is_the_default_a_directive_overrides() {
+        let p = parse_query_with_case("Report", true).unwrap();
+        assert!(p.match_case);
+        assert_eq!(p.name_terms, vec![b"Report".to_vec()]);
+        assert!(
+            !parse_query_with_case("Report case:0", true)
+                .unwrap()
+                .match_case
+        );
+        assert!(
+            parse_query_with_case("Report case:", false)
+                .unwrap()
+                .match_case
+        );
+        assert!(!parse_query_with_case("Report", false).unwrap().match_case);
     }
 
     #[test]

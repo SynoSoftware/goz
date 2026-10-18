@@ -7,7 +7,7 @@
 //! (bootstrap + tail) stays on dedicated OS threads; tokio only serves the pipe.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use goz_core::proto::{
@@ -18,8 +18,10 @@ use goz_core::proto::{
     MAX_CLIENT_FRAME, PAGE_ROWS, QueryRequest, encode_response_frame, push_item,
     push_results_header,
 };
-use goz_core::query::{parse_query, resolve_scope, run_query_deferrable};
-use goz_core::types::{EntryIdx, SortKey, SortSpec};
+use goz_core::query::{
+    VolumeRun, order_hits, parse_query_with_case, resolve_scope, run_query_deferrable,
+};
+use goz_core::types::EntryIdx;
 use goz_winfs::{PipeSecurity, build_pipe_security};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
@@ -38,6 +40,15 @@ const QUERY_PAGE_BACKLOG: usize = 4;
 /// connected-but-silent client cannot block a task forever. The one-shot CLI
 /// client always writes immediately after connecting, well within this window.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pause after a failed pipe connect before listening again. When connects
+/// keep failing (a broken pipe, or a local user who connects and closes in a
+/// loop), it holds the accept loop to about 100 turns a second instead of a
+/// busy loop. A client that connects during the pause waits for it, not
+/// longer: the next instance already exists, and its connect completes at once.
+const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(10);
+/// At most one log line per this period for failed connects; it counts the
+/// failures since the last one, so the service log cannot grow with them.
+const CONNECT_WARN_EVERY: Duration = Duration::from_secs(60);
 
 /// Runs the pipe server until stopped. Blocks on a tokio runtime.
 ///
@@ -62,10 +73,30 @@ async fn accept_loop(
     let mut server = create_instance(&security, true)?;
     let conn_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     tracing::info!(pipe = PIPE_NAME, "query server listening");
+    let mut connect_failures = 0u64;
+    let mut last_connect_warning: Option<Instant> = None;
     loop {
         tokio::select! {
             r = server.connect() => {
-                r.context("pipe connect")?;
+                if let Err(e) = r {
+                    // One client's failed connect (for example a client that
+                    // closed the pipe before the server saw it) ends only that
+                    // connection. The instance is replaced, the new one first,
+                    // so the pipe always has a listener.
+                    connect_failures += 1;
+                    if last_connect_warning.is_none_or(|t| t.elapsed() >= CONNECT_WARN_EVERY) {
+                        tracing::warn!(
+                            error = %e,
+                            failures = connect_failures,
+                            "pipe connect failed; still listening"
+                        );
+                        connect_failures = 0;
+                        last_connect_warning = Some(Instant::now());
+                    }
+                    server = create_instance(&security, false)?;
+                    tokio::time::sleep(CONNECT_RETRY_PAUSE).await;
+                    continue;
+                }
                 let connected = server;
                 // Create the next instance before handling, so there is never
                 // a window with no listener for a client to race into.
@@ -214,10 +245,9 @@ fn encode_query_binary(volumes: &VolumeSet, q: QueryRequest) -> Vec<u8> {
 /// neither the whole response nor the already-emitted hits' path bytes. `emit`
 /// returning `false` means the consumer is gone; encoding stops.
 ///
-/// Pages are encoded straight from each matched hit's stored path bytes: the
-/// mount prefix and the volume-relative path are copied into one reused scratch
-/// buffer and handed to [`push_item`], so a match never allocates an
-/// intermediate `ResultItem`/`String`, and the set is never cloned for paging or
+/// Pages are encoded straight from each matched hit's full path bytes by
+/// [`push_item`], so a match never allocates an intermediate
+/// `ResultItem`/`String`, and the set is never cloned for paging or
 /// re-serialized as JSON. This is the whole point of the binary wire: on a
 /// multi-million-path result set it is ~12x less serialization work than the old
 /// JSON path.
@@ -226,7 +256,7 @@ fn stream_query_binary(
     q: QueryRequest,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let parsed = match parse_query(&q.query) {
+    let parsed = match parse_query_with_case(&q.query, q.match_case) {
         Ok(p) => p,
         Err(e) => {
             let mut out = Vec::new();
@@ -245,9 +275,8 @@ fn stream_query_binary(
     let per_vol_limit = q.limit.map(|l| q.offset.saturating_add(l));
     let targets = targets(volumes, &q.scope);
 
-    // One pre-sorted run per volume that has hits: run_query already ordered each
-    // volume's hits by `q.sort`, so the runs are merged (not re-sorted) below.
-    let mut runs: Vec<Vec<VolHit>> = Vec::new();
+    // One run per volume, ordered into one list by `order_hits` below.
+    let mut runs: Vec<VolumeRun> = Vec::new();
     let mut total: u64 = 0;
     let mut volumes_incomplete = false;
     let mut metadata_pending = false;
@@ -264,7 +293,7 @@ fn stream_query_binary(
         let index = vol.index.read();
         let scope_entry = match scope {
             VolScope::All => None,
-            VolScope::Rel(rel) => match resolve_scope_cached(vol, &index, rel, q.match_case) {
+            VolScope::Rel(rel) => match resolve_scope_cached(vol, &index, rel, parsed.match_case) {
                 Some(e) => Some(e),
                 None => continue, // scope folder absent on this volume: no hits
             },
@@ -275,7 +304,7 @@ fn stream_query_binary(
         //
         // When the page covers every match there is nothing to pick, so ordering
         // is pure post-processing over owned rows and every sort key comes from
-        // the hit itself (`sort_collected` touches no index). Sorting a million
+        // the hit itself (`order_hits` touches no index). Sorting a million
         // rows under the read lock blocked this volume's tail thread from
         // applying a single journal record for the whole sort; doing it after
         // the guard drops blocks nobody.
@@ -286,28 +315,26 @@ fn stream_query_binary(
         // client asking for everything as a NUMBER (`-n 4294967295`, or any
         // limit at or above the match count) took the in-lock path and
         // re-introduced the very stall the deferral exists to prevent.
-        let outcome = run_query_deferrable(&index, &parsed, scope_entry, q.sort, 0, per_vol_limit);
-        total += outcome.total;
-        let sorted = outcome.sorted;
+        let outcome = run_query_deferrable(
+            &index,
+            vol.mount_prefix(),
+            &parsed,
+            scope_entry,
+            q.sort,
+            0,
+            per_vol_limit,
+        );
         drop(index); // hits own their bytes; release the read lock early
-
-        let mut run: Vec<_> = outcome
-            .hits
-            .into_iter()
-            .map(|hit| (vol.clone(), hit))
-            .collect();
-        if !sorted {
-            // Off the lock. `order_merged` k-way merges runs it assumes are
-            // already sorted, so this is not optional.
-            sort_collected(&mut run, q.sort);
-        }
-        if !run.is_empty() {
-            runs.push(run);
-        }
+        total += outcome.total;
+        runs.push(VolumeRun {
+            mount_prefix: vol.mount_prefix(),
+            hits: outcome.hits,
+            sorted: outcome.sorted,
+        });
     }
 
-    // Merge/order the pre-sorted per-volume runs into one global order.
-    let collected = order_merged(runs, q.sort);
+    // Off every lock: sort the deferred runs and merge the volumes.
+    let collected = order_hits(q.sort, runs);
     let start = (q.offset as usize).min(collected.len());
     let end = q
         .limit
@@ -322,7 +349,6 @@ fn stream_query_binary(
     // peaking all together (skipped offset rows and beyond-limit rows drop
     // with the iterator).
     let mut rows_iter = collected.into_iter().skip(start).take(n_rows);
-    let mut path = Vec::new();
     for i in 0..n_pages {
         let rows = if i + 1 < n_pages {
             page
@@ -344,13 +370,10 @@ fn stream_query_binary(
             metadata_pending,
             rows as u32,
         );
-        for (vol, hit) in rows_iter.by_ref().take(rows) {
-            path.clear();
-            path.extend_from_slice(vol.mount_prefix().as_bytes());
-            path.extend_from_slice(&hit.path);
+        for hit in rows_iter.by_ref().take(rows) {
             let size = q.want_size.then_some(hit.size).flatten();
             let mtime = q.want_mtime.then_some(hit.mtime).flatten();
-            push_item(&mut out, &path, hit.is_dir, size, mtime);
+            push_item(&mut out, &hit.path, hit.is_dir, size, mtime);
         }
         let payload_len = (out.len() - 4) as u32;
         out[0..4].copy_from_slice(&payload_len.to_le_bytes());
@@ -536,147 +559,6 @@ fn scope_entry_valid(index: &goz_core::index::VolumeIndex, entry: EntryIdx, rel:
     goz_core::fold::fold(&buf) == goz_core::fold::fold(rel)
 }
 
-/// A query hit paired with the volume it came from (the source of its mount
-/// prefix), the unit the server orders and pages.
-type VolHit = (Arc<VolumeState>, goz_core::query::QueryHit);
-
-/// Orders the merged cross-volume hits by the sort spec (mirrors the engine's
-/// comparator, but on full paths since volumes differ by prefix).
-fn sort_collected(hits: &mut [VolHit], sort: SortSpec) {
-    use std::cmp::Reverse;
-    // Compute each element's folded key ONCE (O(n) folds) instead of re-folding
-    // inside every comparison (O(n log n)). Desc is applied via `Reverse` on the
-    // key so tie/stable order matches the old `sort_by(..).reverse()` exactly.
-    let desc = sort.dir == goz_core::types::SortDir::Desc;
-    match sort.key {
-        SortKey::Name => {
-            if desc {
-                hits.sort_by_cached_key(|(_, a)| Reverse(folded_name(&a.path)));
-            } else {
-                hits.sort_by_cached_key(|(_, a)| folded_name(&a.path));
-            }
-        }
-        SortKey::Path => {
-            if desc {
-                hits.sort_by_cached_key(|(va, a)| Reverse(full_folded(va, a)));
-            } else {
-                hits.sort_by_cached_key(|(va, a)| full_folded(va, a));
-            }
-        }
-        SortKey::Size => {
-            if desc {
-                hits.sort_by_key(|(_, a)| Reverse(a.size.unwrap_or(0)));
-            } else {
-                hits.sort_by_key(|(_, a)| a.size.unwrap_or(0));
-            }
-        }
-        SortKey::DateModified => {
-            if desc {
-                hits.sort_by_key(|(_, a)| Reverse(a.mtime.unwrap_or(i64::MIN)));
-            } else {
-                hits.sort_by_key(|(_, a)| a.mtime.unwrap_or(i64::MIN));
-            }
-        }
-    }
-}
-
-fn full_folded(vol: &VolumeState, hit: &goz_core::query::QueryHit) -> Vec<u8> {
-    let mut v = Vec::new();
-    v.extend_from_slice(vol.mount_prefix().as_bytes());
-    v.extend_from_slice(&hit.path);
-    goz_core::fold::fold(&v)
-}
-
-/// Folded file name (the last `\`-separated component) of a hit path: the
-/// cross-volume key for a name sort. Matches `VolumeIndex::folded_name`, so a run
-/// the engine ordered by name is already ordered by this key.
-fn folded_name(path: &[u8]) -> Vec<u8> {
-    let ns = path
-        .iter()
-        .rposition(|&b| b == b'\\')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    goz_core::fold::fold(&path[ns..])
-}
-
-/// Globally orders the per-volume runs (each already sorted by `sort` inside
-/// [`run_query_deferrable`]) into one list.
-///
-/// A name sort needs no re-sort: the folded file name is volume-independent and
-/// each run is already in that order, so the runs are k-way merged in O(n),
-/// skipping the O(n log n) re-sort plus the full re-fold that dominated a broad
-/// query (~950 ms -> ~150 ms on a 2.8M-hit set). A single run, the common case
-/// of all matches on one volume, is already global and returned as-is. Other
-/// sort keys, whose cross-volume key differs from the per-volume one (path
-/// carries the mount prefix) or which are rare at scale, fall back to
-/// flatten-and-[`sort_collected`].
-fn order_merged(runs: Vec<Vec<VolHit>>, sort: SortSpec) -> Vec<VolHit> {
-    if runs.len() <= 1 {
-        return runs.into_iter().next().unwrap_or_default();
-    }
-    if sort.key != SortKey::Name {
-        let mut all: Vec<_> = runs.into_iter().flatten().collect();
-        sort_collected(&mut all, sort);
-        return all;
-    }
-    let keyed: Vec<Vec<(Vec<u8>, VolHit)>> = runs
-        .into_iter()
-        .map(|run| {
-            run.into_iter()
-                .map(|(v, h)| (folded_name(&h.path), (v, h)))
-                .collect()
-        })
-        .collect();
-    let desc = sort.dir == goz_core::types::SortDir::Desc;
-    debug_assert!(
-        keyed.iter().all(|r| r.windows(2).all(|w| {
-            let ord = w[0].0.cmp(&w[1].0);
-            if desc {
-                ord != std::cmp::Ordering::Less
-            } else {
-                ord != std::cmp::Ordering::Greater
-            }
-        })),
-        "engine run not ordered by the server name key; k-way merge would misorder"
-    );
-    kway_merge(keyed, desc)
-}
-
-/// Stable k-way merge of pre-sorted `(key, item)` runs. Each run must already be
-/// ordered ascending (or descending when `desc`); equal keys resolve to the
-/// earliest run, so the result matches a stable sort of the concatenation. `k`
-/// (the volume count) is tiny, so a linear min-scan over the run heads is used
-/// rather than a heap.
-fn kway_merge<T>(runs: Vec<Vec<(Vec<u8>, T)>>, desc: bool) -> Vec<T> {
-    use std::collections::VecDeque;
-    let total: usize = runs.iter().map(Vec::len).sum();
-    let mut dqs: Vec<VecDeque<(Vec<u8>, T)>> = runs.into_iter().map(VecDeque::from).collect();
-    let mut out = Vec::with_capacity(total);
-    for _ in 0..total {
-        let mut best: Option<usize> = None;
-        for ri in 0..dqs.len() {
-            let Some((k, _)) = dqs[ri].front() else {
-                continue;
-            };
-            best = Some(match best {
-                None => ri,
-                Some(bi) => {
-                    let ord = k.cmp(&dqs[bi][0].0);
-                    let take = if desc {
-                        ord == std::cmp::Ordering::Greater
-                    } else {
-                        ord == std::cmp::Ordering::Less
-                    };
-                    if take { ri } else { bi }
-                }
-            });
-        }
-        let bi = best.expect("total counts every remaining item");
-        out.push(dqs[bi].pop_front().expect("front present").1);
-    }
-    out
-}
-
 /// Case-insensitive ASCII prefix test (drive letters and `\` are ASCII).
 fn starts_with_ci(haystack: &str, prefix: &str) -> bool {
     haystack.len() >= prefix.len()
@@ -686,13 +568,13 @@ fn starts_with_ci(haystack: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        VolScope, build_status, encode_query_binary, handle_request, kway_merge,
-        resolve_scope_cached, scope_entry_valid, starts_with_ci, targets,
+        VolScope, build_status, encode_query_binary, handle_request, resolve_scope_cached,
+        scope_entry_valid, starts_with_ci, targets,
     };
     use crate::volume_state::{VolumeSet, VolumeState};
     use goz_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
     use goz_core::proto::{PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response};
-    use goz_core::query::{parse_query, resolve_scope, run_query};
+    use goz_core::query::resolve_scope;
     use goz_core::types::{Frn, SortKey, SortSpec, VolumePhase};
     use goz_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
@@ -1080,44 +962,9 @@ mod tests {
         assert_eq!(pages[0].items.len(), 1);
     }
 
-    /// `folded_name` here and `VolumeIndex::folded_name` in goz-core are two
-    /// implementations of the same key, in two crates, with nothing linking
-    /// them. [`order_merged`] k-way merges runs the ENGINE sorted, keyed by what
-    /// the SERVER computes, so any drift silently misorders a multi-volume name
-    /// sort. The only guard is a `debug_assert!` that needs a multi-volume,
-    /// multi-hit name sort to fire at all, so drift reaches release unseen.
-    #[test]
-    fn server_folded_name_agrees_with_the_index_key() {
-        let index = merge_index();
-        let parsed = parse_query("log").expect("query parses");
-        let outcome = run_query(
-            &index,
-            &parsed,
-            None,
-            SortSpec::default_for(SortKey::Name),
-            0,
-            None,
-        );
-        assert_eq!(
-            outcome.hits.len(),
-            2,
-            "fixture must produce hits to compare"
-        );
-
-        for hit in &outcome.hits {
-            assert_eq!(
-                super::folded_name(&hit.path),
-                index.folded_name(hit.idx),
-                "server key for {:?} diverged from the index key the engine sorted by",
-                String::from_utf8_lossy(&hit.path)
-            );
-        }
-    }
-
-    /// The payoff the key agreement buys: two pre-sorted runs merged into one
-    /// global name order without a re-sort. The fixture's name order is the
-    /// reverse of its path order, so a merge keyed on the wrong thing cannot
-    /// coincidentally produce the right answer.
+    /// Two volumes' hits merge into one global name order. The fixture's name
+    /// order is the reverse of its path order, so a merge keyed on the wrong
+    /// thing cannot coincidentally produce the right answer.
     #[test]
     fn name_sort_merges_two_volumes_into_one_global_order() {
         let vols = set(&[
@@ -1251,40 +1098,108 @@ mod tests {
         assert!(!starts_with_ci(r"D:\x", r"C:\"));
     }
 
-    fn run(items: &[(&str, char)]) -> Vec<(Vec<u8>, char)> {
-        items
-            .iter()
-            .map(|(k, v)| (k.as_bytes().to_vec(), *v))
-            .collect()
+    /// Every way two hits can tie or nearly tie: es path order against a byte
+    /// compare (`a~qx7zv` against `a\qx7zv`), equal sizes and dates, an unknown
+    /// size, names equal after folding, and one file with two links of the
+    /// same name.
+    fn order_index() -> VolumeIndex {
+        use goz_core::layout::{LayoutFile, LayoutName};
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "P"));
+        index.insert_enum(&dir_record(101, 100, "a"));
+        index.insert_enum(&dir_record(102, 100, "a b"));
+        let mut sizeless = dir_record(205, 102, "nosize.qx7zv");
+        sizeless.attributes = 0;
+        index.insert_enum(&sizeless);
+        for (frn, links, size) in [
+            (200, &[(100, "a~qx7zv")][..], 10),
+            (201, &[(101, "qx7zv")][..], 10),
+            (202, &[(102, "QX7ZV")][..], 30),
+            (203, &[(101, "link.qx7zv"), (102, "link.qx7zv")][..], 10),
+        ] {
+            index.enrich(&LayoutFile {
+                frn: Frn(frn),
+                attributes: 0x20,
+                size: Some(size),
+                mtime_ft: Some(5),
+                names: links
+                    .iter()
+                    .map(|&(parent, name)| LayoutName {
+                        parent_frn: Frn(parent),
+                        name: name.as_bytes().to_vec(),
+                        name_lossy: false,
+                        dos_only: false,
+                    })
+                    .collect(),
+            });
+        }
+        index
     }
 
+    /// `-n K` prints the first K rows of the same query without `-n`, under
+    /// every sort, on one volume and across two. The limited query orders in
+    /// the engine under the lock; the unlimited one is deferred and ordered
+    /// after it, and with two volumes the runs are merged.
     #[test]
-    fn merge_ascending_is_stable_across_and_within_runs() {
-        // Two pre-sorted runs. On the tied key "c", the earlier run's items come
-        // first and keep their in-run order, matching a stable sort of run0 ++ run1.
-        let a = run(&[("a", '1'), ("c", '2'), ("c", '3')]);
-        let b = run(&[("b", '4'), ("c", '5')]);
-        assert_eq!(kway_merge(vec![a, b], false), vec!['1', '4', '2', '3', '5']);
+    fn a_limited_query_is_a_prefix_of_the_unlimited_one() {
+        use goz_core::types::SortDir;
+        for vols in [
+            set(&[volume(r"C:\", order_index(), VolumePhase::Live)]),
+            set(&[
+                volume(r"C:\", order_index(), VolumePhase::Live),
+                volume(r"C:\mnt\", order_index(), VolumePhase::Live),
+            ]),
+        ] {
+            for key in [
+                SortKey::Name,
+                SortKey::Path,
+                SortKey::Size,
+                SortKey::DateModified,
+            ] {
+                for dir in [SortDir::Asc, SortDir::Desc] {
+                    let page = |limit| {
+                        let mut q = query("qx7zv");
+                        q.sort = SortSpec { key, dir };
+                        q.limit = limit;
+                        paths(&encode_query_binary(&vols, q))
+                    };
+                    let unlimited = page(None);
+                    assert_eq!(unlimited.len(), 6 * vols.len());
+                    for k in 0..=unlimited.len() {
+                        assert_eq!(
+                            page(Some(k as u32)),
+                            unlimited[..k],
+                            "{key:?}/{dir:?} on {} volume(s): -n {k}",
+                            vols.len()
+                        );
+                    }
+                }
+            }
+        }
     }
 
+    /// `-case` (the request's `match_case`) makes matching case-sensitive, and
+    /// the `-path` scope follows the same value whether it comes from the
+    /// switch or from a `case:` directive.
     #[test]
-    fn merge_descending_picks_largest_head() {
-        let a = run(&[("c", '1'), ("a", '2')]); // each run already in desc order
-        let b = run(&[("b", '3')]);
-        assert_eq!(kway_merge(vec![a, b], true), vec!['1', '3', '2']);
-    }
+    fn the_case_switch_reaches_the_matcher_and_the_scope() {
+        let vols = set(&[live_volume(r"C:\")]);
+        let run = |text: &str, match_case: bool, scope: Option<&str>| {
+            let mut q = query(text);
+            q.match_case = match_case;
+            q.scope = scope.map(str::to_string);
+            paths(&encode_query_binary(&vols, q))
+        };
+        assert!(run("system32", true, None).is_empty());
+        assert_eq!(run("System32", true, None), [r"C:\Windows\System32"]);
+        assert_eq!(run("system32", false, None), [r"C:\Windows\System32"]);
+        // `case:0` overrides the switch.
+        assert_eq!(run("system32 case:0", true, None), [r"C:\Windows\System32"]);
 
-    #[test]
-    fn merge_handles_empty_and_single() {
-        assert_eq!(kway_merge::<char>(vec![], false), Vec::<char>::new());
+        assert!(run("case: System32", false, Some(r"C:\windows")).is_empty());
         assert_eq!(
-            kway_merge(vec![run(&[("x", '1'), ("y", '2')])], false),
-            vec!['1', '2']
-        );
-        // An empty run interleaved with a non-empty one is skipped cleanly.
-        assert_eq!(
-            kway_merge(vec![run(&[]), run(&[("a", '1')]), run(&[])], false),
-            vec!['1']
+            run("case: System32", false, Some(r"C:\Windows")),
+            [r"C:\Windows\System32"]
         );
     }
 }

@@ -104,12 +104,19 @@ fn bench_query(c: &mut Criterion) {
         ("common(document)", "document"),
         ("wildcard(*.dll)", "*.dll"),
         ("two-term(report txt)", "report txt"),
+        // No name term to drive the arena scan, so every entry's full path
+        // is tested.
+        (
+            "path-term(group_007\\bin_x64_03)",
+            r"module_group_007\bin_x64_03",
+        ),
     ] {
         let parsed = parse_query(query).unwrap();
         group.bench_function(label, |b| {
             b.iter(|| {
                 let out = run_query(
                     black_box(&idx),
+                    r"C:\",
                     black_box(&parsed),
                     None,
                     SortSpec::default(),
@@ -136,6 +143,7 @@ fn bench_query(c: &mut Criterion) {
             b.iter(|| {
                 let out = run_query(
                     black_box(&idx),
+                    r"C:\",
                     black_box(&parsed),
                     None,
                     SortSpec::default(),
@@ -163,6 +171,7 @@ fn bench_query(c: &mut Criterion) {
             b.iter(|| {
                 let out = run_query(
                     black_box(&idx),
+                    r"C:\",
                     black_box(&parsed),
                     None,
                     SortSpec::default(),
@@ -174,7 +183,7 @@ fn bench_query(c: &mut Criterion) {
         });
         broad.bench_function("common(document) LOCKED: sort outside (new)", |b| {
             b.iter(|| {
-                let out = run_query_unsorted(black_box(&idx), black_box(&parsed), None);
+                let out = run_query_unsorted(black_box(&idx), r"C:\", black_box(&parsed), None);
                 black_box(out.hits.len())
             })
         });

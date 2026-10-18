@@ -4,24 +4,31 @@
 //! The scan matches each candidate against the index's precomputed folded name
 //! (case-insensitive queries) and tests the cheapest predicates first: kind and
 //! size, then name substrings and wildcards, then ext, then (only for
-//! survivors) scope ancestry and the reconstructed full path. Path reconstruction, the one expensive step, is
-//! deferred until a candidate has passed everything else.
+//! survivors) scope ancestry and the full path. Full paths come from the
+//! `paths` module, which builds each folder's path once per query, so a path
+//! term costs one copy per candidate instead of a walk to the root.
 
+use super::order::{OrderFields, compare};
 use super::parse::{CodePointBuf, Filters, Kind, ParsedQuery, SizeRange};
+use super::paths::{DirPaths, NameForm, PathMatcher};
 use crate::index::VolumeIndex;
-use crate::types::{EntryIdx, SortDir, SortKey, SortSpec};
+use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
-/// One matched entry. The daemon prepends the volume mount prefix to `path`
-/// and formats `mtime` for display.
+/// One matched entry. The daemon formats `mtime` for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryHit {
     pub idx: EntryIdx,
-    /// Full path within the volume (WTF-8, no mount prefix).
+    /// Full path: the volume's mount prefix, then every folder and the name
+    /// (WTF-8).
     pub path: Vec<u8>,
+    /// File ID, shared by every hard link of the file.
+    pub frn: Frn,
+    /// File ID of the folder that holds this name.
+    pub parent_frn: Frn,
     pub is_dir: bool,
     pub size: Option<u64>,
     pub mtime: Option<i64>,
@@ -34,26 +41,29 @@ pub struct QueryOutcome {
     pub total: u64,
     /// The requested page of hits, ordered per [`Self::sorted`].
     pub hits: Vec<QueryHit>,
-    /// Whether [`Self::hits`] is already in sort order.
+    /// Whether [`Self::hits`] is already in result order.
     ///
     /// `false` means the executor declined to order under the index lock and
-    /// the CALLER must sort before any k-way merge that assumes sorted runs.
+    /// the CALLER must order the hits with [`super::order_hits`].
     /// Always `true` from [`run_query`], always `false` from
     /// [`run_query_unsorted`]; only [`run_query_deferrable`] varies.
     pub sorted: bool,
 }
 
-/// A [`ParsedQuery`]'s substring needles prebuilt into finders once (rather
-/// than per candidate). The remaining predicates (wildcards, filters) are read
+/// A [`ParsedQuery`]'s name needles prebuilt into finders once (rather than
+/// per candidate). The remaining name predicates (wildcards, filters) are read
 /// straight off the `ParsedQuery` in the scan loop.
 pub struct CompiledQuery<'a> {
     name_finders: Vec<memmem::Finder<'a>>,
-    path_finders: Vec<memmem::Finder<'a>>,
-    /// The longest literal substring guaranteed present in any match, drawn
-    /// from the name terms, from wildcard literals (e.g. `.dll` of `*.dll`), and
-    /// from a single `ext:` value (`.ext`). Drives the folded-arena prefilter
-    /// scan. `None` when nothing offers a usable literal (then the query
-    /// iterates every entry).
+    /// The longest literal substring guaranteed present in any match's name,
+    /// drawn from the name terms, from name wildcard literals (e.g. `.dll` of
+    /// `*.dll`), and from a single `ext:` value (`.ext`). Drives the
+    /// folded-arena prefilter scan. `None` when nothing offers a usable
+    /// literal (then the query iterates every entry).
+    ///
+    /// Path terms and path wildcards never supply it: their text can lie in
+    /// any folder of the path, and the literal of `*\docs\*` is `\docs\`,
+    /// which no name contains.
     prefilter: Option<Vec<u8>>,
 }
 
@@ -100,32 +110,23 @@ impl<'a> CompiledQuery<'a> {
                 .iter()
                 .map(|t| memmem::Finder::new(t.as_slice()))
                 .collect(),
-            path_finders: parsed
-                .path_terms
-                .iter()
-                .map(|t| memmem::Finder::new(t.as_slice()))
-                .collect(),
             prefilter: prefilter.map(Cow::into_owned),
         }
     }
 }
 
-/// A matched entry before its path is reconstructed (deferred to the final
-/// page unless a path term or path-sort forces it earlier).
+/// A matched entry before its path is built (deferred to the final page).
 struct Candidate {
     idx: EntryIdx,
     is_dir: bool,
     size: Option<u64>,
     mtime: Option<i64>,
-    /// Reconstructed volume-relative path, filled only when needed.
-    path: Option<Vec<u8>>,
-    /// Precomputed `-sort-path` key: `fold(parent path) + NUL + fold(name)`.
-    /// Filled once per candidate for path sorts so the comparator is a plain
-    /// byte compare instead of re-folding paths on every comparison.
-    sort_key: Option<Vec<u8>>,
+    /// Where the folded path of the parent folder lies in the path sort's
+    /// buffer; filled only for a path sort.
+    folded_parent: (usize, usize),
 }
 
-/// Runs a query over `index`.
+/// Runs a query over `index`, the volume mounted at `mount_prefix` (`C:\`).
 ///
 /// `scope` (if any) restricts results to descendants of that directory entry;
 /// the daemon resolves the `-path` folder via [`resolve_scope`]. Results are
@@ -139,13 +140,23 @@ struct Candidate {
 /// hot path off per-query folding and off per-match path building.
 pub fn run_query(
     index: &VolumeIndex,
+    mount_prefix: &str,
     parsed: &ParsedQuery,
     scope: Option<EntryIdx>,
     sort: SortSpec,
     offset: u32,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(index, parsed, scope, Some(sort), offset, limit, false)
+    run_query_impl(
+        index,
+        mount_prefix,
+        parsed,
+        scope,
+        Some(sort),
+        offset,
+        limit,
+        false,
+    )
 }
 
 /// Like [`run_query`], but allowed to hand back an UNSORTED page when ordering
@@ -161,25 +172,34 @@ pub fn run_query(
 /// That distinction is not knowable before the scan (it depends on the match
 /// count), which is why it lives here rather than in the caller's dispatch.
 ///
-/// The caller MUST check [`QueryOutcome::sorted`] and sort when it is `false`,
-/// before any k-way merge that assumes sorted runs.
+/// The caller MUST check [`QueryOutcome::sorted`] and pass the hits through
+/// [`super::order_hits`] when it is `false`.
 pub fn run_query_deferrable(
     index: &VolumeIndex,
+    mount_prefix: &str,
     parsed: &ParsedQuery,
     scope: Option<EntryIdx>,
     sort: SortSpec,
     offset: u32,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(index, parsed, scope, Some(sort), offset, limit, true)
+    run_query_impl(
+        index,
+        mount_prefix,
+        parsed,
+        scope,
+        Some(sort),
+        offset,
+        limit,
+        true,
+    )
 }
 
 /// Every match, with paths built, in scan order. The CALLER sorts.
 ///
 /// For a full export (`limit: None`) the caller receives every match anyway, so
-/// ordering is pure post-processing that needs no index at all: every sort key
-/// is derivable from the returned [`QueryHit`] (name from the path's last
-/// component, path from the path, size and mtime from the hit).
+/// ordering is pure post-processing that needs no index at all: every key of
+/// the result order is in the returned [`QueryHit`].
 ///
 /// It matters because of who is waiting. The caller holds the volume's index
 /// READ lock for as long as this runs, and the volume's tail thread cannot apply
@@ -187,14 +207,14 @@ pub fn run_query_deferrable(
 /// inside the lock stalled live updates for ~1.7 s; sorting them after it is
 /// released stalls nothing.
 ///
-/// The caller MUST sort the result before any k-way merge that assumes sorted
-/// runs.
+/// The caller MUST pass the result through [`super::order_hits`].
 pub fn run_query_unsorted(
     index: &VolumeIndex,
+    mount_prefix: &str,
     parsed: &ParsedQuery,
     scope: Option<EntryIdx>,
 ) -> QueryOutcome {
-    run_query_impl(index, parsed, scope, None, 0, None, false)
+    run_query_impl(index, mount_prefix, parsed, scope, None, 0, None, false)
 }
 
 /// A folder-scoped query walks the scope's subtree instead of scanning the
@@ -212,8 +232,10 @@ const SUBTREE_WALK_MAX: usize = 200_000;
 /// `allow_defer` lets the executor drop the ordering when the page turns out to
 /// cover every match (see [`run_query_deferrable`]); the reported
 /// [`QueryOutcome::sorted`] says which happened.
+#[allow(clippy::too_many_arguments)]
 fn run_query_impl(
     index: &VolumeIndex,
+    mount_prefix: &str,
     parsed: &ParsedQuery,
     scope: Option<EntryIdx>,
     sort: Option<SortSpec>,
@@ -221,25 +243,13 @@ fn run_query_impl(
     limit: Option<u32>,
     allow_defer: bool,
 ) -> QueryOutcome {
-    let compiled = CompiledQuery::new(parsed);
-    let has_path_terms = !parsed.path_terms.is_empty();
-    let mut scope_memo: FxHashMap<EntryIdx, bool> = FxHashMap::default();
-    // Each parent directory's reconstructed path, or None when it has none (its
-    // ancestry ends in lost+found, or hit the hop cap). ONE memo, shared by the
-    // candidate filter and the page builder: both need exactly this walk, and
-    // doing it twice cost a rare query ~13% for nothing.
-    let mut dir_paths: FxHashMap<EntryIdx, Option<Vec<u8>>> = FxHashMap::default();
-    let mut candidates: Vec<Candidate> = Vec::new();
-    // Per-candidate scratch buffers, allocated once and reused across the scan
-    // so wildcard decoding and extension folding don't heap-allocate per hit.
-    let mut cp_buf = CodePointBuf::new();
-    let mut ext_scratch: Vec<u8> = Vec::new();
+    let mut scan = Scan::new(index, mount_prefix, parsed);
 
     // Folder scope: walk the scope subtree via the child chains, so cost
     // tracks the folder, not the volume. Membership is by construction, so
-    // `evaluate` runs without the scope (its ancestry walk is the expensive
-    // part this path exists to avoid); every other predicate is identical to
-    // the scan paths below. Oversized scopes abort to those paths.
+    // the candidates are tested without the scope (its ancestry walk is the
+    // expensive part this path exists to avoid); every other predicate is
+    // identical to the scan paths below. Oversized scopes abort to those paths.
     let mut subtree_done = false;
     if let Some(root) = scope {
         let mut visited = 0usize;
@@ -247,36 +257,24 @@ fn run_query_impl(
         for idx in index.subtree_entries(root) {
             visited += 1;
             if visited > SUBTREE_WALK_MAX {
-                candidates.clear();
+                scan.candidates.clear();
                 subtree_done = false;
                 break;
             }
             if index.is_synthetic(idx) {
                 continue;
             }
-            if let Some(c) = evaluate(
-                index,
-                parsed,
-                &compiled,
-                idx,
-                None,
-                &mut scope_memo,
-                &mut dir_paths,
-                has_path_terms,
-                &mut cp_buf,
-                &mut ext_scratch,
-            ) {
-                candidates.push(c);
-            }
+            scan.visit(idx, None);
         }
     }
 
     // Fast path: case-insensitive query with a usable literal → scan the
     // folded arena for the prefilter literal and verify the rest per hit.
+    let prefilter = scan.compiled.prefilter.take();
     if subtree_done {
         // Scoped walk answered the query; the scan paths are skipped.
     } else if !parsed.match_case
-        && let Some(needle) = compiled.prefilter.as_deref()
+        && let Some(needle) = prefilter.as_deref()
     {
         let driver = memmem::Finder::new(needle);
         // The haystack holds each distinct name ONCE (names are interned), so
@@ -321,20 +319,7 @@ fn run_query_impl(
                 if index.is_synthetic(idx) {
                     continue;
                 }
-                if let Some(c) = evaluate(
-                    index,
-                    parsed,
-                    &compiled,
-                    idx,
-                    scope,
-                    &mut scope_memo,
-                    &mut dir_paths,
-                    has_path_terms,
-                    &mut cp_buf,
-                    &mut ext_scratch,
-                ) {
-                    candidates.push(c);
-                }
+                scan.visit(idx, scope);
             }
         }
     } else {
@@ -344,23 +329,15 @@ fn run_query_impl(
             if index.is_synthetic(idx) {
                 continue;
             }
-            if let Some(c) = evaluate(
-                index,
-                parsed,
-                &compiled,
-                idx,
-                scope,
-                &mut scope_memo,
-                &mut dir_paths,
-                has_path_terms,
-                &mut cp_buf,
-                &mut ext_scratch,
-            ) {
-                candidates.push(c);
-            }
+            scan.visit(idx, scope);
         }
     }
 
+    let Scan {
+        mut candidates,
+        mut dirs,
+        ..
+    } = scan;
     let total = candidates.len() as u64;
 
     let start = (offset as usize).min(candidates.len());
@@ -384,91 +361,48 @@ fn run_query_impl(
     };
     let sorted = sort.is_some();
 
-    // Sort-by-path: precompute each candidate's comparison key ONCE,
-    // fold(parent dir path) + NUL + fold(name), so ordering is a plain byte
-    // compare instead of re-folding both paths inside every comparison (the
-    // dominant cost on common queries with many matches). The parent path's
-    // folded form is memoized per directory (siblings share it), so each
-    // directory is walked and folded once. Raw display paths are reconstructed
-    // later, only for the page. The NUL separator (< any real byte, absent from
-    // names) makes the byte order equal es's `(parent, name)` tuple order.
+    // Sort-by-path compares each candidate's folded parent path. Siblings share
+    // it, so each parent folder's path is built and stored once.
+    let mut folded_parents = Vec::new();
     if sort.is_some_and(|s| matches!(s.key, SortKey::Path)) {
-        let mut folded_dirs: FxHashMap<EntryIdx, Option<Vec<u8>>> = FxHashMap::default();
+        let mut folded_dirs = DirPaths::new(index, NameForm::Folded, mount_prefix);
+        let mut stored: FxHashMap<EntryIdx, (usize, usize)> = FxHashMap::default();
+        let mut path = Vec::new();
         for c in &mut candidates {
             let parent = index.entry(c.idx).parent();
-            let folded_parent = folded_dirs
-                .entry(parent)
-                .or_insert_with(|| {
-                    let mut buf = Vec::new();
-                    match index.path_of(parent, &mut buf) {
-                        crate::index::PathStatus::Ok => Some(fold(&buf)),
-                        _ => None, // parent under lost+found or a cycle: not presentable
-                    }
-                })
-                .clone();
-            if let Some(fp) = folded_parent {
-                let mut key = fp;
-                key.push(0);
-                key.extend_from_slice(&fold(index.entry(c.idx).name()));
-                c.sort_key = Some(key);
-            }
+            c.folded_parent = *stored.entry(parent).or_insert_with(|| {
+                // A parent with no path leaves the key empty; the page drops
+                // the candidate.
+                folded_dirs.folder_path_into(index, parent, &mut path);
+                let start = folded_parents.len();
+                folded_parents.extend_from_slice(&path);
+                (start, folded_parents.len())
+            });
         }
     }
 
     // Order only enough to fill the page: quickselect the top `end` by the
-    // sort key (O(M)), then sort just that prefix (O(end log end)). This avoids
-    // an O(M log M) sort of the entire match set on common queries.
+    // result order (O(M)), then sort just that prefix (O(end log end)). This
+    // avoids an O(M log M) sort of the entire match set on common queries.
     if let Some(sort) = sort {
-        order_top(index, &mut candidates, sort, end);
+        order_top(index, &folded_parents, &mut candidates, sort, end);
     }
 
-    // Reconstruct paths only for the requested page. A broad result set holds
-    // millions of files under far fewer distinct directories, so memoize each
-    // parent directory's reconstructed path (`path_of` runs once per directory)
-    // and build every file's path as `parent + '\' + name` instead of walking
-    // the whole parent chain per hit. This mirrors the folded-parent memoization
-    // the path-sort branch already uses (`folded_dirs` above). Correct because
-    // `path_of(child) == path_of(parent) + '\' + name` for any presentable child
-    // (a parent under lost+found or a cycle is `None` and the hit is dropped,
-    // exactly as the per-hit `path_of` did); real volumes never approach the
-    // MAX_PATH_HOPS depth where the two could diverge.
+    // Build paths only for the requested page. A broad result set holds
+    // millions of files under far fewer distinct folders, and `dirs` builds
+    // each folder's path once.
     let mut hits = Vec::with_capacity(end - start);
     for c in &candidates[start..end] {
-        // Path-term / path-sort queries already reconstructed the path in eval.
-        if let Some(p) = &c.path {
-            hits.push(QueryHit {
-                idx: c.idx,
-                path: p.clone(),
-                is_dir: c.is_dir,
-                size: c.size,
-                mtime: c.mtime,
-            });
-            continue;
+        let mut path = Vec::new();
+        if !dirs.full_path_into(index, c.idx, &mut path) {
+            continue; // no path; only possible when `has_orphans` was false
         }
         let entry = index.entry(c.idx);
-        let parent = entry.parent();
-        let parent_path = dir_paths.entry(parent).or_insert_with(|| {
-            let mut buf = Vec::new();
-            match index.path_of(parent, &mut buf) {
-                crate::index::PathStatus::Ok => Some(buf),
-                _ => None, // parent under lost+found or a cycle: not presentable
-            }
-        });
-        let Some(parent_path) = parent_path.as_deref() else {
-            continue; // parent not presentable -> path_of(idx) would be non-Ok too
-        };
-        let name = entry.name();
-        let mut path = Vec::with_capacity(parent_path.len() + 1 + name.len());
-        if parent_path.is_empty() {
-            path.extend_from_slice(name); // a file/dir directly under the volume root
-        } else {
-            path.extend_from_slice(parent_path);
-            path.push(b'\\');
-            path.extend_from_slice(name);
-        }
         hits.push(QueryHit {
             idx: c.idx,
             path,
+            frn: entry.frn(),
+            parent_frn: index.entry(entry.parent()).frn(),
             is_dir: c.is_dir,
             size: c.size,
             mtime: c.mtime,
@@ -482,110 +416,123 @@ fn run_query_impl(
     }
 }
 
-/// Verifies all predicates for one candidate, returning it (with a
-/// pre-reconstructed path when path terms forced one) if it matches.
-#[allow(clippy::too_many_arguments)]
-fn evaluate(
-    index: &VolumeIndex,
-    parsed: &ParsedQuery,
-    compiled: &CompiledQuery,
-    idx: EntryIdx,
-    scope: Option<EntryIdx>,
-    scope_memo: &mut FxHashMap<EntryIdx, bool>,
-    dir_paths: &mut FxHashMap<EntryIdx, Option<Vec<u8>>>,
-    has_path_terms: bool,
-    cp_buf: &mut CodePointBuf,
-    ext_scratch: &mut Vec<u8>,
-) -> Option<Candidate> {
-    let entry = index.entry(idx);
-    if !kind_matches(parsed.filters.kind, entry.is_dir()) {
-        return None;
-    }
-    if !size_matches(parsed.filters.size, entry.size()) {
-        return None;
+/// The state one scan shares across its candidates: finders, memos and scratch
+/// buffers, built once per query instead of once per candidate.
+struct Scan<'q, 'i> {
+    index: &'i VolumeIndex,
+    parsed: &'q ParsedQuery,
+    compiled: CompiledQuery<'q>,
+    /// `None` when the query has no path term.
+    paths: Option<PathMatcher<'q>>,
+    /// Raw folder paths. ONE memo, shared by the presentability check and the
+    /// page builder: both need exactly these paths.
+    dirs: DirPaths,
+    scope_memo: FxHashMap<EntryIdx, bool>,
+    code_points: CodePointBuf,
+    ext_scratch: Vec<u8>,
+    candidates: Vec<Candidate>,
+}
+
+impl<'q, 'i> Scan<'q, 'i> {
+    fn new(index: &'i VolumeIndex, mount_prefix: &str, parsed: &'q ParsedQuery) -> Self {
+        Self {
+            index,
+            parsed,
+            compiled: CompiledQuery::new(parsed),
+            paths: PathMatcher::new(index, parsed, mount_prefix),
+            dirs: DirPaths::new(index, NameForm::Raw, mount_prefix),
+            scope_memo: FxHashMap::default(),
+            code_points: CodePointBuf::new(),
+            ext_scratch: Vec::new(),
+            candidates: Vec::new(),
+        }
     }
 
-    // Name/wildcard predicates run against the precomputed folded name
-    // (case-insensitive) or the raw name (case-sensitive), matching how the
-    // needles were folded at parse time.
-    let hay_name = if parsed.match_case {
-        entry.name()
-    } else {
-        index.folded_name(idx)
-    };
-    if !compiled
-        .name_finders
-        .iter()
-        .all(|f| f.find(hay_name).is_some())
-    {
-        return None;
-    }
-    if !parsed
-        .wildcards
-        .iter()
-        .all(|w| w.matches_into(hay_name, cp_buf))
-    {
-        return None;
-    }
-    // The ext check folds the candidate extension, so it runs after the
-    // allocation-free name/wildcard predicates that reject most candidates.
-    if !ext_matches(&parsed.filters, entry.name(), ext_scratch) {
-        return None;
+    /// Keeps entry `idx` as a candidate if it passes every predicate.
+    fn visit(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) {
+        if let Some(c) = self.evaluate(idx, scope) {
+            self.candidates.push(c);
+        }
     }
 
-    if let Some(root) = scope
-        && !in_scope(index, idx, root, scope_memo)
-    {
-        return None;
-    }
-
-    // An entry whose parent has no presentable path (ancestry ends in lost+found)
-    // is dropped by the page loop. Reject it here so it never counts toward
-    // `total` and never occupies a page slot: otherwise `goz -n 10 report` can
-    // print nothing while reporting a non-zero total, and the same query without
-    // `-n` prints the real hits.
-    //
-    // Calls the very function the page loop uses rather than re-deriving its
-    // rules, so the two cannot drift, and memoizes per parent directory rather
-    // than per file. Gated on `has_orphans` because an index with no live
-    // placeholder cannot contain an unpresentable entry: `has_orphans` is a
-    // single load, while the walk it guards is one `path_of` per distinct parent
-    // directory, which on a broad limited query is tens of thousands of walks
-    // the page (100 rows) would never have needed. Paying it unconditionally
-    // cost a broad limited query ~20%.
-    if index.has_orphans() && parent_path(index, entry.parent(), dir_paths).is_none() {
-        return None;
-    }
-
-    let mut path = None;
-    if has_path_terms {
-        let mut buf = Vec::new();
-        if !matches!(index.path_of(idx, &mut buf), crate::index::PathStatus::Ok) {
+    fn evaluate(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> Option<Candidate> {
+        let index = self.index;
+        let parsed = self.parsed;
+        let entry = index.entry(idx);
+        if !kind_matches(parsed.filters.kind, entry.is_dir()) {
             return None;
         }
-        let folded_p = if parsed.match_case {
-            buf.clone()
+        if !size_matches(parsed.filters.size, entry.size()) {
+            return None;
+        }
+
+        // Name/wildcard predicates run against the precomputed folded name
+        // (case-insensitive) or the raw name (case-sensitive), matching how the
+        // needles were folded at parse time.
+        let hay_name = if parsed.match_case {
+            entry.name()
         } else {
-            fold(&buf)
+            index.folded_name(idx)
         };
-        if !compiled
-            .path_finders
+        if !self
+            .compiled
+            .name_finders
             .iter()
-            .all(|f| f.find(&folded_p).is_some())
+            .all(|f| f.find(hay_name).is_some())
         {
             return None;
         }
-        path = Some(buf);
-    }
+        if !parsed
+            .wildcards
+            .iter()
+            .all(|w| w.matches_into(hay_name, &mut self.code_points))
+        {
+            return None;
+        }
+        // The ext check folds the candidate extension, so it runs after the
+        // allocation-free name/wildcard predicates that reject most candidates.
+        if !ext_matches(&parsed.filters, entry.name(), &mut self.ext_scratch) {
+            return None;
+        }
 
-    Some(Candidate {
-        idx,
-        is_dir: entry.is_dir(),
-        size: entry.size(),
-        mtime: entry.mtime(),
-        path,
-        sort_key: None,
-    })
+        if let Some(root) = scope
+            && !in_scope(index, idx, root, &mut self.scope_memo)
+        {
+            return None;
+        }
+
+        // An entry whose parent has no path (ancestry ends in lost+found) is
+        // dropped by the page loop. Reject it here so it never counts toward
+        // `total` and never occupies a page slot: otherwise `goz -n 10 report`
+        // can print nothing while reporting a non-zero total, and the same
+        // query without `-n` prints the real hits.
+        //
+        // Asks the very memo the page loop uses rather than re-deriving its
+        // rules, so the two cannot drift. Gated on `has_orphans` because an
+        // index with no live placeholder cannot contain an unpresentable
+        // entry: `has_orphans` is a single load, while the walk it guards is
+        // one path build per distinct parent folder, which on a broad limited
+        // query is tens of thousands of builds the page (100 rows) would never
+        // have needed. Paying it unconditionally cost a broad limited query
+        // ~20%.
+        if index.has_orphans() && !self.dirs.entry_has_path(index, idx) {
+            return None;
+        }
+
+        if let Some(paths) = &mut self.paths
+            && !paths.matches(index, idx)
+        {
+            return None;
+        }
+
+        Some(Candidate {
+            idx,
+            is_dir: entry.is_dir(),
+            size: entry.size(),
+            mtime: entry.mtime(),
+            folded_parent: (0, 0),
+        })
+    }
 }
 
 fn kind_matches(kind: Option<Kind>, is_dir: bool) -> bool {
@@ -622,27 +569,6 @@ fn ext_matches(filters: &Filters, name: &[u8], scratch: &mut Vec<u8>) -> bool {
 
 fn fold(bytes: &[u8]) -> Vec<u8> {
     crate::fold::fold(bytes)
-}
-
-/// The reconstructed path of `parent`, or `None` when it has none. Memoized per
-/// directory and shared with the page builder.
-///
-/// Returns the path rather than a bool so ONE walk serves both callers: the
-/// candidate filter needs to know whether a hit is presentable at all (so
-/// `total` counts only what the page can return), and the page builder needs the
-/// path itself. Computing them separately walked every parent chain twice.
-fn parent_path<'a>(
-    index: &VolumeIndex,
-    parent: EntryIdx,
-    memo: &'a mut FxHashMap<EntryIdx, Option<Vec<u8>>>,
-) -> &'a Option<Vec<u8>> {
-    memo.entry(parent).or_insert_with(|| {
-        let mut buf = Vec::new();
-        match index.path_of(parent, &mut buf) {
-            crate::index::PathStatus::Ok => Some(buf),
-            _ => None, // parent under lost+found or a cycle: not presentable
-        }
-    })
 }
 
 /// Is `node` a descendant of `root`? Memoized parent walk.
@@ -683,56 +609,65 @@ fn in_scope(
     verdict
 }
 
-/// Total ordering of two candidates under `sort` (direction included), so the
-/// "smallest" `end` candidates are exactly the page to display.
-fn cmp_candidate(
-    index: &VolumeIndex,
-    sort: SortSpec,
-    a: &Candidate,
-    b: &Candidate,
-) -> core::cmp::Ordering {
-    let base = match sort.key {
-        // Folded names are precomputed, so these are cheap byte compares.
-        SortKey::Name => index
-            .folded_name(a.idx)
-            .cmp(index.folded_name(b.idx))
-            .then_with(|| a.idx.cmp(&b.idx)),
-        SortKey::Path => {
-            // Keys were precomputed for path-sort: fold(parent)+NUL+fold(name).
-            let empty: &[u8] = b"";
-            a.sort_key
-                .as_deref()
-                .unwrap_or(empty)
-                .cmp(b.sort_key.as_deref().unwrap_or(empty))
-                .then_with(|| a.idx.cmp(&b.idx))
-        }
-        SortKey::Size => a
-            .size
-            .unwrap_or(0)
-            .cmp(&b.size.unwrap_or(0))
-            .then_with(|| index.folded_name(a.idx).cmp(index.folded_name(b.idx))),
-        SortKey::DateModified => a
-            .mtime
-            .unwrap_or(i64::MIN)
-            .cmp(&b.mtime.unwrap_or(i64::MIN))
-            .then_with(|| index.folded_name(a.idx).cmp(index.folded_name(b.idx))),
-    };
-    if sort.dir == SortDir::Desc {
-        base.reverse()
-    } else {
-        base
+/// A candidate as the result order reads it: straight from the index, so a
+/// tie-break key is loaded only when a comparison reaches it.
+struct Ranked<'a> {
+    index: &'a VolumeIndex,
+    folded_parents: &'a [u8],
+    candidate: &'a Candidate,
+}
+
+impl OrderFields for Ranked<'_> {
+    fn folded_parent(&self) -> &[u8] {
+        let (start, end) = self.candidate.folded_parent;
+        &self.folded_parents[start..end]
+    }
+    fn folded_name(&self) -> &[u8] {
+        self.index.folded_name(self.candidate.idx)
+    }
+    fn size(&self) -> Option<u64> {
+        self.candidate.size
+    }
+    fn mtime(&self) -> Option<i64> {
+        self.candidate.mtime
+    }
+    fn volume(&self) -> &[u8] {
+        b"" // one volume per query run
+    }
+    fn frn(&self) -> Frn {
+        self.index.entry(self.candidate.idx).frn()
+    }
+    fn parent_frn(&self) -> Frn {
+        let parent = self.index.entry(self.candidate.idx).parent();
+        self.index.entry(parent).frn()
+    }
+    fn name(&self) -> &[u8] {
+        self.index.entry(self.candidate.idx).name()
     }
 }
 
 /// Places the top `end` candidates (by `sort`) in `cands[..end]`, sorted. Uses
 /// quickselect to partition when `end` is a small slice of a large match set.
-fn order_top(index: &VolumeIndex, cands: &mut [Candidate], sort: SortSpec, end: usize) {
+fn order_top(
+    index: &VolumeIndex,
+    folded_parents: &[u8],
+    cands: &mut [Candidate],
+    sort: SortSpec,
+    end: usize,
+) {
     if end == 0 {
         return;
     }
-    // `cmp_candidate` breaks ties on the unique `idx`, so the order is total and
-    // stability is irrelevant: unstable sort avoids driftsort's scratch buffer
-    // and uses the faster ipnsort.
+    let cmp = |a: &Candidate, b: &Candidate| {
+        let ranked = |candidate| Ranked {
+            index,
+            folded_parents,
+            candidate,
+        };
+        compare(sort, &ranked(a), &ranked(b))
+    };
+    // The result order is total, so stability is irrelevant: unstable sort
+    // avoids driftsort's scratch buffer and uses the faster ipnsort.
     //
     // A broad query with no limit sorts the whole match set (millions of
     // candidates); that is done in parallel across cores. Quickselect + small
@@ -741,21 +676,21 @@ fn order_top(index: &VolumeIndex, cands: &mut [Candidate], sort: SortSpec, end: 
     use rayon::slice::ParallelSliceMut;
     const PARALLEL_SORT_MIN: usize = 100_000;
     if end < cands.len() {
-        cands.select_nth_unstable_by(end - 1, |a, b| cmp_candidate(index, sort, a, b));
+        cands.select_nth_unstable_by(end - 1, cmp);
         // The selected prefix is not always small: a page asking for all but a
         // handful of matches selects nearly everything, and ordering that
         // serially held the index read lock ~6x longer than the parallel branch
         // below does for the same row count, stalling the volume's tail thread
         // for the difference. Same threshold, same work, just not on one core.
         if end >= PARALLEL_SORT_MIN {
-            cands[..end].par_sort_unstable_by(|a, b| cmp_candidate(index, sort, a, b));
+            cands[..end].par_sort_unstable_by(cmp);
         } else {
-            cands[..end].sort_unstable_by(|a, b| cmp_candidate(index, sort, a, b));
+            cands[..end].sort_unstable_by(cmp);
         }
     } else if cands.len() >= PARALLEL_SORT_MIN {
-        cands.par_sort_unstable_by(|a, b| cmp_candidate(index, sort, a, b));
+        cands.par_sort_unstable_by(cmp);
     } else {
-        cands.sort_unstable_by(|a, b| cmp_candidate(index, sort, a, b));
+        cands.sort_unstable_by(cmp);
     }
 }
 
@@ -815,8 +750,9 @@ mod tests {
     use super::*;
     use crate::index::store::FrnMap;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
+    use crate::query::order::{VolumeRun, order_hits};
     use crate::query::parse::parse_query;
-    use crate::types::Frn;
+    use crate::types::{Frn, SortDir};
     use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 
     fn frn(rec: u64) -> Frn {
@@ -895,6 +831,7 @@ mod tests {
 
         let all = run_query(
             &idx,
+            "",
             &parsed,
             None,
             SortSpec::default_for(SortKey::Name),
@@ -909,7 +846,15 @@ mod tests {
 
         // The failing case: a limit small enough that orphans would have filled it.
         for key in [SortKey::Name, SortKey::Path] {
-            let page = run_query(&idx, &parsed, None, SortSpec::default_for(key), 0, Some(3));
+            let page = run_query(
+                &idx,
+                "",
+                &parsed,
+                None,
+                SortSpec::default_for(key),
+                0,
+                Some(3),
+            );
             assert_eq!(
                 page.hits.len(),
                 2,
@@ -945,7 +890,7 @@ mod tests {
 
     fn run(idx: &VolumeIndex, query: &str) -> Vec<String> {
         let parsed = parse_query(query).unwrap();
-        let out = run_query(idx, &parsed, None, SortSpec::default(), 0, None);
+        let out = run_query(idx, "", &parsed, None, SortSpec::default(), 0, None);
         out.hits
             .iter()
             .map(|h| crate::wtf8::to_string_lossy(&h.path))
@@ -1016,7 +961,7 @@ mod tests {
         let idx = sample_index();
         let parsed = parse_query("").unwrap();
         let scope = resolve_scope(&idx, b"docs\\sub", false).unwrap();
-        let out = run_query(&idx, &parsed, Some(scope), SortSpec::default(), 0, None);
+        let out = run_query(&idx, "", &parsed, Some(scope), SortSpec::default(), 0, None);
         let paths: Vec<String> = out
             .hits
             .iter()
@@ -1031,6 +976,7 @@ mod tests {
         let parsed = parse_query("").unwrap();
         let out = run_query(
             &idx,
+            "",
             &parsed,
             None,
             SortSpec {
@@ -1064,6 +1010,7 @@ mod tests {
         let parsed = parse_query("").unwrap();
         let out = run_query(
             &idx,
+            "",
             &parsed,
             None,
             SortSpec {
@@ -1093,11 +1040,11 @@ mod tests {
         let idx = sample_index();
         let parsed = parse_query("").unwrap();
         let sort = SortSpec::default_for(SortKey::Name);
-        let total = run_query(&idx, &parsed, None, sort, 0, None).total as u32;
+        let total = run_query(&idx, "", &parsed, None, sort, 0, None).total as u32;
         assert!(total > 1, "fixture must have several matches to slice");
 
         for limit in [None, Some(u32::MAX), Some(total), Some(total + 1)] {
-            let out = run_query_deferrable(&idx, &parsed, None, sort, 0, limit);
+            let out = run_query_deferrable(&idx, "", &parsed, None, sort, 0, limit);
             assert!(
                 !out.sorted,
                 "limit {limit:?} covers all {total} matches; ordering must be deferred off-lock"
@@ -1111,13 +1058,13 @@ mod tests {
 
         // A limit that genuinely slices still orders here, where the index is
         // available to pick which matches survive.
-        let sliced = run_query_deferrable(&idx, &parsed, None, sort, 0, Some(total - 1));
+        let sliced = run_query_deferrable(&idx, "", &parsed, None, sort, 0, Some(total - 1));
         assert!(sliced.sorted, "a real slice must still order in-lock");
         assert_eq!(sliced.hits.len(), total as usize - 1);
 
         // `run_query` keeps its unconditional promise for direct callers.
         assert!(
-            run_query(&idx, &parsed, None, sort, 0, Some(u32::MAX)).sorted,
+            run_query(&idx, "", &parsed, None, sort, 0, Some(u32::MAX)).sorted,
             "run_query must always return sorted hits"
         );
     }
@@ -1143,6 +1090,344 @@ mod tests {
             run(&idx, "Report ext:PDF case:"),
             vec!["docs\\sub\\Report.PDF"]
         );
+    }
+
+    // -- path terms and path wildcards --------------------------------------
+
+    /// `docs\` at the root and deeper, so a path wildcard is tested at both.
+    /// `readme.md` repeats at every level, so a name term drives the arena
+    /// scan to every one of them and the path wildcard must pick.
+    fn docs_index() -> VolumeIndex {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let root = NTFS_ROOT_FRN;
+        for r in [
+            enum_rec(frn(100), root, "docs", true),
+            enum_rec(frn(101), root, "repo", true),
+            enum_rec(frn(102), frn(101), "docs", true),
+            enum_rec(frn(103), frn(101), "src", true),
+            enum_rec(frn(200), frn(100), "readme.md", false),
+            enum_rec(frn(201), frn(102), "readme.md", false),
+            enum_rec(frn(202), frn(102), "guide.MD", false),
+            enum_rec(frn(203), frn(103), "readme.md", false),
+            enum_rec(frn(204), frn(103), "main.cs", false),
+            enum_rec(frn(205), frn(101), "readme.md", false),
+        ] {
+            idx.insert_enum(&r);
+        }
+        idx
+    }
+
+    fn paths_under(
+        idx: &VolumeIndex,
+        prefix: &str,
+        query: &str,
+        scope: Option<&[u8]>,
+    ) -> Vec<String> {
+        let parsed = parse_query(query).unwrap();
+        let scope = scope.map(|s| resolve_scope(idx, s, false).expect("scope exists"));
+        let out = run_query(
+            idx,
+            prefix,
+            &parsed,
+            scope,
+            SortSpec::default_for(SortKey::Path),
+            0,
+            None,
+        );
+        out.hits
+            .iter()
+            .map(|h| crate::wtf8::to_string_lossy(&h.path))
+            .collect()
+    }
+
+    /// A wildcard with a separator matches the whole full path, on every scan
+    /// path: the full scan, the folded-arena scan (a name term drives it), and
+    /// the scoped subtree walk. The wildcard's literal `\docs\` is in no name,
+    /// so feeding it to the arena prefilter would find nothing.
+    #[test]
+    fn a_wildcard_with_a_separator_matches_the_full_path() {
+        let idx = docs_index();
+        let docs = [
+            r"C:\docs\readme.md",
+            r"C:\repo\docs\guide.MD",
+            r"C:\repo\docs\readme.md",
+        ];
+
+        // Full scan: no name term, so every entry is tested.
+        assert_eq!(paths_under(&idx, r"C:\", r"*\docs\*.md", None), docs);
+        // Folded-arena scan: `readme` drives it.
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"*\docs\*.md readme", None),
+            [r"C:\docs\readme.md", r"C:\repo\docs\readme.md"]
+        );
+        // Scoped walk.
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"*\docs\*.md", Some(b"repo")),
+            [r"C:\repo\docs\guide.MD", r"C:\repo\docs\readme.md"]
+        );
+        // `path:` with a wildcard is a path wildcard too.
+        assert_eq!(paths_under(&idx, r"C:\", r"path:*\docs\*.md", None), docs);
+    }
+
+    /// The full path starts at the mount prefix, so an anchored wildcard needs
+    /// the drive, as in es: `C:\repo\*.cs` finds the `.cs` files under `repo`,
+    /// and `repo\*.cs`, which no full path starts with, finds nothing.
+    #[test]
+    fn a_path_wildcard_is_anchored_to_the_whole_full_path() {
+        let idx = docs_index();
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"C:\repo\*.cs", None),
+            [r"C:\repo\src\main.cs"]
+        );
+        assert!(paths_under(&idx, r"C:\", r"repo\*.cs", None).is_empty());
+        // `?` stands for one character, a separator included.
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"C:\repo?src\main.c?", None),
+            [r"C:\repo\src\main.cs"]
+        );
+    }
+
+    /// A case-sensitive path wildcard matches the raw full path.
+    #[test]
+    fn a_case_sensitive_path_wildcard_matches_the_raw_path() {
+        let idx = docs_index();
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"*\docs\*.MD case:", None),
+            [r"C:\repo\docs\guide.MD"]
+        );
+    }
+
+    /// Path terms see the same full path, mount prefix included.
+    #[test]
+    fn a_path_term_matches_anywhere_in_the_full_path() {
+        let idx = docs_index();
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"c:\docs", None),
+            [r"C:\docs", r"C:\docs\readme.md"]
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"repo\src", None),
+            [
+                r"C:\repo\src",
+                r"C:\repo\src\main.cs",
+                r"C:\repo\src\readme.md"
+            ]
+        );
+    }
+
+    // -- result order -------------------------------------------------------
+
+    fn add_file(
+        idx: &mut VolumeIndex,
+        f: Frn,
+        links: &[(Frn, &str)],
+        size: Option<u64>,
+        mtime: Option<i64>,
+    ) {
+        use crate::layout::{LayoutFile, LayoutName};
+        idx.enrich(&LayoutFile {
+            frn: f,
+            attributes: 0x20,
+            size,
+            mtime_ft: mtime,
+            names: links
+                .iter()
+                .map(|&(parent_frn, name)| LayoutName {
+                    parent_frn,
+                    name: name.as_bytes().to_vec(),
+                    name_lossy: false,
+                    dos_only: false,
+                })
+                .collect(),
+        });
+    }
+
+    /// Every way two hits can tie or nearly tie: es path order against a byte
+    /// compare (`a~qx7zv` against `a\qx7zv`, `a` against `a b`), equal sizes and
+    /// dates, an unknown size, names equal after folding, and one file with
+    /// two links of the same name.
+    fn order_index() -> VolumeIndex {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let root = NTFS_ROOT_FRN;
+        for r in [
+            enum_rec(frn(100), root, "P", true),
+            enum_rec(frn(101), frn(100), "a", true),
+            enum_rec(frn(102), frn(100), "a b", true),
+            enum_rec(frn(103), frn(101), "x", true),
+        ] {
+            idx.insert_enum(&r);
+        }
+        add_file(
+            &mut idx,
+            frn(200),
+            &[(frn(100), "a~qx7zv")],
+            Some(10),
+            Some(5),
+        );
+        add_file(
+            &mut idx,
+            frn(201),
+            &[(frn(101), "qx7zv")],
+            Some(10),
+            Some(5),
+        );
+        add_file(
+            &mut idx,
+            frn(202),
+            &[(frn(102), "QX7ZV")],
+            Some(30),
+            Some(7),
+        );
+        add_file(&mut idx, frn(203), &[(frn(103), "qx7zv")], None, None);
+        add_file(
+            &mut idx,
+            frn(204),
+            &[(frn(101), "link.qx7zv"), (frn(102), "link.qx7zv")],
+            Some(10),
+            Some(5),
+        );
+        add_file(
+            &mut idx,
+            frn(205),
+            &[(frn(102), "b.qx7zv")],
+            Some(10),
+            Some(5),
+        );
+        idx
+    }
+
+    fn all_sorts() -> Vec<SortSpec> {
+        let mut sorts = Vec::new();
+        for key in [
+            SortKey::Name,
+            SortKey::Path,
+            SortKey::Size,
+            SortKey::DateModified,
+        ] {
+            for dir in [SortDir::Asc, SortDir::Desc] {
+                sorts.push(SortSpec { key, dir });
+            }
+        }
+        sorts
+    }
+
+    fn texts(hits: &[QueryHit]) -> Vec<String> {
+        hits.iter()
+            .map(|h| crate::wtf8::to_string_lossy(&h.path))
+            .collect()
+    }
+
+    /// `-sort path` orders by parent folder, then name, as
+    /// [`SortKey::Path`] documents. `P\a~qx7zv` sits in `P`, so it comes before
+    /// everything in `P\a`, though `\` sorts before `~` in a byte compare of
+    /// the whole path.
+    #[test]
+    fn path_order_is_parent_folder_then_name() {
+        let idx = order_index();
+        let parsed = parse_query("qx7zv").unwrap();
+        let out = run_query(
+            &idx,
+            r"C:\",
+            &parsed,
+            None,
+            SortSpec::default_for(SortKey::Path),
+            0,
+            None,
+        );
+        assert_eq!(
+            texts(&out.hits),
+            [
+                r"C:\P\a~qx7zv",
+                r"C:\P\a\link.qx7zv",
+                r"C:\P\a\qx7zv",
+                r"C:\P\a b\b.qx7zv",
+                r"C:\P\a b\link.qx7zv",
+                r"C:\P\a b\QX7ZV",
+                r"C:\P\a\x\qx7zv",
+            ]
+        );
+    }
+
+    /// An unknown size or date sorts last whichever way the key runs.
+    #[test]
+    fn unknown_sizes_and_dates_sort_last() {
+        let idx = order_index();
+        let parsed = parse_query("qx7zv").unwrap();
+        for sort in all_sorts() {
+            if matches!(sort.key, SortKey::Size | SortKey::DateModified) {
+                let out = run_query(&idx, r"C:\", &parsed, None, sort, 0, None);
+                assert_eq!(
+                    texts(&out.hits).last().unwrap(),
+                    r"C:\P\a\x\qx7zv",
+                    "{sort:?}"
+                );
+            }
+        }
+    }
+
+    /// A limited query is a prefix of the same query without a limit, under
+    /// every sort, whether the engine orders the page under the lock or
+    /// [`order_hits`] orders the deferred set after it.
+    #[test]
+    fn a_limited_query_is_a_prefix_of_the_unlimited_one() {
+        let idx = order_index();
+        for query in ["qx7zv", ""] {
+            let parsed = parse_query(query).unwrap();
+            for sort in all_sorts() {
+                let deferred = run_query_unsorted(&idx, r"C:\", &parsed, None);
+                let unlimited = order_hits(
+                    sort,
+                    vec![VolumeRun {
+                        mount_prefix: r"C:\",
+                        hits: deferred.hits,
+                        sorted: false,
+                    }],
+                );
+                assert_eq!(
+                    run_query(&idx, r"C:\", &parsed, None, sort, 0, None).hits,
+                    unlimited,
+                    "{query:?} {sort:?}: the engine and order_hits disagree"
+                );
+                for k in 0..=unlimited.len() {
+                    let page = run_query(&idx, r"C:\", &parsed, None, sort, 0, Some(k as u32));
+                    assert_eq!(page.hits, unlimited[..k], "{query:?} {sort:?} -n {k}");
+                }
+            }
+        }
+    }
+
+    /// The same holds across volumes. Each volume picks its own top `k`, and
+    /// [`order_hits`] merges them; the result equals the first `k` of every
+    /// match merged. The two prefixes interleave in path order (`C:\mnt\P`
+    /// sorts between `C:` and `C:\P`), and the identical fixtures make every
+    /// name tie across volumes.
+    #[test]
+    fn a_limited_query_is_a_prefix_across_volumes() {
+        let volumes = [(r"C:\", order_index()), (r"C:\mnt\", order_index())];
+        let parsed = parse_query("qx7zv").unwrap();
+        for sort in all_sorts() {
+            let merged = |limit: Option<u32>| {
+                let runs = volumes
+                    .iter()
+                    .map(|(prefix, idx)| {
+                        let out = run_query_deferrable(idx, prefix, &parsed, None, sort, 0, limit);
+                        VolumeRun {
+                            mount_prefix: prefix,
+                            hits: out.hits,
+                            sorted: out.sorted,
+                        }
+                    })
+                    .collect();
+                let mut hits = order_hits(sort, runs);
+                hits.truncate(limit.map_or(usize::MAX, |k| k as usize));
+                hits
+            };
+            let unlimited = merged(None);
+            assert_eq!(unlimited.len(), 14);
+            for k in 0..=unlimited.len() {
+                assert_eq!(merged(Some(k as u32)), unlimited[..k], "{sort:?} -n {k}");
+            }
+        }
     }
 
     // -- oracle property test --------------------------------------------
@@ -1194,13 +1479,57 @@ mod tests {
             let idx = flat_index(&uniq);
             let query = terms.join(" ");
             let parsed = parse_query(&query).unwrap();
-            let out = run_query(&idx, &parsed, None, SortSpec::default(), 0, None);
+            let out = run_query(&idx, "", &parsed, None, SortSpec::default(), 0, None);
             let engine: BTreeSet<String> = out
                 .hits
                 .iter()
                 .map(|h| crate::wtf8::to_string_lossy(&h.path))
                 .collect();
             prop_assert_eq!(engine, oracle(&uniq, &terms));
+        }
+
+        /// A path term finds exactly the entries whose full path, built by
+        /// walking to the root, contains it: over random trees that include
+        /// orphans, which have no path.
+        #[test]
+        fn path_terms_agree_with_a_naive_full_path_search(
+            parents in prop::collection::vec(0usize..14, 1..40),
+            names in prop::collection::vec("[a-cA-C]{1,3}", 40),
+            before in "[a-cA-C]{0,2}",
+            after in "[a-cA-C]{0,2}",
+        ) {
+            let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+            for (i, &p) in parents.iter().enumerate() {
+                let parent = match p {
+                    p if p < i => frn(1000 + p as u64),
+                    12 => frn(999), // never inserted: an orphan's parent
+                    _ => NTFS_ROOT_FRN,
+                };
+                idx.insert_enum(&enum_rec(frn(1000 + i as u64), parent, &names[i], i % 3 != 0));
+            }
+            let term = format!("{before}\\{after}");
+            let parsed = parse_query(&term).unwrap();
+            let out = run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), 0, None);
+            let engine: BTreeSet<String> = out
+                .hits
+                .iter()
+                .map(|h| crate::wtf8::to_string_lossy(&h.path))
+                .collect();
+
+            let needle = crate::fold::fold(term.as_bytes());
+            let mut naive = BTreeSet::new();
+            for e in idx.live_entries().filter(|&e| !idx.is_synthetic(e)) {
+                let mut rel = Vec::new();
+                if idx.path_of(e, &mut rel) != crate::index::PathStatus::Ok {
+                    continue;
+                }
+                let full = [b"C:\\".as_slice(), &rel].concat();
+                let folded = crate::fold::fold(&full);
+                if folded.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                    naive.insert(crate::wtf8::to_string_lossy(&full));
+                }
+            }
+            prop_assert_eq!(engine, naive);
         }
     }
 }

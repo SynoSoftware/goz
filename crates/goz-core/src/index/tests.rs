@@ -421,6 +421,60 @@ fn reconcile_links_adds_and_removes_individual_links() {
     );
 }
 
+/// The tail stats a file before it reconciles the file's links, and nothing
+/// stats a link that reconciliation adds. A new hard link, or the new name of
+/// a renamed link, must still carry the size and date every link shares.
+#[test]
+fn a_reconciled_link_gets_the_size_and_date_of_its_file() {
+    let mut idx = index_from_enum(&[
+        create(frn(10), root_frn(), "dirA", true),
+        create(frn(11), root_frn(), "dirB", true),
+        create(frn(100), frn(10), "orig.txt", false),
+    ]);
+    idx.set_stat(frn(100), 17, 1234);
+    let a = idx.head_of(frn(10)).unwrap();
+    let b = idx.head_of(frn(11)).unwrap();
+    let link = |parent, name: &str| LinkTarget {
+        parent,
+        name: WtfName::new(name.as_bytes().to_vec(), false),
+    };
+    let stats = |idx: &VolumeIndex| -> Vec<(String, Option<u64>, Option<i64>)> {
+        let mut out = Vec::new();
+        let mut cur = idx.head_of(frn(100)).unwrap();
+        while cur != crate::types::NIL {
+            let e = idx.entry(cur);
+            out.push((
+                String::from_utf8_lossy(e.name()).into_owned(),
+                e.size(),
+                e.mtime(),
+            ));
+            cur = e.next_link();
+        }
+        out.sort();
+        out
+    };
+
+    // `fsutil hardlink create dirB\link.txt dirA\orig.txt`.
+    idx.reconcile_links(frn(100), &[link(a, "orig.txt"), link(b, "link.txt")]);
+    assert_eq!(
+        stats(&idx),
+        [
+            ("link.txt".to_string(), Some(17), Some(1234)),
+            ("orig.txt".to_string(), Some(17), Some(1234)),
+        ]
+    );
+
+    // A name-only rename of the first link; no stat follows.
+    idx.reconcile_links(frn(100), &[link(a, "renamed.txt"), link(b, "link.txt")]);
+    assert_eq!(
+        stats(&idx),
+        [
+            ("link.txt".to_string(), Some(17), Some(1234)),
+            ("renamed.txt".to_string(), Some(17), Some(1234)),
+        ]
+    );
+}
+
 #[test]
 fn lone_surrogate_names_round_trip_through_the_index() {
     let mut idx = new_index();
