@@ -1,4 +1,4 @@
-//! Blocking named-pipe client. Opens `\\.\pipe\goz-v1` and exchanges framed
+//! Blocking named-pipe client. Opens `\\.\pipe\gozler-v1` and exchanges framed
 //! messages with the daemon using the shared codec from `gozler-core::proto`:
 //! JSON requests, and tagged responses whose results pages carry a binary body.
 
@@ -93,9 +93,10 @@ impl Client {
         };
 
         // Authenticate the server BEFORE sending any request: a non-elevated
-        // local user can pre-create `\\.\pipe\goz-v1` before the daemon starts
-        // and serve spoofed results. Require the pipe be owned by SYSTEM /
-        // Administrators (created by the elevated daemon). Fail closed on error.
+        // local user can pre-create `\\.\pipe\gozler-v1` before the daemon
+        // starts and serve spoofed results. Require the pipe be owned by
+        // SYSTEM / Administrators (created by the elevated daemon). Fail closed
+        // on error.
         if !insecure {
             match gozler_winfs::pipe_server_is_trusted(pipe.as_handle()) {
                 Ok(true) => {}

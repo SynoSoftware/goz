@@ -9,7 +9,7 @@
 //! form never merges genuinely distinct letters (Cyrillic `й` stays distinct
 //! from `и`); accent-insensitivity is deliberately NOT done here. The result is
 //! close to, but not identical to, NTFS's own `$UpCase` comparison: `$UpCase` is
-//! a per-code-unit table and does not normalize, so goz additionally treats NFC
+//! a per-code-unit table and does not normalize, so gozler additionally treats NFC
 //! and NFD spellings of the same text as equal (any precomposed letter with a
 //! canonical decomposition). Matching never affects index integrity. Both the
 //! needle and each candidate name are folded with the same function, so

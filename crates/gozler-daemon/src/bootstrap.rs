@@ -108,7 +108,7 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
                 }
                 .display_prefix();
                 std::thread::Builder::new()
-                    .name(format!("goz-bootstrap-{label}"))
+                    .name(format!("gozler-bootstrap-{label}"))
                     .spawn_scoped(s, move || bootstrap_volume(vol))
             })
             .collect();
@@ -300,7 +300,7 @@ fn enrich_from_layout(
 /// size (`None` when it could not be read).
 ///
 /// The journal is the only thing that lets a restart replay instead of
-/// rescan, so its size sets the longest downtime goz can recover from without
+/// rescan, so its size sets the longest downtime gozler can recover from without
 /// a full MFT scan. Measured on a busy development C: (2 TB, ~4M entries):
 /// about 4.5 MB of journal per hour, so Windows' default 32 MB holds roughly
 /// nine hours and a cursor saved at night is purged by morning. The cost is

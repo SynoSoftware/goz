@@ -1,7 +1,7 @@
-//! gozler: the goz CLI client.
+//! gozler: the gozler CLI client.
 //!
 //! Parses arguments with the es.exe-compatible rules from
-//! `gozler-core::escompat`, talks to the running daemon over `\\.\pipe\goz-v1`,
+//! `gozler-core::escompat`, talks to the running daemon over `\\.\pipe\gozler-v1`,
 //! and writes results as JSON (`--json`), or through
 //! `gozler_core::output::TableWriter` as plain text (default), CSV, TSV or TXT.
 //!

@@ -1,7 +1,7 @@
 //! FILETIME conversion helpers.
 //!
 //! Windows FILETIME counts 100-nanosecond ticks since 1601-01-01T00:00:00
-//! UTC. Everything's IPC, the USN/MFT records, and goz's own wire protocol all speak
+//! UTC. Everything's IPC, the USN/MFT records, and gozler's own wire protocol all speak
 //! FILETIME; these helpers are the single conversion point for the date
 //! arithmetic that needs Unix milliseconds.
 //!

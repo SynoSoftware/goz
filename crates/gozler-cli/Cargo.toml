@@ -1,6 +1,6 @@
 [package]
 name = "gozler-cli"
-description = "gozler: the goz CLI client. es.exe-compatible flags, blocking named-pipe client"
+description = "gozler: the gozler CLI client. es.exe-compatible flags, blocking named-pipe client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

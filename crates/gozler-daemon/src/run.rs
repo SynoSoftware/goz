@@ -41,7 +41,7 @@ pub(crate) fn start_engine() -> Result<Engine> {
 /// the first queries, and the process's visible memory drops to what queries
 /// actually touch instead of the bootstrap peak.
 ///
-/// `GOZ_PIN_WORKING_SET=1` opts into the opposite trade: pin the resident set
+/// `GOZLER_PIN_WORKING_SET=1` opts into the opposite trade: pin the resident set
 /// as a hard minimum so a low-memory burst can never page the index out and
 /// no query ever pays a soft-fault storm. For latency-sensitive setups.
 pub(crate) fn settle_working_set() {
@@ -51,7 +51,7 @@ pub(crate) fn settle_working_set() {
     // SAFETY: mi_collect takes no pointers and is documented safe to call
     // from any thread at any time.
     unsafe { libmimalloc_sys::mi_collect(true) };
-    let pin = std::env::var_os("GOZ_PIN_WORKING_SET").is_some_and(|v| v == "1");
+    let pin = std::env::var_os("GOZLER_PIN_WORKING_SET").is_some_and(|v| v == "1");
     if pin {
         match gozler_winfs::pin_working_set() {
             Ok(()) => tracing::info!("working set pinned (index kept resident)"),
@@ -62,7 +62,7 @@ pub(crate) fn settle_working_set() {
     } else {
         match gozler_winfs::trim_working_set() {
             Ok(()) => {
-                tracing::info!("working set trimmed once (GOZ_PIN_WORKING_SET=1 to pin instead)")
+                tracing::info!("working set trimmed once (GOZLER_PIN_WORKING_SET=1 to pin instead)")
             }
             Err(e) => tracing::debug!(error = %e, "working set not trimmed (best-effort)"),
         }

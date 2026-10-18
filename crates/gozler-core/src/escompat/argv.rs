@@ -15,7 +15,7 @@
 //!   would match nothing.
 //! - A token consisting solely of dashes (`-`, `--`, `---`, ...) is search
 //!   text, never a switch (es `es_is_literal_switch`).
-//! - Other `--`-prefixed tokens are goz's native namespace, matched exactly
+//! - Other `--`-prefixed tokens are gozler's native namespace, matched exactly
 //!   (case-sensitive, dashes required). Anything else is fatal (exit 6).
 //! - A parameter-taking switch consumes the next token; a missing or
 //!   unparseable parameter is fatal (exit 4).
@@ -86,7 +86,7 @@ pub struct EsPlan {
     /// the results to stdout.
     pub export: Option<String>,
     /// Whether an export file starts with a UTF-8 BOM. Default true: a
-    /// documented goz deviation from stock es (which defaults BOM off).
+    /// documented gozler deviation from stock es (which defaults BOM off).
     /// `-no-utf8-bom` clears it; `-utf8-bom` is accepted and sets it.
     pub bom: bool,
     /// Whether a CSV or TSV includes the header row. `-no-header` clears it.
@@ -124,7 +124,7 @@ pub struct EsPlan {
 
 impl Default for EsPlan {
     /// The plan for an empty command line: name-ascending sort and es's
-    /// default output shape (header on, always-quote on, BOM on per goz's
+    /// default output shape (header on, always-quote on, BOM on per gozler's
     /// deviation).
     fn default() -> Self {
         Self {
@@ -345,7 +345,7 @@ pub(super) enum SwitchAction {
     Column(EsColumn),
     /// A combined `-sort-<key>[-ascending|-descending]` switch.
     SortFixed(SortSpec),
-    /// `-utf8-bom`: set BOM on (a no-op against goz's default).
+    /// `-utf8-bom`: set BOM on (a no-op against gozler's default).
     Utf8Bom,
     /// `-no-utf8-bom`: set BOM off.
     NoUtf8Bom,
@@ -1591,7 +1591,7 @@ mod tests {
 
     #[test]
     fn utf8_bom_switches() {
-        assert!(plan(&["-utf8-bom"]).bom, "accepted no-op vs goz default");
+        assert!(plan(&["-utf8-bom"]).bom, "accepted no-op vs gozler default");
         assert!(!plan(&["-no-utf8-bom"]).bom);
         assert!(plan(&["-no-utf8-bom", "-utf8-bom"]).bom, "last flag wins");
     }

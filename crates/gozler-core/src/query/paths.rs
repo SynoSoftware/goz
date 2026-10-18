@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 /// Which spelling of each name a path is built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NameForm {
-    /// As stored: what goz prints and what a case-sensitive query matches.
+    /// As stored: what gozler prints and what a case-sensitive query matches.
     Raw,
     /// Case-folded: what a case-insensitive query matches and the path sort
     /// compares.

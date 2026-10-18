@@ -1,7 +1,7 @@
 //! Client-side verification that the process serving a named pipe is a trusted
-//! (elevated) goz daemon, not a squatter.
+//! (elevated) gozler daemon, not a squatter.
 //!
-//! A local, unelevated user can pre-create `\\.\pipe\goz-v1` before the elevated
+//! A local, unelevated user can pre-create `\\.\pipe\gozler-v1` before the elevated
 //! daemon starts (the daemon's `FIRST_PIPE_INSTANCE` create then fails) and
 //! serve spoofed results to the client while learning its queries and scope
 //! paths. The daemon's own pipe object is created by an elevated or SYSTEM
@@ -173,8 +173,8 @@ mod tests {
     fn trust_verdict_tracks_the_creating_token() {
         // The daemon's real security attributes, so a pass cannot be an artifact
         // of a permissive default DACL.
-        let security = build_pipe_security().expect("goz pipe SDDL must parse");
-        let name = format!(r"\\.\pipe\goz-trust-test-{}", std::process::id());
+        let security = build_pipe_security().expect("gozler pipe SDDL must parse");
+        let name = format!(r"\\.\pipe\gozler-trust-test-{}", std::process::id());
         let wide = to_wide_nul(&name);
 
         // SAFETY: `wide` is a NUL-terminated pipe name and `security` outlives

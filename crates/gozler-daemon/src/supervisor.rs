@@ -199,7 +199,7 @@ impl Supervisor {
         let thread_slot = slot.clone();
         let thread_stop = stop.clone();
         match std::thread::Builder::new()
-            .name("goz-volume-supervisor".into())
+            .name("gozler-volume-supervisor".into())
             .spawn(move || {
                 let fleet = thread_slot
                     .lock()
@@ -349,7 +349,7 @@ impl Fleet {
         }
         let (tx, rx) = mpsc::sync_channel(1);
         match std::thread::Builder::new()
-            .name("goz-volume-discovery".into())
+            .name("gozler-volume-discovery".into())
             .spawn(move || {
                 let _ = tx.send(gozler_winfs::enumerate_volumes());
             }) {
@@ -743,7 +743,7 @@ impl Supervised {
         // poll or fails the send and cleans up itself.
         let (result_tx, result_rx) = mpsc::sync_channel(0);
         let spawned = std::thread::Builder::new()
-            .name(format!("goz-start-{}", self.state.mount_prefix()))
+            .name(format!("gozler-start-{}", self.state.mount_prefix()))
             .spawn(move || {
                 // Duplicated ON the worker (the pseudo-handle is per-thread)
                 // so the supervisor can cancel an open a sick device pends.

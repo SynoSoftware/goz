@@ -1,6 +1,6 @@
 //! The named-pipe query server.
 //!
-//! A tokio multi-thread runtime accepts connections on `\\.\pipe\goz-v1`,
+//! A tokio multi-thread runtime accepts connections on `\\.\pipe\gozler-v1`,
 //! frames requests/responses with the shared sans-io codec from
 //! `gozler-core::proto`, and answers each `Query` by locking every volume's index
 //! for reads, running the query, and merging the results. Indexing itself
@@ -492,7 +492,7 @@ fn hello(volumes: &VolumeSet, proto_min: u16, proto_max: u16) -> Response {
     }
 }
 
-/// Whether every volume's index is as complete as goz can make it, via
+/// Whether every volume's index is as complete as gozler can make it, via
 /// [`gozler_core::types::VolumePhase::is_complete`]. The same bar
 /// [`DaemonStatus::volumes_incomplete`] applies, so `Hello.ready` and a `Status`
 /// reply can never disagree about whether the index is whole.
@@ -677,7 +677,7 @@ mod tests {
         assert!(ready, "a snapshot volume is ready to serve");
     }
 
-    /// The honesty bit: any volume whose index is NOT as complete as goz can make
+    /// The honesty bit: any volume whose index is NOT as complete as gozler can make
     /// it must mark results incomplete, or the user trusts a partial index.
     #[test]
     fn status_is_incomplete_unless_every_volume_is_live() {

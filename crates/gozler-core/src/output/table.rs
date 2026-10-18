@@ -1,7 +1,7 @@
 //! The one writer of result rows, for every format but JSON: plain text, and
 //! es's CSV, TSV and TXT.
 //!
-//! The CSV bytes are those of voidtools es.exe's `-export-csv`, with goz
+//! The CSV bytes are those of voidtools es.exe's `-export-csv`, with gozler
 //! v0.2.0's layout: the Filename column comes last, not first, and an export
 //! file starts with a UTF-8 byte order mark unless `-no-utf8-bom`. TSV and TXT
 //! follow es too. Format facts, from the es source:

@@ -62,7 +62,7 @@ impl Drop for PipeSecurity {
     }
 }
 
-/// Builds the pipe `SECURITY_ATTRIBUTES` from the goz SDDL.
+/// Builds the pipe `SECURITY_ATTRIBUTES` from the gozler SDDL.
 pub fn build_pipe_security() -> Result<PipeSecurity, WinError> {
     let sddl = format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;{AUTH_USERS_ACCESS};;;AU)");
     let wide = to_wide_nul(&sddl);
@@ -133,8 +133,8 @@ mod tests {
     /// Proves the SDDL the daemon ships actually parses. Without this a typo in
     /// the format string surfaces only when the pipe server starts.
     #[test]
-    fn goz_sddl_parses() {
-        let security = build_pipe_security().expect("goz pipe SDDL must parse");
+    fn gozler_sddl_parses() {
+        let security = build_pipe_security().expect("gozler pipe SDDL must parse");
         assert!(!security.attributes_ptr().is_null());
     }
 }

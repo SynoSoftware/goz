@@ -15,7 +15,7 @@
 
 [licenses]
 allow = [
-    # goz itself ships under MIT; the rest cover dependencies.
+    # gozler itself ships under MIT; the rest cover dependencies.
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

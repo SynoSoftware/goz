@@ -1,7 +1,7 @@
-//! gozlerd: the goz indexing daemon.
+//! gozlerd: the gozler indexing daemon.
 //!
 //! Bootstraps per-volume indexes from the NTFS MFT, tails the USN change
-//! journal, and serves queries over `\\.\pipe\goz-v1`. `run` starts the live
+//! journal, and serves queries over `\\.\pipe\gozler-v1`. `run` starts the live
 //! daemon (console by default; `--service` under the SCM); `scan` does a
 //! one-shot bootstrap and prints stats; `install`/`uninstall` register the
 //! auto-start Windows service.
@@ -33,7 +33,7 @@ mod volume_state;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gozlerd", version, about = "goz indexing daemon")]
+#[command(name = "gozlerd", version, about = "gozler indexing daemon")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

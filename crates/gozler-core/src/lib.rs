@@ -1,4 +1,4 @@
-//! gozler-core: the pure, OS-agnostic heart of goz.
+//! gozler-core: the pure, OS-agnostic heart of gozler.
 //!
 //! Everything that interprets bytes lives here: USN records, MFT enumeration
 //! buffers, FILE_LAYOUT entries, the in-memory index, the query engine, the

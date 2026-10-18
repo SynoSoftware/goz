@@ -1,7 +1,7 @@
 # gozler
 
 gozler is an instant filename search for Windows NTFS: an elevated daemon
-(`gozlerd`) indexes the MFT and serves queries over `\\.\pipe\goz-v1` to an
+(`gozlerd`) indexes the MFT and serves queries over `\\.\pipe\gozler-v1` to an
 `es.exe`-compatible client (`gozler`). Each crate's `lib.rs` or `main.rs` opens
 with a doc comment that explains its design; read it before you change the
 crate.
@@ -113,9 +113,10 @@ change must keep passing, so a test earns its place by the failure it watches.
   older peer's silence means.
 - **The pipe trust check.** Read `docs/SECURITY.md` before you change the pipe,
   elevation or the server-owner check.
-- **The running daemon.** The daemon installed on this machine owns
-  `\\.\pipe\goz-v1`, and other tools search through it. Ask the owner before
-  you stop, replace or reinstall it.
+- **The installed goz.** The goz on this machine (service `goz`, pipe
+  `\\.\pipe\goz-v1`) is the upstream author's software, and every agent
+  finds files through it. Never stop, replace or re-point it. gozler has its
+  own service and pipe, so it installs and is tested beside goz.
 
 ## Before you finish
 

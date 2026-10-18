@@ -132,7 +132,7 @@ pub enum VolumePhase {
 }
 
 impl VolumePhase {
-    /// Whether a result set drawn from this volume is as complete as goz can
+    /// Whether a result set drawn from this volume is as complete as gozler can
     /// ever make it, i.e. it must NOT be flagged incomplete to the user.
     ///
     /// `Snapshot` counts, and that is the whole point of the variant. Such a

@@ -1,6 +1,6 @@
 [package]
 name = "gozler-daemon"
-description = "gozlerd: the goz indexing daemon. MFT bootstrap, USN journal tail, named-pipe query server, Windows service"
+description = "gozlerd: the gozler indexing daemon. MFT bootstrap, USN journal tail, named-pipe query server, Windows service"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

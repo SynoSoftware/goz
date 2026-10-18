@@ -5,14 +5,14 @@
 //! process exit code. These spawn the real binary and check that wiring.
 //!
 //! Only cases that need no running daemon live here. Anything past
-//! `Client::connect` depends on whether `\\.\pipe\goz-v1` happens to be live on
-//! the machine running the suite, which would pass on CI and flake on a
+//! `Client::connect` depends on whether `\\.\pipe\gozler-v1` happens to be live
+//! on the machine running the suite, which would pass on CI and flake on a
 //! developer box with `gozlerd` running. The cases below all end before the
 //! first connect attempt, so they are hermetic on any OS.
 
 use std::process::{Command, Output};
 
-fn goz<const N: usize>(args: [&str; N]) -> Output {
+fn gozler<const N: usize>(args: [&str; N]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_gozler"))
         .args(args)
         .output()
@@ -26,7 +26,7 @@ fn stderr(out: &Output) -> String {
 /// es exit code 6. Parsing rejects the switch before any daemon contact.
 #[test]
 fn unknown_switch_exits_6() {
-    let out = goz(["-bogus-switch", "foo"]);
+    let out = gozler(["-bogus-switch", "foo"]);
     assert_eq!(out.status.code(), Some(6), "stderr: {}", stderr(&out));
     assert!(
         stderr(&out).contains("unknown switch: -bogus-switch"),
@@ -38,7 +38,7 @@ fn unknown_switch_exits_6() {
 /// es exit code 4. `-path` consumes a following value; there is none here.
 #[test]
 fn missing_switch_parameter_exits_4() {
-    let out = goz(["-path"]);
+    let out = gozler(["-path"]);
     assert_eq!(out.status.code(), Some(4), "stderr: {}", stderr(&out));
     assert!(
         stderr(&out).contains("expected an additional parameter after -path"),
@@ -58,11 +58,11 @@ fn unwritable_export_path_exits_5() {
     // A directory that cannot exist, made unique so a stale tree cannot make
     // this pass for the wrong reason (a creatable path would reach connect).
     let missing = std::env::temp_dir()
-        .join(format!("goz-absent-{}", std::process::id()))
+        .join(format!("gozler-absent-{}", std::process::id()))
         .join("out.csv");
     assert!(!missing.exists());
 
-    let out = goz(["-export-csv", &missing.to_string_lossy(), "foo"]);
+    let out = gozler(["-export-csv", &missing.to_string_lossy(), "foo"]);
     assert_eq!(out.status.code(), Some(5), "stderr: {}", stderr(&out));
     assert!(
         stderr(&out).contains("cannot create"),
@@ -75,7 +75,7 @@ fn unwritable_export_path_exits_5() {
 /// contact.
 #[test]
 fn help_exits_0() {
-    let out = goz(["-help"]);
+    let out = gozler(["-help"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert!(!out.stdout.is_empty(), "the help goes to stdout");
 }

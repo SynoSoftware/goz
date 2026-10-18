@@ -31,8 +31,8 @@ use crate::{run, server};
 
 /// Service key name (the SCM/registry key). Keep stable across versions.
 /// (The pipe name is independent: `gozler_core::proto::PIPE_NAME`.)
-pub(crate) const SERVICE_NAME: &str = "goz";
-const DISPLAY_NAME: &str = "goz file index";
+pub(crate) const SERVICE_NAME: &str = "gozler";
+const DISPLAY_NAME: &str = "gozler file index";
 const DESCRIPTION: &str =
     "Indexes NTFS volumes (MFT + USN journal) for instant file search with gozler.";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
@@ -82,13 +82,13 @@ pub(crate) fn install() -> Result<()> {
             // Already installed → open and refresh config (upgrade-safe).
             let service = manager
                 .open_service(SERVICE_NAME, access)
-                .context("opening the existing goz service")?;
+                .context("opening the existing gozler service")?;
             service
                 .change_config(&info)
-                .context("updating the goz service configuration")?;
+                .context("updating the gozler service configuration")?;
             service
         }
-        Err(e) => return Err(e).context("creating the goz service"),
+        Err(e) => return Err(e).context("creating the gozler service"),
     };
 
     // Best-effort description; not worth failing the install over.
@@ -96,8 +96,8 @@ pub(crate) fn install() -> Result<()> {
     // Let the SCM supervise crash recovery: restart on failure with backoff,
     // so a dead daemon self-heals without app involvement or a UAC prompt.
     let _ = set_failure_actions(&service);
-    start_if_stopped(&service).context("starting the goz service")?;
-    println!("goz service installed and started.");
+    start_if_stopped(&service).context("starting the gozler service")?;
+    println!("gozler service installed and started.");
     Ok(())
 }
 
@@ -115,10 +115,10 @@ pub(crate) fn uninstall() -> Result<()> {
         Err(windows_service::Error::Winapi(e))
             if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) =>
         {
-            println!("goz service is not installed; nothing to remove.");
+            println!("gozler service is not installed; nothing to remove.");
             return Ok(());
         }
-        Err(e) => return Err(e).context("opening the goz service"),
+        Err(e) => return Err(e).context("opening the gozler service"),
     };
 
     // Stop first so the record is deleted immediately rather than being marked
@@ -130,8 +130,8 @@ pub(crate) fn uninstall() -> Result<()> {
         wait_for_stopped(&service);
     }
 
-    service.delete().context("deleting the goz service")?;
-    println!("goz service stopped and removed.");
+    service.delete().context("deleting the gozler service")?;
+    println!("gozler service stopped and removed.");
     Ok(())
 }
 
@@ -141,17 +141,19 @@ pub(crate) fn status() -> Result<()> {
         .context("opening the service control manager")?;
     match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
         Ok(service) => {
-            let status = service.query_status().context("querying the goz service")?;
-            println!("goz service: {:?}", status.current_state);
+            let status = service
+                .query_status()
+                .context("querying the gozler service")?;
+            println!("gozler service: {:?}", status.current_state);
             Ok(())
         }
         Err(windows_service::Error::Winapi(e))
             if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) =>
         {
-            println!("goz service: NotInstalled");
+            println!("gozler service: NotInstalled");
             Ok(())
         }
-        Err(e) => Err(e).context("opening the goz service"),
+        Err(e) => Err(e).context("opening the gozler service"),
     }
 }
 
@@ -234,13 +236,13 @@ windows_service::define_windows_service!(ffi_service_main, service_main);
 /// connects. Errors are logged (no console exists in service mode).
 fn service_main(_args: Vec<OsString>) {
     if let Err(e) = run_service() {
-        tracing::error!(error = %e, "goz service exited with an error");
+        tracing::error!(error = %e, "gozler service exited with an error");
     }
 }
 
 fn run_service() -> Result<()> {
     init_service_tracing();
-    tracing::info!("goz service starting");
+    tracing::info!("gozler service starting");
 
     // Stop signal: SCM control handler → async pipe server. `watch` retains the
     // last value, so a Stop that races ahead of the server is never lost.
@@ -333,7 +335,7 @@ fn run_service() -> Result<()> {
             ))?;
         }
         Err(msg) => {
-            tracing::error!(reason = %msg, "goz service failed to start");
+            tracing::error!(reason = %msg, "gozler service failed to start");
             status_handle
                 .set_service_status(stopped_report(ServiceExitCode::ServiceSpecific(1)))?;
             let _ = engine_thread.join();
@@ -344,7 +346,7 @@ fn run_service() -> Result<()> {
     // Block until the engine thread returns: after the Stop control flips
     // `stop_tx`, or when the pipe server fails or the thread panics.
     let exit_code = service_exit_code(engine_thread.join());
-    tracing::info!(?exit_code, "goz service stopped");
+    tracing::info!(?exit_code, "gozler service stopped");
     status_handle.set_service_status(stopped_report(exit_code))?;
     Ok(())
 }
@@ -399,7 +401,7 @@ fn stopped_report(exit_code: ServiceExitCode) -> ServiceStatus {
 }
 
 /// Best-effort file logging for service mode (no console). Writes to
-/// `%SystemRoot%\Logs\goz\gozlerd.log`; any failure skips logging.
+/// `%SystemRoot%\Logs\gozler\gozlerd.log`; any failure skips logging.
 ///
 /// The log must live where only SYSTEM and Administrators can create entries.
 /// Standard users may create folders anywhere under `%ProgramData%`, so a user
@@ -409,7 +411,9 @@ fn init_service_tracing() {
     let Ok(system_root) = std::env::var("SystemRoot") else {
         return;
     };
-    let dir = std::path::Path::new(&system_root).join("Logs").join("goz");
+    let dir = std::path::Path::new(&system_root)
+        .join("Logs")
+        .join("gozler");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }

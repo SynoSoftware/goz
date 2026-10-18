@@ -8,7 +8,7 @@
 //! source: case-sensitive names with every interior dash optional, and
 //! `/`-prefixed fallthrough to search text.
 //!
-//! goz-native extensions live behind a `--` prefix (`--json`, `--status`,
+//! gozler-native extensions live behind a `--` prefix (`--json`, `--status`,
 //! `--insecure-no-server-check`) so they can never collide with es's
 //! single-dash switch namespace.
 //!

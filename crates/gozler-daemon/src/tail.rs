@@ -172,7 +172,7 @@ pub(crate) fn spawn(
     // Propagate it so the supervisor retries this one volume rather than
     // panic the whole daemon.
     let join = std::thread::Builder::new()
-        .name(format!("goz-tail-{mount}"))
+        .name(format!("gozler-tail-{mount}"))
         .spawn(move || {
             let io = gozler_winfs::current_thread_io_handle();
             let usable = io.is_ok();

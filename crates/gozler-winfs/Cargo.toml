@@ -1,6 +1,6 @@
 [package]
 name = "gozler-winfs"
-description = "Thin unsafe Win32 layer for goz: volume handles, journal/MFT ioctls, pipe security. Bytes and handles only; never parses."
+description = "Thin unsafe Win32 layer for gozler: volume handles, journal/MFT ioctls, pipe security. Bytes and handles only; never parses."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
