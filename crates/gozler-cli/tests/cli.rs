@@ -71,6 +71,24 @@ fn unwritable_export_path_exits_5() {
     );
 }
 
+/// A missing `-path` folder exits 4 before any daemon contact, where es
+/// answers nothing with exit 0 and an agent reads that as "no such file".
+#[cfg(windows)]
+#[test]
+fn a_missing_path_folder_exits_4() {
+    let missing = std::env::temp_dir().join(format!("gozler-absent-{}", std::process::id()));
+    assert!(!missing.exists());
+    let missing = missing.to_string_lossy();
+
+    let out = gozler(["-path", &missing, "foo"]);
+    assert_eq!(out.status.code(), Some(4), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!("{missing} does not exist")),
+        "stderr: {}",
+        stderr(&out)
+    );
+}
+
 /// Bug 7: `-help` prints the help to stdout and exits 0, before any daemon
 /// contact.
 #[test]

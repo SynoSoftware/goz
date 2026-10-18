@@ -109,6 +109,9 @@ mod win {
             time_zone: time_zone.clone(),
         };
         let request = build_search(&plan, &working_dir()?, &start).map_err(Failure::Query)?;
+        if let Some(folder) = &request.scope {
+            check_folder_exists(folder)?;
+        }
 
         // Create the export file up front (es semantics): a later daemon-unreachable
         // failure then leaves the observable artifact, a 0-byte file + exit 8.
@@ -168,6 +171,18 @@ mod win {
         let dir = std::env::current_dir()
             .map_err(|e| Failure::Internal(format!("cannot read the working directory: {e}")))?;
         Ok(dir.to_string_lossy().into_owned())
+    }
+
+    /// Fails when the scope folder does not exist. Any other error, such as a
+    /// folder the user cannot read, lets the search run, because gozlerd
+    /// answers from its index and not from the folder.
+    fn check_folder_exists(folder: &str) -> Result<(), Failure> {
+        match std::fs::metadata(folder) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(Failure::MissingFolder(folder.to_string()))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Resolves a drive-relative folder switch such as `-path D:x` against
