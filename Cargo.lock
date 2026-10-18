@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gozler-core",
  "gozler-winfs",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "gozler-winfs",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-daemon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-winfs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "windows-sys",
 ]
