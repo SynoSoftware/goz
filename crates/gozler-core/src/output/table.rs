@@ -10,8 +10,8 @@
 //!   last unless a Name, Path or Filename column is already there. TXT prints
 //!   only the Filename column, whatever the switches ask for.
 //! - CSV and TSV start with a header row of es's column names (`Name`,
-//!   `Path`, `Filename`, `Extension`, `Size`, `Date Modified`), never quoted;
-//!   `-no-header` leaves it out. Plain text and TXT have none.
+//!   `Path`, `Filename`, `Extension`, `Size`, `Date Modified`, `Attributes`),
+//!   never quoted; `-no-header` leaves it out. Plain text and TXT have none.
 //! - Every line ends with CRLF, the last one included, except in plain text,
 //!   which ends lines with LF, as goz v0.2.0 did.
 //! - A CSV text column is always wrapped in `"` with interior `"` doubled;
@@ -22,8 +22,11 @@
 //! - Size is empty for a folder and for an unknown size, and Date Modified for
 //!   an unknown date; neither is quoted. CSV and TSV print the size in bytes.
 //!   Plain text separates columns with a space, as es's console does: it
-//!   groups the size's digits, right-aligns the size and pads the date to
-//!   es's widths, except after the last value of a line.
+//!   groups the size's digits, right-aligns the size and pads the date and
+//!   the attributes to es's widths, except after the last value of a line.
+//! - Attributes print as letters in plain text (`HA`) and as their
+//!   `FILE_ATTRIBUTE_*` number in CSV and TSV (`34`), as es prints them;
+//!   empty when the daemon did not send them.
 //! - A folder's full path carries no trailing backslash.
 
 use crate::proto::ResultItem;
@@ -77,6 +80,9 @@ const PLAIN_SIZE_WIDTH: usize = 14;
 /// Width of the plain-text Date Modified column, es's width for a date:
 /// `2026-10-17T12:34:56` fits, so an unknown date is as wide as a known one.
 const PLAIN_DATE_WIDTH: usize = 19;
+/// Width of the plain-text Attributes column, es's: `RASH` fits, and more
+/// letters run past it.
+const PLAIN_ATTRIBUTES_WIDTH: usize = 4;
 
 impl TableWriter {
     pub fn new(options: TableOptions, format_date: Box<dyn Fn(i64) -> String>) -> Self {
@@ -142,6 +148,11 @@ impl TableWriter {
                     .map(&self.format_date)
                     .unwrap_or_default()
                     .into(),
+                EsColumn::Attributes => match item.attributes {
+                    Some(attributes) if plain => attributes.letters().into(),
+                    Some(attributes) => attributes.bits().to_string().into(),
+                    None => "".into(),
+                },
             };
             if i > 0 {
                 // Plain text ends a line at its last value, without padding.
@@ -160,7 +171,12 @@ impl TableWriter {
                 EsColumn::DateModified if plain && !last => {
                     out.extend_from_slice(format!("{cell:<PLAIN_DATE_WIDTH$}").as_bytes());
                 }
-                EsColumn::Size | EsColumn::DateModified => out.extend_from_slice(cell.as_bytes()),
+                EsColumn::Attributes if plain && !last => {
+                    out.extend_from_slice(format!("{cell:<PLAIN_ATTRIBUTES_WIDTH$}").as_bytes());
+                }
+                EsColumn::Size | EsColumn::DateModified | EsColumn::Attributes => {
+                    out.extend_from_slice(cell.as_bytes());
+                }
             }
         }
         out.extend_from_slice(match self.format {
@@ -202,6 +218,7 @@ fn column_name(column: EsColumn) -> &'static str {
         EsColumn::Extension => "Extension",
         EsColumn::Size => "Size",
         EsColumn::DateModified => "Date Modified",
+        EsColumn::Attributes => "Attributes",
     }
 }
 
@@ -251,6 +268,7 @@ mod tests {
             size,
             mtime_ft,
             is_dir,
+            attributes: None,
         }
     }
 

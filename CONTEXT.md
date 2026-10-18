@@ -16,7 +16,7 @@ _Avoid_: record, node
 
 **Hard link**:
 One of a file's names. Each hard link is its own entry; all of them share the
-file's file ID, size and date.
+file's file ID, size, date and attributes.
 _Avoid_: alias
 
 **File ID**:
@@ -38,6 +38,12 @@ _Avoid_: path within the volume, relative path (when the drive is included)
 **Folded name**:
 An entry's name with case folded away; what a case-insensitive search and the
 result order compare.
+
+**Attributes**:
+The Windows attributes of a file or folder that gozler indexes, each written
+as es writes it, with one letter: `H` hidden, `S` system, `D` folder. `N`
+(normal) means that the file has no other attribute.
+_Avoid_: flags, attribute bits (in prose)
 
 **Unknown size or date**:
 A file's size or date that gozler did not read, because the size and date pass

@@ -9,6 +9,7 @@
 //! structs, and opaque handles; it never parses ioctl record payloads (USN
 //! records, MFT enum output, file-layout entries).
 
+pub mod attributes;
 pub mod escompat;
 pub mod fold;
 pub mod index;

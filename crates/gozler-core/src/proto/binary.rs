@@ -21,10 +21,17 @@
 //! count items, each:
 //!   path_len: u32 LE    raw path byte length (WTF-8, mount prefix included)
 //!   path:     path_len bytes
-//!   iflags:   u8        bit0 is_dir, bit1 has_size, bit2 has_mtime
+//!   iflags:   u8        bit0 is_dir, bit1 has_size, bit2 has_mtime,
+//!                       bit3 has_attributes
 //!   size:     u64 LE    iff has_size
 //!   mtime:    i64 LE    iff has_mtime
+//!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
 //! ```
+//!
+//! Items are positional, so a client that does not know a field misreads
+//! every item after the first that holds it. The daemon therefore sets
+//! has_attributes only when the request asks for attributes, which no client
+//! before protocol 6 does.
 //!
 //! Paths travel as raw WTF-8, exactly the bytes the daemon stored. The decoder
 //! lossy-decodes them to `ResultItem::path` and, when they were not valid UTF-8,
@@ -33,6 +40,7 @@
 
 use super::frame::{begin_frame, end_frame};
 use super::types::{MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem};
+use crate::attributes::Attributes;
 use crate::wtf8;
 
 /// Response frame tag: the body is a JSON [`super::Response`].
@@ -47,6 +55,7 @@ const FLAG_METADATA_PENDING: u8 = 1 << 2;
 const IFLAG_IS_DIR: u8 = 1;
 const IFLAG_HAS_SIZE: u8 = 1 << 1;
 const IFLAG_HAS_MTIME: u8 = 1 << 2;
+const IFLAG_HAS_ATTRIBUTES: u8 = 1 << 3;
 
 /// A truncated or malformed binary results page.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -90,6 +99,7 @@ fn push_item(
     is_dir: bool,
     size: Option<u64>,
     mtime: Option<i64>,
+    attributes: Option<Attributes>,
 ) {
     out.extend_from_slice(&(raw_path.len() as u32).to_le_bytes());
     out.extend_from_slice(raw_path);
@@ -103,12 +113,18 @@ fn push_item(
     if mtime.is_some() {
         iflags |= IFLAG_HAS_MTIME;
     }
+    if attributes.is_some() {
+        iflags |= IFLAG_HAS_ATTRIBUTES;
+    }
     out.push(iflags);
     if let Some(s) = size {
         out.extend_from_slice(&s.to_le_bytes());
     }
     if let Some(m) = mtime {
         out.extend_from_slice(&m.to_le_bytes());
+    }
+    if let Some(a) = attributes {
+        out.extend_from_slice(&a.bits().to_le_bytes());
     }
 }
 
@@ -174,12 +190,13 @@ impl ResultsPage {
         is_dir: bool,
         size: Option<u64>,
         mtime: Option<i64>,
+        attributes: Option<Attributes>,
     ) -> bool {
         if self.count == PAGE_ROWS {
             return false;
         }
         let before = self.frame.len();
-        push_item(&mut self.frame, raw_path, is_dir, size, mtime);
+        push_item(&mut self.frame, raw_path, is_dir, size, mtime, attributes);
         if self.count > 0 && self.frame.len() - self.payload_at > MAX_SERVER_FRAME as usize {
             self.frame.truncate(before);
             return false;
@@ -232,7 +249,7 @@ pub fn encode_results_payload(page: &QueryResults, out: &mut Vec<u8>) {
     let mut scratch = Vec::new();
     for it in &page.items {
         let raw = raw_path_bytes(it, &mut scratch);
-        push_item(out, raw, it.is_dir, it.size, it.mtime_ft);
+        push_item(out, raw, it.is_dir, it.size, it.mtime_ft, it.attributes);
     }
 }
 
@@ -291,6 +308,11 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
         let mtime = (iflags & IFLAG_HAS_MTIME != 0)
             .then(|| r.i64())
             .transpose()?;
+        let attributes = (iflags & IFLAG_HAS_ATTRIBUTES != 0)
+            .then(|| {
+                Attributes::try_from(r.u32()?).map_err(|_| BinError("unindexed attribute bits"))
+            })
+            .transpose()?;
         let lossy = core::str::from_utf8(path).is_err();
         items.push(ResultItem {
             path: wtf8::to_string_lossy(path),
@@ -298,6 +320,7 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
             size,
             mtime_ft: mtime,
             is_dir: iflags & IFLAG_IS_DIR != 0,
+            attributes,
         });
     }
     Ok(QueryResults {
@@ -314,6 +337,10 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    fn hidden_archive() -> Attributes {
+        Attributes::from_letters("ha").expect("H and A are attribute letters")
+    }
 
     fn round_trip(page: &QueryResults) {
         let mut payload = Vec::new();
@@ -346,6 +373,7 @@ mod tests {
                     size: Some(1234),
                     mtime_ft: Some(133_500_000_000_000_000),
                     is_dir: false,
+                    attributes: Some(hidden_archive()),
                 },
                 ResultItem {
                     path: r"D:\folder".into(),
@@ -353,6 +381,7 @@ mod tests {
                     size: None,
                     mtime_ft: None,
                     is_dir: true,
+                    attributes: None,
                 },
                 ResultItem {
                     path: "E:\\ünïcode\\文件.txt".into(),
@@ -360,6 +389,7 @@ mod tests {
                     size: Some(0),
                     mtime_ft: Some(-1),
                     is_dir: false,
+                    attributes: None,
                 },
             ],
             more: true,
@@ -383,6 +413,7 @@ mod tests {
             size: Some(7),
             mtime_ft: None,
             is_dir: false,
+            attributes: None,
         };
         let page = QueryResults {
             total: 1,
@@ -407,6 +438,7 @@ mod tests {
                     size: Some(9),
                     mtime_ft: None,
                     is_dir: false,
+                    attributes: None,
                 }],
                 more: false,
                 volumes_incomplete: false,
@@ -433,7 +465,7 @@ mod tests {
             let mut payload = Vec::new();
             push_results_header(&mut payload, 1, 2, true, false, false, paths.len() as u32);
             for path in &paths {
-                push_item(&mut payload, path, false, Some(3), Some(4));
+                push_item(&mut payload, path, false, Some(3), Some(4), Some(hidden_archive()));
             }
             let mut body = payload.split_off(1);
             let len = body.len();
@@ -445,14 +477,44 @@ mod tests {
         }
     }
 
+    /// A client of protocol 5 or older reads an item as its path, flags, size
+    /// and date, and the next item right after them. An item without
+    /// attributes must keep exactly the bytes that client reads, or it
+    /// misreads every item after the first.
+    #[test]
+    fn an_item_without_attributes_keeps_the_protocol_5_layout() {
+        let mut page = ResultsPage::new(1, 0, false, false, 1);
+        assert!(page.push(br"C:\a", false, Some(2), Some(3), None));
+        let frame = page.finish(false);
+        #[rustfmt::skip]
+        let payload: &[u8] = &[
+            RESP_TAG_RESULTS,
+            1, 0, 0, 0, 0, 0, 0, 0, // total
+            0, 0, 0, 0, 0, 0, 0, 0, // generation
+            0, // page flags
+            1, 0, 0, 0, // item count
+            4, 0, 0, 0, b'C', b':', b'\\', b'a', // path
+            0b110, // iflags: has_size, has_mtime
+            2, 0, 0, 0, 0, 0, 0, 0, // size
+            3, 0, 0, 0, 0, 0, 0, 0, // mtime
+        ];
+        assert_eq!(frame[4..], *payload);
+    }
+
     /// [`ResultsPage`] fills in the more flag, the item count and the frame
     /// length after the items; a slip there makes every client misread the
     /// page. It must write exactly the frame the canonical encoder writes.
     #[test]
     fn a_results_page_frame_matches_the_canonical_encoding() {
         let mut built = ResultsPage::new(9, 3, true, true, 2);
-        assert!(built.push(br"C:\Windows\notepad.exe", false, Some(55), Some(7)));
-        assert!(built.push(br"C:\Windows", true, None, None));
+        assert!(built.push(
+            br"C:\Windows\notepad.exe",
+            false,
+            Some(55),
+            Some(7),
+            Some(hidden_archive()),
+        ));
+        assert!(built.push(br"C:\Windows", true, None, None, None));
         let built = built.finish(true);
 
         let mut canonical = Vec::new();
@@ -466,6 +528,7 @@ mod tests {
                         size: Some(55),
                         mtime_ft: Some(7),
                         is_dir: false,
+                        attributes: Some(hidden_archive()),
                     },
                     ResultItem {
                         path: r"C:\Windows".into(),
@@ -473,6 +536,7 @@ mod tests {
                         size: None,
                         mtime_ft: None,
                         is_dir: true,
+                        attributes: None,
                     },
                 ],
                 more: true,

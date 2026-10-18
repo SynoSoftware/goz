@@ -299,6 +299,7 @@ fn text_search(query: QueryRequest) -> Result<SearchRequest, QueryError> {
             limit: query.limit,
             want_size: query.want_size,
             want_mtime: query.want_mtime,
+            want_attributes: false,
         }),
     })
 }
@@ -422,7 +423,8 @@ fn stream_rows(
         while let Some(hit) = hits.peek() {
             let size = rows.want_size.then_some(hit.size).flatten();
             let mtime = rows.want_mtime.then_some(hit.mtime).flatten();
-            if !page.push(&hit.path, hit.is_dir, size, mtime) {
+            let attributes = rows.want_attributes.then_some(hit.attributes);
+            if !page.push(&hit.path, hit.is_dir, size, mtime, attributes) {
                 break;
             }
             hits.next();
@@ -1161,6 +1163,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Results items are positional, so the attributes travel only when the
+    /// search asks for them: a client of protocol 5, whose JSON has no
+    /// `want_attributes`, gets the items it reads, and a client that asks
+    /// gets them. The requests are the exact JSON each client writes.
+    #[test]
+    fn attributes_travel_only_when_the_search_asks_for_them() {
+        let vols = set(&[live_volume(r"C:\")]);
+        let protocol_5 = concat!(
+            r#"{"t":"Search","query":{"clauses":[{"terms":[{"negated":false,"#,
+            r#""test":{"Name":"system32"}}]}],"match_case":false},"scope":null,"#,
+            r#""returns":{"Rows":{"sort":{"key":"Name","dir":"Asc"},"offset":0,"#,
+            r#""limit":20,"want_size":true,"want_mtime":true}}}"#,
+        );
+        let asking = protocol_5.replace(
+            r#""want_mtime":true}"#,
+            r#""want_mtime":true,"want_attributes":true}"#,
+        );
+        let attributes = |request: &str| {
+            let mut replies = Vec::new();
+            serve(&vols, request.as_bytes(), &mut |reply| {
+                replies.extend_from_slice(&reply);
+                true
+            });
+            results(&replies)[0].items[0]
+                .attributes
+                .map(|a| a.letters())
+        };
+        assert_eq!(attributes(protocol_5), None);
+        assert_eq!(attributes(&asking), Some("D".to_string()));
     }
 
     /// A client of protocol 1 sends its text query without a `Hello`, and

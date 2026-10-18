@@ -4,6 +4,7 @@ use super::{EsPlan, ScopeFolder};
 use crate::proto::{Returns, Rows, SearchRequest};
 use crate::query::parse::regex_test;
 use crate::query::{Clause, ParseOptions, QueryError, QueryStart, Test, parse_query_with};
+use crate::types::EsColumn;
 use crate::winpath::{absolute, parent_of};
 
 /// The request for `plan`: its query parsed, its folders made absolute
@@ -34,9 +35,11 @@ pub fn build_search(
             sort: plan.sort,
             offset: 0,
             limit: plan.row_limit(),
-            // Always fetch metadata; output decides what to show.
+            // Always fetch the size and date; output decides what to show.
+            // Attributes travel only for their column.
             want_size: true,
             want_mtime: true,
+            want_attributes: plan.columns.contains(&EsColumn::Attributes),
         }),
     };
     let mut query = parse_query_with(

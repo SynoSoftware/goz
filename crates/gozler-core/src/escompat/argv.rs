@@ -37,8 +37,10 @@
 //! es terms); when several sort switches appear, the last one wins.
 
 use super::ExitCode;
+use crate::attributes::Attributes;
 use crate::output::{Format, TableOptions};
 use crate::types::{EsColumn, SortDir, SortKey, SortSpec};
+use std::borrow::Cow;
 use std::time::Duration;
 
 /// What a command line asks gozler to do.
@@ -331,8 +333,8 @@ pub(super) enum SwitchAction {
     /// `-get-folder-size`: consume the next token as the scope, verbatim,
     /// and print the total size.
     FolderSize,
-    /// `/ad`, `/a-d`: add this text to the query.
-    SearchText(&'static str),
+    /// `/a` and attribute letters: add the query text they stand for.
+    Attributes(AttributeSwitch),
     /// A family's token gozler does not support; the text says why, after
     /// the token.
     Refused(&'static str),
@@ -387,7 +389,7 @@ impl SwitchAction {
             SwitchAction::Column(_)
             | SwitchAction::Format(_)
             | SwitchAction::Count(_)
-            | SwitchAction::SearchText(_)
+            | SwitchAction::Attributes(_)
             | SwitchAction::Refused(_)
             | SwitchAction::SortFixed(_)
             | SwitchAction::Utf8Bom
@@ -493,11 +495,13 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Family {
-            usage: "/ad, /a-d",
+            usage: "/aLETTERS, /a-LETTERS",
             parse: parse_attribute_switch,
         },
-        help: "folders only, or files only; the letter's case does not matter, and \
-               the other attribute letters are refused",
+        help: "only results with every attribute LETTERS lists, as attrib:LETTERS \
+               finds; - before a letter leaves out results with that attribute. \
+               /ad is folders only and /a-d files only, and /ah-s hidden but not \
+               system. ATTRIBUTES lists the letters, in either case",
     },
     Switch {
         spelling: Spelling::Es {
@@ -541,6 +545,14 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::DateModified),
         },
         help: "add a Date Modified column, in local time",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["attributes", "attribs", "attrib"],
+            action: SwitchAction::Column(EsColumn::Attributes),
+        },
+        help: "add an Attributes column: the attribute letters, such as HA, or in CSV \
+               and TSV their FILE_ATTRIBUTE_* number, such as 34",
     },
     Switch {
         spelling: Spelling::Es {
@@ -749,7 +761,7 @@ pub(super) const SORT_KEYS: &[SortKeyName] = &[
 /// ```
 pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
     let mut plan = EsPlan::default();
-    let mut query: Vec<&str> = Vec::new();
+    let mut query: Vec<Cow<str>> = Vec::new();
     let mut rest = args.iter();
 
     while let Some(token) = rest.next() {
@@ -757,7 +769,7 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
 
         // es literal-switch rule: all-dash tokens are search text.
         if !token.is_empty() && token.bytes().all(|b| b == b'-') {
-            query.push(token);
+            query.push(token.into());
             continue;
         }
 
@@ -770,19 +782,19 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
                 Some(action) => action,
                 // es: unknown `/` tokens search for the text verbatim.
                 None => {
-                    query.push(token);
+                    query.push(token.into());
                     continue;
                 }
             }
         } else {
-            query.push(token);
+            query.push(token.into());
             continue;
         };
 
         match action {
             SwitchAction::Help => return Ok(Command::Help),
             SwitchAction::Version => return Ok(Command::Version),
-            SwitchAction::SearchText(text) => query.push(text),
+            SwitchAction::Attributes(switch) => query.push(switch.query_text().into()),
             action => apply_switch(action, token, &mut rest, &mut plan)?,
         }
     }
@@ -853,41 +865,79 @@ fn parse_order_switch(name: &str) -> Option<SwitchAction> {
     Some(SwitchAction::SortFixed(SortSpec { key, dir }))
 }
 
-/// Parses the `/a` family, es's dir-style attributes: `/ad` folders only and
-/// `/a-d` files only, the letters in either case, as es reads them.
+/// Parses the `/a` family, es's dir-style attributes: each letter, in either
+/// case, is an attribute every result has, and with `-` before it one no
+/// result has.
 fn parse_attribute_switch(name: &str) -> Option<SwitchAction> {
-    const NOT_SUPPORTED: SwitchAction = SwitchAction::Refused(
-        "is not a supported attribute switch; use /ad for folders only or /a-d for files only",
+    const NOT_ATTRIBUTES: SwitchAction = SwitchAction::Refused(
+        "is not an attribute switch: write /a and attribute letters, with - before a \
+         letter to leave that attribute out, such as /ah or /a-h; gozler -help lists \
+         the letters",
     );
-    let mut letters = name.strip_prefix('a')?.chars();
-    let mut kind = None;
-    while let Some(next) = letters.next() {
-        let (exclude, letter) = match next {
-            '-' => (true, letters.next()),
-            letter => (false, Some(letter)),
-        };
-        let wanted = match letter {
-            Some('d' | 'D') if exclude => "file:",
-            Some('d' | 'D') => "folder:",
-            Some(letter) if letter.is_ascii_alphabetic() => {
-                return Some(SwitchAction::Refused(
-                    "needs the attribute column, which this release does not have",
-                ));
-            }
-            _ => return Some(NOT_SUPPORTED),
-        };
-        if kind.is_some_and(|kind| kind != wanted) {
-            return Some(NOT_SUPPORTED);
+    let mut chars = name.strip_prefix('a')?.chars();
+    let (mut required, mut excluded) = (String::new(), String::new());
+    while let Some(next) = chars.next() {
+        match next {
+            '-' => excluded.extend(chars.next()),
+            letter => required.push(letter),
         }
-        kind = Some(wanted);
     }
-    Some(kind.map_or(NOT_SUPPORTED, SwitchAction::SearchText))
+    let (Ok(required), Ok(excluded)) = (
+        Attributes::from_letters(&required),
+        Attributes::from_letters(&excluded),
+    ) else {
+        return Some(NOT_ATTRIBUTES);
+    };
+    // Nothing to test, a `-` without its letter, or a letter both wanted
+    // and left out.
+    if (required.is_empty() && excluded.is_empty())
+        || name.ends_with('-')
+        || required.without(excluded) != required
+    {
+        return Some(NOT_ATTRIBUTES);
+    }
+    Some(SwitchAction::Attributes(AttributeSwitch {
+        required,
+        excluded,
+    }))
+}
+
+/// `/a` and its letters: the attributes every result has, and those no
+/// result has.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AttributeSwitch {
+    required: Attributes,
+    excluded: Attributes,
+}
+
+impl AttributeSwitch {
+    /// The query text: D as `folder:` or `file:`, the other letters every
+    /// result has as one `attrib:`, and each letter no result has as its own
+    /// `!attrib:`, so that `/a-h-s`, as in dir, leaves out hidden files and
+    /// system files, not only files that are both.
+    fn query_text(self) -> String {
+        let folder = Attributes::from_letters("d").expect("D is an attribute letter");
+        let mut words = Vec::new();
+        if self.required.contains(folder) {
+            words.push("folder:".to_string());
+        }
+        if self.excluded.contains(folder) {
+            words.push("file:".to_string());
+        }
+        let required = self.required.without(folder);
+        if !required.is_empty() {
+            words.push(format!("attrib:{}", required.letters()));
+        }
+        let excluded = self.excluded.without(folder).letters();
+        words.extend(excluded.chars().map(|letter| format!("!attrib:{letter}")));
+        words.join(" ")
+    }
 }
 
 /// Applies one matched switch, consuming its parameter from `rest` if it
 /// takes one. `token` is the switch as the user typed it (for messages).
 /// [`parse_argv`] handles [`SwitchAction::Help`], [`SwitchAction::Version`]
-/// and [`SwitchAction::SearchText`], which never reach here.
+/// and [`SwitchAction::Attributes`], which never reach here.
 fn apply_switch(
     action: SwitchAction,
     token: &str,
@@ -955,7 +1005,7 @@ fn apply_switch(
         SwitchAction::Json => plan.json = true,
         SwitchAction::Status => plan.status = true,
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
-        SwitchAction::Help | SwitchAction::Version | SwitchAction::SearchText(_) => {
+        SwitchAction::Help | SwitchAction::Version | SwitchAction::Attributes(_) => {
             unreachable!("parse_argv handles -help, -version and search text")
         }
     }
@@ -1184,21 +1234,18 @@ mod tests {
     }
 
     /// Bug 3: `/ad` and `/a-d` become `folder:` and `file:`, the letter in
-    /// either case, and every other `/a` token exits 4 instead of becoming
-    /// search text that matches nothing.
+    /// either case. The other letters become `attrib:`, each excluded letter
+    /// its own `!attrib:`, and an `/a` token that names no attributes exits 4
+    /// instead of becoming search text that matches nothing.
     #[test]
-    fn attribute_switches_become_kind_functions_or_exit_4() {
+    fn attribute_switches_become_attribute_functions_or_exit_4() {
         assert_eq!(plan(&["/a-d", "report"]).query, "file: report");
         assert_eq!(plan(&["report", "/aD"]).query, "report folder:");
         assert_eq!(
-            fatal(&["/aH"]),
-            EsFatal {
-                exit_code: ExitCode::InvalidInput,
-                message: "/aH needs the attribute column, which this release does not have"
-                    .to_string(),
-            }
+            plan(&["/as-r-hd", "x"]).query,
+            "folder: attrib:S !attrib:R !attrib:H x"
         );
-        for refused in ["/a", "/ad-d", "/a1", "/a-"] {
+        for refused in ["/a", "/ad-d", "/a1", "/a-", "/ah-", "/a--h", "/ab"] {
             assert_eq!(
                 fatal(&[refused]).exit_code,
                 ExitCode::InvalidInput,

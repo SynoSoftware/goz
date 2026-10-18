@@ -5,8 +5,8 @@
 use super::*;
 use crate::types::Frn;
 use crate::usn::record::{
-    FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
-    USN_REASON_RENAME_NEW_NAME,
+    FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_BASIC_INFO_CHANGE,
+    USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -547,6 +547,62 @@ fn a_reconciled_link_gets_the_size_and_date_of_its_file() {
             ("link.txt".to_string(), Some(17), Some(1234)),
             ("renamed.txt".to_string(), Some(17), Some(1234)),
         ]
+    );
+}
+
+/// A journal record names one link, but the attributes belong to the file, so
+/// an attribute change must reach every link, and a link that reconciliation
+/// adds later must start with them; otherwise `/ah` finds a hidden file under
+/// some of its names only.
+#[test]
+fn attributes_reach_every_link_of_a_file() {
+    let mut idx = index_from_enum(&[
+        create(frn(10), root_frn(), "dirA", true),
+        create(frn(11), root_frn(), "dirB", true),
+        create(frn(100), frn(10), "orig.txt", false),
+    ]);
+    let a = idx.head_of(frn(10)).unwrap();
+    let b = idx.head_of(frn(11)).unwrap();
+    let link = |parent, name: &str| LinkTarget {
+        parent,
+        name: WtfName::new(name.as_bytes().to_vec(), false),
+    };
+    idx.reconcile_links(frn(100), &[link(a, "orig.txt"), link(b, "link.txt")]);
+
+    // `attrib +h dirA\orig.txt` writes one record, which names that link.
+    let mut hide = record(
+        frn(100),
+        frn(10),
+        "orig.txt",
+        false,
+        USN_REASON_BASIC_INFO_CHANGE,
+    );
+    hide.attributes = 0x2 | 0x20;
+    idx.apply_batch(&[hide]);
+    idx.reconcile_links(
+        frn(100),
+        &[
+            link(a, "orig.txt"),
+            link(b, "link.txt"),
+            link(b, "third.txt"),
+        ],
+    );
+
+    let mut letters = Vec::new();
+    let mut cur = idx.head_of(frn(100)).unwrap();
+    while cur != crate::types::NIL {
+        let e = idx.entry(cur);
+        letters.push((
+            String::from_utf8_lossy(e.name()).into_owned(),
+            e.attributes().letters(),
+        ));
+        cur = e.next_link();
+    }
+    letters.sort();
+    let hidden = |name: &str| (name.to_string(), "HA".to_string());
+    assert_eq!(
+        letters,
+        [hidden("link.txt"), hidden("orig.txt"), hidden("third.txt")]
     );
 }
 

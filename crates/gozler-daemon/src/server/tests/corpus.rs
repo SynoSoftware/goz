@@ -27,12 +27,14 @@ enum Entry {
     Folder(&'static str),
     /// A file with its size in bytes and the day it was modified.
     File(&'static str, u64, i64),
+    /// A hidden file with its size in bytes and the day it was modified.
+    Hidden(&'static str, u64, i64),
     /// A file with an unknown size and date.
     Unread(&'static str),
     /// One file with several hard links, its size and the day it was modified.
     HardLinks(&'static [&'static str], u64, i64),
 }
-use Entry::{File, Folder, HardLinks, Unread};
+use Entry::{File, Folder, HardLinks, Hidden, Unread};
 
 const C_DRIVE: &[Entry] = &[
     Folder(r"C:\docs"),
@@ -46,7 +48,7 @@ const C_DRIVE: &[Entry] = &[
     File(r"C:\repo\DESIGN.md", 30_000, 5),
     File(r"C:\repo\report.txt", 4096, 4),
     File(r"C:\repo\Report 2026.txt", 4096, 6),
-    File(r"C:\repo\notes.md.bak", 10, 1),
+    Hidden(r"C:\repo\notes.md.bak", 10, 1),
     Folder(r"C:\repo\docs"),
     File(r"C:\repo\docs\testing.md", 2048, 3),
     Folder(r"C:\repo\docs\agents"),
@@ -402,11 +404,38 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             ]),
         ),
         (&["/ad", "b"], prints(&[r"D:\backup"])),
+        // Stage 9 adds the other attribute letters, which exited 4 before.
+        (&["/aH"], prints(&[r"C:\repo\notes.md.bak"])),
         (
-            &["/aH", "report"],
+            &["/a-h", "b"],
+            prints(&[
+                r"D:\backup",
+                r"C:\repo\node_modules\lib.cs",
+                r"C:\tmp\unread.bin",
+            ]),
+        ),
+        // Each excluded letter leaves out what has it, as in dir.
+        (&["/ah-s"], prints(&[r"C:\repo\notes.md.bak"])),
+        (&["/ah-a"], prints(&[])),
+        (&["attrib:ha"], prints(&[r"C:\repo\notes.md.bak"])),
+        (
+            &["!attrib:a", "-path", r"C:\repo\docs"],
+            prints(&[r"C:\repo\docs\agents"]),
+        ),
+        (
+            &["/ab", "report"],
             argv_error(
                 4,
-                "/aH needs the attribute column, which this release does not have",
+                "/ab is not an attribute switch: write /a and attribute letters, with - \
+                 before a letter to leave that attribute out, such as /ah or /a-h; gozler \
+                 -help lists the letters",
+            ),
+        ),
+        (
+            &["attrib:0x2"],
+            query_error(
+                "malformed attrib:: 0 is not an attribute letter; the letters are \
+                 RHSDAVXNTLCOIEUPM",
             ),
         ),
         // Operators. `!` and `|` were refused before stage 5.
@@ -729,6 +758,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
 /// Ticks of a Windows FILETIME in one day.
 const TICKS_PER_DAY: i64 = 864_000_000_000;
 const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 
 /// The index of the volume mounted at `mount`, built from `entries` in order,
 /// so a folder comes before what it holds.
@@ -736,16 +766,34 @@ fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
     let mut index = VolumeIndex::new();
     let mut folders: HashMap<&str, Frn> = HashMap::new();
     for (frn, entry) in (100..).map(Frn).zip(entries) {
-        let (links, size, day) = match entry {
+        let (links, size, day, attributes) = match entry {
             Folder(path) => {
                 let (parent, name) = place(mount, &folders, path);
                 index.insert_enum(&dir_record(frn.0, parent.0, name));
                 folders.insert(&path[mount.len()..], frn);
                 continue;
             }
-            File(path, size, day) => (std::slice::from_ref(path), Some(*size), Some(*day)),
-            Unread(path) => (std::slice::from_ref(path), None, None),
-            HardLinks(paths, size, day) => (*paths, Some(*size), Some(*day)),
+            File(path, size, day) => (
+                std::slice::from_ref(path),
+                Some(*size),
+                Some(*day),
+                FILE_ATTRIBUTE_ARCHIVE,
+            ),
+            Hidden(path, size, day) => (
+                std::slice::from_ref(path),
+                Some(*size),
+                Some(*day),
+                FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE,
+            ),
+            Unread(path) => (
+                std::slice::from_ref(path),
+                None,
+                None,
+                FILE_ATTRIBUTE_ARCHIVE,
+            ),
+            HardLinks(paths, size, day) => {
+                (*paths, Some(*size), Some(*day), FILE_ATTRIBUTE_ARCHIVE)
+            }
         };
         let names = links
             .iter()
@@ -761,7 +809,7 @@ fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
             .collect();
         index.enrich(&LayoutFile {
             frn,
-            attributes: FILE_ATTRIBUTE_ARCHIVE,
+            attributes,
             size,
             mtime_ft: day.map(|d| d * TICKS_PER_DAY),
             names,

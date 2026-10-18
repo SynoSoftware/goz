@@ -13,6 +13,7 @@
 //! lazily repaired: a stale singly-linked chain can cycle through reused slots,
 //! and an exact chain needs no per-candidate staleness guard at query time.
 
+use crate::attributes::PackedAttributes;
 use crate::types::{EntryIdx, Frn, NIL};
 use rustc_hash::FxHashMap;
 
@@ -54,6 +55,7 @@ pub(crate) struct NamePair {
 const _: () = assert!(size_of::<NameRef>() == 8);
 const _: () = assert!(size_of::<NamePair>() == 16);
 const _: () = assert!(size_of::<EntryFlags>() == 1);
+const _: () = assert!(size_of::<PackedAttributes>() == 2);
 const _: () = assert!(size_of::<Frn>() == 8);
 const _: () = assert!(size_of::<EntryIdx>() == 4);
 const _: () = assert!(size_of::<NameId>() == 4);
@@ -492,6 +494,7 @@ pub(crate) struct EntryTable {
     flags: Vec<EntryFlags>,
     size: Vec<u64>,
     mtime: Vec<i64>,
+    attributes: Vec<PackedAttributes>,
     next_link: Vec<EntryIdx>,
     next_same: Vec<EntryIdx>,
     prev_same: Vec<EntryIdx>,
@@ -525,6 +528,7 @@ impl EntryTable {
         flags: EntryFlags,
         size: u64,
         mtime: i64,
+        attributes: PackedAttributes,
         next_link: EntryIdx,
     ) -> EntryIdx {
         self.live += 1;
@@ -536,6 +540,7 @@ impl EntryTable {
             self.flags[i] = flags;
             self.size[i] = size;
             self.mtime[i] = mtime;
+            self.attributes[i] = attributes;
             self.next_link[i] = next_link;
             self.next_same[i] = NIL;
             self.prev_same[i] = NIL;
@@ -551,6 +556,7 @@ impl EntryTable {
             self.flags.push(flags);
             self.size.push(size);
             self.mtime.push(mtime);
+            self.attributes.push(attributes);
             self.next_link.push(next_link);
             self.next_same.push(NIL);
             self.prev_same.push(NIL);
@@ -627,6 +633,10 @@ impl EntryTable {
         self.mtime[idx as usize]
     }
     #[inline]
+    pub(crate) fn attributes(&self, idx: EntryIdx) -> PackedAttributes {
+        self.attributes[idx as usize]
+    }
+    #[inline]
     pub(crate) fn next_link(&self, idx: EntryIdx) -> EntryIdx {
         self.next_link[idx as usize]
     }
@@ -672,6 +682,10 @@ impl EntryTable {
         self.mtime[idx as usize] = mtime;
     }
     #[inline]
+    pub(crate) fn set_attributes(&mut self, idx: EntryIdx, attributes: PackedAttributes) {
+        self.attributes[idx as usize] = attributes;
+    }
+    #[inline]
     pub(crate) fn set_next_link(&mut self, idx: EntryIdx, next: EntryIdx) {
         self.next_link[idx as usize] = next;
     }
@@ -707,6 +721,7 @@ impl EntryTable {
             + ComponentBytes::of_vec(&self.flags)
             + ComponentBytes::of_vec(&self.size)
             + ComponentBytes::of_vec(&self.mtime)
+            + ComponentBytes::of_vec(&self.attributes)
             + ComponentBytes::of_vec(&self.next_link)
             + ComponentBytes::of_vec(&self.next_same)
             + ComponentBytes::of_vec(&self.prev_same)
@@ -726,6 +741,7 @@ impl EntryTable {
         shrink_vec(&mut self.flags);
         shrink_vec(&mut self.size);
         shrink_vec(&mut self.mtime);
+        shrink_vec(&mut self.attributes);
         shrink_vec(&mut self.next_link);
         shrink_vec(&mut self.next_same);
         shrink_vec(&mut self.prev_same);

@@ -1,9 +1,11 @@
 //! The help screen, generated from the vocabulary tables: [`SWITCHES`],
-//! [`SORT_KEYS`], [`SEARCH_FUNCTIONS`], [`ExitCode::ALL`] and [`DIFFERENCES`].
+//! [`SORT_KEYS`], [`SEARCH_FUNCTIONS`], the attribute [`LETTERS`],
+//! [`ExitCode::ALL`] and [`DIFFERENCES`].
 //! A row added to a table is a line of the help.
 
 use super::ExitCode;
 use super::argv::{SORT_KEYS, SWITCHES, Spelling};
+use crate::attributes::LETTERS;
 use crate::query::parse::SEARCH_FUNCTIONS;
 
 /// gozler's version, as `-version` prints it.
@@ -47,10 +49,10 @@ pub fn help() -> String {
     out
 }
 
-const INTRO: &str = "Finds files and folders by name, path, size and date. Terms combine \
-     with AND. Paths accept \\ or /. Shows 20 results unless -n says otherwise. Results: \
-     one full path per line on stdout; diagnostics on stderr. A switch starts with \
-     - or /, and each dash inside its name is optional.";
+const INTRO: &str = "Finds files and folders by name, path, size, date and attributes. \
+     Terms combine with AND. Paths accept \\ or /. Shows 20 results unless -n says \
+     otherwise. Results: one full path per line on stdout; diagnostics on stderr. A \
+     switch starts with - or /, and each dash inside its name is optional.";
 
 /// Search terms that use no function, with what each finds.
 const SEARCH_TERMS: &[(&str, &str)] = &[
@@ -97,6 +99,7 @@ const EXAMPLES: &[&str] = &[
     "gozler -timeout 5000 -no-result-error report",
     "gozler -export-csv files.csv -size -dm ext:cs",
     "gozler /a-d report -size -dm",
+    r"gozler /ah -attributes -path C:\repo",
     "gozler -get-result-count ext:cs",
     r"gozler -get-folder-size C:\repo",
     "gozler --json report",
@@ -139,7 +142,7 @@ const DIFFERENCES: &[Difference] = &[
         why: "scripts parse ISO dates without knowing the locale",
     },
     Difference {
-        gozler: "Plain output pads only the Size and Date Modified columns",
+        gozler: "Plain output pads only the Size, Date Modified and Attributes columns",
         es: "every column is padded to a fixed width",
         why: "a name or folder has no fixed width",
     },
@@ -149,9 +152,14 @@ const DIFFERENCES: &[Difference] = &[
         why: "v0.2.0's default",
     },
     Difference {
-        gozler: "/a letters other than d are refused with exit 4",
-        es: "every attribute letter works",
-        why: "the index holds no attributes",
+        gozler: "/a-h-s leaves out hidden files and system files",
+        es: "/a-h-s becomes !attrib:hs, which leaves out only files that are both",
+        why: "dir's /a-h-s leaves out each, and a script that writes it means that",
+    },
+    Difference {
+        gozler: "attrib: takes attribute letters only",
+        es: "attrib: also takes a FILE_ATTRIBUTE_* number, such as 0x200 for sparse files",
+        why: "the index holds only the attributes that have a letter",
     },
     Difference {
         gozler: "dm: takes today, yesterday, Ndays and YYYY-MM-DD, alone, compared \
@@ -260,6 +268,13 @@ fn sections() -> Vec<Section> {
                         .collect();
                     entry(forms.join(", "), function.help)
                 })
+                .collect(),
+        },
+        Section {
+            title: "ATTRIBUTES (for attrib: and /a)",
+            entries: LETTERS
+                .iter()
+                .map(|row| entry(row.letter.to_string(), row.meaning))
                 .collect(),
         },
         Section {
@@ -436,12 +451,19 @@ mod tests {
             .iter()
             .flat_map(|usage| usage.split(", ").map(str::to_string).collect::<Vec<_>>())
             .collect();
+        let letters = entries("ATTRIBUTES");
         for form in &switch_forms {
             let mut tokens: Vec<&str> = form.split(' ').collect();
             match tokens.get(1).copied() {
                 None if form.contains("KEY") => {
                     for key in &sort_keys {
                         assert_switch_parses(&[&form.replace("KEY", key)]);
+                    }
+                    continue;
+                }
+                None if form.contains("LETTERS") => {
+                    for letter in &letters {
+                        assert_switch_parses(&[&form.replace("LETTERS", letter)]);
                     }
                     continue;
                 }

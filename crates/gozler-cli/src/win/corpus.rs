@@ -9,31 +9,35 @@
 //! are in the daemon's corpus, in `gozler-daemon`'s `server` tests.
 
 use super::ResultWriter;
+use gozler_core::attributes::Attributes;
 use gozler_core::escompat::{Command, parse_argv};
 use gozler_core::output::unix_ms_to_filetime;
 use gozler_core::proto::{QueryResults, ResultItem};
+use gozler_core::types::EsColumn;
 
 /// 2026-10-17T12:34:56 UTC.
 const MODIFIED_UNIX_MS: i64 = 1_792_240_496_000;
 
 /// The result set every row prints: a file, a folder, a file with an unknown
-/// size and date, and a file whose name needs CSV quoting.
+/// size and date, and a file whose name needs CSV quoting. [`print`] drops
+/// the attributes unless the row asks for their column, as the daemon does.
 fn results() -> QueryResults {
     let modified = Some(unix_ms_to_filetime(MODIFIED_UNIX_MS));
-    let item = |path: &str, size, mtime_ft, is_dir| ResultItem {
+    let item = |path: &str, size, mtime_ft, is_dir, letters| ResultItem {
         path: path.to_string(),
         path_u16: None,
         size,
         mtime_ft,
         is_dir,
+        attributes: Some(Attributes::from_letters(letters).expect("attribute letters")),
     };
     QueryResults {
         total: 4,
         items: vec![
-            item(r"C:\repo\report.txt", Some(4096), modified, false),
-            item(r"C:\repo\docs", None, modified, true),
-            item(r"C:\tmp\unread.bin", None, None, false),
-            item(r#"C:\repo\a, "b".txt"#, Some(7), modified, false),
+            item(r"C:\repo\report.txt", Some(4096), modified, false, "a"),
+            item(r"C:\repo\docs", None, modified, true, "d"),
+            item(r"C:\tmp\unread.bin", None, None, false, "n"),
+            item(r#"C:\repo\a, "b".txt"#, Some(7), modified, false, "rhsa"),
         ],
         more: false,
         volumes_incomplete: false,
@@ -247,6 +251,35 @@ const ROWS: &[Row] = &[
             "\"C:\\repo\\a, \"\"b\"\".txt\"\r\n",
         ),
     },
+    // Stage 9: plain output prints the attribute letters, padded to es's
+    // width of 4, and CSV their FILE_ATTRIBUTE_* number, as es does.
+    Row {
+        args: &["report", "-attributes"],
+        prints: concat!(
+            r"A    C:\repo\report.txt",
+            "\n",
+            r"D    C:\repo\docs",
+            "\n",
+            r"N    C:\tmp\unread.bin",
+            "\n",
+            r#"RHSA C:\repo\a, "b".txt"#,
+            "\n",
+        ),
+    },
+    Row {
+        args: &["-csv", "-attrib", "report"],
+        prints: concat!(
+            "Attributes,Filename\r\n",
+            r#"32,"C:\repo\report.txt""#,
+            "\r\n",
+            r#"16,"C:\repo\docs""#,
+            "\r\n",
+            r#"128,"C:\tmp\unread.bin""#,
+            "\r\n",
+            r#"39,"C:\repo\a, ""b"".txt""#,
+            "\r\n",
+        ),
+    },
     // TXT prints only the full paths, whatever the column switches ask for.
     Row {
         args: &["-txt", "-size", "report"],
@@ -285,7 +318,12 @@ fn print(args: &[&str], pages: Vec<QueryResults>) -> String {
     };
     let mut out = Vec::new();
     let mut writer = ResultWriter::new(&plan, jiff::tz::TimeZone::UTC, &mut out);
-    for page in pages {
+    for mut page in pages {
+        if !plan.columns.contains(&EsColumn::Attributes) {
+            page.items
+                .iter_mut()
+                .for_each(|item| item.attributes = None);
+        }
         assert!(writer.page(page).is_ok(), "writing to memory cannot fail");
     }
     assert!(writer.finish().is_ok(), "writing to memory cannot fail");

@@ -3,17 +3,18 @@
 //! totals of every match.
 //!
 //! The scan matches each candidate against the index's precomputed folded name
-//! (case-insensitive queries) and tests the cheapest clauses first: kind,
-//! size and date, then name substrings and wildcards, then ext, then regular
-//! expressions of the name, then (only for survivors) scope ancestry and the
-//! clauses that test the full path. Full paths come from the `paths` module,
-//! which builds each folder's path once per query, so a path term costs one
-//! copy per candidate instead of a walk to the root.
+//! (case-insensitive queries) and tests the cheapest clauses first: kind and
+//! attributes, size and date, then name substrings and wildcards, then ext,
+//! then regular expressions of the name, then (only for survivors) scope
+//! ancestry and the clauses that test the full path. Full paths come from the
+//! `paths` module, which builds each folder's path once per query, so a path
+//! term costs one copy per candidate instead of a walk to the root.
 
 use super::dates::DateRange;
 use super::order::{OrderFields, compare};
 use super::parse::{CodePointBuf, Kind, ParsedQuery, QueryError, SizeRange, Test, Wildcard};
 use super::paths::{DirPaths, NameForm};
+use crate::attributes::{Attributes, PackedAttributes};
 use crate::fold::fold;
 use crate::index::{EntryView, VolumeIndex};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
@@ -36,6 +37,7 @@ pub struct QueryHit {
     pub is_dir: bool,
     pub size: Option<u64>,
     pub mtime: Option<i64>,
+    pub attributes: Attributes,
 }
 
 /// Result of a query: the requested page plus the full match count.
@@ -146,6 +148,12 @@ struct CompiledTerm {
 /// wildcards compiled and its substrings built into finders.
 enum Check {
     Kind(Kind),
+    /// The entry has every packed attribute, and is a folder when `folder`
+    /// is set: the test of D, which the folder flag answers.
+    Attributes {
+        packed: PackedAttributes,
+        folder: bool,
+    },
     Size(SizeRange),
     DateModified(DateRange),
     Name(memmem::Finder<'static>),
@@ -245,6 +253,10 @@ impl CompiledQuery {
                             Test::Size(range) => Check::Size(*range),
                             Test::DateModified(range) => Check::DateModified(*range),
                             Test::Kind(kind) => Check::Kind(*kind),
+                            Test::Attributes(attributes) => {
+                                let (packed, folder) = attributes.pack();
+                                Check::Attributes { packed, folder }
+                            }
                         };
                         Ok(CompiledTerm {
                             negated: term.negated,
@@ -354,7 +366,7 @@ impl Check {
     /// checks reject most entries before the extension check folds anything.
     fn cost(&self) -> u8 {
         match self {
-            Check::Kind(_) => 0,
+            Check::Kind(_) | Check::Attributes { .. } => 0,
             Check::Size(_) | Check::DateModified(_) => 1,
             Check::Name(_) | Check::Path(_) | Check::Parent(_) => 2,
             Check::NameWholeWord(_) | Check::PathWholeWord(_) => 2,
@@ -375,6 +387,9 @@ impl Check {
         Some(match self {
             Check::Kind(Kind::File) => !subject.is_dir,
             Check::Kind(Kind::Folder) => subject.is_dir,
+            Check::Attributes { packed, folder } => {
+                subject.entry.packed_attributes().contains(*packed) && (subject.is_dir || !*folder)
+            }
             // A folder's size is always unknown, so a size test skips folders.
             Check::Size(range) => range.contains(subject.size?),
             Check::DateModified(range) => range.contains(subject.entry.mtime()?),
@@ -724,6 +739,7 @@ fn run_query_impl(
             is_dir: c.is_dir,
             size: c.size,
             mtime: c.mtime,
+            attributes: entry.attributes(),
         });
     }
 
@@ -1776,6 +1792,9 @@ mod tests {
                 prop_oneof![Just(Kind::File), Just(Kind::Folder)].prop_map(Test::Kind),
                 (any::<i64>(), any::<i64>())
                     .prop_map(|(min, max)| Test::DateModified(DateRange { min, max })),
+                "[rhsdavxntlcoieupm]{0,3}".prop_map(|letters| Test::Attributes(
+                    Attributes::from_letters(&letters).expect("every letter is an attribute")
+                )),
             ]
         }
 

@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::attributes::Attributes;
 use crate::query::ParsedQuery;
 use crate::scope::VolumeMounts;
 use crate::types::{SortSpec, VolumePhase};
@@ -20,7 +21,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// meet, rather than agreeing on a version one side cannot actually speak.
 /// The client asks for this version alone, so a daemon older than the client
 /// refuses it.
-pub const PROTO_VERSION: u16 = 5;
+pub const PROTO_VERSION: u16 = 6;
 
 /// The oldest protocol version a daemon of this build serves: protocol 1's
 /// clients send [`Request::Query`] without a `Hello`.
@@ -118,6 +119,10 @@ pub struct Rows {
     pub want_size: bool,
     /// Populate [`ResultItem::mtime_ft`] (skip the lookup otherwise).
     pub want_mtime: bool,
+    /// Populate [`ResultItem::attributes`]. From protocol 6; without it,
+    /// each item is laid out as an older client reads it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_attributes: bool,
 }
 
 /// A server→client message.
@@ -199,6 +204,10 @@ pub struct ResultItem {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mtime_ft: Option<i64>,
     pub is_dir: bool,
+    /// The attributes, as `FILE_ATTRIBUTE_*` bits; `None` = not requested.
+    /// From protocol 6.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub attributes: Option<Attributes>,
 }
 
 /// Daemon-wide index status.
@@ -365,6 +374,7 @@ mod tests {
                 size: Some(1234),
                 mtime_ft: Some(133_500_000_000_000_000),
                 is_dir: false,
+                attributes: None,
             },
             ResultItem {
                 path: r"C:\src".into(),
@@ -372,6 +382,7 @@ mod tests {
                 size: None,
                 mtime_ft: None,
                 is_dir: true,
+                attributes: None,
             },
         ]
     }
@@ -441,6 +452,7 @@ mod tests {
                 limit: Some(20),
                 want_size: true,
                 want_mtime: false,
+                want_attributes: false,
             }),
         });
         let search_json = concat!(
@@ -584,6 +596,7 @@ mod tests {
                 limit: None,
                 want_size: false,
                 want_mtime: true,
+                want_attributes: false,
             }),
         });
         let json = concat!(
@@ -598,6 +611,43 @@ mod tests {
             serde_json::from_str::<Request>(json).expect("deserialize"),
             search
         );
+    }
+
+    /// Protocol 6 adds the attribute test, whose value is `FILE_ATTRIBUTE_*`
+    /// bits, and the request for attributes; a later daemon must still read
+    /// them as this client writes them, and refuses bits it does not index.
+    #[test]
+    fn protocol_6_attribute_test_and_request_keep_their_json() {
+        use crate::query::{Clause, Test};
+        let hidden_system = Attributes::from_letters("hs").expect("attribute letters");
+        let search = Request::Search(SearchRequest {
+            query: ParsedQuery {
+                clauses: vec![Clause::single(Test::Attributes(hidden_system))],
+                match_case: false,
+            },
+            scope: None,
+            returns: Returns::Rows(Rows {
+                sort: SortSpec::default(),
+                offset: 0,
+                limit: None,
+                want_size: false,
+                want_mtime: false,
+                want_attributes: true,
+            }),
+        });
+        let json = concat!(
+            r#"{"t":"Search","query":{"clauses":[{"terms":[{"negated":false,"#,
+            r#""test":{"Attributes":6}}]}],"match_case":false},"scope":null,"#,
+            r#""returns":{"Rows":{"sort":{"key":"Name","dir":"Asc"},"offset":0,"#,
+            r#""limit":null,"want_size":false,"want_mtime":false,"want_attributes":true}}}"#,
+        );
+        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<Request>(json).expect("deserialize"),
+            search
+        );
+        let sparse = json.replace(r#"{"Attributes":6}"#, r#"{"Attributes":512}"#);
+        assert!(serde_json::from_str::<Request>(&sparse).is_err());
     }
 
     #[test]
@@ -696,6 +746,7 @@ mod tests {
             size: None,
             mtime_ft: None,
             is_dir: false,
+            attributes: None,
         };
         let json = serde_json::to_string(&item).expect("serialize");
         assert!(!json.contains("path_u16"), "json: {json}");
@@ -726,6 +777,7 @@ mod tests {
             size: Some(7),
             mtime_ft: Some(-1),
             is_dir: false,
+            attributes: None,
         };
         assert!(item.path.contains('\u{FFFD}'));
         let json = serde_json::to_string(&item).expect("serialize");

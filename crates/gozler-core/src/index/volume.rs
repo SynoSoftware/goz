@@ -19,6 +19,7 @@ use super::store::{
     ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId, NamePair, NameStore,
     SIZE_UNKNOWN,
 };
+use crate::attributes::{Attributes, PackedAttributes};
 use crate::layout::LayoutFile;
 use crate::types::{EntryIdx, Frn, NIL};
 use crate::usn::record::FILE_ATTRIBUTE_DIRECTORY;
@@ -134,7 +135,8 @@ pub struct IndexStats {
 /// guesswork against a single opaque process number.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IndexMemory {
-    /// Struct-of-arrays entry columns (frn/parent/name/flags/size/mtime/links).
+    /// Struct-of-arrays entry columns (frn/parent/name/flags/size/mtime/
+    /// attributes/links).
     pub entries: ComponentBytes,
     /// Original-case name bytes.
     pub arena_raw: ComponentBytes,
@@ -241,6 +243,7 @@ impl VolumeIndex {
             EntryFlags::DIR,
             SIZE_UNKNOWN,
             MTIME_UNKNOWN,
+            PackedAttributes::default(),
             NIL,
         );
         by_frn.set(NTFS_ROOT_FRN.record_number(), root);
@@ -254,6 +257,7 @@ impl VolumeIndex {
             EntryFlags::DIR.with(EntryFlags::LOST_FOUND, true),
             SIZE_UNKNOWN,
             MTIME_UNKNOWN,
+            PackedAttributes::default(),
             NIL,
         );
 
@@ -312,7 +316,7 @@ impl VolumeIndex {
     // -- bootstrap ingestion ---------------------------------------------
 
     /// Ingests one `FSCTL_ENUM_USN_DATA` record (bootstrap): the file exists
-    /// with this name/parent. Idempotent.
+    /// with this name/parent and these attributes. Idempotent.
     pub fn insert_enum(&mut self, rec: &ParsedUsnRecord) {
         self.upsert_link(
             rec.frn,
@@ -321,10 +325,11 @@ impl VolumeIndex {
             rec.name_lossy,
             rec.is_dir(),
         );
+        self.set_attributes(rec.frn, rec.attributes);
     }
 
-    /// Applies FILE_LAYOUT enrichment: sets size/mtime and reconciles the
-    /// file's hard-link names (dropping 8.3 DOS-only aliases).
+    /// Applies FILE_LAYOUT enrichment: sets size/mtime and attributes and
+    /// reconciles the file's hard-link names (dropping 8.3 DOS-only aliases).
     pub fn enrich(&mut self, file: &LayoutFile) {
         let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
 
@@ -367,6 +372,7 @@ impl VolumeIndex {
         if let Some(head) = self.head_of(file.frn) {
             self.set_chain_stat(head, is_dir, file.size, file.mtime_ft);
         }
+        self.set_attributes(file.frn, file.attributes);
     }
 
     // -- live apply -------------------------------------------------------
@@ -403,6 +409,11 @@ impl VolumeIndex {
                     UsnOp::StatDirty { frn } => outcome.needs_stat.push(frn),
                 }
             }
+            // Every record carries the file's attributes as of the record, so
+            // the last record of a batch leaves the current ones, whatever its
+            // reason bits: an attribute change, a compression or encryption
+            // change and a reparse point change each write one.
+            self.set_attributes(rec.frn, rec.attributes);
         }
         self.generation += 1;
         // Compaction is NOT performed here: it is reported so the caller can do
@@ -444,6 +455,17 @@ impl VolumeIndex {
         };
         let is_dir = self.entries.flags(head).contains(EntryFlags::DIR);
         self.set_chain_stat(head, is_dir, Some(size), Some(mtime));
+    }
+
+    /// Sets the attributes of a record's `FILE_ATTRIBUTE_*` bits on every link
+    /// of `frn`, which all name one file. A no-op if the FRN is unknown.
+    fn set_attributes(&mut self, frn: Frn, bits: u32) {
+        let attributes = PackedAttributes::from_record(bits);
+        let mut cur = self.head_of(frn).unwrap_or(NIL);
+        while cur != NIL {
+            self.entries.set_attributes(cur, attributes);
+            cur = self.entries.next_link(cur);
+        }
     }
 
     /// Sets `size` and `mtime` on EVERY link of the file whose chain starts at
@@ -698,6 +720,7 @@ impl VolumeIndex {
     /// Adds one entry: interns its name and links it into its same-name chain,
     /// its parent's child chain and the scope index. The caller links it into
     /// its file's hard-link chain and the FRN map.
+    #[allow(clippy::too_many_arguments)]
     fn alloc_entry(
         &mut self,
         frn: Frn,
@@ -706,9 +729,12 @@ impl VolumeIndex {
         flags: EntryFlags,
         size: u64,
         mtime: i64,
+        attributes: PackedAttributes,
     ) -> EntryIdx {
         let id = self.names.intern(name);
-        let idx = self.entries.alloc(frn, parent, id, flags, size, mtime, NIL);
+        let idx = self
+            .entries
+            .alloc(frn, parent, id, flags, size, mtime, attributes, NIL);
         self.link_same_name(idx, id);
         self.link_child(idx);
         self.dir_index_insert(idx);
@@ -822,7 +848,15 @@ impl VolumeIndex {
         let flags = EntryFlags::EMPTY
             .with(EntryFlags::DIR, is_dir)
             .with(EntryFlags::NON_UNICODE_NAME, name_lossy);
-        let idx = self.alloc_entry(frn, parent_idx, name, flags, SIZE_UNKNOWN, MTIME_UNKNOWN);
+        let idx = self.alloc_entry(
+            frn,
+            parent_idx,
+            name,
+            flags,
+            SIZE_UNKNOWN,
+            MTIME_UNKNOWN,
+            PackedAttributes::default(),
+        );
         self.by_frn.set(record, idx);
         UpsertResult::Ok
     }
@@ -903,6 +937,7 @@ impl VolumeIndex {
             EntryFlags::DIR.with(EntryFlags::PLACEHOLDER, true),
             SIZE_UNKNOWN,
             MTIME_UNKNOWN,
+            PackedAttributes::default(),
         );
         self.by_frn.set(record, idx);
         self.stats.placeholders_created += 1;
@@ -952,7 +987,15 @@ impl VolumeIndex {
     /// `frn`'s chain, leaving the existing head, and its identity, untouched.
     fn add_link(&mut self, frn: Frn, parent_idx: EntryIdx, name: &[u8], name_lossy: bool) {
         let flags = EntryFlags::EMPTY.with(EntryFlags::NON_UNICODE_NAME, name_lossy);
-        let idx = self.alloc_entry(frn, parent_idx, name, flags, SIZE_UNKNOWN, MTIME_UNKNOWN);
+        let idx = self.alloc_entry(
+            frn,
+            parent_idx,
+            name,
+            flags,
+            SIZE_UNKNOWN,
+            MTIME_UNKNOWN,
+            PackedAttributes::default(),
+        );
         let record = frn.record_number();
         if let Some(head) = self.by_frn.get(record) {
             let mut tail = head;
@@ -986,12 +1029,19 @@ impl VolumeIndex {
         }
 
         // Every link names the same file record, so a new link starts with the
-        // size and date the chain already knows. Nothing stats a link that
-        // reconciliation adds, so without this a new hard link, or the new
-        // name of a renamed link, has no size or date.
-        let (size, mtime) = current.first().map_or((SIZE_UNKNOWN, MTIME_UNKNOWN), |&e| {
-            (self.entries.size(e), self.entries.mtime(e))
-        });
+        // size, date and attributes the chain already knows. Nothing stats a
+        // link that reconciliation adds, so without this a new hard link, or
+        // the new name of a renamed link, has no size, date or attributes.
+        let (size, mtime, attributes) = current.first().map_or(
+            (SIZE_UNKNOWN, MTIME_UNKNOWN, PackedAttributes::default()),
+            |&e| {
+                (
+                    self.entries.size(e),
+                    self.entries.mtime(e),
+                    self.entries.attributes(e),
+                )
+            },
+        );
 
         // Match each desired link to an existing entry, else allocate.
         let mut kept: SmallVec<[EntryIdx; 4]> = SmallVec::new();
@@ -1009,8 +1059,15 @@ impl VolumeIndex {
                 let flags = EntryFlags::EMPTY
                     .with(EntryFlags::DIR, is_dir)
                     .with(EntryFlags::NON_UNICODE_NAME, target.name.lossy);
-                let idx =
-                    self.alloc_entry(frn, target.parent, &target.name.bytes, flags, size, mtime);
+                let idx = self.alloc_entry(
+                    frn,
+                    target.parent,
+                    &target.name.bytes,
+                    flags,
+                    size,
+                    mtime,
+                    attributes,
+                );
                 kept.push(idx);
             }
         }
@@ -1313,6 +1370,13 @@ impl<'a> EntryView<'a> {
     pub fn mtime(&self) -> Option<i64> {
         let m = self.index.entries.mtime(self.idx);
         (m != MTIME_UNKNOWN).then_some(m)
+    }
+    pub fn attributes(&self) -> Attributes {
+        self.packed_attributes().unpack(self.is_dir())
+    }
+    /// The attributes but D, as the query engine tests them.
+    pub(crate) fn packed_attributes(&self) -> PackedAttributes {
+        self.index.entries.attributes(self.idx)
     }
     pub fn parent(&self) -> EntryIdx {
         self.index.entries.parent(self.idx)

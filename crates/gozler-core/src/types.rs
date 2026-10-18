@@ -104,6 +104,7 @@ pub enum EsColumn {
     Extension,
     Size,
     DateModified,
+    Attributes,
 }
 
 /// Lifecycle phase of one indexed volume, reported over IPC.

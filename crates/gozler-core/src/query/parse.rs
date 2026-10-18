@@ -29,6 +29,7 @@
 //! compiles the query ([`super::CompiledQuery`]).
 
 use super::dates::{DateRange, QueryStart, date_range};
+use crate::attributes::Attributes;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -252,6 +253,8 @@ pub enum Test {
     /// The date modified is in this range, resolved by the client from its
     /// clock and time zone. From protocol 5.
     DateModified(DateRange),
+    /// The entry has every one of these attributes. From protocol 6.
+    Attributes(Attributes),
 }
 
 impl ParsedQuery {
@@ -339,6 +342,7 @@ enum Function {
     NoPath,
     WholeWord,
     Regex,
+    Attributes,
     File,
     Folder,
     /// Handled by [`case_directive`] before the other functions; a `case:`
@@ -405,6 +409,14 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
                or backreferences. It matches the name, or with -p or a \\\\ in it the \
                full path, whose separators are \\, so write \\\\ or [\\\\/]. Its | and ! \
                belong to the expression",
+    },
+    SearchFunction {
+        names: &["attrib", "attributes", "attr"],
+        function: Function::Attributes,
+        example: "hs",
+        help: "every one of these attribute letters, in either case: hidden and \
+               system here. ATTRIBUTES lists the letters; !attrib:h excludes hidden \
+               files and folders",
     },
     SearchFunction {
         names: &["file"],
@@ -595,14 +607,15 @@ fn any_of(alternatives: Vec<Vec<Clause>>) -> Result<Vec<Clause>, QueryError> {
 
 /// What one term of the query stands for.
 enum Operand {
-    /// A test that is a clause of its own: a name, path or date test.
+    /// A test that is a clause of its own: a name, path, date or attribute
+    /// test.
     Text(Test),
     /// `file:` or `folder:`, and the text after it.
     Kind(Kind, Option<Test>),
     Size(SizeRange),
     Extensions(Extensions),
-    /// A `case:` directive or an empty `path:` or `nopath:`, which test
-    /// nothing.
+    /// A `case:` directive or an empty `path:`, `nopath:` or `attrib:`, which
+    /// test nothing.
     Nothing,
 }
 
@@ -701,6 +714,21 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
                     value,
                     options.working_dir,
                 )?)));
+            }
+            Some(Function::Attributes) => {
+                let attributes =
+                    Attributes::from_letters(value).map_err(|c| QueryError::Malformed {
+                        what: "attrib:",
+                        detail: format!(
+                            "{c} is not an attribute letter; the letters are {}",
+                            Attributes::all_letters()
+                        ),
+                    })?;
+                return Ok(if attributes.is_empty() {
+                    Operand::Nothing
+                } else {
+                    Operand::Text(Test::Attributes(attributes))
+                });
             }
             Some(Function::File) => {
                 return Ok(Operand::Kind(Kind::File, text_test(value, false, options)?));
