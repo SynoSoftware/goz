@@ -12,7 +12,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
-repository = "https://github.com/mustafaahci/goz"
+repository = "https://github.com/SynoSoftware/goz"
 authors = ["Mustafa Ahci", "synapse.sr"]
 
 [workspace.dependencies]

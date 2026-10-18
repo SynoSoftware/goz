@@ -26,7 +26,7 @@ gozler indexes every filename on your fixed NTFS volumes and answers substring q
 
 ## Install
 
-Download `gozler.exe` and `gozlerd.exe` from the [latest release](https://github.com/mustafaahci/goz/releases/latest), or build from source:
+Run `gozler-<version>-x64-Setup.exe` from the [gozler releases](https://github.com/SynoSoftware/goz/releases). It installs both binaries to `C:\Program Files\gozler`, adds that folder to the machine `PATH`, and installs and starts the service. Or download `gozler.exe` and `gozlerd.exe` in the release's zip, or build from source:
 
 ```
 cargo build --release
@@ -52,6 +52,8 @@ Or install it as an auto-start Windows service (elevated):
 .\target\release\gozlerd.exe status      # check state
 .\target\release\gozlerd.exe uninstall   # stop and remove
 ```
+
+To build an installer instead, run `pwsh ./installer/Build.ps1` with Inno Setup 7.1 or later installed. It writes `target\installer\gozler-<version>-x64-Setup.exe`, the installer the release publishes. Uninstalling removes the binaries, the `PATH` entry and the service.
 
 ## Usage
 
