@@ -252,7 +252,8 @@ impl VolumeStatus {
 /// Machine-readable failure class carried by [`Response::Error`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtoError {
-    /// The query string failed to parse.
+    /// The query cannot run as sent: the query string failed to parse, or its
+    /// scope is on no indexed volume.
     BadQuery,
     /// Unexpected server-side failure.
     Internal,

@@ -5,6 +5,11 @@ from an index of each volume that a daemon keeps current.
 
 ## Index
 
+**Indexed volume**:
+A fixed NTFS volume that is attached. gozler indexes it from when it appears
+until it is removed; removable drives, network drives and other filesystems are
+not indexed.
+
 **Entry**:
 One indexed name: a folder, or one name of a file.
 _Avoid_: record, node

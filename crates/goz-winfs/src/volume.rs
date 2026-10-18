@@ -1,7 +1,7 @@
 //! Volume discovery and owned volume handles.
 //!
 //! `enumerate_volumes` classifies every volume on the machine; the daemon
-//! keeps the ones that are `is_fixed && is_ntfs`. `open_volume` turns a volume
+//! indexes the fixed NTFS ones. `open_volume` turns a volume
 //! GUID path into a `\\.\`-style device handle usable with the journal/MFT
 //! FSCTLs.
 
@@ -24,7 +24,7 @@ use crate::util::{from_wide_nul, to_wide_nul};
 /// Defined locally so we needn't pull in `Win32_System_WindowsProgramming`.
 const DRIVE_FIXED: u32 = 3;
 
-/// One classified volume. The daemon filters on `is_fixed && is_ntfs`.
+/// One classified volume.
 #[derive(Debug, Clone)]
 pub struct VolumeInfo {
     /// `\\?\Volume{GUID}\` with the trailing backslash, exactly as returned.
@@ -33,8 +33,9 @@ pub struct VolumeInfo {
     pub mounts: Vec<String>,
     /// `GetDriveType == DRIVE_FIXED`.
     pub is_fixed: bool,
-    /// `GetVolumeInformation` filesystem name is `"NTFS"`.
-    pub is_ntfs: bool,
+    /// The filesystem name, such as `"NTFS"`; `None` when
+    /// `GetVolumeInformationW` failed, as it does on a locked BitLocker volume.
+    pub filesystem: Option<String>,
 }
 
 /// Enumerates every volume via `FindFirstVolumeW`/`FindNextVolumeW`,
@@ -79,7 +80,7 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, WinError> {
 }
 
 /// Classifies a single volume from its NUL-terminated GUID path buffer. All
-/// probing calls are best-effort: on failure the flag is `false`.
+/// probing calls are best-effort: a failed one leaves its field empty.
 fn classify_volume(guid_wide: &[u16]) -> VolumeInfo {
     let guid_path = from_wide_nul(guid_wide);
     let guid_ptr = guid_wide.as_ptr();
@@ -103,7 +104,7 @@ fn classify_volume(guid_wide: &[u16]) -> VolumeInfo {
             fs_name.len() as u32,
         )
     };
-    let is_ntfs = ok != 0 && from_wide_nul(&fs_name) == "NTFS";
+    let filesystem = (ok != 0).then(|| from_wide_nul(&fs_name));
 
     let mounts = query_mount_points(guid_ptr);
 
@@ -111,7 +112,7 @@ fn classify_volume(guid_wide: &[u16]) -> VolumeInfo {
         guid_path,
         mounts,
         is_fixed,
-        is_ntfs,
+        filesystem,
     }
 }
 

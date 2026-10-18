@@ -1,160 +1,39 @@
 //! Daemon orchestration shared by console (`gozlerd run`) and service
-//! (`gozlerd run --service`) modes: bootstrap every volume, spawn a tail thread per
-//! volume with a journal, then serve queries over the pipe until stopped.
+//! (`gozlerd run --service`) modes: start indexing every volume, then serve
+//! queries over the pipe until stopped, while the volumes index.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use goz_core::types::VolumePhase;
-use parking_lot::RwLock;
+use anyhow::{Context, Result};
 use tokio::sync::watch;
 
-use crate::bootstrap::JournalSetup;
 use crate::supervisor::Supervisor;
-use crate::tail::{self, TailHandle};
-use crate::volume_state::{VolumeSet, VolumeState};
+use crate::volume_state::VolumeRegistry;
 use crate::{bootstrap, server};
 
-/// A fully bootstrapped index: every volume indexed and (where a journal
-/// exists) tailing live. Shared by console and service entry points.
+/// The running index. Shared by console and service entry points.
 pub(crate) struct Engine {
-    pub volumes: VolumeSet,
+    pub volumes: Arc<VolumeRegistry>,
     /// Owns every tail thread; see [`Supervisor::shutdown`] for teardown.
     pub supervisor: Supervisor,
-    pub total_entries: usize,
-    pub elapsed: Duration,
 }
 
-/// Bootstraps every fixed NTFS volume and spawns the live-tail threads.
+/// Starts indexing every fixed NTFS volume and returns before any is indexed.
 ///
-/// Blocking and potentially slow (tens of seconds on a large disk): callers
-/// that must stay responsive to an external supervisor (the SCM) run this on a
-/// dedicated thread and report progress while it works.
-pub(crate) fn build_engine() -> Result<Engine> {
-    let started = Instant::now();
-    let scan = bootstrap::scan_all()?;
-
-    let mut states: Vec<Arc<VolumeState>> = Vec::new();
-    let mut tails: Vec<TailHandle> = Vec::new();
-    let mut total_entries = 0usize;
-
-    // A volume that failed to bootstrap still gets a VolumeState, with an empty
-    // index and phase Failed. Every honesty signal iterates the volume set, so a
-    // volume that is absent from it cannot be reported as anything: `--status`
-    // would list the survivors as live, `Hello.ready` would stay true, and a
-    // query scoped to the missing volume would return zero hits with exit 0,
-    // indistinguishable from "that file does not exist".
-    for fv in scan.failed {
-        states.push(Arc::new(VolumeState {
-            guid: fv.guid_path,
-            mounts: fv.mounts,
-            index: RwLock::new(goz_core::index::VolumeIndex::new(
-                goz_core::index::NTFS_ROOT_FRN,
-                goz_core::index::FrnMap::sparse(),
-            )),
-            phase: RwLock::new(VolumePhase::Failed { reason: fv.reason }),
-            metadata_pending: RwLock::new(false),
-            journal_max_bytes: RwLock::new(None),
-            scope_cache: parking_lot::Mutex::new(None),
-        }));
-    }
-
-    for bv in scan.ok {
-        total_entries += bv.entries();
-        let journal_max_bytes = match &bv.journal {
-            JournalSetup::Active(cursor) => Some(cursor.maximum_size),
-            JournalSetup::Refused | JournalSetup::Unavailable => None,
-        };
-        let state = Arc::new(VolumeState {
-            guid: bv.guid_path.clone(),
-            mounts: bv.mounts.clone(),
-            index: RwLock::new(bv.index),
-            phase: RwLock::new(VolumePhase::Live),
-            metadata_pending: RwLock::new(bv.metadata_pending),
-            journal_max_bytes: RwLock::new(journal_max_bytes),
-            scope_cache: parking_lot::Mutex::new(None),
-        });
-
-        let cursor = match bv.journal {
-            JournalSetup::Active(cursor) => {
-                tracing::info!(
-                    volume = %state.mount_prefix(),
-                    entries = state.index.read().len(),
-                    "tailing journal"
-                );
-                Some(cursor)
-            }
-            JournalSetup::Unavailable => {
-                // The index is not tracking yet. A tail started without a
-                // cursor first gets the journal and rebuilds the index, and
-                // the supervisor revives it while the journal stays
-                // unavailable; a cursor taken now, after the build, would
-                // miss the changes made during it.
-                tracing::warn!(
-                    volume = %state.mount_prefix(),
-                    "USN journal unavailable; the volume's tail will rebuild the index once it can read the journal"
-                );
-                *state.phase.write() = VolumePhase::Offline;
-                None
-            }
-            JournalSetup::Refused => {
-                tracing::info!(
-                    volume = %state.mount_prefix(),
-                    "no USN journal; volume is indexed but its index is a snapshot and cannot track changes"
-                );
-                // Snapshot, not Offline: nothing is wrong and nothing will
-                // change. Reporting Offline here made `volumes_incomplete` true
-                // forever, so every query printed "results may be incomplete"
-                // for a volume that was fully indexed. (Recovery partitions
-                // used to land here on every machine; that was a broken
-                // `FSCTL_CREATE_USN_JOURNAL` code, not the filesystem
-                // refusing, and they now get a journal like any other volume.)
-                *state.phase.write() = VolumePhase::Snapshot;
-                // `bv.handle` drops here (CloseHandle); no tail for this volume.
-                states.push(state);
-                continue;
-            }
-        };
-        match tail::spawn(state.clone(), bv.handle, cursor) {
-            Ok(h) => tails.push(h),
-            Err(e) => {
-                // Thread creation or its handle duplication failed (resource
-                // pressure); either way no tail is running. Degrade just this
-                // volume to Offline instead of aborting the whole engine
-                // bootstrap; status will flag it incomplete.
-                tracing::error!(
-                    volume = %state.mount_prefix(),
-                    error = %e,
-                    "failed to spawn tail thread; volume indexed but will not receive live updates"
-                );
-                *state.phase.write() = VolumePhase::Offline;
-            }
-        }
-        states.push(state);
-    }
-
-    // One supervisor for every tail: cancels journal I/O that a sick device
-    // pends forever (observed on a spinning-down HDD), which no in-loop error
-    // handling can see, and revives tails that exit outright, on a bounded
-    // budget. It takes ownership of the tails; teardown goes through it.
-    let supervisor = Supervisor::spawn(tails);
-
-    // This thread needs no allocator purge: the bootstrap transients
-    // (enumeration buffers, the sparse FRN maps `optimize_storage` replaces,
-    // the pre-shrink slack) are freed on the per-volume bootstrap threads,
-    // whose heaps `abandoned_page_purge` returns at thread exit.
-
+/// The pipe opens right after this, so a client asking during the first
+/// bootstrap gets results flagged incomplete, not "the daemon is not running".
+/// Each volume is `Bootstrapping` until its tail has built its index.
+pub(crate) fn start_engine() -> Result<Engine> {
+    let enumerated = bootstrap::enumerate_all()?;
+    let supervisor = Supervisor::spawn(enumerated).context("starting the volume supervisor")?;
     Ok(Engine {
-        volumes: Arc::new(states),
+        volumes: supervisor.volumes(),
         supervisor,
-        total_entries,
-        elapsed: started.elapsed(),
     })
 }
 
-/// Best-effort post-bootstrap memory settling, shared by console + service
-/// modes. Never fatal: logs and continues.
+/// Best-effort post-bootstrap memory settling, which the supervisor runs once
+/// no volume is `Bootstrapping`. Never fatal: logs and continues.
 ///
 /// Default: purge the allocator and TRIM the working set once, the same
 /// one-shot mem_trim Everything performs after indexing. Pages return on
@@ -190,7 +69,7 @@ pub(crate) fn settle_working_set() {
     }
 }
 
-/// Console entry: bootstrap, serve on the pipe, and stop on Ctrl+C.
+/// Console entry: start indexing, serve on the pipe, and stop on Ctrl+C.
 pub(crate) fn run_console() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -204,14 +83,11 @@ pub(crate) fn run_console() -> Result<()> {
         tracing::warn!("gozlerd is not elevated; raw volume access will likely fail");
     }
 
-    let engine = build_engine()?;
+    let engine = start_engine()?;
     tracing::info!(
-        entries = engine.total_entries,
-        volumes = engine.volumes.len(),
-        elapsed_s = engine.elapsed.as_secs_f64(),
-        "bootstrap complete; serving queries (Ctrl+C to stop)"
+        volumes = engine.volumes.current().len(),
+        "serving queries while the volumes index (Ctrl+C to stop)"
     );
-    settle_working_set();
 
     // A never-triggered channel: console stop comes from Ctrl+C inside the
     // server. `_stop_tx` is held so the receiver never sees a closed channel.

@@ -4,8 +4,10 @@
 //! is warm from boot for every user (admin or standard) with no per-session
 //! elevation. `uninstall` stops and removes it. `run` is the SCM entry point:
 //! Windows launches `gozlerd.exe run --service`, which hands the process to the
-//! service dispatcher and reports `StartPending` (with a heartbeat checkpoint,
-//! because bootstrap takes tens of seconds) → `Running` → `Stopped`.
+//! service dispatcher and reports `StartPending` → `Running` → `Stopped`.
+//! `Running` comes as soon as the engine has started, right before the pipe
+//! opens and before the volumes are indexed; queries are flagged incomplete
+//! until they are.
 
 use std::ffi::OsString;
 use std::sync::mpsc;
@@ -243,8 +245,8 @@ fn run_service() -> Result<()> {
     // Stop signal: SCM control handler → async pipe server. `watch` retains the
     // last value, so a Stop that races ahead of the server is never lost.
     let (stop_tx, stop_rx) = watch::channel(false);
-    // Ready signal: engine thread → this thread once bootstrap finishes.
-    let (ready_tx, ready_rx) = mpsc::channel::<Result<usize, String>>();
+    // Ready signal: engine thread → this thread once the engine has started.
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
     // The status handle isn't available until `register` returns, but the
     // control handler (which fires only after startup) needs it. A OnceLock
@@ -275,7 +277,8 @@ fn run_service() -> Result<()> {
         .context("registering the service control handler")?;
     let _ = handle_cell.set(status_handle);
 
-    // Report StartPending right away; bootstrap can take tens of seconds.
+    // Report StartPending right away; listing the volumes can be slow when a
+    // disk is waking up.
     status_handle.set_service_status(status_report(
         ServiceState::StartPending,
         ServiceControlAccept::empty(),
@@ -283,23 +286,23 @@ fn run_service() -> Result<()> {
         Duration::from_secs(4),
     ))?;
 
-    // Build the index on a dedicated thread, then serve until stopped. The SCM
-    // thread stays free to pump checkpoints and receive Stop.
+    // Start the engine on a dedicated thread, then serve until stopped. The
+    // SCM thread stays free to pump checkpoints and receive Stop.
     let engine_thread = std::thread::spawn(move || -> Result<()> {
-        let engine = match run::build_engine() {
+        let engine = match run::start_engine() {
             Ok(engine) => engine,
             Err(e) => {
                 let _ = ready_tx.send(Err(e.to_string()));
                 return Err(e);
             }
         };
-        let _ = ready_tx.send(Ok(engine.total_entries));
+        let _ = ready_tx.send(Ok(()));
         let served = server::run(engine.volumes, stop_rx);
         engine.supervisor.shutdown();
         served
     });
 
-    // Heartbeat StartPending until the engine reports ready (or fails).
+    // Heartbeat StartPending until the engine reports started (or fails).
     let mut checkpoint = 1u32;
     let ready = loop {
         match ready_rx.recv_timeout(Duration::from_secs(2)) {
@@ -320,15 +323,14 @@ fn run_service() -> Result<()> {
     };
 
     match ready {
-        Ok(entries) => {
-            tracing::info!(entries, "index ready; service running");
+        Ok(()) => {
+            tracing::info!("service running; serving queries while the volumes index");
             status_handle.set_service_status(status_report(
                 ServiceState::Running,
                 ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
                 0,
                 Duration::default(),
             ))?;
-            run::settle_working_set();
         }
         Err(msg) => {
             tracing::error!(reason = %msg, "goz service failed to start");

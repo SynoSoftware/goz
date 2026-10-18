@@ -311,7 +311,11 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             &["-path", r"D:\", "report"],
             prints(&[r"D:\backup\report.txt"]),
         ),
-        (&["-path", r"E:\", "report"], prints(&[])),
+        // A scope on no indexed volume is refused, not answered with nothing.
+        (
+            &["-path", r"E:\", "report"],
+            query_error(r"E:\ is not on an indexed volume; gozlerd indexes fixed NTFS volumes"),
+        ),
         (&["-case", "-path", r"C:\Repo", "testing"], prints(&[])),
         // Sort and limit.
         (

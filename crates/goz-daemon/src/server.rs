@@ -28,7 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{Semaphore, watch};
 
-use crate::volume_state::{VolumeSet, VolumeState};
+use crate::volume_state::{VolumeRegistry, VolumeSet, VolumeState};
 
 /// Cap on concurrently-served pipe connections. A silent/hostile local client
 /// cannot pin more than this many tasks + read buffers + pipe instances.
@@ -57,7 +57,7 @@ const CONNECT_WARN_EVERY: Duration = Duration::from_secs(60);
 /// service-control handler's Stop/Shutdown path). Keep at least one
 /// `watch::Sender` alive for the duration in console mode: if every sender
 /// drops, `changed()` resolves and would end the loop prematurely.
-pub(crate) fn run(volumes: VolumeSet, shutdown: watch::Receiver<bool>) -> Result<()> {
+pub(crate) fn run(volumes: Arc<VolumeRegistry>, shutdown: watch::Receiver<bool>) -> Result<()> {
     let security = build_pipe_security().context("building pipe security descriptor")?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -67,7 +67,7 @@ pub(crate) fn run(volumes: VolumeSet, shutdown: watch::Receiver<bool>) -> Result
 }
 
 async fn accept_loop(
-    volumes: VolumeSet,
+    volumes: Arc<VolumeRegistry>,
     security: PipeSecurity,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -148,7 +148,10 @@ fn create_instance(security: &PipeSecurity, first: bool) -> Result<NamedPipeServ
     Ok(server)
 }
 
-async fn handle_connection(mut server: NamedPipeServer, volumes: VolumeSet) -> Result<()> {
+async fn handle_connection(
+    mut server: NamedPipeServer,
+    volumes: Arc<VolumeRegistry>,
+) -> Result<()> {
     let mut decoder = goz_core::proto::FrameDecoder::new(MAX_CLIENT_FRAME);
     let mut read_buf = vec![0u8; 16 * 1024];
     loop {
@@ -178,7 +181,7 @@ async fn handle_connection(mut server: NamedPipeServer, volumes: VolumeSet) -> R
                 // QUERY_PAGE_BACKLOG pages are in flight, and encoding
                 // overlaps the pipe writes instead of preceding them.
                 Ok(Request::Query(q)) => {
-                    let vols = volumes.clone();
+                    let vols = volumes.current();
                     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
                     let encoder = tokio::task::spawn_blocking(move || {
                         // A failed send means the receiver is gone (client
@@ -204,7 +207,7 @@ async fn handle_connection(mut server: NamedPipeServer, volumes: VolumeSet) -> R
                 // Hello / Status are trivial; encode inline as a tagged JSON frame.
                 Ok(req) => {
                     let mut out = Vec::new();
-                    encode_response_frame(&handle_request(&volumes, req), &mut out);
+                    encode_response_frame(&handle_request(&volumes.current(), req), &mut out);
                     out
                 }
                 Err(e) => {
@@ -257,24 +260,34 @@ fn stream_query_binary(
     q: QueryRequest,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
+    let mut refuse = |message: String| {
+        let mut out = Vec::new();
+        encode_response_frame(
+            &Response::Error {
+                code: ProtoError::BadQuery,
+                message,
+            },
+            &mut out,
+        );
+        let _ = emit(out);
+    };
     let parsed = match parse_query_with_case(&q.query, q.match_case) {
         Ok(p) => p,
-        Err(e) => {
-            let mut out = Vec::new();
-            encode_response_frame(
-                &Response::Error {
-                    code: ProtoError::BadQuery,
-                    message: e.to_string(),
-                },
-                &mut out,
-            );
-            let _ = emit(out);
-            return;
-        }
+        Err(e) => return refuse(e.to_string()),
+    };
+    // A scope on no indexed volume (a network drive, a drive letter that does
+    // not exist) is refused: an empty page would read as "no such file".
+    let Some(targets) = targets(volumes, q.scope.as_deref()) else {
+        let scope = q
+            .scope
+            .as_deref()
+            .expect("only a scope can miss every volume");
+        return refuse(format!(
+            "{scope} is not on an indexed volume; gozlerd indexes fixed NTFS volumes"
+        ));
     };
 
     let per_vol_limit = q.limit.map(|l| q.offset.saturating_add(l));
-    let targets = targets(volumes, q.scope.as_deref());
 
     // One run per volume, ordered into one list by `order_hits` below.
     let mut runs: Vec<VolumeRun> = Vec::new();
@@ -490,19 +503,20 @@ enum VolScope {
 }
 
 /// Resolves which volumes (and per-volume unresolved scope) a query targets,
-/// by the rule the client also waits by ([`Scope::of`]).
-fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Vec<(Arc<VolumeState>, VolScope)> {
+/// by the rule the client also waits by ([`Scope::of`]); `None` when the scope
+/// is on no indexed volume.
+fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Option<Vec<(Arc<VolumeState>, VolScope)>> {
     match Scope::of(scope, volumes.iter().map(|v| v.mounted())) {
-        Scope::Everywhere => volumes.iter().map(|v| (v.clone(), VolScope::All)).collect(),
+        Scope::Everywhere => Some(volumes.iter().map(|v| (v.clone(), VolScope::All)).collect()),
         // The folder comes without a trailing separator, so it can equal the
         // path `VolumeIndex::path_of` rebuilds: an untrimmed `Windows\` (shell
         // tab-completion's spelling) resolves fine but never validates, so the
         // scope cache would miss and re-walk the tree on every keystroke.
-        Scope::Folder { volume, folder } => vec![(
+        Scope::Folder { volume, folder } => Some(vec![(
             volumes[volume].clone(),
             VolScope::Rel(folder.as_bytes().to_vec()),
-        )],
-        Scope::Nowhere => Vec::new(),
+        )]),
+        Scope::Nowhere => None,
     }
 }
 
@@ -653,7 +667,7 @@ mod tests {
 
         let vol = live_volume(r"C:\");
         let (_, scope) = targets(&set(&[vol]), Some(r"C:\Windows\"))
-            .pop()
+            .and_then(|mut t| t.pop())
             .expect("C: matches");
         let VolScope::Rel(rel) = scope else {
             panic!("a -path scope must produce Rel")
@@ -696,26 +710,6 @@ mod tests {
 
     fn set(vols: &[Arc<VolumeState>]) -> VolumeSet {
         Arc::new(vols.to_vec())
-    }
-
-    /// Routing a `-path` to the right volume. An unmatched scope returns no
-    /// targets, which the caller renders as zero hits.
-    #[test]
-    fn targets_route_scope_to_one_volume() {
-        let c = live_volume(r"C:\");
-        let d = live_volume(r"D:\");
-        let vols = set(&[c, d]);
-
-        assert_eq!(targets(&vols, None).len(), 2, "no scope means every volume");
-
-        let picked = targets(&vols, Some(r"c:\windows"));
-        assert_eq!(picked.len(), 1, "scope selects exactly one volume");
-        assert_eq!(picked[0].0.mount_prefix(), r"C:\", "case-insensitive match");
-
-        assert!(
-            targets(&vols, Some(r"Z:\nope")).is_empty(),
-            "an unindexed drive yields no targets"
-        );
     }
 
     /// A Snapshot volume must NOT taint results.

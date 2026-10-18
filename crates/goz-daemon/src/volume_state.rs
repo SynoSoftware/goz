@@ -6,6 +6,8 @@
 //! `Send` but not `Sync`): it is moved into the tail thread, so `VolumeState`
 //! stays `Sync` and can be shared across the tokio runtime via `Arc`.
 
+use std::sync::Arc;
+
 use goz_core::index::VolumeIndex;
 use goz_core::scope::VolumeMounts;
 use goz_core::types::{EntryIdx, VolumePhase};
@@ -41,6 +43,22 @@ pub(crate) struct VolumeState {
 }
 
 impl VolumeState {
+    /// A volume that is not indexed yet: an empty index, phase `Bootstrapping`.
+    pub(crate) fn new(guid: String, mounts: Vec<String>) -> Self {
+        Self {
+            guid,
+            mounts,
+            index: RwLock::new(VolumeIndex::new(
+                goz_core::index::NTFS_ROOT_FRN,
+                goz_core::index::FrnMap::sparse(),
+            )),
+            phase: RwLock::new(VolumePhase::Bootstrapping),
+            metadata_pending: RwLock::new(false),
+            journal_max_bytes: RwLock::new(None),
+            scope_cache: Mutex::new(None),
+        }
+    }
+
     /// Where the volume is mounted.
     pub(crate) fn mounted(&self) -> VolumeMounts<'_> {
         VolumeMounts {
@@ -56,7 +74,32 @@ impl VolumeState {
     }
 }
 
-/// The set of indexed volumes. A plain `Arc<Vec<...>>` for v1 (the volume set
-/// only changes on hot-plug, which is post-v1); swap to `arc_swap::ArcSwap`
-/// when hot-plug lands.
-pub(crate) type VolumeSet = std::sync::Arc<Vec<std::sync::Arc<VolumeState>>>;
+/// The indexed volumes at one moment. A request works on one of these from
+/// start to end, so a volume that appears or goes meanwhile cannot change its
+/// answer halfway.
+pub(crate) type VolumeSet = Arc<Vec<Arc<VolumeState>>>;
+
+/// The indexed volumes as they change: the supervisor adds a volume when it
+/// appears and removes it when it goes, and every reader takes a
+/// [`VolumeSet`] from [`VolumeRegistry::current`].
+#[derive(Default)]
+pub(crate) struct VolumeRegistry(RwLock<VolumeSet>);
+
+impl VolumeRegistry {
+    pub(crate) fn current(&self) -> VolumeSet {
+        self.0.read().clone()
+    }
+
+    pub(crate) fn add(&self, volume: Arc<VolumeState>) {
+        let mut set = self.0.write();
+        let mut volumes = Vec::clone(&set);
+        volumes.push(volume);
+        *set = Arc::new(volumes);
+    }
+
+    pub(crate) fn remove(&self, guid: &str) {
+        let mut set = self.0.write();
+        let volumes: Vec<_> = set.iter().filter(|v| v.guid != guid).cloned().collect();
+        *set = Arc::new(volumes);
+    }
+}

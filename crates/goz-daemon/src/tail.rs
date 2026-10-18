@@ -87,14 +87,12 @@ pub(crate) struct TailHandle {
     /// Volume this tail serves, for supervisor log lines.
     pub(crate) mount: String,
     /// The tail's self-reported liveness: beating, busy in a rebuild, or
-    /// retired. The supervisor's stall and retirement decisions read only
-    /// this, never `state.phase`, which is user-facing honesty state; the
-    /// phase is consulted for exactly one thing, gating the revival budget
-    /// refund (see the supervisor's `accrue_health`).
+    /// retired. The supervisor's stall decisions read only this, never
+    /// `state.phase`, which is user-facing honesty state; the phase is
+    /// consulted only for what it says about the volume: whether it is served
+    /// (the supervisor's `accrue_health`) and whether a retired tail left a
+    /// snapshot that needs no revival.
     pub(crate) pulse: Arc<TailPulse>,
-    /// Shared volume state, kept so the supervisor can revive a retired tail
-    /// (reopen by GUID, respawn) and correct the phase when it gives up.
-    pub(crate) state: Arc<VolumeState>,
     /// Real handle to the tail thread, target of `cancel_synchronous_io`.
     pub(crate) io_handle: Arc<goz_winfs::ThreadIoHandle>,
 }
@@ -126,10 +124,10 @@ impl TailHandle {
 
 /// Spawns the tail thread for one volume. `handle` is moved into the thread
 /// (it is not shared). `cursor: None` means the caller has no trustworthy
-/// starting point (a supervisor reviving a tail whose predecessor exited, so
-/// the volume went untailed for a while, or a bootstrap that could not read
-/// the journal) and the thread's first act is a full rescan, which rebuilds
-/// the index and acquires a fresh cursor.
+/// starting point (a volume that was never indexed, or a supervisor reviving
+/// a tail whose predecessor exited, so the volume went untailed for a while)
+/// and the thread's first act is a full build, which builds the index and
+/// acquires a fresh cursor.
 pub(crate) fn spawn(
     state: Arc<VolumeState>,
     handle: VolumeHandle,
@@ -140,16 +138,15 @@ pub(crate) fn spawn(
     let pulse = Arc::new(TailPulse::new());
     let pulse_thread = pulse.clone();
     let mount = state.mount_prefix().to_string();
-    let state_thread = state.clone();
     // The supervisor needs a REAL handle to this thread, and duplicating one
     // must happen ON the thread (the pseudo-handle is per-thread), so the
     // thread sends it back before entering the loop.
     let (io_tx, io_rx) = std::sync::mpsc::sync_channel(1);
     // OS thread creation can fail on a machine near its thread/handle limit.
-    // Propagate it so the caller can degrade this one volume to Offline rather
-    // than panic the whole engine bootstrap.
+    // Propagate it so the supervisor retries this one volume rather than
+    // panic the whole daemon.
     let join = std::thread::Builder::new()
-        .name(format!("goz-tail-{}", state.mount_prefix()))
+        .name(format!("goz-tail-{mount}"))
         .spawn(move || {
             let io = goz_winfs::current_thread_io_handle();
             let usable = io.is_ok();
@@ -171,7 +168,7 @@ pub(crate) fn spawn(
             // `Retired` is a promise that joining is instant, and a close is
             // itself an IRP a sick device can pend.
             let _retired = pulse_thread.retire_on_drop();
-            tail_loop(&state_thread, handle, cursor, &stop_thread, &pulse_thread)
+            tail_loop(&state, handle, cursor, &stop_thread, &pulse_thread)
         })?;
     let io_handle = io_rx
         .recv()
@@ -182,7 +179,6 @@ pub(crate) fn spawn(
         join: Some(join),
         mount,
         pulse,
-        state,
         io_handle: Arc::new(io_handle),
     })
 }
@@ -230,16 +226,15 @@ fn tail_loop(
     // draw an unbounded join from the supervisor's give-up or revive path.
     let handle = &handle;
     let mut rescans: u32 = 0;
-    // A tail without a cursor cannot prove the index is in sync: a revived
-    // tail's volume kept changing while it had no tail, and a bootstrap that
-    // could not read the journal has nothing to replay from. Rebuild it and
-    // pick up a fresh cursor before tailing a single record. Deliberately
-    // NOT routed through `bounded_rescan`: this rebuild is revival's price,
-    // not a journal fault, and charging it would leave every revived
-    // incarnation one incident short of the documented budget (the counter
-    // only resets on a non-empty batch, so on a quiet volume the charge
-    // would never clear). Revival storms are bounded by the supervisor's own
-    // budget instead.
+    // A tail without a cursor cannot prove the index is in sync: a new volume
+    // has no index yet, and a revived tail's volume kept changing while it
+    // had no tail. Build it and pick up a fresh cursor before tailing a
+    // single record. Deliberately NOT routed through `bounded_rescan`: this
+    // build is the price of a start, not a journal fault, and charging it
+    // would leave every incarnation one incident short of the documented
+    // budget (the counter only resets on a non-empty batch, so on a quiet
+    // volume the charge would never clear). Revival storms are bounded by the
+    // supervisor's own budget instead.
     let cursor = match cursor {
         Some(c) => c,
         None => match rescan(state, handle, pulse, RescanReason::NoCursor, stop) {
@@ -652,11 +647,12 @@ fn bounded_rescan(
     rescan(state, handle, pulse, reason, stop)
 }
 
-/// Rebuilds this volume's index in place after a journal loss (wrap, deletion,
-/// or parse anomaly). Re-enumerates the MFT on the handle the tail already owns,
-/// swaps the fresh index in under the write lock, invalidates the scope cache
-/// (its `EntryIdx`s belonged to the old index), and re-acquires a journal
-/// cursor. Queries keep serving (flagged incomplete) during the rebuild.
+/// Builds this volume's index in place: its first build, or a rebuild after a
+/// journal loss (wrap, deletion, or parse anomaly). Enumerates the MFT on the
+/// handle the tail already owns, swaps the fresh index in under the write lock,
+/// invalidates the scope cache (its `EntryIdx`s belonged to the old index), and
+/// acquires a journal cursor. Queries keep serving (flagged incomplete) during
+/// the build.
 fn rescan(
     state: &VolumeState,
     handle: &VolumeHandle,
@@ -669,20 +665,23 @@ fn rescan(
     // `Busy` tells the supervisor this silence is legitimate; the guard
     // restores a fresh beat on every way out of this function.
     let _busy = pulse.busy_scope();
-    *state.phase.write() = VolumePhase::Rescanning;
+    // A volume's first build keeps the phase `Bootstrapping`, so `--status`
+    // tells a volume that was never indexed from one being rebuilt.
+    if *state.phase.read() == VolumePhase::Bootstrapping {
+        tracing::info!(volume = %state.mount_prefix(), "indexing volume");
+    } else {
+        tracing::warn!(volume = %state.mount_prefix(), ?reason, "journal lost; rebuilding index");
+        *state.phase.write() = VolumePhase::Rescanning;
+    }
 
-    // Capture the cursor BEFORE enumerating, exactly as first-time bootstrap
-    // does. A change landing after its MFT region was enumerated but before
-    // a late cursor capture would be in neither the snapshot nor the replay,
-    // and nothing would ever notice; captured first, such changes replay
-    // from the journal. The other race is safe: a journal deleted or
-    // recreated DURING the rebuild invalidates this cursor, the first read
-    // from it fails, and the ordinary error arms trigger another rescan. A
-    // stale cursor is loud, a late cursor is silent.
-    let cursor = match bootstrap::ensure_journal(handle, &state.guid) {
-        JournalSetup::Active(c) => Some(c),
-        JournalSetup::Refused | JournalSetup::Unavailable => None,
-    };
+    // Capture the cursor BEFORE enumerating. A change landing after its MFT
+    // region was enumerated but before a late cursor capture would be in
+    // neither the snapshot nor the replay, and nothing would ever notice;
+    // captured first, such changes replay from the journal. The other race is
+    // safe: a journal deleted or recreated DURING the rebuild invalidates this
+    // cursor, the first read from it fails, and the ordinary error arms
+    // trigger another rescan. A stale cursor is loud, a late cursor is silent.
+    let journal = bootstrap::ensure_journal(handle, &state.guid);
 
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full MFT scan.
@@ -703,7 +702,10 @@ fn rescan(
         // Set before the phase returns to Live, so a query that reads Live
         // also reads the new index's flag rather than the old one's.
         *state.metadata_pending.write() = built.metadata_pending;
-        *state.journal_max_bytes.write() = cursor.map(|c| c.maximum_size);
+        *state.journal_max_bytes.write() = match &journal {
+            JournalSetup::Active(c) => Some(c.maximum_size),
+            JournalSetup::Refused | JournalSetup::Unavailable => None,
+        };
         // Invalidate the scope cache while the index write lock is held: its
         // EntryIdx values belong to the old generation. Clearing it here (rather
         // than after the lock drops) guarantees a reader never sees the new,
@@ -712,23 +714,34 @@ fn rescan(
         *state.scope_cache.lock() = None;
     }
 
-    match cursor {
-        Some(c) => {
+    match journal {
+        JournalSetup::Active(c) => {
             *state.phase.write() = VolumePhase::Live;
             tracing::info!(
                 volume = %state.mount_prefix(),
                 entries = state.index.read().len(),
-                "rescan complete; tailing resumed"
+                "index built; tailing the journal"
             );
             Some(c)
         }
-        None => {
-            // Rebuilt and correct, but no journal to tail (deletion + recreate
-            // failed): fresh as of now but will not receive live updates. Report
-            // Offline so Status/query responses flag the volume incomplete
-            // instead of falsely Live.
+        JournalSetup::Refused => {
+            // Snapshot, not Offline: nothing is wrong and nothing will change,
+            // so the volume must not flag every result incomplete. The tail
+            // stops, and the supervisor sees the phase and does not revive it.
+            *state.phase.write() = VolumePhase::Snapshot;
+            tracing::info!(
+                volume = %state.mount_prefix(),
+                "no USN journal; volume is indexed but its index is a snapshot and cannot track changes"
+            );
+            None
+        }
+        JournalSetup::Unavailable => {
+            // Rebuilt and correct, but no journal to tail right now: fresh as
+            // of now but will not receive live updates. Report Offline so
+            // Status/query responses flag the volume incomplete instead of
+            // falsely Live; the tail stops and the supervisor revives it.
             *state.phase.write() = VolumePhase::Offline;
-            tracing::warn!(volume = %state.mount_prefix(), "rescan rebuilt index but no journal is available; live updates paused");
+            tracing::warn!(volume = %state.mount_prefix(), "index built but no journal is available; live updates paused");
             None
         }
     }

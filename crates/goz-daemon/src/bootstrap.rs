@@ -30,8 +30,7 @@ const JOURNAL_ALLOC_DELTA: u64 = 8 * 1024 * 1024;
 /// 1 MiB ioctl buffer: ~100 ENUM round-trips per million files.
 const IO_BUFFER_BYTES: usize = 1024 * 1024;
 
-/// A freshly bootstrapped volume: its index plus the retained volume handle
-/// and journal cursor the daemon needs to tail it live.
+/// A freshly bootstrapped volume, as `gozlerd scan` reports it.
 pub(crate) struct BootstrappedVolume {
     pub guid_path: String,
     pub mounts: Vec<String>,
@@ -39,10 +38,6 @@ pub(crate) struct BootstrappedVolume {
     pub layout_secs: f64,
     pub journal: JournalSetup,
     pub index: VolumeIndex,
-    /// See [`BuiltIndex::metadata_pending`].
-    pub metadata_pending: bool,
-    /// Kept open for the live tail (moved into the tail thread by the daemon).
-    pub handle: VolumeHandle,
 }
 
 impl BootstrappedVolume {
@@ -59,42 +54,36 @@ impl BootstrappedVolume {
     }
 }
 
-/// A volume that could not be bootstrapped, carried so the daemon can still
-/// represent it.
-///
-/// Skipping a failed volume silently is worse than reporting it Offline: every
-/// honesty signal (`--status`, `Hello.ready`, each page's `volumes_incomplete`)
-/// is computed by iterating the volume set, so a volume that was never inserted
-/// has no phase to be non-Live and is unreportable. A query scoped to it then
-/// returns zero hits with exit 0, indistinguishable from "no such file".
-pub(crate) struct FailedVolume {
-    pub guid_path: String,
-    pub mounts: Vec<String>,
-    pub reason: String,
-}
-
-/// Everything `scan_all` learned: the volumes it indexed, and the ones it could
-/// not. Both halves must reach the engine.
-pub(crate) struct Scan {
-    pub ok: Vec<BootstrappedVolume>,
-    pub failed: Vec<FailedVolume>,
-}
-
-/// Bootstraps every fixed NTFS volume. A volume that fails to bootstrap is
-/// reported and returned in `failed` rather than aborting the whole run, so one
-/// unreadable volume never hides the others' results and never disappears.
-pub(crate) fn scan_all() -> Result<Scan> {
+/// Enables the volume privileges, then lists every volume on the machine.
+pub(crate) fn enumerate_all() -> Result<Vec<VolumeInfo>> {
     // The raw volume and journal reads need these privileges; if the process is
     // not elevated the open itself fails with a clear message, so a
     // privilege-enable failure here is only a warning.
     if let Err(e) = goz_winfs::enable_volume_privileges() {
         tracing::warn!(error = %e, "could not enable volume privileges; continuing");
     }
+    enumerate_volumes().context("enumerating volumes")
+}
 
-    let volumes = enumerate_volumes().context("enumerating volumes")?;
-    let targets: Vec<VolumeInfo> = volumes
+/// Why gozler does not index `vol`, or `None` when it does: gozler indexes
+/// fixed NTFS volumes.
+pub(crate) fn skip_reason(vol: &VolumeInfo) -> Option<String> {
+    if !vol.is_fixed {
+        return Some("not a fixed disk".into());
+    }
+    match vol.filesystem.as_deref() {
+        Some("NTFS") => None,
+        Some(other) => Some(format!("{other}, not NTFS")),
+        None => Some("its filesystem could not be read, as on a locked BitLocker volume".into()),
+    }
+}
+
+/// Bootstraps every fixed NTFS volume once, for `gozlerd scan`. A volume that
+/// fails is logged and left out rather than aborting the whole run.
+pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
+    let targets: Vec<VolumeInfo> = enumerate_all()?
         .into_iter()
-        .filter(|v| v.is_fixed && v.is_ntfs)
+        .filter(|v| skip_reason(v).is_none())
         .collect();
     if targets.is_empty() {
         bail!("no fixed NTFS volumes found");
@@ -134,28 +123,20 @@ pub(crate) fn scan_all() -> Result<Scan> {
     });
 
     let mut ok = Vec::new();
-    let mut failed = Vec::new();
     for (vol, result) in targets.iter().zip(results) {
         match result {
             Ok(scan) => ok.push(scan),
-            Err(e) => {
-                tracing::error!(
-                    volume = %vol.guid_path,
-                    error = %format!("{e:#}"),
-                    "volume failed to bootstrap; it will be reported Failed and serve no results"
-                );
-                failed.push(FailedVolume {
-                    guid_path: vol.guid_path.clone(),
-                    mounts: vol.mounts.clone(),
-                    reason: format!("{e:#}"),
-                });
-            }
+            Err(e) => tracing::error!(
+                volume = %vol.guid_path,
+                error = %format!("{e:#}"),
+                "volume failed to bootstrap"
+            ),
         }
     }
     if ok.is_empty() {
         bail!("no volume could be bootstrapped (see the log for per-volume errors)");
     }
-    Ok(Scan { ok, failed })
+    Ok(ok)
 }
 
 /// Bootstraps a single volume: journal setup → MFT enumeration → FILE_LAYOUT
@@ -181,8 +162,6 @@ fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
         layout_secs: built.layout_secs,
         journal,
         index: built.index,
-        metadata_pending: built.metadata_pending,
-        handle,
     })
 }
 

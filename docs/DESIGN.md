@@ -11,7 +11,9 @@ gozler is four crates:
 
 ## Index coherence
 
-gozler indexes fixed NTFS volumes; removable drives and non-NTFS filesystems (ReFS, exFAT, FAT32) are out of scope and are not tracked.
+gozler indexes fixed NTFS volumes; removable drives and non-NTFS filesystems (ReFS, exFAT, FAT32) are out of scope and are not tracked. The set of indexed volumes follows the machine: within a minute, a fixed NTFS volume that appears (an attached VHD, an unlocked BitLocker drive) is indexed, and a volume that is removed leaves the index. A `-path` scope on no indexed volume is an error, never an empty answer.
+
+The daemon answers queries from the moment it starts. A volume is `bootstrapping` until its first build finishes, and like `rescanning` it marks results incomplete; a volume that cannot be opened is retried on the same budget as a tail that exits, then reported `failed`.
 
 The index is a cache of the filesystem, and a cache that cannot prove it is coherent must rebuild itself. Every sync-loss path (journal wrap, a parse anomaly, a journal that cannot be read at startup, reads that stop answering, even a sick disk that leaves a journal read pending forever, which a supervisor cancels, or a tail thread that exits outright, which the same supervisor revives on a bounded budget) ends in one of three states:
 

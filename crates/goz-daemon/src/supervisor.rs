@@ -1,7 +1,16 @@
-//! Tail supervision: one background thread that reads every tail's
-//! [`Pulse`] and acts on it.
+//! Volume supervision: one background thread that keeps a tail on every
+//! indexed volume and keeps the indexed volumes in step with the machine.
 //!
-//! Three verdicts, one per pulse state:
+//! A volume is indexed by its tail: the supervisor opens the volume and spawns
+//! a tail without a cursor, whose first act is the full build. That one path
+//! serves a volume found at startup, a volume that appears later, a volume
+//! whose start failed (a disk still spinning up at boot), and a tail that
+//! exited. Each scan the supervisor also lists the machine's volumes, adds the
+//! fixed NTFS volumes it does not index yet, and removes the indexed volumes
+//! that are gone, so a query never silently leaves out an attached volume.
+//!
+//! For each tail it reads the [`Pulse`] and gives one of three verdicts, one
+//! per pulse state:
 //!
 //! - a **stale beat** means the thread is wedged in a synchronous journal
 //!   read (observed live: a spinning-down HDD pended one
@@ -20,16 +29,20 @@
 //! that can replace one (revival) and the natural place to stop them all, so
 //! teardown is [`Supervisor::shutdown`] and nothing else holds a tail.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use goz_core::types::VolumePhase;
+use goz_winfs::{VolumeInfo, WinError};
 use parking_lot::{Condvar, Mutex};
 
+use crate::bootstrap;
 use crate::pulse::{Pulse, awake_secs};
 use crate::tail::{self, TailHandle};
+use crate::volume_state::{VolumeRegistry, VolumeState};
 
 /// Pause between supervision scans.
 const SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -78,9 +91,9 @@ enum Action {
     ResetBudget,
     /// Presumed wedged in a synchronous syscall: cancel its I/O.
     CancelIo { stalled_secs: u64 },
-    /// The thread exited and has budget left: respawn it.
+    /// No tail is running and the budget has room: start one.
     Revive,
-    /// The thread exited and its budget is spent: stop supervising it.
+    /// No tail is running and the budget is spent: stop supervising it.
     GiveUp,
 }
 
@@ -162,49 +175,50 @@ pub(crate) struct Supervisor {
     /// cheap insurance against a future blocking call slipping in. `None`
     /// only if duplication failed, which merely forfeits that rescue.
     io: Option<goz_winfs::ThreadIoHandle>,
-    /// Tails held here only if the supervisor thread could not be spawned;
-    /// they run unsupervised (no stuck-I/O rescue, no revival) and are shut
-    /// down directly at teardown.
-    unsupervised: Vec<TailHandle>,
+    volumes: Arc<VolumeRegistry>,
 }
 
 impl Supervisor {
-    /// Takes ownership of every tail and starts the supervision thread. If
-    /// the OS refuses the thread (resource pressure), the tails still run,
-    /// merely unsupervised, exactly as a failed watchdog spawn behaved.
-    pub(crate) fn spawn(tails: Vec<TailHandle>) -> Supervisor {
+    /// Starts indexing every fixed NTFS volume in `enumerated`, the machine's
+    /// volumes at startup, and starts the supervision thread. Returns as soon
+    /// as each of those volumes is in [`Supervisor::volumes`] as
+    /// `Bootstrapping`, so queries are answered, flagged incomplete, while the
+    /// volumes index. Fails only when the OS refuses the thread; nothing would
+    /// index the volumes then.
+    pub(crate) fn spawn(enumerated: Vec<VolumeInfo>) -> std::io::Result<Supervisor> {
+        let volumes = Arc::new(VolumeRegistry::default());
+        let mut fleet = Fleet {
+            volumes: volumes.clone(),
+            supervised: Vec::new(),
+            skipped: HashSet::new(),
+            discovery: None,
+            starting: Some(Instant::now()),
+        };
+        fleet.reconcile(enumerated);
         let stop = Arc::new(StopFlag {
             stopped: Mutex::new(false),
             wake: Condvar::new(),
         });
-        if tails.is_empty() {
-            return Supervisor {
-                stop,
-                join: None,
-                io: None,
-                unsupervised: tails,
-            };
-        }
         // `Builder::spawn` consumes its closure even when thread creation
-        // fails, so the tails ride in a slot the failure path can take back;
-        // dropping them would detach threads that could then never be joined.
-        let slot = Arc::new(Mutex::new(Some(tails)));
+        // fails, so the fleet rides in a slot the failure path can take back;
+        // dropping it would detach tails that could then never be joined.
+        let slot = Arc::new(Mutex::new(Some(fleet)));
         let thread_slot = slot.clone();
         let thread_stop = stop.clone();
         let (io_tx, io_rx) = std::sync::mpsc::sync_channel(1);
         match std::thread::Builder::new()
-            .name("goz-tail-supervisor".into())
+            .name("goz-volume-supervisor".into())
             .spawn(move || {
                 // Same per-thread duplication the tails perform, and for the
                 // same reason: shutdown may need to cancel this thread's own
                 // blocked volume I/O. Unlike a tail, a failure here is not
                 // fatal to the thread; it only forfeits that one rescue.
                 let _ = io_tx.send(goz_winfs::current_thread_io_handle());
-                let tails = thread_slot
+                let fleet = thread_slot
                     .lock()
                     .take()
-                    .expect("supervisor tails are taken exactly once");
-                supervise(tails, &thread_stop);
+                    .expect("the supervisor's fleet is taken exactly once");
+                supervise(fleet, &thread_stop);
             }) {
             Ok(join) => {
                 let io = io_rx.recv().ok().and_then(Result::ok);
@@ -213,31 +227,29 @@ impl Supervisor {
                         "no real handle to the supervisor thread; shutdown cannot cancel its blocked I/O"
                     );
                 }
-                Supervisor {
+                Ok(Supervisor {
                     stop,
                     join: Some(join),
                     io,
-                    unsupervised: Vec::new(),
-                }
+                    volumes,
+                })
             }
             Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "failed to spawn the tail supervisor; tails run without stuck-I/O rescue or revival"
-                );
-                Supervisor {
-                    stop,
-                    join: None,
-                    io: None,
-                    unsupervised: slot.lock().take().unwrap_or_default(),
+                if let Some(fleet) = slot.lock().take() {
+                    fleet.stop_all();
                 }
+                Err(e)
             }
         }
     }
 
+    /// The indexed volumes, which this supervisor keeps current.
+    pub(crate) fn volumes(&self) -> Arc<VolumeRegistry> {
+        self.volumes.clone()
+    }
+
     /// Stops supervision and every tail, joining all of it. The supervision
-    /// thread stops the tails itself (it owns them); the unsupervised
-    /// fallback goes through the same wedge-tolerant teardown here.
+    /// thread stops the tails itself (it owns them).
     ///
     /// The supervisor's join is bounded and cancel-assisted for the same
     /// reason its tails' joins are: a revive in flight can be blocked in
@@ -261,17 +273,164 @@ impl Supervisor {
                 let _ = join.join();
             } else {
                 tracing::error!(
-                    "tail supervisor survived its stop signal and every I/O cancel; abandoning it to process exit"
+                    "volume supervisor survived its stop signal and every I/O cancel; abandoning it to process exit"
                 );
             }
         }
-        stop_tails(std::mem::take(&mut self.unsupervised));
     }
 }
 
-/// One supervised tail: the handle plus its revival history.
+/// Everything the supervision thread owns.
+struct Fleet {
+    volumes: Arc<VolumeRegistry>,
+    /// The indexed volumes that have a tail or may get one. A volume leaves
+    /// this list, and stays indexed, when its tail is given up on or when it
+    /// is a snapshot, which needs no tail.
+    supervised: Vec<Supervised>,
+    /// Volumes found that gozler does not index, each logged once.
+    skipped: HashSet<String>,
+    /// The enumeration running on its worker thread, if one is.
+    discovery: Option<mpsc::Receiver<Result<Vec<VolumeInfo>, WinError>>>,
+    /// When the daemon started, until no volume is `Bootstrapping`.
+    starting: Option<Instant>,
+}
+
+impl Fleet {
+    /// Brings the indexed volumes in step with `enumerated`, the volumes on
+    /// the machine now: starts indexing each fixed NTFS volume that is not
+    /// indexed, and removes each indexed volume that is no longer listed.
+    ///
+    /// Only a volume that is no longer listed is removed. A listed volume
+    /// that now classifies differently stays: a filesystem query that fails
+    /// once must not cost a full rebuild.
+    fn reconcile(&mut self, enumerated: Vec<VolumeInfo>) {
+        let indexed = self.volumes.current();
+        for gone in indexed
+            .iter()
+            .filter(|v| !enumerated.iter().any(|e| e.guid_path == v.guid))
+        {
+            self.remove(gone);
+        }
+        self.skipped
+            .retain(|guid| enumerated.iter().any(|e| &e.guid_path == guid));
+        for vol in enumerated {
+            if indexed.iter().any(|v| v.guid == vol.guid_path) {
+                continue;
+            }
+            match bootstrap::skip_reason(&vol) {
+                Some(reason) => {
+                    if self.skipped.insert(vol.guid_path.clone()) {
+                        tracing::info!(
+                            volume = %vol.guid_path,
+                            mounts = ?vol.mounts,
+                            reason,
+                            "volume not indexed"
+                        );
+                    }
+                }
+                None => {
+                    self.skipped.remove(&vol.guid_path);
+                    let state = Arc::new(VolumeState::new(vol.guid_path, vol.mounts));
+                    tracing::info!(volume = %state.mount_prefix(), "volume found; indexing it");
+                    self.volumes.add(state.clone());
+                    self.supervised.push(Supervised::start(state));
+                }
+            }
+        }
+    }
+
+    /// Stops indexing a volume that is gone: queries leave it out from now on,
+    /// and its tail stops.
+    fn remove(&mut self, gone: &VolumeState) {
+        self.volumes.remove(&gone.guid);
+        tracing::info!(volume = %gone.mount_prefix(), "volume is gone; no longer indexed");
+        if let Some(i) = self
+            .supervised
+            .iter()
+            .position(|s| s.state.guid == gone.guid)
+        {
+            let deadline = Instant::now() + PENDING_DRAIN_WAIT;
+            stop_tails(self.supervised.swap_remove(i).into_tails(deadline));
+        }
+    }
+
+    /// Reconciles the volumes with the last enumeration, if it has finished,
+    /// and starts the next. Enumeration queries every volume's filesystem, and
+    /// a sick device can block that query, so it runs on a worker thread; one
+    /// still running is waited for, never stacked.
+    fn discover(&mut self) {
+        let finished = match &self.discovery {
+            None => None,
+            Some(rx) => match rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => return,
+                Ok(result) => Some(result),
+                // The worker died without reporting.
+                Err(mpsc::TryRecvError::Disconnected) => None,
+            },
+        };
+        self.discovery = None;
+        match finished {
+            Some(Ok(enumerated)) => self.reconcile(enumerated),
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "could not list volumes; trying again next scan")
+            }
+            None => {}
+        }
+        let (tx, rx) = mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("goz-volume-discovery".into())
+            .spawn(move || {
+                let _ = tx.send(goz_winfs::enumerate_volumes());
+            }) {
+            Ok(_) => self.discovery = Some(rx),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not start listing volumes; trying again next scan")
+            }
+        }
+    }
+
+    /// Once no volume is `Bootstrapping`, logs the startup totals and settles
+    /// the working set, one time only.
+    fn settle_once_indexed(&mut self) {
+        let Some(started) = self.starting else {
+            return;
+        };
+        let volumes = self.volumes.current();
+        if volumes
+            .iter()
+            .any(|v| *v.phase.read() == VolumePhase::Bootstrapping)
+        {
+            return;
+        }
+        let entries: usize = volumes.iter().map(|v| v.index.read().len()).sum();
+        tracing::info!(
+            entries,
+            volumes = volumes.len(),
+            elapsed_s = started.elapsed().as_secs_f64(),
+            "startup indexing finished"
+        );
+        crate::run::settle_working_set();
+        self.starting = None;
+    }
+
+    /// Stops every tail, resolving in-flight starts first so a tail a worker
+    /// hands over is stopped with the rest.
+    fn stop_all(self) {
+        let deadline = Instant::now() + PENDING_DRAIN_WAIT;
+        let tails = self
+            .supervised
+            .into_iter()
+            .flat_map(|s| s.into_tails(deadline))
+            .collect();
+        stop_tails(tails);
+    }
+}
+
+/// One supervised volume: its tail plus its revival history.
 struct Supervised {
-    tail: TailHandle,
+    state: Arc<VolumeState>,
+    /// `None` until a start succeeds.
+    tail: Option<TailHandle>,
     /// Revivals since the budget was last refunded.
     revive_attempts: u32,
     /// When the current unbroken run of healthy observations (a fresh
@@ -279,15 +438,19 @@ struct Supervised {
     /// by anything else and by a revival. This, not the incarnation's age,
     /// is what earns a budget refund.
     beating_since: Option<Instant>,
-    /// A revival in flight on its worker thread, polled each scan. `Some`
-    /// suppresses further actions on this tail until the worker reports.
+    /// A start in flight on its worker thread, polled each scan. `Some`
+    /// suppresses further actions on this volume until the worker reports.
     pending: Option<PendingRevival>,
+    /// Why the last start failed, for the phase if the supervisor gives up
+    /// before the volume was ever indexed.
+    last_failure: Option<String>,
 }
 
-/// A revival running on its own short-lived worker thread. Revival opens the
-/// volume, and that open is blocking I/O against possibly-sick hardware; run
-/// inline it would wedge the scan loop and cost every OTHER volume its
-/// stall rescue and revival, so the supervisor never blocks on it.
+/// A tail start (the first, or a revival) running on its own short-lived
+/// worker thread. It opens the volume, and that open is blocking I/O against
+/// possibly-sick hardware; run inline it would wedge the scan loop and cost
+/// every OTHER volume its stall rescue and revival, so the supervisor never
+/// blocks on it.
 struct PendingRevival {
     /// Delivers the worker's outcome over a RENDEZVOUS channel: the send can
     /// only complete into a live receive, never into a buffer, so there is
@@ -331,51 +494,29 @@ const SUPERVISOR_JOIN_WAIT: Duration = Duration::from_secs(15);
 /// that dropped their handles would detach every tail thread with no stop
 /// flag set, leaving live index writers nobody could stop, join, or rescue,
 /// while `Supervisor::shutdown` returned as if teardown had succeeded.
-fn supervise(tails: Vec<TailHandle>, stop: &StopFlag) {
-    let mut supervised: Vec<Supervised> = tails
-        .into_iter()
-        .map(|tail| Supervised {
-            tail,
-            revive_attempts: 0,
-            beating_since: None,
-            pending: None,
-        })
-        .collect();
-    // AssertUnwindSafe: the closure touches only `supervised` (handles and
-    // plain counters), which stays structurally valid wherever a panic
-    // lands; the worst carryover is a half-updated budget on tails that are
-    // about to be stopped anyway.
+fn supervise(mut fleet: Fleet, stop: &StopFlag) {
+    // AssertUnwindSafe: the closure touches only `fleet` (handles, plain
+    // counters, and the registry's lock-guarded list), which stays
+    // structurally valid wherever a panic lands; the worst carryover is a
+    // half-updated budget on tails that are about to be stopped anyway.
     let scanning = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        scan_loop(&mut supervised, stop);
+        scan_loop(&mut fleet, stop);
     }));
     if scanning.is_err() {
         // Do NOT stop the tails: they are healthy writers, and stopping
         // them would silently end tracking while every phase still says
         // Live and the query server keeps serving. Only supervision (stall
-        // rescue, revival) is lost; park until shutdown so teardown still
-        // stops and joins everything properly.
+        // rescue, revival, volume discovery) is lost; park until shutdown so
+        // teardown still stops and joins everything properly.
         tracing::error!(
-            "tail supervisor panicked; tails keep running unsupervised (no stuck-I/O rescue or revival) until shutdown"
+            "volume supervisor panicked; tails keep running unsupervised (no stuck-I/O rescue, revival or new volumes) until shutdown"
         );
         let mut stopped = stop.stopped.lock();
         while !*stopped {
             stop.wake.wait(&mut stopped);
         }
     }
-    // Teardown: resolve in-flight revivals first, then stop every tail a
-    // worker handed over along with the tails already held.
-    let mut tails: Vec<TailHandle> = Vec::with_capacity(supervised.len());
-    let drain_deadline = Instant::now() + PENDING_DRAIN_WAIT;
-    for s in supervised {
-        let Supervised { tail, pending, .. } = s;
-        if let Some(pending) = pending
-            && let Some(fresh) = drain_pending(pending, &tail.mount, drain_deadline)
-        {
-            tails.push(fresh);
-        }
-        tails.push(tail);
-    }
-    stop_tails(tails);
+    fleet.stop_all();
 }
 
 /// Resolves one in-flight revival at teardown: cancel the worker's blocked
@@ -399,16 +540,17 @@ fn drain_pending(pending: PendingRevival, mount: &str, deadline: Instant) -> Opt
         Err(_) => {
             tracing::warn!(
                 volume = %mount,
-                "a revival worker is still blocked at shutdown; abandoning it (it cleans up anything it builds)"
+                "a tail start is still blocked at shutdown; abandoning it (it cleans up anything it builds)"
             );
             None
         }
     }
 }
 
-/// Scan every tail each interval, act on its pulse, and drop the ones given
-/// up on. Returns when the stop flag flips.
-fn scan_loop(supervised: &mut Vec<Supervised>, stop: &StopFlag) {
+/// Scan every tail each interval, act on its pulse, and drop the ones that
+/// need no more supervision; then bring the volumes in step with the machine.
+/// Returns when the stop flag flips.
+fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
     loop {
         {
             let mut stopped = stop.stopped.lock();
@@ -420,18 +562,24 @@ fn scan_loop(supervised: &mut Vec<Supervised>, stop: &StopFlag) {
             }
         }
         let now = awake_secs();
+        let supervised = &mut fleet.supervised;
         let mut i = 0;
         while i < supervised.len() {
             if supervised[i].scan(now) {
                 i += 1;
-            } else {
-                // Given up on: its thread already retired, so this join is
-                // immediate. Dropping the entry releases the pulse and the
-                // duplicated thread handle, which the old watchdog held (and
-                // alarmed through) for the life of the process.
-                supervised.swap_remove(i).tail.shutdown();
+            } else if let Some(tail) = supervised.swap_remove(i).tail {
+                // Given up on, or a snapshot: its thread already retired, so
+                // this join is immediate. Dropping the entry releases the
+                // pulse and the duplicated thread handle, which the old
+                // watchdog held (and alarmed through) for the life of the
+                // process.
+                tail.shutdown();
             }
         }
+        // After the scan, so a volume found now gets its first poll a full
+        // scan interval after its start, the grace `poll_revival` assumes.
+        fleet.discover();
+        fleet.settle_once_indexed();
     }
 }
 
@@ -489,13 +637,52 @@ fn stop_tails(mut tails: Vec<TailHandle>) {
 }
 
 impl Supervised {
-    /// One scan of this tail. Returns false when supervision should end.
+    /// A volume that has no tail yet, with its first start under way. The
+    /// first start is not a revival, so it costs no budget.
+    fn start(state: Arc<VolumeState>) -> Supervised {
+        let mut supervised = Supervised {
+            state,
+            tail: None,
+            revive_attempts: 0,
+            beating_since: None,
+            pending: None,
+            last_failure: None,
+        };
+        supervised.launch();
+        supervised
+    }
+
+    /// Every tail this volume holds or has in flight, resolving a pending
+    /// start by `deadline` (see [`drain_pending`]), so the caller stops them
+    /// together.
+    fn into_tails(self, deadline: Instant) -> Vec<TailHandle> {
+        let mut tails = Vec::new();
+        if let Some(pending) = self.pending
+            && let Some(fresh) = drain_pending(pending, self.state.mount_prefix(), deadline)
+        {
+            tails.push(fresh);
+        }
+        tails.extend(self.tail);
+        tails
+    }
+
+    /// One scan of this volume. Returns false when supervision should end.
     fn scan(&mut self, now: u64) -> bool {
         if self.pending.is_some() {
             self.poll_revival();
             return true;
         }
-        let pulse = self.tail.pulse.load();
+        // No tail yet reads as a retired one: started while budget lasts.
+        let pulse = self
+            .tail
+            .as_ref()
+            .map_or(Pulse::Retired, |t| t.pulse.load());
+        if pulse == Pulse::Retired && *self.state.phase.read() == VolumePhase::Snapshot {
+            // The tail built the index and found that the volume has no
+            // journal and never will: the index is complete and there is
+            // nothing to tail, so reviving it would only rebuild it again.
+            return false;
+        }
         // Track the unbroken run of healthy observations this incarnation
         // has shown. Sampled at scan granularity, which can only
         // under-count health, never fake it. The anchor is only ever
@@ -503,7 +690,7 @@ impl Supervised {
         // bookkeeping (and the phase read) entirely; the common path costs
         // exactly the one atomic load the old watchdog cost.
         if self.revive_attempts > 0 {
-            let live = matches!(*self.tail.state.phase.read(), VolumePhase::Live);
+            let live = matches!(*self.state.phase.read(), VolumePhase::Live);
             self.beating_since =
                 accrue_health(self.beating_since, pulse, live, now, Instant::now());
         }
@@ -514,7 +701,7 @@ impl Supervised {
             Action::Nothing => true,
             Action::ResetBudget => {
                 tracing::debug!(
-                    volume = %self.tail.mount,
+                    volume = %self.state.mount_prefix(),
                     "revived tail has stayed healthy; revival budget refunded"
                 );
                 self.revive_attempts = 0;
@@ -522,7 +709,9 @@ impl Supervised {
                 true
             }
             Action::CancelIo { stalled_secs } => {
-                cancel_stuck_io(&self.tail, stalled_secs);
+                if let Some(tail) = &self.tail {
+                    cancel_stuck_io(tail, stalled_secs);
+                }
                 true
             }
             Action::Revive => {
@@ -536,12 +725,12 @@ impl Supervised {
         }
     }
 
-    /// Starts replacing a retired tail: charge the attempt, then hand the
-    /// blocking work (volume open, spawn) to a worker thread and poll it on
-    /// later scans. The attempt is charged up front: any failure leaves the
-    /// retired tail in place, a later scan lands back in [`Action::Revive`],
-    /// and the budget converts repeated failure into [`Action::GiveUp`] with
-    /// at least a scan interval of backoff between tries.
+    /// Starts replacing a retired tail, or retries a start that failed:
+    /// charge the attempt, then [`launch`](Self::launch). The attempt is
+    /// charged up front: any failure leaves the retired tail (or none) in
+    /// place, a later scan lands back in [`Action::Revive`], and the budget
+    /// converts repeated failure into [`Action::GiveUp`] with at least a scan
+    /// interval of backoff between tries.
     fn launch_revival(&mut self) {
         self.revive_attempts += 1;
         self.beating_since = None;
@@ -550,18 +739,30 @@ impl Supervised {
         // before the revival window opens: a revival blocked on sick
         // hardware must not extend a false Live indefinitely.
         {
-            let mut phase = self.tail.state.phase.write();
+            let mut phase = self.state.phase.write();
             if matches!(*phase, VolumePhase::Live | VolumePhase::Rescanning) {
                 *phase = VolumePhase::Offline;
             }
         }
         tracing::warn!(
-            volume = %self.tail.mount,
+            volume = %self.state.mount_prefix(),
             attempt = self.revive_attempts,
             budget = MAX_REVIVES,
-            "tail thread exited; reviving it"
+            "{}",
+            if self.tail.is_some() {
+                "tail thread exited; reviving it"
+            } else {
+                "the volume's tail did not start; retrying"
+            }
         );
-        let state = self.tail.state.clone();
+        self.launch();
+    }
+
+    /// Hands the blocking work of starting a tail (volume open, spawn) to a
+    /// worker thread, which [`poll_revival`](Self::poll_revival) polls on
+    /// later scans. The tail's first act is the full build.
+    fn launch(&mut self) {
+        let state = self.state.clone();
         let (io_tx, io_rx) = mpsc::sync_channel(1);
         // Capacity 0 (rendezvous) on purpose: a buffered channel would let
         // the worker's send "succeed" with nobody listening, right as
@@ -571,13 +772,13 @@ impl Supervised {
         // poll or fails the send and cleans up itself.
         let (result_tx, result_rx) = mpsc::sync_channel(0);
         let spawned = std::thread::Builder::new()
-            .name(format!("goz-revive-{}", self.tail.mount))
+            .name(format!("goz-start-{}", self.state.mount_prefix()))
             .spawn(move || {
                 // Duplicated ON the worker (the pseudo-handle is per-thread)
                 // so the supervisor can cancel an open a sick device pends.
                 let _ = io_tx.send(goz_winfs::current_thread_io_handle());
                 let outcome = goz_winfs::open_volume(&state.guid)
-                    .map_err(|e| std::io::Error::other(format!("reopening the volume: {e}")))
+                    .map_err(|e| std::io::Error::other(format!("opening the volume: {e}")))
                     .and_then(|handle| tail::spawn(state, handle, None));
                 if let Err(returned) = result_tx.send(outcome) {
                     // The supervisor stopped listening (teardown abandoned
@@ -602,15 +803,15 @@ impl Supervised {
             }
             Err(e) => {
                 tracing::error!(
-                    volume = %self.tail.mount,
+                    volume = %self.state.mount_prefix(),
                     error = %e,
-                    "could not start a revival worker; retrying next scan while budget lasts"
+                    "could not start a worker to start the tail; retrying next scan while budget lasts"
                 );
             }
         }
     }
 
-    /// One poll of an in-flight revival. The first poll happens a full scan
+    /// One poll of an in-flight start. The first poll happens a full scan
     /// interval after launch, which is the grace a legitimate spin-up gets;
     /// a worker still silent after that is presumed blocked in the open and
     /// has its I/O cancelled each scan until it reports.
@@ -626,26 +827,29 @@ impl Supervised {
                 let _ = pending.worker.join();
                 match outcome {
                     Ok(fresh) => {
-                        tracing::info!(volume = %fresh.mount, "tail revived");
+                        tracing::info!(volume = %fresh.mount, "tail started");
                         // The old thread already retired, so this join is
                         // immediate; shutting it down (not just dropping
                         // it) reaps the thread.
-                        std::mem::replace(&mut self.tail, fresh).shutdown();
+                        if let Some(old) = self.tail.replace(fresh) {
+                            old.shutdown();
+                        }
                     }
                     Err(e) => {
                         tracing::error!(
-                            volume = %self.tail.mount,
+                            volume = %self.state.mount_prefix(),
                             error = %e,
-                            "revival failed; retrying next scan while budget lasts"
+                            "starting the tail failed; retrying next scan while budget lasts"
                         );
+                        self.last_failure = Some(e.to_string());
                     }
                 }
             }
             Err(mpsc::TryRecvError::Empty) => {
                 if !pending.reported_blocked {
                     tracing::warn!(
-                        volume = %self.tail.mount,
-                        "revival is blocked opening the volume; cancelling its I/O"
+                        volume = %self.state.mount_prefix(),
+                        "starting the tail is blocked opening the volume; cancelling its I/O"
                     );
                     pending.reported_blocked = true;
                 }
@@ -657,31 +861,42 @@ impl Supervised {
                 let pending = self.pending.take().expect("pending checked above");
                 let _ = pending.worker.join();
                 tracing::error!(
-                    volume = %self.tail.mount,
-                    "revival worker died without reporting; retrying next scan while budget lasts"
+                    volume = %self.state.mount_prefix(),
+                    "the worker starting the tail died without reporting; retrying next scan while budget lasts"
                 );
             }
         }
     }
 
-    /// The budget is spent: say so once, loudly, and stop supervising. The
+    /// The budget is spent: say so once, loudly, and stop supervising. A
     /// tail's own exit already set an honest phase with its own reason
     /// (`Failed` or `Offline`, both logged), and `launch_revival` corrects
-    /// the panic signature before each attempt, so the correction below is
+    /// the panic signature before each attempt. A volume still
+    /// `Bootstrapping` was never indexed, because its tail never started or
+    /// never finished the first build; it becomes `Failed` here, or it would
+    /// claim to be indexing forever. The `Live` correction is
     /// belt-and-braces for any future path that retires a Live tail without
     /// a revival ever launching.
     fn give_up(&self) {
         tracing::error!(
-            volume = %self.tail.mount,
+            volume = %self.state.mount_prefix(),
             attempts = self.revive_attempts,
-            "tail thread keeps dying; giving up until the daemon restarts"
+            "the volume's tail keeps failing; giving up until the daemon restarts"
         );
-        let mut phase = self.tail.state.phase.write();
-        if matches!(*phase, VolumePhase::Live | VolumePhase::Rescanning) {
-            *phase = VolumePhase::Failed {
-                reason: "tail thread kept dying; live updates stopped".into(),
-            };
-        }
+        let mut phase = self.state.phase.write();
+        let reason = match *phase {
+            VolumePhase::Bootstrapping => format!(
+                "never indexed: {}",
+                self.last_failure
+                    .as_deref()
+                    .unwrap_or("its tail kept stopping")
+            ),
+            VolumePhase::Live | VolumePhase::Rescanning => {
+                "tail thread kept dying; live updates stopped".into()
+            }
+            _ => return,
+        };
+        *phase = VolumePhase::Failed { reason };
     }
 }
 
@@ -805,6 +1020,45 @@ mod tests {
         // Busy and Retired break it regardless of phase.
         assert_eq!(accrue_health(started, busy_for(0), true, NOW, t0), None);
         assert_eq!(accrue_health(started, Pulse::Retired, true, NOW, t0), None);
+    }
+
+    /// Only a volume missing from the list leaves the index. An indexed volume
+    /// whose filesystem query fails once classifies as not indexable; building
+    /// the set from the indexable volumes alone would drop it and rebuild its
+    /// whole index on the next scan. A volume gozler skips is not added.
+    #[test]
+    fn only_a_volume_that_is_no_longer_listed_leaves_the_index() {
+        let indexed = r"\\?\Volume{11111111-0000-0000-0000-000000000000}\";
+        let usb_stick = r"\\?\Volume{22222222-0000-0000-0000-000000000000}\";
+        let volumes = Arc::new(VolumeRegistry::default());
+        volumes.add(Arc::new(VolumeState::new(
+            indexed.into(),
+            vec![r"E:\".into()],
+        )));
+        let mut fleet = Fleet {
+            volumes: volumes.clone(),
+            supervised: Vec::new(),
+            skipped: HashSet::new(),
+            discovery: None,
+            starting: None,
+        };
+        let listed = |guid: &str, is_fixed, filesystem: Option<&str>| VolumeInfo {
+            guid_path: guid.into(),
+            mounts: Vec::new(),
+            is_fixed,
+            filesystem: filesystem.map(Into::into),
+        };
+        let guids =
+            || -> Vec<String> { volumes.current().iter().map(|v| v.guid.clone()).collect() };
+
+        fleet.reconcile(vec![
+            listed(indexed, true, None),
+            listed(usb_stick, false, Some("FAT32")),
+        ]);
+        assert_eq!(guids(), [indexed]);
+
+        fleet.reconcile(Vec::new());
+        assert!(guids().is_empty(), "a volume that is gone leaves the index");
     }
 
     /// A stamp newer than the scan's clock reading (a tail that beat after
