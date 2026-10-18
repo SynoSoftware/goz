@@ -48,7 +48,9 @@ Use the vocabulary in `CONTEXT.md`.
   `crates/gozler-core/benches` before you claim a speed-up: run
   `pwsh ./check.ps1 -Bench <name filter>` once before your change and once
   after, because criterion compares each run against the run before it, which
-  may be another agent's.
+  may be another agent's. On Windows the benches count the bench thread's CPU
+  cycles, not wall time, because other work on this machine moves wall-clock
+  timings by tens of percent.
 - **Use plain code.** Use `std` and the workspace's existing dependencies. Add
   a trait, a generic or a macro when it removes real duplication.
 - **Link code in doc comments** with intra-doc links (``[`Frn`]``), so the CI

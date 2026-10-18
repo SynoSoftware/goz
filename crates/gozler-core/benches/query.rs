@@ -9,6 +9,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod measure;
+
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::query::{CompiledQuery, parse_query, run_query, run_query_deferrable};
@@ -94,7 +96,7 @@ fn compiled(query: &str) -> CompiledQuery {
     CompiledQuery::new(&parse_query(query).unwrap()).unwrap()
 }
 
-fn bench_query(c: &mut Criterion) {
+fn bench_query(c: &mut Criterion<measure::Measure>) {
     let (idx, count) = build_index();
     let total = idx.len();
     eprintln!("built index: {count} files, {total} live entries");
@@ -199,5 +201,9 @@ fn bench_query(c: &mut Criterion) {
     broad.finish();
 }
 
-criterion_group!(benches, bench_query);
+criterion_group! {
+    name = benches;
+    config = measure::criterion();
+    targets = bench_query
+}
 criterion_main!(benches);

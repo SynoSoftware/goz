@@ -414,6 +414,7 @@ name = "gozler-core"
 version = "0.2.0"
 dependencies = [
  "criterion",
+ "gozler-winfs",
  "hashbrown",
  "memchr",
  "mimalloc",

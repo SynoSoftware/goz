@@ -46,7 +46,7 @@ pub use error::WinError;
 #[cfg(windows)]
 pub use cancel_io::{ThreadIoHandle, cancel_synchronous_io, current_thread_io_handle};
 #[cfg(windows)]
-pub use clock::awake_time;
+pub use clock::{awake_time, thread_cycles};
 #[cfg(windows)]
 pub use working_set::{SelfMemory, pin_working_set, self_memory, trim_working_set};
 

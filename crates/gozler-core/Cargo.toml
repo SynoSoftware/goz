@@ -25,6 +25,10 @@ proptest.workspace = true
 criterion.workspace = true
 mimalloc = "0.1"
 
+# The benches count CPU cycles on Windows (benches/measure).
+[target.'cfg(windows)'.dev-dependencies]
+gozler-winfs = { path = "../gozler-winfs" }
+
 [[bench]]
 name = "query"
 harness = false

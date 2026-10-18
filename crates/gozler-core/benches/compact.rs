@@ -17,6 +17,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod measure;
+
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::types::Frn;
@@ -134,7 +136,7 @@ fn dirty_index() -> VolumeIndex {
     idx
 }
 
-fn bench_compact(c: &mut Criterion) {
+fn bench_compact(c: &mut Criterion<measure::Measure>) {
     let idx = dirty_index();
     assert!(
         idx.plan_compaction().is_some(),
@@ -179,5 +181,9 @@ fn bench_compact(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_compact);
+criterion_group! {
+    name = benches;
+    config = measure::criterion();
+    targets = bench_compact
+}
 criterion_main!(benches);
