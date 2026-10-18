@@ -383,5 +383,36 @@ mod tests {
             prop_assert_eq!(got, payloads);
             prop_assert_eq!(dec.next_frame(), Ok(None));
         }
+
+        /// Both ends of the pipe decode bytes the other side wrote, so any
+        /// bytes can arrive. The decoder must never panic, never return a
+        /// frame over its cap, and stay failed once it has refused one.
+        #[test]
+        fn arbitrary_bytes_never_exceed_the_cap(
+            chunks in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..32), 0..16),
+            max_frame in 0u32..64,
+        ) {
+            let mut dec = FrameDecoder::new(max_frame);
+            let mut refused = false;
+            for chunk in &chunks {
+                dec.feed(chunk);
+                loop {
+                    match dec.next_frame() {
+                        Ok(Some(frame)) => {
+                            prop_assert!(!refused, "a frame after a refusal");
+                            prop_assert!(frame.len() <= max_frame as usize);
+                        }
+                        Ok(None) => {
+                            prop_assert!(!refused, "no error after a refusal");
+                            break;
+                        }
+                        Err(_) => {
+                            refused = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -148,7 +148,6 @@ impl NameStore {
     /// Interns `name`, bumping its refcount (creating it on first sight).
     /// Panics only if `name` exceeds 64 KiB, which no NTFS component can.
     pub(crate) fn intern(&mut self, name: &[u8]) -> NameId {
-        debug_assert!(name.len() <= u16::MAX as usize, "name exceeds 64 KiB");
         let hash = hash_bytes(name);
         if let Some(&id) = self.by_bytes.find(hash, |&id| {
             self.raw_bytes_of(self.pairs[id as usize]) == name
@@ -158,10 +157,6 @@ impl NameStore {
         }
 
         let folded_bytes = crate::fold::fold(name);
-        debug_assert!(
-            folded_bytes.len() <= u16::MAX as usize,
-            "folded name exceeds 64 KiB"
-        );
         let folded = Self::push(&mut self.folded, &folded_bytes);
         let raw = if folded_bytes.as_slice() == name {
             NameRef {
@@ -190,13 +185,12 @@ impl NameStore {
     }
 
     fn push(buf: &mut Vec<u8>, bytes: &[u8]) -> NameRef {
+        let len = u16::try_from(bytes.len())
+            .expect("every name source caps a name at 255 UTF-16 units, far below 64 KiB");
         let off = buf.len() as u32;
         buf.extend_from_slice(bytes);
         buf.push(0);
-        NameRef {
-            off,
-            len: bytes.len() as u16,
-        }
+        NameRef { off, len }
     }
 
     /// The raw (original-case) bytes of `id`.
@@ -443,11 +437,6 @@ impl EntryFlags {
     pub const PLACEHOLDER: EntryFlags = EntryFlags(1 << 3);
     /// The name contained unpaired UTF-16 surrogates (WTF-8, not UTF-8).
     pub const NON_UNICODE_NAME: EntryFlags = EntryFlags(1 << 4);
-    /// Not a member of its parent's child chain: the parent's slot was
-    /// reclaimed (stale record reuse) while this entry still pointed at it,
-    /// so the entry was severed rather than left to cross-link a reused
-    /// slot's chain. Cleared when a rename relinks it under a real parent.
-    pub const CHAIN_DETACHED: EntryFlags = EntryFlags(1 << 5);
 
     pub const EMPTY: EntryFlags = EntryFlags(0);
 
@@ -476,7 +465,6 @@ impl core::fmt::Debug for EntryFlags {
             (Self::LOST_FOUND, "LOST_FOUND"),
             (Self::PLACEHOLDER, "PLACEHOLDER"),
             (Self::NON_UNICODE_NAME, "NON_UNICODE_NAME"),
-            (Self::CHAIN_DETACHED, "CHAIN_DETACHED"),
         ] {
             if self.contains(bit) {
                 parts.push(name);
@@ -580,6 +568,11 @@ impl EntryTable {
         let i = idx as usize;
         debug_assert!(!self.flags[i].contains(EntryFlags::TOMBSTONE));
         self.flags[i] = EntryFlags::TOMBSTONE;
+        // A dead slot keeps no link into the tree or the name store: its old
+        // parent may be dead too, and a compaction gives its old name id to
+        // another name.
+        self.parent[i] = NIL;
+        self.name_id[i] = NIL;
         self.next_link[i] = NIL;
         self.next_same[i] = NIL;
         self.prev_same[i] = NIL;
@@ -743,6 +736,10 @@ impl EntryTable {
     }
 }
 
+/// How many records past twice its length a dense [`FrnMap`] still grows to
+/// before [`FrnMap::set`] switches it to the sparse backing.
+const DENSE_GROWTH_SLACK: u64 = 1 << 16;
+
 /// Maps a 48-bit MFT record number to its chain-head [`EntryIdx`].
 ///
 /// Keyed by record number (not the full FRN) so slot reuse is detectable:
@@ -780,8 +777,18 @@ impl FrnMap {
         }
     }
 
+    /// Maps `record` to `idx`. A dense map switches to the sparse backing for
+    /// a record number far past its end: a real MFT grows a little at a time,
+    /// but a corrupt journal record can carry any 48-bit number, and growing
+    /// the `Vec` to it would abort the daemon on a failed allocation.
     #[inline]
     pub fn set(&mut self, record: u64, idx: EntryIdx) {
+        if let FrnMap::Dense(v) = self
+            && record > v.len() as u64 * 2 + DENSE_GROWTH_SLACK
+        {
+            let records = v.iter().enumerate().filter(|&(_, &i)| i != NIL);
+            *self = FrnMap::Sparse(records.map(|(r, &i)| (r as u64, i)).collect());
+        }
         match self {
             FrnMap::Dense(v) => {
                 let r = record as usize;

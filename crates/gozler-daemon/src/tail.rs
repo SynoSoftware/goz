@@ -515,8 +515,8 @@ fn reconcile_links(
         pulse.beat();
         let links = match gozler_winfs::link_paths(handle, frn.0) {
             Ok(Some(l)) if !l.is_empty() => l,
-            // Gone, locked, or unwalkable: leave the entry alone. The structural
-            // delete, if there was one, already arrived through the journal.
+            // Gone: leave the entry alone. The journal's delete record
+            // removes it.
             Ok(_) => continue,
             Err(e) => {
                 tracing::debug!(volume = %state.mount_prefix(), frn = frn.0, error = %e, "link walk failed");

@@ -227,8 +227,8 @@ pub struct VolumeStatus {
     pub delete_of_unknown: u64,
     #[serde(default)]
     pub stale_slots: u64,
-    /// Hard-link changes whose Win32 link-set walk could not complete (file
-    /// gone, locked, or a parent not yet indexed). See
+    /// Hard-link changes whose Win32 link-set walk could not complete (the
+    /// walk failed, or a link's folder is not indexed yet). See
     /// `ApplyOutcome::needs_link_reconcile`: successful walks are reconciled
     /// live; these are skipped and counted. Non-zero means a few names on this
     /// volume may be stale until the next rescan.

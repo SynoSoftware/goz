@@ -509,7 +509,7 @@ impl<'q, 'i> Scan<'q, 'i> {
         //
         // Asks the very memo the page loop uses rather than re-deriving its
         // rules, so the two cannot drift. Gated on `has_orphans` because an
-        // index with no live placeholder cannot contain an unpresentable
+        // index with nothing under lost+found cannot contain an unpresentable
         // entry: `has_orphans` is a single load, while the walk it guards is
         // one path build per distinct parent folder, which on a broad limited
         // query is tens of thousands of builds the page (100 rows) would never

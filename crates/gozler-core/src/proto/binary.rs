@@ -224,6 +224,7 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn round_trip(page: &QueryResults) {
         let mut payload = Vec::new();
@@ -328,6 +329,30 @@ mod tests {
         // Chop bytes off the end at every length; none should panic.
         for cut in 0..payload.len() {
             let _ = decode_results_payload(&payload[1..cut.max(1)]);
+        }
+    }
+
+    proptest! {
+        /// A results page arrives from the pipe, so any bytes can arrive, and
+        /// a panic would end the client instead of reporting a bad page.
+        #[test]
+        fn corrupted_pages_error_instead_of_panicking(
+            paths in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..16), 0..4),
+            patches in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let mut payload = Vec::new();
+            push_results_header(&mut payload, 1, 2, true, false, false, paths.len() as u32);
+            for path in &paths {
+                push_item(&mut payload, path, false, Some(3), Some(4));
+            }
+            let mut body = payload.split_off(1);
+            let len = body.len();
+            for (at, byte) in &patches {
+                body[at.index(len)] = *byte;
+            }
+            body.truncate(cut.index(len + 1));
+            let _ = decode_results_payload(&body);
         }
     }
 

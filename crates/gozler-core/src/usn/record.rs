@@ -23,7 +23,7 @@
 use zerocopy::byteorder::little_endian::{I64, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
-use crate::types::Frn;
+use crate::types::{Frn, MAX_NAME_UTF16_BYTES};
 use crate::wtf8;
 
 /// `USN_REASON_DATA_OVERWRITE`: data in the file was overwritten.
@@ -115,8 +115,9 @@ pub enum WalkError {
     #[error("USN record at offset {offset} is too short for its version's fixed header")]
     TruncatedHeader { offset: usize },
     /// The name span (`FileNameOffset .. FileNameOffset + FileNameLength`)
-    /// falls outside the record, or `FileNameLength` is odd (names are
-    /// UTF-16 code units, so byte lengths are always even).
+    /// falls outside the record, `FileNameLength` is odd (names are UTF-16
+    /// code units, so byte lengths are always even), or it is longer than
+    /// any NTFS name (255 code units).
     #[error("USN record at offset {offset} has a malformed file-name span")]
     MalformedName { offset: usize },
 }
@@ -353,7 +354,7 @@ fn extract_name(
     min_name_off: usize,
     offset: usize,
 ) -> Result<(Vec<u8>, bool), WalkError> {
-    if !name_len.is_multiple_of(2) {
+    if !name_len.is_multiple_of(2) || name_len > MAX_NAME_UTF16_BYTES {
         return Err(WalkError::MalformedName { offset });
     }
     // The name must start at or after the version's fixed header. A
@@ -540,6 +541,19 @@ mod tests {
         assert_eq!(r.name.len(), 255);
         assert_eq!(wtf8::to_utf16(&r.name), name_units);
         assert!(!r.name_lossy);
+    }
+
+    /// The layout parser rejected names past the NTFS limit, but the journal
+    /// parser took any even length up to 65534 bytes, and the index stored a
+    /// name over 64 KiB in WTF-8 with a wrapped length.
+    #[test]
+    fn name_longer_than_ntfs_allows_is_an_error() {
+        let fx = RecordFixture::file(1, 2, "").with_name_units(vec![0x0078u16; 256]);
+        let buf = build_enum_buffer(0, &[fx]);
+        assert_eq!(
+            walk_enum_buffer(&buf).unwrap_err(),
+            WalkError::MalformedName { offset: 8 }
+        );
     }
 
     #[test]
@@ -801,6 +815,37 @@ mod tests {
                 let walk = walk_journal_buffer(&buf).expect("fixture buffers must walk");
                 prop_assert_eq!(walk.next_usn, lead);
                 prop_assert_eq!(walk.records.len(), recs.len());
+            }
+
+            /// Journal and enum buffers come from the disk, so any bytes can
+            /// arrive. A corrupt buffer must give an error, not a panic that
+            /// stops the volume's tail, and never a name longer than NTFS
+            /// allows (255 UTF-16 units, at most 765 bytes of WTF-8).
+            #[test]
+            fn corrupted_buffers_error_instead_of_panicking(
+                recs in proptest::collection::vec(arb_fixture(), 1..4),
+                v3 in any::<bool>(),
+                patches in proptest::collection::vec(
+                    (any::<proptest::sample::Index>(), any::<u8>()),
+                    0..8,
+                ),
+                cut in any::<proptest::sample::Index>(),
+            ) {
+                let version = if v3 { 3 } else { 2 };
+                let recs: Vec<_> = recs.into_iter().map(|f| f.with_version(version)).collect();
+                let mut buf = build_enum_buffer(0, &recs);
+                let len = buf.len();
+                for (at, byte) in &patches {
+                    buf[at.index(len)] = *byte;
+                }
+                buf.truncate(cut.index(len + 1));
+                let records = [
+                    walk_enum_buffer(&buf).map(|w| w.records),
+                    walk_journal_buffer(&buf).map(|w| w.records),
+                ];
+                for r in records.iter().flatten().flatten() {
+                    prop_assert!(r.name.len() <= 765, "{}-byte name", r.name.len());
+                }
             }
         }
     }

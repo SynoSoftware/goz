@@ -37,6 +37,11 @@ impl fmt::Debug for Frn {
     }
 }
 
+/// The most bytes an NTFS name can take in UTF-16: 255 code units. The
+/// journal and layout parsers reject a longer name as a corrupt record, which
+/// also keeps every stored name far below the index's 64 KiB name limit.
+pub(crate) const MAX_NAME_UTF16_BYTES: usize = 510;
+
 /// Dense index into the `EntryTable` columns.
 pub type EntryIdx = u32;
 

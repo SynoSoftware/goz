@@ -225,6 +225,82 @@ fn parent_slot_reuse_never_leaks_the_stale_chain() {
     );
 }
 
+/// The daemon caches the entry of the last `-path` folder and checks it with
+/// `path_of` on the next query. A removed entry kept its old name id, which a
+/// compaction gives to another name or to none, so the check built a wrong
+/// path or panicked on every later `-path` query.
+#[test]
+fn removed_entry_has_no_path_after_compaction() {
+    let mut idx = new_index();
+    let mut batch: Vec<_> = (0..400)
+        .map(|i| create(frn(1000 + i), root_frn(), &format!("{i:040}"), false))
+        .collect();
+    batch.push(create(frn(100), root_frn(), "proj", true));
+    idx.apply_batch(&batch);
+    let proj = idx.head_of(frn(100)).unwrap();
+
+    let deletes: Vec<_> = (0..400)
+        .map(|i| delete(frn(1000 + i)))
+        .chain([delete(frn(100))])
+        .collect();
+    idx.apply_batch(&deletes);
+    let plan = idx
+        .plan_compaction()
+        .expect("every deleted name is garbage");
+    idx.apply_compaction(plan);
+
+    assert_eq!(idx.path_of(proj, &mut Vec::new()), PathStatus::Removed);
+}
+
+/// A folder can be removed while a child is still indexed, because the
+/// child's own delete was missed. The child kept pointing at the folder's
+/// freed slot, so the next entry in that slot showed the child under its own
+/// path, and `-path` resolved the child as that entry's subfolder.
+#[test]
+fn children_of_a_removed_folder_move_to_lost_found() {
+    let mut idx = index_from_enum(&[
+        create(frn(100), root_frn(), "old", true),
+        create(frn(101), frn(100), "sub", true),
+    ]);
+    // The delete of `sub` is missed; `old` goes, and `new` reuses its slot.
+    idx.apply_batch(&[delete(frn(100)), create(frn(102), root_frn(), "new", true)]);
+    let new = idx.head_of(frn(102)).unwrap();
+    assert_eq!(path_set(&idx), BTreeSet::from(["new".to_string()]));
+    assert_eq!(idx.child_dir(new, b"sub".to_vec()), None);
+    assert!(
+        idx.has_orphans(),
+        "queries must check for entries without a path"
+    );
+    assert!(idx.dir_index_matches_rebuild());
+    assert!(idx.child_chains_match_rebuild());
+
+    // The child's own record re-parents it.
+    idx.apply_batch(&[rename(frn(101), frn(102), "sub", true)]);
+    assert_eq!(
+        path_set(&idx),
+        BTreeSet::from(["new".to_string(), "new\\sub".to_string()])
+    );
+    assert!(!idx.has_orphans());
+}
+
+/// After `optimize_storage` the FRN map is a `Vec` indexed by record number. A
+/// journal record with a record number near 2^48 grew it to petabytes, and the
+/// failed allocation aborted the daemon.
+#[test]
+fn far_record_number_does_not_grow_the_dense_map() {
+    let files: Vec<_> = (0..200)
+        .map(|i| create(frn(100 + i), root_frn(), &format!("{i}.txt"), false))
+        .collect();
+    let mut idx = index_from_enum(&files);
+    idx.optimize_storage();
+    assert_eq!(idx.memory().frn_map_kind, "dense");
+
+    let far = frn((1 << 48) - 1);
+    idx.apply_batch(&[create(far, root_frn(), "far.txt", false)]);
+    assert_eq!(path_of_frn(&idx, far).as_deref(), Some("far.txt"));
+    assert_eq!(path_of_frn(&idx, frn(100)).as_deref(), Some("0.txt"));
+}
+
 #[test]
 fn double_apply_equals_single_apply() {
     let mut once = index_from_enum(&[create(frn(100), root_frn(), "dir", true)]);
