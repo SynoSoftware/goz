@@ -1,4 +1,4 @@
-//! goz: the CLI client.
+//! gozler: the goz CLI client.
 //!
 //! Parses arguments with the es.exe-compatible rules from
 //! `goz-core::escompat`, talks to the running daemon over `\\.\pipe\goz-v1`,
@@ -28,7 +28,7 @@ fn main() -> ExitCode {
     let plan = match parse_argv(&args) {
         Ok(p) => p,
         Err(fatal) => {
-            eprintln!("goz: {}", fatal.message);
+            eprintln!("gozler: {}", fatal.message);
             return ExitCode::from(fatal.exit_code);
         }
     };
@@ -37,7 +37,7 @@ fn main() -> ExitCode {
 
 #[cfg(not(windows))]
 fn execute(_plan: goz_core::escompat::EsPlan) -> ExitCode {
-    eprintln!("goz: this client requires Windows (it talks to the gozd daemon)");
+    eprintln!("gozler: this client requires Windows (it talks to the gozlerd daemon)");
     ExitCode::from(8)
 }
 
@@ -68,7 +68,7 @@ mod win {
             Some(path) => match std::fs::File::create(path) {
                 Ok(f) => Some(f),
                 Err(e) => {
-                    eprintln!("goz: cannot create {path}: {e}");
+                    eprintln!("gozler: cannot create {path}: {e}");
                     return Err(ExitCode::from(5));
                 }
             },
@@ -82,20 +82,22 @@ mod win {
                 eprintln!(
                     "Error 8: Everything IPC window not found. Please make sure Everything is running."
                 );
-                eprintln!("goz: the gozd daemon is not running (start it with `gozd run`).");
+                eprintln!(
+                    "gozler: the gozlerd daemon is not running (start it with `gozlerd run`)."
+                );
                 return Err(ExitCode::from(8));
             }
             Err(ClientError::Untrusted) => {
                 eprintln!(
-                    "goz: the pipe server is not the trusted gozd daemon (owner is not SYSTEM/Administrators)."
+                    "gozler: the pipe server is not the trusted gozlerd daemon (owner is not SYSTEM/Administrators)."
                 );
                 eprintln!(
-                    "goz: refusing to send the query. If this is expected, pass --insecure-no-server-check."
+                    "gozler: refusing to send the query. If this is expected, pass --insecure-no-server-check."
                 );
                 return Err(ExitCode::from(9));
             }
             Err(ClientError::Protocol(m)) => {
-                eprintln!("goz: {m}");
+                eprintln!("gozler: {m}");
                 return Err(ExitCode::from(7));
             }
         };
@@ -108,15 +110,15 @@ mod win {
         let results = match connection.request(&request) {
             Ok(Response::Results(r)) => r,
             Ok(Response::Error { message, .. }) => {
-                eprintln!("goz: {message}");
+                eprintln!("gozler: {message}");
                 return Err(ExitCode::from(4));
             }
             Ok(_) => {
-                eprintln!("goz: unexpected reply from daemon");
+                eprintln!("gozler: unexpected reply from daemon");
                 return Err(ExitCode::from(7));
             }
             Err(ClientError::Protocol(m)) => {
-                eprintln!("goz: {m}");
+                eprintln!("gozler: {m}");
                 return Err(ExitCode::from(7));
             }
             Err(ClientError::Unreachable) => {
@@ -126,14 +128,14 @@ mod win {
                 return Err(ExitCode::from(8));
             }
             Err(ClientError::Untrusted) => {
-                eprintln!("goz: pipe server not trusted");
+                eprintln!("gozler: pipe server not trusted");
                 return Err(ExitCode::from(9));
             }
         };
 
         if results.volumes_incomplete {
             eprintln!(
-                "goz: warning: some volumes are still indexing or unavailable; results may be incomplete"
+                "gozler: warning: some volumes are still indexing or unavailable; results may be incomplete"
             );
         }
 
@@ -167,7 +169,7 @@ mod win {
             Some(abs) => abs,
             None => {
                 eprintln!(
-                    "goz: warning: could not resolve '{path}' to an absolute path; scope may not match"
+                    "gozler: warning: could not resolve '{path}' to an absolute path; scope may not match"
                 );
                 path.to_owned()
             }
@@ -182,7 +184,7 @@ mod win {
         if let Some(mut file) = export_file {
             let bytes = render_csv(plan, results);
             if let Err(e) = file.write_all(&bytes) {
-                eprintln!("goz: writing export CSV failed: {e}");
+                eprintln!("gozler: writing export CSV failed: {e}");
                 return Err(ExitCode::from(5));
             }
             return Ok(ExitCode::SUCCESS);
@@ -191,14 +193,14 @@ mod win {
         if plan.json {
             match serde_json::to_string_pretty(results) {
                 Ok(s) => {
-                    // Locked writeln! that tolerates a broken pipe (`goz --json '*' | head`)
+                    // Locked writeln! that tolerates a broken pipe (`gozler --json '*' | head`)
                     // instead of println!, which panics on any stdout write error.
                     let stdout = std::io::stdout();
                     let mut out = stdout.lock();
                     let _ = writeln!(out, "{s}");
                 }
                 Err(e) => {
-                    eprintln!("goz: JSON encoding failed: {e}");
+                    eprintln!("gozler: JSON encoding failed: {e}");
                     return Err(ExitCode::from(7));
                 }
             }
@@ -207,7 +209,7 @@ mod win {
 
         // Default: one path per line. StdoutLock is a LineWriter (it flushes on every
         // newline), so wrap it in a BufWriter to batch a large result set into a few
-        // writes. A reader closing early (`goz * | head`) is a clean stop; a genuine
+        // writes. A reader closing early (`gozler * | head`) is a clean stop; a genuine
         // write failure reports exit 5.
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
@@ -216,14 +218,14 @@ mod win {
                 if e.kind() == std::io::ErrorKind::BrokenPipe {
                     return Ok(ExitCode::SUCCESS);
                 }
-                eprintln!("goz: writing results failed: {e}");
+                eprintln!("gozler: writing results failed: {e}");
                 return Err(ExitCode::from(5));
             }
         }
         if let Err(e) = out.flush()
             && e.kind() != std::io::ErrorKind::BrokenPipe
         {
-            eprintln!("goz: writing results failed: {e}");
+            eprintln!("gozler: writing results failed: {e}");
             return Err(ExitCode::from(5));
         }
         Ok(ExitCode::SUCCESS)
@@ -280,11 +282,11 @@ mod win {
     fn status(connection: &mut Client) -> Result<ExitCode, ExitCode> {
         match connection.request(&Request::Status) {
             Ok(Response::Status(s)) => {
-                // Locked writeln! that tolerates a broken pipe (`goz --status | head`)
+                // Locked writeln! that tolerates a broken pipe (`gozler --status | head`)
                 // instead of println!, which panics on any stdout write error.
                 let stdout = std::io::stdout();
                 let mut out = stdout.lock();
-                let _ = writeln!(out, "gozd status: {} volume(s)", s.volumes.len());
+                let _ = writeln!(out, "gozlerd status: {} volume(s)", s.volumes.len());
                 for v in &s.volumes {
                     let mount = v.mounts.first().cloned().unwrap_or_else(|| v.guid.clone());
                     let _ = writeln!(
@@ -364,16 +366,16 @@ mod win {
                     );
                 }
                 if s.volumes_incomplete {
-                    eprintln!("goz: some volumes are not fully live");
+                    eprintln!("gozler: some volumes are not fully live");
                 }
                 Ok(ExitCode::SUCCESS)
             }
             Ok(_) => {
-                eprintln!("goz: unexpected reply to status");
+                eprintln!("gozler: unexpected reply to status");
                 Err(ExitCode::from(7))
             }
             Err(ClientError::Protocol(m)) => {
-                eprintln!("goz: {m}");
+                eprintln!("gozler: {m}");
                 Err(ExitCode::from(7))
             }
             Err(ClientError::Unreachable) => {
@@ -383,7 +385,7 @@ mod win {
                 Err(ExitCode::from(8))
             }
             Err(ClientError::Untrusted) => {
-                eprintln!("goz: pipe server not trusted");
+                eprintln!("gozler: pipe server not trusted");
                 Err(ExitCode::from(9))
             }
         }

@@ -29,7 +29,7 @@ mustafaahci/goz).
   forgets `-n` on a volume of a million files. 20 rows plus the command, the
   warning and the next prompt fit one screen of a 25-line console. With no
   `-n`, goz prints at most 20 rows to stdout; when more exist, stderr says
-  `goz: warning: showing 20 of 1,234,567 matches; narrow the query or pass -n all`
+  `gozler: warning: showing 20 of 1,234,567 matches; narrow the query or pass -n all`
   and the exit code is 10. `-n all` prints every match. `-export-*` writes to
   a file, which floods nothing, so it exports every match unless `-n` is given.
   `-n 0` prints nothing and exits 10 when anything matches. Counts
@@ -37,7 +37,7 @@ mustafaahci/goz).
   `-get-result-count` honors `-n`.
 - New features follow goz's style: an es switch keeps es's name, aliases and
   single-dash form; a goz-only option goes behind `--`, as `--json` does.
-  Messages use `goz: <error>` and `goz: warning: <text>`.
+  Messages use `gozler: <error>` and `gozler: warning: <text>`.
 - **Owner decision: neither v0.2.0 nor es decides behavior.** They supply the
   names and the starting behavior; where either is wrong or worse for the
   user, goz fixes it, and the help lists every difference from es (below).
@@ -81,18 +81,18 @@ Each of these returns a wrong answer that looks valid, or hides a limit:
 
 | # | Command | v0.2.0 result | Fixed result |
 | --- | --- | --- | --- |
-| 1 | `goz "C:\repo\docs\testing.md"` | nothing, exit 0 (paths are matched without the drive) | that file, as in es: a drive path is a full-path term |
-| 2 | `goz dm:today`, or any unknown `name:` function | nothing, exit 0 (searched as text, which can never match, because Windows names cannot contain `:`) | the implemented function, or exit 4 `goz: unknown search function: dc:` |
-| 3 | `goz /a-d report` | nothing, exit 0 (`/a-d` searched as text) | files only (`/a` switch) |
-| 4 | `goz report -n 20` with 300 matches | 20 rows, no sign of more, exit 0 | the same 20 rows, the stderr warning, exit 10 |
+| 1 | `gozler "C:\repo\docs\testing.md"` | nothing, exit 0 (paths are matched without the drive) | that file, as in es: a drive path is a full-path term |
+| 2 | `gozler dm:today`, or any unknown `name:` function | nothing, exit 0 (searched as text, which can never match, because Windows names cannot contain `:`) | the implemented function, or exit 4 `gozler: unknown search function: dc:` |
+| 3 | `gozler /a-d report` | nothing, exit 0 (`/a-d` searched as text) | files only (`/a` switch) |
+| 4 | `gozler report -n 20` with 300 matches | 20 rows, no sign of more, exit 0 | the same 20 rows, the stderr warning, exit 10 |
 | 5 | any query while a volume is still indexing | results, stderr warning, exit 0 | the same results and warning, exit 2 |
-| 6 | `goz report -size -dm` | paths only | paths with size and date columns |
-| 7 | `goz -help` | exit 6 | usage, exit 0 |
+| 6 | `gozler report -size -dm` | paths only | paths with size and date columns |
+| 7 | `gozler -help` | exit 6 | usage, exit 0 |
 | 8 | pipe server fails the trust check | exit 9, the code es uses for "no results" | exit 3 |
-| 9 | `goz docs/agents/testing`, `goz path:docs/agents`, `goz C:/repo/docs/testing.md` | nothing, exit 0 (`-path C:/repo` already works) | the same matches as with `\` |
-| 10 | `goz 'path:"C:\Program Files"'` | searched as a name, because `parse_query` turns any token with quotes into a name term before it looks for a function | quotes delimit a function's value, as in es: `path:"C:\Program Files"` matches that path. Arguments are still joined and split into terms as in v0.2.0, so `goz "ext:cs size:>1mb"`, the way scripts build a query in one string, keeps working. A quoted term that contains a separator is a path term, not a name phrase, so `goz '"C:\Program Files (x86)\Microsoft"'` matches that path; unquoted, its piece `Files` would be a name term and match nothing. A wildcard in a quoted path term is still a wildcard (`'"C:\Program Files\*.cs"'`), because a literal `*` can never match a path. Examples never end a quoted path in `\`, because the Windows argument rules read `\"` as a literal quote |
-| 11 | `goz "!*\node_modules\*"`, `goz "*\docs\*"` | wildcards match names only, so a wildcard with `\` matches nothing | as in es: a wildcard containing `\` matches the full path |
-| 12 | `goz size:0..` on `C:` with every volume live | 627 fewer files than `file:` (measured 2026-10-17), for example `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\155.0.4283.62\155.0.4283.62.manifest`, which has a link count of 2 | find why those files never get a size or date, and fix it |
+| 9 | `gozler docs/agents/testing`, `gozler path:docs/agents`, `gozler C:/repo/docs/testing.md` | nothing, exit 0 (`-path C:/repo` already works) | the same matches as with `\` |
+| 10 | `gozler 'path:"C:\Program Files"'` | searched as a name, because `parse_query` turns any token with quotes into a name term before it looks for a function | quotes delimit a function's value, as in es: `path:"C:\Program Files"` matches that path. Arguments are still joined and split into terms as in v0.2.0, so `gozler "ext:cs size:>1mb"`, the way scripts build a query in one string, keeps working. A quoted term that contains a separator is a path term, not a name phrase, so `gozler '"C:\Program Files (x86)\Microsoft"'` matches that path; unquoted, its piece `Files` would be a name term and match nothing. A wildcard in a quoted path term is still a wildcard (`'"C:\Program Files\*.cs"'`), because a literal `*` can never match a path. Examples never end a quoted path in `\`, because the Windows argument rules read `\"` as a literal quote |
+| 11 | `gozler "!*\node_modules\*"`, `gozler "*\docs\*"` | wildcards match names only, so a wildcard with `\` matches nothing | as in es: a wildcard containing `\` matches the full path |
+| 12 | `gozler size:0..` on `C:` with every volume live | 627 fewer files than `file:` (measured 2026-10-17), for example `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\155.0.4283.62\155.0.4283.62.manifest`, which has a link count of 2 | find why those files never get a size or date, and fix it |
 
 ## Exit codes
 
@@ -116,7 +116,7 @@ v0.2.0 meanings; the rest are new or corrected.
 When several apply, the more serious wins: 1 and 3 to 8 first, then 2, then 9
 and 10, then 0. An empty answer from an indexing volume is 2, not 9.
 
-Each failure writes one `goz: ` line to stderr that says what failed and, where
+Each failure writes one `gozler: ` line to stderr that says what failed and, where
 it helps, what to do next. The codes live in one enum in `goz-core`, with each
 variant's meaning beside it, so the help lists them from the same source.
 
@@ -138,7 +138,7 @@ chose.
 | Status | `--status --json`: machine-readable daemon and per-volume state; `--status` exits 0 when every volume is complete (`VolumePhase::is_complete`) and none has `metadata_pending` set, 2 otherwise |
 | Matching | `-i` (alias of `-case`), `-whole-word` / `-ww`, `-match-path` / `-p`, `-regex` / `-r` |
 | Scope | `-parent DIR` (direct children), `-parent-path PATH` |
-| Kind and attributes | `/ad`, `/a-d`; other attribute letters after the attribute column below. The `/a` and `/o` parsers own every token that starts with `/a` or `/o`: a letter they do not support yet is exit 4 (`goz: /aH needs the attribute column, which this release does not have`), never search text, because `parse_argv` today sends an unmatched `/` token into the query, where it matches nothing |
+| Kind and attributes | `/ad`, `/a-d`; other attribute letters after the attribute column below. The `/a` and `/o` parsers own every token that starts with `/a` or `/o`: a letter they do not support yet is exit 4 (`gozler: /aH needs the attribute column, which this release does not have`), never search text, because `parse_argv` today sends an unmatched `/` token into the query, where it matches nothing |
 | Limit | `-count N`, es's alias of `-n`, and `-n all`. No paging: es's `-viewport-offset` and `-viewport-count` stay unsupported (exit 6). The pipe protocol keeps its `offset` field for applications. |
 | Sorting | es's `/o` forms (`/on`, `/o-n`, `/os`, `/o-s`, `/od`, `/o-d`, `/oe`, `/o-e`) and sort key `extension`, beside the existing `-sort` family |
 | Columns | `-name`, `-path-column`, `-full-path-and-name`, `-extension` / `-ext`; `-size` and `-dm` also in plain output |
@@ -187,15 +187,15 @@ its own, and the daemon's text path (below) passes the daemon's.
 
 ## Target help screen
 
-`goz -help` is generated from the tables (see Design), so the real text follows
+`gozler -help` is generated from the tables (see Design), so the real text follows
 the implementation. This sketch is the target it should read like.
 Everything's documentation settles the details it guesses, such as the column
 layout.
 
 ```text
-goz 0.3.0 - instant file search for Windows NTFS
+gozler 0.3.0 - instant file search for Windows NTFS
 
-Usage: goz [switches] [search terms]
+Usage: gozler [switches] [search terms]
 
   Finds files and folders by name, path, size and date. Terms combine with
   AND. Paths accept \ or /. Shows 20 results unless -n says otherwise.
@@ -256,13 +256,13 @@ GOZ OPTIONS
   --insecure-no-server-check   skip the daemon trust check (testing only)
 
 EXAMPLES
-  goz readme
-  goz C:/SynoSoftware/TinyTorrent2/*.cs
-  goz -path C:/repo ext:cs;cpp !test
-  goz *.log dm:7days /a-d
-  goz ext:cs -n all > files.txt
-  goz -get-result-count ext:cs
-  goz -r "^test[0-9]+\.cs$" -path C:/repo
+  gozler readme
+  gozler C:/SynoSoftware/TinyTorrent2/*.cs
+  gozler -path C:/repo ext:cs;cpp !test
+  gozler *.log dm:7days /a-d
+  gozler ext:cs -n all > files.txt
+  gozler -get-result-count ext:cs
+  gozler -r "^test[0-9]+\.cs$" -path C:/repo
 
 NOTES
   A volume that is offline makes every search outside -path exit 2; search
@@ -284,7 +284,7 @@ EXIT CODES
   4   invalid input: bad value, unknown function, malformed expression
   5   output or export failed
   6   unknown switch
-  7   communication failure, no reply in time, or a daemon older than goz
+  7   communication failure, no reply in time, or a daemon older than gozler
   8   daemon not running
   9   no matches, with -no-result-error
   10  output correct, but the limit left out more matches
@@ -310,7 +310,7 @@ EXIT CODES
   the highest version it covers, and serves a version-1 client the text
   queries version 1 promised. An older daemon answers the new client `Unsupported`;
   the client prints
-  `goz: the running gozd is older than this client; install the matching gozd`
+  `gozler: the running gozlerd is older than this client; install the matching gozlerd`
   and exits 7. Without the gate, an old daemon searches new functions as text
   and finds nothing with exit 0, or rejects the new request with a serde error
   that the client would report as invalid input.
@@ -354,7 +354,7 @@ EXIT CODES
 - **Help is generated** from those tables, never written as one block. The
   guard is a test that parses every switch, function and example the help
   lists. The unknown-switch and unknown-function errors add
-  `goz: run goz -help for the supported switches`.
+  `gozler: run gozler -help for the supported switches`.
 - **Order is deterministic.** Ties break on folded name, then volume, then
   file ID, then parent file ID, then raw name. Hard links need the last two
   keys: each link name is its own entry, and all of them share one file ID
@@ -403,8 +403,8 @@ are settled from that documentation too, because `es.exe` is no longer run.
   rows, the `a<b` row, and the `!` and `|` rows.
 - The twelve bug commands give the fixed results in the table, and every exit
   path maps to one code in the exit-code table.
-- A new `goz` against the old daemon exits 7 with the version message.
-- `goz -help` lists every switch, function and exit code goz accepts, and each
+- A new `gozler` against the old daemon exits 7 with the version message.
+- `gozler -help` lists every switch, function and exit code goz accepts, and each
   listed switch, function and example parses.
 - Every new command has a test for the behavior goz chose, each difference
   from es is a row of the differences table and a line of the help, and the

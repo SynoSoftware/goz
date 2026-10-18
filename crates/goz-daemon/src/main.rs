@@ -1,4 +1,4 @@
-//! gozd: the goz indexing daemon.
+//! gozlerd: the goz indexing daemon.
 //!
 //! Bootstraps per-volume indexes from the NTFS MFT, tails the USN change
 //! journal, and serves queries over `\\.\pipe\goz-v1`. `run` starts the live
@@ -33,7 +33,7 @@ mod volume_state;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gozd", version, about = "goz indexing daemon")]
+#[command(name = "gozlerd", version, about = "goz indexing daemon")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -160,7 +160,7 @@ fn run_scan(query: Option<String>) -> anyhow::Result<()> {
     use std::time::Instant;
 
     if !goz_winfs::is_elevated() {
-        eprintln!("note: gozd is not elevated; raw volume access will likely fail.");
+        eprintln!("note: gozlerd is not elevated; raw volume access will likely fail.");
         eprintln!("      run from an elevated terminal for a real scan.\n");
     }
 

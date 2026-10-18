@@ -1,6 +1,6 @@
 [package]
 name = "goz-cli"
-description = "goz: the CLI client. es.exe-compatible flags, blocking named-pipe client"
+description = "gozler: the goz CLI client. es.exe-compatible flags, blocking named-pipe client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 publish = false
 
 [[bin]]
-name = "goz"
+name = "gozler"
 path = "src/main.rs"
 
 [dependencies]

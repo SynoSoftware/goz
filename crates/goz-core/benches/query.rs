@@ -130,7 +130,7 @@ fn bench_query(c: &mut Criterion) {
     group.finish();
 
     // Broad limit=None: reconstructs and sorts the ENTIRE match set (~2M paths),
-    // the "dump everything" workload (export / `goz foo | wc`) where path
+    // the "dump everything" workload (export / `gozler foo | wc`) where path
     // reconstruction dominates. This is the case the perf work targets.
     let mut broad = c.benchmark_group("query_2M_broad_none");
     broad.sample_size(10);

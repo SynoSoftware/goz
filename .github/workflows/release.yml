@@ -54,8 +54,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Force -DestinationPath "dist/goz-${{ github.ref_name }}-windows-x86_64.zip" -Path `
-            target/release/goz.exe, `
-            target/release/gozd.exe, `
+            target/release/gozler.exe, `
+            target/release/gozlerd.exe, `
             LICENSE, `
             README.md
 

@@ -6,8 +6,8 @@ goz is four crates:
 
 - **`goz-core`**: pure, OS-agnostic. USN/MFT parsing, the index, the query engine, the wire protocol, CSV output, and `es`-compatible argv parsing. Tests run on any OS.
 - **`goz-winfs`**: the thin `unsafe` Win32 layer (`windows-sys` only). Buffers, typed structs, and opaque handles; it never parses an ioctl record payload. It depends on nothing else in the workspace, enforced by cargo-deny.
-- **`goz-daemon`** (`gozd`): bootstrap, USN journal tail, the tokio named-pipe server, and Windows service integration.
-- **`goz-cli`** (`goz`): the `es`-compatible CLI and the blocking named-pipe client.
+- **`goz-daemon`** (`gozlerd`): bootstrap, USN journal tail, the tokio named-pipe server, and Windows service integration.
+- **`goz-cli`** (`gozler`): the `es`-compatible CLI and the blocking named-pipe client.
 
 ## Index coherence
 

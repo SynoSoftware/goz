@@ -1,9 +1,9 @@
 //! Windows service integration (M8).
 //!
-//! `install` registers `gozd` as a LocalSystem auto-start service so the index
+//! `install` registers `gozlerd` as a LocalSystem auto-start service so the index
 //! is warm from boot for every user (admin or standard) with no per-session
 //! elevation. `uninstall` stops and removes it. `run` is the SCM entry point:
-//! Windows launches `gozd.exe run --service`, which hands the process to the
+//! Windows launches `gozlerd.exe run --service`, which hands the process to the
 //! service dispatcher and reports `StartPending` (with a heartbeat checkpoint,
 //! because bootstrap takes tens of seconds) → `Running` → `Stopped`.
 
@@ -41,10 +41,10 @@ const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 const ERROR_SERVICE_ALREADY_RUNNING: i32 = 1056;
 
 /// `ServiceInfo` describing how the SCM should launch us. `current_exe()`
-/// resolves to the installed `gozd.exe`, and `run --service` is the argv the
+/// resolves to the installed `gozlerd.exe`, and `run --service` is the argv the
 /// SCM starts it with.
 fn service_info() -> Result<ServiceInfo> {
-    let exe = std::env::current_exe().context("resolving the gozd.exe path")?;
+    let exe = std::env::current_exe().context("resolving the gozlerd.exe path")?;
     Ok(ServiceInfo {
         name: OsString::from(SERVICE_NAME),
         display_name: OsString::from(DISPLAY_NAME),
@@ -218,11 +218,11 @@ fn wait_for_stopped(service: &windows_service::service::Service) {
     }
 }
 
-/// SCM entry point (`gozd run --service`): hands the process to the service
+/// SCM entry point (`gozlerd run --service`): hands the process to the service
 /// dispatcher. Blocks until the service stops.
 pub(crate) fn run() -> Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
-        .context("starting the service dispatcher (is gozd being launched by the SCM?)")?;
+        .context("starting the service dispatcher (is gozlerd being launched by the SCM?)")?;
     Ok(())
 }
 
@@ -397,7 +397,7 @@ fn stopped_report(exit_code: ServiceExitCode) -> ServiceStatus {
 }
 
 /// Best-effort file logging for service mode (no console). Writes to
-/// `%SystemRoot%\Logs\goz\gozd.log`; any failure skips logging.
+/// `%SystemRoot%\Logs\goz\gozlerd.log`; any failure skips logging.
 ///
 /// The log must live where only SYSTEM and Administrators can create entries.
 /// Standard users may create folders anywhere under `%ProgramData%`, so a user
@@ -414,7 +414,7 @@ fn init_service_tracing() {
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("gozd.log"))
+        .open(dir.join("gozlerd.log"))
     else {
         return;
     };

@@ -414,7 +414,7 @@ fn hello(volumes: &VolumeSet, proto_min: u16, proto_max: u16) -> Response {
     }
     Response::Hello {
         proto: PROTO_VERSION,
-        server: concat!("gozd ", env!("CARGO_PKG_VERSION")).to_string(),
+        server: concat!("gozlerd ", env!("CARGO_PKG_VERSION")).to_string(),
         ready: all_volumes_live(volumes),
     }
 }

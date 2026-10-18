@@ -29,10 +29,10 @@ stage starts is done.
   daemon rule into `goz-core` without changing it. The installed daemon already sends
   what they need: every results page carries the full match count (`total`)
   and the `volumes_incomplete` flag. Their live checks run the built
-  `target\release\goz.exe` against the running `gozd`, which only reads.
+  `target\release\gozler.exe` against the running daemon, which only reads.
 - Stages 4 to 9 change the daemon. Their **Done when** is proven by tests over
   fixture indexes, as the `server.rs` tests do: a second daemon cannot run
-  beside the owner's, because `PIPE_NAME` is fixed and the running `gozd` owns
+  beside the owner's, because `PIPE_NAME` is fixed and the running daemon owns
   it.
 - Each daemon stage that grows the parsed query on the wire raises
   `PROTO_VERSION` by one. The daemon serves every version from 1 up to its
@@ -70,7 +70,7 @@ on any machine.
 **Done when:**
 - A test maps each failure to its code, and the precedence rule holds.
 - The help test parses every switch, function and example the help lists.
-- Against the running daemon: `goz -help` exits 0, and a query on a live
+- Against the running daemon: `gozler -help` exits 0, and a query on a live
   volume exits 0.
 
 ## Stage 2: the default limit and the status commands
@@ -88,11 +88,11 @@ on any machine.
 
 **Done when:** against the running daemon, with `-path C:\` on each command
 so a rescan elsewhere cannot turn the answer into exit 2,
-- `goz ext:cs` prints 20 rows and the warning, and exits 10;
-- `goz ext:cs -n all > $null` exits 0 (redirected, because it prints every
+- `gozler ext:cs` prints 20 rows and the warning, and exits 10;
+- `gozler ext:cs -n all > $null` exits 0 (redirected, because it prints every
   match);
-- `goz -n 0 ext:cs` prints nothing and exits 10;
-- `goz zzzzqqq -no-result-error` exits 9.
+- `gozler -n 0 ext:cs` prints nothing and exits 10;
+- `gozler zzzzqqq -no-result-error` exits 9.
 
 **After install:** `C:\Users\user\.claude\goz.md` drops the warnings this
 stage fixes, and the owner decides whether CLAUDE.md and the TinyTorrent2
@@ -109,8 +109,8 @@ filename-discovery ruling still need `-n 20`.
   writer.
 - `-get-result-count`, which reads `total`.
 
-**Done when:** against the running daemon, `goz /a-d report` lists only
-files; `goz /aH report` exits 4; `goz report -size -dm` prints the two
+**Done when:** against the running daemon, `gozler /a-d report` lists only
+files; `gozler /aH report` exits 4; `gozler report -size -dm` prints the two
 columns; and `-get-result-count` equals the `total` in `--json` output.
 
 ## Stage 4: protocol 2, with today's meaning

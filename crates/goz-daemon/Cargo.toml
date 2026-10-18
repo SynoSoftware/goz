@@ -1,6 +1,6 @@
 [package]
 name = "goz-daemon"
-description = "gozd: the goz indexing daemon. MFT bootstrap, USN journal tail, named-pipe query server, Windows service"
+description = "gozlerd: the goz indexing daemon. MFT bootstrap, USN journal tail, named-pipe query server, Windows service"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 publish = false
 
 [[bin]]
-name = "gozd"
+name = "gozlerd"
 path = "src/main.rs"
 
 [dependencies]

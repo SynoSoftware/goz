@@ -1,4 +1,4 @@
-//! End-to-end exit-code contract for the `goz` binary.
+//! End-to-end exit-code contract for the `gozler` binary.
 //!
 //! `goz_core::escompat` already unit-tests the argv rules themselves; what no
 //! unit test can observe is whether `main` actually maps an `EsFatal` onto the
@@ -7,16 +7,16 @@
 //! Only cases that need no running daemon live here. Anything past
 //! `Client::connect` depends on whether `\\.\pipe\goz-v1` happens to be live on
 //! the machine running the suite, which would pass on CI and flake on a
-//! developer box with `gozd` running. The three cases below all fail before the
+//! developer box with `gozlerd` running. The three cases below all fail before the
 //! first connect attempt, so they are hermetic on any OS.
 
 use std::process::{Command, Output};
 
 fn goz<const N: usize>(args: [&str; N]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_goz"))
+    Command::new(env!("CARGO_BIN_EXE_gozler"))
         .args(args)
         .output()
-        .expect("failed to spawn the goz binary")
+        .expect("failed to spawn the gozler binary")
 }
 
 fn stderr(out: &Output) -> String {

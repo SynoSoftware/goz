@@ -503,7 +503,7 @@ impl<'q, 'i> Scan<'q, 'i> {
 
         // An entry whose parent has no path (ancestry ends in lost+found) is
         // dropped by the page loop. Reject it here so it never counts toward
-        // `total` and never occupies a page slot: otherwise `goz -n 10 report`
+        // `total` and never occupies a page slot: otherwise `gozler -n 10 report`
         // can print nothing while reporting a non-zero total, and the same
         // query without `-n` prints the real hits.
         //

@@ -1,5 +1,5 @@
-//! Daemon orchestration shared by console (`gozd run`) and service
-//! (`gozd run --service`) modes: bootstrap every volume, spawn a tail thread per
+//! Daemon orchestration shared by console (`gozlerd run`) and service
+//! (`gozlerd run --service`) modes: bootstrap every volume, spawn a tail thread per
 //! volume with a journal, then serve queries over the pipe until stopped.
 
 use std::sync::Arc;
@@ -191,7 +191,7 @@ pub(crate) fn run_console() -> Result<()> {
         .init();
 
     if !goz_winfs::is_elevated() {
-        tracing::warn!("gozd is not elevated; raw volume access will likely fail");
+        tracing::warn!("gozlerd is not elevated; raw volume access will likely fail");
     }
 
     let engine = build_engine()?;

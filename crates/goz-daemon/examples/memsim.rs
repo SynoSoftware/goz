@@ -1,4 +1,4 @@
-//! Full-scale memory simulation: replay a real `goz -export-csv` path dump
+//! Full-scale memory simulation: replay a real `gozler -export-csv` path dump
 //! into a fresh `VolumeIndex` and print the per-component memory breakdown
 //! plus process private bytes. This measures exactly what the daemon will
 //! hold for that volume set without needing to restart the service.

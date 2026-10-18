@@ -1,6 +1,6 @@
-# Static CRT so a shipped gozd.exe/goz.exe does not need vcruntime140.dll on the
-# target machine. gozd runs as a Windows service, where a missing DLL surfaces
-# as an opaque SCM start failure rather than a useful error.
+# Static CRT so a shipped gozlerd.exe/gozler.exe does not need vcruntime140.dll
+# on the target machine. gozlerd runs as a Windows service, where a missing DLL
+# surfaces as an opaque SCM start failure rather than a useful error.
 #
 # CAVEAT: cargo takes rustflags from the FIRST matching source only, and the
 # RUSTFLAGS env var outranks these target entries. Any job that exports RUSTFLAGS

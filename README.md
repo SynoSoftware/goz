@@ -24,7 +24,7 @@ goz indexes every filename on your fixed NTFS volumes and answers substring quer
 
 ## Install
 
-Download `goz.exe` and `gozd.exe` from the [latest release](https://github.com/mustafaahci/goz/releases/latest), or build from source:
+Download `gozler.exe` and `gozlerd.exe` from the [latest release](https://github.com/mustafaahci/goz/releases/latest), or build from source:
 
 ```
 cargo build --release
@@ -32,23 +32,23 @@ cargo build --release
 
 Either way you get two binaries (in `target\release` when built locally):
 
-| Binary     | Role                                                                              |
-| ---------- | --------------------------------------------------------------------------------- |
-| `gozd.exe` | The indexing daemon. Runs elevated; owns the index and serves queries.            |
-| `goz.exe`  | The command-line client. Runs unelevated; talks to the daemon.                    |
+| Binary        | Role                                                                              |
+| ------------- | --------------------------------------------------------------------------------- |
+| `gozlerd.exe` | The indexing daemon. Runs elevated; owns the index and serves queries.            |
+| `gozler.exe`  | The command-line client. Runs unelevated; talks to the daemon.                    |
 
 Run the daemon in an elevated terminal:
 
 ```
-.\target\release\gozd.exe run --console
+.\target\release\gozlerd.exe run --console
 ```
 
 Or install it as an auto-start Windows service (elevated):
 
 ```
-.\target\release\gozd.exe install     # register and start
-.\target\release\gozd.exe status      # check state
-.\target\release\gozd.exe uninstall   # stop and remove
+.\target\release\gozlerd.exe install     # register and start
+.\target\release\gozlerd.exe status      # check state
+.\target\release\gozlerd.exe uninstall   # stop and remove
 ```
 
 ## Usage
@@ -57,19 +57,19 @@ Query the running daemon from any terminal:
 
 ```
 # search everywhere
-goz report.pdf
+gozler report.pdf
 
 # scope to a folder, cap results, add columns, sort, export
-goz -path C:\Users\me invoice -n 50 -size -dm -sort-path -export-csv out.csv
+gozler -path C:\Users\me invoice -n 50 -size -dm -sort-path -export-csv out.csv
 
 # machine-readable output
-goz --json kernel32.dll
+gozler --json kernel32.dll
 
 # index and daemon status
-goz --status
+gozler --status
 ```
 
-`goz` accepts a subset of `es.exe` flags (`-path`, `-n` / `-max-results`, the `-sort` family, `-size`, `-dm`, `-export-csv`, and the CSV-shape switches) and matches `es.exe`'s exit codes. Unsupported switches exit `6`, the same as `es.exe`.
+`gozler` accepts a subset of `es.exe` flags (`-path`, `-n` / `-max-results`, the `-sort` family, `-size`, `-dm`, `-export-csv`, and the CSV-shape switches) and matches `es.exe`'s exit codes. Unsupported switches exit `6`, the same as `es.exe`.
 
 ## Performance
 
