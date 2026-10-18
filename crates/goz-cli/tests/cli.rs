@@ -7,7 +7,7 @@
 //! Only cases that need no running daemon live here. Anything past
 //! `Client::connect` depends on whether `\\.\pipe\goz-v1` happens to be live on
 //! the machine running the suite, which would pass on CI and flake on a
-//! developer box with `gozlerd` running. The three cases below all fail before the
+//! developer box with `gozlerd` running. The cases below all end before the
 //! first connect attempt, so they are hermetic on any OS.
 
 use std::process::{Command, Output};
@@ -69,4 +69,31 @@ fn unwritable_export_path_exits_5() {
         "stderr: {}",
         stderr(&out)
     );
+}
+
+/// Bug 7: `-help` prints the help to stdout and exits 0, before any daemon
+/// contact.
+#[test]
+fn help_exits_0() {
+    let out = goz(["-help"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(!out.stdout.is_empty(), "the help goes to stdout");
+}
+
+/// Issue #29: an argument that is not valid Unicode, such as an unpaired
+/// surrogate from a shell glob, exits 4 instead of panicking. Arguments are
+/// read before any daemon contact.
+///
+/// Windows-only: a lone surrogate is a Windows argument; other targets
+/// spell arguments as bytes.
+#[cfg(windows)]
+#[test]
+fn an_argument_that_is_not_unicode_exits_4() {
+    use std::os::windows::ffi::OsStringExt;
+    let lone_surrogate = std::ffi::OsString::from_wide(&[u16::from(b'a'), 0xD800]);
+    let out = Command::new(env!("CARGO_BIN_EXE_gozler"))
+        .arg(lone_surrogate)
+        .output()
+        .expect("failed to spawn the gozler binary");
+    assert_eq!(out.status.code(), Some(4), "stderr: {}", stderr(&out));
 }

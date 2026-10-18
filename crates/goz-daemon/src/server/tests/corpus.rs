@@ -12,7 +12,7 @@
 use super::{decode_frames, dir_record, set, volume};
 use crate::server::encode_query_binary;
 use crate::volume_state::VolumeSet;
-use goz_core::escompat::{EsPlan, parse_argv};
+use goz_core::escompat::{Command, EsPlan, parse_argv};
 use goz_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
 use goz_core::layout::{LayoutFile, LayoutName};
 use goz_core::proto::{QueryRequest, Response};
@@ -68,6 +68,8 @@ enum Printed {
     /// `parse_argv` refuses the command line: gozler prints the message and
     /// exits with the code.
     ArgvError(u8, String),
+    /// The command line asks for the help: gozler prints it and exits 0.
+    Help,
     /// The daemon refuses the query: gozler prints the message and exits 4.
     QueryError(String),
 }
@@ -349,9 +351,9 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             prints(&[r"C:\repo\Report 2026.txt"]),
         ),
         (&["-n", "0", "report"], prints(&[])),
-        // Command lines parse_argv refuses.
         // Bug 7.
-        (&["-help"], argv_error(6, "unknown switch: -help")),
+        (&["-help"], Printed::Help),
+        // Command lines parse_argv refuses.
         (&["--bogus"], argv_error(6, "unknown switch: --bogus")),
         (
             &["-n", "abc"],
@@ -441,8 +443,10 @@ fn request(plan: &EsPlan) -> QueryRequest {
 fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
     let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let plan = match parse_argv(&args) {
-        Ok(plan) => plan,
-        Err(fatal) => return Printed::ArgvError(fatal.exit_code, fatal.message),
+        Ok(Command::Run(plan)) => plan,
+        Ok(Command::Help) => return Printed::Help,
+        Ok(Command::Version) => panic!("{args:?}: no row asks for the version"),
+        Err(fatal) => return Printed::ArgvError(fatal.exit_code.code(), fatal.message),
     };
     let mut paths = Vec::new();
     for frame in decode_frames(&encode_query_binary(volumes, request(&plan))) {

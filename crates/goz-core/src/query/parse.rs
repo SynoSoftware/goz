@@ -223,6 +223,71 @@ pub enum QueryError {
     Malformed { what: &'static str, detail: String },
 }
 
+/// One search function: its names, what it does, and its line in the help.
+pub(crate) struct SearchFunction {
+    /// Names without the colon, matched case-insensitively. The first is the
+    /// one the help lists first.
+    pub(crate) names: &'static [&'static str],
+    function: Function,
+    /// The value the help shows after each name, such as `>1mb` for `size:`.
+    pub(crate) example: &'static str,
+    pub(crate) help: &'static str,
+}
+
+/// What a [`SearchFunction`] does to the query.
+#[derive(Clone, Copy)]
+enum Function {
+    Ext,
+    Size,
+    Path,
+    File,
+    Folder,
+    /// Handled by [`case_directive`] before the other functions; a `case:`
+    /// value it does not accept is searched as text.
+    Case,
+}
+
+/// Every search function, in the order the help lists them. A `name:` token
+/// that names none of them is searched as text, as in es.
+pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
+    SearchFunction {
+        names: &["ext"],
+        function: Function::Ext,
+        example: "cs;txt",
+        help: "extension, one of a list",
+    },
+    SearchFunction {
+        names: &["size"],
+        function: Function::Size,
+        example: ">1mb",
+        help: "file size; also <, >=, <=, =, 1mb..10mb, empty, tiny, small, medium, large, huge, gigantic",
+    },
+    SearchFunction {
+        names: &["path"],
+        function: Function::Path,
+        example: "text",
+        help: "the full path contains text; with * or ? the whole full path matches",
+    },
+    SearchFunction {
+        names: &["file"],
+        function: Function::File,
+        example: "",
+        help: "files only; file:text also matches text",
+    },
+    SearchFunction {
+        names: &["folder", "dir"],
+        function: Function::Folder,
+        example: "",
+        help: "folders only; folder:text also matches text",
+    },
+    SearchFunction {
+        names: &["case"],
+        function: Function::Case,
+        example: "",
+        help: "match case; case:0 turns it off",
+    },
+];
+
 /// Recognizes the `case:` directive: `case:`/`case:1` enable case-sensitivity,
 /// `case:0` disables it. Returns `None` for anything else (so it is not
 /// mistaken for a search term). Case-insensitive on the function name itself.
@@ -280,10 +345,9 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
 
         // Function tokens: prefix before the first ':'.
         if let Some(colon) = text.find(':') {
-            let func = text[..colon].to_ascii_lowercase();
             let value = &text[colon + 1..];
-            match func.as_str() {
-                "ext" => {
+            match function_named(&text[..colon]) {
+                Some(Function::Ext) => {
                     let exts: Vec<Vec<u8>> = value
                         .split(';')
                         .filter(|s| !s.is_empty())
@@ -294,11 +358,11 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
                     }
                     continue;
                 }
-                "size" => {
+                Some(Function::Size) => {
                     q.filters.size = Some(parse_size(value)?);
                     continue;
                 }
-                "path" => {
+                Some(Function::Path) => {
                     if has_wildcard(value) {
                         q.path_wildcards
                             .push(Wildcard::compile(&fold_term(value.as_bytes())));
@@ -307,19 +371,19 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
                     }
                     continue;
                 }
-                "file" => {
+                Some(Function::File) => {
                     q.filters.kind = Some(Kind::File);
                     push_text_term(&mut q, value, &fold_term);
                     continue;
                 }
-                "folder" | "dir" => {
+                Some(Function::Folder) => {
                     q.filters.kind = Some(Kind::Folder);
                     push_text_term(&mut q, value, &fold_term);
                     continue;
                 }
-                _ => {
-                    // Unknown function → literal text (es behavior).
-                }
+                // A `case:` value that is not a directive, and an unknown
+                // function, are literal text (es behavior).
+                Some(Function::Case) | None => {}
             }
         }
 
@@ -327,6 +391,14 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
     }
 
     Ok(q)
+}
+
+/// The search function `name` names, compared case-insensitively.
+fn function_named(name: &str) -> Option<Function> {
+    SEARCH_FUNCTIONS
+        .iter()
+        .find(|row| row.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
+        .map(|row| row.function)
 }
 
 /// Routes an unquoted text token to its bucket: a term with a separator

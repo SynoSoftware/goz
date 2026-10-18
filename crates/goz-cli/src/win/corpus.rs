@@ -9,7 +9,7 @@
 //! are in the daemon's corpus, in `goz-daemon`'s `server` tests.
 
 use super::emit;
-use goz_core::escompat::parse_argv;
+use goz_core::escompat::{Command, parse_argv};
 use goz_core::output::unix_ms_to_filetime;
 use goz_core::proto::{QueryResults, ResultItem};
 
@@ -205,7 +205,9 @@ fn every_row_prints_what_it_recorded() {
     let mut changed = Vec::new();
     for row in ROWS {
         let args: Vec<String> = row.args.iter().map(ToString::to_string).collect();
-        let plan = parse_argv(&args).expect("every output row parses");
+        let Ok(Command::Run(plan)) = parse_argv(&args) else {
+            panic!("{:?}: every output row is a search", row.args);
+        };
         let mut out = Vec::new();
         assert!(
             emit(&plan, &results, &jiff::tz::TimeZone::UTC, &mut out).is_ok(),

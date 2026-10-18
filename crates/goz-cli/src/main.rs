@@ -5,11 +5,8 @@
 //! and writes results as an es-compatible CSV (`-export-csv`), JSON (`--json`),
 //! or a plain path list (default).
 //!
-//! Exit codes (es-compatible where they overlap): 0 ok · 4 missing switch
-//! parameter / bad query · 5 export-file create failure / output write failure ·
-//! 6 unknown switch · 7 protocol failure (malformed daemon reply, reply
-//! timeout, or pipe open error) · 8 daemon unreachable · 9 pipe server not
-//! trusted.
+//! The exit codes are [`goz_core::escompat::ExitCode`]; every failure is a
+//! [`Failure`], which maps to its code in one place.
 
 // Thread-caching allocator: decoding a broad result set allocates a String per
 // path (millions of them), which the Windows default heap serializes.
@@ -19,26 +16,60 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(windows)]
 mod client;
+mod failure;
 
-use goz_core::escompat::parse_argv;
-use std::process::ExitCode;
+use failure::{Failure, output};
+use goz_core::escompat::{Command, ExitCode, help, parse_argv, version};
+use std::io::Write;
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let plan = match parse_argv(&args) {
-        Ok(p) => p,
-        Err(fatal) => {
-            eprintln!("gozler: {}", fatal.message);
-            return ExitCode::from(fatal.exit_code);
+fn main() -> std::process::ExitCode {
+    // A panic is an internal failure: exit 1 after the panic message, not
+    // Rust's 101, which the exit-code table does not list.
+    let report_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        report_panic(info);
+        std::process::exit(ExitCode::Internal.code().into());
+    }));
+
+    let code = match run() {
+        Ok(code) => code,
+        Err(failure) => {
+            failure.report();
+            failure.exit_code()
         }
     };
-    execute(plan)
+    std::process::ExitCode::from(code.code())
+}
+
+fn run() -> Result<ExitCode, Failure> {
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|arg| Failure::ArgumentNotUnicode(arg.to_string_lossy().into_owned()))
+        })
+        .collect::<Result<Vec<String>, Failure>>()?;
+    match parse_argv(&args).map_err(Failure::Argv)? {
+        Command::Help => print(&help()),
+        Command::Version => print(&format!("{}\n", version())),
+        Command::Run(plan) => execute(plan),
+    }
+}
+
+/// Writes `text` to stdout.
+fn print(text: &str) -> Result<ExitCode, Failure> {
+    let mut out = std::io::stdout().lock();
+    output(
+        out.write_all(text.as_bytes()).and_then(|()| out.flush()),
+        "stdout",
+    )?;
+    Ok(ExitCode::Complete)
 }
 
 #[cfg(not(windows))]
-fn execute(_plan: goz_core::escompat::EsPlan) -> ExitCode {
-    eprintln!("gozler: this client requires Windows (it talks to the gozlerd daemon)");
-    ExitCode::from(8)
+fn execute(_plan: goz_core::escompat::EsPlan) -> Result<ExitCode, Failure> {
+    // gozlerd runs only on Windows, so there is never a daemon to talk to.
+    Err(Failure::DaemonNotRunning)
 }
 
 #[cfg(windows)]
@@ -46,102 +77,56 @@ use win::execute;
 
 #[cfg(windows)]
 mod win {
-    use super::client::{Client, ClientError};
-    use goz_core::escompat::EsPlan;
+    use super::client::Client;
+    use super::failure::{Failure, output};
+    use goz_core::escompat::{EsPlan, ExitCode};
     use goz_core::output::{CsvOptions, CsvRow, filetime_to_unix_ms, write_csv};
-    use goz_core::proto::{QueryRequest, QueryResults, Request, Response};
+    use goz_core::proto::{DaemonStatus, QueryRequest, QueryResults, Request, Response};
     use goz_core::types::EsColumn;
     use std::io::Write;
-    use std::process::ExitCode;
 
-    pub(crate) fn execute(plan: EsPlan) -> ExitCode {
-        match run(plan) {
-            Ok(code) => code,
-            Err(code) => code,
-        }
-    }
-
-    fn run(plan: EsPlan) -> Result<ExitCode, ExitCode> {
+    pub(crate) fn execute(plan: EsPlan) -> Result<ExitCode, Failure> {
         // Create the export file up front (es semantics): a later daemon-unreachable
         // failure then leaves the observable artifact, a 0-byte file + exit 8.
         let export_file = match &plan.export_csv {
-            Some(path) => match std::fs::File::create(path) {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    eprintln!("gozler: cannot create {path}: {e}");
-                    return Err(ExitCode::from(5));
-                }
-            },
+            Some(path) => {
+                Some(
+                    std::fs::File::create(path).map_err(|error| Failure::ExportCreate {
+                        path: path.clone(),
+                        error,
+                    })?,
+                )
+            }
             None => None,
         };
 
-        let mut connection = match Client::connect(plan.insecure_no_server_check) {
-            Ok(c) => c,
-            Err(ClientError::Unreachable) => {
-                // es-verbatim line for consumers that grep stderr, plus our hint.
-                eprintln!(
-                    "Error 8: Everything IPC window not found. Please make sure Everything is running."
-                );
-                eprintln!(
-                    "gozler: the gozlerd daemon is not running (start it with `gozlerd run`)."
-                );
-                return Err(ExitCode::from(8));
-            }
-            Err(ClientError::Untrusted) => {
-                eprintln!(
-                    "gozler: the pipe server is not the trusted gozlerd daemon (owner is not SYSTEM/Administrators)."
-                );
-                eprintln!(
-                    "gozler: refusing to send the query. If this is expected, pass --insecure-no-server-check."
-                );
-                return Err(ExitCode::from(9));
-            }
-            Err(ClientError::Protocol(m)) => {
-                eprintln!("gozler: {m}");
-                return Err(ExitCode::from(7));
-            }
-        };
+        let mut connection = Client::connect(plan.insecure_no_server_check)?;
 
         if plan.status {
             return status(&mut connection);
         }
 
-        let request = Request::Query(build_query(&plan));
-        let results = match connection.request(&request) {
-            Ok(Response::Results(r)) => r,
-            Ok(Response::Error { message, .. }) => {
-                eprintln!("gozler: {message}");
-                return Err(ExitCode::from(4));
-            }
-            Ok(_) => {
-                eprintln!("gozler: unexpected reply from daemon");
-                return Err(ExitCode::from(7));
-            }
-            Err(ClientError::Protocol(m)) => {
-                eprintln!("gozler: {m}");
-                return Err(ExitCode::from(7));
-            }
-            Err(ClientError::Unreachable) => {
-                eprintln!(
-                    "Error 8: Everything IPC window not found. Please make sure Everything is running."
-                );
-                return Err(ExitCode::from(8));
-            }
-            Err(ClientError::Untrusted) => {
-                eprintln!("gozler: pipe server not trusted");
-                return Err(ExitCode::from(9));
+        let results = match connection.request(&Request::Query(build_query(&plan)))? {
+            Response::Results(r) => r,
+            Response::Error { code, message } => return Err(Failure::Daemon { code, message }),
+            _ => {
+                return Err(Failure::Communication(
+                    "unexpected reply from daemon".into(),
+                ));
             }
         };
 
+        let mut outcome = ExitCode::Complete;
         if results.volumes_incomplete {
             eprintln!(
                 "gozler: warning: some volumes are still indexing or unavailable; results may be incomplete"
             );
+            outcome = outcome.most_serious(ExitCode::Incomplete);
         }
 
         let tz = jiff::tz::TimeZone::system();
         match export_file {
-            Some(mut file) => emit(&plan, &results, &tz, &mut file),
+            Some(mut file) => emit(&plan, &results, &tz, &mut file)?,
             // StdoutLock is a LineWriter (it flushes on every newline), so wrap
             // it in a BufWriter to batch a large result set into a few writes.
             None => emit(
@@ -149,8 +134,9 @@ mod win {
                 &results,
                 &tz,
                 &mut std::io::BufWriter::new(std::io::stdout().lock()),
-            ),
+            )?,
         }
+        Ok(outcome)
     }
 
     fn build_query(plan: &EsPlan) -> QueryRequest {
@@ -195,50 +181,24 @@ mod win {
         results: &QueryResults,
         tz: &jiff::tz::TimeZone,
         out: &mut impl Write,
-    ) -> Result<ExitCode, ExitCode> {
-        if plan.export_csv.is_some() {
-            let bytes = render_csv(plan, results, tz);
-            if let Err(e) = out.write_all(&bytes) {
-                eprintln!("gozler: writing export CSV failed: {e}");
-                return Err(ExitCode::from(5));
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-
-        if plan.json {
-            match serde_json::to_string_pretty(results) {
-                Ok(s) => {
-                    // Ignores write errors, so a broken pipe
-                    // (`gozler --json '*' | head`) is not a panic as with println!.
-                    let _ = writeln!(out, "{s}");
-                    let _ = out.flush();
-                }
-                Err(e) => {
-                    eprintln!("gozler: JSON encoding failed: {e}");
-                    return Err(ExitCode::from(7));
-                }
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-
-        // Default: one path per line. A reader closing early (`gozler * | head`)
-        // is a clean stop; a genuine write failure reports exit 5.
-        for item in &results.items {
-            if let Err(e) = writeln!(out, "{}", item.path) {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    return Ok(ExitCode::SUCCESS);
-                }
-                eprintln!("gozler: writing results failed: {e}");
-                return Err(ExitCode::from(5));
-            }
-        }
-        if let Err(e) = out.flush()
-            && e.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            eprintln!("gozler: writing results failed: {e}");
-            return Err(ExitCode::from(5));
-        }
-        Ok(ExitCode::SUCCESS)
+    ) -> Result<(), Failure> {
+        let written = if plan.export_csv.is_some() {
+            out.write_all(&render_csv(plan, results, tz))
+        } else if plan.json {
+            let json = serde_json::to_string_pretty(results)
+                .map_err(|e| Failure::Internal(format!("JSON encoding failed: {e}")))?;
+            writeln!(out, "{json}")
+        } else {
+            // Default: one path per line.
+            results
+                .items
+                .iter()
+                .try_for_each(|item| writeln!(out, "{}", item.path))
+        };
+        output(
+            written.and_then(|()| out.flush()),
+            plan.export_csv.as_deref().unwrap_or("stdout"),
+        )
     }
 
     /// Renders the results as an es-compatible CSV, with dates in `tz`.
@@ -288,116 +248,90 @@ mod win {
         }
     }
 
-    fn status(connection: &mut Client) -> Result<ExitCode, ExitCode> {
-        match connection.request(&Request::Status) {
-            Ok(Response::Status(s)) => {
-                // Locked writeln! that tolerates a broken pipe (`gozler --status | head`)
-                // instead of println!, which panics on any stdout write error.
-                let stdout = std::io::stdout();
-                let mut out = stdout.lock();
-                let _ = writeln!(out, "gozlerd status: {} volume(s)", s.volumes.len());
-                for v in &s.volumes {
-                    let mount = v.mounts.first().cloned().unwrap_or_else(|| v.guid.clone());
-                    let _ = writeln!(
-                        out,
-                        "  {mount:<8} {:>12} entries  phase={}{}",
-                        v.entries,
-                        v.phase, // user-facing Display, not Debug
-                        if v.metadata_pending {
-                            "  (metadata pending)"
-                        } else {
-                            ""
-                        }
-                    );
-                    // The journal's size is the replay horizon: everything
-                    // older than what it holds costs a full rescan on restart.
-                    if let Some(bytes) = v.journal_max_bytes {
-                        let _ =
-                            writeln!(out, "           journal max {} MiB", bytes / (1024 * 1024));
-                    }
-                    // Drift counters, shown only when non-zero. These are the
-                    // only outward sign that the index and the volume have
-                    // diverged, so reporting them nowhere made a drifting index
-                    // indistinguishable from a healthy one.
-                    if v.link_reconciles_dropped > 0 {
-                        let _ = writeln!(
-                            out,
-                            "           {} hard-link change(s) not reconciled: some names may be stale",
-                            v.link_reconciles_dropped
-                        );
-                    }
-                    if v.stale_slots > 0 || v.delete_of_unknown > 0 || v.placeholders_created > 0 {
-                        let _ = writeln!(
-                            out,
-                            "           drift: {} stale slot(s), {} unknown delete(s), {} placeholder(s)",
-                            v.stale_slots, v.delete_of_unknown, v.placeholders_created
-                        );
-                    }
-                    // Index memory, component by component. `alloc` differing
-                    // from `used` is capacity slack held by that component.
-                    if let Some(m) = &v.memory {
-                        let mb = |p: &goz_core::proto::MemPair| {
-                            format!("{:.1}/{:.1}", p.used as f64 / 1e6, p.alloc as f64 / 1e6)
-                        };
-                        let total_used = m.entries.used
-                            + m.arena_raw.used
-                            + m.arena_folded.used
-                            + m.frn_map.used
-                            + m.name_tables.used
-                            + m.dir_children.used;
-                        let total_alloc = m.entries.alloc
-                            + m.arena_raw.alloc
-                            + m.arena_folded.alloc
-                            + m.frn_map.alloc
-                            + m.name_tables.alloc
-                            + m.dir_children.alloc;
-                        let _ = writeln!(
-                            out,
-                            "           mem MB used/alloc: total {:.1}/{:.1}  entries {}  names {}  folded {}  frn[{}] {}  ntables {}  dirs {}",
-                            total_used as f64 / 1e6,
-                            total_alloc as f64 / 1e6,
-                            mb(&m.entries),
-                            mb(&m.arena_raw),
-                            mb(&m.arena_folded),
-                            m.frn_map_kind,
-                            mb(&m.frn_map),
-                            mb(&m.name_tables),
-                            mb(&m.dir_children),
-                        );
-                    }
+    fn status(connection: &mut Client) -> Result<ExitCode, Failure> {
+        let status = match connection.request(&Request::Status)? {
+            Response::Status(s) => s,
+            _ => return Err(Failure::Communication("unexpected reply to status".into())),
+        };
+        let mut out = std::io::stdout().lock();
+        output(
+            write_status(&status, &mut out).and_then(|()| out.flush()),
+            "stdout",
+        )?;
+        if status.volumes_incomplete {
+            eprintln!("gozler: some volumes are not fully live");
+        }
+        Ok(ExitCode::Complete)
+    }
+
+    /// Writes the `--status` report.
+    fn write_status(s: &DaemonStatus, out: &mut impl Write) -> std::io::Result<()> {
+        writeln!(out, "gozlerd status: {} volume(s)", s.volumes.len())?;
+        for v in &s.volumes {
+            let mount = v.mounts.first().cloned().unwrap_or_else(|| v.guid.clone());
+            writeln!(
+                out,
+                "  {mount:<8} {:>12} entries  phase={}{}",
+                v.entries,
+                v.phase, // user-facing Display, not Debug
+                if v.metadata_pending {
+                    "  (metadata pending)"
+                } else {
+                    ""
                 }
-                if s.process_private_bytes > 0 {
-                    let _ = writeln!(
-                        out,
-                        "  daemon: {:.1} MB private, {:.1} MB working set",
-                        s.process_private_bytes as f64 / 1e6,
-                        s.process_working_set as f64 / 1e6,
-                    );
-                }
-                if s.volumes_incomplete {
-                    eprintln!("gozler: some volumes are not fully live");
-                }
-                Ok(ExitCode::SUCCESS)
+            )?;
+            // The journal's size is the replay horizon: everything
+            // older than what it holds costs a full rescan on restart.
+            if let Some(bytes) = v.journal_max_bytes {
+                writeln!(out, "           journal max {} MiB", bytes / (1024 * 1024))?;
             }
-            Ok(_) => {
-                eprintln!("gozler: unexpected reply to status");
-                Err(ExitCode::from(7))
+            // Drift counters, shown only when non-zero. These are the
+            // only outward sign that the index and the volume have
+            // diverged, so reporting them nowhere made a drifting index
+            // indistinguishable from a healthy one.
+            if v.link_reconciles_dropped > 0 {
+                writeln!(
+                    out,
+                    "           {} hard-link change(s) not reconciled: some names may be stale",
+                    v.link_reconciles_dropped
+                )?;
             }
-            Err(ClientError::Protocol(m)) => {
-                eprintln!("gozler: {m}");
-                Err(ExitCode::from(7))
+            if v.stale_slots > 0 || v.delete_of_unknown > 0 || v.placeholders_created > 0 {
+                writeln!(
+                    out,
+                    "           drift: {} stale slot(s), {} unknown delete(s), {} placeholder(s)",
+                    v.stale_slots, v.delete_of_unknown, v.placeholders_created
+                )?;
             }
-            Err(ClientError::Unreachable) => {
-                eprintln!(
-                    "Error 8: Everything IPC window not found. Please make sure Everything is running."
-                );
-                Err(ExitCode::from(8))
-            }
-            Err(ClientError::Untrusted) => {
-                eprintln!("gozler: pipe server not trusted");
-                Err(ExitCode::from(9))
+            // Index memory, component by component. `alloc` differing
+            // from `used` is capacity slack held by that component.
+            if let Some(m) = &v.memory {
+                let mb = |p: &goz_core::proto::MemPair| {
+                    format!("{:.1}/{:.1}", p.used as f64 / 1e6, p.alloc as f64 / 1e6)
+                };
+                writeln!(
+                    out,
+                    "           mem MB used/alloc: total {}  entries {}  names {}  folded {}  frn[{}] {}  ntables {}  dirs {}",
+                    mb(&m.total()),
+                    mb(&m.entries),
+                    mb(&m.arena_raw),
+                    mb(&m.arena_folded),
+                    m.frn_map_kind,
+                    mb(&m.frn_map),
+                    mb(&m.name_tables),
+                    mb(&m.dir_children),
+                )?;
             }
         }
+        if s.process_private_bytes > 0 {
+            writeln!(
+                out,
+                "  daemon: {:.1} MB private, {:.1} MB working set",
+                s.process_private_bytes as f64 / 1e6,
+                s.process_working_set as f64 / 1e6,
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]

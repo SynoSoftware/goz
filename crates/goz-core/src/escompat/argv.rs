@@ -1,4 +1,4 @@
-//! es.exe-compatible argv parsing: `parse_argv(args) -> Result<EsPlan, EsFatal>`.
+//! es.exe-compatible argv parsing: `parse_argv(args) -> Result<Command, EsFatal>`.
 //!
 //! Rules implemented from the voidtools es source:
 //!
@@ -12,14 +12,19 @@
 //!   /downloads to search for \downloads").
 //! - A token consisting solely of dashes (`-`, `--`, `---`, ...) is search
 //!   text, never a switch (es `es_is_literal_switch`).
-//! - Other `--`-prefixed tokens are goz's native namespace: exactly `--json`,
-//!   `--status`, and `--insecure-no-server-check` (case-sensitive, dashes
-//!   required). Anything else is fatal (exit 6).
+//! - Other `--`-prefixed tokens are goz's native namespace, matched exactly
+//!   (case-sensitive, dashes required). Anything else is fatal (exit 6).
 //! - A parameter-taking switch consumes the next token; a missing or
 //!   unparseable parameter is fatal (exit 4).
+//! - `-h`, `-help` and `-version` end parsing where they appear, as in es, so
+//!   a token before them can still fail and a token after them is ignored.
 //! - Non-switch tokens become the query: joined with single spaces, in
 //!   command-line order, each token preserved as received. Flags may
 //!   interleave with query tokens freely.
+//!
+//! Every switch and sort key is one row of [`SWITCHES`] or [`SORT_KEYS`],
+//! which both the parser and the help read, so a switch the parser accepts is
+//! a switch the help lists.
 //!
 //! Conservative choices where the research is silent (documented, not
 //! observed from es): the `-sort` parameter is matched with the same
@@ -28,13 +33,19 @@
 //! non-`u32` `-n` value both map to exit 4 ("bad switch parameter" in modern
 //! es terms); when several sort switches appear, the last one wins.
 
+use super::ExitCode;
 use crate::types::{EsColumn, SortDir, SortKey, SortSpec};
 
-/// es exit code 4: a switch expected an additional parameter that was
-/// missing or unparseable.
-const EXIT_EXPECTED_PARAM: u8 = 4;
-/// es exit code 6: unknown switch.
-const EXIT_UNKNOWN_SWITCH: u8 = 6;
+/// What a command line asks gozler to do.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Command {
+    /// `-h` or `-help`: print the help.
+    Help,
+    /// `-version`: print the version.
+    Version,
+    /// Search, or with `--status` report the daemon's state.
+    Run(EsPlan),
+}
 
 /// The fully-resolved plan for one es-compatible invocation.
 ///
@@ -104,55 +115,77 @@ impl Default for EsPlan {
     }
 }
 
-/// A fatal argv-parse error carrying the es-compatible process exit code.
-///
-/// Exit-code mapping (from es.exe):
-///
-/// | Code | es meaning |
-/// |------|------------|
-/// | 4    | expected an additional parameter after a switch (modern es also uses it for a bad switch parameter) |
-/// | 6    | unknown switch |
+/// A command line gozler refuses, with the code it exits with.
 ///
 /// The message names the offending token so the CLI can report it on stderr
 /// and exit with `exit_code`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct EsFatal {
-    /// The process exit code the CLI must terminate with (4 or 6 here).
-    pub exit_code: u8,
+    /// [`ExitCode::UnknownSwitch`] or [`ExitCode::InvalidInput`].
+    pub exit_code: ExitCode,
     /// Human-readable description, including the offending token.
     pub message: String,
 }
 
 impl EsFatal {
-    /// Exit 6: the token looked like a switch but matched nothing.
+    /// The token looked like a switch but matched nothing.
     fn unknown_switch(token: &str) -> Self {
         Self {
-            exit_code: EXIT_UNKNOWN_SWITCH,
+            exit_code: ExitCode::UnknownSwitch,
             message: format!("unknown switch: {token}"),
         }
     }
 
-    /// Exit 4: the switch requires a parameter and none followed.
+    /// The switch requires a parameter and none followed.
     fn missing_param(token: &str) -> Self {
         Self {
-            exit_code: EXIT_EXPECTED_PARAM,
+            exit_code: ExitCode::InvalidInput,
             message: format!("expected an additional parameter after {token}"),
         }
     }
 
-    /// Exit 4: the switch got a parameter it cannot interpret.
+    /// The switch got a parameter it cannot interpret.
     fn bad_param(token: &str, value: &str, expected: &str) -> Self {
         Self {
-            exit_code: EXIT_EXPECTED_PARAM,
+            exit_code: ExitCode::InvalidInput,
             message: format!("expected {expected} after {token}, got: {value}"),
         }
     }
 }
 
+/// One switch, or one family of switches: how the command line spells it,
+/// and its line in the help.
+pub(super) struct Switch {
+    pub(super) spelling: Spelling,
+    pub(super) help: &'static str,
+}
+
+/// How a [`Switch`] is spelled, which also decides its section of the help.
+pub(super) enum Spelling {
+    /// `-name` or `/name`, each dash inside a name optional. The first name is
+    /// the one the help lists first.
+    Es {
+        names: &'static [&'static str],
+        action: SwitchAction,
+    },
+    /// A family of es switches with its own parser, such as `-sort-KEY`.
+    /// `usage` is the help's form, and `parse` gets the name without its
+    /// leading `-` or `/`.
+    Family {
+        usage: &'static str,
+        parse: fn(&str) -> Option<SwitchAction>,
+    },
+    /// A gozler option, `--name`, matched exactly.
+    Native {
+        name: &'static str,
+        action: SwitchAction,
+    },
+}
+
 /// What a matched switch does to the plan.
 #[derive(Clone, Copy, Debug)]
-enum SwitchAction {
+pub(super) enum SwitchAction {
     /// `-n` / `-max-results`: consume the next token as a `u32` limit.
     Limit,
     /// `-path`: consume the next token as the scope, verbatim.
@@ -176,58 +209,219 @@ enum SwitchAction {
     NoDoubleQuote,
     /// `-case` / `-match-case`: case-sensitive matching.
     MatchCase,
+    /// `--json`: print results as JSON.
+    Json,
+    /// `--status`: report the daemon's state instead of searching.
+    Status,
+    /// `--insecure-no-server-check`: skip the pipe server's trust check.
+    InsecureNoServerCheck,
+    /// `-h` / `-help`: stop parsing and print the help.
+    Help,
+    /// `-version`: stop parsing and print the version.
+    Version,
 }
 
-/// Every parameterless and parameter-taking switch except the combined
-/// `-sort-*` family (generated in [`match_switch`]). Canonical spellings;
-/// interior dashes are optional in the input.
-const SIMPLE_SWITCHES: &[(&str, SwitchAction)] = &[
-    ("n", SwitchAction::Limit),
-    ("max-results", SwitchAction::Limit),
-    ("path", SwitchAction::Scope),
-    ("size", SwitchAction::Column(EsColumn::Size)),
-    ("dm", SwitchAction::Column(EsColumn::DateModified)),
-    (
-        "date-modified",
-        SwitchAction::Column(EsColumn::DateModified),
-    ),
-    ("sort", SwitchAction::SortParam),
-    ("export-csv", SwitchAction::ExportCsv),
-    ("utf8-bom", SwitchAction::Utf8Bom),
-    ("no-utf8-bom", SwitchAction::NoUtf8Bom),
-    ("no-header", SwitchAction::NoHeader),
-    ("no-double-quote", SwitchAction::NoDoubleQuote),
-    ("case", SwitchAction::MatchCase),
-    ("match-case", SwitchAction::MatchCase),
+impl SwitchAction {
+    /// The help's name for the parameter the switch consumes, or `None` for a
+    /// switch without one.
+    pub(super) fn param(self) -> Option<&'static str> {
+        match self {
+            SwitchAction::Limit => Some("N"),
+            SwitchAction::Scope => Some("DIR"),
+            SwitchAction::ExportCsv => Some("FILE"),
+            SwitchAction::SortParam => Some("KEY"),
+            SwitchAction::Column(_)
+            | SwitchAction::SortFixed(_)
+            | SwitchAction::Utf8Bom
+            | SwitchAction::NoUtf8Bom
+            | SwitchAction::NoHeader
+            | SwitchAction::NoDoubleQuote
+            | SwitchAction::MatchCase
+            | SwitchAction::Json
+            | SwitchAction::Status
+            | SwitchAction::InsecureNoServerCheck
+            | SwitchAction::Help
+            | SwitchAction::Version => None,
+        }
+    }
+}
+
+/// Every switch gozler accepts, in the order the help lists them.
+pub(super) const SWITCHES: &[Switch] = &[
+    Switch {
+        spelling: Spelling::Es {
+            names: &["n", "max-results"],
+            action: SwitchAction::Limit,
+        },
+        help: "show at most N results",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["path"],
+            action: SwitchAction::Scope,
+        },
+        help: "search below a folder",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["sort"],
+            action: SwitchAction::SortParam,
+        },
+        help: "order by a sort key; KEY-ascending or KEY-descending sets the direction",
+    },
+    Switch {
+        spelling: Spelling::Family {
+            usage: "-sort-KEY",
+            parse: parse_sort_switch,
+        },
+        help: "the same as -sort KEY, also with -ascending or -descending",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["case", "match-case"],
+            action: SwitchAction::MatchCase,
+        },
+        help: "match case",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["export-csv"],
+            action: SwitchAction::ExportCsv,
+        },
+        help: "write the results to FILE as CSV instead of to stdout",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["size"],
+            action: SwitchAction::Column(EsColumn::Size),
+        },
+        help: "add a Size column to the CSV",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["dm", "date-modified"],
+            action: SwitchAction::Column(EsColumn::DateModified),
+        },
+        help: "add a Date Modified column to the CSV",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["utf8-bom"],
+            action: SwitchAction::Utf8Bom,
+        },
+        help: "start the CSV with a UTF-8 byte order mark (the default)",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["no-utf8-bom"],
+            action: SwitchAction::NoUtf8Bom,
+        },
+        help: "leave out the byte order mark",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["no-header"],
+            action: SwitchAction::NoHeader,
+        },
+        help: "leave out the CSV header row",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["no-double-quote"],
+            action: SwitchAction::NoDoubleQuote,
+        },
+        help: "quote a CSV filename only when it needs quotes",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["h", "help"],
+            action: SwitchAction::Help,
+        },
+        help: "show this help",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["version"],
+            action: SwitchAction::Version,
+        },
+        help: "print the version",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "json",
+            action: SwitchAction::Json,
+        },
+        help: "print the results as JSON",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "status",
+            action: SwitchAction::Status,
+        },
+        help: "show the state of gozlerd and each volume instead of searching",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "insecure-no-server-check",
+            action: SwitchAction::InsecureNoServerCheck,
+        },
+        help: "skip the check that the pipe server is gozlerd (testing only)",
+    },
 ];
 
-/// Sort-key spellings accepted by both `-sort <key>` and the combined
-/// `-sort-<key>` switches.
-const SORT_KEYS: &[(&str, SortKey)] = &[
-    ("name", SortKey::Name),
-    ("path", SortKey::Path),
-    ("size", SortKey::Size),
-    ("dm", SortKey::DateModified),
-    ("date-modified", SortKey::DateModified),
+/// One sort key: its spellings, accepted by `-sort KEY` and `-sort-KEY`, and
+/// its line in the help.
+pub(super) struct SortKeyName {
+    /// The first name is the one the help lists first.
+    pub(super) names: &'static [&'static str],
+    pub(super) key: SortKey,
+    pub(super) help: &'static str,
+}
+
+/// Every sort key, in the order the help lists them. A key without a
+/// direction suffix takes [`SortSpec::default_for`].
+pub(super) const SORT_KEYS: &[SortKeyName] = &[
+    SortKeyName {
+        names: &["name"],
+        key: SortKey::Name,
+        help: "name, A to Z (the default)",
+    },
+    SortKeyName {
+        names: &["path"],
+        key: SortKey::Path,
+        help: "folder, then name, A to Z",
+    },
+    SortKeyName {
+        names: &["size"],
+        key: SortKey::Size,
+        help: "size, largest first",
+    },
+    SortKeyName {
+        names: &["dm", "date-modified"],
+        key: SortKey::DateModified,
+        help: "date modified, newest first",
+    },
 ];
 
-/// Parses an argv slice (excluding `argv[0]`) into an [`EsPlan`].
+/// Parses an argv slice (excluding `argv[0]`) into a [`Command`].
 ///
 /// Pure and total: no I/O, no environment access, no panics on any input.
-/// Fatal parse errors return [`EsFatal`] with the es exit code (4 or 6).
+/// A refused command line returns [`EsFatal`] with its exit code.
 ///
 /// ```
-/// use goz_core::escompat::parse_argv;
+/// use goz_core::escompat::{Command, parse_argv};
 ///
 /// let args: Vec<String> = ["report", "-sortpath", "-n", "10"]
 ///     .iter()
 ///     .map(ToString::to_string)
 ///     .collect();
-/// let plan = parse_argv(&args).unwrap();
+/// let Ok(Command::Run(plan)) = parse_argv(&args) else {
+///     panic!("a search");
+/// };
 /// assert_eq!(plan.query, "report");
 /// assert_eq!(plan.limit, Some(10));
 /// ```
-pub fn parse_argv(args: &[String]) -> Result<EsPlan, EsFatal> {
+pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
     let mut plan = EsPlan::default();
     let mut query: Vec<&str> = Vec::new();
     let mut rest = args.iter();
@@ -241,56 +435,78 @@ pub fn parse_argv(args: &[String]) -> Result<EsPlan, EsFatal> {
             continue;
         }
 
-        // Native namespace: exact match only, no dash-optionality.
-        if let Some(native) = token.strip_prefix("--") {
-            match native {
-                "json" => plan.json = true,
-                "status" => plan.status = true,
-                "insecure-no-server-check" => plan.insecure_no_server_check = true,
-                _ => return Err(EsFatal::unknown_switch(token)),
+        let action = if let Some(native) = token.strip_prefix("--") {
+            match_native(native).ok_or_else(|| EsFatal::unknown_switch(token))?
+        } else if let Some(name) = token.strip_prefix('-') {
+            match_switch(name).ok_or_else(|| EsFatal::unknown_switch(token))?
+        } else if let Some(name) = token.strip_prefix('/') {
+            match match_switch(name) {
+                Some(action) => action,
+                // es: unknown `/` tokens search for the text verbatim.
+                None => {
+                    query.push(token);
+                    continue;
+                }
             }
-            continue;
-        }
-
-        let (name, from_slash) = if let Some(stripped) = token.strip_prefix('-') {
-            (stripped, false)
-        } else if let Some(stripped) = token.strip_prefix('/') {
-            (stripped, true)
         } else {
             query.push(token);
             continue;
         };
 
-        match match_switch(name) {
-            Some(action) => apply_switch(action, token, &mut rest, &mut plan)?,
-            // es: unknown `/` tokens search for the text verbatim.
-            None if from_slash => query.push(token),
-            None => return Err(EsFatal::unknown_switch(token)),
+        match action {
+            SwitchAction::Help => return Ok(Command::Help),
+            SwitchAction::Version => return Ok(Command::Version),
+            action => apply_switch(action, token, &mut rest, &mut plan)?,
         }
     }
 
     plan.query = query.join(" ");
-    Ok(plan)
+    Ok(Command::Run(plan))
 }
 
-/// Resolves a prefix-stripped switch name against the full switch set.
-/// Returns `None` when nothing matches (caller decides fatal vs fallthrough).
+/// Resolves a name without its `--` against the gozler options.
+fn match_native(name: &str) -> Option<SwitchAction> {
+    SWITCHES.iter().find_map(|switch| match switch.spelling {
+        Spelling::Native {
+            name: native,
+            action,
+        } if native == name => Some(action),
+        _ => None,
+    })
+}
+
+/// Resolves a name without its `-` or `/` against the es switches, then the
+/// families. Returns `None` when nothing matches (caller decides fatal vs
+/// fallthrough).
 fn match_switch(name: &str) -> Option<SwitchAction> {
-    for (canonical, action) in SIMPLE_SWITCHES {
-        if switch_name_matches(name, canonical) {
-            return Some(*action);
-        }
-    }
-    for (alias, key) in SORT_KEYS {
-        if let Some(spec) = match_sort_form(name, &format!("sort-{alias}"), *key) {
-            return Some(SwitchAction::SortFixed(spec));
-        }
-    }
-    None
+    let exact = SWITCHES.iter().find_map(|switch| match switch.spelling {
+        Spelling::Es { names, action } => names
+            .iter()
+            .any(|canonical| switch_name_matches(name, canonical))
+            .then_some(action),
+        _ => None,
+    });
+    exact.or_else(|| {
+        SWITCHES.iter().find_map(|switch| match switch.spelling {
+            Spelling::Family { parse, .. } => parse(name),
+            _ => None,
+        })
+    })
+}
+
+/// Parses the `-sort-KEY[-ascending|-descending]` family.
+fn parse_sort_switch(name: &str) -> Option<SwitchAction> {
+    SORT_KEYS.iter().find_map(|row| {
+        row.names.iter().find_map(|alias| {
+            match_sort_form(name, &format!("sort-{alias}"), row.key).map(SwitchAction::SortFixed)
+        })
+    })
 }
 
 /// Applies one matched switch, consuming its parameter from `rest` if it
 /// takes one. `token` is the switch as the user typed it (for messages).
+/// [`SwitchAction::Help`] and [`SwitchAction::Version`] end parsing in
+/// [`parse_argv`] and never reach here.
 fn apply_switch(
     action: SwitchAction,
     token: &str,
@@ -324,6 +540,12 @@ fn apply_switch(
         SwitchAction::NoHeader => plan.header = false,
         SwitchAction::NoDoubleQuote => plan.double_quote = false,
         SwitchAction::MatchCase => plan.match_case = true,
+        SwitchAction::Json => plan.json = true,
+        SwitchAction::Status => plan.status = true,
+        SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
+        SwitchAction::Help | SwitchAction::Version => {
+            unreachable!("parse_argv returns at -help and -version")
+        }
     }
     Ok(())
 }
@@ -343,9 +565,11 @@ fn take_param<'a>(
 /// optionally suffixed `-ascending` / `-descending`) into a [`SortSpec`].
 /// Uses the same dash-optional matching as switch names.
 fn parse_sort_param(value: &str) -> Option<SortSpec> {
-    SORT_KEYS
-        .iter()
-        .find_map(|(alias, key)| match_sort_form(value, alias, *key))
+    SORT_KEYS.iter().find_map(|row| {
+        row.names
+            .iter()
+            .find_map(|alias| match_sort_form(value, alias, row.key))
+    })
 }
 
 /// Matches `input` against `base`, `base-ascending`, or `base-descending`
@@ -391,13 +615,16 @@ fn switch_name_matches(input: &str, canonical: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn parse(tokens: &[&str]) -> Result<EsPlan, EsFatal> {
+    fn parse(tokens: &[&str]) -> Result<Command, EsFatal> {
         let args: Vec<String> = tokens.iter().map(ToString::to_string).collect();
         parse_argv(&args)
     }
 
     fn plan(tokens: &[&str]) -> EsPlan {
-        parse(tokens).expect("expected a successful parse")
+        match parse(tokens).expect("expected a successful parse") {
+            Command::Run(plan) => plan,
+            other => panic!("expected a search, got {other:?}"),
+        }
     }
 
     fn fatal(tokens: &[&str]) -> EsFatal {
@@ -512,21 +739,21 @@ mod tests {
 
     #[test]
     fn switch_matching_is_case_sensitive() {
-        assert_eq!(fatal(&["-SORT-PATH"]).exit_code, 6);
-        assert_eq!(fatal(&["-N", "5"]).exit_code, 6);
+        assert_eq!(fatal(&["-SORT-PATH"]).exit_code, ExitCode::UnknownSwitch);
+        assert_eq!(fatal(&["-N", "5"]).exit_code, ExitCode::UnknownSwitch);
     }
 
     #[test]
     fn input_dash_where_canonical_has_none_is_unknown() {
-        assert_eq!(fatal(&["-d-m"]).exit_code, 6);
-        assert_eq!(fatal(&["-si-ze"]).exit_code, 6);
-        assert_eq!(fatal(&["-no--header"]).exit_code, 6);
+        assert_eq!(fatal(&["-d-m"]).exit_code, ExitCode::UnknownSwitch);
+        assert_eq!(fatal(&["-si-ze"]).exit_code, ExitCode::UnknownSwitch);
+        assert_eq!(fatal(&["-no--header"]).exit_code, ExitCode::UnknownSwitch);
     }
 
     #[test]
     fn unknown_dash_switch_is_exit_6_with_token() {
         let err = fatal(&["-zzz"]);
-        assert_eq!(err.exit_code, 6);
+        assert_eq!(err.exit_code, ExitCode::UnknownSwitch);
         assert!(err.message.contains("-zzz"), "message was: {}", err.message);
     }
 
@@ -544,14 +771,14 @@ mod tests {
         assert_eq!(parsed.limit, Some(50));
         assert_eq!(parsed.query, "");
         // A matched `/` switch with a missing parameter is exit 4 like `-`.
-        assert_eq!(fatal(&["/path"]).exit_code, 4);
+        assert_eq!(fatal(&["/path"]).exit_code, ExitCode::InvalidInput);
     }
 
     #[test]
     fn missing_parameter_is_exit_4_naming_the_switch() {
         for switch in ["-n", "-path", "-export-csv", "-sort", "-maxresults"] {
             let err = fatal(&[switch]);
-            assert_eq!(err.exit_code, 4, "switch: {switch}");
+            assert_eq!(err.exit_code, ExitCode::InvalidInput, "switch: {switch}");
             assert!(
                 err.message.contains(switch),
                 "message for {switch} was: {}",
@@ -562,10 +789,13 @@ mod tests {
 
     #[test]
     fn non_numeric_count_is_exit_4() {
-        assert_eq!(fatal(&["-n", "abc"]).exit_code, 4);
-        assert_eq!(fatal(&["-n", "-5"]).exit_code, 4);
+        assert_eq!(fatal(&["-n", "abc"]).exit_code, ExitCode::InvalidInput);
+        assert_eq!(fatal(&["-n", "-5"]).exit_code, ExitCode::InvalidInput);
         // Overflowing u32 is a bad parameter, not a silent wrap.
-        assert_eq!(fatal(&["-n", "4294967296"]).exit_code, 4);
+        assert_eq!(
+            fatal(&["-n", "4294967296"]).exit_code,
+            ExitCode::InvalidInput
+        );
     }
 
     #[test]
@@ -636,7 +866,7 @@ mod tests {
     #[test]
     fn sort_param_unknown_key_is_exit_4() {
         let err = fatal(&["-sort", "bogus"]);
-        assert_eq!(err.exit_code, 4);
+        assert_eq!(err.exit_code, ExitCode::InvalidInput);
         assert!(
             err.message.contains("bogus"),
             "message was: {}",
@@ -736,14 +966,27 @@ mod tests {
     #[test]
     fn native_namespace_unknown_is_exit_6() {
         let err = fatal(&["--bogus"]);
-        assert_eq!(err.exit_code, 6);
+        assert_eq!(err.exit_code, ExitCode::UnknownSwitch);
         assert!(
             err.message.contains("--bogus"),
             "message was: {}",
             err.message
         );
         // Native names are exact: no dash-optionality in the -- namespace.
-        assert_eq!(fatal(&["--insecureno-server-check"]).exit_code, 6);
+        assert_eq!(
+            fatal(&["--insecureno-server-check"]).exit_code,
+            ExitCode::UnknownSwitch
+        );
+    }
+
+    /// As in es, `-help` and `-version` end parsing where they appear: a bad
+    /// token before them still fails, and one after them is never read.
+    #[test]
+    fn help_and_version_end_parsing_where_they_appear() {
+        assert_eq!(parse(&["report", "-help", "-bogus"]), Ok(Command::Help));
+        assert_eq!(parse(&["/h", "-n"]), Ok(Command::Help));
+        assert_eq!(parse(&["-version", "-path"]), Ok(Command::Version));
+        assert_eq!(fatal(&["-bogus", "-h"]).exit_code, ExitCode::UnknownSwitch);
     }
 
     #[test]

@@ -179,6 +179,24 @@ pub struct VolumeMemory {
     pub frn_map_kind: String,
 }
 
+impl VolumeMemory {
+    /// The sum of every component.
+    pub fn total(&self) -> MemPair {
+        let parts = [
+            self.entries,
+            self.arena_raw,
+            self.arena_folded,
+            self.frn_map,
+            self.name_tables,
+            self.dir_children,
+        ];
+        MemPair {
+            used: parts.iter().map(|p| p.used).sum(),
+            alloc: parts.iter().map(|p| p.alloc).sum(),
+        }
+    }
+}
+
 /// Status of one indexed volume.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VolumeStatus {
