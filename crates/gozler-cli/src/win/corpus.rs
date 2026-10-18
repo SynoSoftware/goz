@@ -3,9 +3,9 @@
 //! writes to stdout or to the `-export-csv` file, as the code behaves today.
 //! Dates render in UTC, so every row passes in any time zone.
 //!
-//! A row records today's behavior, right or wrong. A row that a planned fix
-//! changes on purpose carries a comment with its number in the bug table of
-//! `docs/plans/es-superset-specs.md`. The rows for what a command line matches
+//! A row records today's behavior, right or wrong. A row that a fix changed
+//! on purpose carries a comment with its bug number from the "Golden corpus"
+//! section of `docs/DESIGN.md`. The rows for what a command line matches
 //! are in the daemon's corpus, in `gozler-daemon`'s `server` tests.
 
 use super::ResultWriter;

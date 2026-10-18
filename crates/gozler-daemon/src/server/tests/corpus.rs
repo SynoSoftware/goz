@@ -6,9 +6,9 @@
 //! [`Answer`], as in gozler. One row also runs as protocol 1's text query,
 //! which the daemon parses itself.
 //!
-//! A row records today's behavior, right or wrong. A row that a planned fix
-//! changes on purpose carries a comment with its number in the bug table of
-//! `docs/plans/es-superset-specs.md`. The rows for output formats (`--json`,
+//! A row records today's behavior, right or wrong. A row that a fix changed
+//! on purpose carries a comment with its bug number from the "Golden corpus"
+//! section of `docs/DESIGN.md`. The rows for output formats (`--json`,
 //! `-export-csv`, columns) are in `gozler-cli`'s corpus, which prints a fixed
 //! result set.
 

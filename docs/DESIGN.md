@@ -9,9 +9,11 @@ gozler is four crates:
 - **`gozler-daemon`** (`gozlerd`): bootstrap, USN journal tail, the tokio named-pipe server, and Windows service integration.
 - **`gozler-cli`** (`gozler`): the `es`-compatible CLI and the blocking named-pipe client.
 
+The command line splits between the two outer crates by one rule: what asks the operating system is in `gozler-cli`, and everything else is in `gozler-core`, where CI tests it on Ubuntu. `gozler-core` owns the parsing, the vocabulary tables, the help text, the date resolver, the request built from a working directory and a query start it is given, the evaluation, and the output rows. `gozler-cli` reads the arguments, the working directory, the clock and the time zone, resolves drive-relative folders, talks to the pipe, and writes to stdout or the export file.
+
 ## Index coherence
 
-gozler indexes fixed NTFS volumes; removable drives and non-NTFS filesystems (ReFS, exFAT, FAT32) are out of scope and are not tracked. The set of indexed volumes follows the machine: within a minute, a fixed NTFS volume that appears (an attached VHD, an unlocked BitLocker drive) is indexed, and a volume that is removed leaves the index. A `-path` scope on no indexed volume is an error, never an empty answer.
+gozler indexes fixed NTFS volumes; removable drives and non-NTFS filesystems (ReFS, exFAT, FAT32) are out of scope and are not tracked. The set of indexed volumes follows the machine: within a minute, a fixed NTFS volume that appears (an attached VHD, an unlocked BitLocker drive) is indexed, and a volume that is removed leaves the index. A `-path` scope on no indexed volume is an error (exit 4, with a message that names the folder), never an empty answer, because an empty answer reads as "no such file".
 
 The daemon answers queries from the moment it starts. A volume is `bootstrapping` until its first build finishes, and like `rescanning` it marks results incomplete; a volume that cannot be opened is retried on the same budget as a tail that exits, then reported `failed`.
 
@@ -34,3 +36,108 @@ A hard-linked file is one record with several names, and a USN record names only
 - **Everything 1.4** never sees a hard link created after its index was built. Per the [Everything documentation](https://www.voidtools.com/support/everything/), *"changes made to a hard link will only update the first hard link entry."* Only a manual **Tools -> Options -> Indexes -> Force rebuild** picks it up. This is a long-standing, documented limitation.
 - **gozler** reconciles hard links live. A hard-link-change record names only one link (and may name a dead one), so gozler walks the file's real link set over Win32 (`FindFirstFileNameW` / `FindNextFileNameW`) and reconciles the index to exactly that set: names added or removed are applied, not just size and dates. A walk that cannot complete (it failed part way, or a link's folder is not indexed yet) is skipped rather than applied as a partial set, counted, and surfaced by `--status`, and a rescan trues it up. A file that is gone by the time of the walk is left to its delete record. The gap is visible, never silent.
 - **Everything 1.5** (beta) does track new and renamed hard links.
+
+## Command line
+
+A script written for Everything's `es.exe` or for goz v0.2.0 changes only the program name to `gozler`.
+
+- **Names never change.** Every switch, alias, search function and syntax that goz v0.2.0 accepts keeps its name and purpose. An es name keeps es's aliases and single-dash form, so a script written for es finds it; that is why `-whole-words`, `-filename-column`, `datemodified:`, `date-modified:`, `attributes:` and `attr:` exist beside the shorter names. A gozler-only option starts with `--`, as `--json` does, so it can never collide with an es switch. Messages read `gozler: <error>` and `gozler: warning: <text>`.
+- **Owner decision: neither v0.2.0 nor es decides behavior.** They supply the names and the starting behavior. Where either answers wrong, or worse for the user, gozler answers differently. Each difference from es is one row of `DIFFERENCES` in `gozler-core`, with es's behavior and the reason, and the help's NOTES print every row, so a script written for es can find it.
+- **Owner decision: 20 results by default.** A query that forgets `-n` on a volume of a million files would flood an agent's context or a person's console. 20 rows, the command, the warning and the next prompt fit one 25-line console. Without `-n`, gozler prints at most `DEFAULT_LIMIT` rows. When the limit leaves matches out, stderr gives the shown and total counts and gozler exits 10; `-n 0` also exits 10 when anything matches. `-n all` prints every match. `-export-*` writes a file, which floods nothing, so it exports every match unless `-n` is given. `-get-result-count` and the size totals cover every match whatever `-n` says, because a count that stops at the limit tells nothing.
+- **es's behavior comes from its documentation and its source.** `es.exe` is never run (owner ruling). gozler copies es where es is right, and each test pins the behavior gozler chose.
+- **The tables generate the help.** The switches and sort keys (`SWITCHES` and `SORT_KEYS` in `escompat::argv`), the search functions (`SEARCH_FUNCTIONS` in `query::parse`), the attribute letters (`attributes::LETTERS`), the exit codes (`ExitCode`) and the differences from es (`DIFFERENCES` in `escompat::help`) each live in one table that the parser and the help both read. A new switch, function or sort key is one row, and the help lists it. A test parses every switch, function, term and example the help lists, so the help cannot offer something gozler refuses.
+- **`/a` and `/o` are prefix families** with their own small parsers, because es's dash-optional name matching would make `/ad` and `/a-d`, or `/on` and `/o-n`, collide as plain rows. They own every token that starts with `/a` or `/o`, and refuse a letter they do not know with exit 4. Another unknown `/` token is search text, as in es, but as text an `/a` or `/o` token would match nothing.
+
+## Exit codes
+
+Each outcome that a caller handles differently has its own code. `ExitCode` in `gozler-core` holds every code with its meaning, and the help prints that list. Codes 4 to 8 keep their goz v0.2.0 meanings, so scripts written for it still read them. `Failure::exit_code` in `gozler-cli` is the one place that maps a failure to its code. Each failure writes one `gozler: ` line to stderr that says what failed and, where it helps, what to do next. An unknown switch or function adds `gozler: run gozler -help for the supported switches`.
+
+When several codes apply, the more serious wins (`ExitCode::most_serious`): a failure (1, and 3 to 8) before an incomplete answer (2), that before no matches (9) or a cut list (10), and those before a complete answer (0). So an empty answer while a volume in scope is indexing exits 2, not 9, because the matches may exist. `-no-result-error` exits 9 only when nothing matched, not when `-n 0` hid the matches. A count covers every match, so it never exits 10.
+
+An answer is incomplete (exit 2) for two causes: a volume in scope is indexing, rescanning or offline, or the query tests or totals sizes or dates on a volume whose size and date pass failed (see "Sizes and dates"). `--status` exits 2 when any volume is not complete or the size and date pass of any volume failed. `-timeout MS` polls the daemon's status until the volumes in scope are complete or MS runs out, then searches anyway; a volume still incomplete then makes the answer exit 2. The client finds the volumes in scope with `Scope::of`, the rule the daemon routes by, so the two cannot disagree.
+
+## Search
+
+### The client parses, the daemon evaluates
+
+The client parses the query with the `gozler-core` parser and sends the parsed query, its scope and what it wants back (`SearchRequest`). The client resolves everything that depends on where and when it runs: the working directory, the time zone and the query start. The daemon only evaluates. It also accepts protocol 1's text query (`QueryRequest`) from other pipe clients and parses it with the same parser, its own clock and no working directory. A relative path there is invalid input (`BadQuery`), never a literal that silently matches nothing.
+
+The arguments are joined with spaces and split into terms again, as goz v0.2.0 does, because scripts build a query in one string: `gozler "ext:cs size:>1mb"` is two terms. Quotes make spaces and operators plain text, also in a function's value: `path:"C:\Program Files"`.
+
+A query is AND-ed clauses, each an OR of terms that may be negated. That covers `!` and `|` with es's precedence, where `|` binds tighter than the space, and keeps the evaluator flat. The parser refuses with exit 4 what would otherwise search text that no name contains. An unknown function such as `dc:` is one: Windows names cannot contain `:`, so as text it gives an empty answer that looks valid. An unquoted `<` or `>` outside a function value is another, because Windows names cannot contain them either. es groups terms with `< >`; gozler does not.
+
+The folded-arena scan needs one literal that every matching name contains. Only a clause of one positive term supplies it: a name term, a whole-word name term, a name wildcard or a single extension (`CompiledClause::name_literal`). A negated term, a path term, a path wildcard and a regular expression never do. For example, the literal of `*\docs\*` is `\docs\`, which no name contains, so a scan for it would find nothing.
+
+### Paths
+
+- **A path term matches the full path**, as in es. A term with a drive or a separator is a path term, and it matches as a substring: `C:\repo\` finds everything below `repo`, and `C:\repo\x.md` also finds `x.md.bak`. A path wildcard matches the whole full path, so `C:\repo\*.cs` finds the `.cs` files below `repo`. A quoted term with a separator is still a path term, and a `*` in it is still a wildcard, because a path cannot hold a literal `*`.
+- **`/` and `\` both separate folders**, because agents and Unix habits write `/`. The parser turns `/` into `\` in every path that a term, a function value or a switch names. It never changes a regular expression, where `/` and `\` keep their regex meaning; a regular expression sees `\` separators. Output keeps `\`.
+- **A token that starts with `/` and names a switch is that switch**, as in es (`/ad`, `/on`, `/p`). So a relative path is written without a leading `/`.
+- **The client resolves relative paths.** A path term that starts with `.\` or `..\`, a relative `parent:` folder, and a relative `-path`, `-parent` or `-parent-path` folder are joined to the working directory. `gozler_core::winpath` applies the Windows rules itself, without asking the operating system, so a command line builds the same request on any machine; `std::path::absolute` would turn `C:\repo` into a Unix path on the Ubuntu CI. After the join it removes `.` and `..`, because the daemon looks up each component of a scope as a child folder. A rooted `\foo` takes the drive of the working directory. Only a drive-relative folder such as `-path D:x` is resolved by `gozler-cli`, with `std::path::absolute`, before the request is built, because only Windows knows the current folder of each drive.
+
+### Dates
+
+A `dm:` value resolves once, to UTC bounds, from the query start and a time zone. The date resolver in `gozler-core` (`query::dates`, with `jiff`) does it: the client passes its own clock and time zone, and the daemon's text path passes its own. The bounds travel as UTC, so the daemon never needs the client's time zone.
+
+- `today`, `yesterday` and a `YYYY-MM-DD` date are calendar days in the time zone, from midnight to the next midnight, so a day around a daylight-saving change lasts 23 or 25 hours.
+- `Ndays` is the N times 24 hours that end at the query start.
+- A comparison compares times at the value's granularity, as es does: `>today` is after today, and `<7days` is older than the last 7 days. A range `lower..upper` runs from the start of `lower` to the end of `upper`, and a reversed range is invalid input.
+
+### Sizes and dates
+
+A folder has no size, by design, so `size:`, `-get-total-size` and `-get-folder-size` skip folders. A file's size or date is unknown when the size and date pass failed or stopped, or could not read that file. A size or date test, negated or not, never matches an unknown value: `!size:>1mb` does not report an unread file as small, and `report|size:>1mb` still finds `report.txt` through its other term. Because every clause is an OR, this gives the same rows as three-valued logic without tracking unknown results for each entry.
+
+The size and date pass runs in each build, before the volume serves as live, so a live volume never has the pass still running. A pass that failed or stopped sets the volume's `metadata_pending`, and `--status` shows it. Each results page and totals reply carries the flag for the volumes in scope. The client warns and exits 2 when the flag is set and the query tests a size or a date or asks for a size total, because that answer may be short. A file that a successful pass could not read is left out without exit 2; such files are rare, and the help says so.
+
+### Attributes
+
+The index holds each entry's attributes in two bytes (`PackedAttributes`): one bit for each attribute letter but D, because the entry's folder flag already says D. The record's `u32` would take four bytes, and the index holds millions of entries. An attribute without a letter is dropped, so `attrib:` takes letters only.
+
+### Result order
+
+The same query over the same index prints the same list, and a limited list is the start of the full one. `query::order` owns the one comparison that the engine and the daemon both sort by. The sort key decides first, and an unknown size or date sorts last in either direction. Ties then break, always ascending, on the folded name, the volume, the file ID, the parent folder's file ID and the raw name. Hard links need the last two keys: each link name is its own entry, and all of them share one file ID. The raw name separates two links in one case-sensitive folder whose names differ only in case. Each key comes from the hit itself, so no path is rebuilt under the index lock to break a tie.
+
+## Wire protocol
+
+- **The version gate.** The client sends `Request::Hello` with `PROTO_VERSION` as both its lowest and highest version. The daemon serves every version from `OLDEST_PROTO_VERSION` up to its own and answers with the highest version both sides speak, or refuses with `Unsupported`. A daemon older than the client therefore refuses, and the client prints `gozler: the running gozlerd is older than this client; install the matching gozlerd` and exits 7. Without the gate, an old daemon would search a new function as text and find nothing with exit 0, or reject the request with a serde error that the client would report as invalid input. So `gozler` and `gozlerd` install together, from one build.
+- **Each change an older daemon cannot serve raises `PROTO_VERSION` by one**, such as a new kind of term in the parsed query. The parsed query only grows: new variants, never changed ones. A protocol 1 client sends its text query without a `Hello`, and the daemon still serves it.
+- **Results pages are positional binary** (`proto::binary`), so a field an older client does not know would make it misread every item. A new item field therefore travels only when the request asks for it: the attributes need `Rows::want_attributes`, which no client before protocol 6 sends.
+- **Totals cross the pipe without rows.** `-get-result-count`, `-get-total-size` and `-get-folder-size` ask for `Returns::Totals`, and the daemon sums the sizes it already holds for each hit. Summing on the client would stream every match, and `-get-folder-size C:\` is the whole volume. The sum uses checked arithmetic; an overflow, which only a corrupt size in the index can cause, is `ProtoError::Overflow` and exit 1.
+
+## Not planned
+
+Each of these waits for a concrete need:
+
+- Created and accessed dates: the index does not hold them.
+- Content search: `rg` does that.
+- `< >` grouping of terms.
+- Paging: es's `-viewport-offset` and `-viewport-count` are unknown switches (exit 6). The pipe protocol keeps its `offset` field for other applications.
+- EFU file lists, playlists, bookmarks, macros, highlighting, and the size and date format menus.
+
+These do not fit gozler:
+
+- A second command-line grammar beside es's: `/NAME:value` switches, `/F`, `/D`, `/EXT:` and `/NOT:` lists, `AND`/`OR`/`NOT` keywords, and exact-path lookups keyed on a trailing separator.
+- Results filtered by the caller's file permissions: gozler's trust model shows metadata to every local user (see `SECURITY.md`).
+- A scheduled-task install and a tray icon: gozler has its service.
+- Staging all output before printing it: exit codes 2 and 7 already mark a late failure.
+
+## Golden corpus
+
+The golden corpus records what gozler prints for a set of command lines over fixed data, so a change that alters behavior fails a row. The daemon's corpus (`gozler-daemon`, `server::tests::corpus`) runs each command line through `parse_argv` and `build_search` into the daemon's request path over a fixture index, and one row as protocol 1's text query. The output corpus (`gozler-cli`, `win::corpus`) prints a fixed result set through `ResultWriter` in each output format. Dates render in UTC, so every row passes in any time zone.
+
+goz v0.2.0 returned a wrong answer that looked valid, or hid a limit, for each command line below. A corpus row or test marked `Bug N` keeps bug N fixed.
+
+| # | Command line | goz v0.2.0 | gozler |
+| --- | --- | --- | --- |
+| 1 | `gozler C:\repo\docs\testing.md` | nothing, because paths were matched without the drive | that file: a drive path is a path term |
+| 2 | `gozler dm:today`, or any unknown function | nothing: searched as text | the function, or exit 4 for an unknown one |
+| 3 | `gozler /a-d report` | nothing: `/a-d` searched as text | files only |
+| 4 | `gozler report -n 20` with 300 matches | 20 rows, exit 0, no sign of more | the same rows, a warning, exit 10 |
+| 5 | any query while a volume indexes | results and a warning, exit 0 | the same, exit 2 |
+| 6 | `gozler report -size -dm` | paths only | size and date columns |
+| 7 | `gozler -help` | exit 6 | the help, exit 0 |
+| 8 | a pipe server that fails the trust check | exit 9, es's code for no results | exit 3 |
+| 9 | `gozler docs/agents/testing` | nothing | the same matches as with `\` |
+| 10 | `gozler 'path:"C:\Program Files"'` | searched as a name | quotes delimit a function's value, and a quoted term with a separator is a path term |
+| 11 | `gozler "*\docs\*"` | nothing: wildcards matched names only | a wildcard with `\` matches the whole full path |
+| 12 | `gozler size:0..` on `C:` | 627 fewer files than `gozler file:`: names of hard-linked files had no size or date | each name of a hard-linked file gets its size and date (issue #6; issue #47 holds the check on a live `C:`); the corpus pins that a file with an unknown size never matches `size:` |

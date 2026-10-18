@@ -6,9 +6,12 @@ gozler is an instant filename search for Windows NTFS: an elevated daemon
 with a doc comment that explains its design; read it before you change the
 crate.
 
-The plans in `docs/plans/` set where gozler is going and outrank filed issues;
-each plan says when it is scheduled. Read them before you change command-line
-behavior, query syntax, output or exit codes, or before you act on an issue.
+`docs/DESIGN.md` describes how gozler works now and why. Read it before you
+change command-line behavior, query syntax, output or exit codes. A plan in
+`docs/plans/` sets where gozler is going and outranks filed issues; each plan
+says when it is scheduled, so read the plans before you act on an issue. When
+a plan is done, its rules move into `docs/DESIGN.md` and the help, and the plan
+is deleted, because a finished plan read as current misleads.
 
 Use the vocabulary in `CONTEXT.md`.
 
@@ -91,12 +94,14 @@ change must keep passing, so a test earns its place by the failure it watches.
   other workspace crate (`deny.toml`).
 - **The command line.** Scripts written for Everything or for goz v0.2.0 change
   only the program name, to `gozler`: every switch keeps its name and purpose,
-  and gozler's own options start with `--`. `docs/plans/es-superset-specs.md`
-  decides where gozler departs from `es.exe`, such as the exit codes, the CSV
-  columns and the default result limit. The rules live in
-  `gozler_core::escompat` (arguments), `gozler_core::output::table` (output rows),
-  `gozler_core::query::parse` (query syntax) and `gozler-cli`'s `main.rs` (runtime
-  exit codes).
+  and gozler's own options start with `--`. The "Command line" and "Exit
+  codes" sections of `docs/DESIGN.md` say where gozler departs from `es.exe`
+  and why, such as the exit codes, the CSV columns and the default result
+  limit. The rules live in `gozler_core::escompat` (arguments, exit codes and
+  the differences from es that the help prints), `gozler_core::output::table`
+  (output rows), `gozler_core::query::parse` (query syntax) and `gozler-cli`'s
+  `failure.rs` (which failure exits with which code) and `main.rs` (the
+  `--status` code).
 - **Truthful volume state.** A client must always be able to tell whether its
   results are complete. Read the coherence section of `docs/DESIGN.md` before
   you change how the index tracks a volume.

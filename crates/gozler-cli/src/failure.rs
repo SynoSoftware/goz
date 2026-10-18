@@ -129,8 +129,8 @@ mod tests {
         io::Error::from(io::ErrorKind::StorageFull)
     }
 
-    /// Each failure exits with its code from the exit-code table of the specs,
-    /// which scripts read.
+    /// Each failure exits with its code from the exit-code table the help
+    /// prints, which scripts read.
     #[test]
     fn each_failure_exits_with_its_code() {
         let daemon = |code| Failure::Daemon {
