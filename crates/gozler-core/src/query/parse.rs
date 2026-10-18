@@ -7,12 +7,13 @@
 //! `SEARCH_FUNCTIONS`, `!` before a term to exclude it, and `|` between terms
 //! to match either. As in es, `|` binds tighter than the space, so `a|b c` is
 //! `(a or b) and c`, and quotes make operators and spaces plain text, also in
-//! a function's value: `path:"C:\Program Files"`.
+//! a function's value: `path:"C:\Program Files"`. In a `regex:` value, `|`
+//! and `!` belong to the expression without quotes.
 //!
 //! The parser writes every path the way the daemon compares it: `/` becomes
 //! `\`, and a path term that starts with `.\` or `..\`, and a relative
 //! `parent:` folder, are joined to the working directory
-//! ([`ParseOptions::working_dir`]).
+//! ([`ParseOptions::working_dir`]). A regular expression is never rewritten.
 //!
 //! Refused as invalid input, because each would otherwise search text that
 //! no name contains: an unknown function such as `dm:`, an unquoted `<` or
@@ -226,6 +227,17 @@ pub enum Test {
     /// separator and name equals this absolute path, a trailing separator
     /// ignored. From protocol 3.
     Parent(String),
+    /// The name contains this text as a whole word: with no letter or digit
+    /// right before or after it. From protocol 4.
+    NameWholeWord(String),
+    /// The full path contains this text as a whole word. From protocol 4.
+    PathWholeWord(String),
+    /// This regular expression, in the `regex` crate's syntax, matches
+    /// somewhere in the name. From protocol 4.
+    NameRegex(String),
+    /// This regular expression matches somewhere in the full path. From
+    /// protocol 4.
+    PathRegex(String),
     /// The extension is one of these, without the dot, compared ignoring case
     /// whatever the query's case.
     Extension(Vec<String>),
@@ -242,7 +254,14 @@ impl ParsedQuery {
         !self.clauses.iter().flat_map(|c| &c.terms).any(|t| {
             matches!(
                 t.test,
-                Test::Name(_) | Test::Path(_) | Test::NameWildcard(_) | Test::PathWildcard(_)
+                Test::Name(_)
+                    | Test::Path(_)
+                    | Test::NameWildcard(_)
+                    | Test::PathWildcard(_)
+                    | Test::NameWholeWord(_)
+                    | Test::PathWholeWord(_)
+                    | Test::NameRegex(_)
+                    | Test::PathRegex(_)
             )
         })
     }
@@ -269,6 +288,13 @@ pub enum QueryError {
     /// More terms than a query may hold; carries the query's count.
     #[error("the query has {0} terms; a query may have at most {max}", max = super::engine::MAX_QUERY_TERMS)]
     TooManyTerms(usize),
+    /// More regular expressions than a query may hold; carries the query's
+    /// count.
+    #[error(
+        "the query has {0} regular expressions; a query may have at most {max}",
+        max = super::engine::MAX_QUERY_REGEXES
+    )]
+    TooManyRegexes(usize),
 }
 
 /// One search function: its names, what it does, and its line in the help.
@@ -283,13 +309,15 @@ pub(crate) struct SearchFunction {
 }
 
 /// What a [`SearchFunction`] does to the query.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Function {
     Ext,
     Size,
     Path,
     Parent,
     NoPath,
+    WholeWord,
+    Regex,
     File,
     Folder,
     /// Handled by [`case_directive`] before the other functions; a `case:`
@@ -330,6 +358,23 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::NoPath,
         example: "text",
         help: "the name contains text, also with -p; with * or ? the whole name matches",
+    },
+    SearchFunction {
+        names: &["ww"],
+        function: Function::WholeWord,
+        example: "word",
+        help: "the name contains word as a whole word: no letter or digit is right \
+               before or after it, so _ and punctuation end a word; with a separator, \
+               the full path; a wildcard already matches a whole name",
+    },
+    SearchFunction {
+        names: &["regex"],
+        function: Function::Regex,
+        example: r"^test\d+\.cs$",
+        help: "a regular expression in Rust's regex syntax, not es's: no look-around \
+               or backreferences. It matches the name, or with -p or a \\\\ in it the \
+               full path, whose separators are \\, so write \\\\ or [\\\\/]. Its | and ! \
+               belong to the expression",
     },
     SearchFunction {
         names: &["file"],
@@ -373,6 +418,9 @@ pub struct ParseOptions<'a> {
     /// as `path:` values do, instead of the name. `nopath:` still matches the
     /// name.
     pub match_path: bool,
+    /// es `-ww`: whether text terms without a wildcard match whole words, as
+    /// `ww:` values do.
+    pub whole_word: bool,
     /// The absolute folder that a path term starting with `.\` or `..\`, and
     /// a relative `parent:` folder, are below. `None` refuses them with
     /// [`QueryError::RelativePath`]: the daemon parses a protocol 1 query
@@ -605,11 +653,23 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
             Some(Function::Size) => return Ok(Operand::Size(parse_size(value)?)),
             Some(Function::Path) => {
                 let path = path_text(value, options.working_dir)?;
-                return Ok(text_operand(text_of(path, true, has_wildcard(value))));
+                let form = Form::of(has_wildcard(value), options);
+                return Ok(text_operand(text_of(path, true, form)));
             }
             Some(Function::NoPath) => {
                 let name = value.replace('/', r"\");
-                return Ok(text_operand(text_of(name, false, has_wildcard(value))));
+                let form = Form::of(has_wildcard(value), options);
+                return Ok(text_operand(text_of(name, false, form)));
+            }
+            Some(Function::WholeWord) => {
+                let options = ParseOptions {
+                    whole_word: true,
+                    ..*options
+                };
+                return Ok(text_operand(text_test(value, false, &options)?));
+            }
+            Some(Function::Regex) => {
+                return Ok(text_operand(regex_test(value, options.match_path)));
             }
             Some(Function::Parent) => {
                 return Ok(Operand::Text(Test::Parent(parent_folder(
@@ -694,21 +754,77 @@ fn text_test(text: &str, quoted: bool, options: &ParseOptions) -> Result<Option<
     } else {
         text.to_string()
     };
-    Ok(text_of(text, is_path || options.match_path, wildcard))
+    Ok(text_of(
+        text,
+        is_path || options.match_path,
+        Form::of(wildcard, options),
+    ))
 }
 
-/// A test of the full path, or else of the name, for `text`, as a pattern of
-/// `*` and `?` when `wildcard`; `None` when `text` is empty.
-fn text_of(text: String, full_path: bool, wildcard: bool) -> Option<Test> {
+/// How a text term matches what it tests.
+#[derive(Clone, Copy)]
+enum Form {
+    Substring,
+    WholeWord,
+    /// A pattern of `*` and `?` that matches the whole of it.
+    Wildcard,
+}
+
+impl Form {
+    /// A wildcard already matches a whole name or path, so whole-word
+    /// matching leaves it unchanged.
+    fn of(wildcard: bool, options: &ParseOptions) -> Self {
+        match (wildcard, options.whole_word) {
+            (true, _) => Form::Wildcard,
+            (false, true) => Form::WholeWord,
+            (false, false) => Form::Substring,
+        }
+    }
+}
+
+/// A test of the full path, or else of the name, for `text`, matched as
+/// `form` says; `None` when `text` is empty.
+fn text_of(text: String, full_path: bool, form: Form) -> Option<Test> {
     if text.is_empty() {
         return None;
     }
-    Some(match (wildcard, full_path) {
-        (true, true) => Test::PathWildcard(text),
-        (true, false) => Test::NameWildcard(text),
-        (false, true) => Test::Path(text),
-        (false, false) => Test::Name(text),
+    Some(match (form, full_path) {
+        (Form::Substring, true) => Test::Path(text),
+        (Form::Substring, false) => Test::Name(text),
+        (Form::WholeWord, true) => Test::PathWholeWord(text),
+        (Form::WholeWord, false) => Test::NameWholeWord(text),
+        (Form::Wildcard, true) => Test::PathWildcard(text),
+        (Form::Wildcard, false) => Test::NameWildcard(text),
     })
+}
+
+/// The test of a regular expression, from `regex:` or `-r`; `None` for an
+/// empty one. As in es, it matches the name, and the full path with -p
+/// (`match_path`) or when it holds an escaped backslash, `\\`, which can
+/// only match a separator. The pattern is never rewritten: its `/` stays a
+/// `/`, which no full path holds.
+pub(crate) fn regex_test(pattern: &str, match_path: bool) -> Option<Test> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let pattern = pattern.to_string();
+    Some(if match_path || has_escaped_backslash(&pattern) {
+        Test::PathRegex(pattern)
+    } else {
+        Test::NameRegex(pattern)
+    })
+}
+
+/// Whether `pattern` holds `\\`. Each `\` escapes the character after it, so
+/// the pair is read together and `\\d` is a backslash and a `d`.
+fn has_escaped_backslash(pattern: &str) -> bool {
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.next() == Some('\\') {
+            return true;
+        }
+    }
+    false
 }
 
 /// A path term's text as the daemon compares it: every `/` a `\`, and one
@@ -767,9 +883,17 @@ enum Lexeme {
     Or,
 }
 
+impl Word {
+    /// Whether the word so far is a `regex:` term, whose `|` and `!` belong
+    /// to the expression, as in es, where `|` is the regex alternation.
+    fn is_regex(&self) -> bool {
+        function_parts(self).is_some_and(|(name, _)| function_named(name) == Some(Function::Regex))
+    }
+}
+
 /// Splits the query into words and operators. Unquoted whitespace and `|`
-/// end a word, and an unquoted `!` must start one; inside double quotes every
-/// character is text.
+/// end a word, and an unquoted `!` must start one, except in a `regex:`
+/// value; inside double quotes every character is text.
 fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
     let mut lexemes = Vec::new();
     let mut word: Option<Word> = None;
@@ -781,6 +905,12 @@ fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
             } else {
                 word.get_or_insert_default().text.push(ch);
             }
+            continue;
+        }
+        if matches!(ch, '|' | '!')
+            && let Some(regex) = word.as_mut().filter(|word| word.is_regex())
+        {
+            regex.text.push(ch);
             continue;
         }
         match ch {
@@ -1380,6 +1510,70 @@ mod tests {
         );
     }
 
+    /// `ww:` matches one term as whole words and `-ww` every text term; a
+    /// wildcard, which already matches a whole name or path, stays a
+    /// wildcard.
+    #[test]
+    fn whole_word_terms_keep_their_target() {
+        let whole = |s: &str| Test::NameWholeWord(s.to_string());
+        let whole_path = |s: &str| Test::PathWholeWord(s.to_string());
+        assert_eq!(
+            tests(r"ww:report ww:docs/agents ww:*.cs report"),
+            [
+                whole("report"),
+                whole_path(r"docs\agents"),
+                Test::NameWildcard("*.cs".to_string()),
+                name("report"),
+            ]
+        );
+        let whole_word = ParseOptions {
+            whole_word: true,
+            ..ParseOptions::default()
+        };
+        assert_eq!(
+            tests_with(r#"report "two words" path:docs nopath:x *.cs"#, whole_word),
+            [
+                whole("report"),
+                whole("two words"),
+                whole_path("docs"),
+                whole("x"),
+                Test::NameWildcard("*.cs".to_string()),
+            ]
+        );
+    }
+
+    /// A regular expression keeps its text: its `|` and `!` belong to it, as
+    /// es's parser gives them to it, and its `/` is not a separator. It
+    /// matches the name, or the full path with -p or when it holds `\\`.
+    #[test]
+    fn a_regex_keeps_its_text_and_matches_the_path_only_with_a_backslash() {
+        let regex = |s: &str| Test::NameRegex(s.to_string());
+        let path_regex = |s: &str| Test::PathRegex(s.to_string());
+        assert_eq!(
+            tests(r#"regex:^a|b!$ regex:a/b regex:\d+ regex:C:\\repo\\ regex:[\\/]x REGEX:"a b""#),
+            [
+                regex("^a|b!$"),
+                regex("a/b"),
+                regex(r"\d+"),
+                path_regex(r"C:\\repo\\"),
+                path_regex(r"[\\/]x"),
+                regex("a b"),
+            ]
+        );
+        assert_eq!(
+            clauses("x|regex:a|b !regex:c|d"),
+            [
+                vec![term(false, name("x")), term(false, regex("a|b"))],
+                vec![term(true, regex("c|d"))],
+            ]
+        );
+        let match_path = ParseOptions {
+            match_path: true,
+            ..ParseOptions::default()
+        };
+        assert_eq!(tests_with(r"regex:^C:", match_path), [path_regex("^C:")]);
+    }
+
     #[test]
     fn malformed_size_is_reported() {
         assert!(matches!(
@@ -1403,9 +1597,9 @@ mod tests {
         fn arb_query() -> impl Strategy<Value = String> {
             let fragment = prop_oneof![
                 prop::sample::select(vec![
-                    "size:", "ext:", "path:", "parent:", "nopath:", "file:", "folder:", "case:",
-                    "case:0", "dm:", "..", ">=", "<", ">", "=", "*", "?", ";", ".", "\"", " ",
-                    "\\", "/", "!", "|", "kb", "gb", "tiny",
+                    "size:", "ext:", "path:", "parent:", "nopath:", "ww:", "regex:", "file:",
+                    "folder:", "case:", "case:0", "dm:", "..", ">=", "<", ">", "=", "*", "?", ";",
+                    ".", "\"", " ", "\\", "/", "!", "|", "kb", "gb", "tiny",
                 ])
                 .prop_map(str::to_string),
                 "[0-9]{1,24}",

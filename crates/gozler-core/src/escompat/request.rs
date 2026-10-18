@@ -2,6 +2,7 @@
 
 use super::{EsPlan, ScopeFolder};
 use crate::proto::{Returns, Rows, SearchRequest};
+use crate::query::parse::regex_test;
 use crate::query::{Clause, ParseOptions, QueryError, Test, parse_query_with};
 use crate::winpath::{absolute, parent_of};
 
@@ -16,9 +17,11 @@ use crate::winpath::{absolute, parent_of};
 /// knows, so the caller resolves it first (see
 /// [`is_drive_relative`](crate::winpath::is_drive_relative)).
 ///
-/// `-parent DIR` adds a `parent:` test for DIR to the query, and without
-/// `-path` or `-parent-path` it is also the scope, so the daemon walks DIR
-/// instead of every volume and refuses a DIR on no indexed volume.
+/// Each `-r PATTERN` adds the test `regex:PATTERN` would, with the whole
+/// argument as the pattern. `-parent DIR` adds a `parent:` test for DIR to
+/// the query, and without `-path` or `-parent-path` it is also the scope, so
+/// the daemon walks DIR instead of every volume and refuses a DIR on no
+/// indexed volume.
 pub fn build_search(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, QueryError> {
     let returns = match plan.count {
         Some(_) => Returns::Totals,
@@ -36,9 +39,15 @@ pub fn build_search(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, Q
         ParseOptions {
             match_case: plan.match_case,
             match_path: plan.match_path,
+            whole_word: plan.whole_word,
             working_dir: Some(working_dir),
         },
     )?;
+    let regexes = plan
+        .regexes
+        .iter()
+        .filter_map(|pattern| regex_test(pattern, plan.match_path));
+    query.clauses.extend(regexes.map(Clause::single));
     let parent = plan.parent.as_deref().map(|dir| absolute(dir, working_dir));
     query
         .clauses
@@ -121,6 +130,38 @@ mod tests {
         assert_eq!(
             scope(&["-parent", "..", "-path", r"D:\x"]).as_deref(),
             Some(r"D:\x")
+        );
+    }
+
+    /// `-r` takes its whole argument as the pattern, which a `regex:` term
+    /// would need quoted, and reads it as `regex:` does, -p included; `-ww`
+    /// makes the query's text terms whole words.
+    #[test]
+    fn the_matching_switches_shape_the_query() {
+        let tests = |tokens: &[&str]| -> Vec<Test> {
+            build_search(&plan(tokens), r"C:\repo")
+                .expect("parses")
+                .query
+                .clauses
+                .into_iter()
+                .flat_map(|clause| clause.terms)
+                .map(|term| term.test)
+                .collect()
+        };
+        assert_eq!(
+            tests(&["-r", r#"^"a b"|c$"#, "-r", r"x\\y"]),
+            [
+                Test::NameRegex(r#"^"a b"|c$"#.to_string()),
+                Test::PathRegex(r"x\\y".to_string()),
+            ]
+        );
+        assert_eq!(
+            tests(&["-p", "-r", "^C:"]),
+            [Test::PathRegex("^C:".to_string())]
+        );
+        assert_eq!(
+            tests(&["-ww", "report"]),
+            [Test::NameWholeWord("report".to_string())]
         );
     }
 

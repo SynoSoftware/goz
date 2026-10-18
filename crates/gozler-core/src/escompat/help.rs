@@ -91,6 +91,7 @@ const EXAMPLES: &[&str] = &[
     "gozler C:/repo/*.cs",
     r"gozler -parent C:\repo -n all",
     "gozler *.log -sort dm -n 10",
+    r#"gozler -r "^test[0-9]+\.cs$" -path C:\repo"#,
     "gozler -n all ext:cs",
     "gozler -timeout 5000 -no-result-error report",
     "gozler -export-csv files.csv -size -dm ext:cs",
@@ -171,6 +172,12 @@ const DIFFERENCES: &[Difference] = &[
                  not absolute, are below the current folder",
         es: "parent: needs an absolute folder, and the search syntax has no current folder",
         why: "a command line runs in a folder, and a relative -path is below it too",
+    },
+    Difference {
+        gozler: "regex: and -r use Rust's regex syntax, without look-around or \
+                 backreferences",
+        es: "regular expressions use PCRE",
+        why: "Rust's regex runs in linear time, so a pattern cannot hang gozlerd",
     },
     Difference {
         gozler: "Shows 20 results unless -n says otherwise, and exits 10 with a warning \
@@ -415,6 +422,7 @@ mod tests {
                 Some("PATH") => tokens[1] = r"C:\repo\x",
                 Some("FILE") => tokens[1] = "out.csv",
                 Some("KEY") => tokens[1] = "name",
+                Some("PATTERN") => tokens[1] = r"^test\d+\.cs$",
                 Some(param) => panic!("{form}: the test has no value for {param}"),
             }
             assert_switch_parses(&tokens);

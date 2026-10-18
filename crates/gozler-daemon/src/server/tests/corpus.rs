@@ -281,6 +281,42 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             &["-p", "src", "nopath:link"],
             prints(&[r"C:\repo\src\link.md"]),
         ),
+        // Whole words: no letter or digit right before or after the text.
+        // `read` lies inside readme and unread.
+        (&["ww:read"], prints(&[])),
+        (
+            &["-ww", "md"],
+            prints(&[
+                r"C:\repo\DESIGN.md",
+                r"C:\repo\docs\link.md",
+                r"C:\repo\src\link.md",
+                r"C:\repo\notes.md.bak",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+            ]),
+        ),
+        (&["-ww", r"docs\agent"], prints(&[])),
+        // Regular expressions match the name, in the query's case; their `|`
+        // belongs to them, as in es. With `\\` they match the full path.
+        (
+            &[r"regex:^(argv|main)\."],
+            prints(&[r"C:\repo\src\argv.rs", r"C:\repo\src\main.cs"]),
+        ),
+        (&["-i", "regex:^R"], prints(&[r"C:\repo\Report 2026.txt"])),
+        (
+            &["-r", r"^C:\\repo\\docs\\[^\\]+$"],
+            prints(&[
+                r"C:\repo\docs\agents",
+                r"C:\repo\docs\link.md",
+                r"C:\repo\docs\testing.md",
+            ]),
+        ),
+        (
+            &["regex:("],
+            query_error(
+                "malformed regular expression: regex parse error:\n    (\n    ^\nerror: unclosed group",
+            ),
+        ),
         // parent: and -parent find the entries directly in a folder;
         // -parent-path searches below the folder that holds a path.
         (

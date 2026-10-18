@@ -20,7 +20,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// meet, rather than agreeing on a version one side cannot actually speak.
 /// The client asks for this version alone, so a daemon older than the client
 /// refuses it.
-pub const PROTO_VERSION: u16 = 3;
+pub const PROTO_VERSION: u16 = 4;
 
 /// The oldest protocol version a daemon of this build serves: protocol 1's
 /// clients send [`Request::Query`] without a `Hello`.
@@ -511,6 +511,45 @@ mod tests {
         let json = concat!(
             r#"{"t":"Search","query":{"clauses":[{"terms":["#,
             r#"{"negated":false,"test":{"Parent":"C:\\repo"}}]}],"match_case":false},"#,
+            r#""scope":null,"returns":"Totals"}"#,
+        );
+        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<Request>(json).expect("deserialize"),
+            search
+        );
+    }
+
+    /// Protocol 4 adds the whole-word and regular expression tests; a later
+    /// daemon must still read them as this client writes them.
+    #[test]
+    fn protocol_4_word_and_regex_tests_keep_their_json() {
+        use crate::query::{Clause, Term, Test};
+        let term = |test| Term {
+            negated: false,
+            test,
+        };
+        let search = Request::Search(SearchRequest {
+            query: ParsedQuery {
+                clauses: vec![Clause {
+                    terms: vec![
+                        term(Test::NameWholeWord("a".into())),
+                        term(Test::PathWholeWord(r"b\c".into())),
+                        term(Test::NameRegex("^d|e$".into())),
+                        term(Test::PathRegex(r"f\\g".into())),
+                    ],
+                }],
+                match_case: false,
+            },
+            scope: None,
+            returns: Returns::Totals,
+        });
+        let json = concat!(
+            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
+            r#"{"negated":false,"test":{"NameWholeWord":"a"}},"#,
+            r#"{"negated":false,"test":{"PathWholeWord":"b\\c"}},"#,
+            r#"{"negated":false,"test":{"NameRegex":"^d|e$"}},"#,
+            r#"{"negated":false,"test":{"PathRegex":"f\\\\g"}}]}],"match_case":false},"#,
             r#""scope":null,"returns":"Totals"}"#,
         );
         assert_eq!(serde_json::to_string(&search).expect("serialize"), json);

@@ -95,10 +95,16 @@ pub struct EsPlan {
     /// `-get-result-count`, `-get-total-size` or `-get-folder-size`, the last
     /// of them: print a count instead of the results.
     pub count: Option<Count>,
-    /// Case-sensitive matching, from `-case` / `-match-case`. Default off.
+    /// Case-sensitive matching, from `-i`, `-case` or `-match-case`. Default
+    /// off.
     pub match_case: bool,
     /// `-p` / `-match-path`: text terms match the full path. Default off.
     pub match_path: bool,
+    /// `-ww` / `-whole-word`: text terms match whole words. Default off.
+    pub whole_word: bool,
+    /// The pattern of each `-r` / `-regex`, verbatim, in command-line order;
+    /// each must match, as a `regex:` term must.
+    pub regexes: Vec<String>,
     /// `-no-result-error`: exit 9 when nothing matches.
     pub no_result_error: bool,
     /// `-timeout MS`: how long to wait for the volumes in scope to become
@@ -134,6 +140,8 @@ impl Default for EsPlan {
             count: None,
             match_case: false,
             match_path: false,
+            whole_word: false,
+            regexes: Vec::new(),
             no_result_error: false,
             timeout: None,
             json: false,
@@ -343,10 +351,15 @@ pub(super) enum SwitchAction {
     NoHeader,
     /// `-no-double-quote`: quote string columns only when needed.
     NoDoubleQuote,
-    /// `-case` / `-match-case`: case-sensitive matching.
+    /// `-i` / `-case` / `-match-case`: case-sensitive matching.
     MatchCase,
     /// `-p` / `-match-path`: text terms match the full path.
     MatchPath,
+    /// `-ww` / `-whole-word`: text terms match whole words.
+    WholeWord,
+    /// `-r` / `-regex`: consume the next token as a regular expression that
+    /// must match, verbatim.
+    Regex,
     /// `--json`: print results as JSON.
     Json,
     /// `--status`: report the daemon's state instead of searching.
@@ -370,6 +383,7 @@ impl SwitchAction {
             SwitchAction::ParentPath => Some("PATH"),
             SwitchAction::Export(_) => Some("FILE"),
             SwitchAction::SortParam => Some("KEY"),
+            SwitchAction::Regex => Some("PATTERN"),
             SwitchAction::Column(_)
             | SwitchAction::Format(_)
             | SwitchAction::Count(_)
@@ -382,6 +396,7 @@ impl SwitchAction {
             | SwitchAction::NoDoubleQuote
             | SwitchAction::MatchCase
             | SwitchAction::MatchPath
+            | SwitchAction::WholeWord
             | SwitchAction::NoResultError
             | SwitchAction::Json
             | SwitchAction::Status
@@ -448,7 +463,7 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Es {
-            names: &["case", "match-case"],
+            names: &["i", "case", "match-case"],
             action: SwitchAction::MatchCase,
         },
         help: "match case",
@@ -460,6 +475,21 @@ pub(super) const SWITCHES: &[Switch] = &[
         },
         help: "match every text term against the full path, as path: does; \
                nopath: still matches the name",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["ww", "whole-word", "whole-words"],
+            action: SwitchAction::WholeWord,
+        },
+        help: "match every text term as a whole word, as ww: does",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["r", "regex"],
+            action: SwitchAction::Regex,
+        },
+        help: "also match this regular expression, as regex:PATTERN does; the whole \
+               argument is the pattern, its spaces and quotes included",
     },
     Switch {
         spelling: Spelling::Family {
@@ -918,6 +948,8 @@ fn apply_switch(
         SwitchAction::NoDoubleQuote => plan.double_quote = false,
         SwitchAction::MatchCase => plan.match_case = true,
         SwitchAction::MatchPath => plan.match_path = true,
+        SwitchAction::WholeWord => plan.whole_word = true,
+        SwitchAction::Regex => plan.regexes.push(take_param(rest, token)?.to_owned()),
         SwitchAction::Json => plan.json = true,
         SwitchAction::Status => plan.status = true,
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
@@ -1080,6 +1112,8 @@ mod tests {
                 count: None,
                 match_case: false,
                 match_path: false,
+                whole_word: false,
+                regexes: Vec::new(),
                 no_result_error: false,
                 timeout: None,
                 json: false,
@@ -1514,6 +1548,7 @@ mod tests {
 
     #[test]
     fn match_case_aliases() {
+        assert!(plan(&["-i"]).match_case);
         assert!(plan(&["-case"]).match_case);
         assert!(plan(&["-match-case"]).match_case);
         assert!(plan(&["-matchcase"]).match_case);

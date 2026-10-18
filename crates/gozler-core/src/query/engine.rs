@@ -4,11 +4,11 @@
 //!
 //! The scan matches each candidate against the index's precomputed folded name
 //! (case-insensitive queries) and tests the cheapest clauses first: kind and
-//! size, then name substrings and wildcards, then ext, then (only for
-//! survivors) scope ancestry and the clauses that test the full path. Full
-//! paths come from the `paths` module, which builds each folder's path once
-//! per query, so a path term costs one copy per candidate instead of a walk to
-//! the root.
+//! size, then name substrings and wildcards, then ext, then regular
+//! expressions of the name, then (only for survivors) scope ancestry and the
+//! clauses that test the full path. Full paths come from the `paths` module,
+//! which builds each folder's path once per query, so a path term costs one
+//! copy per candidate instead of a walk to the root.
 
 use super::order::{OrderFields, compare};
 use super::parse::{CodePointBuf, Kind, ParsedQuery, QueryError, SizeRange, Test, Wildcard};
@@ -17,6 +17,7 @@ use crate::fold::fold;
 use crate::index::VolumeIndex;
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
+use regex::bytes::{Regex, RegexBuilder};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -83,14 +84,33 @@ pub struct SizeOverflow;
 /// a few terms, and 256 still fits a long `ext:` list.
 pub(crate) const MAX_QUERY_TERMS: usize = 256;
 
+/// The most regular expressions one query may hold. Each compiled regex keeps
+/// up to [`REGEX_SIZE_LIMIT`] for each of its forward and reverse automata, up
+/// to [`REGEX_CACHE_LIMIT`] of lazy DFA cache for each, and a one-pass DFA of
+/// up to 1 MiB that the `regex` crate does not let a caller lower, so the cap
+/// keeps a query from any local user to tens of megabytes. One expression can
+/// hold any number of alternatives.
+pub(crate) const MAX_QUERY_REGEXES: usize = 8;
+
+/// The largest compiled automaton of one regular expression, a tenth of the
+/// `regex` crate's default: it still fits `\w{20}`, and a pattern past it is
+/// refused as malformed.
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+/// The lazy DFA cache of one regular expression; past it, the crate clears
+/// the cache or falls back to a slower engine, never fails.
+const REGEX_CACHE_LIMIT: usize = 1 << 20;
+
 /// A [`ParsedQuery`] ready to test entries: its text folded unless it matches
-/// case, its wildcards compiled and its needles built into finders, once per
-/// query instead of once per candidate.
+/// case, its wildcards and regular expressions compiled and its needles built
+/// into finders, once per query instead of once per candidate.
 ///
 /// The daemon compiles the query, not the client, because the index's folded
 /// names come from the daemon's fold, and a client from another release can
-/// fold some text differently. Compiling also refuses a query with too many
-/// terms ([`QueryError::TooManyTerms`]), which arrives from any local user.
+/// fold some text differently. Compiling also refuses a query from any local
+/// user that holds too many terms ([`QueryError::TooManyTerms`]) or regular
+/// expressions ([`QueryError::TooManyRegexes`]), or a regular expression that
+/// is malformed or compiles past its size limit.
 pub struct CompiledQuery {
     match_case: bool,
     /// Every clause, cheapest first. The clauses from `path_clauses` on test
@@ -98,14 +118,16 @@ pub struct CompiledQuery {
     clauses: Vec<CompiledClause>,
     path_clauses: usize,
     /// The longest literal that every matching name contains, from a clause
-    /// of one positive name term, name wildcard (`.dll` of `*.dll`) or
-    /// single `ext:` value (`.ext`). Drives the folded-arena prefilter scan;
-    /// `None` when no clause offers one (then the query iterates every entry).
+    /// of one positive name term, whole-word name term, name wildcard (`.dll`
+    /// of `*.dll`) or single `ext:` value (`.ext`). Drives the folded-arena
+    /// prefilter scan; `None` when no clause offers one (then the query
+    /// iterates every entry).
     ///
     /// No other clause supplies it: a clause of several terms or a negated
     /// term lets through names without the literal, the text of a path term
-    /// can lie in any folder of the path, and the literal of `*\docs\*` is
-    /// `\docs\`, which no name contains.
+    /// can lie in any folder of the path, the literal of `*\docs\*` is
+    /// `\docs\`, which no name contains, and a regular expression is not a
+    /// literal.
     prefilter: Option<Vec<u8>>,
 }
 
@@ -133,6 +155,13 @@ enum Check {
     /// The folder's full path, without a trailing separator, which the full
     /// path of the folder that holds the entry must equal.
     Parent(Vec<u8>),
+    NameWholeWord(memmem::Finder<'static>),
+    PathWholeWord(memmem::Finder<'static>),
+    /// Compiled case-insensitive unless the query matches case, when it
+    /// tests the folded name or path like every other check. The pattern
+    /// itself is never folded, because folding would turn `\D` into `\d`.
+    NameRegex(Regex),
+    PathRegex(Regex),
 }
 
 impl CompiledQuery {
@@ -156,6 +185,15 @@ impl CompiledQuery {
         if terms > MAX_QUERY_TERMS {
             return Err(QueryError::TooManyTerms(terms));
         }
+        let regexes = parsed
+            .clauses
+            .iter()
+            .flat_map(|clause| &clause.terms)
+            .filter(|term| matches!(term.test, Test::NameRegex(_) | Test::PathRegex(_)))
+            .count();
+        if regexes > MAX_QUERY_REGEXES {
+            return Err(QueryError::TooManyRegexes(regexes));
+        }
 
         let match_case = parsed.match_case;
         let text = |s: &str| {
@@ -166,16 +204,26 @@ impl CompiledQuery {
             }
         };
         let finder = |s: &str| memmem::Finder::new(&text(s)).into_owned();
-        let mut clauses: Vec<CompiledClause> = parsed
+        let regex = |pattern: &str| {
+            RegexBuilder::new(pattern)
+                .case_insensitive(!match_case)
+                .size_limit(REGEX_SIZE_LIMIT)
+                .dfa_size_limit(REGEX_CACHE_LIMIT)
+                .build()
+                .map_err(|e| QueryError::Malformed {
+                    what: "regular expression",
+                    detail: e.to_string(),
+                })
+        };
+        let mut clauses = parsed
             .clauses
             .iter()
-            .map(|clause| CompiledClause {
-                terms: clause
+            .map(|clause| {
+                let terms = clause
                     .terms
                     .iter()
-                    .map(|term| CompiledTerm {
-                        negated: term.negated,
-                        check: match &term.test {
+                    .map(|term| {
+                        let check = match &term.test {
                             Test::Name(s) => Check::Name(finder(s)),
                             Test::Path(s) => Check::Path(finder(s)),
                             Test::NameWildcard(s) => {
@@ -184,17 +232,26 @@ impl CompiledQuery {
                             Test::PathWildcard(s) => {
                                 Check::PathWildcard(Wildcard::compile(&text(s)))
                             }
+                            Test::NameWholeWord(s) => Check::NameWholeWord(finder(s)),
+                            Test::PathWholeWord(s) => Check::PathWholeWord(finder(s)),
+                            Test::NameRegex(s) => Check::NameRegex(regex(s)?),
+                            Test::PathRegex(s) => Check::PathRegex(regex(s)?),
                             Test::Extension(exts) => Check::Extension(
                                 exts.iter().map(|ext| fold(ext.as_bytes())).collect(),
                             ),
                             Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
                             Test::Size(range) => Check::Size(*range),
                             Test::Kind(kind) => Check::Kind(*kind),
-                        },
+                        };
+                        Ok(CompiledTerm {
+                            negated: term.negated,
+                            check,
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<_, QueryError>>()?;
+                Ok(CompiledClause { terms })
             })
-            .collect();
+            .collect::<Result<Vec<_>, QueryError>>()?;
 
         // Every match contains the prefilter, so scanning for it yields a
         // superset of the matches that the clauses then verify. The first of
@@ -220,7 +277,8 @@ impl CompiledQuery {
 
 impl CompiledClause {
     /// The literal every name that passes this clause contains, when the
-    /// clause is one positive name term, name wildcard or single extension.
+    /// clause is one positive name term, whole-word name term, name wildcard
+    /// or single extension.
     fn name_literal(&self) -> Option<Vec<u8>> {
         let [term] = self.terms.as_slice() else {
             return None;
@@ -229,7 +287,7 @@ impl CompiledClause {
             return None;
         }
         match &term.check {
-            Check::Name(finder) => Some(finder.needle().to_vec()),
+            Check::Name(finder) | Check::NameWholeWord(finder) => Some(finder.needle().to_vec()),
             Check::NameWildcard(wildcard) => wildcard.longest_literal(),
             Check::Extension(exts) => match exts.as_slice() {
                 [ext] if !ext.is_empty() => Some([b".", ext.as_slice()].concat()),
@@ -245,7 +303,11 @@ impl CompiledClause {
         let needs_path = self.terms.iter().any(|term| {
             matches!(
                 term.check,
-                Check::Path(_) | Check::PathWildcard(_) | Check::Parent(_)
+                Check::Path(_)
+                    | Check::PathWildcard(_)
+                    | Check::PathWholeWord(_)
+                    | Check::PathRegex(_)
+                    | Check::Parent(_)
             )
         });
         let cost = self.terms.iter().map(|term| term.check.cost()).max();
@@ -289,8 +351,10 @@ impl Check {
             Check::Kind(_) => 0,
             Check::Size(_) => 1,
             Check::Name(_) | Check::Path(_) | Check::Parent(_) => 2,
+            Check::NameWholeWord(_) | Check::PathWholeWord(_) => 2,
             Check::NameWildcard(_) | Check::PathWildcard(_) => 3,
             Check::Extension(_) => 4,
+            Check::NameRegex(_) | Check::PathRegex(_) => 5,
         }
     }
 
@@ -331,8 +395,45 @@ impl Check {
                     .expect("a full path ends with its name");
                 parent.strip_suffix(b"\\").unwrap_or(parent) == folder.as_slice()
             }
+            Check::NameWholeWord(finder) => contains_whole_word(finder, subject.name),
+            Check::PathWholeWord(finder) => contains_whole_word(finder, path()),
+            Check::NameRegex(regex) => regex.is_match(subject.name),
+            Check::PathRegex(regex) => regex.is_match(path()),
         })
     }
+}
+
+/// Whether `text` contains the finder's needle with no letter or digit right
+/// before or after it. As in Everything, every other character, `_`
+/// included, ends a word; letters and digits outside ASCII are word
+/// characters too.
+fn contains_whole_word(finder: &memmem::Finder, text: &[u8]) -> bool {
+    use crate::wtf8::CodePoints;
+    let is_word = |cp: Option<u32>| {
+        cp.and_then(char::from_u32)
+            .is_some_and(char::is_alphanumeric)
+    };
+    // A code point is at most 4 bytes, and only its first is not 0b10xxxxxx.
+    let last = |bytes: &[u8]| {
+        let tail = &bytes[bytes.len().saturating_sub(4)..];
+        let lead = tail.iter().rposition(|b| b & 0xC0 != 0x80)?;
+        CodePoints::new(&tail[lead..]).next()
+    };
+    let mut from = 0;
+    while let Some(rest) = text.get(from..)
+        && let Some(at) = finder.find(rest)
+    {
+        let start = from + at;
+        let end = start + finder.needle().len();
+        let before = last(&text[..start]);
+        let after = CodePoints::new(&text[end..]).next();
+        if !is_word(before) && !is_word(after) {
+            return true;
+        }
+        // The next occurrence may overlap this one: `a-a` in `xa-a-a`.
+        from = start + 1;
+    }
+    false
 }
 
 /// A matched entry before its path is built (deferred to the final page).
@@ -1436,6 +1537,59 @@ mod tests {
         assert!(paths_under(&idx, r"C:\", r"parent:C:\Repo case:", None).is_empty());
     }
 
+    // -- whole words and regular expressions --------------------------------
+
+    /// A whole word has no letter or digit right before or after it, so `_`
+    /// and punctuation end a word, as in Everything, and a letter outside
+    /// ASCII does not. An occurrence inside a longer word does not hide a
+    /// later one that overlaps it. The name term drives the folded-arena
+    /// scan, and the path term the full scan.
+    #[test]
+    fn a_whole_word_has_no_letter_or_digit_beside_it() {
+        let idx = flat_index(&[
+            "my_REPORT.txt".to_string(),
+            "report-v2.txt".to_string(),
+            "reports.txt".to_string(),
+            "2report.txt".to_string(),
+            "üreport.txt".to_string(),
+            "xa-a-a".to_string(),
+        ]);
+        let found = |query: &str| paths_under(&idx, r"C:\", query, None);
+        assert_eq!(
+            found("ww:report"),
+            [r"C:\my_REPORT.txt", r"C:\report-v2.txt"]
+        );
+        assert_eq!(found("ww:a-a"), [r"C:\xa-a-a"]);
+        assert_eq!(found(r"ww:\report"), [r"C:\report-v2.txt"]);
+        assert!(found(r"ww:\repor").is_empty());
+    }
+
+    /// A regular expression matches anywhere in the name unless it anchors,
+    /// in the query's case. With `\\` it matches the full path, whose
+    /// separators are `\`.
+    #[test]
+    fn a_regex_matches_the_name_or_with_a_backslash_the_full_path() {
+        let idx = docs_index();
+        let readmes = [
+            r"C:\docs\readme.md",
+            r"C:\repo\readme.md",
+            r"C:\repo\docs\readme.md",
+            r"C:\repo\src\readme.md",
+        ];
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"regex:^read.e\.md$", None),
+            readmes
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"regex:\.MD$ case:", None),
+            [r"C:\repo\docs\guide.MD"]
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"regex:^c:\\repo\\docs\\", None),
+            [r"C:\repo\docs\guide.MD", r"C:\repo\docs\readme.md"]
+        );
+    }
+
     // -- clauses ------------------------------------------------------------
 
     fn query_of(clauses: Vec<Vec<Term>>) -> ParsedQuery {
@@ -1545,6 +1699,41 @@ mod tests {
         );
     }
 
+    /// A regular expression arrives from any local user, so one that is
+    /// malformed, compiles past the size limit, or comes with more than the
+    /// cap allows is refused before the query runs. A pattern a person
+    /// writes, with Unicode classes repeated, still fits.
+    #[test]
+    fn a_malformed_or_oversized_regex_is_refused() {
+        let regexes = |patterns: &[&str]| {
+            query_of(
+                patterns
+                    .iter()
+                    .map(|p| vec![term(false, Test::NameRegex(p.to_string()))])
+                    .collect(),
+            )
+        };
+        let refusal = |patterns: &[&str]| CompiledQuery::new(&regexes(patterns)).err();
+        for pattern in ["(", r"\w{1000}"] {
+            assert!(
+                matches!(
+                    refusal(&[pattern]),
+                    Some(QueryError::Malformed {
+                        what: "regular expression",
+                        ..
+                    })
+                ),
+                "{pattern}"
+            );
+        }
+        assert_eq!(refusal(&[r"\w{20}"]), None);
+        assert_eq!(refusal(&["a"; MAX_QUERY_REGEXES]), None);
+        assert_eq!(
+            refusal(&["a"; MAX_QUERY_REGEXES + 1]),
+            Some(QueryError::TooManyRegexes(MAX_QUERY_REGEXES + 1))
+        );
+    }
+
     mod untrusted {
         use super::*;
         use crate::proto::{Request, Returns, SearchRequest, decode_request};
@@ -1552,12 +1741,18 @@ mod tests {
 
         fn arb_test() -> impl Strategy<Value = Test> {
             let text = || "[a-zA-Z.*?\\\\/ ]{0,6}";
+            // Always valid: letters, `.` and escaped backslashes.
+            let regex = || r"([a-c.]|\\\\){0,4}";
             prop_oneof![
                 text().prop_map(Test::Name),
                 text().prop_map(Test::Path),
                 text().prop_map(Test::NameWildcard),
                 text().prop_map(Test::PathWildcard),
                 text().prop_map(Test::Parent),
+                text().prop_map(Test::NameWholeWord),
+                text().prop_map(Test::PathWholeWord),
+                regex().prop_map(Test::NameRegex),
+                regex().prop_map(Test::PathRegex),
                 prop::collection::vec(text(), 0..3).prop_map(Test::Extension),
                 (any::<u64>(), any::<u64>())
                     .prop_map(|(min, max)| Test::Size(SizeRange { min, max })),
@@ -1588,7 +1783,10 @@ mod tests {
                 scoped in any::<bool>(),
             ) {
                 let idx = docs_index();
-                let query = CompiledQuery::new(&query).expect("under the cap");
+                let query = match CompiledQuery::new(&query) {
+                    Err(QueryError::TooManyRegexes(_)) => return Ok(()),
+                    compiled => compiled.expect("under the term cap, with valid regexes"),
+                };
                 let scope = scoped.then(|| resolve_scope(&idx, b"repo", false).expect("repo exists"));
                 let page = run_query(&idx, r"C:\", &query, scope, SortSpec::default(), None);
                 let totals = run_totals(&idx, r"C:\", &query, scope).expect("no size is known");

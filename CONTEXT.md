@@ -53,6 +53,15 @@ A search term without a separator; it matches the entry's name.
 A search term with a `\` or `/`, or a `path:` value; it matches the full path,
 as a substring.
 
+**Whole word**:
+A match of a term's text with no letter or digit right before or after it, so
+`_` and punctuation end a word; what `ww:` and `-ww` ask for.
+
+**Regular expression**:
+A `regex:` value or `-r` pattern, in Rust's `regex` syntax. It matches the
+name, or the full path with `-p` or when it holds `\\`; gozler never rewrites
+its `/`.
+
 **Scope**:
 The folder `-path` names. A search finds the entries below it, on the volume
 whose mount prefix is the longest that starts it.

@@ -1202,7 +1202,12 @@ mod tests {
     fn hello_answers_the_highest_shared_version_or_refuses() {
         let vols = set(&[live_volume(r"C:\")]);
 
-        for (range, agreed) in [((1, 1), 1), ((1, 3), PROTO_VERSION), ((2, 2), 2)] {
+        for (range, agreed) in [
+            ((1, 1), 1),
+            ((1, PROTO_VERSION), PROTO_VERSION),
+            ((2, 2), 2),
+            ((3, 3), 3),
+        ] {
             match answer(&vols, hello_request(range.0, range.1)) {
                 Response::Hello { proto, .. } => assert_eq!(proto, agreed, "{range:?}"),
                 other => panic!("{range:?} must negotiate, got {other:?}"),
