@@ -1,0 +1,2442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gozler-ui prototype</title>
+<!--
+PROTOTYPE, throwaway (docs/plans/ui-plan.md, stage 0). Open this file with a
+double-click. It draws the window that docs/plans/ui-spec.md specifies, as
+Windows 11 draws its common controls, on synthetic data and with no daemon.
+The owner chose variant A of the filters, so the other two are gone.
+Nothing here is product code, and it is deleted with the plan.
+-->
+<style>
+:root {
+  --win: #fff; --text: #000; --face: #f0f0f0; --gray: #6d6d6d;
+  --hl: #0078d7; --hltext: #fff;
+  --edge: #7a7a7a; --edgehot: #171717; --lbedge: #828790;
+  --btn: #e1e1e1; --btnb: #adadad; --btnhot: #e5f1fb; --btnhotb: #0078d7;
+  --btnpress: #cce4f7; --btnpressb: #005499;
+  --rowhot: #e5f3ff; --rowsel: #cce8ff; --rowselb: #99d1ff; --rowselun: #d9d9d9;
+  --div: #dcdcdc; --menu: #f9f9f9; --menub: #dadada; --menuhot: #e3e3e3;
+  --link: #0066cc; --tipb: #767676; --tiptext: #575757;
+  --title: #fff; --titletext: #000;
+}
+.hc {
+  --win: #000; --text: #fff; --face: #000; --gray: #3ff23f;
+  --hl: #1aebff; --hltext: #000;
+  --edge: #fff; --edgehot: #1aebff; --lbedge: #fff;
+  --btn: #000; --btnb: #fff; --btnhot: #1aebff; --btnhotb: #1aebff;
+  --btnpress: #1aebff; --btnpressb: #fff;
+  --rowhot: #000; --rowsel: #1aebff; --rowselb: #1aebff; --rowselun: #1aebff;
+  --div: #fff; --menu: #000; --menub: #fff; --menuhot: #1aebff;
+  --link: #ffff00; --tipb: #fff; --tiptext: #fff;
+  --title: #000; --titletext: #fff;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body { background: #5b6b7f; font: 12px "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+#stage { position: absolute; inset: 0 360px 0 0; overflow: auto; }
+#sizer { position: relative; }
+#scaler { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+
+/* ---------- the window ---------- */
+.window { position: absolute; left: 20px; top: 20px; background: var(--win); color: var(--text);
+  border: 1px solid #6f7e91; box-shadow: 0 8px 28px rgba(0,0,0,.35); display: flex; flex-direction: column;
+  border-radius: 8px; overflow: hidden; }
+.window.maxed { border-radius: 0; }
+.titlebar { height: 31px; flex: none; display: flex; align-items: center; background: var(--title); color: var(--titletext); user-select: none; }
+.titlebar .ticon { width: 16px; height: 16px; margin: 0 8px 0 9px; }
+.titlebar .ttext { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.capbtn { width: 46px; height: 31px; display: flex; align-items: center; justify-content: center;
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets"; font-size: 10px; }
+.capbtn:hover { background: #e5e5e5; } .capbtn.close:hover { background: #c42b1c; color: #fff; }
+.hc .capbtn:hover { background: var(--hl); color: var(--hltext); }
+.menubar { height: 20px; flex: none; display: flex; background: var(--win); user-select: none; padding-left: 0; }
+.mbi { padding: 0 7px; line-height: 19px; border: 1px solid transparent; }
+.mbi:hover, .mbi.hot { background: #e5f3ff; border-color: #cce8ff; }
+.mbi.open { background: #cce8ff; border-color: #99d1ff; }
+.hc .mbi:hover, .hc .mbi.hot, .hc .mbi.open { background: var(--hl); color: var(--hltext); border-color: var(--hl); }
+body:not(.cues) u.ak { text-decoration: none; }
+.client { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
+.strip { flex: none; display: flex; gap: 7px; padding: 11px 11px 0; }
+.body { flex: 1; display: flex; padding: 11px; min-height: 0; }
+.vdiv { width: 1px; background: var(--div); margin: 0 5px; flex: none; }
+.right { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.splitter { height: 11px; flex: none; cursor: ns-resize; position: relative; }
+.splitter::after { content: ""; position: absolute; left: 0; right: 0; top: 5px; height: 1px; background: var(--div); }
+
+/* ---------- common controls ---------- */
+.edit { height: 23px; border: 1px solid var(--edge); background: var(--win); color: var(--text); font: inherit; padding: 0 4px; outline: none; }
+.edit:hover { border-color: var(--edgehot); } .edit:focus { border-color: var(--hl); }
+.edit::placeholder { color: var(--gray); }
+.btn { height: 23px; min-width: 75px; padding: 0 10px; border: 1px solid var(--btnb); background: var(--btn); color: var(--text); font: inherit;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; outline: none; user-select: none; position: relative; }
+.btn:hover:not(.dis) { background: var(--btnhot); border-color: var(--btnhotb); }
+.hc .btn:hover:not(.dis) { color: var(--hltext); }
+.btn:active:not(.dis), .btn.on { background: var(--btnpress); border-color: var(--btnpressb); }
+.hc .btn.on { color: var(--hltext); }
+.btn.def { border-color: var(--hl); box-shadow: inset 0 0 0 1px var(--hl); }
+.btn:focus-visible::after, .cues .btn:focus::after { content: ""; position: absolute; inset: 3px; border: 1px dotted var(--text); }
+.btn.dis { color: var(--gray); background: #ccc; border-color: #bfbfbf; }
+.hc .btn.dis { background: #000; border-color: var(--gray); }
+.chk { display: inline-flex; align-items: center; gap: 5px; user-select: none; outline: none; line-height: 17px; position: relative; }
+.chk .box { width: 13px; height: 13px; border: 1px solid #333; background: var(--win); flex: none; display: flex; align-items: center; justify-content: center; }
+.hc .chk .box { border-color: #fff; }
+.chk:hover .box { border-color: var(--hl); background: var(--btnhot); }
+.chk.on .box::after { content: ""; width: 7px; height: 4px; border-left: 2px solid var(--text); border-bottom: 2px solid var(--text); transform: translateY(-1px) rotate(-45deg); }
+.chk.radio .box { border-radius: 50%; }
+.chk.radio.on .box::after { width: 5px; height: 5px; border: 0; border-radius: 50%; background: var(--text); transform: none; }
+.chk:focus-visible .lbl, .cues .chk:focus .lbl { outline: 1px dotted var(--text); }
+.chk.dis { color: var(--gray); }
+.lb { border: 1px solid var(--lbedge); background: var(--win); outline: none; overflow-y: auto; user-select: none; }
+.lb .it { padding: 0 3px; line-height: 15px; height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb .it.sel { background: var(--rowselun); }
+.lb:focus .it.sel { background: var(--hl); color: var(--hltext); }
+.cues .lb:focus .it.cur { outline: 1px dotted var(--text); outline-offset: -1px; }
+.combo { height: 23px; border: 1px solid var(--btnb); background: var(--btn); display: flex; align-items: center; padding: 0 0 0 4px; outline: none; user-select: none; position: relative; min-width: 0; }
+.combo:hover { background: var(--btnhot); border-color: var(--btnhotb); }
+.combo .ct { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 2px; }
+.combo:focus .ct { background: var(--hl); color: var(--hltext); }
+.combo .arrow { width: 17px; flex: none; text-align: center; font-family: "Segoe MDL2 Assets"; font-size: 8px; }
+.drop { position: absolute; background: var(--win); border: 1px solid #646464; z-index: 60; overflow-y: auto; user-select: none; }
+.hc .drop { border-color: #fff; }
+.drop .it { padding: 0 4px; line-height: 17px; white-space: nowrap; }
+.drop .it.cur { background: var(--hl); color: var(--hltext); }
+.label { line-height: 15px; user-select: none; white-space: nowrap; }
+.ro { border: 0; background: transparent; color: var(--text); font: inherit; padding: 0; width: 100%; outline: none; }
+.link { color: var(--link); text-decoration: underline; cursor: pointer; }
+.shield { width: 14px; height: 14px; flex: none; }
+.btn .shield { margin-right: 4px; }
+.gbox { border: 1px solid #dcdcdc; margin: 0 0 9px; padding: 4px 11px 9px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.gbox > legend { padding: 0 3px; margin-left: -3px; }
+.hc .gbox { border-color: #fff; }
+.spage { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.spage .head { font-size: 15px; margin: 0 0 9px; }
+.spage .pbody { flex: 1; min-height: 0; overflow-y: auto; }
+.spage .foot { display: flex; justify-content: flex-end; padding-top: 7px; }
+.spage .chk .lbl { white-space: normal; }
+.hint { color: var(--gray); white-space: normal; line-height: 17px; }
+.rl { overflow: auto; }
+.rl .rlh { display: flex; position: sticky; top: 0; background: var(--win); border-bottom: 1px solid #e5e5e5; }
+.rl .rlh .hcell { line-height: 22px; }
+.rl .it { display: flex; height: 19px; line-height: 19px; padding: 0; overflow: visible; }
+.rl .rlc { flex: none; padding: 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+.rl .rlc.right { justify-content: flex-end; }
+.rl .chk .box { pointer-events: auto; }
+.tree .it { display: flex; align-items: center; gap: 4px; height: 19px; line-height: 19px; }
+.tree .exp { width: 12px; flex: none; font-family: "Segoe MDL2 Assets"; font-size: 8px; text-align: center; color: var(--gray); }
+.chk.part .box::after { content: ""; width: 7px; height: 7px; background: var(--text); }
+
+/* ---------- filter pane ---------- */
+.fpane { flex: none; display: flex; flex-direction: column; overflow: hidden auto; padding-right: 4px; }
+.fpane > * { flex: none; }
+.fpane .grp { margin-top: 11px; display: flex; flex-direction: column; }
+.fpane .grp .label { margin-bottom: 4px; }
+.fpane .gap7 { margin-top: 7px; }
+.attrgrid { display: grid; grid-template-columns: max-content 1fr; column-gap: 7px; row-gap: 4px; align-items: center; }
+
+/* ---------- list view ---------- */
+.lvwrap { flex: 1; position: relative; min-height: 0; }
+.lv { position: absolute; inset: 0; overflow: auto; outline: none; background: var(--win); }
+.lvh { position: sticky; top: 0; z-index: 2; display: flex; height: 25px; background: var(--win); }
+.hcell { flex: none; position: relative; padding: 0 6px; line-height: 24px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; border-right: 1px solid #e5e5e5; }
+.hc .hcell { border-right-color: #fff; border-bottom: 1px solid #fff; }
+.hcell:hover { background: #d9ebf9; } .hc .hcell:hover { background: var(--hl); color: var(--hltext); }
+.hcell.right { text-align: right; }
+.hcell .sort { position: absolute; left: 50%; top: 0; margin-left: -4px; font-size: 7px; line-height: 8px; color: #6a6a6a; }
+.hcell .rz { position: absolute; right: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 3; }
+.rows { position: relative; }
+.row { position: absolute; left: 0; height: 22px; display: flex; align-items: center; border: 1px solid transparent; }
+.row:hover { background: var(--rowhot); }
+.row.sel { background: var(--rowselun); }
+.lv:focus .row.sel { background: var(--rowsel); border-color: var(--rowselb); }
+.hc .row.sel, .hc .lv:focus .row.sel { color: var(--hltext); }
+.hc .row:hover:not(.sel) { outline: 1px solid var(--hl); outline-offset: -1px; }
+.cues .lv:focus .row.cur { outline: 1px dotted var(--text); outline-offset: -2px; }
+.cell { flex: none; padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cell.right { text-align: right; }
+.cell.name { display: flex; align-items: center; gap: 4px; }
+.cell.name span { overflow: hidden; text-overflow: ellipsis; }
+.ico { width: 16px; height: 16px; flex: none; }
+.lvmsg { position: absolute; left: 0; right: 0; top: 25px; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; gap: 11px; text-align: center; z-index: 1; }
+.lvmsg .mt { max-width: 520px; line-height: 17px; }
+.lvmsg .md { max-width: 520px; color: var(--gray); font-family: Consolas, monospace; }
+.lvmsg .mbtns { display: flex; gap: 7px; }
+
+/* ---------- inspector ---------- */
+.insp { flex: none; overflow: hidden; display: flex; flex-direction: column; }
+.ihead { display: flex; align-items: center; gap: 7px; min-height: 32px; }
+.ihead .iname { font-size: 15px; font-weight: 600; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ihead .ibtns { display: flex; gap: 7px; flex: none; }
+.ifields { display: grid; grid-template-columns: max-content 1fr; column-gap: 11px; row-gap: 4px; margin-top: 7px; }
+.ifields .label { color: var(--gray); line-height: 17px; }
+.ifields .ro { line-height: 17px; height: 17px; }
+.inote { line-height: 17px; }
+
+/* ---------- status bar ---------- */
+.status { height: 22px; flex: none; display: flex; background: var(--face); border-top: 1px solid #d7d7d7; user-select: none; position: relative; }
+.hc .status { border-top-color: #fff; }
+.part { padding: 0 6px; line-height: 21px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-right: 1px solid #d7d7d7; flex: none; }
+.hc .part { border-right-color: #fff; }
+.part.last { flex: 1; border-right: 0; padding-right: 18px; }
+.grip { position: absolute; right: 0; bottom: 0; width: 16px; height: 16px; cursor: nwse-resize;
+  background: radial-gradient(circle, #a0a0a0 1px, transparent 1.5px) 0 0 / 4px 4px; clip-path: polygon(100% 0, 100% 100%, 0 100%); }
+.redge { position: absolute; top: 0; right: -3px; width: 6px; bottom: 0; cursor: ew-resize; z-index: 5; }
+.bedge { position: absolute; left: 0; bottom: -3px; height: 6px; right: 0; cursor: ns-resize; z-index: 5; }
+
+/* ---------- menus, tooltips, dialogs ---------- */
+.menu { position: absolute; background: var(--menu); color: var(--text); border: 1px solid var(--menub); border-radius: 8px; padding: 4px; z-index: 70;
+  box-shadow: 0 4px 14px rgba(0,0,0,.25); user-select: none; min-width: 140px; }
+.mi { display: flex; align-items: center; height: 24px; padding: 0 6px 0 0; border-radius: 4px; white-space: nowrap; }
+.mi .mk { width: 28px; text-align: center; flex: none; }
+.mi .ml { flex: 1; padding-right: 24px; }
+.mi .ms { color: var(--gray); padding-right: 4px; }
+.mi .sub { width: 14px; text-align: right; font-family: "Segoe MDL2 Assets"; font-size: 8px; }
+.mi.cur { background: var(--menuhot); }
+.hc .mi.cur { color: var(--hltext); } .hc .mi.cur .ms { color: var(--hltext); }
+.mi.dis { color: var(--gray); }
+.mi.bold .ml { font-weight: 600; }
+.msep { height: 1px; background: var(--menub); margin: 4px 6px; }
+.tip { position: absolute; z-index: 80; background: var(--win); border: 1px solid var(--tipb); color: var(--tiptext); padding: 2px 6px; white-space: nowrap; pointer-events: none; box-shadow: 1px 2px 4px rgba(0,0,0,.2); }
+.balloon { position: absolute; z-index: 85; background: var(--win); border: 1px solid var(--tipb); color: var(--text); padding: 6px 10px; width: max-content; max-width: 280px; box-shadow: 1px 3px 8px rgba(0,0,0,.25); border-radius: 4px; }
+.modal { position: absolute; inset: 0; z-index: 50; }
+.dlg { position: absolute; background: var(--face); color: var(--text); border: 1px solid #6f7e91; box-shadow: 0 8px 28px rgba(0,0,0,.4); display: flex; flex-direction: column; border-radius: 8px; overflow: hidden; }
+.dlg .titlebar { background: var(--title); }
+.dlg .dbody { padding: 11px; flex: 1; position: relative; }
+.dlg .dbtns { display: flex; justify-content: flex-end; gap: 7px; padding: 0 11px 11px; }
+.dlg.mbox .dbody { background: var(--win); display: flex; gap: 11px; padding: 22px 22px 22px 22px; align-items: flex-start; line-height: 17px; }
+.dlg.mbox .dbtns { background: var(--face); padding: 11px; border-top: 1px solid #dfdfdf; }
+.page { position: absolute; }
+.mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; white-space: pre; overflow: auto; background: var(--win); border: 1px solid var(--edge); padding: 4px; }
+.dtp { height: 23px; border: 1px solid var(--edge); background: var(--win); display: flex; align-items: center; gap: 4px; padding: 0 0 0 4px; }
+.dtp input[type=date] { border: 0; font: inherit; background: transparent; color: var(--text); outline: none; }
+.dtp.off input[type=date] { color: var(--gray); }
+
+/* ---------- prototype chrome (not part of the design) ---------- */
+#panel { position: absolute; right: 0; top: 0; bottom: 0; width: 360px; overflow-y: auto; background: #151a23; color: #dfe6ef; font: 12px system-ui, sans-serif; padding: 12px 14px 80px; }
+#panel h2 { font-size: 13px; margin: 14px 0 6px; color: #ffb454; letter-spacing: .02em; }
+#panel h1 { font-size: 14px; margin: 0 0 4px; color: #fff; }
+#panel p { margin: 4px 0; color: #a9b4c2; line-height: 1.45; }
+#panel .row2 { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 3px 0; }
+#panel button { background: #2a3342; color: #e8eef6; border: 1px solid #3c475a; border-radius: 4px; padding: 3px 7px; font: inherit; cursor: pointer; }
+#panel button:hover { background: #36425a; }
+#panel select { background: #2a3342; color: #e8eef6; border: 1px solid #3c475a; border-radius: 4px; font: inherit; padding: 2px; }
+#panel label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+#panel table { width: 100%; border-collapse: collapse; }
+#panel td { padding: 2px 4px; vertical-align: top; border-bottom: 1px solid #232b38; }
+#panel td:first-child { color: #8d9aab; width: 38%; }
+#panel .changed { color: #ffd479; }
+#panel .bad { color: #ff7b72; } #panel .good { color: #7ee787; }
+#log { font-family: Consolas, monospace; font-size: 11px; color: #b8c4d3; white-space: pre-wrap; }
+#switcher { position: fixed; left: calc(50% - 180px); transform: translateX(-50%); bottom: 14px; z-index: 100; display: flex; align-items: center; gap: 8px;
+  background: #ffb454; color: #111; border-radius: 999px; padding: 6px 10px; font: 600 13px system-ui, sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+#switcher button { border: 0; background: #111; color: #ffb454; border-radius: 999px; width: 28px; height: 26px; font-size: 14px; cursor: pointer; }
+body.nopanel #panel { display: none; } body.nopanel #stage { right: 0; } body.nopanel #switcher { left: 50%; }
+#tray { position: absolute; right: 12px; bottom: 12px; width: 34px; height: 34px; border-radius: 6px; background: #202020; display: flex; align-items: center; justify-content: center; cursor: default; z-index: 90; outline: none; }
+#tray:hover, #tray:focus-visible { background: #3a3a3a; }
+.traymenu { position: absolute; right: 12px; bottom: 52px; background: var(--menu); color: var(--text); border: 1px solid var(--menub); border-radius: 8px; padding: 4px; z-index: 95; min-width: 160px; box-shadow: 0 4px 14px rgba(0,0,0,.25); font: 12px "Segoe UI", sans-serif; }
+.toast { position: absolute; right: 12px; bottom: 56px; width: 330px; background: #2b2b2b; color: #fff; border-radius: 8px; padding: 12px 14px; z-index: 94; font: 12px/17px "Segoe UI", sans-serif; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+#loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font: 14px system-ui; background: #5b6b7f; z-index: 200; }
+</style>
+</head>
+<body>
+<div id="loading">Building 260,000 synthetic entries…</div>
+<div id="stage"><div id="sizer"><div id="scaler"></div></div><div id="tray" tabindex="0" hidden><svg width="18" height="18" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="#4aa3ff" stroke-width="2"/><path d="M10 10l4.5 4.5" stroke="#4aa3ff" stroke-width="2.4" stroke-linecap="round"/></svg></div></div>
+<aside id="panel"></aside>
+<div id="switcher"><button id="vpanel" title="Show or hide the prototype panel" style="width:auto;padding:0 10px">Panel</button></div>
+
+<script type="text/plain" id="helptext">gozler 0.2.1 (2026-10-18) - Instant file search for Windows NTFS
+
+Usage: gozler [options] [search terms]
+
+  Find files and folders by name, path, size, date or attribute. Search terms
+  combine with AND. By default gozler prints one full path per line, at most 20
+  unless -n says otherwise, and writes warnings and errors to stderr.
+
+Examples:
+  gozler report                  Find names that contain report
+  gozler *.cs                    Find .cs files
+  gozler -path C:\repo ext:cs    Find .cs files below C:\repo
+  gozler *.log dm:7days          Find .log files modified in the last 7 days
+  gozler "size:>1gb"             Find files larger than 1 GB
+  gozler *.iso -sort size -n 10  Show the 10 largest .iso files
+  gozler -n all report           Show every match, not only the first 20
+  gozler /a-d report             Find only files whose names contain report
+  gozler -parent C:\repo -n all  List everything directly in C:\repo
+  gozler -r "^test[0-9]+\.cs$" -path C:\repo
+                                 Find names that match a regular expression
+
+Search syntax (what gozler receives; quote it for the shell as shown below):
+  report                   Name contains report
+  *.cs                     Whole name matches a wildcard (* and ?)
+  "two words"              Name contains the phrase
+  !test                    Exclude names that contain test
+  a|b                      Either term; | binds tighter than a space
+  C:\repo\                 Everything below that folder
+  ext:cs;txt               Extension is cs or txt
+  dm:7days                 Modified in the last 7 days
+  size:>1mb                Larger than 1 MB
+  docs\agents              Full path contains docs\agents; / works as \ too
+  C:\repo\*.cs             .cs files below that folder
+  *\node_modules\*         A wildcard with \ matches the whole full path
+  path:"C:\Program Files"  Quotes keep the spaces in a function's value
+
+Search functions:
+  ext:cs;txt           Extension is one in the list; ext: alone finds files
+                       without one
+  size:>1mb            File size; also <, <=, >=, =, ranges such as 1mb..10mb,
+                       and empty, tiny, small, medium, large, huge or gigantic
+  dm:today, datemodified:today, date-modified:today
+                       Date modified: today, yesterday, YYYY-MM-DD or Ndays;
+                       also <, <=, >, >= and ranges such as
+                       2026-01-01..2026-03-31
+  path:text            Full path contains text; with * or ?, the whole full
+                       path must match
+  parent:C:\repo       Only the files and folders directly in this folder
+  nopath:text          Name contains text, even with -p
+  ww:word              Name contains word, with no letter or digit right before
+                       or after it
+  regex:^test\d+\.cs$  Name matches a regular expression in Rust syntax
+  attrib:hs, attributes:hs, attr:hs
+                       Has every attribute in the value, here hidden and
+                       system; letters in either case; !attrib:h excludes
+                       hidden items
+  file:                Files only; file:text also matches text
+  folder:, dir:        Folders only; folder:text also matches text
+  case:                Match case; case:0 turns it off
+
+Attribute letters (for attrib: and /a):
+  R  Read-only
+  H  Hidden
+  S  System
+  D  Folder
+  A  Archive
+  V  Integrity stream
+  X  No scrub data
+  N  Normal (no other attribute)
+  T  Temporary
+  L  Reparse point, such as a symbolic link or junction
+  C  Compressed
+  O  Offline
+  I  Not content indexed
+  E  Encrypted
+  U  Unpinned
+  P  Pinned
+  M  Recall on data access
+
+Sort keys:
+  name               Name, A to Z (default)
+  path               Folder, then name, A to Z
+  size               Size, largest first
+  dm, date-modified  Date modified, newest first
+  extension          Extension, A to Z; folders and names without one come
+                     first
+
+Notes:
+  - dm:today, dm:yesterday and dm:YYYY-MM-DD are calendar days in the local
+    time zone. 7days is the 7 times 24 hours before the search starts, and
+    dm:<30days finds files older than 30 days.
+  - regex: and -r use Rust regular expressions, without look-around or
+    backreferences. A pattern matches the name; with -p, or when it contains
+    \\, it matches the full path.
+  - Files whose size or date Windows did not report never match size: or dm:,
+    even negated.
+(The prototype shows an excerpt of `gozler --help-full`; the window shows all of it.)</script>
+
+<script>
+'use strict';
+// =====================================================================
+// Strings. English is the one source; the pseudo-language is generated.
+// =====================================================================
+const EN = {
+  'app': 'gozler',
+  'menu.file': '&File', 'menu.edit': '&Edit', 'menu.view': '&View', 'menu.help': '&Help', 'menu.lang': 'La&nguage',
+  'cmd.open': '&Open', 'cmd.openloc': 'Open file &location', 'cmd.props': 'Propert&ies',
+  'cmd.export': '&Export results…', 'cmd.cancelexport': '&Cancel export', 'cmd.settings': '&Settings…', 'cmd.exit': 'E&xit',
+  'cmd.copy': '&Copy', 'cmd.copypath': 'Copy as &path', 'cmd.copyname': 'Copy &name', 'cmd.selall': 'Select &all',
+  'cmd.searchhere': '&Search in this folder',
+  'cmd.filters': '&Filters', 'cmd.inspector': '&Inspector', 'cmd.columns': '&Columns', 'cmd.refresh': '&Refresh',
+  'cmd.find': '&Find',
+  'cmd.sortby': 'Sort &by', 'cmd.syntax': '&Search syntax', 'cmd.about': '&About gozler',
+  'sort.name': '&Name', 'sort.path': '&Path', 'sort.size': '&Size', 'sort.dm': '&Date modified', 'sort.ext': '&Extension',
+  'sort.asc': '&Ascending', 'sort.desc': 'Des&cending',
+  'col.name': '&Name', 'col.path': '&Path', 'col.size': '&Size', 'col.dm': '&Date modified', 'col.ext': '&Extension', 'col.attr': '&Attributes',
+  'lang.default': '&Windows default',
+  'key.ctrl': 'Ctrl', 'key.shift': 'Shift', 'key.alt': 'Alt', 'key.win': 'Win', 'key.enter': 'Enter',
+  'search.cue': 'Find files and folders',
+  'mc.match': 'M&atch:', 'mm.word': 'Start of words', 'mm.start': 'Start of name', 'mm.any': 'Anywhere', 'mm.ww': 'Whole words', 'mm.regex': 'Regular expression',
+  'mc.case': 'Match &case', 'mc.path': 'Match &path',
+  'f.clear': 'C&lear filters', 'f.kind': '&Kind', 'f.location': 'L&ocation', 'f.choose': 'Choose fol&der…',
+  'f.parent': 'Only directl&y in this folder', 'f.date': 'Date &modified', 'f.size': 'Si&ze', 'f.attrs': 'A&ttributes',
+  'kind.0': 'All', 'kind.1': 'Folders', 'kind.2': 'Files', 'kind.3': 'Audio', 'kind.4': 'Archives', 'kind.5': 'Documents',
+  'kind.6': 'Executables', 'kind.7': 'Pictures', 'kind.8': 'Videos',
+  'loc.everywhere': 'Everywhere', 'loc.indexing': '{0} (indexing)', 'loc.offline': '{0} (offline)',
+  'date.0': 'Any time', 'date.1': 'Today', 'date.2': 'Yesterday', 'date.3': 'Last 7 days', 'date.4': 'Last 30 days',
+  'date.5': 'Last 365 days', 'date.custom': 'Custom…', 'date.range': '{0} to {1}', 'date.from': 'From {0}', 'date.to': 'Until {0}',
+  'size.0': 'Any size', 'size.1': 'Empty', 'size.2': 'Tiny (up to 10 KB)', 'size.3': 'Small (10 to 100 KB)',
+  'size.4': 'Medium (100 KB to 1 MB)', 'size.5': 'Large (1 to 16 MB)', 'size.6': 'Huge (16 to 128 MB)',
+  'size.7': 'Gigantic (over 128 MB)', 'size.custom': 'Custom…', 'size.range': '{0} to {1}', 'size.min': 'At least {0}', 'size.max': 'Up to {0}',
+  'attr.h': 'Hidden', 'attr.s': 'System', 'attr.r': 'Read-only', 'attr.l': 'Link', 'attr.c': 'Compressed', 'attr.e': 'Encrypted',
+  'attrc.0': 'Any', 'attrc.1': 'Only', 'attrc.2': 'Exclude',
+  'c.name': 'Name', 'c.path': 'Path', 'c.size': 'Size', 'c.dm': 'Date modified', 'c.ext': 'Extension', 'c.attr': 'Attributes',
+  'size.unknown': 'Unknown', 'size.kb': '{0} KB', 'size.bytes_one': '{0} byte', 'size.bytes_other': '{0} bytes',
+  'unit.KB': 'KB', 'unit.MB': 'MB', 'unit.GB': 'GB', 'unit.TB': 'TB',
+  'm.nomatch': 'No files match.', 'm.type': 'Type to search.',
+  'm.clear': 'C&lear filters', 'm.everywhere': 'Se&arch everywhere', 'm.missing': 'The folder {0} does not exist.',
+  'm.choose': 'Choose fol&der…',
+  'p.dm': '{0} is not a date. Use a date such as dm:today, dm:yesterday or dm:2026-01-31.',
+  'p.size': '{0} is not a size. Use a size such as size:large or size:1mb..10mb.',
+  'p.attr': '{0} has a letter that is not an attribute. Use letters such as attrib:h for hidden items.',
+  'p.quote': 'A quotation mark is not closed. Add the closing " or remove the opening one.',
+  'd.stopped': 'The gozler service is stopped, so gozler cannot search. Start it, and gozler searches again by itself.', 'd.stopped.b': 'St&art the service',
+  'd.disabled': 'The gozler service is turned off, so gozler cannot search. Turn it on, and gozler searches again by itself.', 'd.disabled.b': 'T&urn on the service',
+  'd.notinst': 'The gozler service is not installed, so gozler cannot search. Install it, and gozler searches again by itself.', 'd.notinst.b': '&Install the service',
+  'd.missing': 'gozler is not fully installed: the gozler service is missing. Download gozler and run its setup.', 'd.missing.b': 'Download &gozler',
+  'd.starting': 'The gozler service is starting. Your search runs when it is ready.',
+  'd.unknown': 'The gozler service is not running, and gozler could not find out why: {0} Check the gozler service in Services.', 'd.unknown.b': 'Open Serv&ices',
+  'd.notgozler': 'The search service is not the gozler service, so gozler did not connect. Restart Windows, so that the gozler service starts first, then search again.',
+  'd.tooold': 'The installed gozler service is older than this window. Download gozler and run its setup to update the service.', 'd.tooold.b': 'Download &gozler',
+  'd.refused': 'The gozler service refused this search. Change the search, then try again.',
+  'd.lost': 'The connection to the gozler service was lost. gozler reconnects when the service answers.',
+  's.results_one': '{0} result', 's.results_other': '{0} results',
+  's.showing': 'Showing the first {0} of {1} results', 's.searching': 'Searching…', 's.filtered': ' · Filtered',
+  's.selected': '{0} selected · {1}', 's.selectedonly': '{0} selected', 's.reading': 'Reading the selection…',
+  's.exporting': 'Exporting… {0} rows', 's.exported': 'Exported {0} rows to {1}',
+  's.indexing': '{0} is indexing — results may be incomplete.', 's.offline': '{0} is offline — results may be incomplete.',
+  's.meta': 'Some sizes and dates on {0} are unknown.',
+  'i.open': 'Ope&n', 'i.openloc': 'Open file locat&ion', 'i.copypath': 'Copy a&s path',
+  'i.folder': 'Folder', 'i.fullpath': 'Full path', 'i.type': 'Type', 'i.size': 'Size', 'i.dm': 'Date modified',
+  'i.attrs': 'Attributes', 'i.volume': 'Volume',
+  'i.typefile': 'File ({0})', 'i.typefilenoext': 'File', 'i.typefolder': 'Folder',
+  'i.sizeexact': '{0} ({1})', 'i.calc': 'Calculating…', 'i.foldersize_one': '{1} in {0} item', 'i.foldersize_other': '{1} in {0} items',
+  'i.vol.live': '{0} (live)', 'i.vol.indexing': '{0} (indexing)', 'i.vol.offline': '{0} (offline)',
+  'i.files_one': '{0} file', 'i.files_other': '{0} files', 'i.folders_one': '{0} folder', 'i.folders_other': '{0} folders',
+  'i.and': '{0} and {1}', 'i.total': 'Total size', 'i.count': 'Selected', 'i.unknownpart_one': '{0}, {1} file unknown',
+  'i.unknownpart_other': '{0}, {1} files unknown', 'i.matches_one': '{0} result', 'i.matches_other': '{0} results',
+  'i.nothing': 'Select a file to see its details here.',
+  'a.h': 'Hidden', 'a.s': 'System', 'a.r': 'Read-only', 'a.a': 'Archive', 'a.l': 'Link', 'a.c': 'Compressed', 'a.e': 'Encrypted', 'a.none': 'None',
+  'b.ok': 'OK', 'b.cancel': 'Cancel', 'b.apply': '&Apply', 'b.close': 'Close', 'b.save': '&Save',
+  'o.title': 'Settings', 'o.cat.general': 'General', 'o.cat.search': 'Search', 'o.cat.keyboard': 'Keyboard', 'o.cat.index': 'Index', 'o.cat.filter': 'Include',
+  'o.restore': '&Restore defaults',
+  'o.lang': 'La&nguage:', 'o.g.startup': 'Starting and closing', 'o.g.explorer': 'File Explorer',
+  'o.signin': 'S&tart gozler when I sign in to Windows',
+  'o.background': '&Keep gozler running in the notification area when I close its window',
+  'o.updates': 'Check for &updates when gozler starts',
+  'o.verb': 'Show "Search with &gozler" on folders',
+  'o.openfolders': 'Open &folders:', 'o.openfiles': 'Open f&iles:', 'o.openloc': 'Open file &location:', 'o.browse': 'Browse…',
+  'o.cue.explorer': 'File Explorer', 'o.cue.default': 'The file\'s default program',
+  'o.cmdhint': '%1 is the folder or file. An empty box does what File Explorer does.',
+  'o.s.box': 'Search box',
+  'o.sayt': '&Search as you type', 'o.clicksel': 'Select the search text when I &click the search box',
+  'o.actsel': 'Select the search text when gozler is ac&tivated', 'o.showall': 'Show every file and folder when the search is empt&y',
+  'o.k.show': 'Show gozler', 'o.k.cmds': 'Commands',
+  'o.hotkey': 'S&hortcut to show gozler from any program:', 'o.hotkeynone': 'None', 'o.winkey': '&Windows key',
+  'o.hotkeyhint': 'Press the keys together. Backspace removes the shortcut.',
+  'o.hotkeyclosed': 'gozler ends when you close its window, so this shortcut works only while the window is open. To keep it working, turn on "Keep gozler running" on the General page.',
+  'o.winl': 'Windows keeps Win+L for locking the computer. Choose another shortcut.',
+  'o.hotkeybusy': 'Another program uses {0}. Choose another shortcut.',
+  'o.filter': 'Show commands &containing:', 'o.k.command': 'Command', 'o.k.keys': 'Shortcuts', 'o.k.for': '&Shortcuts for the selected command:',
+  'o.add': 'A&dd…', 'o.edit': '&Edit…', 'o.remove': 'Re&move', 'k.context': 'Context menu',
+  'o.k.addtitle': 'Add shortcut', 'o.k.edittitle': 'Edit shortcut', 'o.k.press': '&Shortcut for {0}:',
+  'o.k.none': 'Press the keys for the shortcut.',
+  'o.k.reserved': '{0} belongs to the search box or the list.',
+  'o.k.typing': '{0} is for typing or for the menus. Choose a shortcut with Ctrl, such as Ctrl+K, or a function key, such as F3.',
+  'o.k.taken': '{0} is the shortcut for {1}. Remove it there first.',
+  'o.adminnote': 'These settings apply to every user of this PC. Changing them needs administrator permission.',
+  'o.i.drives': 'Drives', 'o.i.holds': 'What the index holds', 'o.i.service': 'Service',
+  'o.index.vol': 'Drive', 'o.index.state': 'State', 'o.index.entries': 'Entries',
+  'o.index.live': 'Live', 'o.index.indexing': 'Indexing', 'o.index.offline': 'Offline', 'o.index.out': 'Not indexed', 'o.index.pending': 'Live, some sizes and dates unknown',
+  'o.autonew': 'Include &new fixed drives automatically',
+  'o.i.always': 'Names, sizes, dates modified and attributes are always indexed.',
+  'o.dc': 'Dates &created', 'o.dc.hint': 'Adds the Date created column. Uses more service memory.',
+  'o.fs': '&Folder sizes', 'o.fs.hint': 'A folder\'s Size shows the size of everything in it. Uses more service memory.',
+  'o.rebuild': 'Re&build index', 'o.rebuild.what': 'Rebuild the gozler index',
+  'o.index.mem': 'Service memory: {0} working set, {1} private bytes.',
+  'o.index.more': 'For the full report, run gozler --status in a terminal.',
+  'o.x.folders': 'Folders', 'o.x.files': 'Names',
+  'o.f.tree': '&Folders gozler indexes:', 'o.modify': '&Modify…',
+  'o.sum.in': 'Folder', 'o.sum.out': 'Left out inside it',
+  'o.mod.title': 'Indexed folders', 'o.mod.tree': '&Change the selected folders:', 'o.mod.sum': 'S&ummary of the selected folders:',
+  'o.preview': 'Indexed now: {0} entries. After OK: about {1}{2}.',
+  'o.preview.added': ', and the folders you checked again, counted once they are indexed',
+  'o.f.hint': 'Uncheck a folder to leave it out of the index. To index only some folders, uncheck the drive and check those folders.',
+  'o.totalcmd': 'Use Total &Commander',
+  'o.tc.none': 'gozler found no Total Commander (TOTALCMD64.EXE or TOTALCMD.EXE). Choose it with Browse….',
+  'o.xfiles': 'Names that are not inde&xed:', 'o.xfiles.hint': 'Separate names with a semicolon, such as *.tmp;node_modules;.git. A folder that matches is left out with everything in it.',
+  'o.xhidden': 'Exclude &hidden files and folders', 'o.xsystem': 'Exclude s&ystem files and folders',
+  'o.svc.what': 'Change the gozler index settings',
+  'tray.show': '&Show window', 'tray.exit': 'E&xit', 'tray.tip': 'gozler',
+  'tray.note': 'gozler is still running. Press {0} or click its icon in the notification area to show it. Choose Exit from its menu to stop it.',
+  'tray.note2': 'gozler is still running. Click its icon in the notification area to show it. Choose Exit from its menu to stop it.',
+  'fb.hotkeylost': 'Another program uses {0}, so it no longer shows gozler. Choose another shortcut in File > Settings > Keyboard.',
+  's.update': 'gozler {0} is available',
+  'col.dc': 'Date c&reated', 'c.dc': 'Date created', 'sort.dc': 'Date c&reated',
+  'cd.title': 'Custom date', 'cd.from': '&From:', 'cd.to': '&To:', 'cd.order': 'From must be on or before To.',
+  'cs.title': 'Custom size', 'cs.min': '&Minimum:', 'cs.max': 'Ma&ximum:', 'cs.unit': '&Unit:',
+  'cs.nan': 'Enter a number, such as 1.5.', 'cs.order': 'Minimum must not be larger than Maximum.', 'cs.none': 'Enter a Minimum, a Maximum or both.',
+  'sx.title': 'Search syntax',
+  'ab.title': 'About gozler', 'ab.version': 'gozler {0}', 'ab.what': 'Instant filename search for Windows NTFS volumes.',
+  'ab.copy': 'Copyright © 2026 Mustafa Ahci and synapse.sr. MIT licence.',
+  'sv.title': 'Export results', 'sv.name': 'File &name:', 'sv.type': 'Save as &type:', 'sv.csv': 'CSV (*.csv)', 'sv.tsv': 'Tab-separated values (*.tsv)', 'sv.txt': 'Text, full paths only (*.txt)',
+  'sv.note': 'Stand-in for the Windows save dialog (IFileSaveDialog), which the window uses.',
+  'fb.export': 'gozler could not write {0}. {1} Choose another folder or free some space, then export again.',
+  'fb.clipboard': 'The clipboard is in use by another program. Try again in a moment.',
+  'fb.gone': '{0} no longer exists. Press F5 to search again.',
+  'fb.opencmd': 'gozler could not start {0}. {1} Check the command in File > Settings > General.',
+  'fb.settings': 'gozler could not save its settings to {0}. {1} Your changes apply until you close the window.',
+  'win.accessdenied': 'Access is denied.', 'win.notfound': 'The system cannot find the file specified.',
+};
+const LANGS = [{ tag: 'en', name: '&English' }, { tag: 'qps-ploc', name: '&Pseudo (qps-ploc)' }];
+const ACCENT = { a:'á',b:'ƀ',c:'ç',d:'ď',e:'é',f:'ƒ',g:'ĝ',h:'ĥ',i:'í',j:'ĵ',k:'ķ',l:'ĺ',m:'ɱ',n:'ñ',o:'ó',p:'þ',q:'ǫ',r:'ŕ',s:'š',t:'ŧ',u:'ú',v:'ṽ',w:'ŵ',x:'ẋ',y:'ý',z:'ž',
+  A:'Á',B:'Ɓ',C:'Ç',D:'Ď',E:'É',F:'Ƒ',G:'Ĝ',H:'Ĥ',I:'Í',J:'Ĵ',K:'Ķ',L:'Ĺ',M:'Ṁ',N:'Ñ',O:'Ó',P:'Þ',Q:'Ǫ',R:'Ŕ',S:'Š',T:'Ŧ',U:'Ú',V:'Ṽ',W:'Ŵ',X:'Ẋ',Y:'Ý',Z:'Ž' };
+const pseudoCache = new Map();
+function pseudo(s) {
+  if (pseudoCache.has(s)) return pseudoCache.get(s);
+  let out = '', vis = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '{') { const j = s.indexOf('}', i); out += s.slice(i, j + 1); i = j; vis += 3; continue; }
+    if (c === '&' && i + 1 < s.length) { out += '&' + s[i + 1]; i++; vis++; continue; }
+    out += ACCENT[c] || c; vis++;
+  }
+  const target = vis <= 12 ? vis * 2 : Math.ceil(vis * 1.5);
+  const r = '[' + out + '·'.repeat(Math.max(0, target - vis - 2)) + ']';
+  pseudoCache.set(s, r); return r;
+}
+let LANG = 'en';
+function t(key, ...args) {
+  let s = EN[key];
+  if (s === undefined) return key;
+  if (LANG === 'qps-ploc') s = pseudo(s);
+  return s.replace(/\{(\d)\}/g, (_, n) => args[+n] ?? '');
+}
+function tn(key, n, ...args) { return t(key + (n === 1 ? '_one' : '_other'), fmtInt(n), ...args); }
+function plain(s) { return s.replace(/&(.)/g, '$1'); }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function akHtml(s) { // "&Open" -> O underlined; the letter is the access key.
+  const i = s.indexOf('&');
+  if (i < 0 || i === s.length - 1) return esc(s);
+  return esc(s.slice(0, i)) + '<u class="ak">' + esc(s[i + 1]) + '</u>' + esc(s.slice(i + 2));
+}
+function akOf(s) { const i = s.indexOf('&'); return i >= 0 && i < s.length - 1 ? s[i + 1].toLowerCase() : ''; }
+
+// =====================================================================
+// Formatting, as Windows does it (GetNumberFormatEx, StrFormatByteSizeEx).
+// =====================================================================
+const NF = new Intl.NumberFormat();
+const DF = new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'short' });
+const DFS = new Intl.DateTimeFormat(undefined, { dateStyle: 'short', timeStyle: 'medium' });
+const DD = new Intl.DateTimeFormat(undefined, { dateStyle: 'short' });
+function fmtInt(n) { return NF.format(n); }
+function fmtBytes(b) {
+  if (b < 1024) return tn('size.bytes', b);
+  const units = ['KB', 'MB', 'GB', 'TB']; let v = b / 1024, u = 0;
+  while (v >= 1000 && u < 3) { v /= 1024; u++; }
+  const digits = v < 10 ? 2 : v < 100 ? 1 : 0;
+  const f = new Intl.NumberFormat(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  return f.format(v) + ' ' + t('unit.' + units[u]);
+}
+function fmtKB(b) { return t('size.kb', fmtInt(Math.ceil(b / 1024))); }
+
+// =====================================================================
+// Synthetic index: 260,000 entries on C:\ and D:\, deterministic.
+// =====================================================================
+const UNKNOWN = -1;
+const A_R = 1, A_H = 2, A_S = 4, A_D = 16, A_A = 32, A_L = 0x400, A_C = 0x800, A_E = 0x4000;
+const C = { names: [], lower: [], dir: [], isDir: [], size: null, mtime: null, attrs: null, selfDir: [] };
+const DIRS = []; // { path, lower, parent, vol, entry }
+function makeCorpus() {
+  let seed = 20261018;
+  const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let x = Math.imul(seed ^ seed >>> 15, 1 | seed); x = x + Math.imul(x ^ x >>> 7, 61 | x) ^ x; return ((x ^ x >>> 14) >>> 0) / 4294967296; };
+  const pick = a => a[Math.floor(rnd() * a.length)];
+  const now = Date.now();
+  const sizes = [], mtimes = [], attrs = [];
+  function addEntry(name, dir, isDir, size, mtime, attr) {
+    C.names.push(name); C.lower.push(name.toLowerCase()); C.dir.push(dir); C.isDir.push(isDir ? 1 : 0);
+    sizes.push(size); mtimes.push(mtime); attrs.push(attr | (isDir ? A_D : 0)); C.selfDir.push(-1);
+    return C.names.length - 1;
+  }
+  function addDir(name, parent, attr = 0) {
+    const pp = DIRS[parent].path;
+    const path = pp.endsWith('\\') ? pp + name : pp + '\\' + name;
+    const e = addEntry(name, parent, true, 0, now - rnd() * 3 * 365 * 864e5, attr);
+    const id = DIRS.length;
+    DIRS.push({ path, lower: path.toLowerCase(), parent, vol: DIRS[parent].vol, entry: e });
+    C.selfDir[e] = id; return id;
+  }
+  DIRS.push({ path: 'C:\\', lower: 'c:\\', parent: -1, vol: 0, entry: -1 });
+  DIRS.push({ path: 'D:\\', lower: 'd:\\', parent: -1, vol: 1, entry: -1 });
+  const FOLDERS = ['Documents', 'Downloads', 'Pictures', 'Music', 'Videos', 'Desktop', 'Projects', 'src', 'lib', 'bin', 'obj', 'Debug', 'Release',
+    'assets', 'images', 'docs', 'tests', 'Archive', '2023', '2024', '2025', '2026', 'Backup', 'Old', 'New folder', 'Clients', 'Invoices',
+    'Fotos', 'Urlaub 2025', 'Família', 'Проекты', '写真', '音楽', 'Résumés', 'Zoë’s things', 'Scans', 'Taxes', 'Receipts', 'Contracts', 'drafts',
+    'Meeting notes', 'Travel', 'Recipes', 'Garden', 'School', 'Work', 'Personal', 'Shared', 'Exports', 'Reports', 'Templates', 'Fonts', 'Icons'];
+  const WORDS = ['report', 'budget', 'invoice', 'notes', 'photo', 'holiday', 'draft', 'final', 'backup', 'config', 'readme', 'setup', 'project', 'design',
+    'meeting', 'contract', 'presentation', 'summary', 'review', 'schedule', 'data', 'export', 'image', 'scan', 'letter', 'plan', 'archive', 'log',
+    'test', 'build', 'release', 'manual', 'guide', 'recipe', 'résumé', 'café', 'naïve', 'Zürich', 'København', 'São Paulo', '東京', '北京', 'Москва',
+    'Αθήνα', '서울', '日記', 'Отчёт', 'Ελληνικά', 'quarterly', 'annual', 'weekly', 'customer', 'supplier', 'warehouse', 'delivery', 'birthday'];
+  const EXT = [['dll', 60, 4e5], ['js', 50, 2e4], ['png', 45, 2e5], ['json', 40, 4e3], ['txt', 30, 6e3], ['cs', 30, 9e3], ['rs', 15, 12e3],
+    ['h', 25, 8e3], ['cpp', 20, 2e4], ['jpg', 45, 3e6], ['mp3', 20, 6e6], ['pdf', 25, 9e5], ['docx', 18, 2e5], ['xlsx', 12, 1e5], ['zip', 8, 6e7],
+    ['exe', 10, 3e6], ['md', 12, 5e3], ['xml', 15, 2e4], ['html', 10, 3e4], ['css', 8, 1e4], ['ts', 15, 1e4], ['mp4', 8, 4e8], ['mkv', 3, 2e9],
+    ['iso', 1, 4e9], ['csv', 6, 3e5], ['log', 12, 2e5], ['ps1', 4, 4e3], ['msi', 2, 4e7], ['7z', 3, 8e7], ['wav', 3, 3e7], ['flac', 3, 3e7],
+    ['heic', 6, 2e6], ['svg', 6, 6e3], ['ico', 4, 2e4], ['bak', 3, 5e6], ['', 4, 2e3], ['tmp', 3, 1e5]];
+  const extBag = []; for (const [e, w] of EXT) for (let i = 0; i < w; i++) extBag.push(e);
+  const extScale = Object.fromEntries(EXT.map(([e, , s]) => [e, s]));
+  // A fixed skeleton, then random subtrees.
+  const users = addDir('Users', 0);
+  const people = ['Public', 'alex', 'Ana María', '李伟', 'zoë.ångström'].map(n => addDir(n, users));
+  addDir('Program Files', 0); addDir('Program Files (x86)', 0);
+  const windows = addDir('Windows', 0, A_S); addDir('System32', windows, A_S); addDir('WinSxS', windows, A_S);
+  addDir('ProgramData', 0, A_H);
+  const dproj = addDir('Projects', 1); addDir('Photos', 1); addDir('Archive', 1); addDir('Backups', 1); addDir('Музыка', 1); addDir('写真', 1);
+  // A deep node_modules chain: a path of about 250 characters, and one past 260.
+  let deep = addDir('web-shop', dproj);
+  for (const n of ['frontend', 'node_modules', '@babel', 'plugin-transform-modules-commonjs', 'node_modules', '@babel', 'helper-module-transforms',
+    'node_modules', '@babel', 'helper-simple-access', 'lib', 'internal', 'generated', 'very-long-folder-name-for-testing-path-limits']) deep = addDir(n, deep);
+  const deepDirs = [deep];
+  const queue = [...people, 2, 3, 4, 5, dproj, 9, 10, 11, 12, 13];
+  while (DIRS.length < 12000 && queue.length) {
+    const p = queue.shift();
+    const depth = DIRS[p].path.split('\\').length;
+    const n = depth < 4 ? 4 + Math.floor(rnd() * 6) : Math.floor(rnd() * 4);
+    for (let i = 0; i < n && DIRS.length < 12000; i++) {
+      let name = pick(FOLDERS); if (rnd() < 0.3) name += ' ' + Math.floor(rnd() * 90 + 10);
+      queue.push(addDir(name, p, rnd() < 0.01 ? A_H : 0));
+    }
+  }
+  const LONG = [
+    'Meeting notes from the planning session about the new warehouse layout and the delivery schedule for next year (draft 3).docx',
+    'Quarterly report – Q3 2026 – customer satisfaction survey results, regional breakdown and recommendations (final, approved).pdf',
+    'Résumé – Zoë Ångström – Senior Product Designer (English and Deutsch versions combined).pdf',
+    '東京タワーの夜景と隅田川の花火大会の写真 2025年夏.jpg', 'Ελληνικά σημειώσεις για το ταξίδι στην Αθήνα.txt', 'Отчёт за третий квартал 2026 года.xlsx',
+    '🎵 Summer playlist – 2026.m3u', 'Paracetamol 500mg.pdf', 'comparator settings.txt', 'naïve café menu (Zürich, Bahnhofstrasse).pdf', 'IMG_20260704_183512_HDR_with_a_very_long_generated_camera_suffix_0001.jpg',
+  ];
+  let longI = 0;
+  const target = 260000;
+  while (C.names.length < target) {
+    const d = rnd() < 0.002 ? pick(deepDirs) : 2 + Math.floor(Math.pow(rnd(), 1.6) * (DIRS.length - 2));
+    const ext = pick(extBag);
+    let base;
+    const r = rnd();
+    if (r < 0.003) { base = LONG[longI++ % LONG.length]; }
+    else {
+      if (r < 0.12) base = 'IMG_' + (1000 + Math.floor(rnd() * 9000));
+      else if (r < 0.2) base = 'DSC0' + Math.floor(rnd() * 9999).toString().padStart(4, '0');
+      else if (r < 0.28) base = 'Invoice 2026-' + String(1 + Math.floor(rnd() * 12)).padStart(2, '0') + '-' + String(1 + Math.floor(rnd() * 28)).padStart(2, '0');
+      else if (r < 0.7) base = pick(WORDS) + (rnd() < 0.5 ? ' ' + pick(WORDS) : '_' + Math.floor(rnd() * 400));
+      else base = pick(WORDS) + '-' + pick(WORDS) + '.' + pick(['min', 'test', 'spec', 'v2', 'old', 'copy']);
+      base += ext ? '.' + ext : '';
+    }
+    const e = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1).toLowerCase() : '';
+    const scale = extScale[e] ?? 1e5;
+    let size = Math.floor(scale * Math.exp((rnd() - 0.5) * 3));
+    if (rnd() < 0.01) size = 0;
+    if (rnd() < 0.003) size = UNKNOWN;
+    let mt = now - Math.pow(rnd(), 2.2) * 3 * 365 * 864e5;
+    if (rnd() < 0.01) mt = now - rnd() * 864e5;
+    let attr = A_A;
+    if (rnd() < 0.01) attr |= A_H; if (DIRS[d].path.startsWith('C:\\Windows') || rnd() < 0.003) attr |= A_S;
+    if (rnd() < 0.02) attr |= A_R; if (rnd() < 0.002) attr |= A_L; if (rnd() < 0.005) attr |= A_C; if (rnd() < 0.002) attr |= A_E;
+    addEntry(base, d, false, size, mt, attr);
+  }
+  C.size = Float64Array.from(sizes); C.mtime = Float64Array.from(mtimes); C.attrs = Uint32Array.from(attrs);
+}
+function fullPath(e) { const p = DIRS[C.dir[e]].path; return p.endsWith('\\') ? p + C.names[e] : p + '\\' + C.names[e]; }
+function folderOf(e) { return DIRS[C.dir[e]].path; }
+function extOf(e) { if (C.isDir[e]) return ''; const n = C.names[e], i = n.lastIndexOf('.'); return i > 0 ? n.slice(i + 1).toLowerCase() : ''; }
+function attrLetters(a) { let s = ''; for (const [l, b] of [['R', A_R], ['H', A_H], ['S', A_S], ['D', A_D], ['A', A_A], ['L', A_L], ['C', A_C], ['E', A_E]]) if (a & b) s += l; return s; }
+
+// =====================================================================
+// The query: typed text plus filter clauses (a stand-in for gozler's parser).
+// =====================================================================
+const KIND_EXT = { 3: 'mp3;wav;flac;aac;ogg;opus;wma;m4a', 4: 'zip;7z;rar;tar;gz;bz2;xz;zst;cab;iso', 5: 'pdf;doc;docx;xls;xlsx;ppt;pptx;odt;ods;odp;rtf;txt;md;csv',
+  6: 'exe;msi;bat;cmd;ps1;com;scr', 7: 'jpg;jpeg;png;gif;bmp;webp;tif;tiff;heic;svg;ico', 8: 'mp4;mkv;avi;mov;wmv;webm;m4v;mpg;mpeg' };
+const SIZEW = { empty: [0, 0], tiny: [1, 10240], small: [10241, 102400], medium: [102401, 1048576], large: [1048577, 16777216], huge: [16777217, 134217728], gigantic: [134217729, Infinity] };
+const UNIT = { kb: 1024, mb: 1048576, gb: 1073741824, tb: 1099511627776 };
+function parseSize(v) {
+  if (SIZEW[v]) return SIZEW[v];
+  const one = x => { const m = /^(\d+(?:\.\d+)?)(kb|mb|gb|tb)?$/.exec(x); return m ? Math.round(+m[1] * (UNIT[m[2]] || 1)) : null; };
+  let m;
+  if (v.includes('..')) { const [a, b] = v.split('..'); const lo = a ? one(a) : 0, hi = b ? one(b) : Infinity; return lo === null || hi === null ? null : [lo, hi]; }
+  if ((m = /^(>=|<=|>|<|=)?(.+)$/.exec(v))) { const n = one(m[2]); if (n === null) return null;
+    return { '>': [n + 1, Infinity], '>=': [n, Infinity], '<': [0, n - 1], '<=': [0, n], '=': [n, n] }[m[1] || '='] || [n, n]; }
+  return null;
+}
+function dayStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); }
+function parseDm(v, now) {
+  const today = dayStart(now);
+  const one = x => { if (x === 'today') return [today, Infinity]; if (x === 'yesterday') return [today - 864e5, today - 1];
+    let m = /^(\d+)days?$/.exec(x); if (m) return [now - m[1] * 864e5, Infinity];
+    m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(x); if (m) { const s = new Date(+m[1], m[2] - 1, +m[3]).getTime(); return [s, s + 864e5 - 1]; } return null; };
+  if (v.includes('..')) { const [a, b] = v.split('..'); const lo = a ? one(a) : [0], hi = b ? one(b) : [0, Infinity]; return lo && hi ? [lo[0], hi[1]] : null; }
+  const m = /^(>=|<=|>|<)(.+)$/.exec(v);
+  if (m) { const r = one(m[2]); if (!r) return null; return { '>=': [r[0], Infinity], '>': [r[1] + 1, Infinity], '<=': [0, r[1]], '<': [0, r[0] - 1] }[m[1]]; }
+  return one(v);
+}
+function tokens(text) {
+  const out = []; let cur = '', q = false, any = false;
+  for (const ch of text) {
+    if (ch === '"') { q = !q; any = true; continue; }
+    if (/\s/.test(ch) && !q) { if (any) out.push(cur); cur = ''; any = false; continue; }
+    cur += ch; any = true;
+  }
+  if (q) return { error: { key: 'p.quote' } };
+  if (any) out.push(cur);
+  return { list: out };
+}
+function parseQuery(text, opts) {
+  const q = { terms: [], neg: [], ext: null, kind: 0, dm: null, size: null, attrOn: 0, attrOff: 0, re: null, testsMeta: false };
+  if (opts.mode === 'regex') {
+    // The daemon compiles the pattern, so a bad one is its refusal (spec: Daemon failures).
+    if (text) { try { q.re = new RegExp(text, opts.case ? 'u' : 'iu'); } catch (e) { return { error: { refused: true, detail: e.message.replace(/^Invalid regular expression: /, '') } }; } }
+    return { q };
+  }
+  const tk = tokens(text); if (tk.error) return tk;
+  for (let tok of tk.list) {
+    let neg = false; if (tok.startsWith('!')) { neg = true; tok = tok.slice(1); }
+    const m = /^([a-z-]+):(.*)$/i.exec(tok);
+    if (m && !/^[a-z]$/i.test(m[1])) {
+      const f = m[1].toLowerCase(), v = m[2].toLowerCase();
+      if (f === 'ext') { q.ext = v.split(';'); continue; }
+      if (f === 'dm' || f === 'datemodified' || f === 'date-modified') { const r = parseDm(v, Date.now()); if (!r) return { error: { key: 'p.dm', arg: tok } }; q.dm = r; q.testsMeta = true; continue; }
+      if (f === 'size') { const r = parseSize(v); if (!r) return { error: { key: 'p.size', arg: tok } }; q.size = r; q.testsMeta = true; continue; }
+      if (f === 'attrib' || f === 'attr' || f === 'attributes') { let bits = 0; for (const ch of v) { const b = { r: A_R, h: A_H, s: A_S, d: A_D, a: A_A, l: A_L, c: A_C, e: A_E }[ch]; if (!b) return { error: { key: 'p.attr', arg: tok } }; bits |= b; } if (neg) q.attrOff |= bits; else q.attrOn |= bits; continue; }
+      if (f === 'folder' || f === 'dir') { q.kind = 1; if (v) q.terms.push(v); continue; }
+      if (f === 'file') { q.kind = 2; if (v) q.terms.push(v); continue; }
+    }
+    (neg ? q.neg : q.terms).push(opts.case ? tok : tok.toLowerCase());
+  }
+  return { q };
+}
+// Each filter group except Location adds a clause, parsed on its own (spec: Filter pane).
+function filterClauses(F) {
+  const c = [];
+  if (F.kind === 1) c.push('folder:'); else if (F.kind === 2) c.push('file:'); else if (F.kind >= 3) c.push('ext:' + KIND_EXT[F.kind]);
+  const dmw = [null, 'today', 'yesterday', '7days', '30days', '365days'];
+  if (F.date > 0 && F.date < 6) c.push('dm:' + dmw[F.date]);
+  if (F.date === 6 && F.dateCustom) { const iso = x => new Date(x).toISOString().slice(0, 10); const { from, to } = F.dateCustom;
+    c.push(from && to ? `dm:${iso(from)}..${iso(to)}` : from ? `dm:>=${iso(from)}` : `dm:<=${iso(to)}`); }
+  const szw = [null, 'empty', 'tiny', 'small', 'medium', 'large', 'huge', 'gigantic'];
+  if (F.size > 0 && F.size < 8) c.push('size:' + szw[F.size]);
+  if (F.size === 8 && F.sizeCustom) { const { min, max, unit } = F.sizeCustom; c.push(`size:${min ?? ''}${min != null ? unit : ''}..${max ?? ''}${max != null ? unit : ''}`); }
+  const letters = 'hsrlce';
+  F.attrs.forEach((v, i) => { if (v === 1) c.push('attrib:' + letters[i]); if (v === 2) c.push('!attrib:' + letters[i]); });
+  return c;
+}
+const isW = ch => !!ch && /[\p{L}\p{N}]/u.test(ch);
+// Where a match of a name term may sit, by match mode (spec: Search box).
+const AT = {
+  word: (h, i) => !isW(h[i - 1]),
+  start: (h, i) => i === 0,
+  any: () => true,
+  ww: (h, i, len) => !isW(h[i - 1]) && !isW(h[i + len]),
+};
+function matches(e, q, opts, scope, parentDir) {
+  if (scope) { const dl = DIRS[C.dir[e]].lower; const fp = dl.endsWith('\\') ? dl : dl + '\\';
+    if (parentDir != null) { if (C.dir[e] !== parentDir) return false; } else if (!fp.startsWith(scope)) return false; }
+  if (q.kind === 1 && !C.isDir[e]) return false; if (q.kind === 2 && C.isDir[e]) return false;
+  if (q.ext) { if (C.isDir[e]) return false; if (!q.ext.includes(extOf(e))) return false; }
+  if (q.size) { if (C.isDir[e]) return false; const s = C.size[e]; if (s === UNKNOWN || s < q.size[0] || s > q.size[1]) return false; }
+  if (q.dm) { const m = C.mtime[e]; if (m < q.dm[0] || m > q.dm[1]) return false; }
+  if (q.attrOn && (C.attrs[e] & q.attrOn) !== q.attrOn) return false;
+  if (q.attrOff && (C.attrs[e] & q.attrOff)) return false;
+  if (!q.terms.length && !q.neg.length && !q.re) return true;
+  const hay = opts.path ? (opts.case ? fullPath(e) : fullPath(e).toLowerCase()) : (opts.case ? C.names[e] : C.lower[e]);
+  if (q.re) return q.re.test(opts.path ? fullPath(e) : C.names[e]);
+  for (const term of q.terms) {
+    // A path term keeps its substring meaning; the mode applies to name terms.
+    const pathTerm = term.includes('\\') && !opts.path;
+    const h = pathTerm ? fullPath(e).toLowerCase() : hay;
+    const at = pathTerm ? AT.any : AT[opts.mode];
+    let i = h.indexOf(term), ok = false;
+    while (i >= 0) { if (at(h, i, term.length)) { ok = true; break; } i = h.indexOf(term, i + 1); }
+    if (!ok) return false;
+  }
+  for (const term of q.neg) if (hay.includes(term)) return false;
+  return true;
+}
+function sortRows(arr, key, desc) {
+  const n = C.lower, cmpStr = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+  const k = {
+    name: (a, b) => cmpStr(n[a], n[b]),
+    path: (a, b) => cmpStr(DIRS[C.dir[a]].lower, DIRS[C.dir[b]].lower) || cmpStr(n[a], n[b]),
+    size: (a, b) => (C.size[b] - C.size[a]) || cmpStr(n[a], n[b]),
+    dm: (a, b) => (C.mtime[b] - C.mtime[a]) || cmpStr(n[a], n[b]),
+    dc: (a, b) => (ctimeOf(b) - ctimeOf(a)) || cmpStr(n[a], n[b]),
+    ext: (a, b) => cmpStr(extOf(a), extOf(b)) || cmpStr(n[a], n[b]),
+  }[key];
+  arr.sort(desc ? (a, b) => k(b, a) : k);
+  return arr;
+}
+
+// =====================================================================
+// The model. Facts only; every caption is a function of these (rule 12).
+// =====================================================================
+const LIMIT = 100000, CHUNK = 8192, CACHE_CHUNKS = 4;
+// The window's settings (ui.json, per person) and the service's settings
+// (per machine, changed with administrator permission) (spec: Settings dialog).
+const WIN_DEFAULTS = { lang: 'default', signin: false, background: true, updates: false, verb: false, openFolders: '', openFiles: '', openLoc: '',
+  sayt: true, clickSel: true, actSel: false, showAll: true, hotkey: null, keys: {} };
+// rules: a folder's lower-case path -> indexed or not, saved only where it
+// differs from the folder above; a drive with no rule is indexed.
+const SERVICE_DEFAULTS = { rules: {}, autoNew: true, dc: false, fs: false, xFiles: '', xHidden: false, xSystem: false };
+// A drive counts as indexed when any part of it is, as C:\ is with only C:\Users\ana checked.
+const driveIndexed = (root, rules = S.service.rules) => rules[root.toLowerCase()] !== false
+  || Object.entries(rules).some(([k, v]) => v && k.startsWith(root.toLowerCase()));
+const DRIVES = [{ root: 'C:\\', label: 'Windows', entries: 1871204 }, { root: 'D:\\', label: 'Data', entries: 402377 }];
+const S = {
+  scale: 1, hc: false,
+  text: '', opts: { mode: 'word', case: false, path: false },
+  F: { kind: 0, loc: 0, locItems: [], parentOnly: false, date: 0, dateCustom: null, size: 0, sizeCustom: null, attrs: [0, 0, 0, 0, 0, 0] },
+  sort: { key: 'name', desc: false },
+  settings: structuredClone(WIN_DEFAULTS), service: structuredClone(SERVICE_DEFAULTS),
+  mask: null, dirSize: null, indexingNow: new Set(), update: null,
+  cols: [{ k: 'name', w: 320 }, { k: 'path', w: 380 }, { k: 'size', w: 90 }, { k: 'dm', w: 130 }],
+  allCols: ['name', 'path', 'size', 'dm', 'ext', 'attr'],
+  showFilters: true, showInspector: true, inspH: 196,
+  win: { w: 1180, h: 760, maxed: false },
+  gen: 0, inflight: { results: false, selection: false, status: false, export: false },
+  shown: { kind: 'nothing' }, // 'rows' {rows, total, filteredQuery} | 'message' {msg}
+  searchedOnce: false,
+  chunks: new Map(), pendingChunks: new Set(),
+  sel: new Set(), anchor: -1, cur: -1,
+  selection: { kind: 'none' }, // 'reading' | 'files' {entries}
+  folderSize: null, // {entry, state:'calc'|'done', count, bytes}
+  exp: null, // {path, rows, total, timer, fails}
+  activity: null, // part 3 fact: {kind:'exporting'|'exported', rows, name}
+  // Prototype switches: the daemon and the environment.
+  daemon: 'normal', cIndexing: false, dOffline: false, dMeta: false, slow: false, hold: false,
+  locMissing: false, exportFails: false, clipBusy: false, settingsFail: false, settingsWarned: false, filesGone: false,
+  log: [],
+};
+const latency = () => S.slow ? 2000 : 300;
+const filtersSet = () => S.F.kind || S.F.loc || S.F.parentOnly || S.F.date || S.F.size || S.F.attrs.some(Boolean);
+const selCount = () => S.sel.size;
+const selReady = () => S.selection.kind === 'files';
+const rowsShown = () => S.shown.kind === 'rows' ? S.shown.rows.length : 0;
+function log(s) { S.log.unshift(new Date().toLocaleTimeString() + '  ' + s); S.log.length = Math.min(S.log.length, 14); }
+
+// ---------- search ----------
+let typeTimer = 0, pendingReply = null;
+function textChanged() {
+  clearTimeout(typeTimer);
+  if (S.settings.sayt) typeTimer = setTimeout(() => runSearch('typing'), 150);
+}
+function scopeOf() {
+  const it = S.F.locItems[S.F.loc - 1];
+  if (S.locMissing) return { missing: 'D:\\Old' };
+  if (!S.F.loc) return {};
+  const lower = it.path.toLowerCase();
+  const scope = lower.endsWith('\\') ? lower : lower + '\\';
+  let parentDir = null;
+  if (S.F.parentOnly) { parentDir = DIRS.findIndex(d => d.lower === lower.replace(/\\$/, '') || d.lower === lower); if (parentDir < 0) parentDir = -2; }
+  return { scope, parentDir };
+}
+function runSearch(why) {
+  clearTimeout(typeTimer);
+  S.gen++; const gen = S.gen;
+  const parsed = parseQuery(S.text, S.opts);
+  log(`search #${gen} (${why}): "${S.text}"` + (filtersSet() ? ' + ' + filterClauses(S.F).join(' ') : ''));
+  if (parsed.error) { finishMessage(parsed.error.refused ? { type: 'daemon', d: 'refused', detail: parsed.error.detail } : { type: 'parse', ...parsed.error }); return; }
+  for (const clause of filterClauses(S.F)) { const p = parseQuery(clause, { case: false, mode: 'any' }); Object.assign(parsed.q, mergeClause(parsed.q, p.q)); }
+  const sc = scopeOf();
+  if (sc.missing) { finishMessage({ type: 'missing', folder: sc.missing }); return; }
+  if (!S.text && !S.settings.showAll && !filtersSet()) { finishMessage({ type: 'type' }); return; }
+  S.inflight.results = true; S.searchedOnce = true;
+  update();
+  const t0 = performance.now();
+  const reply = () => {
+    if (gen !== S.gen) return;
+    if (S.hold) { pendingReply = reply; return; }
+    if (S.daemon !== 'normal') { S.inflight.results = false; finishMessage({ type: 'daemon', d: S.daemon }); return; }
+    const out = [];
+    for (let e = 0; e < C.names.length; e++) if ((!S.mask || S.mask[e]) && matches(e, parsed.q, S.opts, sc.scope, sc.parentDir)) out.push(e);
+    sortRows(out, S.sort.key, S.sort.desc);
+    S.inflight.results = false;
+    S.shown = { kind: 'rows', total: out.length, rows: out.slice(0, LIMIT), all: out, testsMeta: parsed.q.testsMeta, q: parsed.q, opts: { ...S.opts } };
+    // T2: new rows replace the old, scrolled to the top; the selection is cleared.
+    S.chunks = new Map([[0, true]]); S.pendingChunks.clear();
+    clearSelection();
+    log(`  reply #${gen}: ${fmtInt(out.length)} matches in ${Math.round(performance.now() - t0)} ms (incl. latency)`);
+    if (out.length === 0) S.shown = { kind: 'message', msg: { type: 'nomatch' } };
+    listScrollTop(0);
+    update(); renderRows();
+  };
+  setTimeout(reply, latency());
+}
+function mergeClause(q, c) {
+  const r = {};
+  if (c.ext) r.ext = q.ext ? q.ext.filter(x => c.ext.includes(x)) : c.ext;
+  if (c.kind) r.kind = c.kind;
+  if (c.dm) { r.dm = q.dm ? [Math.max(q.dm[0], c.dm[0]), Math.min(q.dm[1], c.dm[1])] : c.dm; r.testsMeta = true; }
+  if (c.size) { r.size = q.size ? [Math.max(q.size[0], c.size[0]), Math.min(q.size[1], c.size[1])] : c.size; r.testsMeta = true; }
+  r.attrOn = q.attrOn | c.attrOn; r.attrOff = q.attrOff | c.attrOff;
+  return r;
+}
+function finishMessage(msg) {
+  S.inflight.results = false; S.shown = { kind: 'message', msg }; clearSelection(); update(); renderRows();
+}
+function releaseHold() { if (pendingReply) { const r = pendingReply; pendingReply = null; r(); } for (const f of heldChunks.splice(0)) f(); for (const f of heldSel.splice(0)) f(); }
+
+// ---------- rows on demand ----------
+const heldChunks = [];
+function ensureChunk(c) {
+  if (S.chunks.has(c) || S.pendingChunks.has(c)) return;
+  S.pendingChunks.add(c); const gen = S.gen;
+  const delay = latency() + Math.round(100 * (c * CHUNK) / LIMIT);
+  const arrive = () => {
+    if (gen !== S.gen) return;
+    if (S.hold) { heldChunks.push(arrive); return; }
+    S.pendingChunks.delete(c); S.chunks.set(c, true);
+    // Keep at most 32,768 rows: drop the chunks farthest from the view.
+    const mid = Math.floor(firstVisible() / CHUNK);
+    while (S.chunks.size > CACHE_CHUNKS) { let far = -1, fd = -1; for (const k of S.chunks.keys()) { const d = Math.abs(k - mid); if (d > fd) { fd = d; far = k; } } S.chunks.delete(far); }
+    renderRows(); update();
+  };
+  setTimeout(arrive, delay);
+}
+const rowLoaded = r => S.chunks.has(Math.floor(r / CHUNK));
+
+// ---------- selection (rule C) ----------
+let selTimer = 0; const heldSel = [];
+function clearSelection() { S.sel.clear(); S.anchor = -1; S.cur = -1; clearTimeout(selTimer); S.selection = { kind: 'none' }; S.inflight.selection = false; S.folderSize = null; }
+function selectionChanged() {
+  clearTimeout(selTimer); S.folderSize = null;
+  if (!S.sel.size) { S.selection = { kind: 'none' }; S.inflight.selection = false; update(); return; }
+  const pos = [...S.sel];
+  if (pos.every(rowLoaded)) { S.selection = { kind: 'files', entries: pos.sort((a, b) => a - b).map(p => S.shown.rows[p]) }; S.inflight.selection = false; startFolderSize(); update(); return; }
+  S.selection = { kind: 'reading', positions: pos }; update();
+  const gen = S.gen;
+  selTimer = setTimeout(() => {
+    S.inflight.selection = true; update(); log(`selection read: ${fmtInt(pos.length)} rows`);
+    const done = () => {
+      if (gen !== S.gen || S.selection.kind !== 'reading' || S.selection.positions !== pos) return;
+      if (S.hold) { heldSel.push(done); return; }
+      S.inflight.selection = false;
+      S.selection = { kind: 'files', entries: pos.sort((a, b) => a - b).map(p => S.shown.rows[p]) };
+      // The same reply refreshes the cached rows inside the span.
+      const vis = Math.floor(firstVisible() / CHUNK); S.chunks.set(vis, true);
+      startFolderSize(); renderRows(); update();
+    };
+    setTimeout(done, latency());
+  }, 150);
+}
+function startFolderSize() {
+  if (S.selection.kind !== 'files' || S.selection.entries.length !== 1) return;
+  const e = S.selection.entries[0]; if (!C.isDir[e]) return;
+  const d = C.selfDir[e]; S.folderSize = { entry: e, state: 'calc' };
+  setTimeout(() => {
+    if (!S.folderSize || S.folderSize.entry !== e) return; // T7: a new selection cancels it.
+    let count = 0, bytes = 0;
+    for (let i = 0; i < C.names.length; i++) { let x = C.dir[i]; while (x >= 0 && x !== d) x = DIRS[x].parent; if (x === d) { count++; if (!C.isDir[i] && C.size[i] > 0) bytes += C.size[i]; } }
+    S.folderSize = { entry: e, state: 'done', count, bytes }; update();
+  }, latency() + 500);
+}
+
+// ---------- commands (one table, every surface reads it) ----------
+function focusIn(el) { return el && (document.activeElement === el || el.contains(document.activeElement)); }
+function searchHasSelectedText() { const s = UI.search; return document.activeElement === s && s.selectionEnd > s.selectionStart; }
+const CMD = {
+  open: { k: 'cmd.open', on: () => selCount() >= 1 && selCount() <= 15 && selReady(), run: () => actOnFiles('open') },
+  openloc: { k: 'cmd.openloc', on: () => selCount() >= 1 && selCount() <= 15 && selReady(), run: () => actOnFiles('openloc') },
+  props: { k: 'cmd.props', on: () => selCount() === 1 && selReady(), run: () => actOnFiles('props') },
+  export: { k: 'cmd.export', on: () => rowsShown() > 0 && !S.exp, run: () => exportDialog() },
+  cancelexport: { k: 'cmd.cancelexport', on: () => !!S.exp, run: () => cancelExport() },
+  settings: { k: 'cmd.settings', on: () => true, run: () => settingsDialog() },
+  exit: { k: 'cmd.exit', on: () => true, run: () => { log('Exit: gozler ends, every request is cancelled (T14)' + (S.settings.background ? ', the tray icon goes' : '') + (S.settings.hotkey ? ', and Windows gets its own use of the shortcut back' : '') + '. The prototype keeps running.'); } },
+  showwin: { k: 'tray.show', on: () => S.settings.background, run: () => showWindow('Show window') },
+  copy: { k: 'cmd.copy', on: () => focusIn(UI.search) ? searchHasSelectedText() : selCount() > 0 && selReady(), run: () => focusIn(UI.search) ? document.execCommand('copy') : copyFiles('files') },
+  copypath: { k: 'cmd.copypath', on: () => selCount() > 0 && selReady(), run: () => copyFiles('path') },
+  copyname: { k: 'cmd.copyname', on: () => selCount() > 0 && selReady(), run: () => copyFiles('name') },
+  selall: { k: 'cmd.selall', on: () => true, run: () => selectAll() },
+  searchhere: { k: 'cmd.searchhere', on: () => selCount() === 1 && selReady(), run: () => searchInFolder() },
+  filters: { k: 'cmd.filters', on: () => true, checked: () => S.showFilters, run: () => { S.showFilters = !S.showFilters; settingChanged(); layout(); update(); } },
+  inspector: { k: 'cmd.inspector', on: () => true, checked: () => S.showInspector, run: () => { S.showInspector = !S.showInspector; settingChanged(); layout(); update(); } },
+  refresh: { k: 'cmd.refresh', on: () => S.searchedOnce, run: () => runSearch('F5') },
+  find: { k: 'cmd.find', on: () => true, run: () => { UI.search.focus(); UI.search.select(); } },
+  clearfilters: { k: 'f.clear', on: () => !!filtersSet(), run: () => clearFilters() },
+  syntax: { k: 'cmd.syntax', on: () => true, run: () => syntaxDialog() },
+  about: { k: 'cmd.about', on: () => true, run: () => aboutDialog() },
+};
+// Each command's default shortcuts, the "Key" column of the spec's Commands.
+// The person's own, from Settings > Keyboard, replace a command's defaults.
+const DEFAULT_KEYS = { openloc: ['ctrl+Enter'], props: ['alt+Enter'], settings: ['ctrl+,'], copy: ['ctrl+C'], copypath: ['ctrl+shift+C'],
+  selall: ['ctrl+A'], refresh: ['F5'], find: ['ctrl+F', 'ctrl+E'], syntax: ['F1'] };
+const keysOf = (id, keys = S.settings.keys) => keys[id] ?? DEFAULT_KEYS[id] ?? [];
+// The commands a person can give a shortcut, by the menu that shows them.
+const KEY_COMMANDS = [['menu.file', ['open', 'openloc', 'props', 'export', 'cancelexport', 'settings', 'exit']],
+  ['menu.edit', ['copy', 'copypath', 'copyname', 'selall', 'find']], ['menu.view', ['filters', 'inspector', 'refresh']],
+  ['menu.help', ['syntax', 'about']], ['k.context', ['searchhere']]];
+function cmdName(id) { const [m] = KEY_COMMANDS.find(([, ids]) => ids.includes(id)); return plain(t(m)) + ' > ' + plain(t(CMD[id].k)); }
+// A key press as a shortcut, such as "ctrl+shift+K"; null for a modifier alone.
+function keyName(e) {
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return null;
+  const key = /^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : /^Digit\d$/.test(e.code) ? e.code.slice(5) : e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+  return [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', key].filter(Boolean).join('+');
+}
+const KEY_TEXT = { ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', PageUp: 'PgUp', PageDown: 'PgDn', Escape: 'Esc' };
+function keyText(combo) { return combo ? combo.split('+').map(x => ({ ctrl: t('key.ctrl'), shift: t('key.shift'), alt: t('key.alt'), win: t('key.win'), Enter: t('key.enter') }[x] || KEY_TEXT[x] || x)).join('+') : ''; }
+// Why a command shortcut is refused, or null (spec: The Keyboard page).
+function refuseKey(combo, id, keys) {
+  if (!combo) return t('o.k.none');
+  const parts = combo.split('+'), key = parts.pop(), ctrl = parts.includes('ctrl'), alt = parts.includes('alt'), text = keyText(combo);
+  if ((!ctrl && !alt && ['Tab', 'Enter', 'Escape'].includes(key)) || ['shift+F10', 'alt+F4', 'ctrl+V', 'ctrl+X', 'ctrl+Z'].includes(combo)
+    || (ctrl && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Backspace', 'Delete'].includes(key))) return t('o.k.reserved', text);
+  if ((alt && !ctrl && /^[A-Z0-9]$/.test(key)) || (!ctrl && !alt && !/^F\d+$/.test(key))) return t('o.k.typing', text);
+  const owner = Object.keys(CMD).find(c => c !== id && keysOf(c, keys).includes(combo));
+  return owner ? t('o.k.taken', text, cmdName(owner)) : null;
+}
+function run(id, from) {
+  const c = CMD[id];
+  if (!c.on()) { log(`${id}: disabled, nothing happens` + (from ? ` (${from})` : '')); update(); return; }
+  log(`command ${id}` + (from ? ` (${from})` : ''));
+  c.run(); update();
+}
+function setMatch(k, v) { if (S.opts[k] === v) return; S.opts[k] = v; settingChanged(); runSearch('match ' + k); }
+function clearFilters() { S.F.kind = 0; S.F.loc = 0; S.F.parentOnly = false; S.F.date = 0; S.F.dateCustom = null; S.F.size = 0; S.F.sizeCustom = null; S.F.attrs = [0, 0, 0, 0, 0, 0]; S.locMissing = false; syncFilterControls(); runSearch('clear filters'); }
+function settingChanged() {
+  if (S.settingsFail && !S.settingsWarned) { S.settingsWarned = true;
+    setTimeout(() => msgBox(t('fb.settings', 'C:\\Users\\alex\\AppData\\Local\\gozler\\ui.json', t('win.accessdenied'))), 0); }
+}
+function selectedEntries() { return S.selection.kind === 'files' ? S.selection.entries : []; }
+function actOnFiles(kind) {
+  const es = selectedEntries();
+  if (S.filesGone) { msgBox(t('fb.gone', fullPath(es[0]))); return; }
+  // Each entry runs its open command, or File Explorer's way when it is empty.
+  const cmdFor = e => kind === 'openloc' ? S.settings.openLoc : kind === 'open' ? (C.isDir[e] ? S.settings.openFolders : S.settings.openFiles) : '';
+  const bad = es.map(cmdFor).find(c => /nosuch/i.test(c));
+  if (bad) { msgBox(t('fb.opencmd', bad.split(' ')[0], t('win.notfound'))); return; }
+  const what = { open: 'Open', openloc: 'Open file location', props: 'Properties' }[kind];
+  const how = e => { const c = cmdFor(e); return c ? c.replace(/%1/g, fullPath(e)) : kind === 'props' ? fullPath(e) : `${C.isDir[e] || kind === 'openloc' ? 'File Explorer' : 'default program'}: ${fullPath(e)}`; };
+  log(`${what}: ${es.slice(0, 3).map(how).join(' | ')}${es.length > 3 ? ` … (${es.length})` : ''}`);
+}
+function copyFiles(kind) {
+  if (S.clipBusy) { msgBox(t('fb.clipboard')); return; }
+  const es = selectedEntries();
+  const text = es.map(e => kind === 'name' ? C.names[e] : kind === 'path' ? '"' + fullPath(e) + '"' : fullPath(e)).join('\r\n');
+  log(`clipboard (${kind === 'files' ? 'CF_HDROP' : 'text'}): ${fmtInt(es.length)} items, ${fmtInt(text.length)} characters. First: ${text.split('\r\n')[0]}`);
+}
+function searchInFolder() {
+  const e = selectedEntries()[0];
+  const path = C.isDir[e] ? fullPath(e) : folderOf(e);
+  addLocation(path); runSearch('search in this folder');
+}
+function addLocation(path) {
+  let i = S.F.locItems.findIndex(x => x.path === path);
+  if (i < 0) { S.F.locItems.push({ path, chosen: true }); i = S.F.locItems.length - 1; }
+  S.F.loc = i + 1; S.locMissing = false; syncFilterControls();
+}
+
+// ---------- export ----------
+function exportDialog() {
+  let type = 0;
+  const name = h('input', { class: 'edit', style: 'width:100%', value: 'results.csv' });
+  const types = combo([t('sv.csv'), t('sv.tsv'), t('sv.txt')], 0, i => { type = i; name.value = name.value.replace(/\.(csv|tsv|txt)$/i, '') + ['.csv', '.tsv', '.txt'][i]; });
+  types.el.style.width = '100%';
+  dialog({
+    title: t('sv.title'), w: 460,
+    body: h('div', {}, h('p', { style: 'margin:0 0 11px;color:var(--gray)' }, t('sv.note')),
+      grid2([[labelFor(t('sv.name'), name), name], [labelFor(t('sv.type'), types.el), types.el]])),
+    buttons: [{ k: 'b.save', def: true, act: () => { startExport('D:\\Exports\\' + name.value, type); return true; } }, { k: 'b.cancel', cancel: true }],
+    first: name,
+  });
+}
+function startExport(path, type) {
+  const total = S.shown.all.length;
+  S.exp = { path, rows: 0, total, type }; S.inflight.export = true; S.activity = { kind: 'exporting', rows: 0 };
+  log(`export to ${path}: ${fmtInt(total)} rows (every match, not only the first 100,000)`);
+  const step = Math.max(1, Math.ceil(total / 8));
+  S.exp.timer = setInterval(() => {
+    if (!S.exp) return;
+    if (S.exportFails && S.exp.rows >= step) { const p = S.exp.path; endExport(); S.activity = null; update(); msgBox(t('fb.export', p, t('win.accessdenied'))); return; }
+    S.exp.rows = Math.min(total, S.exp.rows + step); S.activity = { kind: 'exporting', rows: S.exp.rows };
+    if (S.exp.rows >= total) { const n = S.exp.path.split('\\').pop(); endExport(); S.activity = { kind: 'exported', rows: total, name: n }; log('export finished'); }
+    update();
+  }, 500);
+  update();
+}
+function endExport() { clearInterval(S.exp.timer); S.exp = null; S.inflight.export = false; }
+function cancelExport() { log(`export cancelled: ${S.exp.path} deleted`); endExport(); S.activity = null; }
+
+// ---------- daemon fix-it buttons (simulated) ----------
+function fixIt(d) {
+  const what = { stopped: 'net start gozler (as administrator, after the UAC prompt)', disabled: 'sc.exe config gozler start= auto, then net start gozler (as administrator)',
+    notinst: 'gozlerd.exe install (as administrator)', missing: 'open https://github.com/SynoSoftware/goz/releases', tooold: 'open https://github.com/SynoSoftware/goz/releases',
+    unknown: 'open services.msc' }[d];
+  log('fix-it: would run ' + what);
+  if (['stopped', 'disabled', 'notinst'].includes(d)) setTimeout(() => { S.daemon = 'normal'; log('  the service now answers; the window searches again by itself (T4)'); renderPanel(); }, 1500);
+}
+// Status poll: every 2 s while a failure or an incomplete volume can resolve by itself (T4, T5).
+let lastPollNeed = null;
+setInterval(() => {
+  const msg = S.shown.kind === 'message' && S.shown.msg.type === 'daemon';
+  const pollable = msg && ['starting', 'lost', 'stopped', 'disabled', 'notinst'].includes(S.shown.msg.d);
+  if (pollable && S.daemon === 'normal') { log('status poll: the service answers again (T4)'); runSearch('status poll'); }
+  const idx = S.cIndexing;
+  if (lastPollNeed === true && !idx && S.shown.kind === 'rows') { log('status poll: C:\\ is complete; the search runs again (T4)'); runSearch('status poll'); }
+  lastPollNeed = idx;
+  if (currentDialog && currentDialog.onTick) currentDialog.onTick();
+}, 2000);
+
+// =====================================================================
+// DOM helpers
+// =====================================================================
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === 'style' && typeof v === 'string') el.style.cssText = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'html') el.innerHTML = v;
+    else if (v !== false && v != null) el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) el.append(k.nodeType ? k : document.createTextNode(k));
+  return el;
+}
+// A caption that follows the language: data-t holds its key.
+function cap(el, key) { el.dataset.t = key; el.innerHTML = akHtml(t(key)); const ak = akOf(t(key)); if (ak) el.dataset.ak = ak; return el; }
+function applyText(root = document) { for (const el of root.querySelectorAll('[data-t]')) { el.innerHTML = akHtml(t(el.dataset.t)); const ak = akOf(t(el.dataset.t)); if (ak) el.dataset.ak = ak; else delete el.dataset.ak; } }
+function button(key, onclick, opts = {}) {
+  const b = h('div', { class: 'btn' + (opts.def ? ' def' : ''), tabindex: 0, role: 'button' });
+  if (opts.shield) b.append(shieldSvg());
+  const s = h('span'); if (opts.raw) { s.innerHTML = akHtml(key); if (akOf(key)) b.dataset.ak = akOf(key); } else { cap(s, key); if (s.dataset.ak) b.dataset.ak = s.dataset.ak; }
+  b.append(s);
+  b.addEventListener('click', e => { if (!b.classList.contains('dis')) onclick(e); });
+  b.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && !b.classList.contains('dis')) { e.preventDefault(); e.stopPropagation(); onclick(e); } });
+  b._sync = () => { const s2 = b.querySelector('[data-t]'); if (s2 && s2.dataset.ak) b.dataset.ak = s2.dataset.ak; };
+  return b;
+}
+function setEnabled(el, on) { el.classList.toggle('dis', !on); if (el.classList.contains('btn')) el.tabIndex = on ? 0 : -1; }
+function checkbox(key, getter, onchange, radio = false) {
+  const lbl = h('span', { class: 'lbl' });
+  const el = h('div', { class: 'chk' + (radio ? ' radio' : ''), tabindex: 0, role: radio ? 'radio' : 'checkbox' }, h('span', { class: 'box' }), lbl);
+  cap(lbl, key); el.dataset.ak = lbl.dataset.ak || '';
+  el._sync = () => { el.classList.toggle('on', !!getter()); el.dataset.ak = lbl.dataset.ak || ''; };
+  const flip = () => { if (el.classList.contains('dis')) return; onchange(radio ? true : !getter()); el._sync(); };
+  el.addEventListener('click', flip);
+  el.addEventListener('keydown', e => { if (e.key === ' ') { e.preventDefault(); flip(); } });
+  el._sync(); return el;
+}
+function labelFor(text, target) { const l = h('div', { class: 'label', html: akHtml(text) }); l.dataset.ak = akOf(text); l._target = target; return l; }
+function grid2(rows) { const g = h('div', { style: 'display:grid;grid-template-columns:max-content 1fr;gap:7px 11px;align-items:center' }); for (const [a, b] of rows) g.append(a, b); return g; }
+// A drop-down list combo box (CBS_DROPDOWNLIST). onPick(i, how): how is 'list' (closed up on it), 'key' (arrows while closed), 'enter'.
+function combo(items, sel, onPick, opts = {}) {
+  const ct = h('span', { class: 'ct' });
+  const el = h('div', { class: 'combo', tabindex: 0, role: 'combobox' }, ct, h('span', { class: 'arrow' }, '\uE70D'));
+  const st = { items, sel, open: null };
+  const show = () => { ct.textContent = st.items[st.sel] ?? ''; };
+  el._set = (its, s) => { st.items = its; st.sel = s; show(); };
+  el._get = () => st.sel;
+  const close = (pick) => {
+    if (!st.open) return; const d = st.open; st.open = null; d.list.remove(); document.removeEventListener('mousedown', d.away, true);
+    if (pick != null) { st.sel = pick; show(); onPick(pick, 'list'); }
+  };
+  const openList = () => {
+    if (st.open) return;
+    const r = rel(el); const list = h('div', { class: 'drop' });
+    list.style.left = r.x + 'px'; list.style.top = (r.y + r.h) + 'px'; list.style.minWidth = r.w + 'px';
+    let cur = st.sel;
+    const paint = () => [...list.children].forEach((c, i) => c.classList.toggle('cur', i === cur));
+    st.items.forEach((s, i) => list.append(h('div', { class: 'it', onmousemove: () => { cur = i; paint(); }, onmousedown: e => { e.preventDefault(); close(i); } }, s)));
+    paint(); popupLayer().append(list);
+    const away = e => { if (!list.contains(e.target) && !el.contains(e.target)) close(null); };
+    document.addEventListener('mousedown', away, true);
+    st.open = { list, away, move: d => { cur = Math.max(0, Math.min(st.items.length - 1, cur + d)); paint(); }, pick: () => close(cur) };
+  };
+  el.addEventListener('mousedown', e => { e.preventDefault(); el.focus(); st.open ? close(null) : openList(); });
+  el.addEventListener('keydown', e => {
+    if (e.altKey && e.key === 'ArrowDown' || e.key === 'F4') { e.preventDefault(); st.open ? st.open.pick() : openList(); return; }
+    if (st.open) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); st.open.move(1); } else if (e.key === 'ArrowUp') { e.preventDefault(); st.open.move(-1); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); st.open.pick(); } else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(null); }
+      return;
+    }
+    let n = st.sel;
+    if (e.key === 'ArrowDown') n++; else if (e.key === 'ArrowUp') n--; else if (e.key === 'Home') n = 0; else if (e.key === 'End') n = st.items.length - 1;
+    else if (e.key === 'Enter' && opts.onEnter) { if (opts.onEnter(st.sel)) { e.preventDefault(); e.stopPropagation(); } return; }
+    else return;
+    e.preventDefault(); n = Math.max(0, Math.min(st.items.length - 1, n)); if (n !== st.sel) { st.sel = n; show(); onPick(n, 'key'); }
+  });
+  el.addEventListener('blur', () => close(null));
+  show(); return { el, set: el._set, get: el._get };
+}
+function listbox(items, sel, onPick, rowsVisible) {
+  const el = h('div', { class: 'lb', tabindex: 0, role: 'listbox' });
+  el.style.height = (rowsVisible * 15 + 2) + 'px';
+  const st = { items, sel };
+  const paint = () => { el.replaceChildren(...st.items.map((s, i) => h('div', { class: 'it' + (i === st.sel ? ' sel cur' : ''), title: s, onmousedown: e => { e.preventDefault(); el.focus(); pick(i); } }, s))); };
+  const pick = i => { i = Math.max(0, Math.min(st.items.length - 1, i)); if (i !== st.sel) { st.sel = i; paint(); onPick(i); } };
+  el.addEventListener('keydown', e => {
+    const m = { ArrowDown: st.sel + 1, ArrowUp: st.sel - 1, Home: 0, End: st.items.length - 1, PageDown: st.sel + rowsVisible - 1, PageUp: st.sel - rowsVisible + 1 }[e.key];
+    if (m !== undefined) { e.preventDefault(); pick(m); el.children[st.sel]?.scrollIntoView({ block: 'nearest' }); }
+  });
+  el._set = (its, s) => { st.items = its; st.sel = s; paint(); };
+  paint(); return el;
+}
+function popupLayer() { return UI.scaler; }
+function rel(el) { // a rectangle in the scaler's unscaled coordinates
+  const a = el.getBoundingClientRect(), b = UI.scaler.getBoundingClientRect();
+  return { x: (a.left - b.left) / S.scale, y: (a.top - b.top) / S.scale, w: a.width / S.scale, h: a.height / S.scale };
+}
+function shieldSvg() { const s = h('span', { class: 'shield', html: '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 1l6 2.2v4.3c0 3.6-2.6 6.4-6 7.5-3.4-1.1-6-3.9-6-7.5V3.2z" fill="#1c64c8"/><path d="M8 1v14c3.4-1.1 6-3.9 6-7.5V3.2z" fill="#f2c200"/><path d="M8 1v7H2V3.2zM8 8h6c-.3 3.4-2.8 6-6 7z" fill="#2d7ee6" opacity=".9"/></svg>' }); return s; }
+
+// ---------- file-type icons (stand-ins for the shell's system image list) ----------
+const ICON_KIND = { folder: 'folder', jpg: 'pic', jpeg: 'pic', png: 'pic', heic: 'pic', svg: 'pic', ico: 'pic', gif: 'pic', bmp: 'pic', mp3: 'audio', wav: 'audio', flac: 'audio', m3u: 'audio',
+  mp4: 'video', mkv: 'video', zip: 'zip', '7z': 'zip', iso: 'zip', exe: 'exe', msi: 'exe', dll: 'dll', pdf: 'pdf', docx: 'doc', xlsx: 'xls', csv: 'xls',
+  cs: 'code', rs: 'code', js: 'code', ts: 'code', h: 'code', cpp: 'code', html: 'code', css: 'code', json: 'code', xml: 'code', ps1: 'code', txt: 'txt', md: 'txt', log: 'txt' };
+const ICONS = {};
+function iconSvg(kind, px = 16) {
+  const page = (band, glyph = '') => `<svg viewBox="0 0 16 16" width="${px}" height="${px}"><path d="M3 .5h7l3.5 3.5v11.5H3z" fill="#fff" stroke="#8a8a8a"/><path d="M10 .5V4h3.5" fill="#e8e8e8" stroke="#8a8a8a"/>${band ? `<rect x="3.5" y="9" width="9.5" height="5" fill="${band}"/>` : ''}${glyph}</svg>`;
+  return {
+    folder: `<svg viewBox="0 0 16 16" width="${px}" height="${px}"><path d="M1 3h5l1.5 1.5H15V14H1z" fill="#dcb04a"/><path d="M1 5.5h14V14H1z" fill="#f2c94c"/></svg>`,
+    pic: page('#3aa3e0', '<path d="M4 13l3-3 2 2 2-2 2 3z" fill="#2e8b57"/>'), audio: page('#8e5cc7'), video: page('#d35d2c'), zip: page('#e3b505', '<path d="M8 1v7" stroke="#555" stroke-dasharray="1 1"/>'),
+    exe: `<svg viewBox="0 0 16 16" width="${px}" height="${px}"><rect x="1" y="2.5" width="14" height="11" fill="#fff" stroke="#6a6a6a"/><rect x="1" y="2.5" width="14" height="2.5" fill="#2b79d0"/></svg>`,
+    dll: page(null, '<path d="M5 7h6M5 9h6M5 11h4" stroke="#7a7a7a"/><circle cx="11" cy="12" r="2" fill="#9aa"/>'), pdf: page('#d23b2a'), doc: page('#2b5fb4'), xls: page('#1f7a44'),
+    code: page(null, '<path d="M6 7L4.5 9.5 6 12M10 7l1.5 2.5L10 12" stroke="#2b79d0" fill="none"/>'), txt: page(null, '<path d="M5 6h6M5 8h6M5 10h6M5 12h4" stroke="#9a9a9a"/>'), file: page(null),
+  }[kind];
+}
+function iconFor(e, px = 16) {
+  const kind = C.isDir[e] ? 'folder' : (ICON_KIND[extOf(e)] || 'file');
+  const key = kind + px; if (!ICONS[key]) ICONS[key] = 'data:image/svg+xml,' + encodeURIComponent(iconSvg(kind, px).replace('<svg ', '<svg xmlns="http://www.w3.org/2000/svg" '));
+  return ICONS[key];
+}
+
+// =====================================================================
+// Building the window (once); update() refreshes states and captions.
+// =====================================================================
+const UI = {};
+function build() {
+  UI.scaler = document.getElementById('scaler');
+  const win = UI.win = h('div', { class: 'window' });
+  const title = UI.title = h('div', { class: 'ttext' });
+  win.append(h('div', { class: 'titlebar', ondblclick: () => toggleMax() },
+    h('img', { class: 'ticon', src: iconFor(0) && 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="#2b79d0" stroke-width="2"/><path d="M10 10l4.5 4.5" stroke="#2b79d0" stroke-width="2.4" stroke-linecap="round"/></svg>') }),
+    title,
+    h('div', { class: 'capbtn', title: 'Minimize' }, '\uE921'), UI.maxBtn = h('div', { class: 'capbtn', title: 'Maximize', onclick: () => toggleMax() }, '\uE922'),
+    h('div', { class: 'capbtn close', title: 'Close', onclick: () => closeWindow('close button') }, '\uE8BB')));
+  UI.menubar = h('div', { class: 'menubar' });
+  for (const m of MENUBAR) {
+    const it = h('div', { class: 'mbi', onmousedown: e => { e.preventDefault(); if (openBarIndex === MENUBAR.indexOf(m)) closeMenus(); else openBarMenu(MENUBAR.indexOf(m), false); },
+      onmouseenter: () => { if (openBarIndex >= 0 && openBarIndex !== MENUBAR.indexOf(m)) openBarMenu(MENUBAR.indexOf(m), false); } });
+    if (m.right) it.style.marginLeft = 'auto';
+    cap(it, m.k); m.el = it; UI.menubar.append(it);
+  }
+  win.append(UI.menubar);
+  const client = UI.client = h('div', { class: 'client' });
+  // Strip: the search box and the match controls.
+  UI.search = h('input', { class: 'edit', style: 'flex:1;min-width:120px', spellcheck: 'false', 'aria-label': 'Search' });
+  UI.search.addEventListener('input', () => { S.text = UI.search.value; textChanged(); update(); });
+  UI.search.addEventListener('mousedown', e => { if (S.settings.clickSel && document.activeElement !== UI.search) { e.preventDefault(); UI.search.focus(); UI.search.select(); } });
+  UI.search.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); if (UI.search.value) { UI.search.value = ''; S.text = ''; textChanged(); update(); } }
+    else if (e.key === 'Enter' && !e.ctrlKey && !e.altKey) { e.preventDefault(); runSearch('Enter'); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); if (rowsShown()) { UI.lv.focus(); if (S.cur < 0) setCursor(0, false, false); } }
+  });
+  UI.strip = h('div', { class: 'strip' }, UI.search);
+  buildMatchControls();
+  client.append(UI.strip);
+  const body = UI.body = h('div', { class: 'body' });
+  UI.fpane = h('div', { class: 'fpane' }); UI.vdiv = h('div', { class: 'vdiv' });
+  const right = h('div', { class: 'right' });
+  UI.lvwrap = h('div', { class: 'lvwrap' });
+  UI.lv = h('div', { class: 'lv', tabindex: 0, role: 'grid', 'aria-label': 'Results' });
+  UI.lvh = h('div', { class: 'lvh' }); UI.rows = h('div', { class: 'rows' });
+  UI.lv.append(UI.lvh, UI.rows);
+  UI.lvmsg = h('div', { class: 'lvmsg' });
+  UI.lvwrap.append(UI.lv, UI.lvmsg);
+  UI.split = h('div', { class: 'splitter' });
+  UI.insp = h('div', { class: 'insp' });
+  right.append(UI.lvwrap, UI.split, UI.insp);
+  body.append(UI.fpane, UI.vdiv, right);
+  client.append(body);
+  UI.status = h('div', { class: 'status' });
+  UI.parts = [0, 1, 2, 3].map(i => h('div', { class: 'part' + (i === 3 ? ' last' : '') }));
+  UI.status.append(...UI.parts, h('div', { class: 'grip', onmousedown: e => startResize(e, 'both') }));
+  client.append(UI.status);
+  win.append(client, h('div', { class: 'redge', onmousedown: e => startResize(e, 'x') }), h('div', { class: 'bedge', onmousedown: e => startResize(e, 'y') }));
+  UI.scaler.append(win);
+  wireList(); wireSplitter();
+  buildFilters();
+  buildHeader();
+}
+
+// ---------- match controls ----------
+const MODES = ['word', 'start', 'any', 'ww', 'regex'];
+function buildMatchControls() {
+  UI.strip.querySelectorAll('.mctl').forEach(el => el.remove());
+  UI.mode = combo(MODES.map(m => t('mm.' + m)), MODES.indexOf(S.opts.mode), i => setMatch('mode', MODES[i]));
+  UI.mode.el.style.width = Math.max(...MODES.map(m => textW(t('mm.' + m)))) + 30 + 'px';
+  const lbl = labelFor(t('mc.match'), UI.mode.el);
+  UI.mcase = checkbox('mc.case', () => S.opts.case, v => setMatch('case', v));
+  UI.mpath = checkbox('mc.path', () => S.opts.path, v => setMatch('path', v));
+  for (const el of [lbl, UI.mode.el, UI.mcase, UI.mpath]) { el.classList.add('mctl'); UI.strip.append(el); }
+  lbl.style.alignSelf = 'center';
+}
+
+// ---------- filters ----------
+function locNames() {
+  const vol = v => v === 'C:\\' && S.cIndexing ? t('loc.indexing', v) : v === 'D:\\' && S.dOffline ? t('loc.offline', v) : v;
+  return [t('loc.everywhere'), ...S.F.locItems.map(x => x.chosen ? x.path : vol(x.path))];
+}
+const DATE_N = 6, SIZE_N = 8;
+function dateItems() { const a = []; for (let i = 0; i < DATE_N; i++) a.push(t('date.' + i)); if (S.F.dateCustom) a.push(customDateText()); a.push(t('date.custom')); return a; }
+function sizeItems() { const a = []; for (let i = 0; i < SIZE_N; i++) a.push(t('size.' + i)); if (S.F.sizeCustom) a.push(customSizeText()); a.push(t('size.custom')); return a; }
+function customDateText() { const { from, to } = S.F.dateCustom; return from && to ? t('date.range', DD.format(from), DD.format(to)) : from ? t('date.from', DD.format(from)) : t('date.to', DD.format(to)); }
+function customSizeText() { const { min, max, unit } = S.F.sizeCustom; const u = t('unit.' + unit.toUpperCase()); return min != null && max != null ? t('size.range', min + ' ' + u, max + ' ' + u) : min != null ? t('size.min', min + ' ' + u) : t('size.max', max + ' ' + u); }
+// The combo index that the filter state shows: a custom range sits just before "Custom…".
+function dateIndex() { return S.F.date === 6 ? DATE_N : S.F.date; }
+function sizeIndex() { return S.F.size === 8 ? SIZE_N : S.F.size; }
+function pickDate(i, how) {
+  const items = dateItems(), isCustomItem = i === items.length - 1, isRange = S.F.dateCustom && i === DATE_N;
+  if (isCustomItem) { if (how === 'key') { return; } customDateDialog(); return; } // arrows onto Custom… open nothing
+  S.F.date = isRange ? 6 : i; filtersChanged();
+}
+function pickSize(i, how) {
+  const items = sizeItems(), isCustomItem = i === items.length - 1, isRange = S.F.sizeCustom && i === SIZE_N;
+  if (isCustomItem) { if (how === 'key') return; customSizeDialog(); return; }
+  S.F.size = isRange ? 8 : i; filtersChanged();
+}
+function filtersChanged() { settingChanged(); syncFilterControls(); runSearch('filter'); }
+const ATTR_KEYS = ['h', 's', 'r', 'l', 'c', 'e'];
+function buildFilters() {
+  UI.f = {};
+  const F = S.F; UI.fpane.replaceChildren();
+  const clear = UI.f.clear = button('f.clear', () => run('clearfilters', 'filter pane'));
+  UI.fpane.append(clear);
+  const grp = (key, ctl, extra = []) => { const l = h('div', { class: 'label' }); cap(l, key); l._target = ctl; const g = h('div', { class: 'grp' }, l, ctl, ...extra); UI.fpane.append(g); return g; };
+  const kinds = () => Array.from({ length: 9 }, (_, i) => t('kind.' + i));
+  UI.f.kind = listbox(kinds(), F.kind, i => { F.kind = i; filtersChanged(); }, 9);
+  grp('f.kind', UI.f.kind);
+  UI.f.loc = listbox(locNames(), F.loc, i => { F.loc = i; S.locMissing = false; filtersChanged(); }, 4);
+  UI.f.choose = button('f.choose', () => chooseFolder());
+  UI.f.parent = checkbox('f.parent', () => F.parentOnly, v => { F.parentOnly = v; filtersChanged(); });
+  grp('f.location', UI.f.loc, [h('div', { class: 'gap7', style: 'display:flex' }, UI.f.choose), h('div', { class: 'gap7' }, UI.f.parent)]);
+  UI.f.datec = combo(dateItems(), dateIndex(), pickDate, { onEnter: i => { if (i === dateItems().length - 1) { customDateDialog(); return true; } } });
+  grp('f.date', UI.f.datec.el);
+  UI.f.sizec = combo(sizeItems(), sizeIndex(), pickSize, { onEnter: i => { if (i === sizeItems().length - 1) { customSizeDialog(); return true; } } });
+  grp('f.size', UI.f.sizec.el);
+  const ag = h('div', { class: 'attrgrid' }); UI.f.attrs = [];
+  ATTR_KEYS.forEach((k, i) => {
+    const c = combo([0, 1, 2].map(j => t('attrc.' + j)), F.attrs[i], j => { F.attrs[i] = j; filtersChanged(); });
+    const l = h('div', { class: 'label' }); l.dataset.t = 'attr.' + k; l.textContent = t('attr.' + k);
+    UI.f.attrs.push(c); ag.append(l, c.el);
+  });
+  const g = grp('f.attrs', ag); g.firstChild._target = UI.f.attrs[0].el;
+}
+function syncFilterControls() {
+  const F = S.F;
+  const kinds = Array.from({ length: 9 }, (_, i) => t('kind.' + i));
+  UI.f.kind._set(kinds, F.kind); UI.f.loc._set(locNames(), F.loc);
+  UI.f.parent._sync(); UI.f.datec.set(dateItems(), dateIndex()); UI.f.sizec.set(sizeItems(), sizeIndex());
+  UI.f.attrs.forEach((c, i) => c.set([0, 1, 2].map(j => t('attrc.' + j)), F.attrs[i]));
+  setEnabled(UI.f.clear, !!filtersSet());
+}
+async function chooseFolder() {
+  // Stand-in for IFileOpenDialog with FOS_PICKFOLDERS.
+  const pick = ['C:\\Users\\alex\\Documents', 'D:\\Projects\\web-shop', 'C:\\Users\\Ana María\\Pictures'];
+  const lb = listbox(pick, 0, () => { }, 3); lb.style.width = '100%';
+  dialog({ title: 'Select Folder', w: 420, body: h('div', {}, h('p', { style: 'margin:0 0 11px;color:var(--gray)' }, 'Stand-in for the Windows folder picker (IFileOpenDialog), which the window uses.'), lb),
+    buttons: [{ text: 'Select Folder', def: true, act: () => { addLocation(pick[[...lb.children].findIndex(c => c.classList.contains('sel'))]); runSearch('location'); return true; } }, { k: 'b.cancel', cancel: true }], first: lb });
+}
+
+// ---------- the list ----------
+const COLDEF = { name: { k: 'c.name', sort: 'name' }, path: { k: 'c.path', sort: 'path' }, size: { k: 'c.size', sort: 'size', right: true }, dm: { k: 'c.dm', sort: 'dm' }, ext: { k: 'c.ext', sort: 'ext' }, attr: { k: 'c.attr' }, dc: { k: 'c.dc', sort: 'dc' } };
+const DEFW = { name: 320, path: 380, size: 90, dm: 130, ext: 80, attr: 80, dc: 130 };
+function buildHeader() {
+  UI.lvh.replaceChildren();
+  let total = 0;
+  for (const c of S.cols) {
+    const d = COLDEF[c.k];
+    const cell = h('div', { class: 'hcell' + (d.right ? ' right' : ''), style: `width:${c.w}px` });
+    const txt = h('span'); txt.dataset.t = d.k; txt.textContent = t(d.k); cell.append(txt);
+    if (d.sort && S.sort.key === d.sort) cell.append(h('span', { class: 'sort' }, S.sort.desc ? '▼' : '▲'));
+    cell.addEventListener('click', e => { if (e.target.classList.contains('rz')) return; if (!d.sort) return; headerSort(d.sort); });
+    const rz = h('div', { class: 'rz' });
+    rz.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); const x0 = e.clientX, w0 = c.w;
+      const mv = ev => { c.w = Math.max(30, w0 + (ev.clientX - x0) / S.scale); buildHeader(); renderRows(); };
+      const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); settingChanged(); };
+      document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); });
+    cell.append(rz); UI.lvh.append(cell); total += c.w;
+  }
+  UI.lvh.style.width = total + 'px'; UI.rows.style.width = total + 'px';
+}
+function headerSort(key) {
+  // First click on Size or Date modified sorts largest or newest first, as gozler's keys do.
+  if (S.sort.key === key) S.sort.desc = !S.sort.desc; else { S.sort.key = key; S.sort.desc = false; }
+  settingChanged(); buildHeader(); runSearch('sort');
+}
+const ROWH = 22;
+function firstVisible() { return Math.floor(UI.lv.scrollTop / ROWH); }
+function listScrollTop(v) { UI.lv.scrollTop = v; }
+let rowsRaf = 0;
+function renderRows() {
+  cancelAnimationFrame(rowsRaf);
+  rowsRaf = requestAnimationFrame(() => {
+    const n = rowsShown();
+    UI.rows.style.height = (n * ROWH) + 'px';
+    const top = firstVisible(), count = Math.ceil(UI.lv.clientHeight / ROWH) + 1;
+    const frag = document.createDocumentFragment();
+    for (let r = top; r < Math.min(n, top + count); r++) {
+      const loaded = rowLoaded(r); if (!loaded) ensureChunk(Math.floor(r / CHUNK));
+      const row = h('div', { class: 'row' + (S.sel.has(r) ? ' sel' : '') + (r === S.cur ? ' cur' : ''), style: `top:${r * ROWH + 25}px;width:${UI.rows.style.width}` });
+      row.dataset.r = r;
+      if (loaded) {
+        const e = S.shown.rows[r], mk = cellMarks(e);
+        for (const c of S.cols) {
+          const cell = h('div', { class: 'cell' + (COLDEF[c.k].right ? ' right' : '') + (c.k === 'name' ? ' name' : ''), style: `width:${c.w}px` });
+          if (c.k === 'name') { cell.append(h('img', { class: 'ico', src: iconFor(e) }), marked(C.names[e], mk.name)); cell.title = C.names[e]; }
+          else if (c.k === 'path' && mk.path.length) cell.append(marked(folderOf(e), mk.path));
+          else cell.textContent = cellText(e, c.k);
+          row.append(cell);
+        }
+      }
+      frag.append(row);
+    }
+    UI.rows.style.top = '0px';
+    UI.rows.replaceChildren(frag);
+    // Rows sit below the sticky header inside the scroll area.
+    UI.rows.style.marginTop = '-25px';
+  });
+}
+// The parts of a name and of a folder that the shown search matched, as
+// [start, end) ranges for the bold text (spec: Results list).
+function cellMarks(e) {
+  const out = { name: [], path: [] }, { q, opts } = S.shown; if (!q) return out;
+  const name = C.names[e], full = fullPath(e), off = full.length - name.length, folderLen = folderOf(e).length;
+  const onFull = rs => { for (const [a, b] of rs) { if (b > off) out.name.push([Math.max(a, off) - off, b - off]); if (a < folderLen) out.path.push([a, Math.min(b, folderLen)]); } };
+  if (q.re) { const g = new RegExp(q.re.source, q.re.flags + 'g'), text = opts.path ? full : name, rs = [];
+    for (const m of text.matchAll(g)) if (m[0]) rs.push([m.index, m.index + m[0].length]);
+    opts.path ? onFull(rs) : out.name.push(...rs); return out; }
+  for (const term of q.terms) {
+    if (!term) continue;
+    const onPath = opts.path || term.includes('\\'), text = onPath ? full : name;
+    const hay = opts.case && !term.includes('\\') ? text : text.toLowerCase();
+    const at = term.includes('\\') && !opts.path ? AT.any : AT[opts.mode], rs = [];
+    for (let i = hay.indexOf(term); i >= 0; i = hay.indexOf(term, i + 1)) if (at(hay, i, term.length)) rs.push([i, i + term.length]);
+    onPath ? onFull(rs) : out.name.push(...rs);
+  }
+  return out;
+}
+function marked(text, ranges) {
+  const span = h('span'); let at = 0;
+  for (const [a, b] of ranges.sort((x, y) => x[0] - y[0])) { if (b <= at) continue; const from = Math.max(a, at); if (from > at) span.append(text.slice(at, from)); span.append(h('b', {}, text.slice(from, b))); at = b; }
+  if (at < text.length) span.append(text.slice(at));
+  return span;
+}
+// The prototype's corpus has no creation dates; derive a stable one.
+const ctimeOf = e => C.mtime[e] - (e % 997) * 7 * 3600e3;
+function cellText(e, k) {
+  switch (k) {
+    case 'path': return folderOf(e);
+    case 'size': return C.isDir[e] ? (S.dirSize ? fmtKB(S.dirSize[C.selfDir[e]]) : '') : C.size[e] === UNKNOWN ? t('size.unknown') : fmtKB(C.size[e]);
+    case 'dm': return DF.format(C.mtime[e]).replace(',', '');
+    case 'dc': return DF.format(ctimeOf(e)).replace(',', '');
+    case 'ext': return extOf(e);
+    case 'attr': return attrLetters(C.attrs[e]);
+  }
+}
+function setCursor(r, shift, ctrl) {
+  const n = rowsShown(); if (!n) return;
+  r = Math.max(0, Math.min(n - 1, r));
+  if (shift && S.anchor >= 0) { if (!ctrl) S.sel.clear(); const [a, b] = S.anchor < r ? [S.anchor, r] : [r, S.anchor]; for (let i = a; i <= b; i++) S.sel.add(i); }
+  else if (!ctrl) { S.sel.clear(); S.sel.add(r); S.anchor = r; }
+  S.cur = r;
+  const top = r * ROWH, vh = UI.lv.clientHeight - 25;
+  if (top < UI.lv.scrollTop) UI.lv.scrollTop = top; else if (top + ROWH > UI.lv.scrollTop + vh) UI.lv.scrollTop = top + ROWH - vh;
+  renderRows(); selectionChanged();
+}
+function selectAll() {
+  if (focusIn(UI.search)) { UI.search.select(); return; }
+  const n = rowsShown(); if (!n) return;
+  S.sel = new Set(Array.from({ length: n }, (_, i) => i)); S.anchor = 0; if (S.cur < 0) S.cur = 0; renderRows(); selectionChanged();
+}
+function wireList() {
+  UI.lv.addEventListener('scroll', () => renderRows());
+  UI.lv.addEventListener('mousedown', e => {
+    const row = e.target.closest('.row'); if (!row) return;
+    const r = +row.dataset.r;
+    if (e.button === 2) { if (!S.sel.has(r)) { S.sel.clear(); S.sel.add(r); S.anchor = r; S.cur = r; renderRows(); selectionChanged(); } return; }
+    if (e.ctrlKey && !e.shiftKey) { S.sel.has(r) ? S.sel.delete(r) : S.sel.add(r); S.anchor = r; S.cur = r; renderRows(); selectionChanged(); return; }
+    setCursor(r, e.shiftKey, e.ctrlKey);
+  });
+  UI.lv.addEventListener('dblclick', e => { if (e.target.closest('.row')) run('open', 'double-click'); });
+  UI.lv.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (e.target.closest('.lvh')) { openPopup(columnItems(), (e.clientX - UI.scaler.getBoundingClientRect().left) / S.scale, (e.clientY - UI.scaler.getBoundingClientRect().top) / S.scale, {}); return; }
+    if (!e.target.closest('.row')) return; // below the last row: no menu
+    const b = UI.scaler.getBoundingClientRect();
+    openContextMenu((e.clientX - b.left) / S.scale, (e.clientY - b.top) / S.scale);
+  });
+  UI.lv.addEventListener('keydown', e => {
+    const page = Math.max(1, Math.floor((UI.lv.clientHeight - 25) / ROWH) - 1);
+    const m = { ArrowDown: S.cur + 1, ArrowUp: S.cur - 1, PageDown: S.cur + page, PageUp: S.cur - page, Home: 0, End: rowsShown() - 1 }[e.key];
+    if (m !== undefined && !e.altKey) { e.preventDefault(); if (e.ctrlKey && !e.shiftKey) { S.cur = Math.max(0, Math.min(rowsShown() - 1, m)); renderRows(); } else setCursor(m, e.shiftKey, e.ctrlKey); return; }
+    if (e.key === ' ' && e.ctrlKey && S.cur >= 0) { e.preventDefault(); S.sel.has(S.cur) ? S.sel.delete(S.cur) : S.sel.add(S.cur); renderRows(); selectionChanged(); return; }
+    if (e.key === 'Enter' && !e.ctrlKey && !e.altKey) { e.preventDefault(); run('open', 'Enter'); return; }
+  });
+}
+function wireSplitter() {
+  UI.split.addEventListener('mousedown', e => { e.preventDefault(); const y0 = e.clientY, h0 = S.inspH;
+    const mv = ev => { S.inspH = Math.max(90, Math.min(500, h0 - (ev.clientY - y0) / S.scale)); layout(); };
+    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); settingChanged(); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); });
+}
+
+// ---------- inspector ----------
+function renderInspector() {
+  const I = UI.insp; I.replaceChildren();
+  if (!S.showInspector) return;
+  const sel = S.selection;
+  if (S.shown.kind !== 'rows') return;
+  if (sel.kind === 'none') { I.append(h('div', { class: 'ihead' }, h('div', { class: 'iname' }, tn('i.matches', S.shown.total))), h('div', { class: 'inote', style: 'color:var(--gray)' }, t('i.nothing'))); return; }
+  if (sel.kind === 'reading') { I.append(h('div', { class: 'ihead' }, h('div', { class: 'iname' }, tn('i.count', selCount()) || '')), h('div', { class: 'inote' }, t('s.reading'))); I.querySelector('.iname').textContent = t('s.selectedonly', fmtInt(selCount())); return; }
+  const es = sel.entries;
+  const field = (k, v) => [h('div', { class: 'label' }, t(k)), h('input', { class: 'ro', readonly: true, value: v, tabindex: 0 })];
+  if (es.length === 1) {
+    const e = es[0];
+    const bOpen = button('i.open', () => run('open', 'inspector')), bLoc = button('i.openloc', () => run('openloc', 'inspector')),
+      bCopy = button('i.copypath', () => run('copypath', 'inspector'));
+    I.append(h('div', { class: 'ihead' }, h('img', { src: iconFor(e, 32), width: 32, height: 32 }), h('div', { class: 'iname', title: C.names[e] }, C.names[e]), h('div', { class: 'ibtns' }, bOpen, bLoc, bCopy)));
+    let size;
+    if (C.isDir[e]) size = S.folderSize && S.folderSize.entry === e && S.folderSize.state === 'done' ? tn('i.foldersize', S.folderSize.count, fmtBytes(S.folderSize.bytes)) : t('i.calc');
+    else size = C.size[e] === UNKNOWN ? t('size.unknown') : t('i.sizeexact', fmtBytes(C.size[e]), tn('size.bytes', C.size[e]));
+    const a = C.attrs[e]; const words = [['a.r', A_R], ['a.h', A_H], ['a.s', A_S], ['a.a', A_A], ['a.l', A_L], ['a.c', A_C], ['a.e', A_E]].filter(([, b]) => a & b).map(([k]) => t(k));
+    const vol = DIRS[C.dir[e]].vol === 0 ? 'C:\\' : 'D:\\';
+    const volText = vol === 'C:\\' && S.cIndexing ? t('i.vol.indexing', vol) : vol === 'D:\\' && S.dOffline ? t('i.vol.offline', vol) : t('i.vol.live', vol);
+    const ext = extOf(e);
+    I.append(h('div', { class: 'ifields' }, ...field('i.folder', folderOf(e)), ...field('i.fullpath', fullPath(e)),
+      ...field('i.type', C.isDir[e] ? t('i.typefolder') : ext ? t('i.typefile', ext.toUpperCase()) : t('i.typefilenoext')),
+      ...field('i.size', size), ...field('i.dm', DFS.format(C.mtime[e]).replace(',', '')), ...field('i.attrs', words.join(', ') || t('a.none')), ...field('i.volume', volText)));
+    return;
+  }
+  let files = 0, folders = 0, bytes = 0, unknown = 0;
+  for (const e of es) { if (C.isDir[e]) folders++; else { files++; if (C.size[e] === UNKNOWN) unknown++; else bytes += C.size[e]; } }
+  const parts = [files ? tn('i.files', files) : null, folders ? tn('i.folders', folders) : null].filter(Boolean);
+  const total = unknown ? tn('i.unknownpart', unknown, fmtBytes(bytes)).replace(/^(.*?), /, fmtBytes(bytes) + ', ') : fmtBytes(bytes);
+  I.append(h('div', { class: 'ihead' }, h('div', { class: 'iname' }, parts.length === 2 ? t('i.and', parts[0], parts[1]) : parts[0])),
+    h('div', { class: 'ifields' }, ...field('i.total', files ? total : '—')));
+}
+
+// ---------- status bar ----------
+function statusTexts() {
+  const p = ['', '', '', ''];
+  const filteredHidden = filtersSet() && !S.showFilters ? t('s.filtered') : '';
+  if (S.inflight.results || (S.shown.kind === 'nothing')) p[0] = t('s.searching');
+  else if (S.shown.kind === 'rows') p[0] = (S.shown.total > LIMIT ? t('s.showing', fmtInt(LIMIT), fmtInt(S.shown.total)) : tn('s.results', S.shown.total)) + filteredHidden;
+  else if (S.shown.msg.type === 'nomatch') p[0] = tn('s.results', 0) + filteredHidden;
+  if (S.selection.kind === 'reading') p[1] = t('s.reading');
+  else if (S.selection.kind === 'files') {
+    let bytes = 0, files = 0; for (const e of S.selection.entries) if (!C.isDir[e]) { files++; if (C.size[e] > 0) bytes += C.size[e]; }
+    p[1] = files ? t('s.selected', fmtInt(selCount()), fmtBytes(bytes)) : t('s.selectedonly', fmtInt(selCount()));
+  }
+  if (S.activity) p[2] = S.activity.kind === 'exporting' ? t('s.exporting', fmtInt(S.activity.rows)) : t('s.exported', fmtInt(S.activity.rows), S.activity.name);
+  const scopeHasC = !S.F.loc || (S.F.locItems[S.F.loc - 1] || {}).path?.startsWith('C:');
+  const scopeHasD = !S.F.loc || (S.F.locItems[S.F.loc - 1] || {}).path?.startsWith('D:');
+  if (S.cIndexing && scopeHasC) p[3] = t('s.indexing', 'C:\\');
+  else if (S.indexingNow.size) p[3] = t('s.indexing', [...S.indexingNow][0]);
+  else if (S.dOffline && scopeHasD) p[3] = t('s.offline', 'D:\\');
+  else if (S.dMeta && scopeHasD && S.shown.testsMeta) p[3] = t('s.meta', 'D:\\');
+  return p;
+}
+const measureCtx = document.createElement('canvas').getContext('2d');
+function textW(s, font = '12px "Segoe UI"') { measureCtx.font = font; return Math.ceil(measureCtx.measureText(s).width); }
+function statusWidths() {
+  // Each fixed part fits its longest message, with the largest numbers, in this language.
+  const w1 = Math.max(textW(t('s.showing', fmtInt(100000), fmtInt(3204000)) + t('s.filtered')), textW(t('s.searching')));
+  const w2 = Math.max(textW(t('s.selected', fmtInt(100000), fmtBytes(999.9 * 1073741824))), textW(t('s.reading')));
+  const w3 = Math.max(textW(t('s.exporting', fmtInt(2011814))), textW(t('s.exported', fmtInt(2011814), 'results.csv')));
+  return [w1 + 13, w2 + 13, w3 + 13];
+}
+
+// ---------- list message (empty area) ----------
+function renderListMessage() {
+  const M = UI.lvmsg; M.replaceChildren();
+  if (S.shown.kind !== 'message') { M.hidden = true; return; }
+  M.hidden = false;
+  const m = S.shown.msg; const btns = h('div', { class: 'mbtns' });
+  let text = '', detail = '';
+  switch (m.type) {
+    case 'nomatch': text = t('m.nomatch'); if (filtersSet()) btns.append(button('m.clear', () => run('clearfilters', 'message'))); if (S.F.loc) btns.append(button('m.everywhere', () => { S.F.loc = 0; S.F.parentOnly = false; syncFilterControls(); runSearch('search everywhere'); })); break;
+    case 'type': text = t('m.type'); break;
+    case 'parse': text = m.arg ? t(m.key, m.arg) : t(m.key); detail = m.detail || ''; break;
+    case 'missing': text = t('m.missing', m.folder); btns.append(button('m.choose', () => chooseFolder()), button('m.everywhere', () => { S.locMissing = false; S.F.loc = 0; syncFilterControls(); runSearch('search everywhere'); })); break;
+    case 'daemon': {
+      const d = m.d; text = t('d.' + d, d === 'unknown' ? 'OpenService failed: Access is denied. (5)' : '');
+      if (d === 'refused') detail = m.detail || 'scope C:\\nowhere is on no indexed volume';
+      const bk = 'd.' + d + '.b'; if (EN[bk]) btns.append(button(bk, () => fixIt(d), { shield: ['stopped', 'disabled', 'notinst'].includes(d) }));
+    }
+  }
+  M.append(h('div', { class: 'mt' }, text));
+  if (detail) M.append(h('div', { class: 'md' }, detail));
+  if (btns.children.length) M.append(btns);
+}
+
+// ---------- update: states, captions, enabled ----------
+function update() {
+  UI.title.textContent = S.text ? S.text + ' – ' + t('app') : t('app');
+  UI.search.placeholder = t('search.cue');
+  UI.mode.set(MODES.map(m => t('mm.' + m)), MODES.indexOf(S.opts.mode)); UI.mcase._sync(); UI.mpath._sync();
+  const txt = statusTexts(), ws = statusWidths();
+  UI.parts.forEach((p, i) => { p.textContent = txt[i]; if (i < 3) p.style.width = ws[i] + 'px'; p.title = txt[i]; });
+  if (!txt[3] && S.update) UI.parts[3].append(h('span', { class: 'link', onclick: () => log('opens https://github.com/SynoSoftware/goz/releases/latest in the browser') }, t('s.update', S.update)));
+  if (UI.f.clear) setEnabled(UI.f.clear, !!filtersSet());
+  renderListMessage(); renderInspector();
+  renderPanel();
+}
+function layout() {
+  const w = UI.win;
+  if (S.win.maxed) { const st = document.getElementById('stage'); S.win.w = st.clientWidth / S.scale - 40; S.win.h = st.clientHeight / S.scale - 40; }
+  w.style.width = S.win.w + 'px'; w.style.height = S.win.h + 'px';
+  w.classList.toggle('maxed', S.win.maxed);
+  UI.fpane.hidden = !S.showFilters; UI.vdiv.hidden = !S.showFilters;
+  UI.split.hidden = !S.showInspector; UI.insp.hidden = !S.showInspector;
+  UI.insp.style.height = S.inspH + 'px';
+  const sizer = document.getElementById('sizer');
+  sizer.style.width = (S.win.w + 60) * S.scale + 'px'; sizer.style.height = (S.win.h + 80) * S.scale + 'px';
+  UI.scaler.style.transform = `scale(${S.scale})`;
+  renderRows();
+}
+function minSize() {
+  // The smallest client at which every control still fits (spec: Main window).
+  // The filter pane scrolls, so its height is left out.
+  const listMin = 25 + 3 * ROWH;
+  const right = listMin + (S.showInspector ? 11 + 90 : 0);
+  const h = 31 + 20 + 11 + 23 + 22 + right + 22 + 2;
+  const paneW = S.showFilters ? UI.fpane.offsetWidth + 11 : 0;
+  const stripW = 22 + 120 + [...UI.strip.querySelectorAll('.mctl')].reduce((a, b) => a + b.offsetWidth + 7, 0);
+  const statusW = statusWidths().reduce((a, b) => a + b, 0) + 100;
+  const w = Math.max(stripW, 22 + paneW + 300, statusW);
+  return { w: Math.ceil(w), h: Math.ceil(h) };
+}
+function startResize(e, axis) {
+  e.preventDefault(); const x0 = e.clientX, y0 = e.clientY, w0 = S.win.w, h0 = S.win.h; S.win.maxed = false;
+  const mv = ev => { const m = minSize();
+    if (axis !== 'y') S.win.w = Math.max(m.w, w0 + (ev.clientX - x0) / S.scale);
+    if (axis !== 'x') S.win.h = Math.max(m.h, h0 + (ev.clientY - y0) / S.scale);
+    layout(); renderPanel(); };
+  const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+  document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+}
+function toggleMax() { S.win.maxed = !S.win.maxed; if (!S.win.maxed) { S.win.w = 1180; S.win.h = 760; } UI.maxBtn.textContent = S.win.maxed ? '\uE923' : '\uE922'; layout(); }
+
+// =====================================================================
+// Menus
+// =====================================================================
+const MENUBAR = [
+  { k: 'menu.file', items: () => [I('open'), I('openloc'), I('props'), '-', S.exp ? I('cancelexport') : I('export'), '-', I('settings'), '-', I('exit')] },
+  { k: 'menu.edit', items: () => [I('copy'), I('copypath'), I('copyname'), '-', I('selall'), '-', I('find')] },
+  { k: 'menu.view', items: () => [I('filters'), I('inspector'), { text: t('cmd.columns'), sub: columnItems }, '-', { text: t('cmd.sortby'), sub: sortItems }, '-', I('refresh')] },
+  { k: 'menu.help', items: () => [I('syntax'), '-', I('about')] },
+  // MFT_RIGHTJUSTIFY: one click from the window, in the same place in every language.
+  { k: 'menu.lang', right: true, items: () => languageItems() },
+];
+function I(id, opts = {}) { const c = CMD[id]; return { text: t(c.k), sc: opts.noShortcut ? '' : keyText(keysOf(id)[0]), enabled: c.on(), check: !!c.checked, checked: c.checked ? c.checked() : false, cmd: id, bold: opts.bold }; }
+function columnItems() {
+  return S.allCols.map(k => ({ text: t('col.' + k), check: true, checked: S.cols.some(c => c.k === k), enabled: k !== 'name',
+    act: () => { const i = S.cols.findIndex(c => c.k === k); if (i >= 0) S.cols.splice(i, 1); else { const order = S.allCols; S.cols.push({ k, w: DEFW[k] }); S.cols.sort((a, b) => order.indexOf(a.k) - order.indexOf(b.k)); } settingChanged(); buildHeader(); renderRows(); } }));
+}
+function sortItems() {
+  const keys = ['name', 'path', 'size', 'dm', ...(S.service.dc ? ['dc'] : []), 'ext'];
+  return [...keys.map(k => ({ text: t('sort.' + k), radio: true, checked: S.sort.key === k, act: () => { if (S.sort.key !== k) { S.sort.key = k; S.sort.desc = false; buildHeader(); settingChanged(); runSearch('sort'); } } })), '-',
+    { text: t('sort.asc'), radio: true, checked: !S.sort.desc, act: () => { S.sort.desc = false; buildHeader(); runSearch('sort'); } },
+    { text: t('sort.desc'), radio: true, checked: S.sort.desc, act: () => { S.sort.desc = true; buildHeader(); runSearch('sort'); } }];
+}
+function languageItems() {
+  return [{ text: t('lang.default'), radio: true, checked: S.settings.lang === 'default', act: () => setLanguage('default') },
+    ...LANGS.map(l => ({ text: l.name, raw: true, radio: true, checked: S.settings.lang === l.tag, act: () => setLanguage(l.tag) }))];
+}
+function contextItems() {
+  return [I('open', { bold: true, noShortcut: true }), I('openloc', { noShortcut: true }), '-', I('copy', { noShortcut: true }), I('copypath', { noShortcut: true }), I('copyname', { noShortcut: true }), '-', I('searchhere', { noShortcut: true }), '-', I('props', { noShortcut: true })];
+}
+let popups = [], openBarIndex = -1, barKeyMode = -1;
+function closeMenus() { for (const p of popups) p.el.remove(); popups = []; openBarIndex = -1; MENUBAR.forEach(m => m.el.classList.remove('open', 'hot')); if (barKeyMode >= 0) { barKeyMode = -1; } update(); }
+function openBarMenu(i, viaKey) {
+  closeMenus(); openBarIndex = i; const m = MENUBAR[i];
+  m.el.classList.add('open'); const r = rel(m.el);
+  openPopup(m.items(), r.x, r.y + r.h, { bar: i, select: viaKey ? 0 : -1 });
+}
+function openContextMenu(x, y) { closeMenus(); openPopup(contextItems(), x, y, { context: true, select: -1 }); log('context menu opened'); }
+function normItems(items) { return items.map(it => it === '-' ? { sep: true } : it); }
+function openPopup(items, x, y, opts) {
+  const list = normItems(items);
+  const el = h('div', { class: 'menu', role: 'menu' });
+  const p = { el, list, cur: opts.select ?? -1, opts, child: null };
+  list.forEach((it, i) => {
+    if (it.sep) { el.append(h('div', { class: 'msep' })); return; }
+    const enabled = it.enabled !== false;
+    const mk = it.checked ? (it.radio ? '●' : '✓') : '';
+    const row = h('div', { class: 'mi' + (enabled ? '' : ' dis') + (it.bold ? ' bold' : ''), role: 'menuitem' },
+      h('span', { class: 'mk', style: it.radio ? 'font-size:7px' : '' }, mk), h('span', { class: 'ml', html: akHtml(it.text) }), h('span', { class: 'ms' }, it.sc || ''), h('span', { class: 'sub' }, it.sub ? '\uE76C' : ''));
+    row.addEventListener('mouseenter', () => { p.cur = i; paintPopup(p); if (it.sub) openSub(p, i); else closeChild(p); });
+    row.addEventListener('mousedown', e => e.preventDefault());
+    row.addEventListener('click', () => activate(p, i));
+    el.append(row); it.row = row;
+  });
+  popupLayer().append(el);
+  el.style.left = x + 'px'; el.style.top = y + 'px';
+  // Keep the menu inside the stage, as Windows keeps it on the monitor.
+  const vw = UI.scaler.offsetWidth || 99999;
+  if (x + el.offsetWidth > vw) el.style.left = Math.max(0, vw - el.offsetWidth) + 'px';
+  popups.push(p); paintPopup(p);
+  if (!document._menuAway) {
+    document._menuAway = e => { if (!popups.length) return; if (popups.some(q => q.el.contains(e.target)) || e.target.closest?.('.mbi')) return; closeMenus(); };
+    document.addEventListener('mousedown', document._menuAway, true);
+  }
+  return p;
+}
+function paintPopup(p) { p.list.forEach((it, i) => it.row && it.row.classList.toggle('cur', i === p.cur)); }
+function closeChild(p) { if (p.child) { const idx = popups.indexOf(p.child); for (const q of popups.splice(idx)) q.el.remove(); p.child = null; } }
+function openSub(p, i) {
+  if (p.child && p.child.parentIndex === i) return; closeChild(p);
+  const it = p.list[i]; const r = rel(it.row);
+  const c = openPopup(it.sub(), r.x + r.w + 2, r.y - 5, { parent: p, select: -1 }); c.parentIndex = i; p.child = c;
+}
+function activate(p, i) {
+  const it = p.list[i]; if (!it || it.sep) return;
+  if (it.sub) { openSub(p, i); p.child.cur = firstSelectable(p.child, 0, 1); paintPopup(p.child); return; }
+  if (it.enabled === false) return;
+  closeMenus();
+  // T11: the command is asked again whether it is enabled when it is chosen.
+  if (it.cmd) run(it.cmd, p.opts.context ? 'context menu' : 'menu'); else if (it.act) { it.act(); update(); }
+}
+function firstSelectable(p, from, dir) { const n = p.list.length; for (let k = 0; k < n; k++) { const i = (from + dir * k + n * 2) % n; if (!p.list[i].sep) return i; } return -1; }
+function menuKey(e) {
+  const p = popups[popups.length - 1];
+  const k = e.key;
+  if (k === 'ArrowDown') p.cur = firstSelectable(p, p.cur + 1, 1);
+  else if (k === 'ArrowUp') p.cur = firstSelectable(p, p.cur < 0 ? p.list.length - 1 : p.cur - 1, -1);
+  else if (k === 'ArrowRight') { const it = p.list[p.cur]; if (it && it.sub) { activate(p, p.cur); } else if (popups[0].opts.bar !== undefined) { const b = popups[0].opts.bar; openBarMenu((b + 1) % MENUBAR.length, true); } }
+  else if (k === 'ArrowLeft') { if (p.opts.parent) { closeChild(p.opts.parent); } else if (p.opts.bar !== undefined) openBarMenu((p.opts.bar + MENUBAR.length - 1) % MENUBAR.length, true); }
+  else if (k === 'Enter' || k === ' ') { if (p.cur >= 0) activate(p, p.cur); }
+  else if (k === 'Escape') { if (p.opts.parent) closeChild(p.opts.parent); else { const b = p.opts.bar; closeMenus(); if (b !== undefined) { barKeyMode = b; MENUBAR[b].el.classList.add('hot'); } } }
+  else if (k === 'Alt' || k === 'F10') { closeMenus(); }
+  else if (k.length === 1) {
+    const hits = p.list.map((it, i) => !it.sep && akOf(it.text) === k.toLowerCase() ? i : -1).filter(i => i >= 0);
+    if (hits.length === 1) activate(p, hits[0]); else if (hits.length > 1) p.cur = hits.find(i => i > p.cur) ?? hits[0];
+  } else return;
+  e.preventDefault(); if (popups.length) paintPopup(popups[popups.length - 1]);
+}
+
+// =====================================================================
+// Dialogs (modal, owned by the window): Enter = default button, Esc = Cancel.
+// =====================================================================
+let currentDialog = null;
+function dialog({ title, w, body, buttons, first, onTick, mbox, cls }) {
+  const modal = h('div', { class: 'modal' });
+  const d = h('div', { class: 'dlg' + (mbox ? ' mbox' : '') + (cls ? ' ' + cls : ''), role: 'dialog' });
+  d.style.width = w + 'px';
+  const tb = h('div', { class: 'titlebar' }, h('div', { class: 'ttext', style: 'padding-left:11px' }, title), h('div', { class: 'capbtn close', onclick: () => close(null) }, '\uE8BB'));
+  const bodyEl = h('div', { class: 'dbody' }, body);
+  const bar = h('div', { class: 'dbtns' });
+  const st = { modal, d, buttons: [], onTick, apply: null };
+  const close = (res) => { modal.remove(); currentDialog = st.prev; (st.prevFocus || UI.lv).focus(); if (st.onClose) st.onClose(res); update(); };
+  st.close = close;
+  for (const b of buttons) {
+    const el = button(b.k || b.text, () => { if (b.cancel) { close(null); return; } if (b.act) { const r = b.act(st); if (r) close(true); } }, { def: b.def, raw: !b.k });
+    if (b.disabled) setEnabled(el, false);
+    b.el = el; st.buttons.push(b); bar.append(el);
+    if (b.k === 'b.apply') st.apply = el;
+  }
+  d.append(tb, bodyEl, bar); modal.append(d); UI.scaler.append(modal);
+  // Centred on the owner window.
+  const wr = rel(UI.win); const dr = d.getBoundingClientRect();
+  d.style.left = Math.round(wr.x + (wr.w - w) / 2) + 'px'; d.style.top = Math.round(wr.y + (wr.h - dr.height / S.scale) / 2.4) + 'px';
+  tb.addEventListener('mousedown', e => { if (e.target.closest('.capbtn')) return; e.preventDefault(); const x0 = e.clientX, y0 = e.clientY, l0 = parseFloat(d.style.left), t0 = parseFloat(d.style.top);
+    const mv = ev => { d.style.left = l0 + (ev.clientX - x0) / S.scale + 'px'; d.style.top = t0 + (ev.clientY - y0) / S.scale + 'px'; };
+    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); });
+  st.prev = currentDialog; st.prevFocus = document.activeElement; currentDialog = st;
+  (first || st.buttons[0].el).focus();
+  return st;
+}
+function dialogKey(e) {
+  const st = currentDialog, root = st.d;
+  if (e.key === 'Tab') { e.preventDefault(); cycleFocus(root, e.shiftKey); return; }
+  if (e.key === 'Escape') { if (document.activeElement.closest('.combo') && document.querySelector('.drop')) return; e.preventDefault(); const c = st.buttons.find(b => b.cancel); if (c) st.close(null); else st.close(null); return; }
+  if (e.key === 'Enter') {
+    if (document.activeElement.classList.contains('btn')) return; // the focused button takes Enter
+    if (document.activeElement.tagName === 'TEXTAREA') return;
+    if (document.querySelector('.drop')) return;
+    const def = st.buttons.find(b => b.def); if (def && !def.el.classList.contains('dis')) { e.preventDefault(); def.el.click(); }
+    return;
+  }
+  // The hotkey control takes every combination while it has focus, as Windows' does.
+  if (document.activeElement.classList.contains('hk')) return;
+  if (e.altKey && e.key.length === 1) { e.preventDefault(); mnemonic(root, e.key.toLowerCase()); }
+}
+function focusables(root) {
+  return [...root.querySelectorAll('input:not([readonly]), input.ro, .btn, .chk, .combo, .lb, .lv, [tabindex="0"]')]
+    .filter((el, i, a) => a.indexOf(el) === i && el.tabIndex >= 0 && !el.classList.contains('dis') && el.offsetParent !== null && !el.closest('[hidden]'));
+}
+function cycleFocus(root, back) {
+  const f = focusables(root); if (!f.length) return;
+  const i = f.indexOf(document.activeElement.closest('.lb, .combo, .chk, .btn') || document.activeElement);
+  const n = back ? (i <= 0 ? f.length - 1 : i - 1) : (i + 1) % f.length;
+  f[n].focus(); if (f[n].tagName === 'INPUT' && !f[n].readOnly) f[n].select();
+  document.body.classList.add('cues');
+}
+function mnemonic(root, ch) {
+  // Access keys in the window or dialog; a label focuses the control it names.
+  const els = [...root.querySelectorAll('[data-ak]')].filter(el => el.dataset.ak === ch && el.offsetParent !== null && !el.closest('.menu'));
+  for (const el of els) {
+    const ctl = el._target || el.closest('.btn, .chk') || el;
+    if (ctl.classList.contains('dis')) continue;
+    document.body.classList.add('cues');
+    if (ctl.classList.contains('btn')) { ctl.focus(); ctl.click(); }
+    else if (ctl.classList.contains('chk')) { ctl.focus(); ctl.click(); }
+    else ctl.focus();
+    return true;
+  }
+  return false;
+}
+function msgBox(text, icon = 'warn') {
+  const ic = h('div', { html: icon === 'warn' ? '<svg width="32" height="32" viewBox="0 0 32 32"><path d="M16 2l15 27H1z" fill="#f2c200" stroke="#a87b00"/><rect x="14.6" y="10" width="2.8" height="11" fill="#000"/><rect x="14.6" y="23" width="2.8" height="2.8" fill="#000"/></svg>' : '' });
+  log('message box: ' + text);
+  return dialog({ title: t('app'), w: 440, mbox: true, body: h('div', { style: 'display:flex;gap:11px' }, ic, h('div', { style: 'padding-top:6px' }, text)), buttons: [{ k: 'b.ok', def: true, act: () => true }] });
+}
+function balloon(target, text) {
+  document.querySelectorAll('.balloon').forEach(b => b.remove());
+  const r = rel(target); const b = h('div', { class: 'balloon' }, text);
+  b.style.left = r.x + 'px'; b.style.top = (r.y + r.h + 4) + 'px'; UI.scaler.append(b);
+  setTimeout(() => b.remove(), 4000); target.focus();
+}
+// A stand-in for the Windows hotkey control (HOTKEY_CLASS): it shows the keys
+// pressed together; Backspace clears it.
+const TAKEN = 'ctrl+alt+T'; // the prototype's stand-in for a shortcut another program holds
+function hotkeyText(hk) { return hk ? hk.split('+').map(x => ({ win: t('key.win'), ctrl: t('key.ctrl'), shift: t('key.shift'), alt: t('key.alt') }[x] || x)).join(' + ') : t('o.hotkeynone'); }
+const hotkeyShort = hk => hotkeyText(hk).replace(/ \+ /g, '+');
+function hotkeyField(get, set) {
+  const el = h('input', { class: 'edit hk', style: 'width:180px', spellcheck: 'false' });
+  el.addEventListener('beforeinput', e => e.preventDefault());
+  const show = () => { el.value = hotkeyText(get()); };
+  el.addEventListener('keydown', e => {
+    if (['Tab', 'Enter', 'Escape'].includes(e.key) && !e.ctrlKey && !e.altKey) return;
+    e.preventDefault(); e.stopPropagation();
+    if ((e.key === 'Backspace' || e.key === 'Delete') && !e.ctrlKey && !e.altKey && !e.shiftKey) { set(null); show(); return; }
+    const combo = keyName(e); if (combo) { set(combo); show(); }
+  });
+  show(); el._show = show; return el;
+}
+function pickProgram(done) {
+  // Stand-in for the Windows file dialog filtered to programs (IFileOpenDialog).
+  const pick = ['C:\\Program Files\\totalcmd\\TOTALCMD64.EXE', 'C:\\Program Files\\GPSoftware\\Directory Opus\\dopus.exe', 'C:\\Windows\\notepad.exe'];
+  const lb = listbox(pick, 0, () => { }, 3); lb.style.width = '100%';
+  dialog({ title: 'Open', w: 460, body: h('div', {}, h('p', { style: 'margin:0 0 11px;color:var(--gray)' }, 'Stand-in for the Windows file dialog, filtered to programs (*.exe).'), lb),
+    buttons: [{ text: 'Open', def: true, act: () => { done(pick[[...lb.children].findIndex(c => c.classList.contains('sel'))]); return true; } }, { k: 'b.cancel', cancel: true }], first: lb });
+}
+// ---------- window lifetime: close, the tray and the shortcut ----------
+function closeWindow(from) {
+  if (!S.settings.background) { run('exit', from); return; }
+  closeMenus(); UI.win.hidden = true; S.hiddenToTray = true; log(`close (${from}): the window hides; gozler keeps running in the notification area`);
+  if (!S.trayNoted) { S.trayNoted = true; settingChanged(); toast(S.settings.hotkey ? t('tray.note', hotkeyShort(S.settings.hotkey)) : t('tray.note2')); }
+  updateTray(); renderPanel();
+}
+function showWindow(from) {
+  UI.win.hidden = false; S.hiddenToTray = false; hideTrayMenu();
+  UI.search.focus({ preventScroll: true }); UI.search.select(); log(`show window (${from})`); layout(); update();
+}
+function updateTray() { document.getElementById('tray').hidden = !S.settings.background; }
+function hideTrayMenu() { document.querySelectorAll('.traymenu').forEach(m => m.remove()); }
+function toast(text) {
+  document.querySelectorAll('.toast').forEach(x => x.remove());
+  const el = h('div', { class: 'toast' }, h('div', { style: 'font-weight:600;margin-bottom:4px' }, 'gozler'), text);
+  document.getElementById('stage').append(el); setTimeout(() => el.remove(), 8000);
+}
+function wireTray() {
+  const tr = document.getElementById('tray');
+  tr.title = t('tray.tip');
+  tr.onclick = () => showWindow('tray icon');
+  tr.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showWindow('Enter on the tray icon'); } };
+  tr.oncontextmenu = e => {
+    e.preventDefault(); hideTrayMenu();
+    const m = h('div', { class: 'traymenu' },
+      h('div', { class: 'mi bold', onclick: () => showWindow('tray menu') }, h('span', { class: 'mk' }), h('span', { class: 'ml', html: akHtml(t('tray.show')) })),
+      h('div', { class: 'mi', onclick: () => { hideTrayMenu(); run('exit', 'tray menu'); } }, h('span', { class: 'mk' }), h('span', { class: 'ml', html: akHtml(t('tray.exit')) })));
+    document.getElementById('stage').append(m);
+    setTimeout(() => document.addEventListener('mousedown', function away(ev) { if (!m.isConnected || !m.contains(ev.target)) { m.remove(); document.removeEventListener('mousedown', away); } }), 0);
+  };
+}
+// ---------- settings ----------
+function gbox(key, ...kids) { return h('fieldset', { class: 'gbox' }, h('legend', {}, t(key)), ...kids); }
+function hint(text) { return h('div', { class: 'hint' }, text); }
+function setShield(btn, on) { const sh = btn.querySelector('.shield'); if (on && !sh) btn.prepend(shieldSvg()); else if (!on && sh) sh.remove(); }
+// A list view in report mode, with check boxes on the first column when
+// `checks` is given (LVS_REPORT, LVS_EX_CHECKBOXES).
+function reportList({ cols, rows, rowsVisible, onPick, checks }) {
+  const el = h('div', { class: 'lb rl', tabindex: 0, role: 'listbox' });
+  el.style.height = (rowsVisible * 19 + 24) + 'px';
+  const st = { sel: 0 };
+  const toggle = i => { checks.set(i, !checks.get(i)); render(); };
+  const pick = i => { const n = rows().length; i = Math.max(0, Math.min(n - 1, i)); if (i !== st.sel) { st.sel = i; render(); onPick && onPick(i); } };
+  const render = () => {
+    const rs = rows(); st.sel = Math.max(0, Math.min(st.sel, rs.length - 1));
+    el.replaceChildren(h('div', { class: 'rlh' }, ...cols.map(c => h('div', { class: 'hcell', style: `width:${c.w}px` }, c.text))),
+      ...rs.map((r, i) => {
+        const row = h('div', { class: 'it' + (i === st.sel ? ' sel cur' : ''), onmousedown: e => { e.preventDefault(); el.focus(); pick(i); } });
+        r.forEach((c, j) => {
+          const cell = h('div', { class: 'rlc' + (cols[j].right ? ' right' : ''), style: `width:${cols[j].w}px` });
+          if (j === 0 && checks) cell.append(h('span', { class: 'chk' + (checks.get(i) ? ' on' : ''), onmousedown: e => { e.preventDefault(); e.stopPropagation(); el.focus(); st.sel = i; toggle(i); } }, h('span', { class: 'box' })));
+          cell.append(c); row.append(cell);
+        });
+        return row;
+      }));
+  };
+  el.addEventListener('keydown', e => {
+    if (e.key === ' ' && checks) { e.preventDefault(); toggle(st.sel); return; }
+    const m = { ArrowDown: st.sel + 1, ArrowUp: st.sel - 1, Home: 0, End: rows().length - 1 }[e.key];
+    if (m !== undefined) { e.preventDefault(); pick(m); }
+  });
+  el._render = render; el._sel = () => st.sel; el._setSel = i => { st.sel = i; render(); };
+  render(); return el;
+}
+// The Include page's folder tree: a tree view with check boxes and the
+// partial state (TVS_CHECKBOXES, TVS_EX_PARTIALCHECKBOXES). The real window
+// lists a folder's subfolders from the drive when it is first expanded; the
+// prototype reads them from its corpus.
+let DIR_KIDS = null;
+function folderTree(rules, onChange) {
+  if (!DIR_KIDS) { DIR_KIDS = DIRS.map(() => []); DIRS.forEach((d, i) => { if (d.parent >= 0) DIR_KIDS[d.parent].push(i); });
+    DIR_KIDS.forEach(k => k.sort((a, b) => DIRS[a].lower < DIRS[b].lower ? -1 : 1)); }
+  const roots = DIRS.map((d, i) => i).filter(i => DIRS[i].parent < 0);
+  const el = h('div', { class: 'lb tree', tabindex: 0, role: 'tree' });
+  // Each drive opens one level deep, so the folders to uncheck are in view.
+  const open = new Set(roots); let cur = roots[0];
+  const below = d => { const p = DIRS[d].lower.endsWith('\\') ? DIRS[d].lower : DIRS[d].lower + '\\'; return k => k.startsWith(p); };
+  const partial = d => Object.keys(rules).some(below(d));
+  const toggle = d => {
+    const v = partial(d) || !folderIndexed(d, rules);
+    for (const k of Object.keys(rules)) if (k === DIRS[d].lower || below(d)(k)) delete rules[k];
+    const above = DIRS[d].parent >= 0 ? folderIndexed(DIRS[d].parent, rules) : true;
+    if (v !== above) rules[DIRS[d].lower] = v;
+    onChange(); render();
+  };
+  const visible = () => { const out = []; const walk = (d, depth) => { out.push([d, depth]); if (open.has(d)) for (const k of DIR_KIDS[d]) walk(k, depth + 1); }; roots.forEach(r => walk(r, 0)); return out; };
+  const nameOf = d => { const dr = DIRS[d]; if (dr.parent < 0) { const drive = DRIVES.find(x => x.root.toLowerCase() === dr.lower); return dr.path + (drive ? ' ' + drive.label : ''); } return dr.path.slice(dr.path.lastIndexOf('\\') + 1); };
+  const render = () => {
+    el.replaceChildren(...visible().map(([d, depth]) => {
+      const on = folderIndexed(d, rules), part = partial(d);
+      const exp = h('span', { class: 'exp', onmousedown: e => { e.preventDefault(); e.stopPropagation(); el.focus(); cur = d; open.has(d) ? open.delete(d) : open.add(d); render(); } }, DIR_KIDS[d].length ? (open.has(d) ? '\uE70D' : '\uE76C') : '');
+      const box = h('span', { class: 'chk' + (part ? ' part' : on ? ' on' : ''), onmousedown: e => { e.preventDefault(); e.stopPropagation(); el.focus(); cur = d; toggle(d); } }, h('span', { class: 'box' }));
+      return h('div', { class: 'it' + (d === cur ? ' sel cur' : ''), style: `padding-left:${3 + depth * 16}px`, onmousedown: e => { e.preventDefault(); el.focus(); cur = d; render(); } }, exp, box, h('span', {}, nameOf(d)));
+    }));
+    el.querySelector('.cur')?.scrollIntoView({ block: 'nearest' });
+  };
+  el.addEventListener('keydown', e => {
+    const vis = visible().map(([d]) => d), i = vis.indexOf(cur);
+    if (e.key === ' ') { e.preventDefault(); toggle(cur); return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); cur = vis[Math.max(0, Math.min(vis.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; render(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); if (DIR_KIDS[cur].length && !open.has(cur)) open.add(cur); else if (open.has(cur) && DIR_KIDS[cur].length) cur = DIR_KIDS[cur][0]; render(); return; }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); if (open.has(cur)) open.delete(cur); else if (DIRS[cur].parent >= 0) cur = DIRS[cur].parent; render(); return; }
+  });
+  el._reveal = d => { for (let x = DIRS[d].parent; x >= 0; x = DIRS[x].parent) open.add(x); cur = d; render(); };
+  el._render = render; render(); return el;
+}
+// Stand-in for the Windows permission prompt (User Account Control).
+function permissionPrompt(what, done) {
+  log('Windows asks for administrator permission: ' + what);
+  dialog({ title: 'User Account Control', w: 440, body: h('div', {},
+      h('div', { style: 'font-size:15px;margin-bottom:11px;white-space:normal' }, 'Do you want to allow this app to make changes to your device?'),
+      h('div', { style: 'font-weight:600' }, 'gozler'), h('div', { style: 'margin-top:4px' }, what),
+      h('p', { class: 'hint', style: 'margin:11px 0 0' }, 'Stand-in for the Windows permission prompt.')),
+    buttons: [{ text: 'Yes', def: true, act: () => { setTimeout(done, 0); return true; } }, { text: 'No', cancel: true }] });
+}
+// Which entries the service's settings leave in the index.
+// Which entries a set of service settings leaves in the index (mask: 1 in,
+// 0 out), and how many entries each drive has in and in all.
+function indexMask(v) {
+  const n = C.names.length, mask = new Uint8Array(n), driveIn = {}, driveAll = {};
+  const pats = v.xFiles.split(';').map(x => x.trim()).filter(Boolean)
+    .map(x => new RegExp('^' + x.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i'));
+  const named = e => pats.some(r => r.test(C.names[e])) || (v.xHidden && (C.attrs[e] & A_H)) || (v.xSystem && (C.attrs[e] & A_S));
+  // A folder is out when the nearest choice above it leaves it out, or when it
+  // or a folder above it matches a name or an attribute. Parents come first in DIRS.
+  const nameOut = new Uint8Array(DIRS.length), dirOut = new Uint8Array(DIRS.length);
+  DIRS.forEach((d, i) => { nameOut[i] = (d.entry >= 0 && named(d.entry)) || (d.parent >= 0 && nameOut[d.parent]) ? 1 : 0; dirOut[i] = nameOut[i] || !folderIndexed(i, v.rules) ? 1 : 0; });
+  let anyOut = false;
+  for (let e = 0; e < n; e++) {
+    const out = C.isDir[e] ? dirOut[C.selfDir[e]] : dirOut[C.dir[e]] || named(e);
+    mask[e] = out ? 0 : 1; if (out) anyOut = true;
+    const root = DIRS[C.dir[e]].path.slice(0, 3);
+    driveAll[root] = (driveAll[root] || 0) + 1; if (!out) driveIn[root] = (driveIn[root] || 0) + 1;
+  }
+  return { mask, anyOut, driveIn, driveAll };
+}
+function applyIndexSettings() {
+  const r = indexMask(S.service);
+  S.mask = r.anyOut ? r.mask : null; S.driveIn = r.driveIn; S.driveAll = r.driveAll;
+  if (S.service.fs) { S.dirSize = new Float64Array(DIRS.length);
+    for (let e = 0; e < C.names.length; e++) if (!C.isDir[e] && C.size[e] > 0 && (!S.mask || S.mask[e])) for (let x = C.dir[e]; x >= 0; x = DIRS[x].parent) S.dirSize[x] += C.size[e]; }
+  else S.dirSize = null;
+}
+// The preview line: the service's dry-run count of the draft. It counts only
+// what the index holds, so folders checked again are named, not counted.
+function previewText(v) {
+  const r = indexMask(v), both = {}; let added = false;
+  for (let e = 0; e < C.names.length; e++) { if (!r.mask[e]) continue; if (S.mask && !S.mask[e]) { added = true; continue; }
+    const root = DIRS[C.dir[e]].path.slice(0, 3); both[root] = (both[root] || 0) + 1; }
+  const scaled = counts => DRIVES.reduce((sum, d) => sum + Math.round(d.entries * (counts[d.root] || 0) / (S.driveAll[d.root] || 1)), 0);
+  return t('o.preview', fmtInt(scaled(S.driveIn)), fmtInt(scaled(both)), added ? t('o.preview.added') : '');
+}
+// Windows' "Index these locations": each indexed folder, with the folders left out inside it.
+let DIR_BY_LOWER = null;
+function includeSummary(rules) {
+  DIR_BY_LOWER = DIR_BY_LOWER || new Map(DIRS.map((d, i) => [d.lower, i]));
+  const locs = [...DIRS.map((d, i) => i).filter(i => DIRS[i].parent < 0 && rules[DIRS[i].lower] !== false),
+    ...Object.keys(rules).filter(k => rules[k]).map(k => DIR_BY_LOWER.get(k))];
+  const outs = new Map(locs.map(d => [d, []]));
+  for (const k of Object.keys(rules).filter(k => rules[k] === false)) {
+    const d = DIR_BY_LOWER.get(k);
+    for (let x = DIRS[d].parent; x >= 0; x = DIRS[x].parent) if (outs.has(x)) { outs.get(x).push(DIRS[d].path); break; }
+  }
+  return locs.sort((a, b) => DIRS[a].lower < DIRS[b].lower ? -1 : 1).map(d => ({ d, path: DIRS[d].path, out: outs.get(d).sort().join('; ') }));
+}
+// Windows' "Indexed Locations" dialog: the folder tree and the same summary.
+function indexedFoldersDialog(rules, done) {
+  const draft = structuredClone(rules);
+  let sum = null;
+  const tree = folderTree(draft, () => sum && sum._render()); tree.style.height = '250px';
+  sum = reportList({ cols: [{ text: t('o.sum.in'), w: 190 }, { text: t('o.sum.out'), w: 330 }], rowsVisible: 4,
+    rows: () => includeSummary(draft).map(r => [r.path, r.out]), onPick: i => tree._reveal(includeSummary(draft)[i].d) });
+  dialog({ title: t('o.mod.title'), w: 580, body: h('div', { style: 'display:flex;flex-direction:column;gap:4px' },
+      labelFor(t('o.mod.tree'), tree), tree, hint(t('o.f.hint')), h('div', { style: 'height:7px' }), labelFor(t('o.mod.sum'), sum), sum),
+    buttons: [{ k: 'b.ok', def: true, act: () => { setTimeout(() => done(draft), 0); return true; } }, { k: 'b.cancel', cancel: true }], first: tree });
+}
+// The nearest saved choice at or above a folder decides; a drive with none is indexed.
+function folderIndexed(d, rules) {
+  for (let x = d; x >= 0; x = DIRS[x].parent) { const r = rules[DIRS[x].lower]; if (r !== undefined) return r; }
+  return true;
+}
+function startIndexing(root) { S.indexingNow.add(root); update(); setTimeout(() => { S.indexingNow.delete(root); log(root + ' is indexed'); update(); }, 4000); }
+function applyService(next) {
+  const before = S.service; S.service = structuredClone(next);
+  for (const d of DRIVES) if (driveIndexed(d.root, next.rules) && !driveIndexed(d.root, before.rules)) startIndexing(d.root);
+  if (next.dc !== before.dc) {
+    if (next.dc) { S.allCols.splice(S.allCols.indexOf('dm') + 1, 0, 'dc'); S.cols.push({ k: 'dc', w: DEFW.dc }); S.cols.sort((a, b) => S.allCols.indexOf(a.k) - S.allCols.indexOf(b.k)); }
+    else { S.allCols = S.allCols.filter(k => k !== 'dc'); S.cols = S.cols.filter(c => c.k !== 'dc'); if (S.sort.key === 'dc') S.sort.key = 'name'; }
+    buildHeader();
+  }
+  applyIndexSettings();
+  // Location lists the indexed drives, then the chosen folders.
+  const was = S.F.locItems[S.F.loc - 1];
+  S.F.locItems = [...DRIVES.filter(d => driveIndexed(d.root, next.rules)).map(d => ({ path: d.root })), ...S.F.locItems.filter(it => it.chosen)];
+  S.F.loc = was ? S.F.locItems.findIndex(it => it.path === was.path) + 1 : 0;
+  syncFilterControls();
+  log('service settings applied for every user: ' + JSON.stringify(S.service));
+}
+function rebuildIndex() { for (const d of DRIVES) if (driveIndexed(d.root)) startIndexing(d.root); log('the service reads every included drive again'); }
+function applyWindowSettings(next) {
+  const before = S.settings; S.settings = structuredClone(next); settingChanged(); updateTray();
+  if (next.lang !== before.lang) setLanguage(next.lang);
+  const notes = [];
+  if (next.signin !== before.signin) notes.push(next.signin ? 'Run value: gozler-ui.exe --sign-in' : 'Run value removed');
+  if (next.background !== before.background) notes.push(next.background ? 'close hides the window to the notification area' : 'close exits; no tray icon');
+  if (next.verb !== before.verb) notes.push(next.verb ? '"Search with gozler" written under HKCU\\Software\\Classes\\Directory' : '"Search with gozler" removed');
+  if (next.hotkey !== before.hotkey) notes.push(!next.hotkey ? 'no shortcut' : next.hotkey.startsWith('win+') ? 'keyboard hook for ' + next.hotkey + '; Windows gets it back when it changes or gozler exits' : 'RegisterHotKey ' + next.hotkey);
+  if (JSON.stringify(next.keys) !== JSON.stringify(before.keys)) notes.push('menus and accelerator table rebuilt from the person\'s shortcuts');
+  if (next.updates && !before.updates) { notes.push('gozler checks for updates at its next start; the prototype checks now'); setTimeout(() => { S.update = '0.4.0'; update(); }, 1000); }
+  if (!next.updates) S.update = null;
+  log('settings applied' + (notes.length ? ': ' + notes.join('; ') : ''));
+}
+function keyDialog(titleKey, id, initial, keys, done) {
+  let combo = initial;
+  const f = hotkeyField(() => combo, v => { combo = v; }); f.style.width = '100%';
+  dialog({ title: t(titleKey), w: 400, body: h('div', { style: 'display:flex;flex-direction:column;gap:4px' }, labelFor(t('o.k.press', cmdName(id)), f), f),
+    buttons: [{ k: 'b.ok', def: true, act: () => { const why = combo && combo === initial ? null : refuseKey(combo, id, keys); if (why) { balloon(f, why); return false; } setTimeout(() => done(combo), 0); return true; } },
+      { k: 'b.cancel', cancel: true }], first: f });
+}
+function settingsDialog() {
+  const win = structuredClone(S.settings), svc = structuredClone(S.service);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const svcDirty = () => !same(svc, S.service), dirty = () => svcDirty() || !same(win, S.settings);
+  // A service change puts the shield on OK and Apply, because applying it asks Windows for permission.
+  const changed = () => { const okEl = st.buttons.find(b => b.k === 'b.ok').el; setEnabled(st.apply, dirty()); setShield(okEl, svcDirty()); setShield(st.apply, svcDirty()); };
+  const check = (key, obj, field) => checkbox(key, () => obj[field], v => { obj[field] = v; changed(); });
+  const refs = {};
+  const kb = { filter: '', sel: 'open', key: 0 };
+  const general = () => {
+    // One row per open command: an empty box shows, as its cue, what happens then.
+    const boxes = {};
+    // Asks the index for Total Commander, as a search from the search box
+    // would: file: totalcmd*.exe, newest first (spec: The General page).
+    const tc = button('o.totalcmd', () => {
+      log('search sent: file: totalcmd*.exe, sorted by date modified, newest first');
+      if (S.daemon !== 'normal') { balloon(tc, t('d.' + S.daemon, 'OpenService failed: Access is denied. (5)')); return; }
+      const found = S.noTC ? [] : ['C:\\Program Files\\totalcmd\\TOTALCMD64.EXE', 'D:\\Backups\\totalcmd-old\\TOTALCMD64.EXE'];
+      if (!found.length) { balloon(tc, t('o.tc.none')); return; }
+      const cmd = `"${found[0]}" /O /A /P=L /L="%1"`;
+      for (const f of ['openFolders', 'openFiles']) { win[f] = cmd; boxes[f].value = cmd; }
+      changed(); log('Total Commander found: ' + found.join(' | ') + ' -> the newest, ' + found[0]);
+    });
+    const openRows = [['o.openfolders', 'openFolders', 'o.cue.explorer'], ['o.openfiles', 'openFiles', 'o.cue.default'], ['o.openloc', 'openLoc', 'o.cue.explorer']].flatMap(([label, field, cue]) => {
+      const box = h('input', { class: 'edit', style: 'width:100%', value: win[field], spellcheck: 'false', placeholder: t(cue) });
+      box.addEventListener('input', () => { win[field] = box.value; changed(); }); boxes[field] = box;
+      const browse = button('o.browse', () => pickProgram(path => { box.value = `"${path}" "%1"`; win[field] = box.value; changed(); box.focus(); }));
+      return [labelFor(t(label), box), box, browse];
+    });
+    const langTags = ['default', ...LANGS.map(l => l.tag)];
+    const lang = combo([plain(t('lang.default')), ...LANGS.map(l => plain(l.name))], Math.max(0, langTags.indexOf(win.lang)), i => { win.lang = langTags[i]; changed(); });
+    lang.el.style.width = '220px';
+    return [h('div', { style: 'display:flex;align-items:center;gap:7px' }, labelFor(t('o.lang'), lang.el), lang.el), h('div', { style: 'height:4px' }),
+      gbox('o.g.startup', check('o.signin', win, 'signin'), check('o.updates', win, 'updates'), check('o.background', win, 'background')),
+      gbox('o.g.explorer', check('o.verb', win, 'verb'), h('div', { style: 'display:grid;grid-template-columns:max-content 1fr max-content;gap:7px;align-items:center' }, ...openRows),
+        h('div', { style: 'display:flex;align-items:center;gap:11px' }, h('div', { class: 'hint', style: 'flex:1' }, t('o.cmdhint')), tc))];
+  };
+  const search = () => [gbox('o.s.box', check('o.sayt', win, 'sayt'), check('o.showall', win, 'showAll'), check('o.clicksel', win, 'clickSel'), check('o.actsel', win, 'actSel'))];
+  const keyboard = () => {
+    // The hotkey control holds Ctrl, Alt and Shift; the Windows key is a check box
+    // beside it. Without the Windows key, the control's rules (HKM_SETRULES) turn
+    // a key with fewer than two of them into Ctrl+Alt and the key.
+    let hkWin = !!(win.hotkey && win.hotkey.startsWith('win+'));
+    let hkCtl = win.hotkey ? win.hotkey.replace(/^win\+/, '') : null;
+    const ruled = c => { if (!c || hkWin) return c; const parts = c.split('+'); const key = parts.pop(); return parts.length >= 2 ? c : ['ctrl', 'alt', key].join('+'); };
+    const syncHk = () => { hkCtl = ruled(hkCtl); win.hotkey = hkCtl ? (hkWin ? 'win+' : '') + hkCtl : null; hk._show(); changed(); };
+    const hk = hotkeyField(() => hkCtl, v => { hkCtl = v; syncHk(); }); refs.hk = hk;
+    const winBox = checkbox('o.winkey', () => hkWin, v => { hkWin = v; syncHk(); });
+    // Command shortcuts: the commands that match the filter, and the selected one's keys.
+    const shown = () => KEY_COMMANDS.flatMap(([, ids]) => ids).filter(id => { const f = kb.filter.trim().toLowerCase();
+      return !f || (cmdName(id) + ' ' + keysOf(id, win.keys).map(keyText).join(' ')).toLowerCase().includes(f); });
+    const setKeys = (id, list) => { if (same(list, DEFAULT_KEYS[id] ?? [])) delete win.keys[id]; else win.keys[id] = list; changed(); };
+    const filter = h('input', { class: 'edit', style: 'flex:1;min-width:0', value: kb.filter, spellcheck: 'false' });
+    const cmds = reportList({ cols: [{ text: t('o.k.command'), w: 300 }, { text: t('o.k.keys'), w: 200 }], rowsVisible: 5,
+      rows: () => shown().map(id => [cmdName(id), keysOf(id, win.keys).map(keyText).join(', ')]),
+      onPick: i => { kb.sel = shown()[i]; kb.key = 0; refresh(); } });
+    const keys = listbox([], 0, i => { kb.key = i; }, 4); keys.style.flex = '1'; keys.style.height = 'auto';
+    const keyList = () => keysOf(kb.sel, win.keys);
+    const add = button('o.add', () => keyDialog('o.k.addtitle', kb.sel, null, win.keys, combo => {
+      const list = keyList(); if (!list.includes(combo)) setKeys(kb.sel, [...list, combo]); kb.key = keyList().indexOf(combo); refresh(); add.focus(); }));
+    const edit = button('o.edit', () => keyDialog('o.k.edittitle', kb.sel, keyList()[kb.key], win.keys, combo => {
+      const list = [...keyList()]; list[kb.key] = combo; setKeys(kb.sel, list.filter((k, i) => list.indexOf(k) === i)); refresh(); edit.focus(); }));
+    const remove = button('o.remove', () => { const list = keyList().filter((_, i) => i !== kb.key); setKeys(kb.sel, list); kb.key = Math.max(0, kb.key - 1); refresh(); (list.length ? keys : add).focus(); });
+    const refresh = () => {
+      const ids = shown(); if (!ids.includes(kb.sel) && ids.length) { kb.sel = ids[0]; kb.key = 0; }
+      cmds._setSel(Math.max(0, ids.indexOf(kb.sel)));
+      const list = ids.length ? keyList() : []; keys._set(list.map(keyText), Math.min(kb.key, list.length - 1));
+      setEnabled(add, ids.length > 0); setEnabled(edit, list.length > 0); setEnabled(remove, list.length > 0);
+    };
+    filter.addEventListener('input', () => { kb.filter = filter.value; refresh(); });
+    refresh();
+    return [gbox('o.k.show', labelFor(t('o.hotkey'), hk), h('div', { style: 'display:flex;align-items:center;gap:11px' }, hk, winBox),
+        hint(t('o.hotkeyhint')), ...(win.background ? [] : [hint(t('o.hotkeyclosed'))])),
+      gbox('o.k.cmds', h('div', { style: 'display:flex;align-items:center;gap:7px' }, labelFor(t('o.filter'), filter), filter), cmds,
+        labelFor(t('o.k.for'), keys), h('div', { style: 'display:flex;gap:7px;align-items:stretch' }, keys, h('div', { style: 'display:flex;flex-direction:column;gap:7px' }, add, edit, remove)))];
+  };
+  const serviceDown = () => S.daemon !== 'normal' && [hint(t('d.' + S.daemon, 'OpenService failed: Access is denied. (5)'))];
+  const driveState = d => !driveIndexed(d.root) ? t('o.index.out') : S.indexingNow.has(d.root) || (d.root === 'C:\\' && S.cIndexing) ? t('o.index.indexing')
+    : d.root === 'D:\\' && S.dOffline ? t('o.index.offline') : d.root === 'D:\\' && S.dMeta ? t('o.index.pending') : t('o.index.live');
+  const index = () => {
+    const down = serviceDown(); if (down) return down;
+    const drives = reportList({ cols: [{ text: t('o.index.vol'), w: 150 }, { text: t('o.index.state'), w: 210 }, { text: t('o.index.entries'), w: 90, right: true }], rowsVisible: 3,
+      rows: () => DRIVES.map(d => [d.root + ' ' + d.label, driveState(d), driveIndexed(d.root) ? fmtInt(Math.round(d.entries * (S.driveIn[d.root] || 0) / (S.driveAll[d.root] || 1))) : '—']) });
+    refs.drives = drives;
+    const rebuild = button('o.rebuild', () => permissionPrompt(t('o.rebuild.what'), rebuildIndex), { shield: true });
+    return [hint(t('o.adminnote')), h('div', { style: 'height:7px' }),
+      gbox('o.i.drives', drives),
+      gbox('o.i.holds', hint(t('o.i.always')), check('o.dc', svc, 'dc'), h('div', { class: 'hint', style: 'padding-left:18px' }, t('o.dc.hint')),
+        check('o.fs', svc, 'fs'), h('div', { class: 'hint', style: 'padding-left:18px' }, t('o.fs.hint'))),
+      gbox('o.i.service', h('div', { class: 'label' }, t('o.index.mem', fmtBytes(412e6), fmtBytes(398e6))), hint(t('o.index.more')), h('div', { style: 'display:flex' }, rebuild))];
+  };
+  const filter = () => {
+    const down = serviceDown(); if (down) return down;
+    // Every change asks for a new dry-run count, 300 ms after the last one.
+    const preview = h('div', { class: 'label', style: 'white-space:normal;line-height:17px' }, previewText(svc));
+    let timer = 0;
+    const edited = () => { changed(); clearTimeout(timer); timer = setTimeout(() => { preview.textContent = previewText(svc); }, 300); };
+    const list = reportList({ cols: [{ text: t('o.sum.in'), w: 190 }, { text: t('o.sum.out'), w: 320 }], rowsVisible: 5,
+      rows: () => includeSummary(svc.rules).map(r => [r.path, r.out]) });
+    const modify = button('o.modify', () => indexedFoldersDialog(svc.rules, rules => { svc.rules = rules; list._render(); edited(); modify.focus(); }));
+    const pats = h('input', { class: 'edit', style: 'width:100%', value: svc.xFiles, spellcheck: 'false' });
+    pats.addEventListener('input', () => { svc.xFiles = pats.value; edited(); });
+    const ck = (key, field) => checkbox(key, () => svc[field], v => { svc[field] = v; edited(); });
+    return [hint(t('o.adminnote')), h('div', { style: 'height:4px' }), preview, h('div', { style: 'height:7px' }),
+      gbox('o.x.folders', labelFor(t('o.f.tree'), list), list, h('div', { style: 'display:flex' }, modify), ck('o.autonew', 'autoNew')),
+      gbox('o.x.files', labelFor(t('o.xfiles'), pats), pats, hint(t('o.xfiles.hint')), ck('o.xhidden', 'xHidden'), ck('o.xsystem', 'xSystem'))];
+  };
+  const PAGES = [
+    { key: 'o.cat.general', obj: win, defs: WIN_DEFAULTS, fields: ['lang', 'signin', 'background', 'updates', 'verb', 'openFolders', 'openFiles', 'openLoc'], build: general },
+    { key: 'o.cat.search', obj: win, defs: WIN_DEFAULTS, fields: ['sayt', 'clickSel', 'actSel', 'showAll'], build: search },
+    { key: 'o.cat.keyboard', obj: win, defs: WIN_DEFAULTS, fields: ['hotkey', 'keys'], build: keyboard },
+    { key: 'o.cat.index', obj: svc, defs: SERVICE_DEFAULTS, fields: ['dc', 'fs'], build: index },
+    { key: 'o.cat.filter', obj: svc, defs: SERVICE_DEFAULTS, fields: ['rules', 'autoNew', 'xFiles', 'xHidden', 'xSystem'], build: filter },
+  ];
+  let cat = 0;
+  const frame = h('div', { style: 'position:relative;margin-left:11px;flex:1;min-width:0;height:530px' });
+  for (const pg of PAGES) {
+    pg.body = h('div', { class: 'pbody' });
+    // Restore defaults sets this page's controls to their defaults; OK or Apply applies them.
+    pg.restore = button('o.restore', () => { for (const f of pg.fields) pg.obj[f] = structuredClone(pg.defs[f]); renderPage(); changed(); pg.restore.focus(); });
+    pg.el = h('div', { class: 'spage' }, h('div', { class: 'head' }, t(pg.key)), pg.body, h('div', { class: 'foot' }, pg.restore));
+    frame.append(pg.el);
+  }
+  const renderPage = () => { const pg = PAGES[cat]; refs.drives = null; pg.body.replaceChildren(...pg.build()); setEnabled(pg.restore, !(pg.obj === svc && S.daemon !== 'normal')); };
+  const showPage = () => { PAGES.forEach((pg, i) => { pg.el.hidden = i !== cat; }); renderPage(); };
+  const cats = listbox(PAGES.map(pg => t(pg.key)), 0, i => { cat = i; showPage(); }, 5);
+  cats.style.width = '110px'; cats.style.height = '530px';
+  const goTo = i => { cat = i; cats._set(PAGES.map(pg => t(pg.key)), i); showPage(); };
+  const validate = () => {
+    if (win.hotkey && win.hotkey.toLowerCase() === 'win+l') { goTo(2); balloon(refs.hk, t('o.winl')); return false; }
+    if (win.hotkey && win.hotkey !== S.settings.hotkey && win.hotkey.toLowerCase() === TAKEN.toLowerCase()) { goTo(2); balloon(refs.hk, t('o.hotkeybusy', hotkeyShort(win.hotkey))); return false; }
+    return true;
+  };
+  const commit = () => {
+    if (!same(win, S.settings)) applyWindowSettings(win);
+    if (svcDirty()) applyService(svc);
+    changed(); renderPage(); runSearch('settings');
+  };
+  const apply = then => {
+    if (!validate()) return;
+    if (svcDirty()) permissionPrompt(t('o.svc.what'), () => { commit(); then(); });
+    else { if (dirty()) commit(); then(); }
+  };
+  const st = dialog({ title: t('o.title'), w: 720, body: h('div', { style: 'display:flex' }, cats, frame),
+    buttons: [{ k: 'b.ok', def: true, act: () => { apply(() => st.close(true)); return false; } }, { k: 'b.cancel', cancel: true }, { k: 'b.apply', act: () => { apply(() => { }); return false; } }],
+    first: cats, onTick: () => { if (refs.drives) refs.drives._render(); } });
+  showPage(); setEnabled(st.apply, false);
+}
+function dateField(key, initial) {
+  const on = { v: !!initial };
+  const inp = h('input', { type: 'date', value: (initial ? new Date(initial) : new Date()).toISOString().slice(0, 10) });
+  const box = checkbox('', () => on.v, v => { on.v = v; wrap.classList.toggle('off', !v); wrap._onchange && wrap._onchange(); });
+  box.querySelector('.lbl').remove();
+  const wrap = h('div', { class: 'dtp' + (on.v ? '' : ' off') }, box, inp);
+  inp.addEventListener('input', () => wrap._onchange && wrap._onchange());
+  wrap._value = () => on.v ? new Date(inp.value + 'T00:00:00').getTime() : null; wrap._input = inp;
+  return wrap;
+}
+function customDateDialog() {
+  const prev = S.F.date;
+  const cur = S.F.dateCustom || {};
+  const from = dateField('cd.from', cur.from ?? Date.now() - 7 * 864e5), to = dateField('cd.to', cur.to ?? null);
+  const okOn = () => setEnabled(st.buttons[0].el, from._value() != null || to._value() != null);
+  from._onchange = okOn; to._onchange = okOn;
+  const st = dialog({ title: t('cd.title'), w: 300,
+    body: grid2([[labelFor(t('cd.from'), from.querySelector('.chk')), from], [labelFor(t('cd.to'), to.querySelector('.chk')), to]]),
+    buttons: [{ k: 'b.ok', def: true, act: () => { const f = from._value(), tt = to._value(); if (f != null && tt != null && f > tt) { balloon(to._input, t('cd.order')); return false; }
+      S.F.dateCustom = { from: f, to: tt }; S.F.date = 6; filtersChanged(); return true; } }, { k: 'b.cancel', cancel: true }],
+    first: from.querySelector('.chk') });
+  st.onClose = res => { if (!res) { S.F.date = prev; syncFilterControls(); } }; // Cancel returns the combo box to the previous choice.
+  okOn();
+}
+function customSizeDialog() {
+  const prev = S.F.size; const cur = S.F.sizeCustom || {};
+  const min = h('input', { class: 'edit', style: 'width:90px', value: cur.min ?? '' }), max = h('input', { class: 'edit', style: 'width:90px', value: cur.max ?? '' });
+  let unit = ['kb', 'mb', 'gb'].indexOf(cur.unit || 'mb');
+  const u = combo([t('unit.KB'), t('unit.MB'), t('unit.GB')], unit, i => { unit = i; }); u.el.style.width = '90px';
+  const num = s => { s = s.trim(); if (!s) return null; const dec = (1.5).toLocaleString().charAt(1); const n = Number(s.replace(dec, '.')); return isFinite(n) && n >= 0 ? n : NaN; };
+  const st = dialog({ title: t('cs.title'), w: 280,
+    body: grid2([[labelFor(t('cs.min'), min), min], [labelFor(t('cs.max'), max), max], [labelFor(t('cs.unit'), u.el), u.el]]),
+    buttons: [{ k: 'b.ok', def: true, act: () => {
+      const a = num(min.value), b = num(max.value);
+      if (Number.isNaN(a)) { balloon(min, t('cs.nan')); return false; } if (Number.isNaN(b)) { balloon(max, t('cs.nan')); return false; }
+      if (a == null && b == null) { balloon(min, t('cs.none')); return false; } if (a != null && b != null && a > b) { balloon(max, t('cs.order')); return false; }
+      S.F.sizeCustom = { min: a, max: b, unit: ['kb', 'mb', 'gb'][unit] }; S.F.size = 8; filtersChanged(); return true; } }, { k: 'b.cancel', cancel: true }],
+    first: min });
+  st.onClose = res => { if (!res) { S.F.size = prev; syncFilterControls(); } };
+}
+function syntaxDialog() {
+  const pre = h('div', { class: 'mono', tabindex: 0, style: 'height:420px' }, document.getElementById('helptext').textContent);
+  dialog({ title: t('sx.title'), w: 640, body: pre, buttons: [{ k: 'b.close', def: true, cancel: true }], first: pre });
+}
+function aboutDialog() {
+  dialog({ title: t('ab.title'), w: 380, body: h('div', { style: 'display:flex;gap:11px;align-items:flex-start;line-height:17px' },
+    h('img', { width: 32, height: 32, src: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="#2b79d0" stroke-width="2"/><path d="M10 10l4.5 4.5" stroke="#2b79d0" stroke-width="2.4" stroke-linecap="round"/></svg>') }),
+    h('div', {}, h('div', { style: 'font-weight:600' }, t('ab.version', '0.3.0')), h('div', {}, t('ab.what')), h('div', { style: 'margin-top:7px' }, t('ab.copy')),
+      h('div', { style: 'margin-top:7px' }, h('span', { class: 'link', tabindex: 0 }, 'github.com/SynoSoftware/goz')))),
+    buttons: [{ k: 'b.close', def: true, cancel: true }] });
+}
+
+// ---------- tooltips ----------
+let tipTimer = 0, tipEl = null;
+function showTip(el, text) { hideTip(); tipTimer = setTimeout(() => { const r = rel(el); tipEl = h('div', { class: 'tip' }, text); tipEl.style.left = (r.x + 4) + 'px'; tipEl.style.top = (r.y + r.h + 4) + 'px'; UI.scaler.append(tipEl); }, 500); }
+function hideTip() { clearTimeout(tipTimer); if (tipEl) tipEl.remove(); tipEl = null; }
+function flash(s) { log(s); }
+
+// =====================================================================
+// Keyboard: accelerators, then dialog-style keys (IsDialogMessageW), by focus.
+// =====================================================================
+let altAlone = false;
+document.addEventListener('keydown', e => {
+  if (e.target.closest && e.target.closest('#panel')) return;
+  if (e.key === 'Alt') { altAlone = true; e.preventDefault(); return; }
+  altAlone = false;
+  if (popups.length) { menuKey(e); return; }
+  if (currentDialog) { dialogKey(e); return; }
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (barKeyMode >= 0) {
+    if (k === 'ArrowRight' || k === 'ArrowLeft') { MENUBAR[barKeyMode].el.classList.remove('hot'); barKeyMode = (barKeyMode + (k === 'ArrowRight' ? 1 : MENUBAR.length - 1)) % MENUBAR.length; MENUBAR[barKeyMode].el.classList.add('hot'); }
+    else if (k === 'ArrowDown' || k === 'Enter') { const b = barKeyMode; barKeyMode = -1; openBarMenu(b, true); }
+    else if (k === 'Escape' || k === 'F10') { MENUBAR[barKeyMode].el.classList.remove('hot'); barKeyMode = -1; }
+    else if (k.length === 1) { const i = MENUBAR.findIndex(m => akOf(t(m.k)) === k); if (i >= 0) { barKeyMode = -1; openBarMenu(i, true); } }
+    e.preventDefault(); return;
+  }
+  // Accelerator table: the command shortcuts in use. Copy and Select all act
+  // on the focused control, so Ctrl+C and Ctrl+A reach the search box too.
+  const combo = keyName(e), accId = combo && Object.keys(CMD).find(c => keysOf(c).includes(combo));
+  if (accId) { e.preventDefault(); run(accId, keyText(combo)); return; }
+  if (e.key === 'F10' && !e.shiftKey) { e.preventDefault(); document.body.classList.add('cues'); barKeyMode = 0; MENUBAR[0].el.classList.add('hot'); return; }
+  if (e.key === 'F4' && e.altKey) { e.preventDefault(); closeWindow('Alt+F4'); return; }
+  if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
+    e.preventDefault();
+    if (focusIn(UI.lv) && S.cur >= 0) { if (!S.sel.has(S.cur)) { S.sel.clear(); S.sel.add(S.cur); renderRows(); selectionChanged(); } const r = rel(UI.lv); openContextMenu(r.x + 40, r.y + 25 + (S.cur * ROWH - UI.lv.scrollTop) + ROWH); }
+    return;
+  }
+  if (e.key === 'Tab') { e.preventDefault(); cycleFocus(UI.win, e.shiftKey); return; }
+  if (e.altKey && k.length === 1) {
+    e.preventDefault(); document.body.classList.add('cues');
+    if (mnemonic(UI.client, k)) return;
+    const i = MENUBAR.findIndex(m => akOf(t(m.k)) === k); if (i >= 0) openBarMenu(i, true);
+    return;
+  }
+}, true);
+document.addEventListener('keyup', e => {
+  if (e.key === 'Alt' && altAlone && !currentDialog && !(e.target.closest && e.target.closest('#panel'))) {
+    e.preventDefault(); document.body.classList.add('cues');
+    if (popups.length) { closeMenus(); return; }
+    if (barKeyMode >= 0) { MENUBAR[barKeyMode].el.classList.remove('hot'); barKeyMode = -1; return; }
+    barKeyMode = 0; MENUBAR[0].el.classList.add('hot');
+  }
+  altAlone = false;
+}, true);
+document.addEventListener('mousedown', e => { if (!e.target.closest('#panel')) { if (barKeyMode >= 0) { MENUBAR[barKeyMode].el.classList.remove('hot'); barKeyMode = -1; } } });
+document.addEventListener('focusin', () => renderPanelSoon());
+
+// =====================================================================
+// Language: the Language menu, and OK or Apply in Settings, switch at once;
+// nothing but captions changes.
+// =====================================================================
+function setLanguage(choice) {
+  S.settings.lang = choice;
+  LANG = choice === 'default' ? (navigator.language.startsWith('qps') ? 'qps-ploc' : 'en') : choice;
+  const focus = document.activeElement, top = UI.lv.scrollTop;
+  applyText(UI.win);
+  buildMatchControls();
+  buildFilters(); syncFilterControls(); buildHeader();
+  UI.lv.scrollTop = top; renderRows(); update();
+  if (focus && document.contains(focus)) focus.focus();
+  settingChanged();
+  log(`language: ${choice} (${LANG}); no search ran (T12)`);
+}
+
+// =====================================================================
+// The prototype panel: switches, scenarios and the model's state.
+// =====================================================================
+const DAEMON = { normal: 'Normal', stopped: 'Service stopped', disabled: 'Service turned off', notinst: 'Not installed, gozlerd.exe beside', missing: 'Not installed, gozlerd.exe missing',
+  starting: 'Running, not answering yet', unknown: 'State cannot be read', notgozler: 'Owner check fails', tooold: 'Daemon older than the window', refused: 'Daemon refuses the request', lost: 'Connection lost' };
+const SCEN = [
+  ['S1 Starting', () => { S.hold = true; S.shown = { kind: 'nothing' }; S.text = ''; UI.search.value = ''; runSearch('start'); }],
+  ['S2 New search runs', () => { S.hold = false; setText('report'); runSearch('scenario'); setTimeout(() => { S.hold = true; setText('report final'); runSearch('scenario'); }, 500); }],
+  ['S3 Results', () => { S.hold = false; setText('quarterly report'); runSearch('scenario'); }],
+  ['Start of words: para 50', () => { S.hold = false; setText('para 50'); runSearch('scenario'); }],
+  ['S4 Over 100,000', () => { S.hold = false; setText(''); runSearch('scenario'); }],
+  ['S5 No results', () => { S.hold = false; S.F.kind = 7; S.F.loc = 2; syncFilterControls(); setText('zzqx'); runSearch('scenario'); }],
+  ['S6 Type to search', () => { S.hold = false; S.settings.showAll = false; clearF(); setText(''); runSearch('scenario'); }],
+  ['S7 Parse error (J7)', () => { S.hold = false; setText('dm:yesterdy'); runSearch('scenario'); }],
+  ['S8 Folder missing', () => { S.hold = false; S.locMissing = true; runSearch('scenario'); }],
+  ['S9 Service stopped', () => { S.hold = false; S.daemon = 'stopped'; runSearch('scenario'); }],
+  ['S10 Filtered, pane hidden', () => { S.hold = false; S.F.kind = 5; syncFilterControls(); S.showFilters = false; layout(); setText('report'); runSearch('scenario'); }],
+  ['S11 Export runs', () => { S.hold = false; setText('report'); runSearch('scenario'); setTimeout(() => startExport('D:\\Exports\\results.csv', 0), 500); }],
+  ['S12 Reading the selection', () => { S.hold = false; setText(''); runSearch('scenario'); setTimeout(() => { UI.lv.focus(); S.hold = true; selectAll(); }, 700); }],
+  ['S13 C:\\ indexing', () => { S.hold = false; S.cIndexing = true; setText('report'); runSearch('scenario'); }],
+  ['Long names, multi-select', () => { S.hold = false; setText('résumé|meeting|東京|отчёт'); S.opts.mode = 'regex'; runSearch('scenario');
+    setTimeout(() => { UI.lv.focus(); setCursor(0, false, false); setCursor(4, true, false); }, 700); }],
+  ['Deep paths', () => { S.hold = false; S.cols = [{ k: 'name', w: 260 }, { k: 'path', w: 560 }, { k: 'size', w: 90 }, { k: 'dm', w: 130 }]; buildHeader(); setText('node_modules\\'); runSearch('scenario'); }],
+];
+function setText(s) { S.text = s; UI.search.value = s; }
+function clearF() { S.F.kind = 0; S.F.loc = 0; S.F.parentOnly = false; S.F.date = 0; S.F.dateCustom = null; S.F.size = 0; S.F.sizeCustom = null; S.F.attrs = [0, 0, 0, 0, 0, 0]; S.locMissing = false; syncFilterControls(); }
+function resetForScenario() { S.opts = { mode: 'word', case: false, path: false }; S.daemon = 'normal'; S.cIndexing = false; S.dOffline = false; S.settings.showAll = true; if (S.exp) endExport(); S.activity = null; S.showFilters = true; clearF(); clearSelection(); layout(); }
+let prevPanel = {};
+function renderPanelSoon() { clearTimeout(renderPanelSoon.t); renderPanelSoon.t = setTimeout(renderPanel, 30); }
+function accessKeyReport() {
+  const els = [...UI.client.querySelectorAll('[data-ak]')].filter(el => el.offsetParent !== null && !el.closest('.menu'));
+  const seen = {}; for (const el of els) { const k = el.dataset.ak; if (!k) continue; const name = plain(el.textContent).trim().slice(0, 22); (seen[k] = seen[k] || []).push(name); }
+  const menu = MENUBAR.map(m => akOf(t(m.k)));
+  const dup = Object.entries(seen).filter(([k, v]) => new Set(v).size > 1 || menu.includes(k));
+  return { count: Object.keys(seen).length + menu.length, dup };
+}
+function renderPanel() {
+  const P = document.getElementById('panel');
+  if (!UI.win) return;
+  const m = minSize();
+  const fitPx = (screenH) => Math.ceil(m.h * S.scale) <= screenH - 40;
+  const focus = document.activeElement;
+  const focusName = !focus || focus === document.body ? '(none)' : focus === UI.search ? 'search box' : focus === UI.lv ? 'results list' : (focus.getAttribute('role') || focus.tagName.toLowerCase()) + ': ' + plain(focus.textContent || focus.value || '').trim().slice(0, 30);
+  const sel = S.selection.kind === 'files' ? `${fmtInt(S.selection.entries.length)} files (read)` : S.selection.kind === 'reading' ? `reading ${fmtInt(S.selection.positions.length)} rows` : 'none';
+  const st = statusTexts();
+  const ak = accessKeyReport();
+  const fields = {
+    'Search text': S.text ? `"${S.text}"` : '(empty)',
+    'Filter clauses': filterClauses(S.F).join(' ') || '(none)',
+    'Shown': S.shown.kind === 'rows' ? `${fmtInt(S.shown.rows.length)} rows of ${fmtInt(S.shown.total)}` : S.shown.kind === 'message' ? `message: ${S.shown.msg.type}${S.shown.msg.d ? ' ' + S.shown.msg.d : ''}` : 'nothing yet',
+    'In flight': Object.entries(S.inflight).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none',
+    'Cached rows': [...S.chunks.keys()].sort((a, b) => a - b).map(c => `${fmtInt(c * CHUNK)}–${fmtInt(c * CHUNK + CHUNK - 1)}`).join(', ') || 'none',
+    'Selection': sel,
+    'Focus': focusName,
+    'Status 1–4': st.map(s => s || '·').join(' | '),
+    'Min. window': `${m.w} × ${m.h} px at 100 % → ${Math.ceil(m.w * S.scale)} × ${Math.ceil(m.h * S.scale)} px at ${S.scale * 100} %`,
+    'Fits 1920×1080?': fitPx(1080) ? '<span class="good">yes</span>' : `<span class="bad">no: needs ${Math.ceil(m.h * S.scale)} px of about 1,040</span>`,
+    'Access keys': `${ak.count} letters in use (menu bar included)` + (ak.dup.length ? ` — <span class="bad">clashes: ${ak.dup.map(([k, v]) => k.toUpperCase() + ' (' + v.join(', ') + ')').join('; ')}</span>` : ' — <span class="good">no clash</span>'),
+  };
+  const rows = Object.entries(fields).map(([k, v]) => `<tr><td>${k}</td><td class="${prevPanel[k] !== undefined && prevPanel[k] !== v ? 'changed' : ''}">${v.startsWith('<span') || v.includes('<span') ? v : esc(v)}</td></tr>`).join('');
+  prevPanel = fields;
+  if (!P._built) {
+    P._built = true;
+    P.innerHTML = `<h1>gozler-ui prototype</h1>
+      <p>Throwaway. It draws the window that <b>ui-spec.md</b> specifies, as Windows 11 draws common controls, on 260,000 synthetic entries with daemon-like delays. The question: does each screen, label, group, key and state pass the owner's review before stage 1 builds it?</p>
+      <p>It imitates Win32 and proves nothing about it: UI Automation, real DPI scaling and IsDialogMessageW stay for the real window.</p>
+      <h2>Display</h2>
+      <div class="row2"><span>Scale</span><button data-scale="1">100 %</button><button data-scale="1.5">150 %</button>
+        <label><input type="checkbox" id="hcbox"> High contrast</label></div>
+      <div class="row2"><span>Language</span><button data-lang="default">Windows default</button><button data-lang="en">English</button><button data-lang="qps-ploc">Pseudo</button></div>
+      <h2>Daemon and environment</h2>
+      <div class="row2"><select id="dsel">${Object.entries(DAEMON).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select><button id="dgo">Search now</button></div>
+      <div class="row2"><button id="psc">Press the shortcut in another program</button><button id="pact">Switch to gozler from another program</button></div>
+      <div class="row2">
+        <label><input type="checkbox" data-flag="cIndexing"> C:\\ indexing</label><label><input type="checkbox" data-flag="dOffline"> D:\\ offline</label>
+        <label><input type="checkbox" data-flag="dMeta"> D:\\ sizes/dates unknown</label><label><input type="checkbox" data-flag="slow"> Slow replies (2 s)</label>
+        <label><input type="checkbox" data-flag="hold"> Hold every reply</label><label><input type="checkbox" data-flag="exportFails"> Next export fails</label>
+        <label><input type="checkbox" data-flag="filesGone"> Files no longer exist</label><label><input type="checkbox" data-flag="clipBusy"> Clipboard busy</label>
+        <label><input type="checkbox" data-flag="settingsFail"> Settings cannot be saved</label><label><input type="checkbox" data-flag="noTC"> No Total Commander</label></div>
+      <h2>States and scenarios</h2><div class="row2" id="scen"></div>
+      <h2>Model state</h2><table id="ptab"></table>
+      <h2>Event log</h2><div id="log"></div>
+      <h2>Try</h2><p>Tab and Shift+Tab; Alt alone, then arrows; Alt+F, Alt+A (Match), Alt+C, Alt+P, Alt+K (Kind), Alt+O (Location); Down from the search box; Shift+arrows and Ctrl+A in the list; Shift+F10; F1; Ctrl+, (Settings; on Keyboard, press a shortcut; Ctrl+Alt+T stands for one that another program holds); Alt+Enter; Ctrl+Enter; right-click the header; drag the splitter, the column edges and the window corner.</p>`;
+    P.querySelectorAll('[data-scale]').forEach(b => b.onclick = () => { S.scale = +b.dataset.scale; layout(); renderPanel(); });
+    P.querySelector('#hcbox').onchange = e => { S.hc = e.target.checked; document.body.classList.toggle('hc', S.hc); renderRows(); };
+    P.querySelectorAll('[data-lang]').forEach(b => b.onclick = () => setLanguage(b.dataset.lang));
+    P.querySelector('#dsel').onchange = e => { S.daemon = e.target.value; log('daemon: ' + DAEMON[S.daemon]); renderPanel(); };
+    P.querySelector('#dgo').onclick = () => runSearch('panel');
+    const pact = P.querySelector('#pact'); pact.onmousedown = e => e.preventDefault();
+    pact.onclick = () => { if (UI.win.hidden) { log('the window is hidden: there is nothing to switch to'); return; }
+      if (S.settings.actSel) { UI.search.focus(); UI.search.select(); log('activated: the search box has the focus, its text selected'); } else log('activated: the focus stays where it was'); };
+    P.querySelector('#psc').onclick = () => { if (S.settings.hotkey) showWindow(hotkeyShort(S.settings.hotkey)); else log('no shortcut is set: the key goes to the other program'); };
+    P.querySelectorAll('[data-flag]').forEach(c => c.onchange = () => { S[c.dataset.flag] = c.checked; if (c.dataset.flag === 'hold' && !c.checked) releaseHold(); if (c.dataset.flag === 'settingsFail') S.settingsWarned = false; log(`${c.dataset.flag}: ${c.checked}`); syncFilterControls(); update(); });
+    const sc = P.querySelector('#scen');
+    for (const [name, fn] of SCEN) { const b = h('button', {}, name); b.onclick = () => { resetForScenario(); releaseHold(); fn(); log('scenario: ' + name); update(); syncPanelInputs(); }; sc.append(b); }
+  }
+  P.querySelector('#ptab').innerHTML = rows;
+  P.querySelector('#log').textContent = S.log.join('\n');
+  syncPanelInputs();
+}
+function syncPanelInputs() {
+  const P = document.getElementById('panel');
+  P.querySelector('#dsel').value = S.daemon;
+  P.querySelectorAll('[data-flag]').forEach(c => c.checked = !!S[c.dataset.flag]);
+}
+
+// ---------- prototype chrome ----------
+document.getElementById('vpanel').onclick = () => { document.body.classList.toggle('nopanel'); if (S.win.maxed) layout(); };
+
+// ---------- start ----------
+setTimeout(() => {
+  makeCorpus();
+  // Location lists every indexed volume from Status.
+  S.F.locItems = [{ path: 'C:\\' }, { path: 'D:\\' }];
+  build(); applyIndexSettings(); wireTray(); updateTray(); setLanguage('default');
+  layout(); syncFilterControls(); update();
+  document.getElementById('loading').remove();
+  UI.search.focus({ preventScroll: true });
+  runSearch('start');
+  window.addEventListener('resize', () => { if (S.win.maxed) layout(); });
+}, 30);
+</script>
+</body>
+</html>
