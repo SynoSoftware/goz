@@ -1,6 +1,6 @@
 # Specs: es superset
 
-goz as a compatible superset of goz v0.2.0, with the Everything commands we
+gozler as a compatible superset of goz v0.2.0, with the Everything commands we
 need on top.
 
 The schedule and the order of work are in
@@ -8,7 +8,7 @@ The schedule and the order of work are in
 
 ## Goal
 
-Make goz the dependable file finder for people and agents. It keeps every
+Make gozler the dependable file finder for people and agents. It keeps every
 command-line name of goz v0.2.0, fixes the behavior that is wrong, and adds
 the Everything (`es.exe`) commands we need on top. Internals may be refactored
 freely; this is not a smallest-change plan.
@@ -28,26 +28,26 @@ mustafaahci/goz).
   match, which floods the context of an agent or the screen of a person who
   forgets `-n` on a volume of a million files. 20 rows plus the command, the
   warning and the next prompt fit one screen of a 25-line console. With no
-  `-n`, goz prints at most 20 rows to stdout; when more exist, stderr says
+  `-n`, gozler prints at most 20 rows to stdout; when more exist, stderr says
   `gozler: warning: showing 20 of 1,234,567 matches; narrow the query or pass -n all`
   and the exit code is 10. `-n all` prints every match. `-export-*` writes to
   a file, which floods nothing, so it exports every match unless `-n` is given.
   `-n 0` prints nothing and exits 10 when anything matches. Counts
   (`-get-result-count` and the size totals) cover every match, unlike es, where
   `-get-result-count` honors `-n`.
-- New features follow goz's style: an es switch keeps es's name, aliases and
-  single-dash form; a goz-only option goes behind `--`, as `--json` does.
+- New features follow gozler's style: an es switch keeps es's name, aliases and
+  single-dash form; a gozler-only option goes behind `--`, as `--json` does.
   Messages use `gozler: <error>` and `gozler: warning: <text>`.
 - **Owner decision: neither v0.2.0 nor es decides behavior.** They supply the
   names and the starting behavior; where either is wrong or worse for the
-  user, goz fixes it, and the help lists every difference from es (below).
+  user, gozler fixes it, and the help lists every difference from es (below).
 
 ### Differences from es
 
-Scripts written for es need to know where goz answers differently. The help's
+Scripts written for es need to know where gozler answers differently. The help's
 NOTES print this list from one table in `goz-core`, so it cannot fall behind:
 
-| es | goz | Why |
+| es | gozler | Why |
 | --- | --- | --- |
 | CSV is Filename, Size, Date, with locale dates | Size, Date, Filename, with ISO dates | v0.2.0's layout; scripts parse ISO dates without knowing the locale |
 | An unknown function such as `dc:` is searched as text and matches nothing | exit 4 (bug 2) | a silent empty answer looks valid |
@@ -126,7 +126,7 @@ All names come from Everything's command-line and search-syntax
 documentation, and every one exists in `es.exe -help` 1.1.0.37 on this
 machine. Before building one, check its behavior in Everything's
 documentation; never run `es.exe` (owner ruling). Copy that behavior when it
-is right, fix it when it is not, and write the test for the behavior goz
+is right, fix it when it is not, and write the test for the behavior gozler
 chose.
 
 ### Switches
@@ -250,7 +250,7 @@ SWITCHES
   -timeout MS         wait up to MS for indexing volumes before searching
   -h, -help, -version
 
-GOZ OPTIONS
+GOZLER OPTIONS
   --json              results as JSON
   --status [--json]   daemon and volume state
   --insecure-no-server-check   skip the daemon trust check (testing only)
@@ -382,11 +382,11 @@ Created and accessed dates (the index does not hold them), content search
 highlighting, and the size and date format menus. Add one when a concrete
 need appears.
 
-From the filefinder plan, these do not fit goz: its `/NAME:value` switch
+From the filefinder plan, these do not fit gozler: its `/NAME:value` switch
 grammar, `/F`, `/D`, `/EXT:` and `/NOT:` lists, the `AND`/`OR`/`NOT` keyword
 grammar, exact-path lookups keyed on a trailing separator, results filtered by
-the caller's file permissions (goz's trust model shows metadata to every local
-user), the scheduled-task install and tray icon (goz has its service), and
+the caller's file permissions (gozler's trust model shows metadata to every local
+user), the scheduled-task install and tray icon (gozler has its service), and
 staging all output before printing (exit codes 2 and 7 already mark a late
 failure).
 
@@ -404,9 +404,9 @@ are settled from that documentation too, because `es.exe` is no longer run.
 - The twelve bug commands give the fixed results in the table, and every exit
   path maps to one code in the exit-code table.
 - A new `gozler` against the old daemon exits 7 with the version message.
-- `gozler -help` lists every switch, function and exit code goz accepts, and each
+- `gozler -help` lists every switch, function and exit code gozler accepts, and each
   listed switch, function and example parses.
-- Every new command has a test for the behavior goz chose, each difference
+- Every new command has a test for the behavior gozler chose, each difference
   from es is a row of the differences table and a line of the help, and the
   full CI set from `AGENTS.md` passes.
 - `C:\Users\user\.claude\goz.md` drops its warnings and lists the new syntax.

@@ -1,12 +1,12 @@
-# goz
+# gozler
 
-goz is an instant filename search for Windows NTFS: an elevated daemon
+gozler is an instant filename search for Windows NTFS: an elevated daemon
 (`gozlerd`) indexes the MFT and serves queries over `\\.\pipe\goz-v1` to an
 `es.exe`-compatible client (`gozler`). Each crate's `lib.rs` or `main.rs` opens
 with a doc comment that explains its design; read it before you change the
 crate.
 
-The plans in `docs/plans/` set where goz is going and outrank filed issues;
+The plans in `docs/plans/` set where gozler is going and outrank filed issues;
 each plan says when it is scheduled. Read them before you change command-line
 behavior, query syntax, output or exit codes, or before you act on an issue.
 
@@ -89,11 +89,12 @@ change must keep passing, so a test earns its place by the failure it watches.
   other workspace crate (`deny.toml`).
 - **The command line.** Scripts written for Everything or for goz v0.2.0 change
   only the program name, to `gozler`: every switch keeps its name and purpose,
-  and goz's own options start with `--`. `docs/plans/es-superset-specs.md` decides where goz
-  departs from `es.exe`, such as the exit codes, the CSV columns and the
-  default result limit. The rules live in `goz_core::escompat` (arguments),
-  `goz_core::output::csv` (CSV), `goz_core::query::parse` (query syntax) and
-  `goz-cli`'s `main.rs` (runtime exit codes).
+  and gozler's own options start with `--`. `docs/plans/es-superset-specs.md`
+  decides where gozler departs from `es.exe`, such as the exit codes, the CSV
+  columns and the default result limit. The rules live in
+  `goz_core::escompat` (arguments), `goz_core::output::csv` (CSV),
+  `goz_core::query::parse` (query syntax) and `goz-cli`'s `main.rs` (runtime
+  exit codes).
 - **Truthful volume state.** A client must always be able to tell whether its
   results are complete. Read the coherence section of `docs/DESIGN.md` before
   you change how the index tracks a volume.
@@ -106,12 +107,12 @@ change must keep passing, so a test earns its place by the failure it watches.
 - **The pipe trust check.** Read `docs/SECURITY.md` before you change the pipe,
   elevation or the server-owner check.
 - **The running daemon.** The daemon installed on this machine owns
-  `\\.\pipe\goz-v1`, and other tools search through it. Ask the owner before you stop, replace or
-  reinstall it.
+  `\\.\pipe\goz-v1`, and other tools search through it. Ask the owner before
+  you stop, replace or reinstall it.
 
 ## Before you finish
 
-This file owns goz's build and test rules, also where a parent repository's
+This file owns gozler's build and test rules, also where a parent repository's
 instructions differ.
 
 Builds share the machine with interactive work and other agents, and a first

@@ -1,7 +1,7 @@
 # Plan: es superset
 
 The order in which to build [the es superset specs](es-superset-specs.md). The
-specs decide what goz does; this plan decides the order and how each stage
+specs decide what gozler does; this plan decides the order and how each stage
 proves it is done.
 
 ## Schedule
@@ -22,7 +22,7 @@ stage starts is done.
 
 - A stage is done when the full CI set from `AGENTS.md` passes and every item
   of its **Done when** is proven. Each new switch, function and exit code has
-  a test for the behavior goz chose, and its table row, so the generated help
+  a test for the behavior gozler chose, and its table row, so the generated help
   and its parse-everything test cover it. Each new difference from es gets
   its row in the differences table.
 - Stages 1 to 3 change only what the client does; stage 2 also moves one

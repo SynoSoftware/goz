@@ -2,7 +2,7 @@
 
 ## Trust model
 
-goz has the same trust model as Everything. Stated plainly:
+gozler has the same trust model as Everything. Stated plainly:
 
 - The daemon runs **elevated** and builds its index from a raw NTFS MFT read, which bypasses per-file NTFS ACLs. The index therefore contains the name, size, and timestamps of every file on every tracked volume, regardless of who can normally read them.
 - The query pipe (`\\.\pipe\goz-v1`) grants **Authenticated Users** read/write, so any authenticated local user can query the index. It exposes only that metadata, never file contents. On a shared machine, treat filenames as visible to all local users.

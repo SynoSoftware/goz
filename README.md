@@ -1,13 +1,13 @@
-# goz
+# gozler
 
 [![CI](https://github.com/mustafaahci/goz/actions/workflows/ci.yml/badge.svg)](https://github.com/mustafaahci/goz/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#requirements)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](rust-toolchain.toml)
 
-**goz** *(göz, pronounced /ɟøz/)* is an instant file-search engine for Windows NTFS, written in Rust. A fast, open-source alternative to voidtools Everything.
+**gozler** *(gözler, Turkish for "eyes")* is an instant file-search engine for Windows NTFS, written in Rust. A fast, open-source alternative to voidtools Everything. It grew out of goz (göz, "eye"), as vim grew out of vi.
 
-goz indexes every filename on your fixed NTFS volumes and answers substring queries in single-digit milliseconds, from the command line or from your own tools over a named pipe.
+gozler indexes every filename on your fixed NTFS volumes and answers substring queries in single-digit milliseconds, from the command line or from your own tools over a named pipe.
 
 ## Highlights
 
@@ -101,7 +101,7 @@ goz wins the resident-RAM rows that matter for a background daemon and edges out
 
 ## How it works
 
-goz is a small workspace of four crates: a pure, OS-agnostic core (parsing, index, query engine), a thin `unsafe` Win32 layer, an indexing daemon, and a CLI client. The design notes, including how the index stays coherent and how hard-link reconciliation works, are in [docs/DESIGN.md](docs/DESIGN.md).
+gozler is a small workspace of four crates: a pure, OS-agnostic core (parsing, index, query engine), a thin `unsafe` Win32 layer, an indexing daemon, and a CLI client. The design notes, including how the index stays coherent and how hard-link reconciliation works, are in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Security
 
