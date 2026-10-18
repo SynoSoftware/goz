@@ -21,6 +21,9 @@ pub(crate) enum Failure {
     ArgumentNotUnicode(String),
     /// The query cannot run as written.
     Query(QueryError),
+    /// The folder a search is scoped to does not exist, so an empty answer
+    /// would read as "no such file" instead of "wrong folder".
+    MissingFolder(String),
     /// The `-export-*` file cannot be created.
     ExportCreate { path: String, error: io::Error },
     /// Writing the results, the status or the help failed; `to` is the export
@@ -50,7 +53,9 @@ impl Failure {
     pub(crate) fn exit_code(&self) -> ExitCode {
         match self {
             Failure::Argv(fatal) => fatal.exit_code,
-            Failure::ArgumentNotUnicode(_) | Failure::Query(_) => ExitCode::InvalidInput,
+            Failure::ArgumentNotUnicode(_) | Failure::Query(_) | Failure::MissingFolder(_) => {
+                ExitCode::InvalidInput
+            }
             Failure::ExportCreate { .. } | Failure::Output { .. } => ExitCode::OutputFailed,
             Failure::DaemonNotRunning(_) | Failure::NotWindows => ExitCode::DaemonNotRunning,
             Failure::DaemonNotReady => ExitCode::Communication,
@@ -83,6 +88,7 @@ impl Failure {
                     eprintln!("gozler: run gozler --help-full for every search function");
                 }
             }
+            Failure::MissingFolder(folder) => eprintln!("gozler: {folder} does not exist"),
             Failure::ExportCreate { path, error } => {
                 eprintln!("gozler: cannot create {path}: {error}")
             }
