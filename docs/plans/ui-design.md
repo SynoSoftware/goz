@@ -99,7 +99,7 @@ during the work; the rules here change only by a design decision.
 | `native-windows-gui` | rejected | no release since September 2022 |
 | Messages and an update function (Elm style), with a view diffed against the controls | rejected | the list asks for each cell's text inside `LVN_GETDISPINFO` and needs the answer before it returns, so it cannot wait for an update cycle; a diffing layer is a GUI framework |
 | A general command list that handlers return and one applier runs | rejected | the same `LVN_GETDISPINFO` constraint; the core's typed return values (`Accepted` and `Fetch`) already tell each handler what to do |
-| A widget trait hierarchy with a layout engine | rejected | the window has one fixed layout and five small dialogs; the hierarchy would be more code than the window |
+| A widget trait hierarchy with a layout engine | rejected | the window has one fixed layout and six small dialogs; the hierarchy would be more code than the window |
 | **Core, thin `win` layer, `.rc` resources** | **chosen** | the least code that keeps the failures below out by construction |
 
 ### Rules that keep the first version from needing a rewrite
@@ -271,6 +271,7 @@ handles.
 | Which part of a name or path a search matched, for the bold part of a cell | `gozler-core`'s matching, which returns the ranges of each match; the window asks only for the visible rows and draws them with `NM_CUSTOMDRAW` |
 | `dm:` resolution with the local clock and time zone | `gozler_core::query::dates` |
 | The size words' ranges | one table in `gozler-core` that the parser and the filter pane both read |
+| A folder's size: the sum of the known sizes of the files below it | `gozlerd`'s index, which keeps it for each folder and sends it as the folder's size; `size:`, the size sort and the output read it as they read a file's size |
 | The search syntax that Help > Search syntax shows | `gozler_core::escompat::search_syntax`, beside `help`, which renders the search terms, `SEARCH_FUNCTIONS` and the attribute `LETTERS` with the sections of the full reference, without color; the dialog shows its text |
 | Whether a volume's results are complete | `VolumePhase::is_complete` |
 | Pipe server owner check, version handshake, the service's state | `gozler-client`, with `gozler-winfs` |
@@ -300,6 +301,18 @@ Changes these need:
   handshake. The window's Regular expression mode is the existing `-r`.
 - The size ranges move out of the `match` in `parse_size` into a table that
   the parser reads, with no change to what `size:` means.
+- **Folder sizes** (spec: Results list). Each volume's index keeps one sum
+  for each folder: the known sizes of every file below it, each name of a
+  hard-linked file counted, as `-get-folder-size` counts today. The size and
+  date pass computes the sums when it ends; until then a folder's size is
+  unknown, as its files' sizes are. Every later journal change keeps them
+  exact: a file created, deleted or resized changes each folder above it by
+  the difference, and a moved file or folder moves its size from the old
+  folders above it to the new ones. A results row already carries a size
+  for any item (`proto::binary`'s `has_size`), so the layout does not
+  change. The engine's size test and the size sort read a folder's sum as
+  they read a file's size; the totals still add files only, because a
+  folder's size is already the sum of its files.
 - `QueryError::Malformed` carries a typed reason in place of its `detail`
   string, so the window can say in every language what is wrong and how to
   fix it. Its `Display` writes the same English as today, so `gozler`'s
@@ -347,7 +360,7 @@ The UI thread never waits for the pipe. Each request runs on its own thread
 - The window asks for status every 2 seconds while `Model::polls_status` says
   so: the service is not running, runs but does not answer yet, or the
   connection was lost, a volume in scope
-  is bootstrapping or rescanning, or the Settings Index category is shown. One
+  is bootstrapping or rescanning, or the Settings Index page is shown. One
   timer serves every reason.
 - A results page carries only the combined flags `volumes_incomplete` and
   `metadata_pending`. When a page sets a flag that the latest status does not
@@ -576,7 +589,7 @@ gozler-ui/src
 │  └─ wake.rs        Waker
 └─ app/              cfg(windows); safe Rust
    ├─ main_window.rs MainWindow and its message handlers
-   ├─ dialogs.rs     Settings, Custom date, Custom size, Search syntax, About
+   ├─ dialogs.rs     Settings, the command shortcut dialog, Custom date, Custom size, Search syntax, About
    ├─ icons.rs       the system image index for each extension
    └─ requests.rs    Requests: one thread per Fetch, the cancel tokens, the reply channel
 ```
@@ -597,7 +610,9 @@ script, and the window needs an icon and version information in any case.
 Windows SDK's `rc.exe`, and skips it on other targets. The script holds no
 text, because English has one source, `en.json` (rule 12). It holds:
 
-- the Settings, Custom date, Custom size, Search syntax and About dialogs, as
+- the Settings dialog and its pages, the command shortcut dialog (Settings >
+  Keyboard, Add… and Edit…), and the Custom date, Custom size, Search syntax
+  and About dialogs, as
   `DIALOGEX` templates with control IDs and empty captions. `DialogBoxParamW`
   then gives the modal loop, the Tab order, `Enter` and `Esc`, and
   per-monitor DPI scaling, which Windows applies to template dialogs. The
@@ -812,9 +827,9 @@ fonts are freed only when that call returns, after every control is gone.
 `run_modal` with a dialog state that holds the copy and a `&MainWindow`. While
 the dialog runs, Windows disables the main window, and the accelerators do not
 run, but replies still reach the main window, which handles them as usual
-(rule 1). When the Index category is shown or hidden, it tells the model
+(rule 1). When the Index page is shown or hidden, it tells the model
 through the `&MainWindow`, and the main window sets or kills its status timer
-from `polls_status`. The category keeps its own 2-second timer only to show
+from `polls_status`. The page keeps its own 2-second timer only to show
 the model's latest status. Apply and OK check the input (spec: Dialogs), then
 call a `MainWindow` method that gives the copy to the model and saves it.
 

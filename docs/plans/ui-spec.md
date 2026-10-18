@@ -178,8 +178,11 @@ alone while the search is empty.
   slightly darker button.
 - **The modes apply to name terms.** A path term, a wildcard and a search
   function keep their own meaning, so `ext:pdf para` finds PDF files with a
-  word that starts with `para`. With Match path, a mode applies to the full
-  path instead of the name.
+  word that starts with `para`, and in Start of name `docs\agents` still
+  finds the files below that folder. Whole words is `-ww`, which `gozler`
+  already applies to path terms too, so it keeps that rule and the window
+  and `gozler -ww` agree. With Match path, a mode applies to the full path
+  instead of the name.
 - **Start of words** is the rule of the owner's SearchHelper: each term must
   match where a word of the name starts, in any order, so `para 50` finds
   `Paracetamol 500mg.pdf`. A word starts at the start of the name or after a
@@ -223,11 +226,21 @@ alone while the search is empty.
 | --- | --- | --- | --- |
 | Name | shown, cannot be hidden | `name` | the name, with the icon of its extension |
 | Path | shown | `path` | the folder of the full path |
-| Size | shown | `size` | the size in KB, rounded up, as File Explorer shows it ("1,234 KB"), so sizes line up for comparison; empty for a folder; "Unknown" for an unknown size |
+| Size | shown | `size` | the size in KB, rounded up, as File Explorer shows it ("1,234 KB"), so sizes line up for comparison; for a folder, the size of every file below it (see "Folder sizes"); "Unknown" for an unknown size |
 | Date modified | shown | `dm` | local date and time, in the Windows short date and time format |
 | Extension | hidden | `extension` | the extension; empty for a folder |
 | Attributes | hidden | (not sortable) | the attribute letters, as `gozler` prints them |
 
+- **Folder sizes.** A folder's size is the sum of the known sizes of every
+  file below it, the number `gozler -get-folder-size` gives, as in
+  Everything with "Index folder size" on. The service keeps it for every
+  folder, always: about 8 bytes a folder, 2.2 MB for the 270,137 folders on
+  the owner's machine, against 196 MB for the whole index, so it needs no
+  setting. Because the window answers as `gozler` does ("Goal"), the service
+  and `gozler` change with it: the Size column, `-size` and exports show it,
+  `size:` tests it and the size sort orders folders by it. `-get-total-size`
+  and `-get-folder-size` still add files only, because a folder's size is
+  already the sum of its files. Stage 1 of the plan builds it.
 - **The matched part of a name or path is bold,** as in Everything, so the
   person sees why a row matched: `para 50` makes "Para" and "50" bold in
   `Paracetamol 500mg.pdf`. `gozler-core` gives the matched ranges for the
@@ -430,11 +443,11 @@ row's last column names its check; the design's model tests use the same IDs.
 | T7 | The selection changes while a folder's size is calculated | the inspector shows the new selection | unchanged | the old size request is cancelled | core test; stage 6 |
 | T8 | An export ends while a search runs | part 3 shows the export's result; part 1 still says Searching… | Export results… returns | none | core test; stage 4 |
 | T9 | An export fails | a message box names the file and Windows' reason; part 3 is cleared | Export results… returns | the partial file is deleted | core test; stage 4 |
-| T10 | The service stops while the Settings dialog is open | the dialog stays open and usable; its Index category shows the failure; the main window shows the failure behind it | unchanged | the status poll runs | core test; after install |
+| T10 | The service stops while the Settings dialog is open | the dialog stays open and usable; its Index page shows the failure; the main window shows the failure behind it | unchanged | the status poll runs | core test; after install |
 | T11 | New results arrive while the context menu is open | the menu stays open | a command chosen from it acts on the selection when it is chosen; if the selection was cleared meanwhile, it does nothing | none | core test |
 | T12 | The language changes | every caption changes; nothing else does | unchanged | none; no search runs | stage 8 |
 | T13 | The window moves to a monitor with another DPI | the layout and fonts scale; nothing else changes | unchanged | none | after install |
-| T14 | gozler exits while work runs: Exit, or Close with no shortcut set | the window closes at once | — | every request is cancelled; a partial export is deleted; the settings are saved | stage 3, stage 4 |
+| T14 | gozler exits while work runs: Exit, or Close with "Keep gozler running in the notification area" off | the window closes at once | — | every request is cancelled; a partial export is deleted; the settings are saved | stage 3, stage 4 |
 
 ## Journeys
 
@@ -648,14 +661,13 @@ appearance settings.
 | | | Select the search text when gozler is activated | check box | off; on: switching to gozler puts the focus in the search box with its text selected |
 | Keyboard | Show gozler | Shortcut to show gozler from any program | hotkey control and a "Windows key" check box | none |
 | | Commands | Show commands containing | edit box that filters the list | empty |
-| | | every command of "Commands", as "Menu > Command" | list | — |
+| | | every command of "Commands" that is one item of the menu bar or the context menu, as "Menu > Command" | list | — |
 | | | Shortcuts for the selected command | list, Add…, Edit…, Remove | the "Key" column of "Commands" |
-| Index | Drives | one row per fixed NTFS drive, with its state and its entry count | list view | — |
-| | What the index holds | names, sizes, dates modified and attributes | text: always held, because the search and the filters need them | — |
-| | | Dates created | check box; adds the Date created column and the `dc:` search function | off, because it costs service memory |
-| | | Folder sizes | check box; a folder's Size column shows the size of everything below it | off, because it costs service memory |
+| Index | Drives | one row per fixed NTFS or ReFS drive, with its state and its entry count | list view | — |
+| | What the index holds | names, sizes, folder sizes, dates modified and attributes | text: always held, because the search, the filters and the Size column need them | — |
+| | | Dates created (service settings plan) | check box; adds the Date created column and the `dc:` search function | off, because it costs service memory |
 | | Service | the service's state and memory, and `gozler --status` for the full report | text | — |
-| | | Rebuild index | button with the administrator shield | — |
+| | | Rebuild index (service settings plan) | button with the administrator shield | — |
 | Include | — | the preview line: entries indexed now and after OK | text at the top of the page | — |
 | | Folders | Folders gozler indexes: each indexed folder and the folders left out inside it | list view, read-only | every drive, nothing left out |
 | | | Modify… | button: opens Indexed folders, the folder tree with check boxes | — |
@@ -679,6 +691,14 @@ appearance settings.
   administrator permission." The service settings
   plan owns how the service stores, checks and applies them; it is not
   written yet.
+- **What waits for the service settings plan:** the Include page, and the
+  Index page's Dates created and Rebuild index, because each needs a
+  service request that does not exist yet, and Dates created adds a search
+  function that `gozler` does not have ("Goal"). Until that plan is built,
+  Settings shows General, Search, Keyboard and the Index page without those
+  two controls: the drives, their states and entry counts, what the index
+  holds, and the service's state and memory. Anyone can read it, so it
+  needs no administrator permission.
 - **What a service change does at once:** an unchecked drive or folder
   loses its entries and the service frees their memory; a drive or folder
   checked again is read and shows "indexing" until it is complete; a name
@@ -708,7 +728,7 @@ is indexed.
   one place, so no choice is hidden deep in a tree. It is read-only, as in
   Windows; Modify… changes it.
 - **Modify… opens Indexed folders,** Windows' "Indexed Locations" dialog:
-  - a tree of each fixed NTFS drive and its folders, opened one level deep
+  - a tree of each fixed NTFS or ReFS drive and its folders, opened one level deep
     so the folders to uncheck are in view. A checked folder is indexed with
     everything below it; an unchecked one is left out. A partial check box
     means that some folders below it differ;
@@ -781,8 +801,11 @@ that works from any program, and the shortcuts of the window's commands.
 
 **Command shortcuts**
 
-- The list shows every command of "Commands" as its menu and its name, such
-  as "Edit > Find", with its shortcuts after it. Typing in "Show commands
+- The list shows every command of "Commands" that is one item of the menu
+  bar or the context menu, as its menu and its name, such as "Edit > Find",
+  with its shortcuts after it. A submenu of choices, such as Columns, Sort
+  by or Language, the match controls, Clear filters and the tray's Show
+  window take no command shortcut; the shortcut to show gozler is above. Typing in "Show commands
   containing" keeps only the commands whose name or shortcut contains the
   text, so `ctrl+e` finds the command that has it.
 - **Add…** and **Edit…** open a small dialog with one hotkey control. A
@@ -867,7 +890,7 @@ that works from any program, and the shortcuts of the window's commands.
 
 ### The Index page
 
-- The drive list shows each fixed NTFS drive by its mount prefix and label,
+- The drive list shows each fixed NTFS or ReFS drive by its mount prefix and label,
   such as "C:\ Windows", with its state (live, indexing, offline, not
   indexed, when nothing on it is checked) and its entry count. What is
   indexed is decided on the Include page. A drive that is offline keeps its
@@ -875,17 +898,17 @@ that works from any program, and the shortcuts of the window's commands.
   lost.
 - The page refreshes its states and counts every 2 seconds while it is
   shown.
-- **Dates created and folder sizes** are off by default, because each adds
-  memory per entry to the service. The page shows the service's memory, so
-  the person sees the cost after they turn one on.
+- **Dates created** is off by default, because it adds memory per entry to
+  the service. The page shows the service's memory, so the person sees the
+  cost after they turn it on. Folder sizes cost about 8 bytes a folder, so
+  they are always held ("Results list").
 - **Rebuild index** makes the service read every included drive again, as
   after a restart. It acts at once, so the button itself has the shield and
   asks Windows for permission. It is for an index the person no longer trusts; the
   service keeps itself current without it. While it runs, the drives show
   "indexing" and searches give incomplete results, as status part 4 says.
 - **Removable drives, network drives and other filesystems are not in the
-  list,** because the service does not index them (DESIGN.md); ReFS is
-  [SynoSoftware/goz#52](https://github.com/SynoSoftware/goz/issues/52).
+  list,** because the service does not index them (DESIGN.md).
 
 ### Everything's options, one by one
 
@@ -938,7 +961,7 @@ what gozler finds or does, and gozler does not already decide it.
 | Indexes | Force Rebuild | Index: Rebuild index |
 | Indexes | Index recent changes | no |
 | Indexes | Index file size, date modified, attributes | always, because the search and the filters need them |
-| Indexes | Index folder size | Index: Folder sizes |
+| Indexes | Index folder size | always: a folder's size is the sum of its files ("Results list") |
 | Indexes | Index date created | Index: Dates created |
 | Indexes | Index date accessed | no: Windows can turn its updates off (`NtfsDisableLastAccessUpdate`), so it can mislead |
 | Indexes | Fast size, date, attribute, path and extension sorts | no: gozler sorts each search's results by any column |
@@ -948,10 +971,10 @@ what gozler finds or does, and gozler does not already decide it.
 | NTFS | Remove offline volumes | always: an offline drive keeps its row and shows "offline" |
 | NTFS | Include only (per volume) | Include: uncheck the drive, check the folders |
 | NTFS | USN journal enable, size and allocation, load recent changes, monitor changes | no: the service uses each drive's journal as Windows keeps it |
-| ReFS | ReFS volumes | not yet: [SynoSoftware/goz#52](https://github.com/SynoSoftware/goz/issues/52) |
+| ReFS | ReFS volumes | always: the service indexes fixed ReFS drives as it indexes NTFS ones |
 | Folders | Indexed folders and their rescans | no: owner decision |
 | File Lists | File lists and their editor | no: owner decision |
-| Exclude | Exclude hidden, exclude system | Include: Files |
+| Exclude | Exclude hidden, exclude system | Include: Names |
 | Exclude | Exclude list: folders and filters | Include: the folder tree and the file patterns |
 | Exclude | Include only folders | Include: the folder tree |
 | Exclude | Include only files | no: the Kind filter narrows a search to file types |
@@ -1065,7 +1088,7 @@ window runs (owner decisions 5 and 6).
 
 | Feature | Why not |
 | --- | --- |
-| Removable, ReFS and network volumes | gozler indexes fixed NTFS volumes; ReFS is [SynoSoftware/goz#52](https://github.com/SynoSoftware/goz/issues/52) |
+| Removable and network volumes | gozler indexes fixed NTFS and ReFS volumes |
 | Database location, compression | the index lives in the daemon's memory |
 | Date accessed | Windows can turn its updates off, so it can mislead; Date created is an Index setting |
 | Find duplicate files, content search, plugins | gozler searches names, paths, sizes, dates and attributes |

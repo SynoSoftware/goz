@@ -3,7 +3,8 @@
 //! generated from the vocabulary tables: [`SWITCHES`], [`SORT_KEYS`],
 //! [`SEARCH_FUNCTIONS`], the attribute [`LETTERS`] and [`ExitCode::ALL`], and
 //! from this module's examples, search terms and notes, so a row added to a
-//! table is a line of the full reference.
+//! table is a line of the full reference. [`search_syntax`] renders the
+//! full reference's search sections alone, for the window.
 
 use super::ExitCode;
 use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling};
@@ -296,14 +297,26 @@ struct Entry {
     token: ColorToken,
 }
 
+/// The search terms, the search functions and the attribute letters, without
+/// color: what a search box accepts, with nothing about options, shell
+/// quoting or exit codes. Its rows are the full reference's.
+pub fn search_syntax() -> String {
+    let mut out = String::new();
+    for section in [
+        search_terms("Search terms:"),
+        search_functions(),
+        attribute_letters("Attribute letters:"),
+    ] {
+        render_section(&mut out, &section, false);
+    }
+    // Each section starts with a blank line, which the first one does not
+    // need.
+    out.remove(0);
+    out
+}
+
 /// The full reference's sections above its notes and exit codes.
 fn full_sections() -> Vec<Section> {
-    let pairs = |table: &[(&str, &'static str)]| -> Vec<Entry> {
-        table
-            .iter()
-            .map(|&(usage, text)| entry(usage.to_string(), text))
-            .collect()
-    };
     let examples = EXAMPLES
         .iter()
         .map(|example| entry(example.usage.to_string(), example.text))
@@ -313,36 +326,16 @@ fn full_sections() -> Vec<Section> {
             usage_column: EXAMPLE_COLUMN,
             ..section("Examples:", examples)
         },
-        section(
+        search_terms(
             "Search syntax (what gozler receives; quote it for the shell as shown below):",
-            pairs(SEARCH_TERMS),
         ),
         Section {
             usage_column: EXAMPLE_COLUMN,
             ..section("Quoting in the shell:", pairs(QUOTING))
         },
+        search_functions(),
+        attribute_letters("Attribute letters (for attrib: and /a):"),
     ];
-    sections.push(section(
-        "Search functions:",
-        SEARCH_FUNCTIONS
-            .iter()
-            .map(|function| {
-                let forms: Vec<String> = function
-                    .names
-                    .iter()
-                    .map(|name| format!("{name}:{}", function.example))
-                    .collect();
-                entry(forms.join(", "), function.help)
-            })
-            .collect(),
-    ));
-    sections.push(section(
-        "Attribute letters (for attrib: and /a):",
-        LETTERS
-            .iter()
-            .map(|row| entry(row.letter.to_string(), row.meaning))
-            .collect(),
-    ));
     for (group, title) in GROUPS {
         let options = SWITCHES
             .iter()
@@ -361,6 +354,45 @@ fn full_sections() -> Vec<Section> {
         }
     }
     sections
+}
+
+fn search_terms(title: &'static str) -> Section {
+    section(title, pairs(SEARCH_TERMS))
+}
+
+fn search_functions() -> Section {
+    section(
+        "Search functions:",
+        SEARCH_FUNCTIONS
+            .iter()
+            .map(|function| {
+                let forms: Vec<String> = function
+                    .names
+                    .iter()
+                    .map(|name| format!("{name}:{}", function.example))
+                    .collect();
+                entry(forms.join(", "), function.help)
+            })
+            .collect(),
+    )
+}
+
+fn attribute_letters(title: &'static str) -> Section {
+    section(
+        title,
+        LETTERS
+            .iter()
+            .map(|row| entry(row.letter.to_string(), row.meaning))
+            .collect(),
+    )
+}
+
+/// The entries of a table of usages and their texts.
+fn pairs(table: &[(&str, &'static str)]) -> Vec<Entry> {
+    table
+        .iter()
+        .map(|&(usage, text)| entry(usage.to_string(), text))
+        .collect()
 }
 
 fn exit_codes(codes: &[ExitCode]) -> Section {

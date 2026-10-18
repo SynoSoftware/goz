@@ -7,9 +7,9 @@ implementation progresses.
 
 ## Schedule
 
-**Scheduled:** not yet. The owner sets the date. The plan needs `gozlerd`
-installed and running on the owner's machine, because the live checks search
-through it.
+**Scheduled:** started on 2026-10-18, the day the owner approved the
+prototype (stage 0). The plan needs `gozlerd` installed and running on the
+owner's machine, because the live checks search through it.
 
 ## How every stage works
 
@@ -25,9 +25,9 @@ through it.
   Exact comparisons search only the probe's fixture folder, where nothing else
   changes, and the expected answer is the fixture's own count or list and the
   answer of the `gozler.exe` of the same build. Stage 1 is the only stage
-  that changes the daemon and the protocol, for word start and name start;
-  the owner installs its build before stage 2 starts, so from then on the
-  installed `gozlerd` serves both.
+  that changes the daemon and the protocol, for word start, name start and
+  folder sizes; the owner installs its build before stage 2 starts, so from
+  then on the installed `gozlerd` serves both.
 - **Screenshots.** The probe takes a screenshot of every state that the stage
   makes reachable, in English and in the pseudo-language, at the machine's
   DPI. Each passes [the screenshot standard](#the-screenshot-standard).
@@ -135,7 +135,12 @@ window, and every later stage's screenshots are compared with its screens.
 - The owner has used the prototype and approved its screens, and each
   correction is in the spec.
 
-## Stage 1: the shared code
+## Stage 1: the shared code and folder sizes
+
+Two milestones, each reviewed and committed on its own: the shared code,
+then folder sizes. The owner installs the build after both, once.
+
+### Milestone 1: the shared code
 
 - Move the pipe client into `gozler-client`, with the service-state query,
   the scope-folder check, its own error type and the cancel check
@@ -166,9 +171,11 @@ window, and every later stage's screenshots are compared with its screens.
 - `deny.toml` and the Ubuntu CI stub cover `gozler-client`.
 
 **Done when:**
-- Both golden corpora and the parser's tests pass with no changed row or
-  message, so `gozler` behaves and writes as before. `gozler --help` prints
-  the same text as before the stage.
+- Both golden corpora pass with no changed row, and every parser message is
+  unchanged, so `gozler` behaves and writes as before. `gozler --help`
+  changes only by the rows of `wordstart:` and `startwith:`, and by the
+  `nopath:` and `regex:` rows, reworded so that they read correctly in the
+  search-only help too.
 - `search_syntax()` needs no new test: its rows are the full reference's
   rows, which `everything_the_help_lists_parses` already parses. Reading
   its text once shows the three sections and no option, quoting or exit
@@ -191,11 +198,47 @@ window, and every later stage's screenshots are compared with its screens.
   busy proves the same for the connect retries. Without the token check, the
   wait lasts 30 seconds (`READ_DEADLINE`) and the retries about 500 ms, so
   both tests can fail.
-- Against the running daemon, `gozler ext:cs -n 3`, `gozler -get-result-count
-  ext:cs`, `gozler --status` and `gozler -path X:\no-such-folder x` exit with
-  the codes they gave before the stage, and their output has the same form:
-  three full paths, one number, the same status headings, the same message.
-  The numbers are not compared, because the index changes between two runs.
+- Before install, the new `gozler` against the installed, older `gozlerd`
+  gives the version gate's refusal ("the running gozlerd is older than this
+  client; install the matching gozlerd", exit 7), because `gozler` and
+  `gozlerd` install together (DESIGN.md: "Wire protocol").
+
+### Milestone 2: folder sizes
+
+- Each volume's index keeps a size for each folder: the sum of the known
+  sizes of every file below it ([spec: Results list](ui-spec.md#results-list),
+  [design: Shared code](ui-design.md#shared-code)). The size and date pass
+  computes the sums when it ends; every journal change after it keeps them
+  exact. The daemon sends a folder's sum as its size; `size:` and the size
+  sort read it; `-get-total-size` and `-get-folder-size` still add files
+  only. It costs at most 8 bytes a folder, which `--status` shows in the
+  index memory.
+- `DESIGN.md`'s "Sizes and dates" replaces "A folder has no size, by design,
+  so `size:`, `-get-total-size` and `-get-folder-size` skip folders" with the
+  rule above, and the help and the golden corpora follow it.
+
+**Done when:**
+- A test drives one volume's index through creates, deletes, size changes,
+  moves of files and of folders, and hard links, and after each step every
+  folder's size equals the sum recomputed from its files. A `proptest` over
+  random sequences of those changes fits `AGENTS.md`'s test rules. It fails
+  if any one journal path forgets to update the folders above it.
+- An engine test: `size:>N` matches a folder whose files add up to more than
+  N; the size sort places a folder by its sum; `-get-total-size` over a
+  folder and its files counts each file once.
+- The golden corpora change only where a folder's row now shows its size,
+  and the commit message names those rows.
+
+**After install** (both milestones):
+- Against the installed `gozlerd`, `gozler ext:cs -n 3`,
+  `gozler -get-result-count ext:cs`, `gozler --status` and
+  `gozler -path X:\no-such-folder x` exit with the codes they gave before the
+  stage, and their output has the same form: three full paths, one number,
+  the same status headings, the same message. The numbers are not compared,
+  because the index changes between two runs.
+- For a folder in the probe's fixture, `gozler <folder> -size` shows the
+  same size as `gozler -get-folder-size <folder>`; after a file below it
+  grows, both show the new sum.
 
 ## Stage 2: the window, the text and the probe
 
@@ -495,9 +538,12 @@ ones the owner accepted.
   ([spec: Settings dialog](ui-spec.md#settings-dialog),
   [Window lifetime](ui-spec.md#window-lifetime),
   [Dialogs](ui-spec.md#dialogs); [design: Execution paths](ui-design.md#execution-paths)).
-- The Index and Include pages wait for the service settings
-  plan, which is not written yet; this stage builds the window's three pages
-  and shows the Index page read-only until then.
+- The Index page as [spec: Window settings and service
+  settings](ui-spec.md#window-settings-and-service-settings) says until the
+  service settings plan is built: the drives, their states and entry
+  counts, what the index holds, and the service's state and memory. The
+  Include page, Dates created and Rebuild index wait for that plan, which
+  is not written yet.
 - First, before the dialog depends on it, the keyboard hook items in
   [design: Not verified](ui-design.md#not-verified): the owner sets `Win+S`
   in a first build and presses it. Windows Search and Start stay closed,
@@ -538,17 +584,18 @@ ones the owner accepted.
   path in the spec's command and leaves Open file location alone; with no
   `TOTALCMD*.EXE` in the index, and with the service stopped, it shows the
   spec's balloons and changes no box. Covers: C6.
-- With a shortcut set, closing the window hides it and the process keeps
-  running; Show window brings it back with the search text selected; File >
-  Exit ends the process. With no shortcut, closing ends the process. The
-  probe checks the window's visibility and the process, not the tray icon,
-  because the notification area is the owner's taskbar. Covers: C7, C24.
+- With "Keep gozler running in the notification area" on, the default,
+  closing the window hides it and the process keeps running, with or
+  without a shortcut; Show window brings it back with the search text
+  selected; File > Exit ends the process. The probe checks the window's
+  visibility and the process, not the tray icon, because the notification
+  area is the owner's taskbar. Covers: C7, C24.
 - With the probe holding the window's shortcut before the window starts,
   the window shows the spec's "another program uses" message the first time
   it shows, and the tray's Show window still brings it back.
 - With "Show every file and folder when the search is empty" off, the empty
   search shows "Type to search." Covers: S6.
-- The Index category lists the volumes and phases of `gozler --status
+- The Index page lists the volumes and phases of `gozler --status
   --json`. Entry counts are not compared, because they change between two
   reads.
 - A damaged `ui.json` opens the window with the defaults.
@@ -587,7 +634,7 @@ ones the owner accepted.
   bar names the newer release and its link opens the release page; off,
   gozler makes no request (Resource Monitor's Network page shows none).
 - With the dialog open, the owner stops the service: the dialog stays usable,
-  its Index category shows the failure, and the main window shows it behind
+  its Index page shows the failure, and the main window shows it behind
   the dialog. Covers: T10.
 
 ## Stage 8: languages
@@ -1097,7 +1144,9 @@ impl Requests {
 ## When the plan is done
 
 The spec's [acceptance criteria](ui-spec.md#acceptance-criteria) hold, and
-the full CI set from `AGENTS.md` passes. `AGENTS.md` names the `win` module in
+the full CI set from `AGENTS.md` passes. The Include page, Dates created
+and Rebuild index wait for the service settings plan, so when this plan is
+deleted, their rules move into that plan instead of `DESIGN.md`. `AGENTS.md` names the `win` module in
 its `unsafe` rule, and `DESIGN.md` lists `gozler-ui` and `gozler-client` among
 the crates. The rules of the spec and the design move into `docs/DESIGN.md`,
 and the spec, the design and this plan are deleted.

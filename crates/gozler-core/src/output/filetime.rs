@@ -1,4 +1,4 @@
-//! FILETIME conversion helpers.
+//! FILETIME conversion helpers, and the date format of the output.
 //!
 //! Windows FILETIME counts 100-nanosecond ticks since 1601-01-01T00:00:00
 //! UTC. Everything's IPC, the USN/MFT records, and gozler's own wire protocol all speak
@@ -35,6 +35,19 @@ pub fn filetime_to_unix_ms(ft: i64) -> i64 {
 pub fn unix_ms_to_filetime(ms: i64) -> i64 {
     ms.saturating_mul(10_000)
         .saturating_add(FILETIME_UNIX_EPOCH)
+}
+
+/// Formats a FILETIME as `YYYY-MM-DDTHH:MM:SS`, ISO 8601 in `tz`, so a
+/// consumer parses it whatever the locale; empty for a time `jiff` cannot
+/// hold.
+pub fn format_date_local(filetime: i64, tz: &jiff::tz::TimeZone) -> String {
+    match jiff::Timestamp::from_millisecond(filetime_to_unix_ms(filetime)) {
+        Ok(ts) => ts
+            .to_zoned(tz.clone())
+            .strftime("%Y-%m-%dT%H:%M:%S")
+            .to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 #[cfg(test)]

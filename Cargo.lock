@@ -402,11 +402,21 @@ dependencies = [
 name = "gozler-cli"
 version = "0.3.0"
 dependencies = [
+ "gozler-client",
  "gozler-core",
  "gozler-winfs",
  "jiff",
  "mimalloc",
  "serde_json",
+]
+
+[[package]]
+name = "gozler-client"
+version = "0.3.0"
+dependencies = [
+ "gozler-core",
+ "gozler-winfs",
+ "tokio",
 ]
 
 [[package]]

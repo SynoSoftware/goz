@@ -2,14 +2,15 @@
 
 ## Workspace
 
-gozler is four crates:
+gozler is five crates:
 
 - **`gozler-core`**: pure, OS-agnostic. USN, MFT and folder-listing parsing, the index, the query engine, the wire protocol, CSV output, and `es`-compatible argv parsing. Tests run on any OS.
 - **`gozler-winfs`**: the thin `unsafe` Win32 layer (`windows-sys` only). Buffers, typed structs, and opaque handles; it never parses an ioctl record payload. It depends on nothing else in the workspace, enforced by cargo-deny.
 - **`gozler-daemon`** (`gozlerd`): bootstrap, USN journal tail, the tokio named-pipe server, and Windows service integration.
-- **`gozler-cli`** (`gozler`): the `es`-compatible CLI and the blocking named-pipe client.
+- **`gozler-client`**: the blocking named-pipe client, with the state of the gozler service and the scope-folder check, which `gozler` and the window share. Its error types build on every OS; the pipe is Windows only.
+- **`gozler-cli`** (`gozler`): the `es`-compatible CLI.
 
-The command line splits between the two outer crates by one rule: what asks the operating system is in `gozler-cli`, and everything else is in `gozler-core`, where CI tests it on Ubuntu. `gozler-core` owns the parsing, the vocabulary tables, the help text, the date resolver, the request built from a working directory and a query start it is given, the evaluation, and the output rows. `gozler-cli` reads the arguments, the working directory, the clock and the time zone, resolves drive-relative folders, talks to the pipe, and writes to stdout or the export file.
+The command line splits by one rule: what asks the operating system is in `gozler-cli` and `gozler-client`, and everything else is in `gozler-core`, where CI tests it on Ubuntu. `gozler-core` owns the parsing, the vocabulary tables, the help text, the date resolver, the request built from a working directory and a query start it is given, the evaluation, and the output rows. `gozler-cli` reads the arguments, the working directory, the clock and the time zone, resolves drive-relative folders, talks to the pipe through `gozler-client`, and writes to stdout or the export file.
 
 ## Index coherence
 
@@ -77,7 +78,9 @@ A query is AND-ed clauses, each an OR of terms that may be negated. That covers 
 
 Regular expressions use Rust's `regex` crate, which matches in linear time, so no pattern can hang gozlerd. The price is that a pattern has no look-around and no backreferences.
 
-The folded-arena scan needs one literal that every matching name contains. Only a clause of one positive term supplies it: a name term, a whole-word name term, a name wildcard or a single extension (`CompiledClause::name_literal`). A negated term, a path term, a path wildcard and a regular expression never do. For example, the literal of `*\docs\*` is `\docs\`, which no name contains, so a scan for it would find nothing.
+**Word start and name start.** `wordstart:` matches a term where a word of the name starts: at the start of the name or after a character that is not a letter or digit, so `wordstart:1234` finds `IMG_1234.jpg` and `wordstart:para` does not find `comparator.txt`. `startwith:` matches at the start of the name. With `-p`, or with `\` or `/` in the value, each tests the full path instead, as `ww:` does. Accents count, as in every comparison (`gozler_core::fold`). The window's match mode is a parse default (`ParseOptions::term_match`). Start of words and Start of name reach name terms only; a term with a separator and the values of `path:`, `nopath:`, `file:` and `folder:` stay plain substrings, so a typed folder still finds what is below it. Whole words is `-ww` and keeps its rule, which reaches those terms and values too. With `-p`, a mode tests the full path.
+
+The folded-arena scan needs one literal that every matching name contains. Only a clause of one positive term supplies it: a name term, a whole-word, word-start or name-start name term, a name wildcard or a single extension (`CompiledClause::name_literal`). A negated term, a path term, a path wildcard and a regular expression never do. For example, the literal of `*\docs\*` is `\docs\`, which no name contains, so a scan for it would find nothing.
 
 ### Paths
 

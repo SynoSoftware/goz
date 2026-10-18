@@ -2,8 +2,9 @@
 
 use super::{EsPlan, ScopeFolder};
 use crate::proto::{Returns, Rows, SearchRequest};
-use crate::query::parse::regex_test;
-use crate::query::{Clause, ParseOptions, QueryError, QueryStart, Test, parse_query_with};
+use crate::query::{
+    Clause, ParseOptions, QueryError, QueryStart, TermMatch, Test, parse_query_with, regex_test,
+};
 use crate::types::EsColumn;
 use crate::winpath::{absolute, parent_of};
 
@@ -20,10 +21,7 @@ use crate::winpath::{absolute, parent_of};
 /// [`is_drive_relative`](crate::winpath::is_drive_relative)).
 ///
 /// Each `-r PATTERN` adds the test `regex:PATTERN` would, with the whole
-/// argument as the pattern. `-parent DIR` adds a `parent:` test for DIR to
-/// the query, and without `-path` or `-parent-path` it is also the scope, so
-/// the daemon walks DIR instead of every volume and refuses a DIR on no
-/// indexed volume.
+/// argument as the pattern, and `-parent DIR` adds what [`add_parent`] adds.
 pub fn build_search(
     plan: &EsPlan,
     working_dir: &str,
@@ -47,7 +45,11 @@ pub fn build_search(
         ParseOptions {
             match_case: plan.match_case,
             match_path: plan.match_path,
-            whole_word: plan.whole_word,
+            term_match: if plan.whole_word {
+                TermMatch::WholeWords
+            } else {
+                TermMatch::Anywhere
+            },
             working_dir: Some(working_dir),
             query_start: Some(query_start),
         },
@@ -57,20 +59,32 @@ pub fn build_search(
         .iter()
         .filter_map(|pattern| regex_test(pattern, plan.match_path));
     query.clauses.extend(regexes.map(Clause::single));
-    let parent = plan.parent.as_deref().map(|dir| absolute(dir, working_dir));
-    query
-        .clauses
-        .extend(parent.clone().map(|dir| Clause::single(Test::Parent(dir))));
-    let scope = match &plan.scope {
-        Some(ScopeFolder::Dir(dir)) => Some(absolute(dir, working_dir)),
-        Some(ScopeFolder::ParentOf(path)) => Some(parent_of(&absolute(path, working_dir))),
-        None => parent,
-    };
-    Ok(SearchRequest {
+    let scope = plan.scope.as_ref().map(|scope| match scope {
+        ScopeFolder::Dir(dir) => absolute(dir, working_dir),
+        ScopeFolder::ParentOf(path) => parent_of(&absolute(path, working_dir)),
+    });
+    let mut request = SearchRequest {
         query,
         scope,
         returns,
-    })
+    };
+    if let Some(dir) = &plan.parent {
+        add_parent(&mut request, absolute(dir, working_dir));
+    }
+    Ok(request)
+}
+
+/// Limits `request` to the entries directly in `folder`, an absolute path,
+/// as `-parent` does: it adds a `parent:` test for `folder`, and when the
+/// request has no scope, `folder` becomes its scope, so the daemon walks
+/// the folder instead of every volume and refuses a folder on no indexed
+/// volume.
+pub fn add_parent(request: &mut SearchRequest, folder: String) {
+    request
+        .query
+        .clauses
+        .push(Clause::single(Test::Parent(folder.clone())));
+    request.scope.get_or_insert(folder);
 }
 
 #[cfg(test)]

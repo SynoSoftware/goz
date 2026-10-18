@@ -1,8 +1,8 @@
 //! gozler: the gozler CLI client.
 //!
 //! Parses arguments with the es.exe-compatible rules from
-//! `gozler-core::escompat`, talks to the running daemon over `\\.\pipe\gozler-v1`,
-//! and writes results as JSON (`--json`), or through
+//! `gozler-core::escompat`, talks to the running daemon over `\\.\pipe\gozler-v1`
+//! through `gozler-client`, and writes results as JSON (`--json`), or through
 //! `gozler_core::output::TableWriter` as plain text (default), CSV, TSV or TXT.
 //!
 //! The exit codes are [`gozler_core::escompat::ExitCode`]; every failure is a
@@ -14,8 +14,6 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[cfg(windows)]
-mod client;
 mod failure;
 #[cfg(windows)]
 mod overview;
@@ -98,13 +96,13 @@ use win::{execute, overview};
 
 #[cfg(windows)]
 mod win {
-    use super::client::Client;
     use super::failure::{Failure, output};
     use super::overview::{Index, Service, render};
+    use gozler_client::{CancelToken, Client, ClientError, folder_is_missing};
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
     use gozler_core::output::table::grouped;
-    use gozler_core::output::{TableWriter, filetime_to_unix_ms};
-    use gozler_core::proto::{DaemonStatus, QueryResults, VolumeStatus};
+    use gozler_core::output::{TableWriter, format_date_local};
+    use gozler_core::proto::{DaemonStatus, PIPE_NAME, QueryResults, VolumeStatus};
     use gozler_core::query::QueryStart;
     use gozler_core::scope::Scope;
     use gozler_core::winpath::is_drive_relative;
@@ -119,21 +117,21 @@ mod win {
     /// that draws it and `NO_COLOR` is not set, and exits with the code of
     /// the failure that keeps gozlerd from answering, if any.
     pub(crate) fn overview() -> Result<ExitCode, Failure> {
-        let failure = match Client::connect(false) {
+        let error = match connect(false) {
             Ok(mut connection) => {
                 let index = index(&mut connection)?;
                 print_overview(&Service::Running(index))?;
                 return Ok(ExitCode::Complete);
             }
-            Err(failure) => failure,
+            Err(error) => error,
         };
-        let service = match &failure {
-            Failure::DaemonNotReady => Service::NotReady,
-            Failure::DaemonNotRunning(why) => Service::NotRunning(why),
-            _ => return Err(failure),
+        let service = match &error {
+            ClientError::NotReady => Service::NotReady,
+            ClientError::NotRunning(why) => Service::NotRunning(why),
+            _ => return Err(error.into()),
         };
         print_overview(&service)?;
-        Ok(failure.exit_code())
+        Ok(Failure::from(error).exit_code())
     }
 
     fn print_overview(service: &Service) -> Result<(), Failure> {
@@ -170,9 +168,15 @@ mod win {
         })
     }
 
+    /// Connects to the running daemon, and checks that the elevated daemon
+    /// owns the pipe unless `insecure` is set. gozler never cancels a request.
+    fn connect(insecure: bool) -> Result<Client, ClientError> {
+        Client::connect(PIPE_NAME, !insecure, CancelToken::default())
+    }
+
     pub(crate) fn execute(plan: EsPlan) -> Result<ExitCode, Failure> {
         if plan.status {
-            let mut connection = Client::connect(plan.insecure_no_server_check)?;
+            let mut connection = connect(plan.insecure_no_server_check)?;
             return status(&mut connection, plan.json);
         }
         search(plan)
@@ -186,8 +190,8 @@ mod win {
             time_zone: time_zone.clone(),
         };
         let request = build_search(&plan, &working_dir()?, &start).map_err(Failure::Query)?;
-        if let Some(folder) = &request.scope {
-            check_folder_exists(folder)?;
+        if let Some(folder) = request.scope.as_deref().filter(|f| folder_is_missing(f)) {
+            return Err(Failure::MissingFolder(folder.to_string()));
         }
 
         // Create the export file up front (es semantics): a later daemon-unreachable
@@ -203,7 +207,7 @@ mod win {
             _ => None,
         };
 
-        let mut connection = Client::connect(plan.insecure_no_server_check)?;
+        let mut connection = connect(plan.insecure_no_server_check)?;
         if let Some(timeout) = plan.timeout {
             wait_for_scope(&mut connection, request.scope.as_deref(), timeout)?;
         }
@@ -248,18 +252,6 @@ mod win {
         let dir = std::env::current_dir()
             .map_err(|e| Failure::Internal(format!("cannot read the working directory: {e}")))?;
         Ok(dir.to_string_lossy().into_owned())
-    }
-
-    /// Fails when the scope folder does not exist. Any other error, such as a
-    /// folder the user cannot read, lets the search run, because gozlerd
-    /// answers from its index and not from the folder.
-    fn check_folder_exists(folder: &str) -> Result<(), Failure> {
-        match std::fs::metadata(folder) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err(Failure::MissingFolder(folder.to_string()))
-            }
-            _ => Ok(()),
-        }
     }
 
     /// Resolves a drive-relative folder switch such as `-path D:x` against
@@ -370,19 +362,6 @@ mod win {
 
         fn destination(&self) -> &'p str {
             self.plan.export.as_deref().unwrap_or("stdout")
-        }
-    }
-
-    /// Formats a Windows FILETIME as local `YYYY-MM-DDTHH:MM:SS` in `tz`, ISO
-    /// 8601, so a consumer parses it regardless of locale.
-    fn format_date_local(filetime: i64, tz: &jiff::tz::TimeZone) -> String {
-        let ms = filetime_to_unix_ms(filetime);
-        match jiff::Timestamp::from_millisecond(ms) {
-            Ok(ts) => ts
-                .to_zoned(tz.clone())
-                .strftime("%Y-%m-%dT%H:%M:%S")
-                .to_string(),
-            Err(_) => String::new(),
         }
     }
 

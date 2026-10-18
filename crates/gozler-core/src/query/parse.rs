@@ -173,6 +173,69 @@ impl SizeRange {
     }
 }
 
+/// A word that `size:` takes in place of a number, and the range it names.
+pub struct SizeWord {
+    /// The word, matched case-insensitively.
+    pub word: &'static str,
+    pub range: SizeRange,
+}
+
+const KB: u64 = 1024;
+const MB: u64 = 1024 * KB;
+const GB: u64 = 1024 * MB;
+const TB: u64 = 1024 * GB;
+
+/// The size words, smallest first, as Everything defines them: each starts
+/// above the previous one's maximum, so a size on a boundary has one word.
+pub const SIZE_WORDS: &[SizeWord] = &[
+    SizeWord {
+        word: "empty",
+        range: SizeRange { min: 0, max: 0 },
+    },
+    SizeWord {
+        word: "tiny",
+        range: SizeRange {
+            min: 1,
+            max: 10 * KB,
+        },
+    },
+    SizeWord {
+        word: "small",
+        range: SizeRange {
+            min: 10 * KB + 1,
+            max: 100 * KB,
+        },
+    },
+    SizeWord {
+        word: "medium",
+        range: SizeRange {
+            min: 100 * KB + 1,
+            max: MB,
+        },
+    },
+    SizeWord {
+        word: "large",
+        range: SizeRange {
+            min: MB + 1,
+            max: 16 * MB,
+        },
+    },
+    SizeWord {
+        word: "huge",
+        range: SizeRange {
+            min: 16 * MB + 1,
+            max: 128 * MB,
+        },
+    },
+    SizeWord {
+        word: "gigantic",
+        range: SizeRange {
+            min: 128 * MB + 1,
+            max: u64::MAX,
+        },
+    },
+];
+
 /// A parsed query: the entries that match every clause.
 ///
 /// The client sends it to the daemon as part of a
@@ -244,6 +307,16 @@ pub enum Test {
     /// This regular expression matches somewhere in the full path. From
     /// protocol 4.
     PathRegex(String),
+    /// The name contains this text where a word starts: at the start of the
+    /// name, or after a character that is not a letter or digit. From
+    /// protocol 7.
+    NameWordStart(String),
+    /// The full path contains this text where a word starts. From protocol 7.
+    PathWordStart(String),
+    /// The name starts with this text. From protocol 7.
+    NameStart(String),
+    /// The full path starts with this text. From protocol 7.
+    PathStart(String),
     /// The extension is one of these, without the dot, compared ignoring case
     /// whatever the query's case.
     Extension(Vec<String>),
@@ -282,6 +355,10 @@ impl ParsedQuery {
                     | Test::PathWholeWord(_)
                     | Test::NameRegex(_)
                     | Test::PathRegex(_)
+                    | Test::NameWordStart(_)
+                    | Test::PathWordStart(_)
+                    | Test::NameStart(_)
+                    | Test::PathStart(_)
             )
         })
     }
@@ -297,10 +374,9 @@ pub enum QueryError {
     /// A `name:` term whose name is no search function; carries the name.
     #[error("unknown search function: {0}:")]
     UnknownFunction(String),
-    /// A value or part of the query that does not parse; `what` names it,
-    /// ending in a colon, and `detail` says what is wrong and how to fix it.
-    #[error("{what} {detail}")]
-    Malformed { what: &'static str, detail: String },
+    /// A value or part of the query that does not parse.
+    #[error("{0}")]
+    Malformed(Malformed),
     /// A relative path, which only a working directory can resolve, in a
     /// query parsed without one; carries the path.
     #[error(
@@ -320,6 +396,51 @@ pub enum QueryError {
         max = super::engine::MAX_QUERY_REGEXES
     )]
     TooManyRegexes(usize),
+}
+
+/// What is wrong with a value or a part of the query that does not parse.
+/// Each reason belongs to one search function or to the query, which its
+/// message names first, ending in a colon, before what is wrong and how to
+/// fix it. A `String` carries the text that is wrong, as typed.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Malformed {
+    /// A `!` that does not start a term.
+    #[error("query: ! must start a term; quote it to search for it")]
+    MisplacedNot,
+    /// A `!` with no term after it.
+    #[error("query: ! needs a term after it")]
+    NotWithoutTerm,
+    /// A `|` without a term on each side.
+    #[error("query: | needs a term on each side")]
+    OrWithoutTerms,
+    /// `!` or `|` applied to a term that tests nothing, such as `case:`.
+    #[error("query: {0} tests nothing, so ! and | cannot apply to it")]
+    OperatorOnNothing(String),
+    #[error("size: {0} is not a size; write a number with kb, mb, gb or tb, such as 10mb")]
+    Size(String),
+    /// A date range whose lower value starts after its upper one.
+    #[error("dm: {0} is a reversed range; write the earlier date first")]
+    ReversedDates(String),
+    /// A date before or after every date the resolver can hold.
+    #[error("dm: {0} is out of range")]
+    DateOutOfRange(String),
+    /// `Ndays` without a number of days above 0.
+    #[error("dm: {0} needs a number of days above 0")]
+    Days(String),
+    #[error("dm: {0} is not a date; use today, yesterday, Ndays or YYYY-MM-DD")]
+    Date(String),
+    /// `parent:` without a folder.
+    #[error("parent: needs a folder")]
+    NoParentFolder,
+    #[error(
+        "attrib: {0} is not an attribute letter; the letters are {letters}",
+        letters = Attributes::all_letters()
+    )]
+    AttributeLetter(char),
+    /// A regular expression that does not compile, or compiles past its
+    /// size limit; carries the `regex` crate's message, in English.
+    #[error("regular expression: {0}")]
+    Regex(String),
 }
 
 /// One search function: its names, what it does, and its line in the help.
@@ -343,6 +464,8 @@ enum Function {
     Parent,
     NoPath,
     WholeWord,
+    WordStart,
+    NameStart,
     Regex,
     Attributes,
     File,
@@ -392,7 +515,8 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["nopath"],
         function: Function::NoPath,
         example: "text",
-        help: "Name contains text, even with `-p`; with `*` or `?`, the whole name must match",
+        help: "Name contains text, also when other terms test the full path; \
+               with `*` or `?`, the whole name must match",
     },
     SearchFunction {
         names: &["ww"],
@@ -402,10 +526,24 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
                with `\\` or `/` in the value, the full path must contain it",
     },
     SearchFunction {
+        names: &["wordstart"],
+        function: Function::WordStart,
+        example: "para",
+        help: "A word in the name starts with para, as in my_Paracetamol.pdf; \
+               with `\\` or `/` in the value, a word in the full path must",
+    },
+    SearchFunction {
+        names: &["startwith"],
+        function: Function::NameStart,
+        example: "read",
+        help: "Name starts with read; with `\\` or `/` in the value, the full path must",
+    },
+    SearchFunction {
         names: &["regex"],
         function: Function::Regex,
         example: r"^test\d+\.cs$",
-        help: "Name matches a regular expression in Rust syntax; Notes has the details",
+        help: "Name matches a regular expression in Rust syntax; with `\\\\` in the \
+               pattern, the full path must",
     },
     SearchFunction {
         names: &["attrib", "attributes", "attr"],
@@ -456,9 +594,9 @@ pub struct ParseOptions<'a> {
     /// as `path:` values do, instead of the name. `nopath:` still matches the
     /// name.
     pub match_path: bool,
-    /// es `-ww`: whether text terms without a wildcard match whole words, as
-    /// `ww:` values do.
-    pub whole_word: bool,
+    /// How text terms without a wildcard match: es `-ww` asks for whole
+    /// words, as `ww:` values match, and the window passes its match mode.
+    pub term_match: TermMatch,
     /// The absolute folder that a path term starting with `.\` or `..\`, and
     /// a relative `parent:` folder, are below. `None` refuses them with
     /// [`QueryError::RelativePath`]: the daemon parses a protocol 1 query
@@ -467,6 +605,38 @@ pub struct ParseOptions<'a> {
     /// What `dm:` values resolve against. `None` refuses them with
     /// [`QueryError::NoQueryStart`].
     pub query_start: Option<&'a QueryStart>,
+}
+
+/// Where a text term's text must lie in the name, or in the full path for a
+/// path term. A wildcard already matches the whole name or path, so it
+/// ignores this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TermMatch {
+    /// Anywhere, as a substring.
+    #[default]
+    Anywhere,
+    /// As a whole word, as `ww:` matches.
+    WholeWords,
+    /// Where a word starts, as `wordstart:` matches.
+    WordStart,
+    /// At the start, as `startwith:` matches.
+    NameStart,
+}
+
+impl TermMatch {
+    /// How a path term, and the value of a search function other than
+    /// `ww:`, `wordstart:` and `startwith:`, match when this is the default
+    /// for text terms. Word start and name start reach name terms only, so
+    /// a typed path still finds what is below it; whole words reach every
+    /// text term, as `-ww` always has.
+    fn beyond_name_terms(self) -> TermMatch {
+        match self {
+            TermMatch::WholeWords => TermMatch::WholeWords,
+            TermMatch::Anywhere | TermMatch::WordStart | TermMatch::NameStart => {
+                TermMatch::Anywhere
+            }
+        }
+    }
 }
 
 /// Parses a case-insensitive query string, without a working directory or a
@@ -525,9 +695,8 @@ pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuer
             .map(|item| {
                 let terms = operand(&item.word, &options)?.terms();
                 if terms.is_empty() {
-                    return Err(malformed_expression(&format!(
-                        "{} tests nothing, so ! and | cannot apply to it",
-                        item.word.text
+                    return Err(QueryError::Malformed(Malformed::OperatorOnNothing(
+                        item.word.text.clone(),
                     )));
                 }
                 Ok(if item.negated {
@@ -678,6 +847,21 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
         // A function value may hold `<` and `>`, as `size:<1mb` does, and its
         // quotes only delimit it, so `*` and `?` in it stay wildcards.
         let text_operand = |test: Option<Test>| test.map_or(Operand::Nothing, Operand::Text);
+        // `ww:`, `wordstart:` and `startwith:` match their value as they
+        // say, a path value included.
+        let matched_as = |term_match| {
+            let options = ParseOptions {
+                term_match,
+                ..*options
+            };
+            Ok(text_operand(text_test(value, false, &options, term_match)?))
+        };
+        // Every other function's value keeps its own meaning.
+        let value_match = options.term_match.beyond_name_terms();
+        let value_options = ParseOptions {
+            term_match: value_match,
+            ..*options
+        };
         match function_named(name) {
             Some(Function::Ext) => return Ok(Operand::Extensions(extensions(value))),
             Some(Function::Size) => return Ok(Operand::Size(parse_size(value)?)),
@@ -687,21 +871,17 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
             }
             Some(Function::Path) => {
                 let path = path_text(value, options.working_dir)?;
-                let form = Form::of(has_wildcard(value), options);
+                let form = Form::of(has_wildcard(value), value_match);
                 return Ok(text_operand(text_of(path, true, form)));
             }
             Some(Function::NoPath) => {
                 let name = value.replace('/', r"\");
-                let form = Form::of(has_wildcard(value), options);
+                let form = Form::of(has_wildcard(value), value_match);
                 return Ok(text_operand(text_of(name, false, form)));
             }
-            Some(Function::WholeWord) => {
-                let options = ParseOptions {
-                    whole_word: true,
-                    ..*options
-                };
-                return Ok(text_operand(text_test(value, false, &options)?));
-            }
+            Some(Function::WholeWord) => return matched_as(TermMatch::WholeWords),
+            Some(Function::WordStart) => return matched_as(TermMatch::WordStart),
+            Some(Function::NameStart) => return matched_as(TermMatch::NameStart),
             Some(Function::Regex) => {
                 return Ok(text_operand(regex_test(value, options.match_path)));
             }
@@ -712,14 +892,8 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
                 )?)));
             }
             Some(Function::Attributes) => {
-                let attributes =
-                    Attributes::from_letters(value).map_err(|c| QueryError::Malformed {
-                        what: "attrib:",
-                        detail: format!(
-                            "{c} is not an attribute letter; the letters are {}",
-                            Attributes::all_letters()
-                        ),
-                    })?;
+                let attributes = Attributes::from_letters(value)
+                    .map_err(|c| QueryError::Malformed(Malformed::AttributeLetter(c)))?;
                 return Ok(if attributes.is_empty() {
                     Operand::Nothing
                 } else {
@@ -727,13 +901,12 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
                 });
             }
             Some(Function::File) => {
-                return Ok(Operand::Kind(Kind::File, text_test(value, false, options)?));
+                let test = text_test(value, false, &value_options, value_match)?;
+                return Ok(Operand::Kind(Kind::File, test));
             }
             Some(Function::Folder) => {
-                return Ok(Operand::Kind(
-                    Kind::Folder,
-                    text_test(value, false, options)?,
-                ));
+                let test = text_test(value, false, &value_options, value_match)?;
+                return Ok(Operand::Kind(Kind::Folder, test));
             }
             // A `case:` value that is not a directive is searched as text.
             Some(Function::Case) => {}
@@ -745,7 +918,8 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
     }
     // Only `""` is an empty word; it searches for the empty phrase, which
     // every name contains.
-    let test = text_test(text, word.quote_at.is_some(), options)?;
+    let path_match = options.term_match.beyond_name_terms();
+    let test = text_test(text, word.quote_at.is_some(), options, path_match)?;
     Ok(Operand::Text(test.unwrap_or(Test::Name(String::new()))))
 }
 
@@ -794,8 +968,14 @@ fn extensions(value: &str) -> Extensions {
 /// too, and a wildcard anchors either to the whole of what it matches. A
 /// `quoted` term without a separator is a phrase, whose `*` and `?` are text;
 /// with a separator it is a path term like any other, because a literal `*`
-/// can never match a path.
-fn text_test(text: &str, quoted: bool, options: &ParseOptions) -> Result<Option<Test>, QueryError> {
+/// can never match a path. A term with a separator matches as `path_match`
+/// says, every other term as [`ParseOptions::term_match`] says.
+fn text_test(
+    text: &str,
+    quoted: bool,
+    options: &ParseOptions,
+    path_match: TermMatch,
+) -> Result<Option<Test>, QueryError> {
     let is_path = text.contains(['\\', '/']);
     let wildcard = has_wildcard(text) && (is_path || !quoted);
     let text = if is_path {
@@ -806,27 +986,31 @@ fn text_test(text: &str, quoted: bool, options: &ParseOptions) -> Result<Option<
     Ok(text_of(
         text,
         is_path || options.match_path,
-        Form::of(wildcard, options),
+        Form::of(
+            wildcard,
+            if is_path {
+                path_match
+            } else {
+                options.term_match
+            },
+        ),
     ))
 }
 
 /// How a text term matches what it tests.
 #[derive(Clone, Copy)]
 enum Form {
-    Substring,
-    WholeWord,
+    Text(TermMatch),
     /// A pattern of `*` and `?` that matches the whole of it.
     Wildcard,
 }
 
 impl Form {
-    /// A wildcard already matches a whole name or path, so whole-word
-    /// matching leaves it unchanged.
-    fn of(wildcard: bool, options: &ParseOptions) -> Self {
-        match (wildcard, options.whole_word) {
-            (true, _) => Form::Wildcard,
-            (false, true) => Form::WholeWord,
-            (false, false) => Form::Substring,
+    fn of(wildcard: bool, term_match: TermMatch) -> Self {
+        if wildcard {
+            Form::Wildcard
+        } else {
+            Form::Text(term_match)
         }
     }
 }
@@ -838,10 +1022,14 @@ fn text_of(text: String, full_path: bool, form: Form) -> Option<Test> {
         return None;
     }
     Some(match (form, full_path) {
-        (Form::Substring, true) => Test::Path(text),
-        (Form::Substring, false) => Test::Name(text),
-        (Form::WholeWord, true) => Test::PathWholeWord(text),
-        (Form::WholeWord, false) => Test::NameWholeWord(text),
+        (Form::Text(TermMatch::Anywhere), true) => Test::Path(text),
+        (Form::Text(TermMatch::Anywhere), false) => Test::Name(text),
+        (Form::Text(TermMatch::WholeWords), true) => Test::PathWholeWord(text),
+        (Form::Text(TermMatch::WholeWords), false) => Test::NameWholeWord(text),
+        (Form::Text(TermMatch::WordStart), true) => Test::PathWordStart(text),
+        (Form::Text(TermMatch::WordStart), false) => Test::NameWordStart(text),
+        (Form::Text(TermMatch::NameStart), true) => Test::PathStart(text),
+        (Form::Text(TermMatch::NameStart), false) => Test::NameStart(text),
         (Form::Wildcard, true) => Test::PathWildcard(text),
         (Form::Wildcard, false) => Test::NameWildcard(text),
     })
@@ -852,7 +1040,7 @@ fn text_of(text: String, full_path: bool, form: Form) -> Option<Test> {
 /// (`match_path`) or when it holds an escaped backslash, `\\`, which can
 /// only match a separator. The pattern is never rewritten: its `/` stays a
 /// `/`, which no full path holds.
-pub(crate) fn regex_test(pattern: &str, match_path: bool) -> Option<Test> {
+pub fn regex_test(pattern: &str, match_path: bool) -> Option<Test> {
     if pattern.is_empty() {
         return None;
     }
@@ -897,10 +1085,7 @@ fn path_text(text: &str, working_dir: Option<&str>) -> Result<String, QueryError
 fn parent_folder(value: &str, working_dir: Option<&str>) -> Result<String, QueryError> {
     let value = value.replace('/', r"\");
     if value.is_empty() {
-        return Err(QueryError::Malformed {
-            what: "parent:",
-            detail: "needs a folder".to_string(),
-        });
+        return Err(QueryError::Malformed(Malformed::NoParentFolder));
     }
     match working_dir {
         Some(working_dir) => Ok(crate::winpath::absolute(&value, working_dir)),
@@ -976,9 +1161,7 @@ fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
             }
             '!' if word.is_none() => lexemes.push(Lexeme::Not),
             '!' => {
-                return Err(malformed_expression(
-                    "! must start a term; quote it to search for it",
-                ));
+                return Err(QueryError::Malformed(Malformed::MisplacedNot));
             }
             c if c.is_whitespace() => lexemes.extend(word.take().map(Lexeme::Word)),
             c => {
@@ -1002,7 +1185,7 @@ struct Item {
 
 /// The lexemes as groups of items joined by `|`; the query AND-s the groups.
 fn groups(lexemes: Vec<Lexeme>) -> Result<Vec<Vec<Item>>, QueryError> {
-    let or_needs_terms = || malformed_expression("| needs a term on each side");
+    let or_needs_terms = || QueryError::Malformed(Malformed::OrWithoutTerms);
     let mut groups: Vec<Vec<Item>> = Vec::new();
     let mut nots = 0usize;
     // After a `|`, the next word joins the last group.
@@ -1034,51 +1217,21 @@ fn groups(lexemes: Vec<Lexeme>) -> Result<Vec<Vec<Item>>, QueryError> {
         return Err(or_needs_terms());
     }
     if nots > 0 {
-        return Err(malformed_expression("! needs a term after it"));
+        return Err(QueryError::Malformed(Malformed::NotWithoutTerm));
     }
     Ok(groups)
 }
 
-fn malformed_expression(detail: &str) -> QueryError {
-    QueryError::Malformed {
-        what: "query:",
-        detail: detail.to_string(),
-    }
-}
-
-const KB: u64 = 1024;
-const MB: u64 = 1024 * KB;
-const GB: u64 = 1024 * MB;
-const TB: u64 = 1024 * GB;
-
 /// Parses an es-style `size:` expression: a bare number, a comparison
-/// (`>`, `>=`, `<`, `<=`, `=`), a range `a..b`, or a named constant
-/// (`empty`, `tiny`, …, `gigantic`). Numbers accept `kb`/`mb`/`gb`/`tb`
-/// (1024-based) suffixes.
+/// (`>`, `>=`, `<`, `<=`, `=`), a range `a..b`, or a word of
+/// [`SIZE_WORDS`]. Numbers accept `kb`/`mb`/`gb`/`tb` (1024-based)
+/// suffixes.
 fn parse_size(value: &str) -> Result<SizeRange, QueryError> {
     let v = value.trim();
-    let malformed = |bad: &str| QueryError::Malformed {
-        what: "size:",
-        detail: format!("{bad} is not a size; write a number with kb, mb, gb or tb, such as 10mb"),
-    };
+    let malformed = |bad: &str| QueryError::Malformed(Malformed::Size(bad.to_string()));
 
-    // Named constants, as Everything defines them: each above the previous
-    // one's maximum, so a size on a boundary matches one constant.
-    let above = |lower: u64, max: u64| {
-        Ok(SizeRange {
-            min: lower + 1,
-            max,
-        })
-    };
-    match v.to_ascii_lowercase().as_str() {
-        "empty" => return Ok(SizeRange { min: 0, max: 0 }),
-        "tiny" => return above(0, 10 * KB),
-        "small" => return above(10 * KB, 100 * KB),
-        "medium" => return above(100 * KB, MB),
-        "large" => return above(MB, 16 * MB),
-        "huge" => return above(16 * MB, 128 * MB),
-        "gigantic" => return above(128 * MB, u64::MAX),
-        _ => {}
+    if let Some(word) = SIZE_WORDS.iter().find(|w| w.word.eq_ignore_ascii_case(v)) {
+        return Ok(word.range);
     }
 
     // Range a..b (either side optional).
@@ -1407,7 +1560,12 @@ mod tests {
             assert!(
                 matches!(
                     parse_query(query),
-                    Err(QueryError::Malformed { what: "query:", .. })
+                    Err(QueryError::Malformed(
+                        Malformed::MisplacedNot
+                            | Malformed::NotWithoutTerm
+                            | Malformed::OrWithoutTerms
+                            | Malformed::OperatorOnNothing(_)
+                    ))
                 ),
                 "{query}"
             );
@@ -1517,10 +1675,7 @@ mod tests {
         );
         assert!(matches!(
             parse_query("parent:"),
-            Err(QueryError::Malformed {
-                what: "parent:",
-                ..
-            })
+            Err(QueryError::Malformed(Malformed::NoParentFolder))
         ));
     }
 
@@ -1579,7 +1734,7 @@ mod tests {
             ]
         );
         let whole_word = ParseOptions {
-            whole_word: true,
+            term_match: TermMatch::WholeWords,
             ..ParseOptions::default()
         };
         assert_eq!(
@@ -1591,6 +1746,52 @@ mod tests {
                 whole("x"),
                 Test::NameWildcard("*.cs".to_string()),
             ]
+        );
+    }
+
+    /// `wordstart:` and `startwith:` match one term as `ww:` does, a value
+    /// with a separator testing the full path. The window's match mode,
+    /// passed as [`ParseOptions::term_match`], reaches name terms only: a
+    /// path term, a `path:` or `nopath:` value and a `file:` value keep
+    /// their plain meaning, so a typed folder still finds what is below it,
+    /// and with -p the mode tests the full path.
+    #[test]
+    fn word_start_and_name_start_terms_keep_their_target() {
+        let word_start = |s: &str| Test::NameWordStart(s.to_string());
+        let start = |s: &str| Test::NameStart(s.to_string());
+        assert_eq!(
+            tests(r"wordstart:para startwith:read wordstart:docs/ag startwith:C:\repo *.cs"),
+            [
+                word_start("para"),
+                start("read"),
+                Test::PathWordStart(r"docs\ag".to_string()),
+                Test::PathStart(r"C:\repo".to_string()),
+                Test::NameWildcard("*.cs".to_string()),
+            ]
+        );
+        let options = |term_match, match_path| ParseOptions {
+            term_match,
+            match_path,
+            ..ParseOptions::default()
+        };
+        assert_eq!(
+            tests_with(
+                r"para docs\ag path:docs nopath:x ww:y file:z",
+                options(TermMatch::WordStart, false)
+            ),
+            [
+                word_start("para"),
+                path(r"docs\ag"),
+                path("docs"),
+                name("x"),
+                Test::NameWholeWord("y".to_string()),
+                name("z"),
+                Test::Kind(Kind::File),
+            ]
+        );
+        assert_eq!(
+            tests_with(r"para docs\ag", options(TermMatch::NameStart, true)),
+            [Test::PathStart("para".to_string()), path(r"docs\ag")]
         );
     }
 
@@ -1630,7 +1831,7 @@ mod tests {
     fn malformed_size_is_reported() {
         assert!(matches!(
             parse_query("size:abc"),
-            Err(QueryError::Malformed { what: "size:", .. })
+            Err(QueryError::Malformed(Malformed::Size(_)))
         ));
     }
 
@@ -1649,9 +1850,41 @@ mod tests {
         fn arb_query() -> impl Strategy<Value = String> {
             let fragment = prop_oneof![
                 prop::sample::select(vec![
-                    "size:", "ext:", "path:", "parent:", "nopath:", "ww:", "regex:", "file:",
-                    "folder:", "case:", "case:0", "dm:", "..", ">=", "<", ">", "=", "*", "?", ";",
-                    ".", "\"", " ", "\\", "/", "!", "|", "kb", "gb", "tiny", "today", "days", "-",
+                    "size:",
+                    "ext:",
+                    "path:",
+                    "parent:",
+                    "nopath:",
+                    "ww:",
+                    "wordstart:",
+                    "startwith:",
+                    "regex:",
+                    "file:",
+                    "folder:",
+                    "case:",
+                    "case:0",
+                    "dm:",
+                    "..",
+                    ">=",
+                    "<",
+                    ">",
+                    "=",
+                    "*",
+                    "?",
+                    ";",
+                    ".",
+                    "\"",
+                    " ",
+                    "\\",
+                    "/",
+                    "!",
+                    "|",
+                    "kb",
+                    "gb",
+                    "tiny",
+                    "today",
+                    "days",
+                    "-",
                 ])
                 .prop_map(str::to_string),
                 "[0-9]{1,24}",

@@ -13,7 +13,7 @@
 //! text path with its own, so the bounds travel as UTC and the daemon never
 //! needs the client's time zone.
 
-use super::parse::QueryError;
+use super::parse::{Malformed, QueryError};
 use crate::output::unix_ms_to_filetime;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
@@ -52,10 +52,6 @@ struct Period {
 /// The [`DateRange`] of a `dm:` value, read against `start`.
 pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, QueryError> {
     let value = value.trim();
-    let malformed = |detail: String| QueryError::Malformed {
-        what: "dm:",
-        detail,
-    };
     // The first tick at or after `at`, and the last tick before it.
     let from = |at: Timestamp| unix_ms_to_filetime(at.as_millisecond());
     let before = |at: Timestamp| from(at) - 1;
@@ -70,8 +66,8 @@ pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, Q
         if let (Some(lower), Some(upper)) = (lower, upper)
             && lower.start > upper.start
         {
-            return Err(malformed(format!(
-                "{value} is a reversed range; write the earlier date first"
+            return Err(QueryError::Malformed(Malformed::ReversedDates(
+                value.to_string(),
             )));
         }
         return Ok(DateRange {
@@ -119,11 +115,9 @@ pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, Q
 /// The period one date value names: a calendar day or the last N days.
 fn period(value: &str, start: &QueryStart) -> Result<Period, QueryError> {
     let value = value.trim();
-    let malformed = |detail: String| QueryError::Malformed {
-        what: "dm:",
-        detail,
-    };
-    let out_of_range = |_| malformed(format!("{value} is out of range"));
+    let malformed =
+        |reason: fn(String) -> Malformed| QueryError::Malformed(reason(value.to_string()));
+    let out_of_range = |_| malformed(Malformed::DateOutOfRange);
     let today = || start.now.to_zoned(start.time_zone.clone()).date();
     let lower = value.to_ascii_lowercase();
     let date = match lower.as_str() {
@@ -135,7 +129,7 @@ fn period(value: &str, start: &QueryStart) -> Result<Period, QueryError> {
                     .parse::<u32>()
                     .ok()
                     .filter(|&days| days > 0)
-                    .ok_or_else(|| malformed(format!("{value} needs a number of days above 0")))?;
+                    .ok_or_else(|| malformed(Malformed::Days))?;
                 let length = SignedDuration::from_secs(i64::from(days) * 24 * 60 * 60);
                 let first = start.now.checked_sub(length).map_err(out_of_range)?;
                 return Ok(Period {
@@ -143,11 +137,7 @@ fn period(value: &str, start: &QueryStart) -> Result<Period, QueryError> {
                     end: start.now,
                 });
             }
-            iso_date(value).ok_or_else(|| {
-                malformed(format!(
-                    "{value} is not a date; use today, yesterday, Ndays or YYYY-MM-DD"
-                ))
-            })?
+            iso_date(value).ok_or_else(|| malformed(Malformed::Date))?
         }
     };
     let midnight = |date: Date| -> Result<Timestamp, QueryError> {
@@ -314,7 +304,9 @@ mod tests {
             assert!(
                 matches!(
                     date_range(value, &start),
-                    Err(QueryError::Malformed { what: "dm:", .. })
+                    Err(QueryError::Malformed(
+                        Malformed::ReversedDates(_) | Malformed::Days(_) | Malformed::Date(_)
+                    ))
                 ),
                 "{value}"
             );

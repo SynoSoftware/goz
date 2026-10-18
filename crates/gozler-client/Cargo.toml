@@ -1,0 +1,23 @@
+[package]
+name = "gozler-client"
+description = "gozler-client: the blocking client of gozlerd's named pipe, which gozler and the window share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+gozler-core = { path = "../gozler-core" }
+
+[target.'cfg(windows)'.dependencies]
+gozler-winfs = { path = "../gozler-winfs" }
+
+# The tests serve their own pipe with tokio, because a pipe created with raw
+# Win32 calls would put `unsafe` outside gozler-winfs.
+[target.'cfg(windows)'.dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

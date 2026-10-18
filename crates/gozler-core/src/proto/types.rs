@@ -21,7 +21,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// meet, rather than agreeing on a version one side cannot actually speak.
 /// The client asks for this version alone, so a daemon older than the client
 /// refuses it.
-pub const PROTO_VERSION: u16 = 6;
+pub const PROTO_VERSION: u16 = 7;
 
 /// The oldest protocol version a daemon of this build serves: protocol 1's
 /// clients send [`Request::Query`] without a `Hello`.
@@ -652,6 +652,45 @@ mod tests {
         );
         let sparse = json.replace(r#"{"Attributes":6}"#, r#"{"Attributes":512}"#);
         assert!(serde_json::from_str::<Request>(&sparse).is_err());
+    }
+
+    /// Protocol 7 adds the word-start and name-start tests; a later daemon
+    /// must still read them as this client writes them.
+    #[test]
+    fn protocol_7_word_start_and_name_start_tests_keep_their_json() {
+        use crate::query::{Clause, Term, Test};
+        let term = |test| Term {
+            negated: false,
+            test,
+        };
+        let search = Request::Search(SearchRequest {
+            query: ParsedQuery {
+                clauses: vec![Clause {
+                    terms: vec![
+                        term(Test::NameWordStart("a".into())),
+                        term(Test::PathWordStart(r"b\c".into())),
+                        term(Test::NameStart("d".into())),
+                        term(Test::PathStart(r"C:\e".into())),
+                    ],
+                }],
+                match_case: false,
+            },
+            scope: None,
+            returns: Returns::Totals,
+        });
+        let json = concat!(
+            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
+            r#"{"negated":false,"test":{"NameWordStart":"a"}},"#,
+            r#"{"negated":false,"test":{"PathWordStart":"b\\c"}},"#,
+            r#"{"negated":false,"test":{"NameStart":"d"}},"#,
+            r#"{"negated":false,"test":{"PathStart":"C:\\e"}}]}],"match_case":false},"#,
+            r#""scope":null,"returns":"Totals"}"#,
+        );
+        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
+        assert_eq!(
+            serde_json::from_str::<Request>(json).expect("deserialize"),
+            search
+        );
     }
 
     #[test]

@@ -31,11 +31,11 @@ multiple-versions = "warn"
 
 # The Win32 layer produces and consumes raw bytes and opaque handles; every
 # interpretation of them lives in gozler-core, where it is testable from fixtures
-# on any OS (see gozler-winfs/src/lib.rs). Naming gozler-core's only two legitimate
+# on any OS (see gozler-winfs/src/lib.rs). Naming gozler-core's only legitimate
 # dependents turns a gozler-winfs → gozler-core edge into a hard error.
 [[bans.deny]]
 crate = "gozler-core"
-wrappers = ["gozler-cli", "gozler-daemon"]
+wrappers = ["gozler-cli", "gozler-client", "gozler-daemon"]
 
 [advisories]
 yanked = "deny"

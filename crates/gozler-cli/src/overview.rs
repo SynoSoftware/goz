@@ -7,8 +7,9 @@ use gozler_core::escompat::version;
 use gozler_core::output::style::{ColorToken, paint};
 use gozler_core::output::table::grouped;
 
-use crate::failure::NotRunning;
+use crate::failure::{problem, repair, state};
 use crate::win::bytes;
+use gozler_client::NotRunning;
 
 /// What gozlerd reports about the index.
 pub(crate) struct Index {
@@ -75,9 +76,9 @@ pub(crate) fn render(service: &Service, color: bool) -> String {
             out.text.push_str("Run gozler again in a few seconds.\n");
         }
         Service::NotRunning(why) => {
-            out.paint(ColorToken::Danger, why.state());
+            out.paint(ColorToken::Danger, state(why));
             out.text.push('\n');
-            match why.repair() {
+            match repair(why) {
                 Some(repair) => {
                     out.label("Fix");
                     out.text.push_str(repair.how);
@@ -88,7 +89,7 @@ pub(crate) fn render(service: &Service, color: bool) -> String {
                 }
                 None => {
                     out.label("");
-                    out.text.push_str(&why.problem());
+                    out.text.push_str(&problem(why));
                     out.text.push('\n');
                 }
             }

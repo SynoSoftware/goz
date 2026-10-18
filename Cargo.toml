@@ -4,6 +4,7 @@ members = [
     "crates/gozler-core",
     "crates/gozler-winfs",
     "crates/gozler-daemon",
+    "crates/gozler-client",
     "crates/gozler-cli",
 ]
 

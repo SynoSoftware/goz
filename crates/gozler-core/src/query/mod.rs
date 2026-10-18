@@ -21,6 +21,6 @@ pub use engine::{
 };
 pub use order::{VolumeRun, order_hits};
 pub use parse::{
-    Clause, Kind, ParseOptions, ParsedQuery, QueryError, SizeRange, Term, Test, parse_query,
-    parse_query_with,
+    Clause, Kind, Malformed, ParseOptions, ParsedQuery, QueryError, SIZE_WORDS, SizeRange,
+    SizeWord, Term, TermMatch, Test, parse_query, parse_query_with, regex_test,
 };

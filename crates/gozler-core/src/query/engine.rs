@@ -12,7 +12,9 @@
 
 use super::dates::DateRange;
 use super::order::{OrderFields, compare};
-use super::parse::{CodePointBuf, Kind, ParsedQuery, QueryError, SizeRange, Test, Wildcard};
+use super::parse::{
+    CodePointBuf, Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test, Wildcard,
+};
 use super::paths::{DirPaths, NameForm};
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::fold::fold;
@@ -121,8 +123,9 @@ pub struct CompiledQuery {
     clauses: Vec<CompiledClause>,
     path_clauses: usize,
     /// The longest literal that every matching name contains, from a clause
-    /// of one positive name term, whole-word name term, name wildcard (`.dll`
-    /// of `*.dll`) or single `ext:` value (`.ext`). Drives the folded-arena
+    /// of one positive name term, whole-word, word-start or name-start name
+    /// term, name wildcard (`.dll` of `*.dll`) or single `ext:` value
+    /// (`.ext`). Drives the folded-arena
     /// prefilter scan; `None` when no clause offers one (then the query
     /// iterates every entry).
     ///
@@ -167,6 +170,10 @@ enum Check {
     Parent(Vec<u8>),
     NameWholeWord(memmem::Finder<'static>),
     PathWholeWord(memmem::Finder<'static>),
+    NameWordStart(memmem::Finder<'static>),
+    PathWordStart(memmem::Finder<'static>),
+    NameStart(Vec<u8>),
+    PathStart(Vec<u8>),
     /// Compiled case-insensitive unless the query matches case, when it
     /// tests the folded name or path like every other check. The pattern
     /// itself is never folded, because folding would turn `\D` into `\d`.
@@ -220,10 +227,7 @@ impl CompiledQuery {
                 .size_limit(REGEX_SIZE_LIMIT)
                 .dfa_size_limit(REGEX_CACHE_LIMIT)
                 .build()
-                .map_err(|e| QueryError::Malformed {
-                    what: "regular expression:",
-                    detail: e.to_string(),
-                })
+                .map_err(|e| QueryError::Malformed(Malformed::Regex(e.to_string())))
         };
         let mut clauses = parsed
             .clauses
@@ -244,6 +248,10 @@ impl CompiledQuery {
                             }
                             Test::NameWholeWord(s) => Check::NameWholeWord(finder(s)),
                             Test::PathWholeWord(s) => Check::PathWholeWord(finder(s)),
+                            Test::NameWordStart(s) => Check::NameWordStart(finder(s)),
+                            Test::PathWordStart(s) => Check::PathWordStart(finder(s)),
+                            Test::NameStart(s) => Check::NameStart(text(s)),
+                            Test::PathStart(s) => Check::PathStart(text(s)),
                             Test::NameRegex(s) => Check::NameRegex(regex(s)?),
                             Test::PathRegex(s) => Check::PathRegex(regex(s)?),
                             Test::Extension(exts) => Check::Extension(
@@ -292,8 +300,8 @@ impl CompiledQuery {
 
 impl CompiledClause {
     /// The literal every name that passes this clause contains, when the
-    /// clause is one positive name term, whole-word name term, name wildcard
-    /// or single extension.
+    /// clause is one positive name term, whole-word, word-start or name-start
+    /// name term, name wildcard or single extension.
     fn name_literal(&self) -> Option<Vec<u8>> {
         let [term] = self.terms.as_slice() else {
             return None;
@@ -302,7 +310,10 @@ impl CompiledClause {
             return None;
         }
         match &term.check {
-            Check::Name(finder) | Check::NameWholeWord(finder) => Some(finder.needle().to_vec()),
+            Check::Name(finder) | Check::NameWholeWord(finder) | Check::NameWordStart(finder) => {
+                Some(finder.needle().to_vec())
+            }
+            Check::NameStart(start) => Some(start.clone()),
             Check::NameWildcard(wildcard) => wildcard.longest_literal(),
             Check::Extension(exts) => match exts.as_slice() {
                 [ext] if !ext.is_empty() => Some([b".", ext.as_slice()].concat()),
@@ -321,6 +332,8 @@ impl CompiledClause {
                 Check::Path(_)
                     | Check::PathWildcard(_)
                     | Check::PathWholeWord(_)
+                    | Check::PathWordStart(_)
+                    | Check::PathStart(_)
                     | Check::PathRegex(_)
                     | Check::Parent(_)
             )
@@ -370,6 +383,8 @@ impl Check {
             Check::Size(_) | Check::DateModified(_) => 1,
             Check::Name(_) | Check::Path(_) | Check::Parent(_) => 2,
             Check::NameWholeWord(_) | Check::PathWholeWord(_) => 2,
+            Check::NameWordStart(_) | Check::PathWordStart(_) => 2,
+            Check::NameStart(_) | Check::PathStart(_) => 2,
             Check::NameWildcard(_) | Check::PathWildcard(_) => 3,
             Check::Extension(_) => 4,
             Check::NameRegex(_) | Check::PathRegex(_) => 5,
@@ -419,6 +434,10 @@ impl Check {
             }
             Check::NameWholeWord(finder) => contains_whole_word(finder, subject.name),
             Check::PathWholeWord(finder) => contains_whole_word(finder, path()),
+            Check::NameWordStart(finder) => contains_at_word_start(finder, subject.name),
+            Check::PathWordStart(finder) => contains_at_word_start(finder, path()),
+            Check::NameStart(start) => subject.name.starts_with(start),
+            Check::PathStart(start) => path().starts_with(start),
             Check::NameRegex(regex) => regex.is_match(subject.name),
             Check::PathRegex(regex) => regex.is_match(path()),
         })
@@ -430,11 +449,30 @@ impl Check {
 /// included, ends a word; letters and digits outside ASCII are word
 /// characters too.
 fn contains_whole_word(finder: &memmem::Finder, text: &[u8]) -> bool {
+    occurrences(finder, text).any(|(before, after)| !is_word(before) && !is_word(after))
+}
+
+/// Whether `text` contains the finder's needle where a word starts: at the
+/// start of `text`, or after a character that is not a letter or digit, as
+/// [`contains_whole_word`] reads a word.
+fn contains_at_word_start(finder: &memmem::Finder, text: &[u8]) -> bool {
+    occurrences(finder, text).any(|(before, _)| !is_word(before))
+}
+
+/// Whether a code point is a letter or a digit; `None`, the edge of the
+/// text, is not.
+fn is_word(cp: Option<u32>) -> bool {
+    cp.and_then(char::from_u32)
+        .is_some_and(char::is_alphanumeric)
+}
+
+/// Each occurrence of the finder's needle in `text`, overlapping ones
+/// included, as the code points right before and after it.
+fn occurrences<'a>(
+    finder: &'a memmem::Finder,
+    text: &'a [u8],
+) -> impl Iterator<Item = (Option<u32>, Option<u32>)> + 'a {
     use crate::wtf8::CodePoints;
-    let is_word = |cp: Option<u32>| {
-        cp.and_then(char::from_u32)
-            .is_some_and(char::is_alphanumeric)
-    };
     // A code point is at most 4 bytes, and only its first is not 0b10xxxxxx.
     let last = |bytes: &[u8]| {
         let tail = &bytes[bytes.len().saturating_sub(4)..];
@@ -442,20 +480,13 @@ fn contains_whole_word(finder: &memmem::Finder, text: &[u8]) -> bool {
         CodePoints::new(&tail[lead..]).next()
     };
     let mut from = 0;
-    while let Some(rest) = text.get(from..)
-        && let Some(at) = finder.find(rest)
-    {
-        let start = from + at;
+    std::iter::from_fn(move || {
+        let start = from + finder.find(text.get(from..)?)?;
         let end = start + finder.needle().len();
-        let before = last(&text[..start]);
-        let after = CodePoints::new(&text[end..]).next();
-        if !is_word(before) && !is_word(after) {
-            return true;
-        }
         // The next occurrence may overlap this one: `a-a` in `xa-a-a`.
         from = start + 1;
-    }
-    false
+        Some((last(&text[..start]), CodePoints::new(&text[end..]).next()))
+    })
 }
 
 /// A matched entry before its path is built (deferred to the final page).
@@ -1070,7 +1101,7 @@ mod tests {
     use super::*;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::query::order::{VolumeRun, order_hits};
-    use crate::query::parse::{Clause, Term, parse_query};
+    use crate::query::parse::{Clause, ParseOptions, Term, parse_query, parse_query_with};
     use crate::types::{Frn, SortDir};
     use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 
@@ -1601,6 +1632,57 @@ mod tests {
         assert!(found(r"ww:\repor").is_empty());
     }
 
+    /// A word starts at the start of the name or after a character that is
+    /// not a letter or digit, and `startwith:` matches only at the start of
+    /// the name; with `-p`, both read the full path, which starts with `C:`.
+    /// The name terms drive the folded-arena scan, and `-case` the full scan.
+    #[test]
+    fn word_start_and_name_start_read_where_the_name_or_a_word_starts() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        idx.insert_enum(&enum_rec(frn(100), NTFS_ROOT_FRN, "docs", true));
+        let names = [
+            "Paracetamol 500mg.pdf",
+            "IMG_1234.jpg",
+            "comparator.txt",
+            "my report.txt",
+        ];
+        for (i, name) in names.into_iter().enumerate() {
+            idx.insert_enum(&enum_rec(frn(200 + i as u64), frn(100), name, false));
+        }
+        let found = |query: &str, match_case, match_path| {
+            let options = ParseOptions {
+                match_case,
+                match_path,
+                ..ParseOptions::default()
+            };
+            paths_of(&idx, parse_query_with(query, options).unwrap())
+        };
+        let in_names = |query: &str| found(query, false, false);
+        let pills = [r"C:\docs\Paracetamol 500mg.pdf"];
+        assert_eq!(in_names("wordstart:para wordstart:50"), pills);
+        assert_eq!(in_names("wordstart:1234"), [r"C:\docs\IMG_1234.jpg"]);
+        assert_eq!(in_names("wordstart:para"), pills);
+        assert_eq!(in_names("wordstart:c"), [r"C:\docs\comparator.txt"]);
+        assert_eq!(in_names("startwith:para"), pills);
+        assert_eq!(in_names("wordstart:report"), [r"C:\docs\my report.txt"]);
+        assert!(in_names("startwith:report").is_empty());
+        assert_eq!(in_names("wordstart:PARA"), pills);
+        assert!(found("wordstart:PARA", true, false).is_empty());
+
+        assert_eq!(in_names("wordstart:docs"), [r"C:\docs"]);
+        assert_eq!(
+            found("wordstart:docs", false, true),
+            [
+                r"C:\docs",
+                r"C:\docs\comparator.txt",
+                r"C:\docs\IMG_1234.jpg",
+                r"C:\docs\my report.txt",
+                r"C:\docs\Paracetamol 500mg.pdf",
+            ]
+        );
+        assert!(found("wordstart:ocs", false, true).is_empty());
+    }
+
     /// A regular expression matches anywhere in the name unless it anchors,
     /// in the query's case. With `\\` it matches the full path, whose
     /// separators are `\`.
@@ -1761,10 +1843,7 @@ mod tests {
             assert!(
                 matches!(
                     refusal(&[pattern]),
-                    Some(QueryError::Malformed {
-                        what: "regular expression:",
-                        ..
-                    })
+                    Some(QueryError::Malformed(Malformed::Regex(_)))
                 ),
                 "{pattern}"
             );
@@ -1794,6 +1873,10 @@ mod tests {
                 text().prop_map(Test::Parent),
                 text().prop_map(Test::NameWholeWord),
                 text().prop_map(Test::PathWholeWord),
+                text().prop_map(Test::NameWordStart),
+                text().prop_map(Test::PathWordStart),
+                text().prop_map(Test::NameStart),
+                text().prop_map(Test::PathStart),
                 regex().prop_map(Test::NameRegex),
                 regex().prop_map(Test::PathRegex),
                 prop::collection::vec(text(), 0..3).prop_map(Test::Extension),
