@@ -2,6 +2,7 @@
 //! gozler writes to stderr and the code it exits with.
 
 use super::ExitCode;
+use crate::output::table::grouped;
 use crate::proto::QueryResults;
 use std::fmt;
 
@@ -21,6 +22,14 @@ impl Answer {
     pub fn add_page(&mut self, page: &QueryResults) {
         self.total = page.total;
         self.shown += page.items.len() as u64;
+        self.volumes_incomplete |= page.volumes_incomplete;
+    }
+
+    /// Counts in the page of a `-get-result-count` search, whose output, the
+    /// number of matches, shows every match, so the limit leaves none out.
+    pub fn add_count_page(&mut self, page: &QueryResults) {
+        self.total = page.total;
+        self.shown = page.total;
         self.volumes_incomplete |= page.volumes_incomplete;
     }
 
@@ -91,19 +100,6 @@ impl fmt::Display for Warning {
     }
 }
 
-/// `n` with a comma between each group of three digits, as `1,234,567`.
-fn grouped(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, digit) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(digit);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +129,23 @@ mod tests {
         assert_eq!(answer(3, 0, false).exit_code(false).code(), 10);
         assert_eq!(answer(3, 3, false).exit_code(false).code(), 0);
         assert_eq!(answer(300, 20, true).exit_code(false).code(), 2);
+    }
+
+    /// `-get-result-count` asks for no rows, yet its count shows every match,
+    /// so it never warns that the limit cut the list or exits 10.
+    #[test]
+    fn a_result_count_is_never_cut() {
+        let mut count = Answer::default();
+        count.add_count_page(&QueryResults {
+            total: 3,
+            items: Vec::new(),
+            more: false,
+            volumes_incomplete: false,
+            metadata_pending: false,
+            generation: 0,
+        });
+        assert!(count.warnings().is_empty());
+        assert_eq!(count.exit_code(false).code(), 0);
     }
 
     /// `-no-result-error` exits 9 only when nothing matched: not when `-n 0`

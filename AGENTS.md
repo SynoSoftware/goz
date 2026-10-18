@@ -92,7 +92,7 @@ change must keep passing, so a test earns its place by the failure it watches.
   and gozler's own options start with `--`. `docs/plans/es-superset-specs.md`
   decides where gozler departs from `es.exe`, such as the exit codes, the CSV
   columns and the default result limit. The rules live in
-  `gozler_core::escompat` (arguments), `gozler_core::output::csv` (CSV),
+  `gozler_core::escompat` (arguments), `gozler_core::output::table` (output rows),
   `gozler_core::query::parse` (query syntax) and `gozler-cli`'s `main.rs` (runtime
   exit codes).
 - **Truthful volume state.** A client must always be able to tell whether its

@@ -84,11 +84,16 @@ impl Default for SortSpec {
     }
 }
 
-/// Optional CSV columns, in flag order. `Filename` is always emitted last and
-/// is not represented here (es semantics: `-size -dm` → `Size,Date
-/// Modified,Filename`).
+/// An output column, which a column switch such as `-size` adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EsColumn {
+    /// The entry's name, without its folder.
+    Name,
+    /// The full path of the folder that holds the entry.
+    Path,
+    /// The full path, which es calls Filename.
+    FullPath,
+    Extension,
     Size,
     DateModified,
 }

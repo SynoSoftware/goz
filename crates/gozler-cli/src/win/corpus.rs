@@ -63,17 +63,32 @@ const ROWS: &[Row] = &[
             "\n",
         ),
     },
-    // Bug 6: plain output ignores -size and -dm.
+    // Bug 6: plain output prints -size and -dm, as es's console does: digits
+    // grouped and right-aligned, every date as wide as a known one.
     Row {
         args: &["report", "-size", "-dm"],
         prints: concat!(
-            r"C:\repo\report.txt",
+            r"         4,096 2026-10-17T12:34:56 C:\repo\report.txt",
             "\n",
-            r"C:\repo\docs",
+            r"               2026-10-17T12:34:56 C:\repo\docs",
             "\n",
-            r"C:\tmp\unread.bin",
+            r"                                   C:\tmp\unread.bin",
             "\n",
-            r#"C:\repo\a, "b".txt"#,
+            r#"             7 2026-10-17T12:34:56 C:\repo\a, "b".txt"#,
+            "\n",
+        ),
+    },
+    // A Name column replaces Filename, and a line ends at its last value.
+    Row {
+        args: &["report", "-name", "-size"],
+        prints: concat!(
+            "report.txt          4,096",
+            "\n",
+            "docs",
+            "\n",
+            "unread.bin",
+            "\n",
+            r#"a, "b".txt              7"#,
             "\n",
         ),
     },
@@ -192,6 +207,71 @@ const ROWS: &[Row] = &[
             r#""C:\tmp\unread.bin""#,
             "\r\n",
             r#""C:\repo\a, ""b"".txt""#,
+            "\r\n",
+        ),
+    },
+    // CSV on stdout has no byte order mark. Name, Path and Extension are
+    // text columns, quoted like Filename, which they replace.
+    Row {
+        args: &["-csv", "-name", "-path-column", "-extension", "report"],
+        prints: concat!(
+            "Name,Path,Extension\r\n",
+            r#""report.txt","C:\repo","txt""#,
+            "\r\n",
+            r#""docs","C:\repo","""#,
+            "\r\n",
+            r#""unread.bin","C:\tmp","bin""#,
+            "\r\n",
+            r#""a, ""b"".txt","C:\repo","txt""#,
+            "\r\n",
+        ),
+    },
+    // TSV quotes a value only when it holds a tab, a quote or a line break.
+    Row {
+        args: &["-tsv", "-size", "report"],
+        prints: concat!(
+            "Size\tFilename\r\n",
+            "4096\tC:\\repo\\report.txt\r\n",
+            "\tC:\\repo\\docs\r\n",
+            "\tC:\\tmp\\unread.bin\r\n",
+            "7\t\"C:\\repo\\a, \"\"b\"\".txt\"\r\n",
+        ),
+    },
+    Row {
+        args: &["-export-tsv", "out.tsv", "report"],
+        prints: concat!(
+            "\u{FEFF}Filename\r\n",
+            "C:\\repo\\report.txt\r\n",
+            "C:\\repo\\docs\r\n",
+            "C:\\tmp\\unread.bin\r\n",
+            "\"C:\\repo\\a, \"\"b\"\".txt\"\r\n",
+        ),
+    },
+    // TXT prints only the full paths, whatever the column switches ask for.
+    Row {
+        args: &["-txt", "-size", "report"],
+        prints: concat!(
+            r"C:\repo\report.txt",
+            "\r\n",
+            r"C:\repo\docs",
+            "\r\n",
+            r"C:\tmp\unread.bin",
+            "\r\n",
+            r#"C:\repo\a, "b".txt"#,
+            "\r\n",
+        ),
+    },
+    Row {
+        args: &["-export-txt", "out.txt", "report"],
+        prints: concat!(
+            "\u{FEFF}",
+            r"C:\repo\report.txt",
+            "\r\n",
+            r"C:\repo\docs",
+            "\r\n",
+            r"C:\tmp\unread.bin",
+            "\r\n",
+            r#"C:\repo\a, "b".txt"#,
             "\r\n",
         ),
     },

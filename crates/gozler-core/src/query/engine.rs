@@ -559,12 +559,20 @@ fn ext_matches(filters: &Filters, name: &[u8], scratch: &mut Vec<u8>) -> bool {
     let Some(exts) = &filters.ext else {
         return true;
     };
-    let Some(dot) = name.iter().rposition(|&b| b == b'.') else {
+    let Some(ext) = extension(name) else {
         return false; // no extension → cannot match an ext: filter
     };
     scratch.clear();
-    crate::fold::fold_into(&name[dot + 1..], scratch);
+    crate::fold::fold_into(ext, scratch);
     exts.iter().any(|e| e.as_slice() == scratch.as_slice())
+}
+
+/// The extension of an entry's name, folder or file: what follows its last
+/// `.`, or `None` when the name has no dot. `ext:` matches it, and the
+/// Extension column prints it.
+pub fn extension(name: &[u8]) -> Option<&[u8]> {
+    let dot = name.iter().rposition(|&b| b == b'.')?;
+    Some(&name[dot + 1..])
 }
 
 fn fold(bytes: &[u8]) -> Vec<u8> {

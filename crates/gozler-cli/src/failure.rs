@@ -17,7 +17,7 @@ pub(crate) enum Failure {
     /// An argument is not valid Unicode, so it could never match a name as
     /// typed; it carries the argument with the invalid part replaced.
     ArgumentNotUnicode(String),
-    /// The `-export-csv` file cannot be created.
+    /// The `-export-*` file cannot be created.
     ExportCreate { path: String, error: io::Error },
     /// Writing the results, the status or the help failed; `to` is the export
     /// file or `stdout`.

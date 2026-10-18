@@ -77,6 +77,8 @@ const EXAMPLES: &[&str] = &[
     "gozler -n all ext:cs",
     "gozler -timeout 5000 -no-result-error report",
     "gozler -export-csv files.csv -size -dm ext:cs",
+    "gozler /a-d report -size -dm",
+    "gozler -get-result-count ext:cs",
     "gozler --json report",
 ];
 
@@ -97,14 +99,30 @@ struct Difference {
 
 const DIFFERENCES: &[Difference] = &[
     Difference {
-        gozler: "CSV columns are Size, Date Modified, Filename, with ISO dates",
-        es: "Filename first, with dates in the locale's format",
-        why: "v0.2.0's layout; scripts parse ISO dates without knowing the locale",
+        gozler: "In CSV and TSV, Filename comes after the other columns",
+        es: "an export puts Filename first",
+        why: "v0.2.0's CSV layout",
     },
     Difference {
-        gozler: "The CSV starts with a UTF-8 byte order mark; -no-utf8-bom leaves it out",
+        gozler: "Dates are ISO 8601 in local time, and plain output groups digits with \
+                 commas, whatever the locale",
+        es: "dates and digit grouping follow the locale",
+        why: "scripts parse ISO dates without knowing the locale",
+    },
+    Difference {
+        gozler: "Plain output pads only the Size and Date Modified columns",
+        es: "every column is padded to a fixed width",
+        why: "a name or folder has no fixed width",
+    },
+    Difference {
+        gozler: "An export file starts with a UTF-8 byte order mark; -no-utf8-bom leaves it out",
         es: "a byte order mark only with -utf8-bom",
         why: "v0.2.0's default",
+    },
+    Difference {
+        gozler: "/a letters other than d, and /oe, are refused with exit 4",
+        es: "every attribute letter and sort by extension work",
+        why: "the index holds no attributes, and gozler has no extension sort yet",
     },
     Difference {
         gozler: "One argument with a space splits into terms; write a phrase as \"two words\"",
@@ -303,11 +321,19 @@ mod tests {
             .collect()
     }
 
-    /// A search that leaves every token to the switches: a listed switch the
-    /// parser does not know would fail, or with `/` become search text.
+    /// A search that searches no text: a listed switch the parser does not
+    /// know would fail, or with `/` become search text. A switch may add a
+    /// function, as `/ad` adds `folder:`.
     fn assert_switch_parses(tokens: &[&str]) {
         match parse_argv(&argv(tokens)) {
-            Ok(Command::Run(plan)) => assert_eq!(plan.query, "", "{tokens:?}"),
+            Ok(Command::Run(plan)) => {
+                let parsed = parse_query(&plan.query).unwrap_or_else(|e| panic!("{tokens:?}: {e}"));
+                assert!(
+                    parsed.is_text_empty(),
+                    "{tokens:?} searches {:?}",
+                    plan.query
+                );
+            }
             Ok(Command::Help | Command::Version) => {}
             Err(fatal) => panic!("{tokens:?}: {fatal}"),
         }

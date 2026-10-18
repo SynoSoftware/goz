@@ -17,8 +17,8 @@ mod paths;
 pub use crate::fold;
 
 pub use engine::{
-    CompiledQuery, QueryHit, QueryOutcome, resolve_scope, run_query, run_query_deferrable,
-    run_query_unsorted,
+    CompiledQuery, QueryHit, QueryOutcome, extension, resolve_scope, run_query,
+    run_query_deferrable, run_query_unsorted,
 };
 pub use order::{VolumeRun, order_hits};
 pub use parse::{

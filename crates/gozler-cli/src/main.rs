@@ -2,8 +2,8 @@
 //!
 //! Parses arguments with the es.exe-compatible rules from
 //! `gozler-core::escompat`, talks to the running daemon over `\\.\pipe\goz-v1`,
-//! and writes results as an es-compatible CSV (`-export-csv`), JSON (`--json`),
-//! or a plain path list (default).
+//! and writes results as JSON (`--json`), or through
+//! `gozler_core::output::TableWriter` as plain text (default), CSV, TSV or TXT.
 //!
 //! The exit codes are [`gozler_core::escompat::ExitCode`]; every failure is a
 //! [`Failure`], which maps to its code in one place.
@@ -80,10 +80,9 @@ mod win {
     use super::client::Client;
     use super::failure::{Failure, output};
     use gozler_core::escompat::{Answer, EsPlan, ExitCode};
-    use gozler_core::output::{CsvOptions, CsvRow, filetime_to_unix_ms, write_csv};
+    use gozler_core::output::{TableWriter, filetime_to_unix_ms};
     use gozler_core::proto::{DaemonStatus, QueryRequest, QueryResults, VolumeStatus};
     use gozler_core::scope::Scope;
-    use gozler_core::types::EsColumn;
     use std::io::Write;
     use std::time::{Duration, Instant};
 
@@ -94,16 +93,15 @@ mod win {
     pub(crate) fn execute(plan: EsPlan) -> Result<ExitCode, Failure> {
         // Create the export file up front (es semantics): a later daemon-unreachable
         // failure then leaves the observable artifact, a 0-byte file + exit 8.
-        let export_file = match &plan.export_csv {
-            Some(path) => {
-                Some(
-                    std::fs::File::create(path).map_err(|error| Failure::ExportCreate {
-                        path: path.clone(),
-                        error,
-                    })?,
-                )
-            }
-            None => None,
+        // -get-result-count prints the count, never results, so it writes none.
+        let export_file = match &plan.export {
+            Some(path) if !plan.result_count => Some(std::fs::File::create(path).map_err(
+                |error| Failure::ExportCreate {
+                    path: path.clone(),
+                    error,
+                },
+            )?),
+            _ => None,
         };
 
         let mut connection = Client::connect(plan.insecure_no_server_check)?;
@@ -117,19 +115,30 @@ mod win {
             wait_for_scope(&mut connection, request.scope.as_deref(), timeout)?;
         }
 
-        let out: Box<dyn Write> = match export_file {
-            Some(file) => Box::new(file),
-            // StdoutLock is a LineWriter (it flushes on every newline), so wrap
-            // it in a BufWriter to batch a large result set into a few writes.
-            None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
-        };
-        let mut writer = ResultWriter::new(&plan, jiff::tz::TimeZone::system(), out);
         let mut answer = Answer::default();
-        connection.query(request, |page| {
-            answer.add_page(&page);
-            writer.page(page)
-        })?;
-        writer.finish()?;
+        if plan.result_count {
+            connection.query(request, |page| {
+                answer.add_count_page(&page);
+                Ok(())
+            })?;
+            let mut out = std::io::stdout().lock();
+            let written = writeln!(out, "{}", answer.total).and_then(|()| out.flush());
+            output(written, "stdout")?;
+        } else {
+            let out: Box<dyn Write> = match export_file {
+                Some(file) => Box::new(file),
+                // StdoutLock is a LineWriter (it flushes on every newline), so
+                // wrap it in a BufWriter to batch a large result set into a few
+                // writes.
+                None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
+            };
+            let mut writer = ResultWriter::new(&plan, jiff::tz::TimeZone::system(), out);
+            connection.query(request, |page| {
+                answer.add_page(&page);
+                writer.page(page)
+            })?;
+            writer.finish()?;
+        }
         for warning in answer.warnings() {
             eprintln!("gozler: warning: {warning}");
         }
@@ -196,112 +205,75 @@ mod win {
 
     /// Writes one result set to stdout or the export file, in the format the
     /// plan asks for, as its pages arrive, so a large export never waits for
-    /// or holds the whole set. CSV dates are local time in `tz`.
+    /// or holds the whole set. Dates are local time in `tz`.
     struct ResultWriter<'p, W: Write> {
         plan: &'p EsPlan,
-        tz: jiff::tz::TimeZone,
         out: W,
-        /// Whether a CSV page was written, so the byte order mark and the
-        /// header come once.
-        csv_started: bool,
-        /// The pages so far with `--json`, which prints one object at the end.
-        json: Option<QueryResults>,
+        rows: Rows,
+    }
+
+    /// How a [`ResultWriter`] writes the rows.
+    enum Rows {
+        Table(TableWriter),
+        /// `--json`, which prints one object at the end: the pages so far.
+        Json(Option<QueryResults>),
     }
 
     impl<'p, W: Write> ResultWriter<'p, W> {
         fn new(plan: &'p EsPlan, tz: jiff::tz::TimeZone, out: W) -> Self {
-            Self {
-                plan,
-                tz,
-                out,
-                csv_started: false,
-                json: None,
-            }
+            let rows = if plan.json && plan.export.is_none() {
+                Rows::Json(None)
+            } else {
+                let format_date = move |filetime| format_date_local(filetime, &tz);
+                Rows::Table(TableWriter::new(
+                    plan.table_options(),
+                    Box::new(format_date),
+                ))
+            };
+            Self { plan, out, rows }
         }
 
         fn page(&mut self, page: QueryResults) -> Result<(), Failure> {
-            let written = if self.plan.export_csv.is_some() {
-                let csv = render_csv(self.plan, &page, &self.tz, !self.csv_started);
-                self.csv_started = true;
-                self.out.write_all(&csv)
-            } else if self.plan.json {
-                match &mut self.json {
-                    None => self.json = Some(page),
-                    Some(all) => {
-                        all.items.extend(page.items);
-                        all.more = page.more;
-                    }
+            let written = match &mut self.rows {
+                Rows::Table(table) => {
+                    let mut bytes = Vec::new();
+                    table.write_page(&page.items, &mut bytes);
+                    self.out.write_all(&bytes)
                 }
-                Ok(())
-            } else {
-                // Default: one path per line.
-                page.items
-                    .iter()
-                    .try_for_each(|item| writeln!(self.out, "{}", item.path))
+                Rows::Json(pages) => {
+                    match pages {
+                        None => *pages = Some(page),
+                        Some(all) => {
+                            all.items.extend(page.items);
+                            all.more = page.more;
+                        }
+                    }
+                    Ok(())
+                }
             };
             output(written, self.destination())
         }
 
         /// Writes what the pages left to write, and flushes.
         fn finish(mut self) -> Result<(), Failure> {
-            let written = match self.json.take() {
-                Some(all) => {
-                    let json = serde_json::to_string_pretty(&all)
+            let written = match &self.rows {
+                Rows::Json(Some(all)) => {
+                    let json = serde_json::to_string_pretty(all)
                         .map_err(|e| Failure::Internal(format!("JSON encoding failed: {e}")))?;
                     writeln!(self.out, "{json}")
                 }
-                None => Ok(()),
+                Rows::Json(None) | Rows::Table(_) => Ok(()),
             };
             output(written.and_then(|()| self.out.flush()), self.destination())
         }
 
         fn destination(&self) -> &'p str {
-            self.plan.export_csv.as_deref().unwrap_or("stdout")
+            self.plan.export.as_deref().unwrap_or("stdout")
         }
     }
 
-    /// Renders one page of results as es-compatible CSV, with dates in `tz`;
-    /// only the `first` page starts with the byte order mark and the header.
-    fn render_csv(
-        plan: &EsPlan,
-        results: &QueryResults,
-        tz: &jiff::tz::TimeZone,
-        first: bool,
-    ) -> Vec<u8> {
-        let opts = CsvOptions {
-            bom: plan.bom && first,
-            header: plan.header && first,
-            double_quote: plan.double_quote,
-            columns: plan.columns.clone(),
-        };
-
-        // Pre-format dates (CsvRow borrows them). Local time, ISO-8601, so the
-        // JavaScript consumer's `new Date()` parses it regardless of locale.
-        let want_date = plan.columns.contains(&EsColumn::DateModified);
-        let dates: Vec<Option<String>> = results
-            .items
-            .iter()
-            .map(|it| {
-                it.mtime_ft
-                    .filter(|_| want_date)
-                    .map(|ft| format_date_local(ft, tz))
-            })
-            .collect();
-
-        let rows = results.items.iter().zip(&dates).map(|(it, date)| CsvRow {
-            path: &it.path,
-            size: it.size,
-            mtime: date.as_deref(),
-            is_dir: it.is_dir,
-        });
-
-        let mut out = Vec::new();
-        write_csv(&opts, rows, &mut out);
-        out
-    }
-
-    /// Formats a Windows FILETIME as local `YYYY-MM-DDTHH:MM:SS` in `tz` (resolved
-    /// once by the caller). The `TimeZone` handle is cheap (Arc-backed) to clone.
+    /// Formats a Windows FILETIME as local `YYYY-MM-DDTHH:MM:SS` in `tz`, ISO
+    /// 8601, so a consumer parses it regardless of locale.
     fn format_date_local(filetime: i64, tz: &jiff::tz::TimeZone) -> String {
         let ms = filetime_to_unix_ms(filetime);
         match jiff::Timestamp::from_millisecond(ms) {

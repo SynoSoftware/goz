@@ -9,7 +9,10 @@
 //!   has one, so `-d-m` does not match `-dm`.
 //! - An unknown `-` switch is fatal (exit 6). An unknown `/` token falls
 //!   through to the search text verbatim (es source comment: "allow
-//!   /downloads to search for \downloads").
+//!   /downloads to search for \downloads"), except a token that starts with
+//!   `/a` or `/o`: the attribute and sort families own every such token, and
+//!   refuse one they do not support with exit 4, because as search text it
+//!   would match nothing.
 //! - A token consisting solely of dashes (`-`, `--`, `---`, ...) is search
 //!   text, never a switch (es `es_is_literal_switch`).
 //! - Other `--`-prefixed tokens are goz's native namespace, matched exactly
@@ -34,6 +37,7 @@
 //! es terms); when several sort switches appear, the last one wins.
 
 use super::ExitCode;
+use crate::output::{Format, TableOptions};
 use crate::types::{EsColumn, SortDir, SortKey, SortSpec};
 use std::time::Duration;
 
@@ -63,24 +67,31 @@ pub struct EsPlan {
     pub scope: Option<String>,
     /// How many results to show, from `-n`; [`EsPlan::row_limit`] applies it.
     pub limit: Limit,
-    /// Optional CSV columns from `-size` / `-dm` / `-date-modified`, in flag
-    /// order with es dedupe semantics (a repeated flag moves its column to
-    /// the end). `Filename` is always emitted last and is not listed here.
+    /// The columns the column switches ask for, in their order with es dedupe
+    /// semantics (a repeated switch moves its column to the end). The writer
+    /// adds the Filename column; see [`crate::output::table`].
     pub columns: Vec<EsColumn>,
     /// Result order. Defaults to name-ascending (es with no `-sort` flag);
     /// unsuffixed sort switches use es's per-key default direction.
     pub sort: SortSpec,
-    /// `-export-csv` value, verbatim. `None` means write results to stdout.
-    pub export_csv: Option<String>,
-    /// Whether the CSV starts with a UTF-8 BOM. Default true: a
+    /// How the rows are written: the last of `-csv`, `-tsv`, `-txt` and the
+    /// `-export-*` switches, as in es, or plain text without any.
+    pub format: Format,
+    /// The file of the last `-export-*` switch, verbatim. `None` means write
+    /// the results to stdout.
+    pub export: Option<String>,
+    /// Whether an export file starts with a UTF-8 BOM. Default true: a
     /// documented goz deviation from stock es (which defaults BOM off).
     /// `-no-utf8-bom` clears it; `-utf8-bom` is accepted and sets it.
     pub bom: bool,
-    /// Whether the CSV includes the header row. `-no-header` clears it.
+    /// Whether a CSV or TSV includes the header row. `-no-header` clears it.
     pub header: bool,
-    /// Whether string columns are always double-quoted (es default).
+    /// Whether CSV text columns are always double-quoted (es default).
     /// `-no-double-quote` downgrades to quote-only-when-needed.
     pub double_quote: bool,
+    /// `-get-result-count`: print the number of matches instead of the
+    /// results.
+    pub result_count: bool,
     /// Case-sensitive matching, from `-case` / `-match-case`. Default off.
     pub match_case: bool,
     /// `-no-result-error`: exit 9 when nothing matches.
@@ -88,7 +99,8 @@ pub struct EsPlan {
     /// `-timeout MS`: how long to wait for the volumes in scope to become
     /// complete before searching. `None` searches at once.
     pub timeout: Option<Duration>,
-    /// Native `--json`: emit results as JSON instead of CSV/plain text.
+    /// Native `--json`: print the results to stdout as JSON, whatever the
+    /// format; an export file keeps its format.
     pub json: bool,
     /// Native `--status`: report daemon/index status instead of searching.
     pub status: bool,
@@ -108,10 +120,12 @@ impl Default for EsPlan {
             limit: Limit::Default,
             columns: Vec::new(),
             sort: SortSpec::default(),
-            export_csv: None,
+            format: Format::Plain,
+            export: None,
             bom: true,
             header: true,
             double_quote: true,
+            result_count: false,
             match_case: false,
             no_result_error: false,
             timeout: None,
@@ -128,13 +142,30 @@ impl EsPlan {
     /// Without `-n`, stdout gets [`DEFAULT_LIMIT`] rows, so a query that
     /// forgets `-n` on a volume of a million files cannot flood a console or
     /// an agent's context, while an export file, which floods nothing, gets
-    /// every match.
+    /// every match. `-get-result-count` needs no rows: every page carries the
+    /// number of matches.
     pub fn row_limit(&self) -> Option<u32> {
+        if self.result_count {
+            return Some(0);
+        }
         match self.limit {
-            Limit::Default if self.export_csv.is_some() => None,
+            Limit::Default if self.export.is_some() => None,
             Limit::Default => Some(DEFAULT_LIMIT),
             Limit::All => None,
             Limit::Rows(rows) => Some(rows),
+        }
+    }
+
+    /// How the rows are written. Only an export file gets the byte order
+    /// mark, as in es, because on stdout it would reach the next program in a
+    /// pipe as part of the first line.
+    pub fn table_options(&self) -> TableOptions {
+        TableOptions {
+            format: self.format,
+            columns: self.columns.clone(),
+            bom: self.bom && self.export.is_some(),
+            header: self.header,
+            double_quote: self.double_quote,
         }
     }
 }
@@ -190,6 +221,15 @@ impl EsFatal {
             message: format!("expected {expected} after {token}, got: {value}"),
         }
     }
+
+    /// A switch family refuses the token; `reason` completes the sentence
+    /// that starts with it.
+    fn refused(token: &str, reason: &str) -> Self {
+        Self {
+            exit_code: ExitCode::InvalidInput,
+            message: format!("{token} {reason}"),
+        }
+    }
 }
 
 /// One switch, or one family of switches: how the command line spells it,
@@ -233,8 +273,18 @@ pub(super) enum SwitchAction {
     NoResultError,
     /// `-path`: consume the next token as the scope, verbatim.
     Scope,
-    /// `-export-csv`: consume the next token as the output path, verbatim.
-    ExportCsv,
+    /// `-csv`, `-tsv`, `-txt`: write the rows in this format.
+    Format(Format),
+    /// `-export-csv`, `-export-tsv`, `-export-txt`: consume the next token as
+    /// the file to write the rows to in this format, verbatim.
+    Export(Format),
+    /// `-get-result-count`: print the number of matches.
+    ResultCount,
+    /// `/ad`, `/a-d`: add this text to the query.
+    SearchText(&'static str),
+    /// A family's token gozler does not support; the text says why, after
+    /// the token.
+    Refused(&'static str),
     /// `-sort`: consume the next token as a sort-key name with an optional
     /// `-ascending` / `-descending` suffix.
     SortParam,
@@ -272,9 +322,13 @@ impl SwitchAction {
             SwitchAction::Limit => Some("N"),
             SwitchAction::Timeout => Some("MS"),
             SwitchAction::Scope => Some("DIR"),
-            SwitchAction::ExportCsv => Some("FILE"),
+            SwitchAction::Export(_) => Some("FILE"),
             SwitchAction::SortParam => Some("KEY"),
             SwitchAction::Column(_)
+            | SwitchAction::Format(_)
+            | SwitchAction::ResultCount
+            | SwitchAction::SearchText(_)
+            | SwitchAction::Refused(_)
             | SwitchAction::SortFixed(_)
             | SwitchAction::Utf8Bom
             | SwitchAction::NoUtf8Bom
@@ -299,7 +353,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Limit,
         },
         help: "show at most N results, or every result with -n all. Without -n, \
-               gozler shows 20, and -export-csv writes every result. Exit 10 when \
+               gozler shows 20, and -export-* writes every result. Exit 10 when \
                the limit leaves out matches",
     },
     Switch {
@@ -324,6 +378,14 @@ pub(super) const SWITCHES: &[Switch] = &[
         help: "the same as -sort KEY, also with -ascending or -descending",
     },
     Switch {
+        spelling: Spelling::Family {
+            usage: "/on, /o-n, /os, /o-s, /od, /o-d",
+            parse: parse_order_switch,
+        },
+        help: "order by name, size or date modified as dir does: A to Z, smallest \
+               or oldest first; - reverses the order",
+    },
+    Switch {
         spelling: Spelling::Es {
             names: &["case", "match-case"],
             action: SwitchAction::MatchCase,
@@ -331,32 +393,112 @@ pub(super) const SWITCHES: &[Switch] = &[
         help: "match case",
     },
     Switch {
-        spelling: Spelling::Es {
-            names: &["export-csv"],
-            action: SwitchAction::ExportCsv,
+        spelling: Spelling::Family {
+            usage: "/ad, /a-d",
+            parse: parse_attribute_switch,
         },
-        help: "write the results to FILE as CSV instead of to stdout",
+        help: "folders only, or files only; the letter's case does not matter, and \
+               the other attribute letters are refused",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["name"],
+            action: SwitchAction::Column(EsColumn::Name),
+        },
+        help: "add a Name column: the name without its folder",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["path-column"],
+            action: SwitchAction::Column(EsColumn::Path),
+        },
+        help: "add a Path column: the folder that holds the result",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["full-path-and-name", "filename-column"],
+            action: SwitchAction::Column(EsColumn::FullPath),
+        },
+        help: "add the Filename column, the full path, here; without it or -name or \
+               -path-column, Filename comes last",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["extension", "ext"],
+            action: SwitchAction::Column(EsColumn::Extension),
+        },
+        help: "add an Extension column: what follows the name's last dot",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["size"],
             action: SwitchAction::Column(EsColumn::Size),
         },
-        help: "add a Size column to the CSV",
+        help: "add a Size column, empty for a folder",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["dm", "date-modified"],
             action: SwitchAction::Column(EsColumn::DateModified),
         },
-        help: "add a Date Modified column to the CSV",
+        help: "add a Date Modified column, in local time",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["csv"],
+            action: SwitchAction::Format(Format::Csv),
+        },
+        help: "print the results as CSV",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["tsv"],
+            action: SwitchAction::Format(Format::Tsv),
+        },
+        help: "print the results as tab-separated values",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["txt"],
+            action: SwitchAction::Format(Format::Txt),
+        },
+        help: "print only the full paths, with CRLF line ends",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["export-csv"],
+            action: SwitchAction::Export(Format::Csv),
+        },
+        help: "write the results to FILE as CSV instead of to stdout",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["export-tsv"],
+            action: SwitchAction::Export(Format::Tsv),
+        },
+        help: "write the results to FILE as tab-separated values",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["export-txt"],
+            action: SwitchAction::Export(Format::Txt),
+        },
+        help: "write the full paths to FILE",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["get-result-count"],
+            action: SwitchAction::ResultCount,
+        },
+        help: "print only the number of matches, which counts every match \
+               whatever -n says",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["utf8-bom"],
             action: SwitchAction::Utf8Bom,
         },
-        help: "start the CSV with a UTF-8 byte order mark (the default)",
+        help: "start an export file with a UTF-8 byte order mark (the default)",
     },
     Switch {
         spelling: Spelling::Es {
@@ -370,14 +512,14 @@ pub(super) const SWITCHES: &[Switch] = &[
             names: &["no-header"],
             action: SwitchAction::NoHeader,
         },
-        help: "leave out the CSV header row",
+        help: "leave out the CSV or TSV header row",
     },
     Switch {
         spelling: Spelling::Es {
             names: &["no-double-quote"],
             action: SwitchAction::NoDoubleQuote,
         },
-        help: "quote a CSV filename only when it needs quotes",
+        help: "quote a CSV text column only when it needs quotes",
     },
     Switch {
         spelling: Spelling::Es {
@@ -413,7 +555,8 @@ pub(super) const SWITCHES: &[Switch] = &[
             name: "json",
             action: SwitchAction::Json,
         },
-        help: "print the results, or with --status the state, as JSON",
+        help: "print the results, or with --status the state, as JSON; -export-* \
+               still writes its file in its format",
     },
     Switch {
         spelling: Spelling::Native {
@@ -519,6 +662,7 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
         match action {
             SwitchAction::Help => return Ok(Command::Help),
             SwitchAction::Version => return Ok(Command::Version),
+            SwitchAction::SearchText(text) => query.push(text),
             action => apply_switch(action, token, &mut rest, &mut plan)?,
         }
     }
@@ -566,10 +710,67 @@ fn parse_sort_switch(name: &str) -> Option<SwitchAction> {
     })
 }
 
+/// Parses the `/o` family, es's dir-style sorts: `/on`, `/os` and `/od`
+/// ascending, and with `-` after the `o` descending.
+fn parse_order_switch(name: &str) -> Option<SwitchAction> {
+    let rest = name.strip_prefix('o')?;
+    let (dir, letter) = match rest.strip_prefix('-') {
+        Some(letter) => (SortDir::Desc, letter),
+        None => (SortDir::Asc, rest),
+    };
+    let key = match letter {
+        "n" => SortKey::Name,
+        "s" => SortKey::Size,
+        "d" => SortKey::DateModified,
+        "e" => {
+            return Some(SwitchAction::Refused(
+                "sorts by extension, which this release does not have",
+            ));
+        }
+        _ => {
+            return Some(SwitchAction::Refused(
+                "is not a sort; use /on, /os or /od, or /o-n, /o-s or /o-d to reverse",
+            ));
+        }
+    };
+    Some(SwitchAction::SortFixed(SortSpec { key, dir }))
+}
+
+/// Parses the `/a` family, es's dir-style attributes: `/ad` folders only and
+/// `/a-d` files only, the letters in either case, as es reads them.
+fn parse_attribute_switch(name: &str) -> Option<SwitchAction> {
+    const NOT_SUPPORTED: SwitchAction = SwitchAction::Refused(
+        "is not a supported attribute switch; use /ad for folders only or /a-d for files only",
+    );
+    let mut letters = name.strip_prefix('a')?.chars();
+    let mut kind = None;
+    while let Some(next) = letters.next() {
+        let (exclude, letter) = match next {
+            '-' => (true, letters.next()),
+            letter => (false, Some(letter)),
+        };
+        let wanted = match letter {
+            Some('d' | 'D') if exclude => "file:",
+            Some('d' | 'D') => "folder:",
+            Some(letter) if letter.is_ascii_alphabetic() => {
+                return Some(SwitchAction::Refused(
+                    "needs the attribute column, which this release does not have",
+                ));
+            }
+            _ => return Some(NOT_SUPPORTED),
+        };
+        if kind.is_some_and(|kind| kind != wanted) {
+            return Some(NOT_SUPPORTED);
+        }
+        kind = Some(wanted);
+    }
+    Some(kind.map_or(NOT_SUPPORTED, SwitchAction::SearchText))
+}
+
 /// Applies one matched switch, consuming its parameter from `rest` if it
 /// takes one. `token` is the switch as the user typed it (for messages).
-/// [`SwitchAction::Help`] and [`SwitchAction::Version`] end parsing in
-/// [`parse_argv`] and never reach here.
+/// [`parse_argv`] handles [`SwitchAction::Help`], [`SwitchAction::Version`]
+/// and [`SwitchAction::SearchText`], which never reach here.
 fn apply_switch(
     action: SwitchAction,
     token: &str,
@@ -597,7 +798,13 @@ fn apply_switch(
         }
         SwitchAction::NoResultError => plan.no_result_error = true,
         SwitchAction::Scope => plan.scope = Some(take_param(rest, token)?.to_owned()),
-        SwitchAction::ExportCsv => plan.export_csv = Some(take_param(rest, token)?.to_owned()),
+        SwitchAction::Format(format) => plan.format = format,
+        SwitchAction::Export(format) => {
+            plan.export = Some(take_param(rest, token)?.to_owned());
+            plan.format = format;
+        }
+        SwitchAction::ResultCount => plan.result_count = true,
+        SwitchAction::Refused(reason) => return Err(EsFatal::refused(token, reason)),
         SwitchAction::SortParam => {
             let value = take_param(rest, token)?;
             plan.sort = parse_sort_param(value)
@@ -618,8 +825,8 @@ fn apply_switch(
         SwitchAction::Json => plan.json = true,
         SwitchAction::Status => plan.status = true,
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
-        SwitchAction::Help | SwitchAction::Version => {
-            unreachable!("parse_argv returns at -help and -version")
+        SwitchAction::Help | SwitchAction::Version | SwitchAction::SearchText(_) => {
+            unreachable!("parse_argv handles -help, -version and search text")
         }
     }
     Ok(())
@@ -768,10 +975,12 @@ mod tests {
                     key: SortKey::Path,
                     dir: SortDir::Asc,
                 },
-                export_csv: Some("C:\\tmp\\out.csv".to_string()),
+                format: Format::Csv,
+                export: Some("C:\\tmp\\out.csv".to_string()),
                 bom: true,
                 header: true,
                 double_quote: true,
+                result_count: false,
                 match_case: false,
                 no_result_error: false,
                 timeout: None,
@@ -838,6 +1047,86 @@ mod tests {
     fn slash_token_without_match_falls_through_to_query() {
         assert_eq!(plan(&["/nomatch"]).query, "/nomatch");
         assert_eq!(plan(&["report", "/downloads"]).query, "report /downloads");
+    }
+
+    /// Bug 3: `/ad` and `/a-d` become `folder:` and `file:`, the letter in
+    /// either case, and every other `/a` token exits 4 instead of becoming
+    /// search text that matches nothing.
+    #[test]
+    fn attribute_switches_become_kind_functions_or_exit_4() {
+        assert_eq!(plan(&["/a-d", "report"]).query, "file: report");
+        assert_eq!(plan(&["report", "/aD"]).query, "report folder:");
+        assert_eq!(
+            fatal(&["/aH"]),
+            EsFatal {
+                exit_code: ExitCode::InvalidInput,
+                message: "/aH needs the attribute column, which this release does not have"
+                    .to_string(),
+            }
+        );
+        for refused in ["/a", "/ad-d", "/a1", "/a-"] {
+            assert_eq!(
+                fatal(&[refused]).exit_code,
+                ExitCode::InvalidInput,
+                "{refused}"
+            );
+        }
+    }
+
+    /// es's `/o` sorts run ascending, smallest and oldest first, unlike
+    /// `-sort size` and `-sort dm`; `-` reverses them. `/oe` waits for the
+    /// extension sort key, and every other `/o` token exits 4.
+    #[test]
+    fn order_switches_map_to_sort_keys() {
+        assert_eq!(
+            plan(&["/os"]).sort,
+            SortSpec {
+                key: SortKey::Size,
+                dir: SortDir::Asc,
+            }
+        );
+        assert_eq!(
+            plan(&["/o-d"]).sort,
+            SortSpec {
+                key: SortKey::DateModified,
+                dir: SortDir::Desc,
+            }
+        );
+        for refused in ["/oe", "/o-e", "/ox", "/o"] {
+            assert_eq!(
+                fatal(&[refused]).exit_code,
+                ExitCode::InvalidInput,
+                "{refused}"
+            );
+        }
+    }
+
+    /// As in es, the last format switch wins and an export switch also names
+    /// the file; only an export file starts with the byte order mark.
+    #[test]
+    fn the_last_format_switch_wins() {
+        let tsv_file = plan(&["-export-csv", "out.csv", "-tsv"]);
+        assert_eq!(
+            (tsv_file.format, tsv_file.export.as_deref()),
+            (Format::Tsv, Some("out.csv"))
+        );
+        assert!(tsv_file.table_options().bom);
+        let csv_stdout = plan(&["-txt", "-csv"]);
+        assert_eq!(
+            (csv_stdout.format, &csv_stdout.export),
+            (Format::Csv, &None)
+        );
+        assert!(!csv_stdout.table_options().bom);
+    }
+
+    /// `-get-result-count` asks for no rows, whatever `-n` says: every page
+    /// carries the number of matches.
+    #[test]
+    fn the_result_count_asks_for_no_rows() {
+        assert_eq!(
+            plan(&["-get-result-count", "-n", "all"]).row_limit(),
+            Some(0)
+        );
     }
 
     #[test]

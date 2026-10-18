@@ -214,8 +214,31 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         (&[r#""C:\Program Files (x86)\Microsoft""#], prints(&[])),
         // Bug 10: a query in one argument splits into terms.
         (&["ext:rs size:>1kb"], prints(&[r"C:\repo\src\argv.rs"])),
-        // Bug 3.
-        (&["/a-d", "report"], prints(&[])),
+        // Bug 3: fixed, /a-d is file: and /ad is folder:.
+        (
+            &["/a-d", "report"],
+            prints(&[
+                r"C:\repo\Report 2026.txt",
+                r"C:\repo\report.txt",
+                r"D:\backup\report.txt",
+            ]),
+        ),
+        (
+            &["/a-d", "b"],
+            prints(&[
+                r"C:\repo\node_modules\lib.cs",
+                r"C:\repo\notes.md.bak",
+                r"C:\tmp\unread.bin",
+            ]),
+        ),
+        (&["/ad", "b"], prints(&[r"D:\backup"])),
+        (
+            &["/aH", "report"],
+            argv_error(
+                4,
+                "/aH needs the attribute column, which this release does not have",
+            ),
+        ),
         // Operators.
         (
             &["report", "!2026"],
@@ -336,6 +359,17 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\repo\docs\agents\testing.md",
                 r"C:\repo\docs\link.md",
                 r"C:\repo\src\link.md",
+            ]),
+        ),
+        // es's /os sorts smallest first.
+        (
+            &["/os", "*.md"],
+            prints(&[
+                r"C:\repo\docs\link.md",
+                r"C:\repo\src\link.md",
+                r"C:\repo\docs\agents\testing.md",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\DESIGN.md",
             ]),
         ),
         // Unknown sizes, a folder's included, sort last.
