@@ -14,10 +14,7 @@ use gozler_core::proto::{
     DaemonStatus, MemPair, PIPE_NAME, PROTO_VERSION, ProtoError, Request, Response, VolumeMemory,
     VolumeStatus,
 };
-use gozler_core::proto::{
-    MAX_CLIENT_FRAME, PAGE_ROWS, QueryRequest, encode_response_frame, push_item,
-    push_results_header,
-};
+use gozler_core::proto::{MAX_CLIENT_FRAME, QueryRequest, ResultsPage, encode_response_frame};
 use gozler_core::query::{
     VolumeRun, order_hits, parse_query_with_case, resolve_scope, run_query_deferrable,
 };
@@ -34,13 +31,20 @@ use crate::volume_state::{VolumeRegistry, VolumeSet, VolumeState};
 /// cannot pin more than this many tasks + read buffers + pipe instances.
 const MAX_CONNECTIONS: usize = 64;
 /// Pages in flight between the query encoder and the pipe writer. Each page
-/// is ~[`PAGE_ROWS`] rows (~450 KB), so the backlog bounds a full export's
-/// buffered bytes at ~2 MB where it used to buffer the entire response.
+/// is ~[`gozler_core::proto::PAGE_ROWS`] rows (~450 KB), so the backlog
+/// bounds a full export's buffered bytes at ~2 MB where it used to buffer the
+/// entire response.
 const QUERY_PAGE_BACKLOG: usize = 4;
 /// Idle/half-open connections are dropped after this long with no request, so a
 /// connected-but-silent client cannot block a task forever. The one-shot CLI
 /// client always writes immediately after connecting, well within this window.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// A connection whose client takes none of a reply for this long is dropped,
+/// so a client that stops reading cannot hold its result set and its
+/// connection slot forever. It is long because a person who pauses the
+/// console (a selection in the window, `| more`) also stops the client
+/// reading, and waiting only keeps those resources a while longer.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Pause after a failed pipe connect before listening again. When connects
 /// keep failing (a broken pipe, or a local user who connects and closes in a
 /// loop), it holds the accept loop to about 100 turns a second instead of a
@@ -190,7 +194,7 @@ async fn handle_connection(
                     });
                     let mut write_err: Option<std::io::Error> = None;
                     while let Some(page) = rx.recv().await {
-                        if let Err(e) = server.write_all(&page).await {
+                        if let Err(e) = write_reply(&mut server, &page).await {
                             write_err = Some(e);
                             break;
                         }
@@ -222,9 +226,17 @@ async fn handle_connection(
                     out
                 }
             };
-            server.write_all(&out).await?;
+            write_reply(&mut server, &out).await?;
         }
     }
+}
+
+/// Writes reply bytes to the client, failing with `TimedOut` when the client
+/// has not taken them within [`WRITE_TIMEOUT`].
+async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Result<()> {
+    tokio::time::timeout(WRITE_TIMEOUT, server.write_all(bytes))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client stopped reading"))?
 }
 
 /// Collects every streamed page into one buffer: the tests' view of
@@ -241,16 +253,16 @@ fn encode_query_binary(volumes: &VolumeSet, q: QueryRequest) -> Vec<u8> {
 }
 
 /// Runs a query and emits the framed response as it is produced: one or more
-/// binary results-page frames (paged at [`PAGE_ROWS`], `more` set on all but the
-/// last), or a single tagged JSON error frame if the query failed to parse. An
-/// empty result set still emits one `more: false` page so the client always sees
+/// binary results-page frames (paged by [`ResultsPage::push`], `more` set on
+/// all but the last), or a single tagged JSON error frame if the query failed
+/// to parse. An empty result set still emits one `more: false` page so the client always sees
 /// a terminal frame. Each framed page is handed to `emit` as soon as it is
 /// encoded, and the matched hits are consumed as it goes, so a full export holds
 /// neither the whole response nor the already-emitted hits' path bytes. `emit`
 /// returning `false` means the consumer is gone; encoding stops.
 ///
 /// Pages are encoded straight from each matched hit's full path bytes by
-/// [`push_item`], so a match never allocates an intermediate
+/// [`ResultsPage`], so a match never allocates an intermediate
 /// `ResultItem`/`String`, and the set is never cloned for paging or
 /// re-serialized as JSON. This is the whole point of the binary wire: on a
 /// multi-million-path result set it is ~12x less serialization work than the old
@@ -355,42 +367,29 @@ fn stream_query_binary(
         .unwrap_or(collected.len());
     let n_rows = end - start;
 
-    let page = PAGE_ROWS as usize;
-    let n_pages = n_rows.div_ceil(page).max(1);
     // Consuming iteration: each emitted page's hits DROP right after
     // encoding, so the held path bytes drain with export progress instead of
     // peaking all together (skipped offset rows and beyond-limit rows drop
     // with the iterator).
-    let mut rows_iter = collected.into_iter().skip(start).take(n_rows);
-    for i in 0..n_pages {
-        let rows = if i + 1 < n_pages {
-            page
-        } else {
-            n_rows - i * page
-        };
-        // Frame = 4-byte LE length placeholder + payload, length backfilled
-        // once the payload is written (avoids a second buffer + copy per
-        // page). ~96 bytes/row covers a typical path + fields without a
-        // mid-page regrow.
-        let mut out = Vec::with_capacity(rows * 96 + 64);
-        out.extend_from_slice(&[0u8; 4]);
-        push_results_header(
-            &mut out,
+    let mut rows = collected.into_iter().skip(start).take(n_rows).peekable();
+    loop {
+        let mut page = ResultsPage::new(
             total,
             0, // generation: unused by the CLI, matches the prior wire
-            i + 1 < n_pages,
             volumes_incomplete,
             metadata_pending,
-            rows as u32,
+            rows.len(),
         );
-        for hit in rows_iter.by_ref().take(rows) {
+        while let Some(hit) = rows.peek() {
             let size = q.want_size.then_some(hit.size).flatten();
             let mtime = q.want_mtime.then_some(hit.mtime).flatten();
-            push_item(&mut out, &hit.path, hit.is_dir, size, mtime);
+            if !page.push(&hit.path, hit.is_dir, size, mtime) {
+                break;
+            }
+            rows.next();
         }
-        let payload_len = (out.len() - 4) as u32;
-        out[0..4].copy_from_slice(&payload_len.to_le_bytes());
-        if !emit(out) {
+        let more = rows.peek().is_some();
+        if !emit(page.finish(more)) || !more {
             return;
         }
     }
@@ -570,7 +569,10 @@ mod tests {
     };
     use crate::volume_state::{VolumeSet, VolumeState};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-    use gozler_core::proto::{PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response};
+    use gozler_core::proto::{
+        FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response,
+        decode_response_frame,
+    };
     use gozler_core::query::resolve_scope;
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
     use gozler_core::usn::record::{
@@ -851,6 +853,54 @@ mod tests {
         assert_eq!(pages[1].items.len(), 1);
         assert_eq!(pages[0].total, n, "total is the whole match count");
         assert_eq!(pages[1].total, n, "total must not drift across pages");
+    }
+
+    /// Every page must fit the 16 MiB frame cap the client decodes with, or
+    /// the client refuses it and the search fails with exit 7. [`PAGE_ROWS`]
+    /// paths of about 4 KB pass that cap, and any local user can create them.
+    #[test]
+    fn pages_of_long_paths_fit_the_clients_frame_cap() {
+        let mut index = VolumeIndex::new();
+        // 17 nested folders with 250-character names make every full path
+        // below them 4,282 bytes, so PAGE_ROWS rows would need 17.6 MB.
+        let mut parent = NTFS_ROOT_FRN.0;
+        for level in 0..17 {
+            index.insert_enum(&dir_record(100 + level, parent, &"d".repeat(250)));
+            parent = 100 + level;
+        }
+        for i in 0..PAGE_ROWS as u64 {
+            let mut rec = dir_record(1000 + i, parent, &format!("hit{i:05}.log"));
+            rec.attributes = 0;
+            index.insert_enum(&rec);
+        }
+        let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
+
+        let mut decoder = FrameDecoder::new(MAX_SERVER_FRAME);
+        decoder.feed(&encode_query_binary(&vols, query("hit")));
+        let mut pages = Vec::new();
+        while let Some(frame) = decoder
+            .next_frame()
+            .expect("every frame fits the client's cap")
+        {
+            match decode_response_frame(&frame).expect("decodes") {
+                Response::Results(page) => pages.push(page),
+                other => panic!("expected Results, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            pages.len(),
+            2,
+            "the byte cap splits the rows over two pages"
+        );
+        assert!(pages[0].more, "first page must signal more");
+        assert!(!pages[1].more, "last page must be terminal");
+        let names: Vec<String> = pages
+            .iter()
+            .flat_map(|page| &page.items)
+            .map(|item| item.path.rsplit('\\').next().unwrap().to_string())
+            .collect();
+        let expected: Vec<String> = (0..PAGE_ROWS).map(|i| format!("hit{i:05}.log")).collect();
+        assert_eq!(names, expected, "every row arrives once, in order");
     }
 
     /// When the page consumer reports it is gone (`emit` returns false, i.e.

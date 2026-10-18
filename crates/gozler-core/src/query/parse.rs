@@ -203,7 +203,18 @@ pub enum QueryError {
     UnsupportedOperator(char),
     #[error("malformed {what}: {detail}")]
     Malformed { what: &'static str, detail: String },
+    /// More terms than a query may hold; carries the query's count.
+    #[error("the query has {0} terms; a query may have at most {max}", max = MAX_QUERY_TERMS)]
+    TooManyTerms(usize),
 }
+
+/// The most terms one query may hold, counting name and path terms, both
+/// kinds of wildcard and `ext:` values. The engine tests each candidate
+/// against every term under the volume's index read lock, so the cost of a
+/// query grows with its term count; without a cap, one query from any local
+/// user holds that lock, and the journal tail waiting behind it, for minutes.
+/// Real queries use a few terms, and 256 still fits a long `ext:` list.
+const MAX_QUERY_TERMS: usize = 256;
 
 /// One search function: its names, what it does, and its line in the help.
 pub(crate) struct SearchFunction {
@@ -372,6 +383,14 @@ pub fn parse_query_with_case(input: &str, match_case: bool) -> Result<ParsedQuer
         push_text_term(&mut q, text, &fold_term);
     }
 
+    let terms = q.name_terms.len()
+        + q.path_terms.len()
+        + q.wildcards.len()
+        + q.path_wildcards.len()
+        + q.filters.ext.as_ref().map_or(0, Vec::len);
+    if terms > MAX_QUERY_TERMS {
+        return Err(QueryError::TooManyTerms(terms));
+    }
     Ok(q)
 }
 
@@ -784,6 +803,26 @@ mod tests {
             parse_query("size:abc"),
             Err(QueryError::Malformed { what: "size:", .. })
         ));
+    }
+
+    /// Every term costs each candidate a test under the index read lock, so a
+    /// query past the cap is refused rather than holding the lock for
+    /// minutes. `ext:` values count too: a long list costs the same per
+    /// candidate.
+    #[test]
+    fn a_query_with_more_than_the_maximum_terms_is_refused() {
+        let query = |name_terms: usize, exts: usize| {
+            let exts: Vec<String> = (0..exts).map(|i| format!("e{i}")).collect();
+            format!("{} ext:{}", vec!["a"; name_terms].join(" "), exts.join(";"))
+        };
+        assert!(
+            parse_query(&query(200, 56)).is_ok(),
+            "256 terms are allowed"
+        );
+        assert_eq!(
+            parse_query(&query(200, 57)),
+            Err(QueryError::TooManyTerms(257))
+        );
     }
 
     #[test]

@@ -15,8 +15,7 @@ pub mod frame;
 pub mod types;
 
 pub use binary::{
-    RESP_TAG_JSON, RESP_TAG_RESULTS, decode_results_payload, encode_results_payload, push_item,
-    push_results_header,
+    RESP_TAG_JSON, RESP_TAG_RESULTS, ResultsPage, decode_results_payload, encode_results_payload,
 };
 pub use frame::{
     FrameDecoder, FrameError, RespFrameError, decode_request, decode_response_frame, encode_frame,

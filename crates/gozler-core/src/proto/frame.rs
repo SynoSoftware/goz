@@ -24,9 +24,31 @@ const COMPACT_THRESHOLD: usize = 64 * 1024;
 /// ([`MAX_CLIENT_FRAME`](super::types::MAX_CLIENT_FRAME) /
 /// [`MAX_SERVER_FRAME`](super::types::MAX_SERVER_FRAME)).
 pub fn encode_frame(payload: &[u8], out: &mut Vec<u8>) {
-    let len = u32::try_from(payload.len()).expect("frame payload exceeds u32::MAX bytes");
-    out.extend_from_slice(&len.to_le_bytes());
+    let start = begin_frame(out);
     out.extend_from_slice(payload);
+    end_frame(out, start);
+}
+
+/// Starts a frame at the end of `out` and returns where it starts. The caller
+/// appends the payload, then [`end_frame`] writes its length, so a large frame
+/// is built in place without a second buffer and copy.
+pub(crate) fn begin_frame(out: &mut Vec<u8>) -> usize {
+    let start = out.len();
+    out.extend_from_slice(&[0; PREFIX_LEN]);
+    start
+}
+
+/// Writes the length of the frame that [`begin_frame`] started at `start`;
+/// its payload runs to the end of `out`.
+///
+/// # Panics
+///
+/// Panics if the payload is longer than `u32::MAX` bytes, as
+/// [`encode_frame`] does.
+pub(crate) fn end_frame(out: &mut [u8], start: usize) {
+    let payload = out.len() - start - PREFIX_LEN;
+    let len = u32::try_from(payload).expect("frame payload exceeds u32::MAX bytes");
+    out[start..start + PREFIX_LEN].copy_from_slice(&len.to_le_bytes());
 }
 
 /// Frame decoding failure.

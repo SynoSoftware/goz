@@ -31,7 +31,8 @@
 //! reconstructs the exact UTF-16 into `path_u16` from the same bytes, so a page
 //! round-trips to the identical [`ResultItem`]s the JSON path produced.
 
-use super::types::{QueryResults, ResultItem};
+use super::frame::{begin_frame, end_frame};
+use super::types::{MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem};
 use crate::wtf8;
 
 /// Response frame tag: the body is a JSON [`super::Response`].
@@ -55,7 +56,7 @@ pub struct BinError(&'static str);
 /// Writes a results-page frame payload header: the [`RESP_TAG_RESULTS`] tag byte
 /// followed by the fixed page fields. Callers then push `count` items with
 /// [`push_item`] and wrap the whole payload in a frame.
-pub fn push_results_header(
+fn push_results_header(
     out: &mut Vec<u8>,
     total: u64,
     generation: u64,
@@ -82,9 +83,8 @@ pub fn push_results_header(
 }
 
 /// Appends one item: raw WTF-8 path bytes (mount prefix already prepended) plus
-/// its metadata. No allocation; the daemon calls this straight from a reused
-/// scratch holding `prefix + hit.path`.
-pub fn push_item(
+/// its metadata.
+fn push_item(
     out: &mut Vec<u8>,
     raw_path: &[u8],
     is_dir: bool,
@@ -112,6 +112,95 @@ pub fn push_item(
     }
 }
 
+/// One results page, built in place as a complete frame: the daemon
+/// [`push`](Self::push)es matched hits straight from their path bytes until
+/// the page refuses one, then [`finish`](Self::finish)es it and writes it to
+/// the pipe.
+pub struct ResultsPage {
+    frame: Vec<u8>,
+    /// Where the payload starts in `frame`, after the length prefix.
+    payload_at: usize,
+    /// Where the header's flags byte and item count sit in `frame`;
+    /// [`finish`](Self::finish) fills in both.
+    flags_at: usize,
+    count_at: usize,
+    count: u32,
+}
+
+impl ResultsPage {
+    /// Starts a page whose header carries these fields. `rows_left`, the rows
+    /// still to send, sizes the buffer.
+    pub fn new(
+        total: u64,
+        generation: u64,
+        volumes_incomplete: bool,
+        metadata_pending: bool,
+        rows_left: usize,
+    ) -> Self {
+        // ~96 bytes per row covers a typical path and its fields without a
+        // regrow mid-page.
+        let rows = rows_left.min(PAGE_ROWS as usize);
+        let mut frame = Vec::with_capacity(rows * 96 + 64);
+        // The buffer is empty, so the frame starts at 0, where `finish` ends it.
+        begin_frame(&mut frame);
+        let payload_at = frame.len();
+        push_results_header(
+            &mut frame,
+            total,
+            generation,
+            false,
+            volumes_incomplete,
+            metadata_pending,
+            0,
+        );
+        let count_at = frame.len() - size_of::<u32>();
+        Self {
+            frame,
+            payload_at,
+            flags_at: count_at - 1,
+            count_at,
+            count: 0,
+        }
+    }
+
+    /// Appends one item, or returns `false` and leaves the page unchanged
+    /// when the page is full: it holds [`PAGE_ROWS`] items, or the item would
+    /// take its payload past [`MAX_SERVER_FRAME`], the cap a client decodes
+    /// with. An empty page takes any item, so every page holds at least one;
+    /// NTFS limits a full path to far less than the cap.
+    pub fn push(
+        &mut self,
+        raw_path: &[u8],
+        is_dir: bool,
+        size: Option<u64>,
+        mtime: Option<i64>,
+    ) -> bool {
+        if self.count == PAGE_ROWS {
+            return false;
+        }
+        let before = self.frame.len();
+        push_item(&mut self.frame, raw_path, is_dir, size, mtime);
+        if self.count > 0 && self.frame.len() - self.payload_at > MAX_SERVER_FRAME as usize {
+            self.frame.truncate(before);
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+
+    /// Completes the frame. `more` tells the client that another page of the
+    /// same query follows.
+    pub fn finish(mut self, more: bool) -> Vec<u8> {
+        if more {
+            self.frame[self.flags_at] |= FLAG_MORE;
+        }
+        self.frame[self.count_at..self.count_at + size_of::<u32>()]
+            .copy_from_slice(&self.count.to_le_bytes());
+        end_frame(&mut self.frame, 0);
+        self.frame
+    }
+}
+
 /// Reconstructs the raw WTF-8 path bytes for an item: when the item carried
 /// exact UTF-16 (its `path` was lossy), decode those; otherwise the UTF-8
 /// `path` bytes are already the raw bytes. Lets [`encode_results_payload`]
@@ -128,8 +217,8 @@ fn raw_path_bytes<'a>(item: &'a ResultItem, scratch: &'a mut Vec<u8>) -> &'a [u8
 }
 
 /// Encodes a whole page as one frame payload (tag + header + items) into `out`.
-/// Convenience for tests and any non-streaming caller; the daemon pages and
-/// frames itself with [`push_results_header`] / [`push_item`].
+/// Convenience for tests and any non-streaming caller; the daemon builds each
+/// page in place with [`ResultsPage`].
 pub fn encode_results_payload(page: &QueryResults, out: &mut Vec<u8>) {
     push_results_header(
         out,
@@ -184,7 +273,7 @@ impl<'a> Reader<'a> {
 /// Decodes a results-page frame payload (the bytes AFTER the tag byte) into a
 /// [`QueryResults`]. Each path is lossy-decoded to `path`, with `path_u16`
 /// reconstructed from the same bytes when they were not valid UTF-8, matching
-/// the paths the daemon encoded via [`push_item`]. Bounds-checked against truncation.
+/// the paths the daemon encoded via [`ResultsPage`]. Bounds-checked against truncation.
 pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
     let mut r = Reader { buf: body, pos: 0 };
     let total = r.u64()?;
@@ -356,39 +445,43 @@ mod tests {
         }
     }
 
+    /// [`ResultsPage`] fills in the more flag, the item count and the frame
+    /// length after the items; a slip there makes every client misread the
+    /// page. It must write exactly the frame the canonical encoder writes.
     #[test]
-    fn header_matches_from_hits_layout() {
-        // The daemon builds a page from raw (prefix + path) bytes via
-        // push_results_header + push_item; assert that produces the same bytes
-        // as encode_results_payload over the equivalent items.
-        let prefix = b"C:\\";
-        let rel = b"Windows\\notepad.exe";
-        let mut raw = Vec::new();
-        raw.extend_from_slice(prefix);
-        raw.extend_from_slice(rel);
+    fn a_results_page_frame_matches_the_canonical_encoding() {
+        let mut built = ResultsPage::new(9, 3, true, true, 2);
+        assert!(built.push(br"C:\Windows\notepad.exe", false, Some(55), Some(7)));
+        assert!(built.push(br"C:\Windows", true, None, None));
+        let built = built.finish(true);
 
-        let mut from_hits = Vec::new();
-        push_results_header(&mut from_hits, 1, 0, false, false, false, 1);
-        push_item(&mut from_hits, &raw, false, Some(55), Some(7));
-
-        let mut from_items = Vec::new();
-        encode_results_payload(
-            &QueryResults {
-                total: 1,
-                items: vec![ResultItem {
-                    path: String::from_utf8(raw.clone()).unwrap(),
-                    path_u16: None,
-                    size: Some(55),
-                    mtime_ft: Some(7),
-                    is_dir: false,
-                }],
-                more: false,
-                volumes_incomplete: false,
-                metadata_pending: false,
-                generation: 0,
-            },
-            &mut from_items,
+        let mut canonical = Vec::new();
+        super::super::frame::encode_response_frame(
+            &super::super::Response::Results(QueryResults {
+                total: 9,
+                items: vec![
+                    ResultItem {
+                        path: r"C:\Windows\notepad.exe".into(),
+                        path_u16: None,
+                        size: Some(55),
+                        mtime_ft: Some(7),
+                        is_dir: false,
+                    },
+                    ResultItem {
+                        path: r"C:\Windows".into(),
+                        path_u16: None,
+                        size: None,
+                        mtime_ft: None,
+                        is_dir: true,
+                    },
+                ],
+                more: true,
+                volumes_incomplete: true,
+                metadata_pending: true,
+                generation: 3,
+            }),
+            &mut canonical,
         );
-        assert_eq!(from_hits, from_items);
+        assert_eq!(built, canonical);
     }
 }
