@@ -95,8 +95,31 @@ neither happens.
   2026-10-17 20:36, read on 2026-10-18 17:05: about 20.5 hours on a
   development day. A saved index would therefore cover a night off, but not
   a weekend, after which a start builds from the MFT anyway.
-- **Still open:** the single-pass build and its comparison with the two-pass
-  index, which needs code and an elevated `gozlerd scan` run.
+- **The single-pass experiment.** An uncommitted `gozlerd scan
+  --compare-single-pass` built C: with two passes, one pass and two passes
+  again, and compared the single-pass index with the second two-pass index
+  by full path, folder flag, size, date and attributes.
+  - Time, with a warm disk cache: 16.09 s, single pass 11.58 s, 15.50 s. The
+    enumeration took 5.5 s warm against 12.15 s cold, so at boot the single
+    pass saves about half of the build: a cold single pass took 10.11 s
+    against 22.14 s.
+  - Entries: two passes 2,019,054 (60 without a path), single pass
+    2,019,117 (none without a path). 38 entries were only in the two-pass
+    index and 101 only in the single-pass index; nearly all were files that
+    changed between the builds (browser and app caches, temp files).
+  - The one real difference: the enumeration pass never returns the
+    `$Extend` folder, so the two-pass build leaves the NTFS metadata files
+    under it without a path, while the single pass gives them their path.
+    They become findable, as `$Boot` and `$AttrDef` already are.
+  - The file-layout pass also returns the root folder's own record, which
+    names the root as its parent. Taken as a name, it made the root its own
+    parent and left no entry a path; the single pass must only enrich the
+    root.
+
+**Stage 0 is done.** One pass builds the same index in about half the time
+at boot. Stage 1 is worth doing; saving the index (stage 2) is not, for now:
+after stage 1 a start takes about 10 s, and a saved index would win at most
+that, only after a downtime shorter than the 20.5-hour journal.
 
 ## Stage 1: build with one MFT pass
 
