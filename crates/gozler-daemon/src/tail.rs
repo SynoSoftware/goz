@@ -685,7 +685,6 @@ fn rescan(
     reason: RescanReason,
     stop: &AtomicBool,
 ) -> Option<JournalInfo> {
-    tracing::warn!(volume = %state.mount_prefix(), ?reason, "journal lost; rebuilding index");
     // The rebuild re-enumerates the whole MFT without stamping the pulse.
     // `Busy` tells the supervisor this silence is legitimate; the guard
     // restores a fresh beat on every way out of this function.
