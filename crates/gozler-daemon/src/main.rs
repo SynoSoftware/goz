@@ -148,8 +148,10 @@ fn run_scan(query: Option<String>) -> anyhow::Result<()> {
         println!("volume {}", s.mounted().display_prefix());
         println!("  guid          {}", s.guid_path);
         println!("  entries       {}", s.entries());
-        println!("  enum          {:.2}s", s.enum_secs);
         println!("  file_layout   {:.2}s", s.layout_secs);
+        if let Some(enum_secs) = s.enum_secs {
+            println!("  enum          {enum_secs:.2}s (the file-layout pass stopped)");
+        }
         match &s.journal {
             bootstrap::JournalSetup::Active(c) => println!(
                 "  journal       id={:#x} next_usn={}",

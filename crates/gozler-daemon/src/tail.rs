@@ -685,7 +685,7 @@ fn rescan(
     reason: RescanReason,
     stop: &AtomicBool,
 ) -> Option<JournalInfo> {
-    // The rebuild re-enumerates the whole MFT without stamping the pulse.
+    // The rebuild rereads the whole MFT without stamping the pulse.
     // `Busy` tells the supervisor this silence is legitimate; the guard
     // restores a fresh beat on every way out of this function.
     let _busy = pulse.busy_scope();
@@ -698,8 +698,8 @@ fn rescan(
         *state.phase.write() = VolumePhase::Rescanning;
     }
 
-    // Capture the cursor BEFORE enumerating. A change landing after its MFT
-    // region was enumerated but before a late cursor capture would be in
+    // Capture the cursor BEFORE reading the MFT. A change landing after its MFT
+    // region was read but before a late cursor capture would be in
     // neither the snapshot nor the replay, and nothing would ever notice;
     // captured first, such changes replay from the journal. The other race is
     // safe: a journal deleted or recreated DURING the rebuild invalidates this

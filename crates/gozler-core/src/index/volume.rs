@@ -336,14 +336,11 @@ impl VolumeIndex {
 
         // Enrichment is ADD-ONLY: it never tombstones or replaces an existing
         // entry. This is critical: the entry may be a directory that already
-        // has children pointing at its EntryIdx, and (during the bootstrap
-        // race) its name may legitimately differ from the LAYOUT snapshot
-        // because a rename landed between the ENUM and LAYOUT passes. Tombstone
-        // + realloc here would orphan those children under a reused slot.
+        // has children pointing at its EntryIdx, and tombstone + realloc here
+        // would orphan those children under a reused slot.
         if self.head_of(file.frn).is_none() {
-            // ENUM missed this FRN, or saw a previous tenant of its record that
-            // was deleted before this pass; build the chain from LAYOUT.
-            // No entry of this FRN exists, so nothing of it is orphaned.
+            // No entry of this FRN exists, so nothing of it is orphaned:
+            // build the chain from LAYOUT.
             let desired: Vec<LinkTarget> = file
                 .names
                 .iter()
@@ -375,6 +372,31 @@ impl VolumeIndex {
             self.set_chain_stat(head, is_dir, file.size, file.mtime_ft);
         }
         self.set_attributes(file.frn, file.attributes);
+    }
+
+    /// Ingests one FILE_LAYOUT record, the bootstrap's first and usually only
+    /// pass: its first name stands in for the ENUM record, which also fills a
+    /// folder that an earlier child left as a placeholder, then
+    /// [`Self::enrich`] adds the other hard-link names, the size and the date.
+    /// An ENUM record ingested later for the same file rewrites a single-name
+    /// entry in place and leaves a hard-link chain as it is. The root folder's
+    /// own
+    /// record names itself as its parent, unlike any ENUM record; it only
+    /// enriches the root that [`Self::new`] made, because taking its name and
+    /// parent would make the root its own parent and leave no entry a path.
+    pub fn insert_layout(&mut self, file: &LayoutFile) {
+        let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        let first_name = file.names.iter().find(|n| !n.dos_only);
+        if let Some(name) = first_name.filter(|n| n.parent_frn != file.frn) {
+            self.upsert_link(
+                file.frn,
+                name.parent_frn,
+                &name.name,
+                name.name_lossy,
+                is_dir,
+            );
+        }
+        self.enrich(file);
     }
 
     // -- live apply -------------------------------------------------------

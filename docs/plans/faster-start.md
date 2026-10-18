@@ -16,7 +16,9 @@ can trust for that time. A rescan after a journal fault runs the same build.
 ## Schedule
 
 - **Stage 0** is done (2026-10-18).
-- **Stage 1** is next. The owner sets the date.
+- **Stage 1** is implemented (2026-10-18), and its rules are in
+  `docs/DESIGN.md`. It is done when the owner has measured a start after
+  installing it; then stages 0 and 1 leave this file.
 - **Stage 2** is deferred. It starts only when a user with an HDD or with many
   millions of entries reports that a start is still too slow after stage 1,
   and then only after the review that "Expert reviews" names.
