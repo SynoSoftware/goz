@@ -197,11 +197,35 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\repo\docs\agents\testing.md",
             ]),
         ),
-        // Bug 11.
+        // Bug 11, and `!`, which was refused before stage 5: every entry
+        // but the one below node_modules, 26 of 27.
         (
             &[r"!*\node_modules\*"],
-            query_error(
-                r#"operator '!' is not supported yet; quote it to search for it literally (e.g. "a!b")"#,
+            prints_then(
+                &[
+                    r"C:\repo\docs\agents",
+                    r"C:\Program Files\app.exe",
+                    r"C:\repo\src\argv.rs",
+                    r"D:\backup",
+                    r"C:\repo\DESIGN.md",
+                    r"C:\docs",
+                    r"C:\repo\docs",
+                    r"C:\Program Files (x86)\Microsoft\edge.manifest",
+                    r"C:\repo\docs\link.md",
+                    r"C:\repo\src\link.md",
+                    r"C:\repo\src\main.cs",
+                    r"C:\Program Files (x86)\Microsoft",
+                    r"C:\repo\node_modules",
+                    r"C:\repo\notes.md.bak",
+                    r"C:\Program Files",
+                    r"C:\Program Files (x86)",
+                    r"C:\docs\readme.txt",
+                    r"C:\repo",
+                    r"C:\repo\Report 2026.txt",
+                    r"C:\repo\report.txt",
+                ],
+                &["showing 20 of 26 matches; narrow the query or pass -n all"],
+                10,
             ),
         ),
         // Bug 9.
@@ -210,9 +234,19 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         (&["path:docs/agents"], prints(&[])),
         // Bug 9.
         (&["C:/repo/docs/testing.md"], prints(&[])),
-        // Bug 10.
-        (&[r#"path:"C:\Program Files""#], prints(&[])),
-        // Bug 10.
+        // Bug 10: fixed, quotes delimit a function's value, which matches as
+        // a substring, so `Program Files (x86)` matches too.
+        (
+            &[r#"path:"C:\Program Files""#],
+            prints(&[
+                r"C:\Program Files\app.exe",
+                r"C:\Program Files (x86)\Microsoft\edge.manifest",
+                r"C:\Program Files (x86)\Microsoft",
+                r"C:\Program Files",
+                r"C:\Program Files (x86)",
+            ]),
+        ),
+        // Bug 10: a quoted path term, which stage 6 fixes.
         (&[r#""C:\Program Files (x86)\Microsoft""#], prints(&[])),
         // Bug 10: a query in one argument splits into terms.
         (&["ext:rs size:>1kb"], prints(&[r"C:\repo\src\argv.rs"])),
@@ -241,20 +275,33 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 "/aH needs the attribute column, which this release does not have",
             ),
         ),
-        // Operators.
+        // Operators. `!` and `|` were refused before stage 5.
         (
             &["report", "!2026"],
-            query_error(
-                r#"operator '!' is not supported yet; quote it to search for it literally (e.g. "a!b")"#,
-            ),
+            prints(&[r"C:\repo\report.txt", r"D:\backup\report.txt"]),
         ),
         (
             &["report|testing"],
-            query_error(
-                r#"operator '|' is not supported yet; quote it to search for it literally (e.g. "a|b")"#,
-            ),
+            prints(&[
+                r"C:\repo\Report 2026.txt",
+                r"C:\repo\report.txt",
+                r"D:\backup\report.txt",
+                r"C:\repo\docs\testing.md",
+                r"C:\repo\docs\agents\testing.md",
+            ]),
         ),
-        (&["a<b"], prints(&[])),
+        // `|` binds tighter than the space, as in es.
+        (&["DESIGN|argv rs"], prints(&[r"C:\repo\src\argv.rs"])),
+        (
+            &["DESIGN", "|", "argv", "rs"],
+            prints(&[r"C:\repo\src\argv.rs"]),
+        ),
+        // An unquoted `<` was searched as text before stage 5, which no
+        // Windows name contains.
+        (
+            &["a<b"],
+            query_error("'<' is not supported: gozler does not group terms with < and >"),
+        ),
         // Functions.
         (
             &["ext:CS;.txt"],
@@ -310,8 +357,8 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             ]),
         ),
         (&["dir:docs"], prints(&[r"C:\docs", r"C:\repo\docs"])),
-        // Bug 2.
-        (&["dm:today"], prints(&[])),
+        // Bug 2: fixed, an unknown function is refused; stage 8 adds `dm:`.
+        (&["dm:today"], query_error("unknown search function: dm:")),
         // Scope: -path searches below a folder, never the folder itself.
         (&["-path", r"C:\tmp"], prints(&[r"C:\tmp\unread.bin"])),
         (

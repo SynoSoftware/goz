@@ -69,7 +69,12 @@ impl Failure {
             Failure::ArgumentNotUnicode(arg) => {
                 eprintln!("gozler: an argument is not valid Unicode: {arg}");
             }
-            Failure::Query(error) => eprintln!("gozler: {error}"),
+            Failure::Query(error) => {
+                eprintln!("gozler: {error}");
+                if matches!(error, QueryError::UnknownFunction(_)) {
+                    eprintln!("gozler: run gozler -help for the supported switches");
+                }
+            }
             Failure::ExportCreate { path, error } => {
                 eprintln!("gozler: cannot create {path}: {error}")
             }
@@ -137,7 +142,7 @@ mod tests {
             (argv_failure(&["-n"]), 4),
             (argv_failure(&["-n", "x"]), 4),
             (Failure::ArgumentNotUnicode("a\u{FFFD}".into()), 4),
-            (Failure::Query(QueryError::UnsupportedOperator('!')), 4),
+            (Failure::Query(QueryError::UnknownFunction("dm".into())), 4),
             (
                 Failure::ExportCreate {
                     path: "out.csv".into(),

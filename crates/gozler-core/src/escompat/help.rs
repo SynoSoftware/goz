@@ -67,6 +67,12 @@ const SEARCH_TERMS: &[(&str, &str)] = &[
         r"*\node_modules\*",
         r"a wildcard with \ matches the whole full path",
     ),
+    ("!test", "exclude names containing \"test\""),
+    ("a|b", "either term; | binds tighter than the space"),
+    (
+        r#"path:"C:\Program Files""#,
+        "quotes around a function's value keep its spaces",
+    ),
 ];
 
 /// Complete command lines, each of which parses.
@@ -132,9 +138,15 @@ const DIFFERENCES: &[Difference] = &[
         why: "scripts build a query in one string",
     },
     Difference {
-        gozler: "An unquoted ! or | is refused with exit 4; quote it to search for it",
-        es: "! is not, and | is or",
-        why: "this release does not implement them",
+        gozler: "An unknown search function, such as dc:, is refused with exit 4",
+        es: "an unknown function is searched as text and matches nothing",
+        why: "a silent empty answer looks valid",
+    },
+    Difference {
+        gozler: "An unquoted < or > outside a function value is refused with exit 4",
+        es: "< > groups terms",
+        why: "Windows names cannot contain < or >, so the text never matched, and \
+              grouping is not planned",
     },
     Difference {
         gozler: "Shows 20 results unless -n says otherwise, and exits 10 with a warning \

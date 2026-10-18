@@ -2,8 +2,8 @@
 //! scans a [`crate::index::VolumeIndex`] and returns a sorted page of hits.
 //!
 //! [`crate::fold`] provides case folding; [`parse`] turns a query string into a
-//! [`parse::ParsedQuery`] of AND-ed clauses (loudly rejecting unsupported
-//! operators); [`engine`] compiles it and runs it against the index with
+//! [`parse::ParsedQuery`] of AND-ed clauses (refusing what it cannot search,
+//! such as an unknown function); [`engine`] compiles it and runs it against the index with
 //! scope, sort, and a limit; [`order`] owns the result order the engine and
 //! the daemon both sort by.
 

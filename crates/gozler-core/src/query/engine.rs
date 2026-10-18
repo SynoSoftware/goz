@@ -1079,6 +1079,24 @@ mod tests {
         assert_eq!(jpg, vec!["photo.JPG"]);
     }
 
+    /// `ext:` with no extension finds the files without one, as in es, where
+    /// a folder has no extension; it matched every entry before (#21). `!`
+    /// and `|` take it as one term.
+    #[test]
+    fn ext_alone_finds_files_without_an_extension() {
+        let mut idx = VolumeIndex::new();
+        for r in [
+            enum_rec(frn(100), NTFS_ROOT_FRN, "src", true),
+            enum_rec(frn(101), NTFS_ROOT_FRN, "LICENSE", false),
+            enum_rec(frn(102), NTFS_ROOT_FRN, "main.rs", false),
+        ] {
+            idx.insert_enum(&r);
+        }
+        assert_eq!(run(&idx, "ext:"), ["LICENSE"]);
+        assert_eq!(run(&idx, "!ext:"), ["main.rs", "src"]);
+        assert_eq!(run(&idx, "ext:|ext:rs"), ["LICENSE", "main.rs"]);
+    }
+
     #[test]
     fn size_filter_excludes_unknown_and_out_of_range() {
         let idx = sample_index();
@@ -1400,8 +1418,8 @@ mod tests {
         texts(&out.hits)
     }
 
-    /// The evaluator already reads what the parser will write for `!` and
-    /// `|`: a clause passes when any of its terms does, and a negated term
+    /// The evaluator reads what the parser writes for `!` and `|`: a clause
+    /// passes when any of its terms does, and a negated term
     /// when its test fails, except that a size test of an unknown size fails
     /// either way. Only a clause of one positive name term may drive the
     /// folded-arena scan: `guide|main` driven by `guide` would never reach
