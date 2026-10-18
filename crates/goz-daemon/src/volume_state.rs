@@ -29,11 +29,12 @@ pub(crate) struct VolumeState {
     /// The size and date pass of the index's last build failed or stopped, so
     /// some sizes and dates are unknown. Set at bootstrap and by every rescan.
     pub metadata_pending: RwLock<bool>,
-    /// Maximum size of the volume's USN journal at bootstrap, `None` without a
-    /// journal. Surfaced by `--status` because the journal's size bounds how
-    /// long a downtime can be replayed instead of rescanned, and a journal that
-    /// could not be grown was invisible for months when only the log knew.
-    pub journal_max_bytes: Option<u64>,
+    /// Maximum size of the volume's USN journal as of the index's last build,
+    /// `None` without a journal. Set at bootstrap and by every rescan.
+    /// Surfaced by `--status` because the journal's size bounds how long a
+    /// downtime can be replayed instead of rescanned, and a journal that could
+    /// not be grown was invisible for months when only the log knew.
+    pub journal_max_bytes: RwLock<Option<u64>>,
     /// Memoized `-path` scope resolution (case-insensitive queries only).
     pub scope_cache: Mutex<Option<ScopeCache>>,
 }

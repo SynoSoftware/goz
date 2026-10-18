@@ -37,9 +37,7 @@ pub(crate) struct BootstrappedVolume {
     pub mounts: Vec<String>,
     pub enum_secs: f64,
     pub layout_secs: f64,
-    /// `None` if the volume has no usable USN journal (bootstrap still works;
-    /// only the live tail would be unavailable).
-    pub cursor: Option<JournalInfo>,
+    pub journal: JournalSetup,
     pub index: VolumeIndex,
     /// See [`BuiltIndex::metadata_pending`].
     pub metadata_pending: bool,
@@ -163,7 +161,7 @@ fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
 
     // The journal is only needed for the live tail; a one-shot scan reads the
     // MFT directly, so an unavailable journal is not fatal here.
-    let cursor = ensure_journal(&handle, &vol.guid_path);
+    let journal = ensure_journal(&handle, &vol.guid_path);
     // First-time bootstrap passes no stop flag, so the rebuild can never abort.
     let built = build_index(&handle, None)?.expect("build_index cannot abort without a stop flag");
 
@@ -172,7 +170,7 @@ fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
         mounts: vol.mounts.clone(),
         enum_secs: built.enum_secs,
         layout_secs: built.layout_secs,
-        cursor,
+        journal,
         index: built.index,
         metadata_pending: built.metadata_pending,
         handle,
@@ -199,10 +197,11 @@ enum LayoutPass {
 }
 
 /// Builds a fresh [`VolumeIndex`] for an already-open volume handle: a full MFT
-/// enumeration followed by FILE_LAYOUT enrichment. Shared by first-time
-/// bootstrap and the live tail's rescan (after a USN journal wrap/deletion),
-/// which rebuilds the index on the handle it already owns. Returns `None` when
-/// `stop` aborts the build. The journal is the caller's concern.
+/// enumeration followed by FILE_LAYOUT enrichment, with its storage optimized
+/// for publishing. Shared by first-time bootstrap and the live tail's rescan
+/// (after a USN journal wrap/deletion), which rebuilds the index on the handle
+/// it already owns. Returns `None` when `stop` aborts the build. The journal is
+/// the caller's concern.
 pub(crate) fn build_index(
     handle: &VolumeHandle,
     stop: Option<&AtomicBool>,
@@ -246,6 +245,10 @@ pub(crate) fn build_index(
         LayoutPass::Cancelled => return Ok(None),
     };
     let layout_secs = layout_start.elapsed().as_secs_f64();
+
+    // Every record has been seen, so the FRN map can densify against its true
+    // maximum, and the growth slack of the build goes back.
+    index.optimize_storage();
 
     Ok(Some(BuiltIndex {
         index,
@@ -321,22 +324,33 @@ fn journal_target_bytes(volume_bytes: Option<u64>) -> u64 {
         .clamp(JOURNAL_MIN_SIZE, JOURNAL_MAX_SIZE)
 }
 
-/// Returns the volume's USN journal info if one is usable, else `None`.
+/// What [`ensure_journal`] got for a volume.
+pub(crate) enum JournalSetup {
+    /// A usable journal, with the cursor to tail it from.
+    Active(JournalInfo),
+    /// The volume has no journal and refused to create one, so it never will.
+    Refused,
+    /// No usable journal right now (a query that failed, a deletion in
+    /// progress, or a journal created but not yet active); a later attempt
+    /// may get one.
+    Unavailable,
+}
+
+/// Gets the volume's USN journal, creating or growing it as needed.
 ///
 /// Never fatal: a one-shot scan reads the MFT directly and does not need the
 /// journal. An active journal smaller than [`journal_target_bytes`] is grown
 /// in place; a failure to grow is an error (not a warning: it went unread as a
 /// warning for months while every restart fell back to a full scan) but the
 /// journal is still used at its current size. An absent journal is created on
-/// the spot and used if creation succeeds; if it cannot be created, or a
-/// deletion is in progress, this yields `None` (usually with a note) and live
-/// updates are unavailable.
-pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> Option<JournalInfo> {
+/// the spot and used if creation succeeds. Every other outcome logs a note and
+/// leaves live updates unavailable.
+pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> JournalSetup {
     let target = journal_target_bytes(volume_total_bytes(guid_path).ok());
     match query_usn_journal(handle) {
         Ok(JournalQuery::Active(info)) => {
             if info.maximum_size >= target {
-                return Some(info);
+                return JournalSetup::Active(info);
             }
             let wanted_mib = target / (1024 * 1024);
             let actual_mib = info.maximum_size / (1024 * 1024);
@@ -347,7 +361,7 @@ pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> Option<J
                     actual_mib,
                     "could not grow the USN journal; at this size a restart after more than a few hours of changes must rescan the whole volume"
                 );
-                return Some(info);
+                return JournalSetup::Active(info);
             }
             // Growing keeps the journal ID and every record, so the pre-grow
             // cursor stays valid; re-query only so the reported size is the
@@ -367,38 +381,37 @@ pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> Option<J
                             "USN journal size unchanged; the filesystem capped it"
                         );
                     }
-                    Some(grown)
+                    JournalSetup::Active(grown)
                 }
                 other => {
                     tracing::error!(
                         state = ?other,
                         "journal state changed right after growing it; keeping the earlier cursor"
                     );
-                    Some(info)
+                    JournalSetup::Active(info)
                 }
             }
         }
         Ok(JournalQuery::NotActive) => {
             match create_usn_journal(handle, target, JOURNAL_ALLOC_DELTA) {
                 Ok(()) => match query_usn_journal(handle) {
-                    Ok(JournalQuery::Active(info)) => Some(info),
+                    Ok(JournalQuery::Active(info)) => JournalSetup::Active(info),
                     // We just created a journal and it is not active. Rare, but
                     // naming it matters: a volume that should have tailed live
-                    // silently will not, and every other `None` here means
-                    // something different.
+                    // silently will not.
                     Ok(other) => {
                         tracing::warn!(
                             state = ?other,
                             "created a USN journal but it is not active; live updates unavailable"
                         );
-                        None
+                        JournalSetup::Unavailable
                     }
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
                             "created a USN journal but could not re-query it; live updates unavailable"
                         );
-                        None
+                        JournalSetup::Unavailable
                     }
                 },
                 Err(e) => {
@@ -406,17 +419,17 @@ pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> Option<J
                         error = %e,
                         "no USN journal and could not create one; live updates unavailable"
                     );
-                    None
+                    JournalSetup::Refused
                 }
             }
         }
         Ok(JournalQuery::DeleteInProgress) => {
             tracing::warn!("USN journal deletion in progress; live updates unavailable");
-            None
+            JournalSetup::Unavailable
         }
         Err(e) => {
             tracing::warn!(error = %e, "could not query the USN journal; live updates unavailable");
-            None
+            JournalSetup::Unavailable
         }
     }
 }

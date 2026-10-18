@@ -450,7 +450,7 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
                 entries: index.len() as u64,
                 generation: index.generation(),
                 metadata_pending: *v.metadata_pending.read(),
-                journal_max_bytes: v.journal_max_bytes,
+                journal_max_bytes: *v.journal_max_bytes.read(),
                 placeholders_created: stats.placeholders_created,
                 delete_of_unknown: stats.delete_of_unknown,
                 stale_slots: stats.stale_slots,
@@ -613,7 +613,7 @@ mod tests {
             index: RwLock::new(index),
             phase: RwLock::new(phase),
             metadata_pending: RwLock::new(false),
-            journal_max_bytes: None,
+            journal_max_bytes: RwLock::new(None),
             scope_cache: Mutex::new(None),
         })
     }

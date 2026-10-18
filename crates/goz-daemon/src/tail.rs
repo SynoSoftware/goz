@@ -36,7 +36,7 @@ use goz_winfs::{
     JournalInfo, VolumeHandle, read_usn_journal, stat_file,
 };
 
-use crate::bootstrap;
+use crate::bootstrap::{self, JournalSetup};
 use crate::pulse::TailPulse;
 use crate::volume_state::VolumeState;
 
@@ -127,8 +127,9 @@ impl TailHandle {
 /// Spawns the tail thread for one volume. `handle` is moved into the thread
 /// (it is not shared). `cursor: None` means the caller has no trustworthy
 /// starting point (a supervisor reviving a tail whose predecessor exited, so
-/// the volume went untailed for a while) and the thread's first act is a full
-/// rescan, which rebuilds the index and acquires a fresh cursor.
+/// the volume went untailed for a while, or a bootstrap that could not read
+/// the journal) and the thread's first act is a full rescan, which rebuilds
+/// the index and acquires a fresh cursor.
 pub(crate) fn spawn(
     state: Arc<VolumeState>,
     handle: VolumeHandle,
@@ -186,6 +187,36 @@ pub(crate) fn spawn(
     })
 }
 
+/// Where the tail reads the journal next, and the run of failed reads there.
+/// One value, so a rescan's fresh cursor always comes with a fresh failure
+/// run: a run carried across a rescan would leave a Live volume unmarked while
+/// its reads fail, or escalate the next failure straight into another rescan.
+struct ReadPosition {
+    start_usn: i64,
+    journal_id: u64,
+    /// `None` while reads succeed.
+    failures: Option<ReadFailures>,
+}
+
+impl ReadPosition {
+    fn at(cursor: JournalInfo) -> Self {
+        Self {
+            start_usn: cursor.next_usn,
+            journal_id: cursor.journal_id,
+            failures: None,
+        }
+    }
+}
+
+/// A run of consecutive failed journal reads.
+struct ReadFailures {
+    since: Instant,
+    backoff: Duration,
+    /// This run moved the volume to Offline, so only its end moves it back and
+    /// the tail never stomps a phase someone else owns (Rescanning, Failed).
+    degraded: bool,
+}
+
 fn tail_loop(
     state: &VolumeState,
     handle: VolumeHandle,
@@ -199,9 +230,10 @@ fn tail_loop(
     // draw an unbounded join from the supervisor's give-up or revive path.
     let handle = &handle;
     let mut rescans: u32 = 0;
-    // A revived tail starts with no cursor: changes kept landing while the
-    // volume had no tail, so nothing proves the index is in sync. Rebuild it
-    // and pick up a fresh cursor before tailing a single record. Deliberately
+    // A tail without a cursor cannot prove the index is in sync: a revived
+    // tail's volume kept changing while it had no tail, and a bootstrap that
+    // could not read the journal has nothing to replay from. Rebuild it and
+    // pick up a fresh cursor before tailing a single record. Deliberately
     // NOT routed through `bounded_rescan`: this rebuild is revival's price,
     // not a journal fault, and charging it would leave every revived
     // incarnation one incident short of the documented budget (the counter
@@ -210,37 +242,34 @@ fn tail_loop(
     // budget instead.
     let cursor = match cursor {
         Some(c) => c,
-        None => match rescan(state, handle, pulse, RescanReason::TailRevived, stop) {
+        None => match rescan(state, handle, pulse, RescanReason::NoCursor, stop) {
             Some(c) => c,
             None => return,
         },
     };
-    let mut start_usn = cursor.next_usn;
-    let mut journal_id = cursor.journal_id;
+    let mut pos = ReadPosition::at(cursor);
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
-    // Journal-read failure streak. `degraded` records that WE moved the volume
-    // to Offline, so only we move it back and we never stomp a phase someone
-    // else owns (Rescanning, Failed).
-    let mut failing_since: Option<Instant> = None;
-    let mut backoff = RETRY_BACKOFF_MIN;
-    let mut degraded = false;
 
     while !stop.load(Ordering::Relaxed) {
         // Liveness stamp for the supervisor: as long as this loop is turning,
         // however unhealthily, no one cancels our I/O.
         pulse.beat();
-        match read_usn_journal(handle, start_usn, journal_id, REASON_MASK, 0, &mut buf) {
+        match read_usn_journal(
+            handle,
+            pos.start_usn,
+            pos.journal_id,
+            REASON_MASK,
+            0,
+            &mut buf,
+        ) {
             Ok(bytes) => {
-                if degraded {
+                if pos.failures.take().is_some_and(|f| f.degraded) {
                     tracing::info!(
                         volume = %state.mount_prefix(),
                         "journal reads recovered; volume is tracking again"
                     );
                     *state.phase.write() = VolumePhase::Live;
-                    degraded = false;
                 }
-                failing_since = None;
-                backoff = RETRY_BACKOFF_MIN;
                 let walk = match walk_journal_buffer(&buf[..bytes]) {
                     Ok(w) => w,
                     Err(e) => {
@@ -256,8 +285,7 @@ fn tail_loop(
                             stop,
                         ) {
                             Some(c) => {
-                                start_usn = c.next_usn;
-                                journal_id = c.journal_id;
+                                pos = ReadPosition::at(c);
                                 continue;
                             }
                             None => return,
@@ -266,7 +294,7 @@ fn tail_loop(
                 };
                 if walk.records.is_empty() {
                     // Caught up (or only filtered-out records): advance and idle.
-                    start_usn = walk.next_usn;
+                    pos.start_usn = walk.next_usn;
                     std::thread::sleep(IDLE_POLL);
                     continue;
                 }
@@ -307,7 +335,7 @@ fn tail_loop(
                 if outcome.wants_compact {
                     compact_index(state);
                 }
-                start_usn = walk.next_usn;
+                pos.start_usn = walk.next_usn;
                 rescans = 0; // a healthy batch resets the rescan storm guard
             }
             Err(e) if e.code == ERROR_JOURNAL_ENTRY_DELETED => {
@@ -323,10 +351,7 @@ fn tail_loop(
                     &mut rescans,
                     stop,
                 ) {
-                    Some(c) => {
-                        start_usn = c.next_usn;
-                        journal_id = c.journal_id;
-                    }
+                    Some(c) => pos = ReadPosition::at(c),
                     None => return,
                 }
             }
@@ -351,13 +376,7 @@ fn tail_loop(
                     &mut rescans,
                     stop,
                 ) {
-                    Some(c) => {
-                        start_usn = c.next_usn;
-                        journal_id = c.journal_id;
-                        failing_since = None;
-                        backoff = RETRY_BACKOFF_MIN;
-                        degraded = false;
-                    }
+                    Some(c) => pos = ReadPosition::at(c),
                     None => return,
                 }
             }
@@ -372,7 +391,12 @@ fn tail_loop(
                 // reports it complete. Past `DEGRADE_AFTER` the drift is real, so
                 // say so and let `--status`, `Hello.ready`, and every result page
                 // carry it.
-                let since = *failing_since.get_or_insert_with(Instant::now);
+                let failures = pos.failures.get_or_insert_with(|| ReadFailures {
+                    since: Instant::now(),
+                    backoff: RETRY_BACKOFF_MIN,
+                    degraded: false,
+                });
+                let since = failures.since;
                 // Nor may we retry FOREVER: deleting the journal mid-read was
                 // observed to answer the stale cursor with
                 // ERROR_INVALID_PARAMETER (87), a code no arm maps, and no
@@ -393,18 +417,12 @@ fn tail_loop(
                         &mut rescans,
                         stop,
                     ) {
-                        Some(c) => {
-                            start_usn = c.next_usn;
-                            journal_id = c.journal_id;
-                            failing_since = None;
-                            backoff = RETRY_BACKOFF_MIN;
-                            degraded = false;
-                        }
+                        Some(c) => pos = ReadPosition::at(c),
                         None => return,
                     }
                     continue;
                 }
-                if !degraded && since.elapsed() >= DEGRADE_AFTER {
+                if !failures.degraded && since.elapsed() >= DEGRADE_AFTER {
                     tracing::error!(
                         volume = %state.mount_prefix(),
                         error = %e,
@@ -412,7 +430,7 @@ fn tail_loop(
                         "journal reads keep failing; marking volume Offline (its index is no longer current)"
                     );
                     *state.phase.write() = VolumePhase::Offline;
-                    degraded = true;
+                    failures.degraded = true;
                 } else {
                     tracing::warn!(volume = %state.mount_prefix(), error = %e, "journal read failed; retrying");
                 }
@@ -420,8 +438,8 @@ fn tail_loop(
                 // per RETRY_BACKOFF_MAX instead of one every 500 ms forever.
                 // Interruptible: a stop arriving mid-backoff must not wait out
                 // up to 30 s, or teardown would mistake this tail for wedged.
-                sleep_unless_stopped(stop, backoff);
-                backoff = (backoff * 2).min(RETRY_BACKOFF_MAX);
+                sleep_unless_stopped(stop, failures.backoff);
+                failures.backoff = (failures.backoff * 2).min(RETRY_BACKOFF_MAX);
             }
         }
     }
@@ -661,7 +679,10 @@ fn rescan(
     // recreated DURING the rebuild invalidates this cursor, the first read
     // from it fails, and the ordinary error arms trigger another rescan. A
     // stale cursor is loud, a late cursor is silent.
-    let cursor = bootstrap::ensure_journal(handle, &state.guid);
+    let cursor = match bootstrap::ensure_journal(handle, &state.guid) {
+        JournalSetup::Active(c) => Some(c),
+        JournalSetup::Refused | JournalSetup::Unavailable => None,
+    };
 
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full MFT scan.
@@ -682,6 +703,7 @@ fn rescan(
         // Set before the phase returns to Live, so a query that reads Live
         // also reads the new index's flag rather than the old one's.
         *state.metadata_pending.write() = built.metadata_pending;
+        *state.journal_max_bytes.write() = cursor.map(|c| c.maximum_size);
         // Invalidate the scope cache while the index write lock is held: its
         // EntryIdx values belong to the old generation. Clearing it here (rather
         // than after the lock drops) guarantees a reader never sees the new,

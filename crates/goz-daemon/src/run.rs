@@ -10,6 +10,7 @@ use goz_core::types::VolumePhase;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 
+use crate::bootstrap::JournalSetup;
 use crate::supervisor::Supervisor;
 use crate::tail::{self, TailHandle};
 use crate::volume_state::{VolumeSet, VolumeState};
@@ -54,51 +55,50 @@ pub(crate) fn build_engine() -> Result<Engine> {
             )),
             phase: RwLock::new(VolumePhase::Failed { reason: fv.reason }),
             metadata_pending: RwLock::new(false),
-            journal_max_bytes: None,
+            journal_max_bytes: RwLock::new(None),
             scope_cache: parking_lot::Mutex::new(None),
         }));
     }
 
-    for mut bv in scan.ok {
+    for bv in scan.ok {
         total_entries += bv.entries();
-        // One-shot: densify the FRN map and return bootstrap growth slack.
-        // Before the volume is shared, so no lock is even contended.
-        bv.index.optimize_storage();
+        let journal_max_bytes = match &bv.journal {
+            JournalSetup::Active(cursor) => Some(cursor.maximum_size),
+            JournalSetup::Refused | JournalSetup::Unavailable => None,
+        };
         let state = Arc::new(VolumeState {
             guid: bv.guid_path.clone(),
             mounts: bv.mounts.clone(),
             index: RwLock::new(bv.index),
             phase: RwLock::new(VolumePhase::Live),
             metadata_pending: RwLock::new(bv.metadata_pending),
-            journal_max_bytes: bv.cursor.map(|c| c.maximum_size),
+            journal_max_bytes: RwLock::new(journal_max_bytes),
             scope_cache: parking_lot::Mutex::new(None),
         });
 
-        match bv.cursor {
-            Some(cursor) => {
+        let cursor = match bv.journal {
+            JournalSetup::Active(cursor) => {
                 tracing::info!(
                     volume = %state.mount_prefix(),
                     entries = state.index.read().len(),
                     "tailing journal"
                 );
-                match tail::spawn(state.clone(), bv.handle, Some(cursor)) {
-                    Ok(h) => tails.push(h),
-                    Err(e) => {
-                        // Thread creation or its handle duplication failed
-                        // (resource pressure); either way no tail is running.
-                        // Degrade just this volume to Offline instead of
-                        // aborting the whole engine bootstrap; status will
-                        // flag it incomplete.
-                        tracing::error!(
-                            volume = %state.mount_prefix(),
-                            error = %e,
-                            "failed to spawn tail thread; volume indexed but will not receive live updates"
-                        );
-                        *state.phase.write() = VolumePhase::Offline;
-                    }
-                }
+                Some(cursor)
             }
-            None => {
+            JournalSetup::Unavailable => {
+                // The index is not tracking yet. A tail started without a
+                // cursor first gets the journal and rebuilds the index, and
+                // the supervisor revives it while the journal stays
+                // unavailable; a cursor taken now, after the build, would
+                // miss the changes made during it.
+                tracing::warn!(
+                    volume = %state.mount_prefix(),
+                    "USN journal unavailable; the volume's tail will rebuild the index once it can read the journal"
+                );
+                *state.phase.write() = VolumePhase::Offline;
+                None
+            }
+            JournalSetup::Refused => {
                 tracing::info!(
                     volume = %state.mount_prefix(),
                     "no USN journal; volume is indexed but its index is a snapshot and cannot track changes"
@@ -112,6 +112,23 @@ pub(crate) fn build_engine() -> Result<Engine> {
                 // refusing, and they now get a journal like any other volume.)
                 *state.phase.write() = VolumePhase::Snapshot;
                 // `bv.handle` drops here (CloseHandle); no tail for this volume.
+                states.push(state);
+                continue;
+            }
+        };
+        match tail::spawn(state.clone(), bv.handle, cursor) {
+            Ok(h) => tails.push(h),
+            Err(e) => {
+                // Thread creation or its handle duplication failed (resource
+                // pressure); either way no tail is running. Degrade just this
+                // volume to Offline instead of aborting the whole engine
+                // bootstrap; status will flag it incomplete.
+                tracing::error!(
+                    volume = %state.mount_prefix(),
+                    error = %e,
+                    "failed to spawn tail thread; volume indexed but will not receive live updates"
+                );
+                *state.phase.write() = VolumePhase::Offline;
             }
         }
         states.push(state);
@@ -123,16 +140,10 @@ pub(crate) fn build_engine() -> Result<Engine> {
     // budget. It takes ownership of the tails; teardown goes through it.
     let supervisor = Supervisor::spawn(tails);
 
-    // Purge THIS thread's allocator heap before handing off. The sparse FRN
-    // maps swapped for dense and the pre-shrink slack were freed on this
-    // thread by `optimize_storage`, and mimalloc heaps are per-thread: the
-    // post-publish purge in `settle_working_set` runs on a DIFFERENT thread
-    // (the SCM thread in service mode) and cannot reach them, which left
-    // ~100 MB of dead bootstrap memory committed for the daemon's lifetime.
-    // (The enumeration buffers were freed on the per-volume bootstrap
-    // threads, whose heaps `abandoned_page_purge` returns at thread exit.)
-    // SAFETY: mi_collect takes no pointers and is safe from any thread.
-    unsafe { libmimalloc_sys::mi_collect(true) };
+    // This thread needs no allocator purge: the bootstrap transients
+    // (enumeration buffers, the sparse FRN maps `optimize_storage` replaces,
+    // the pre-shrink slack) are freed on the per-volume bootstrap threads,
+    // whose heaps `abandoned_page_purge` returns at thread exit.
 
     Ok(Engine {
         volumes: Arc::new(states),

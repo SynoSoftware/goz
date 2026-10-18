@@ -88,8 +88,10 @@ pub enum PathStatus {
     Ok,
     /// The chain terminates in lost+found (an unresolved orphan).
     InLostFound,
-    /// The hop cap was hit: corrupt/raced parent links; the volume should
-    /// rescan rather than trust this path.
+    /// The hop cap was hit: a loop in the parent links, which a journal replay
+    /// can close until its later records open it again, or a real folder tree
+    /// deeper than the cap, which a rescan rebuilds the same way. The entry has
+    /// no trustworthy path.
     CycleDetected,
 }
 

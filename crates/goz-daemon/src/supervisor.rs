@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use goz_core::types::VolumePhase;
 use parking_lot::{Condvar, Mutex};
 
-use crate::pulse::{Pulse, now_unix};
+use crate::pulse::{Pulse, awake_secs};
 use crate::tail::{self, TailHandle};
 
 /// Pause between supervision scans.
@@ -419,7 +419,7 @@ fn scan_loop(supervised: &mut Vec<Supervised>, stop: &StopFlag) {
                 return;
             }
         }
-        let now = now_unix();
+        let now = awake_secs();
         let mut i = 0;
         while i < supervised.len() {
             if supervised[i].scan(now) {
@@ -807,10 +807,11 @@ mod tests {
         assert_eq!(accrue_health(started, Pulse::Retired, true, NOW, t0), None);
     }
 
-    /// A clock that jumps backwards (NTP step) must read as "not stalled",
-    /// never as a huge stall that shoots a healthy tail.
+    /// A stamp newer than the scan's clock reading (a tail that beat after
+    /// the scan read the clock) must read as "not stalled", never as a huge
+    /// stall that shoots a healthy tail.
     #[test]
-    fn a_backwards_clock_never_cancels() {
+    fn a_stamp_newer_than_now_never_cancels() {
         assert_eq!(
             assess(Pulse::Beat(NOW + 600), NOW, 0, false),
             Action::Nothing
