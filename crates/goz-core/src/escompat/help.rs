@@ -48,8 +48,9 @@ pub fn help() -> String {
 }
 
 const INTRO: &str = "Finds files and folders by name, path and size. Terms combine with \
-     AND. Results: one full path per line on stdout; diagnostics on stderr. \
-     A switch starts with - or /, and each dash inside its name is optional.";
+     AND. Shows 20 results unless -n says otherwise. Results: one full path per \
+     line on stdout; diagnostics on stderr. A switch starts with - or /, and each \
+     dash inside its name is optional.";
 
 /// Search terms that use no function, with what each finds.
 const SEARCH_TERMS: &[(&str, &str)] = &[
@@ -73,6 +74,8 @@ const EXAMPLES: &[&str] = &[
     "gozler readme",
     r"gozler -path C:\repo ext:cs",
     "gozler *.log -sort dm -n 10",
+    "gozler -n all ext:cs",
+    "gozler -timeout 5000 -no-result-error report",
     "gozler -export-csv files.csv -size -dm ext:cs",
     "gozler --json report",
 ];
@@ -112,6 +115,18 @@ const DIFFERENCES: &[Difference] = &[
         gozler: "An unquoted ! or | is refused with exit 4; quote it to search for it",
         es: "! is not, and | is or",
         why: "this release does not implement them",
+    },
+    Difference {
+        gozler: "Shows 20 results unless -n says otherwise, and exits 10 with a warning \
+                 when the limit leaves out matches, -n 0 included",
+        es: "prints every match, and -n cuts the list silently with exit 0",
+        why: "a query that forgets -n on a volume of a million files floods a \
+              console or an agent's context",
+    },
+    Difference {
+        gozler: "-n all shows every result",
+        es: "-n all is invalid input",
+        why: "it is the way to lift the default limit",
     },
     Difference {
         gozler: "Each outcome has its own exit code, listed below",
@@ -330,6 +345,7 @@ mod tests {
                 }
                 None => {}
                 Some("N") => tokens[1] = "5",
+                Some("MS") => tokens[1] = "1000",
                 Some("DIR") => tokens[1] = r"C:\repo",
                 Some("FILE") => tokens[1] = "out.csv",
                 Some("KEY") => tokens[1] = "name",

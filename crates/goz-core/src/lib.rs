@@ -16,6 +16,7 @@ pub mod layout;
 pub mod output;
 pub mod proto;
 pub mod query;
+pub mod scope;
 pub mod types;
 pub mod usn;
 pub mod wtf8;

@@ -1,7 +1,8 @@
 //! The golden corpus: command lines run over one fixture index, each with what
 //! gozler prints for it, as the code behaves today. A row runs its command line
 //! through `parse_argv` into the request gozler sends, and that request through
-//! [`encode_query_binary`], the daemon's query path.
+//! [`encode_query_binary`], the daemon's query path; the rows printed, the
+//! warnings and the exit code then come from [`Answer`], as in gozler.
 //!
 //! A row records today's behavior, right or wrong. A row that a planned fix
 //! changes on purpose carries a comment with its number in the bug table of
@@ -12,7 +13,7 @@
 use super::{decode_frames, dir_record, set, volume};
 use crate::server::encode_query_binary;
 use crate::volume_state::VolumeSet;
-use goz_core::escompat::{Command, EsPlan, parse_argv};
+use goz_core::escompat::{Answer, Command, EsPlan, parse_argv};
 use goz_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
 use goz_core::layout::{LayoutFile, LayoutName};
 use goz_core::proto::{QueryRequest, Response};
@@ -63,8 +64,13 @@ const D_DRIVE: &[Entry] = &[Folder(r"D:\backup"), File(r"D:\backup\report.txt", 
 /// What gozler prints for a command line.
 #[derive(Debug, PartialEq)]
 enum Printed {
-    /// Full paths on stdout, one per line, in result order.
-    Paths(Vec<String>),
+    /// Full paths on stdout, one per line, in result order, then each warning
+    /// on stderr, and the exit code.
+    Paths {
+        paths: Vec<String>,
+        warnings: Vec<String>,
+        exit: u8,
+    },
     /// `parse_argv` refuses the command line: gozler prints the message and
     /// exits with the code.
     ArgvError(u8, String),
@@ -74,8 +80,17 @@ enum Printed {
     QueryError(String),
 }
 
+/// A complete answer: the paths, no warning and exit 0.
 fn prints(paths: &[&str]) -> Printed {
-    Printed::Paths(paths.iter().map(ToString::to_string).collect())
+    prints_then(paths, &[], 0)
+}
+
+fn prints_then(paths: &[&str], warnings: &[&str], exit: u8) -> Printed {
+    Printed::Paths {
+        paths: paths.iter().map(ToString::to_string).collect(),
+        warnings: warnings.iter().map(ToString::to_string).collect(),
+        exit,
+    }
 }
 
 fn argv_error(code: u8, message: &str) -> Printed {
@@ -348,16 +363,59 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         // Bug 4.
         (
             &["report", "-n", "1"],
-            prints(&[r"C:\repo\Report 2026.txt"]),
+            prints_then(
+                &[r"C:\repo\Report 2026.txt"],
+                &["showing 1 of 3 matches; narrow the query or pass -n all"],
+                10,
+            ),
         ),
-        (&["-n", "0", "report"], prints(&[])),
+        // Bug 4.
+        (
+            &["-n", "0", "report"],
+            prints_then(
+                &[],
+                &["showing 0 of 3 matches; narrow the query or pass -n all"],
+                10,
+            ),
+        ),
+        // The default limit: 20 rows when more match.
+        (
+            &[],
+            prints_then(
+                &[
+                    r"C:\repo\docs\agents",
+                    r"C:\Program Files\app.exe",
+                    r"C:\repo\src\argv.rs",
+                    r"D:\backup",
+                    r"C:\repo\DESIGN.md",
+                    r"C:\docs",
+                    r"C:\repo\docs",
+                    r"C:\Program Files (x86)\Microsoft\edge.manifest",
+                    r"C:\repo\node_modules\lib.cs",
+                    r"C:\repo\docs\link.md",
+                    r"C:\repo\src\link.md",
+                    r"C:\repo\src\main.cs",
+                    r"C:\Program Files (x86)\Microsoft",
+                    r"C:\repo\node_modules",
+                    r"C:\repo\notes.md.bak",
+                    r"C:\Program Files",
+                    r"C:\Program Files (x86)",
+                    r"C:\docs\readme.txt",
+                    r"C:\repo",
+                    r"C:\repo\Report 2026.txt",
+                ],
+                &["showing 20 of 27 matches; narrow the query or pass -n all"],
+                10,
+            ),
+        ),
+        (&["zzzzqqq", "-no-result-error"], prints_then(&[], &[], 9)),
         // Bug 7.
         (&["-help"], Printed::Help),
         // Command lines parse_argv refuses.
         (&["--bogus"], argv_error(6, "unknown switch: --bogus")),
         (
             &["-n", "abc"],
-            argv_error(4, "expected a number after -n, got: abc"),
+            argv_error(4, "expected a number or all after -n, got: abc"),
         ),
         (
             &["-path"],
@@ -433,7 +491,7 @@ fn request(plan: &EsPlan) -> QueryRequest {
         scope: plan.scope.clone(),
         sort: plan.sort,
         offset: 0,
-        limit: plan.limit,
+        limit: plan.row_limit(),
         want_size: true,
         want_mtime: true,
         match_case: plan.match_case,
@@ -449,14 +507,22 @@ fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
         Err(fatal) => return Printed::ArgvError(fatal.exit_code.code(), fatal.message),
     };
     let mut paths = Vec::new();
+    let mut answer = Answer::default();
     for frame in decode_frames(&encode_query_binary(volumes, request(&plan))) {
         match frame {
-            Response::Results(page) => paths.extend(page.items.into_iter().map(|i| i.path)),
+            Response::Results(page) => {
+                answer.add_page(&page);
+                paths.extend(page.items.into_iter().map(|i| i.path));
+            }
             Response::Error { message, .. } => return Printed::QueryError(message),
             other => panic!("unexpected reply to a query: {other:?}"),
         }
     }
-    Printed::Paths(paths)
+    Printed::Paths {
+        paths,
+        warnings: answer.warnings().iter().map(ToString::to_string).collect(),
+        exit: answer.exit_code(plan.no_result_error).code(),
+    }
 }
 
 /// Every row prints what it recorded. All changed rows are listed at once, so

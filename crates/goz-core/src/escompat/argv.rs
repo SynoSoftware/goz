@@ -35,6 +35,7 @@
 
 use super::ExitCode;
 use crate::types::{EsColumn, SortDir, SortKey, SortSpec};
+use std::time::Duration;
 
 /// What a command line asks gozler to do.
 #[derive(Clone, Debug, PartialEq)]
@@ -60,9 +61,8 @@ pub struct EsPlan {
     /// `-path` value, verbatim. The CLI absolutizes it (GetFullPathName
     /// semantics, no existence check); the core stays path-API-free.
     pub scope: Option<String>,
-    /// `-n` / `-max-results` value: return only the top N results after
-    /// sorting. `None` means unlimited.
-    pub limit: Option<u32>,
+    /// How many results to show, from `-n`; [`EsPlan::row_limit`] applies it.
+    pub limit: Limit,
     /// Optional CSV columns from `-size` / `-dm` / `-date-modified`, in flag
     /// order with es dedupe semantics (a repeated flag moves its column to
     /// the end). `Filename` is always emitted last and is not listed here.
@@ -83,6 +83,11 @@ pub struct EsPlan {
     pub double_quote: bool,
     /// Case-sensitive matching, from `-case` / `-match-case`. Default off.
     pub match_case: bool,
+    /// `-no-result-error`: exit 9 when nothing matches.
+    pub no_result_error: bool,
+    /// `-timeout MS`: how long to wait for the volumes in scope to become
+    /// complete before searching. `None` searches at once.
+    pub timeout: Option<Duration>,
     /// Native `--json`: emit results as JSON instead of CSV/plain text.
     pub json: bool,
     /// Native `--status`: report daemon/index status instead of searching.
@@ -100,7 +105,7 @@ impl Default for EsPlan {
         Self {
             query: String::new(),
             scope: None,
-            limit: None,
+            limit: Limit::Default,
             columns: Vec::new(),
             sort: SortSpec::default(),
             export_csv: None,
@@ -108,11 +113,44 @@ impl Default for EsPlan {
             header: true,
             double_quote: true,
             match_case: false,
+            no_result_error: false,
+            timeout: None,
             json: false,
             status: false,
             insecure_no_server_check: false,
         }
     }
+}
+
+impl EsPlan {
+    /// The most rows to ask the daemon for, or `None` for every match.
+    ///
+    /// Without `-n`, stdout gets [`DEFAULT_LIMIT`] rows, so a query that
+    /// forgets `-n` on a volume of a million files cannot flood a console or
+    /// an agent's context, while an export file, which floods nothing, gets
+    /// every match.
+    pub fn row_limit(&self) -> Option<u32> {
+        match self.limit {
+            Limit::Default if self.export_csv.is_some() => None,
+            Limit::Default => Some(DEFAULT_LIMIT),
+            Limit::All => None,
+            Limit::Rows(rows) => Some(rows),
+        }
+    }
+}
+
+/// The rows gozler shows without `-n`.
+pub const DEFAULT_LIMIT: u32 = 20;
+
+/// How many results a command line asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// No `-n`.
+    Default,
+    /// `-n all`.
+    All,
+    /// `-n N`.
+    Rows(u32),
 }
 
 /// A command line gozler refuses, with the code it exits with.
@@ -186,8 +224,13 @@ pub(super) enum Spelling {
 /// What a matched switch does to the plan.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum SwitchAction {
-    /// `-n` / `-max-results`: consume the next token as a `u32` limit.
+    /// `-n` / `-max-results` / `-count`: consume the next token as a `u32`
+    /// limit or `all`.
     Limit,
+    /// `-timeout`: consume the next token as milliseconds to wait.
+    Timeout,
+    /// `-no-result-error`: exit 9 when nothing matches.
+    NoResultError,
     /// `-path`: consume the next token as the scope, verbatim.
     Scope,
     /// `-export-csv`: consume the next token as the output path, verbatim.
@@ -227,6 +270,7 @@ impl SwitchAction {
     pub(super) fn param(self) -> Option<&'static str> {
         match self {
             SwitchAction::Limit => Some("N"),
+            SwitchAction::Timeout => Some("MS"),
             SwitchAction::Scope => Some("DIR"),
             SwitchAction::ExportCsv => Some("FILE"),
             SwitchAction::SortParam => Some("KEY"),
@@ -237,6 +281,7 @@ impl SwitchAction {
             | SwitchAction::NoHeader
             | SwitchAction::NoDoubleQuote
             | SwitchAction::MatchCase
+            | SwitchAction::NoResultError
             | SwitchAction::Json
             | SwitchAction::Status
             | SwitchAction::InsecureNoServerCheck
@@ -250,10 +295,12 @@ impl SwitchAction {
 pub(super) const SWITCHES: &[Switch] = &[
     Switch {
         spelling: Spelling::Es {
-            names: &["n", "max-results"],
+            names: &["n", "max-results", "count"],
             action: SwitchAction::Limit,
         },
-        help: "show at most N results",
+        help: "show at most N results, or every result with -n all. Without -n, \
+               gozler shows 20, and -export-csv writes every result. Exit 10 when \
+               the limit leaves out matches",
     },
     Switch {
         spelling: Spelling::Es {
@@ -334,6 +381,21 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Es {
+            names: &["no-result-error"],
+            action: SwitchAction::NoResultError,
+        },
+        help: "exit 9 when nothing matches",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["timeout"],
+            action: SwitchAction::Timeout,
+        },
+        help: "wait up to MS milliseconds for the volumes in scope to finish \
+               indexing, then search; a volume still indexing makes the answer exit 2",
+    },
+    Switch {
+        spelling: Spelling::Es {
             names: &["h", "help"],
             action: SwitchAction::Help,
         },
@@ -351,14 +413,15 @@ pub(super) const SWITCHES: &[Switch] = &[
             name: "json",
             action: SwitchAction::Json,
         },
-        help: "print the results as JSON",
+        help: "print the results, or with --status the state, as JSON",
     },
     Switch {
         spelling: Spelling::Native {
             name: "status",
             action: SwitchAction::Status,
         },
-        help: "show the state of gozlerd and each volume instead of searching",
+        help: "show the state of gozlerd and each volume instead of searching; exit 2 \
+               when a volume is not live or its sizes and dates could not be read",
     },
     Switch {
         spelling: Spelling::Native {
@@ -419,7 +482,7 @@ pub(super) const SORT_KEYS: &[SortKeyName] = &[
 ///     panic!("a search");
 /// };
 /// assert_eq!(plan.query, "report");
-/// assert_eq!(plan.limit, Some(10));
+/// assert_eq!(plan.row_limit(), Some(10));
 /// ```
 pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
     let mut plan = EsPlan::default();
@@ -516,11 +579,23 @@ fn apply_switch(
     match action {
         SwitchAction::Limit => {
             let value = take_param(rest, token)?;
-            let limit: u32 = value
-                .parse()
-                .map_err(|_| EsFatal::bad_param(token, value, "a number"))?;
-            plan.limit = Some(limit);
+            plan.limit = match value {
+                "all" => Limit::All,
+                _ => Limit::Rows(
+                    value
+                        .parse()
+                        .map_err(|_| EsFatal::bad_param(token, value, "a number or all"))?,
+                ),
+            };
         }
+        SwitchAction::Timeout => {
+            let value = take_param(rest, token)?;
+            let ms: u32 = value
+                .parse()
+                .map_err(|_| EsFatal::bad_param(token, value, "milliseconds"))?;
+            plan.timeout = Some(Duration::from_millis(ms.into()));
+        }
+        SwitchAction::NoResultError => plan.no_result_error = true,
         SwitchAction::Scope => plan.scope = Some(take_param(rest, token)?.to_owned()),
         SwitchAction::ExportCsv => plan.export_csv = Some(take_param(rest, token)?.to_owned()),
         SwitchAction::SortParam => {
@@ -687,7 +762,7 @@ mod tests {
             EsPlan {
                 query: "report".to_string(),
                 scope: Some("C:\\some dir".to_string()),
-                limit: Some(200),
+                limit: Limit::Rows(200),
                 columns: vec![EsColumn::Size, EsColumn::DateModified],
                 sort: SortSpec {
                     key: SortKey::Path,
@@ -698,6 +773,8 @@ mod tests {
                 header: true,
                 double_quote: true,
                 match_case: false,
+                no_result_error: false,
+                timeout: None,
                 json: false,
                 status: false,
                 insecure_no_server_check: false,
@@ -711,7 +788,7 @@ mod tests {
             plan(&["-sortpath"]).sort,
             SortSpec::default_for(SortKey::Path)
         );
-        assert_eq!(plan(&["-maxresults", "7"]).limit, Some(7));
+        assert_eq!(plan(&["-maxresults", "7"]).limit, Limit::Rows(7));
         assert!(!plan(&["-noutf8bom"]).bom);
         assert!(!plan(&["-nodoublequote"]).double_quote);
         assert_eq!(
@@ -734,7 +811,7 @@ mod tests {
         );
         // Partial omission is fine too: any subset of dashes may be dropped.
         assert!(!plan(&["-no-utf8bom"]).bom);
-        assert_eq!(plan(&["-max-results", "3"]).limit, Some(3));
+        assert_eq!(plan(&["-max-results", "3"]).limit, Limit::Rows(3));
     }
 
     #[test]
@@ -768,7 +845,7 @@ mod tests {
         // Research: es_check_param treats `-` and `/` prefixes identically,
         // so /n is the -n switch, not search text.
         let parsed = plan(&["/n", "50"]);
-        assert_eq!(parsed.limit, Some(50));
+        assert_eq!(parsed.limit, Limit::Rows(50));
         assert_eq!(parsed.query, "");
         // A matched `/` switch with a missing parameter is exit 4 like `-`.
         assert_eq!(fatal(&["/path"]).exit_code, ExitCode::InvalidInput);
@@ -794,6 +871,35 @@ mod tests {
         // Overflowing u32 is a bad parameter, not a silent wrap.
         assert_eq!(
             fatal(&["-n", "4294967296"]).exit_code,
+            ExitCode::InvalidInput
+        );
+    }
+
+    /// The owner's default limit: stdout gets 20 rows unless -n says
+    /// otherwise, and an export file every match; -n all lifts the limit, and
+    /// -count is es's alias of -n.
+    #[test]
+    fn the_limit_defaults_to_20_rows_on_stdout() {
+        let row_limit = |tokens: &[&str]| plan(tokens).row_limit();
+        assert_eq!(row_limit(&["report"]), Some(20));
+        assert_eq!(row_limit(&["-export-csv", "out.csv", "report"]), None);
+        assert_eq!(row_limit(&["-n", "all", "report"]), None);
+        assert_eq!(row_limit(&["-count", "0", "report"]), Some(0));
+        assert_eq!(
+            row_limit(&["-export-csv", "out.csv", "-n", "5", "report"]),
+            Some(5)
+        );
+        assert_eq!(fatal(&["-n", "ALL"]).exit_code, ExitCode::InvalidInput);
+    }
+
+    #[test]
+    fn timeout_takes_milliseconds() {
+        assert_eq!(
+            plan(&["-timeout", "1500"]).timeout,
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            fatal(&["-timeout", "soon"]).exit_code,
             ExitCode::InvalidInput
         );
     }
@@ -939,7 +1045,7 @@ mod tests {
     fn query_tokens_join_with_single_spaces_around_interleaved_flags() {
         let parsed = plan(&["foo", "-size", "bar", "-n", "5", "baz qux"]);
         assert_eq!(parsed.query, "foo bar baz qux");
-        assert_eq!(parsed.limit, Some(5));
+        assert_eq!(parsed.limit, Limit::Rows(5));
         assert_eq!(parsed.columns, vec![EsColumn::Size]);
     }
 

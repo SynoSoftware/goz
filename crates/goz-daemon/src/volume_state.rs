@@ -7,6 +7,7 @@
 //! stays `Sync` and can be shared across the tokio runtime via `Arc`.
 
 use goz_core::index::VolumeIndex;
+use goz_core::scope::VolumeMounts;
 use goz_core::types::{EntryIdx, VolumePhase};
 use parking_lot::{Mutex, RwLock};
 
@@ -40,10 +41,18 @@ pub(crate) struct VolumeState {
 }
 
 impl VolumeState {
-    /// The display prefix for paths on this volume (its first mount, e.g.
-    /// `C:\`, or the GUID path if it has no drive letter).
+    /// Where the volume is mounted.
+    pub(crate) fn mounted(&self) -> VolumeMounts<'_> {
+        VolumeMounts {
+            mounts: &self.mounts,
+            guid: &self.guid,
+        }
+    }
+
+    /// The prefix full paths on this volume print with
+    /// ([`VolumeMounts::display_prefix`]).
     pub(crate) fn mount_prefix(&self) -> &str {
-        self.mounts.first().unwrap_or(&self.guid).as_str()
+        self.mounted().display_prefix()
     }
 }
 

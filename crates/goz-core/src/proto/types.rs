@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::scope::VolumeMounts;
 use crate::types::{SortSpec, VolumePhase};
 
 /// Protocol version spoken by this build.
@@ -236,6 +237,16 @@ pub struct VolumeStatus {
     /// Per-component index memory breakdown. `None` from daemons predating it.
     #[serde(default)]
     pub memory: Option<VolumeMemory>,
+}
+
+impl VolumeStatus {
+    /// Where the volume is mounted.
+    pub fn mounted(&self) -> VolumeMounts<'_> {
+        VolumeMounts {
+            mounts: &self.mounts,
+            guid: &self.guid,
+        }
+    }
 }
 
 /// Machine-readable failure class carried by [`Response::Error`].

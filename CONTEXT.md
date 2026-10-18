@@ -21,7 +21,8 @@ _Avoid_: FRN (outside code), inode
 
 **Mount prefix**:
 Where a volume is mounted, as gozler prints it: a drive such as `C:\`, or a
-mount folder.
+mount folder. A volume can have several; its full paths print with the first,
+or with its GUID path when it has none.
 _Avoid_: drive (for a volume mounted in a folder)
 
 **Full path**:
@@ -46,6 +47,10 @@ A search term without a separator; it matches the entry's name.
 **Path term**:
 A search term with a `\` or `/`, or a `path:` value; it matches the full path,
 as a substring.
+
+**Scope**:
+The folder `-path` names. A search finds the entries below it, on the volume
+whose mount prefix is the longest that starts it.
 
 **Path wildcard**:
 A path term with `*` or `?`; it must match the whole full path, as `*\docs\*`

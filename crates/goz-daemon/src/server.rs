@@ -21,6 +21,7 @@ use goz_core::proto::{
 use goz_core::query::{
     VolumeRun, order_hits, parse_query_with_case, resolve_scope, run_query_deferrable,
 };
+use goz_core::scope::Scope;
 use goz_core::types::EntryIdx;
 use goz_winfs::{PipeSecurity, build_pipe_security};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -273,7 +274,7 @@ fn stream_query_binary(
     };
 
     let per_vol_limit = q.limit.map(|l| q.offset.saturating_add(l));
-    let targets = targets(volumes, &q.scope);
+    let targets = targets(volumes, q.scope.as_deref());
 
     // One run per volume, ordered into one list by `order_hits` below.
     let mut runs: Vec<VolumeRun> = Vec::new();
@@ -488,31 +489,20 @@ enum VolScope {
     Rel(Vec<u8>),
 }
 
-/// Resolves which volumes (and per-volume unresolved scope) a query targets.
-fn targets(volumes: &VolumeSet, scope: &Option<String>) -> Vec<(Arc<VolumeState>, VolScope)> {
-    match scope {
-        None => volumes.iter().map(|v| (v.clone(), VolScope::All)).collect(),
-        Some(path) => {
-            let Some(vol) = volumes
-                .iter()
-                .find(|v| starts_with_ci(path, v.mount_prefix()))
-            else {
-                return Vec::new();
-            };
-            // Trim trailing separators. `VolumeIndex::path_of` emits `dir\name`
-            // with no trailing separator, so an untrimmed `Windows\` (what shell
-            // tab-completion produces, and what the CLI's `std::path::absolute`
-            // preserves) resolves fine but can never equal the reconstructed
-            // path: the scope cache would fail validation and re-walk the tree
-            // on every keystroke, with correct results and no other symptom.
-            // Trimming also lets both spellings share one cache entry.
-            let raw = &path.as_bytes()[vol.mount_prefix().len()..];
-            let end = raw
-                .iter()
-                .rposition(|&b| b != b'\\' && b != b'/')
-                .map_or(0, |i| i + 1);
-            vec![(vol.clone(), VolScope::Rel(raw[..end].to_vec()))]
-        }
+/// Resolves which volumes (and per-volume unresolved scope) a query targets,
+/// by the rule the client also waits by ([`Scope::of`]).
+fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Vec<(Arc<VolumeState>, VolScope)> {
+    match Scope::of(scope, volumes.iter().map(|v| v.mounted())) {
+        Scope::Everywhere => volumes.iter().map(|v| (v.clone(), VolScope::All)).collect(),
+        // The folder comes without a trailing separator, so it can equal the
+        // path `VolumeIndex::path_of` rebuilds: an untrimmed `Windows\` (shell
+        // tab-completion's spelling) resolves fine but never validates, so the
+        // scope cache would miss and re-walk the tree on every keystroke.
+        Scope::Folder { volume, folder } => vec![(
+            volumes[volume].clone(),
+            VolScope::Rel(folder.as_bytes().to_vec()),
+        )],
+        Scope::Nowhere => Vec::new(),
     }
 }
 
@@ -559,17 +549,11 @@ fn scope_entry_valid(index: &goz_core::index::VolumeIndex, entry: EntryIdx, rel:
     goz_core::fold::fold(&buf) == goz_core::fold::fold(rel)
 }
 
-/// Case-insensitive ASCII prefix test (drive letters and `\` are ASCII).
-fn starts_with_ci(haystack: &str, prefix: &str) -> bool {
-    haystack.len() >= prefix.len()
-        && haystack.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         VolScope, build_status, encode_query_binary, handle_request, resolve_scope_cached,
-        scope_entry_valid, starts_with_ci, targets,
+        scope_entry_valid, targets,
     };
     use crate::volume_state::{VolumeSet, VolumeState};
     use goz_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
@@ -668,7 +652,7 @@ mod tests {
         assert_eq!(entry, plain, "both spellings name the same directory");
 
         let vol = live_volume(r"C:\");
-        let (_, scope) = targets(&set(&[vol]), &Some(r"C:\Windows\".to_string()))
+        let (_, scope) = targets(&set(&[vol]), Some(r"C:\Windows\"))
             .pop()
             .expect("C: matches");
         let VolScope::Rel(rel) = scope else {
@@ -722,18 +706,14 @@ mod tests {
         let d = live_volume(r"D:\");
         let vols = set(&[c, d]);
 
-        assert_eq!(
-            targets(&vols, &None).len(),
-            2,
-            "no scope means every volume"
-        );
+        assert_eq!(targets(&vols, None).len(), 2, "no scope means every volume");
 
-        let picked = targets(&vols, &Some(r"c:\windows".to_string()));
+        let picked = targets(&vols, Some(r"c:\windows"));
         assert_eq!(picked.len(), 1, "scope selects exactly one volume");
         assert_eq!(picked[0].0.mount_prefix(), r"C:\", "case-insensitive match");
 
         assert!(
-            targets(&vols, &Some(r"Z:\nope".to_string())).is_empty(),
+            targets(&vols, Some(r"Z:\nope")).is_empty(),
             "an unindexed drive yields no targets"
         );
     }
@@ -1089,15 +1069,6 @@ mod tests {
                 "ready must track the same bar as volumes_incomplete"
             );
         }
-    }
-
-    #[test]
-    fn starts_with_ci_respects_length_and_case() {
-        assert!(starts_with_ci(r"c:\x", r"C:\"));
-        assert!(starts_with_ci(r"C:\", r"C:\"));
-        // Shorter than the prefix: must not panic or match.
-        assert!(!starts_with_ci("C:", r"C:\"));
-        assert!(!starts_with_ci(r"D:\x", r"C:\"));
     }
 
     /// Every way two hits can tie or nearly tie: es path order against a byte

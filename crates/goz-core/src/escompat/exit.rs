@@ -12,7 +12,8 @@ pub enum ExitCode {
     /// A failure no other code describes.
     Internal = 1,
     /// A volume in scope is indexing, rescanning or offline, so the answer may
-    /// be incomplete. The results that exist are printed.
+    /// be incomplete; the results that exist are printed. For `--status`, also
+    /// a volume whose size and date pass failed or stopped.
     Incomplete = 2,
     /// The pipe server is not the trusted daemon.
     Untrusted = 3,
@@ -26,11 +27,15 @@ pub enum ExitCode {
     Communication = 7,
     /// The daemon is not running.
     DaemonNotRunning = 8,
+    /// Nothing matched, and `-no-result-error` asked for this code.
+    NoMatches = 9,
+    /// The output is correct, but the limit left out more matches.
+    Truncated = 10,
 }
 
 impl ExitCode {
     /// Every code, in numeric order.
-    pub const ALL: [ExitCode; 9] = [
+    pub const ALL: [ExitCode; 11] = [
         ExitCode::Complete,
         ExitCode::Internal,
         ExitCode::Incomplete,
@@ -40,6 +45,8 @@ impl ExitCode {
         ExitCode::UnknownSwitch,
         ExitCode::Communication,
         ExitCode::DaemonNotRunning,
+        ExitCode::NoMatches,
+        ExitCode::Truncated,
     ];
 
     /// The process exit code.
@@ -54,7 +61,8 @@ impl ExitCode {
             ExitCode::Internal => "internal failure",
             ExitCode::Incomplete => {
                 "incomplete: a volume in scope is indexing, rescanning or offline; \
-                 the results that exist are printed"
+                 the results that exist are printed. --status also exits 2 when the \
+                 sizes and dates of a volume could not be read"
             }
             ExitCode::Untrusted => {
                 "the pipe server is not the trusted gozlerd \
@@ -67,13 +75,19 @@ impl ExitCode {
             ExitCode::UnknownSwitch => "unknown switch",
             ExitCode::Communication => "communication with gozlerd failed, or no reply in time",
             ExitCode::DaemonNotRunning => "gozlerd is not running",
+            ExitCode::NoMatches => "no matches, with -no-result-error",
+            ExitCode::Truncated => {
+                "the output is correct, but the limit left out more matches; \
+                 stderr gives the shown and total counts"
+            }
         }
     }
 
     /// The code a run exits with when both `self` and `other` apply to it: a
-    /// failure (1 and 3 to 8) before an incomplete answer (2), and that before
-    /// a complete one (0). Of two failures, `self` wins: the first one stops
-    /// the run.
+    /// failure (1 and 3 to 8) before an incomplete answer (2), that before no
+    /// matches (9) or a cut list (10), and those before a complete answer (0).
+    /// Of two codes at one level, `self` wins: the first failure stops the
+    /// run, and 9 and 10 never apply together.
     pub fn most_serious(self, other: ExitCode) -> ExitCode {
         if other.severity() > self.severity() {
             other
@@ -85,6 +99,7 @@ impl ExitCode {
     fn severity(self) -> u8 {
         match self {
             ExitCode::Complete => 0,
+            ExitCode::NoMatches | ExitCode::Truncated => 1,
             ExitCode::Incomplete => 2,
             ExitCode::Internal
             | ExitCode::Untrusted
@@ -102,8 +117,8 @@ mod tests {
     use super::ExitCode;
 
     /// The precedence rule of the exit-code table: a failure wins over an
-    /// incomplete answer, which wins over a complete one, whichever comes
-    /// first.
+    /// incomplete answer, which wins over no matches or a cut list, which win
+    /// over a complete answer, whichever comes first.
     #[test]
     fn the_more_serious_outcome_wins() {
         let cases = [
@@ -114,6 +129,11 @@ mod tests {
             (ExitCode::Internal, ExitCode::Incomplete, 1),
             (ExitCode::Complete, ExitCode::Untrusted, 3),
             (ExitCode::Communication, ExitCode::OutputFailed, 7),
+            (ExitCode::Truncated, ExitCode::Incomplete, 2),
+            (ExitCode::NoMatches, ExitCode::Incomplete, 2),
+            (ExitCode::Complete, ExitCode::Truncated, 10),
+            (ExitCode::NoMatches, ExitCode::Complete, 9),
+            (ExitCode::Truncated, ExitCode::OutputFailed, 5),
         ];
         for (first, second, wins) in cases {
             assert_eq!(
@@ -130,6 +150,6 @@ mod tests {
     #[test]
     fn all_holds_every_code_in_order() {
         let codes: Vec<u8> = ExitCode::ALL.iter().map(|code| code.code()).collect();
-        assert_eq!(codes, (0..=8).collect::<Vec<u8>>());
+        assert_eq!(codes, (0..=10).collect::<Vec<u8>>());
     }
 }

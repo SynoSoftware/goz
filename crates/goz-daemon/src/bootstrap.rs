@@ -49,6 +49,14 @@ impl BootstrappedVolume {
     pub(crate) fn entries(&self) -> usize {
         self.index.len()
     }
+
+    /// Where the volume is mounted.
+    pub(crate) fn mounted(&self) -> goz_core::scope::VolumeMounts<'_> {
+        goz_core::scope::VolumeMounts {
+            mounts: &self.mounts,
+            guid: &self.guid_path,
+        }
+    }
 }
 
 /// A volume that could not be bootstrapped, carried so the daemon can still
@@ -104,10 +112,11 @@ pub(crate) fn scan_all() -> Result<Scan> {
         let threads: Vec<_> = targets
             .iter()
             .map(|vol| {
-                let label = vol
-                    .mounts
-                    .first()
-                    .map_or(vol.guid_path.as_str(), String::as_str);
+                let label = goz_core::scope::VolumeMounts {
+                    mounts: &vol.mounts,
+                    guid: &vol.guid_path,
+                }
+                .display_prefix();
                 std::thread::Builder::new()
                     .name(format!("goz-bootstrap-{label}"))
                     .spawn_scoped(s, move || bootstrap_volume(vol))

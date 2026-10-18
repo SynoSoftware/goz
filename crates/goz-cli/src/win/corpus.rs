@@ -1,14 +1,14 @@
 //! The golden corpus for output: command lines run through `parse_argv` and
-//! [`emit`] over one fixed result set, with the exact text gozler writes to
-//! stdout or to the `-export-csv` file, as the code behaves today. Dates render
-//! in UTC, so every row passes in any time zone.
+//! [`ResultWriter`] over one fixed result set, with the exact text gozler
+//! writes to stdout or to the `-export-csv` file, as the code behaves today.
+//! Dates render in UTC, so every row passes in any time zone.
 //!
 //! A row records today's behavior, right or wrong. A row that a planned fix
 //! changes on purpose carries a comment with its number in the bug table of
 //! `docs/plans/es-superset-specs.md`. The rows for what a command line matches
 //! are in the daemon's corpus, in `goz-daemon`'s `server` tests.
 
-use super::emit;
+use super::ResultWriter;
 use goz_core::escompat::{Command, parse_argv};
 use goz_core::output::unix_ms_to_filetime;
 use goz_core::proto::{QueryResults, ResultItem};
@@ -197,29 +197,48 @@ const ROWS: &[Row] = &[
     },
 ];
 
-/// Every row prints what it recorded. All changed rows are listed at once, so
-/// a change shows every row it moves.
+/// The text gozler writes for `pages`, the pages of one result set.
+fn print(args: &[&str], pages: Vec<QueryResults>) -> String {
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+    let Ok(Command::Run(plan)) = parse_argv(&args) else {
+        panic!("{args:?}: every output row is a search");
+    };
+    let mut out = Vec::new();
+    let mut writer = ResultWriter::new(&plan, jiff::tz::TimeZone::UTC, &mut out);
+    for page in pages {
+        assert!(writer.page(page).is_ok(), "writing to memory cannot fail");
+    }
+    assert!(writer.finish().is_ok(), "writing to memory cannot fail");
+    String::from_utf8(out).expect("gozler writes UTF-8")
+}
+
+/// [`results`] as the daemon sends it when it spans two pages.
+fn two_pages() -> Vec<QueryResults> {
+    let mut first = results();
+    let mut second = results();
+    second.items = first.items.split_off(2);
+    first.more = true;
+    vec![first, second]
+}
+
+/// Every row prints what it recorded, also when the results arrive in two
+/// pages: gozler prints each page as it arrives, and the CSV byte order mark
+/// and header, and the one JSON object, must still come once. All changed
+/// rows are listed at once, so a change shows every row it moves.
 #[test]
 fn every_row_prints_what_it_recorded() {
-    let results = results();
     let mut changed = Vec::new();
     for row in ROWS {
-        let args: Vec<String> = row.args.iter().map(ToString::to_string).collect();
-        let Ok(Command::Run(plan)) = parse_argv(&args) else {
-            panic!("{:?}: every output row is a search", row.args);
-        };
-        let mut out = Vec::new();
-        assert!(
-            emit(&plan, &results, &jiff::tz::TimeZone::UTC, &mut out).is_ok(),
-            "{:?}: writing to memory cannot fail",
-            row.args
-        );
-        let printed = String::from_utf8(out).expect("gozler writes UTF-8");
-        if printed != row.prints {
-            changed.push(format!(
-                "{:?}\n  recorded: {:?}\n  printed:  {:?}",
-                row.args, row.prints, printed
-            ));
+        for (pages, printed) in [
+            ("one page", print(row.args, vec![results()])),
+            ("two pages", print(row.args, two_pages())),
+        ] {
+            if printed != row.prints {
+                changed.push(format!(
+                    "{:?} in {pages}\n  recorded: {:?}\n  printed:  {:?}",
+                    row.args, row.prints, printed
+                ));
+            }
         }
     }
     assert!(

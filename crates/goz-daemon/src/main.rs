@@ -172,12 +172,7 @@ fn run_scan(query: Option<String>) -> anyhow::Result<()> {
         .sum();
 
     for s in &scans {
-        let mount = s
-            .mounts
-            .first()
-            .cloned()
-            .unwrap_or_else(|| s.guid_path.clone());
-        println!("volume {mount}");
+        println!("volume {}", s.mounted().display_prefix());
         println!("  guid          {}", s.guid_path);
         println!("  entries       {}", s.entries());
         println!("  enum          {:.2}s", s.enum_secs);
@@ -216,11 +211,11 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
     let parsed = parse_query(query).map_err(|e| anyhow::anyhow!("bad query: {e}"))?;
     println!("\nquery: {query:?}");
     for s in scans {
-        let mount = s.mounts.first().cloned().unwrap_or_default();
+        let mount = s.mounted().display_prefix();
         let t = Instant::now();
         let out = run_query(
             &s.index,
-            &mount,
+            mount,
             &parsed,
             None,
             SortSpec::default(),
@@ -229,10 +224,8 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
         );
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         println!(
-            "  {}: {} match(es) in {:.1} ms (showing up to 20)",
-            s.mounts.first().map(String::as_str).unwrap_or(&s.guid_path),
-            out.total,
-            ms
+            "  {mount}: {} match(es) in {:.1} ms (showing up to 20)",
+            out.total, ms
         );
         for hit in &out.hits {
             let path = goz_core::wtf8::to_string_lossy(&hit.path);
