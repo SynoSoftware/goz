@@ -156,6 +156,25 @@ limit, a replay too long) ends in a full build and never in `live` with a
 stale index; the proptest passes; the file's folder refuses a standard user;
 and a restart of C: is measured against stage 1's time.
 
+## Expert reviews
+
+An independent review is worth its cost only where evidence cannot settle
+the question, so the plan asks for one at these points and not before:
+
+1. **After the single-pass experiment, before stage 1 lands.** A review of
+   the stage 1 code change: its paths (a file-layout pass that stops part
+   way, a rescan, a cancelled build) and its control flow, because the
+   change alters how every index is built. The experiment itself needs no
+   review: it compares two indexes, and the comparison is the evidence.
+2. **Before stage 2 starts.** An independent plan review, with a second
+   reviewer who challenges the first, of how stage 2 meets its seven
+   requirements, because it adds a security boundary and a way to serve a
+   stale index as `live`.
+3. **When a measurement contradicts this plan.** For example, if the
+   journal horizon is much longer than 20.5 hours or starts are much rarer
+   than measured, the decisions above are reassessed with a review before
+   work continues.
+
 ## When the plan is done
 
 The rules of the stages that were built move into `docs/DESIGN.md`, "Index
