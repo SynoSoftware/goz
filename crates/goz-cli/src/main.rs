@@ -139,7 +139,18 @@ mod win {
             );
         }
 
-        emit(&plan, &results, export_file)
+        let tz = jiff::tz::TimeZone::system();
+        match export_file {
+            Some(mut file) => emit(&plan, &results, &tz, &mut file),
+            // StdoutLock is a LineWriter (it flushes on every newline), so wrap
+            // it in a BufWriter to batch a large result set into a few writes.
+            None => emit(
+                &plan,
+                &results,
+                &tz,
+                &mut std::io::BufWriter::new(std::io::stdout().lock()),
+            ),
+        }
     }
 
     fn build_query(plan: &EsPlan) -> QueryRequest {
@@ -176,14 +187,18 @@ mod win {
         }
     }
 
+    /// Writes `results` to `out`, the export file with `-export-csv` and stdout
+    /// otherwise, in the format the plan asks for. CSV dates are local time in
+    /// `tz`.
     fn emit(
         plan: &EsPlan,
         results: &QueryResults,
-        export_file: Option<std::fs::File>,
+        tz: &jiff::tz::TimeZone,
+        out: &mut impl Write,
     ) -> Result<ExitCode, ExitCode> {
-        if let Some(mut file) = export_file {
-            let bytes = render_csv(plan, results);
-            if let Err(e) = file.write_all(&bytes) {
+        if plan.export_csv.is_some() {
+            let bytes = render_csv(plan, results, tz);
+            if let Err(e) = out.write_all(&bytes) {
                 eprintln!("gozler: writing export CSV failed: {e}");
                 return Err(ExitCode::from(5));
             }
@@ -193,11 +208,10 @@ mod win {
         if plan.json {
             match serde_json::to_string_pretty(results) {
                 Ok(s) => {
-                    // Locked writeln! that tolerates a broken pipe (`gozler --json '*' | head`)
-                    // instead of println!, which panics on any stdout write error.
-                    let stdout = std::io::stdout();
-                    let mut out = stdout.lock();
+                    // Ignores write errors, so a broken pipe
+                    // (`gozler --json '*' | head`) is not a panic as with println!.
                     let _ = writeln!(out, "{s}");
+                    let _ = out.flush();
                 }
                 Err(e) => {
                     eprintln!("gozler: JSON encoding failed: {e}");
@@ -207,12 +221,8 @@ mod win {
             return Ok(ExitCode::SUCCESS);
         }
 
-        // Default: one path per line. StdoutLock is a LineWriter (it flushes on every
-        // newline), so wrap it in a BufWriter to batch a large result set into a few
-        // writes. A reader closing early (`gozler * | head`) is a clean stop; a genuine
-        // write failure reports exit 5.
-        let stdout = std::io::stdout();
-        let mut out = std::io::BufWriter::new(stdout.lock());
+        // Default: one path per line. A reader closing early (`gozler * | head`)
+        // is a clean stop; a genuine write failure reports exit 5.
         for item in &results.items {
             if let Err(e) = writeln!(out, "{}", item.path) {
                 if e.kind() == std::io::ErrorKind::BrokenPipe {
@@ -231,8 +241,8 @@ mod win {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Renders the results as an es-compatible CSV.
-    fn render_csv(plan: &EsPlan, results: &QueryResults) -> Vec<u8> {
+    /// Renders the results as an es-compatible CSV, with dates in `tz`.
+    fn render_csv(plan: &EsPlan, results: &QueryResults, tz: &jiff::tz::TimeZone) -> Vec<u8> {
         let opts = CsvOptions {
             bom: plan.bom,
             header: plan.header,
@@ -241,16 +251,15 @@ mod win {
         };
 
         // Pre-format dates (CsvRow borrows them). Local time, ISO-8601, so the
-        // JavaScript consumer's `new Date()` parses it regardless of locale. Resolve
-        // the system time zone ONCE (it is loop-invariant) instead of per row.
+        // JavaScript consumer's `new Date()` parses it regardless of locale.
         let want_date = plan.columns.contains(&EsColumn::DateModified);
-        let tz = want_date.then(jiff::tz::TimeZone::system);
         let dates: Vec<Option<String>> = results
             .items
             .iter()
             .map(|it| {
-                tz.as_ref()
-                    .and_then(|tz| it.mtime_ft.map(|ft| format_date_local(ft, tz)))
+                it.mtime_ft
+                    .filter(|_| want_date)
+                    .map(|ft| format_date_local(ft, tz))
             })
             .collect();
 
@@ -390,4 +399,7 @@ mod win {
             }
         }
     }
+
+    #[cfg(test)]
+    mod corpus;
 }

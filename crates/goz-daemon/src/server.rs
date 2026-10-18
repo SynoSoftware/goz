@@ -582,6 +582,8 @@ mod tests {
     use parking_lot::{Mutex, RwLock};
     use std::sync::Arc;
 
+    mod corpus;
+
     fn dir_record(frn: u64, parent: u64, name: &str) -> ParsedUsnRecord {
         ParsedUsnRecord {
             major_version: 2,
