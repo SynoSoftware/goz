@@ -255,14 +255,14 @@ impl<'q> PathMatcher<'q> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{FrnMap, NTFS_ROOT_FRN, PathStatus};
+    use crate::index::{NTFS_ROOT_FRN, PathStatus};
     use crate::types::Frn;
     use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 
     /// One chain of folders, deeper than [`MAX_PATH_HOPS`], with a file at
     /// every level.
     fn deep_index() -> (VolumeIndex, Vec<EntryIdx>) {
-        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut index = VolumeIndex::new();
         let mut parent = NTFS_ROOT_FRN;
         let mut entries = Vec::new();
         let rec = |frn: u64, parent: Frn, name: String, dir: bool| ParsedUsnRecord {

@@ -25,7 +25,7 @@ pub(crate) type NameId = u32;
 /// a buffer selector; nothing enforces the bound, `push` truncates if it ever
 /// did not hold), so `u32`/`u16` are ample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct NameRef {
+pub(crate) struct NameRef {
     /// Byte offset into the arena. Bit 31 (`RAW_IN_FOLDED`) on a RAW ref means
     /// the raw bytes live in the FOLDED arena (the name folds to itself, so
     /// one copy serves both).
@@ -749,7 +749,7 @@ const DENSE_GROWTH_SLACK: u64 = 1 << 16;
 /// [`FrnMap::densify_if_smaller`] swaps to `Dense` at publish when the record
 /// space is compact, which on a real NTFS volume it essentially always is.
 #[derive(Debug)]
-pub enum FrnMap {
+pub(crate) enum FrnMap {
     /// `Vec` indexed by record number; [`NIL`] marks an empty slot.
     Dense(Vec<EntryIdx>),
     /// Fallback for sparse / arbitrary record-number spaces.
@@ -758,19 +758,12 @@ pub enum FrnMap {
 
 impl FrnMap {
     /// A hash-backed map (the default; safe for any record-number space).
-    pub fn sparse() -> Self {
+    pub(crate) fn sparse() -> Self {
         FrnMap::Sparse(FxHashMap::default())
     }
 
-    /// A dense map pre-sized for record numbers in `0..capacity`. `capacity` is
-    /// only a sizing hint: `set` grows the `Vec` for a larger record number and
-    /// `get` bounds-checks.
-    pub fn dense(capacity: usize) -> Self {
-        FrnMap::Dense(vec![NIL; capacity])
-    }
-
     #[inline]
-    pub fn get(&self, record: u64) -> Option<EntryIdx> {
+    pub(crate) fn get(&self, record: u64) -> Option<EntryIdx> {
         match self {
             FrnMap::Dense(v) => v.get(record as usize).copied().filter(|&i| i != NIL),
             FrnMap::Sparse(m) => m.get(&record).copied(),
@@ -782,7 +775,7 @@ impl FrnMap {
     /// but a corrupt journal record can carry any 48-bit number, and growing
     /// the `Vec` to it would abort the daemon on a failed allocation.
     #[inline]
-    pub fn set(&mut self, record: u64, idx: EntryIdx) {
+    pub(crate) fn set(&mut self, record: u64, idx: EntryIdx) {
         if let FrnMap::Dense(v) = self
             && record > v.len() as u64 * 2 + DENSE_GROWTH_SLACK
         {
@@ -804,7 +797,7 @@ impl FrnMap {
     }
 
     #[inline]
-    pub fn remove(&mut self, record: u64) {
+    pub(crate) fn remove(&mut self, record: u64) {
         match self {
             FrnMap::Dense(v) => {
                 if let Some(slot) = v.get_mut(record as usize) {
@@ -830,7 +823,7 @@ impl FrnMap {
     /// Called once per volume when it goes live: bootstrap has seen every
     /// record by then, so `max key` is the true bound, and `set` still grows
     /// the Vec if the journal later mints a higher record number.
-    pub fn densify_if_smaller(&mut self) {
+    pub(crate) fn densify_if_smaller(&mut self) {
         let FrnMap::Sparse(m) = self else { return };
         let Some(&max) = m.keys().max() else { return };
         let per_bucket = (size_of::<(u64, EntryIdx)>() + 1) as u128;
@@ -846,7 +839,7 @@ impl FrnMap {
     }
 
     /// A short label for diagnostics ("dense" / "sparse").
-    pub fn kind(&self) -> &'static str {
+    pub(crate) fn kind(&self) -> &'static str {
         match self {
             FrnMap::Dense(_) => "dense",
             FrnMap::Sparse(_) => "sparse",

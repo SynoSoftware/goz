@@ -37,7 +37,7 @@ jobs:
         run: cargo clippy --workspace --all-targets
 
       # The ubuntu leg is the load-bearing half of the purity contract: gozler-core
-      # is 9.8k of the workspace's 14.3k lines and green here means none of it
+      # holds most of the workspace's code, and green here means none of it
       # *calls* a Windows API. (Only *calls*: an unused platform dep would still
       # link. The declared-dep half is the allowlist below.)
       - name: Test

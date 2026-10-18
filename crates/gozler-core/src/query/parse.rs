@@ -68,9 +68,9 @@ impl Wildcard {
     }
 
     /// Matches the whole of `name` (WTF-8, folded iff the query is
-    /// case-insensitive) against the pattern. Convenience wrapper that
-    /// allocates a one-off buffer; the hot path uses [`Wildcard::matches_into`].
-    pub fn matches(&self, name: &[u8]) -> bool {
+    /// case-insensitive) against the pattern, with a one-off buffer.
+    #[cfg(test)]
+    fn matches(&self, name: &[u8]) -> bool {
         let mut buf = CodePointBuf::new();
         self.matches_into(name, &mut buf)
     }
@@ -84,7 +84,7 @@ impl Wildcard {
         let mut run: Vec<u8> = Vec::new();
         for tok in &self.tokens {
             match tok {
-                GlobTok::Lit(cp) => encode_wtf8(*cp, &mut run),
+                GlobTok::Lit(cp) => crate::wtf8::encode_code_point(*cp, &mut run),
                 _ => {
                     if run.len() > best.len() {
                         best = std::mem::take(&mut run);
@@ -97,25 +97,6 @@ impl Wildcard {
             best = run;
         }
         (!best.is_empty()).then_some(best)
-    }
-}
-
-/// Encodes one code point as WTF-8 (surrogates permitted).
-fn encode_wtf8(cp: u32, out: &mut Vec<u8>) {
-    if cp < 0x80 {
-        out.push(cp as u8);
-    } else if cp < 0x800 {
-        out.push(0xC0 | (cp >> 6) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
-    } else if cp < 0x10000 {
-        out.push(0xE0 | (cp >> 12) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
-    } else {
-        out.push(0xF0 | (cp >> 18) as u8);
-        out.push(0x80 | ((cp >> 12) & 0x3F) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
     }
 }
 
@@ -204,7 +185,8 @@ pub struct ParsedQuery {
 impl ParsedQuery {
     /// `true` when there are no positive text constraints: the query matches
     /// everything subject to `filters`.
-    pub fn is_text_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_text_empty(&self) -> bool {
         self.name_terms.is_empty()
             && self.path_terms.is_empty()
             && self.wildcards.is_empty()

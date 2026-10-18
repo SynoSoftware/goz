@@ -122,19 +122,8 @@ pub fn encode_request(req: &Request, out: &mut Vec<u8>) {
     encode_frame(&json, out);
 }
 
-/// Encodes a [`Response`] as one frame (`frame(json(resp))`), appending to `out`.
-pub fn encode_response(resp: &Response, out: &mut Vec<u8>) {
-    let json = serde_json::to_vec(resp).expect("Response JSON serialization is infallible");
-    encode_frame(&json, out);
-}
-
 /// Decodes one frame payload (as popped from [`FrameDecoder`]) as a [`Request`].
 pub fn decode_request(frame: &[u8]) -> Result<Request, serde_json::Error> {
-    serde_json::from_slice(frame)
-}
-
-/// Decodes one frame payload (as popped from [`FrameDecoder`]) as a [`Response`].
-pub fn decode_response(frame: &[u8]) -> Result<Response, serde_json::Error> {
     serde_json::from_slice(frame)
 }
 
@@ -193,7 +182,7 @@ pub fn decode_response_frame(frame: &[u8]) -> Result<Response, RespFrameError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{MAX_CLIENT_FRAME, PROTO_VERSION, ProtoError};
+    use super::super::types::{MAX_CLIENT_FRAME, PROTO_VERSION};
     use super::*;
     use proptest::prelude::*;
 
@@ -336,23 +325,8 @@ mod tests {
     }
 
     #[test]
-    fn response_helpers_round_trip() {
-        let resp = Response::Error {
-            code: ProtoError::BadQuery,
-            message: "unbalanced quote".into(),
-        };
-        let mut wire = Vec::new();
-        encode_response(&resp, &mut wire);
-        let mut dec = FrameDecoder::new(MAX_CLIENT_FRAME);
-        dec.feed(&wire);
-        let frame = dec.next_frame().expect("no error").expect("one frame");
-        assert_eq!(decode_response(&frame).expect("valid json"), resp);
-    }
-
-    #[test]
     fn decode_rejects_malformed_json() {
         assert!(decode_request(b"not json").is_err());
-        assert!(decode_response(b"{\"t\":\"NoSuchVariant\"}").is_err());
     }
 
     proptest! {

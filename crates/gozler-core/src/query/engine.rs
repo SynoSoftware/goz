@@ -37,7 +37,7 @@ pub struct QueryHit {
 /// Result of a query: the requested page plus the full match count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryOutcome {
-    /// Total matches before offset/limit (es `totitems` semantics).
+    /// Total matches before the limit (es `totitems` semantics).
     pub total: u64,
     /// The requested page of hits, ordered per [`Self::sorted`].
     pub hits: Vec<QueryHit>,
@@ -45,8 +45,7 @@ pub struct QueryOutcome {
     ///
     /// `false` means the executor declined to order under the index lock and
     /// the CALLER must order the hits with [`super::order_hits`].
-    /// Always `true` from [`run_query`], always `false` from
-    /// [`run_query_unsorted`]; only [`run_query_deferrable`] varies.
+    /// Always `true` from [`run_query`]; only [`run_query_deferrable`] varies.
     pub sorted: bool,
 }
 
@@ -130,8 +129,10 @@ struct Candidate {
 ///
 /// `scope` (if any) restricts results to descendants of that directory entry;
 /// the daemon resolves the `-path` folder via [`resolve_scope`]. Results are
-/// sorted per `sort`, then `offset`/`limit` select the page; `total` reports
-/// the full match count.
+/// sorted per `sort`, then the first `limit` form the page; `total` reports
+/// the full match count. There is no offset: the daemon applies a request's
+/// offset after it merges the volumes, so an offset here would page each
+/// volume on its own.
 ///
 /// The common case, a case-insensitive query with at least one substring
 /// term, scans the index's contiguous folded-name arena with a single
@@ -144,19 +145,9 @@ pub fn run_query(
     parsed: &ParsedQuery,
     scope: Option<EntryIdx>,
     sort: SortSpec,
-    offset: u32,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(
-        index,
-        mount_prefix,
-        parsed,
-        scope,
-        Some(sort),
-        offset,
-        limit,
-        false,
-    )
+    run_query_impl(index, mount_prefix, parsed, scope, sort, limit, false)
 }
 
 /// Like [`run_query`], but allowed to hand back an UNSORTED page when ordering
@@ -172,6 +163,13 @@ pub fn run_query(
 /// That distinction is not knowable before the scan (it depends on the match
 /// count), which is why it lives here rather than in the caller's dispatch.
 ///
+/// It matters because of who is waiting. The caller holds the volume's index
+/// READ lock for as long as this runs, and the volume's tail thread cannot apply
+/// a single journal record until that lock is released. Sorting a million rows
+/// inside the lock stalled live updates for ~1.7 s; sorting them after it is
+/// released stalls nothing. Every key of the result order is in the returned
+/// [`QueryHit`], so ordering after the lock needs no index.
+///
 /// The caller MUST check [`QueryOutcome::sorted`] and pass the hits through
 /// [`super::order_hits`] when it is `false`.
 pub fn run_query_deferrable(
@@ -180,41 +178,9 @@ pub fn run_query_deferrable(
     parsed: &ParsedQuery,
     scope: Option<EntryIdx>,
     sort: SortSpec,
-    offset: u32,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(
-        index,
-        mount_prefix,
-        parsed,
-        scope,
-        Some(sort),
-        offset,
-        limit,
-        true,
-    )
-}
-
-/// Every match, with paths built, in scan order. The CALLER sorts.
-///
-/// For a full export (`limit: None`) the caller receives every match anyway, so
-/// ordering is pure post-processing that needs no index at all: every key of
-/// the result order is in the returned [`QueryHit`].
-///
-/// It matters because of who is waiting. The caller holds the volume's index
-/// READ lock for as long as this runs, and the volume's tail thread cannot apply
-/// a single journal record until that lock is released. Sorting a million rows
-/// inside the lock stalled live updates for ~1.7 s; sorting them after it is
-/// released stalls nothing.
-///
-/// The caller MUST pass the result through [`super::order_hits`].
-pub fn run_query_unsorted(
-    index: &VolumeIndex,
-    mount_prefix: &str,
-    parsed: &ParsedQuery,
-    scope: Option<EntryIdx>,
-) -> QueryOutcome {
-    run_query_impl(index, mount_prefix, parsed, scope, None, 0, None, false)
+    run_query_impl(index, mount_prefix, parsed, scope, sort, limit, true)
 }
 
 /// A folder-scoped query walks the scope's subtree instead of scanning the
@@ -227,19 +193,15 @@ pub fn run_query_unsorted(
 /// the folder.
 const SUBTREE_WALK_MAX: usize = 200_000;
 
-/// `sort: None` skips ordering entirely and returns every match.
-///
 /// `allow_defer` lets the executor drop the ordering when the page turns out to
 /// cover every match (see [`run_query_deferrable`]); the reported
 /// [`QueryOutcome::sorted`] says which happened.
-#[allow(clippy::too_many_arguments)]
 fn run_query_impl(
     index: &VolumeIndex,
     mount_prefix: &str,
     parsed: &ParsedQuery,
     scope: Option<EntryIdx>,
-    sort: Option<SortSpec>,
-    offset: u32,
+    sort: SortSpec,
     limit: Option<u32>,
     allow_defer: bool,
 ) -> QueryOutcome {
@@ -340,25 +302,21 @@ fn run_query_impl(
     } = scan;
     let total = candidates.len() as u64;
 
-    let start = (offset as usize).min(candidates.len());
     let end = match limit {
-        Some(n) => (start + n as usize).min(candidates.len()),
+        Some(n) => (n as usize).min(candidates.len()),
         None => candidates.len(),
     };
 
     // A page that covers every match has nothing to select, so ordering it here
     // buys nothing the caller cannot do itself once it has released the index
     // lock. Dropping the sort in that case is the whole point of
-    // `run_query_deferrable`: see `run_query_unsorted` for who is waiting on
-    // that lock. `end` is already clamped to the match count, so this is exactly
-    // "the page is the whole set".
+    // `run_query_deferrable`, whose doc says who is waiting on that lock. `end`
+    // is already clamped to the match count, so this is exactly "the page is
+    // the whole set".
     //
     // Everything below keys off the rebound `sort`, so a deferred query also
     // skips the path-key precompute it would never consult.
-    let sort = match sort {
-        Some(s) if !(allow_defer && end == candidates.len()) => Some(s),
-        _ => None,
-    };
+    let sort = (!(allow_defer && end == candidates.len())).then_some(sort);
     let sorted = sort.is_some();
 
     // Sort-by-path compares each candidate's folded parent path. Siblings share
@@ -391,8 +349,8 @@ fn run_query_impl(
     // Build paths only for the requested page. A broad result set holds
     // millions of files under far fewer distinct folders, and `dirs` builds
     // each folder's path once.
-    let mut hits = Vec::with_capacity(end - start);
-    for c in &candidates[start..end] {
+    let mut hits = Vec::with_capacity(end);
+    for c in &candidates[..end] {
         let mut path = Vec::new();
         if !dirs.full_path_into(index, c.idx, &mut path) {
             continue; // no path; only possible when `has_orphans` was false
@@ -575,10 +533,6 @@ pub fn extension(name: &[u8]) -> Option<&[u8]> {
     Some(&name[dot + 1..])
 }
 
-fn fold(bytes: &[u8]) -> Vec<u8> {
-    crate::fold::fold(bytes)
-}
-
 /// Is `node` a descendant of `root`? Memoized parent walk.
 fn in_scope(
     index: &VolumeIndex,
@@ -723,7 +677,7 @@ pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Opti
         for comp in components {
             // Move the folded bytes into the lookup key instead of re-cloning
             // them inside `child_dir` (which previously took `&[u8]`).
-            cur = index.child_dir(cur, fold(comp))?;
+            cur = index.child_dir(cur, crate::fold::fold(comp))?;
         }
         return Some(cur);
     }
@@ -756,7 +710,6 @@ pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::store::FrnMap;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::query::order::{VolumeRun, order_hits};
     use crate::query::parse::parse_query;
@@ -784,7 +737,7 @@ mod tests {
     /// Builds: docs/ (100), docs/sub/ (101), docs/sub/Report.PDF (102, 4KB),
     /// docs/notes.txt (103, 200B), photo.JPG (104, 2MB) at root.
     fn sample_index() -> VolumeIndex {
-        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut idx = VolumeIndex::new();
         let root = NTFS_ROOT_FRN;
         for r in [
             enum_rec(frn(100), root, "docs", true),
@@ -808,7 +761,7 @@ mod tests {
     /// record, FRN sequence mismatch), and densest during bootstrap and rescan,
     /// which are exactly the windows the server still queries.
     fn index_with_orphans() -> VolumeIndex {
-        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut idx = VolumeIndex::new();
         let root = NTFS_ROOT_FRN;
         // Two presentable hits.
         idx.insert_enum(&enum_rec(frn(100), root, "real1.log", false));
@@ -843,7 +796,6 @@ mod tests {
             &parsed,
             None,
             SortSpec::default_for(SortKey::Name),
-            0,
             None,
         );
         assert_eq!(all.hits.len(), 2, "only the presentable files are hits");
@@ -854,15 +806,7 @@ mod tests {
 
         // The failing case: a limit small enough that orphans would have filled it.
         for key in [SortKey::Name, SortKey::Path] {
-            let page = run_query(
-                &idx,
-                "",
-                &parsed,
-                None,
-                SortSpec::default_for(key),
-                0,
-                Some(3),
-            );
+            let page = run_query(&idx, "", &parsed, None, SortSpec::default_for(key), Some(3));
             assert_eq!(
                 page.hits.len(),
                 2,
@@ -898,7 +842,7 @@ mod tests {
 
     fn run(idx: &VolumeIndex, query: &str) -> Vec<String> {
         let parsed = parse_query(query).unwrap();
-        let out = run_query(idx, "", &parsed, None, SortSpec::default(), 0, None);
+        let out = run_query(idx, "", &parsed, None, SortSpec::default(), None);
         out.hits
             .iter()
             .map(|h| crate::wtf8::to_string_lossy(&h.path))
@@ -969,7 +913,7 @@ mod tests {
         let idx = sample_index();
         let parsed = parse_query("").unwrap();
         let scope = resolve_scope(&idx, b"docs\\sub", false).unwrap();
-        let out = run_query(&idx, "", &parsed, Some(scope), SortSpec::default(), 0, None);
+        let out = run_query(&idx, "", &parsed, Some(scope), SortSpec::default(), None);
         let paths: Vec<String> = out
             .hits
             .iter()
@@ -991,7 +935,6 @@ mod tests {
                 key: SortKey::Path,
                 dir: SortDir::Asc,
             },
-            0,
             None,
         );
         let paths: Vec<String> = out
@@ -1013,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn offset_and_limit_paginate_but_total_is_full_count() {
+    fn limit_cuts_the_page_but_total_is_full_count() {
         let idx = sample_index();
         let parsed = parse_query("").unwrap();
         let out = run_query(
@@ -1025,7 +968,6 @@ mod tests {
                 key: SortKey::Name,
                 dir: SortDir::Asc,
             },
-            1,
             Some(2),
         );
         assert_eq!(out.total, 5);
@@ -1048,11 +990,11 @@ mod tests {
         let idx = sample_index();
         let parsed = parse_query("").unwrap();
         let sort = SortSpec::default_for(SortKey::Name);
-        let total = run_query(&idx, "", &parsed, None, sort, 0, None).total as u32;
+        let total = run_query(&idx, "", &parsed, None, sort, None).total as u32;
         assert!(total > 1, "fixture must have several matches to slice");
 
         for limit in [None, Some(u32::MAX), Some(total), Some(total + 1)] {
-            let out = run_query_deferrable(&idx, "", &parsed, None, sort, 0, limit);
+            let out = run_query_deferrable(&idx, "", &parsed, None, sort, limit);
             assert!(
                 !out.sorted,
                 "limit {limit:?} covers all {total} matches; ordering must be deferred off-lock"
@@ -1066,13 +1008,13 @@ mod tests {
 
         // A limit that genuinely slices still orders here, where the index is
         // available to pick which matches survive.
-        let sliced = run_query_deferrable(&idx, "", &parsed, None, sort, 0, Some(total - 1));
+        let sliced = run_query_deferrable(&idx, "", &parsed, None, sort, Some(total - 1));
         assert!(sliced.sorted, "a real slice must still order in-lock");
         assert_eq!(sliced.hits.len(), total as usize - 1);
 
         // `run_query` keeps its unconditional promise for direct callers.
         assert!(
-            run_query(&idx, "", &parsed, None, sort, 0, Some(u32::MAX)).sorted,
+            run_query(&idx, "", &parsed, None, sort, Some(u32::MAX)).sorted,
             "run_query must always return sorted hits"
         );
     }
@@ -1106,7 +1048,7 @@ mod tests {
     /// `readme.md` repeats at every level, so a name term drives the arena
     /// scan to every one of them and the path wildcard must pick.
     fn docs_index() -> VolumeIndex {
-        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut idx = VolumeIndex::new();
         let root = NTFS_ROOT_FRN;
         for r in [
             enum_rec(frn(100), root, "docs", true),
@@ -1139,7 +1081,6 @@ mod tests {
             &parsed,
             scope,
             SortSpec::default_for(SortKey::Path),
-            0,
             None,
         );
         out.hits
@@ -1255,7 +1196,7 @@ mod tests {
     /// dates, an unknown size, names equal after folding, and one file with
     /// two links of the same name.
     fn order_index() -> VolumeIndex {
-        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut idx = VolumeIndex::new();
         let root = NTFS_ROOT_FRN;
         for r in [
             enum_rec(frn(100), root, "P", true),
@@ -1339,7 +1280,6 @@ mod tests {
             &parsed,
             None,
             SortSpec::default_for(SortKey::Path),
-            0,
             None,
         );
         assert_eq!(
@@ -1363,7 +1303,7 @@ mod tests {
         let parsed = parse_query("qx7zv").unwrap();
         for sort in all_sorts() {
             if matches!(sort.key, SortKey::Size | SortKey::DateModified) {
-                let out = run_query(&idx, r"C:\", &parsed, None, sort, 0, None);
+                let out = run_query(&idx, r"C:\", &parsed, None, sort, None);
                 assert_eq!(
                     texts(&out.hits).last().unwrap(),
                     r"C:\P\a\x\qx7zv",
@@ -1382,7 +1322,7 @@ mod tests {
         for query in ["qx7zv", ""] {
             let parsed = parse_query(query).unwrap();
             for sort in all_sorts() {
-                let deferred = run_query_unsorted(&idx, r"C:\", &parsed, None);
+                let deferred = run_query_deferrable(&idx, r"C:\", &parsed, None, sort, None);
                 let unlimited = order_hits(
                     sort,
                     vec![VolumeRun {
@@ -1392,12 +1332,12 @@ mod tests {
                     }],
                 );
                 assert_eq!(
-                    run_query(&idx, r"C:\", &parsed, None, sort, 0, None).hits,
+                    run_query(&idx, r"C:\", &parsed, None, sort, None).hits,
                     unlimited,
                     "{query:?} {sort:?}: the engine and order_hits disagree"
                 );
                 for k in 0..=unlimited.len() {
-                    let page = run_query(&idx, r"C:\", &parsed, None, sort, 0, Some(k as u32));
+                    let page = run_query(&idx, r"C:\", &parsed, None, sort, Some(k as u32));
                     assert_eq!(page.hits, unlimited[..k], "{query:?} {sort:?} -n {k}");
                 }
             }
@@ -1418,7 +1358,7 @@ mod tests {
                 let runs = volumes
                     .iter()
                     .map(|(prefix, idx)| {
-                        let out = run_query_deferrable(idx, prefix, &parsed, None, sort, 0, limit);
+                        let out = run_query_deferrable(idx, prefix, &parsed, None, sort, limit);
                         VolumeRun {
                             mount_prefix: prefix,
                             hits: out.hits,
@@ -1444,7 +1384,7 @@ mod tests {
 
     /// A flat index of random-named files at the root.
     fn flat_index(names: &[String]) -> VolumeIndex {
-        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut idx = VolumeIndex::new();
         for (i, n) in names.iter().enumerate() {
             idx.insert_enum(&enum_rec(frn(1000 + i as u64), NTFS_ROOT_FRN, n, false));
         }
@@ -1487,7 +1427,7 @@ mod tests {
             let idx = flat_index(&uniq);
             let query = terms.join(" ");
             let parsed = parse_query(&query).unwrap();
-            let out = run_query(&idx, "", &parsed, None, SortSpec::default(), 0, None);
+            let out = run_query(&idx, "", &parsed, None, SortSpec::default(), None);
             let engine: BTreeSet<String> = out
                 .hits
                 .iter()
@@ -1506,7 +1446,7 @@ mod tests {
             before in "[a-cA-C]{0,2}",
             after in "[a-cA-C]{0,2}",
         ) {
-            let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+            let mut idx = VolumeIndex::new();
             for (i, &p) in parents.iter().enumerate() {
                 let parent = match p {
                     p if p < i => frn(1000 + p as u64),
@@ -1517,7 +1457,7 @@ mod tests {
             }
             let term = format!("{before}\\{after}");
             let parsed = parse_query(&term).unwrap();
-            let out = run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), 0, None);
+            let out = run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), None);
             let engine: BTreeSet<String> = out
                 .hits
                 .iter()

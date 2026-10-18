@@ -18,7 +18,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
+use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::types::Frn;
 use gozler_core::usn::record::{
     FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
@@ -53,7 +53,7 @@ fn rec(f: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> ParsedUsnR
 /// actually warranted: every third file is renamed (leaving its old name dead)
 /// and every seventh is deleted.
 fn dirty_index() -> VolumeIndex {
-    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+    let mut idx = VolumeIndex::new();
     let mut next: u64 = 1000;
     let mut files: Vec<Frn> = Vec::new();
 

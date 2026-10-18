@@ -48,10 +48,7 @@ impl VolumeState {
         Self {
             guid,
             mounts,
-            index: RwLock::new(VolumeIndex::new(
-                gozler_core::index::NTFS_ROOT_FRN,
-                gozler_core::index::FrnMap::sparse(),
-            )),
+            index: RwLock::new(VolumeIndex::new()),
             phase: RwLock::new(VolumePhase::Bootstrapping),
             metadata_pending: RwLock::new(false),
             journal_max_bytes: RwLock::new(None),

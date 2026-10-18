@@ -19,7 +19,7 @@
 //! U+DFFF`, which a real text needle can never contain) pass through
 //! unchanged.
 
-use crate::wtf8::CodePoints;
+use crate::wtf8::{CodePoints, encode_code_point};
 use smallvec::SmallVec;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::decompose_canonical;
@@ -67,7 +67,7 @@ fn fold_non_ascii(bytes: &[u8], out: &mut Vec<u8>) {
             // composition, so flush the run and pass it through unchanged.
             None => {
                 compose_into(&mut run, out);
-                encode(cp, out);
+                encode_code_point(cp, out);
             }
         }
     }
@@ -80,7 +80,7 @@ fn compose_into(run: &mut SmallVec<[char; 256]>, out: &mut Vec<u8>) {
         return;
     }
     for c in run.iter().copied().nfc() {
-        encode(c as u32, out);
+        encode_code_point(c as u32, out);
     }
     run.clear();
 }
@@ -96,25 +96,6 @@ pub fn fold(bytes: &[u8]) -> Vec<u8> {
 /// length-preserving and diverges from filesystem semantics.
 fn lower_char(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
-}
-
-/// Encodes one code point as WTF-8 (surrogates permitted).
-fn encode(cp: u32, out: &mut Vec<u8>) {
-    if cp < 0x80 {
-        out.push(cp as u8);
-    } else if cp < 0x800 {
-        out.push(0xC0 | (cp >> 6) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
-    } else if cp < 0x10000 {
-        out.push(0xE0 | (cp >> 12) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
-    } else {
-        out.push(0xF0 | (cp >> 18) as u8);
-        out.push(0x80 | ((cp >> 12) & 0x3F) as u8);
-        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
-        out.push(0x80 | (cp & 0x3F) as u8);
-    }
 }
 
 #[cfg(test)]

@@ -47,8 +47,7 @@ impl Failure {
             Failure::Communication(_) => ExitCode::Communication,
             Failure::Daemon { code, .. } => match code {
                 ProtoError::BadQuery => ExitCode::InvalidInput,
-                ProtoError::Internal => ExitCode::Internal,
-                ProtoError::TooLarge | ProtoError::Unsupported => ExitCode::Communication,
+                ProtoError::Unsupported => ExitCode::Communication,
             },
             Failure::Internal(_) => ExitCode::Internal,
         }
@@ -151,8 +150,6 @@ mod tests {
                 7,
             ),
             (daemon(ProtoError::BadQuery), 4),
-            (daemon(ProtoError::Internal), 1),
-            (daemon(ProtoError::TooLarge), 7),
             (daemon(ProtoError::Unsupported), 7),
             (Failure::Internal(String::new()), 1),
         ];

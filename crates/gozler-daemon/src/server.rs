@@ -335,7 +335,6 @@ fn stream_query_binary(
             &parsed,
             scope_entry,
             q.sort,
-            0,
             per_vol_limit,
         );
         drop(index); // hits own their bytes; release the read lock early
@@ -570,7 +569,7 @@ mod tests {
         scope_entry_valid, targets,
     };
     use crate::volume_state::{VolumeSet, VolumeState};
-    use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
+    use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response};
     use gozler_core::query::resolve_scope;
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
@@ -598,7 +597,7 @@ mod tests {
 
     /// `C:\Windows\System32` as an index, built through the public API only.
     fn windows_index() -> VolumeIndex {
-        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut index = VolumeIndex::new();
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "Windows"));
         index.insert_enum(&dir_record(101, 100, "System32"));
         index
@@ -624,7 +623,7 @@ mod tests {
     /// sorts after `z\a.log` by name but before it by path. A fixture where the
     /// two agree would pass even with the name key computed wrongly.
     fn merge_index() -> VolumeIndex {
-        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut index = VolumeIndex::new();
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "a"));
         index.insert_enum(&dir_record(101, NTFS_ROOT_FRN.0, "z"));
         for (frn, parent, name) in [(102, 100, "z.log"), (103, 101, "a.log")] {
@@ -834,7 +833,7 @@ mod tests {
     #[test]
     fn pages_carry_more_until_the_last_and_a_stable_total() {
         // One directory holding PAGE_ROWS + 1 matches, so the encoder pages.
-        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut index = VolumeIndex::new();
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "many"));
         let n = PAGE_ROWS as u64 + 1;
         for i in 0..n {
@@ -859,7 +858,7 @@ mod tests {
     /// instead of encoding every remaining page into the void.
     #[test]
     fn streaming_stops_when_the_consumer_goes_away() {
-        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut index = VolumeIndex::new();
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "many"));
         for i in 0..(PAGE_ROWS as u64 * 3) {
             let mut rec = dir_record(1000 + i, 100, &format!("hit{i:05}.log"));
@@ -1073,7 +1072,7 @@ mod tests {
     /// same name.
     fn order_index() -> VolumeIndex {
         use gozler_core::layout::{LayoutFile, LayoutName};
-        let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+        let mut index = VolumeIndex::new();
         index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "P"));
         index.insert_enum(&dir_record(101, 100, "a"));
         index.insert_enum(&dir_record(102, 100, "a b"));

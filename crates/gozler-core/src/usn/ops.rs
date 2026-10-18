@@ -15,7 +15,6 @@ use super::record::{
     ParsedUsnRecord, USN_REASON_BASIC_INFO_CHANGE, USN_REASON_DATA_EXTEND,
     USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
     USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
-    USN_REASON_RENAME_OLD_NAME,
 };
 
 /// One normalized index operation derived from a USN record.
@@ -49,25 +48,20 @@ pub enum UsnOp {
     /// Size and/or timestamps may have changed; USN records carry neither,
     /// so the entry needs an external re-stat.
     StatDirty { frn: Frn },
-    /// A `RENAME_OLD_NAME` record was seen without its NEW counterpart in
-    /// the same record. Telemetry only; the index ignores it (the NEW
-    /// record alone carries the committed state).
-    RenameOldSeen { frn: Frn },
 }
 
 /// Normalizes one record's accumulated reason bitmask into index ops.
 ///
-/// Decision table (rows evaluated top to bottom; rows 2-5 are cumulative,
+/// Decision table (rows evaluated top to bottom; rows 2-4 are cumulative,
 /// each `&`-test independently appends its op):
 ///
 /// | # | Condition (bitwise `&`)                                              | Effect                              |
 /// |---|----------------------------------------------------------------------|-------------------------------------|
 /// | 1 | `FILE_DELETE`                                                        | `[Delete]` and NOTHING else: delete wins over all accumulated bits |
 /// | 2 | `RENAME_NEW_NAME` or `FILE_CREATE`                                   | push `Upsert` (record name/parent are current state; no OLD/NEW pairing state machine exists by design) |
-/// | 3 | `RENAME_OLD_NAME` and none of `RENAME_NEW_NAME`/`FILE_CREATE`/`FILE_DELETE` | push `RenameOldSeen` (telemetry) |
-/// | 4 | `HARD_LINK_CHANGE`                                                   | push `LinkDirty` (never upsert: the named link may be dead) |
-/// | 5 | `FILE_CREATE`/`DATA_OVERWRITE`/`DATA_EXTEND`/`DATA_TRUNCATION`/`BASIC_INFO_CHANGE` | push `StatDirty` (a USN record carries no size/mtime, so a create needs one too) |
-/// | 6 | none of the above (e.g. CLOSE-only, security-only)                   | empty |
+/// | 3 | `HARD_LINK_CHANGE`                                                   | push `LinkDirty` (never upsert: the named link may be dead) |
+/// | 4 | `FILE_CREATE`/`DATA_OVERWRITE`/`DATA_EXTEND`/`DATA_TRUNCATION`/`BASIC_INFO_CHANGE` | push `StatDirty` (a USN record carries no size/mtime, so a create needs one too) |
+/// | 5 | none of the above (e.g. CLOSE-only, security-only, `RENAME_OLD_NAME` alone: the NEW record carries the committed state) | empty |
 pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 2]> {
     let mut ops = SmallVec::new();
     let reason = rec.reason;
@@ -89,20 +83,12 @@ pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 2]> {
         });
     }
 
-    // Row 3: OLD without NEW/CREATE/DELETE in the same record.
-    if reason & USN_REASON_RENAME_OLD_NAME != 0
-        && reason & (USN_REASON_RENAME_NEW_NAME | USN_REASON_FILE_CREATE | USN_REASON_FILE_DELETE)
-            == 0
-    {
-        ops.push(UsnOp::RenameOldSeen { frn: rec.frn });
-    }
-
-    // Row 4.
+    // Row 3.
     if reason & USN_REASON_HARD_LINK_CHANGE != 0 {
         ops.push(UsnOp::LinkDirty { frn: rec.frn });
     }
 
-    // Row 5. FILE_CREATE is here as well as in row 2: a USN record carries no
+    // Row 4. FILE_CREATE is here as well as in row 2: a USN record carries no
     // size or timestamp, so a newly created file has no metadata anywhere until
     // something stats it. A file created and never written emits CREATE with no
     // DATA_* bit ever following, so without this its size stays unknown for the
@@ -125,7 +111,9 @@ pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, USN_REASON_CLOSE};
+    use crate::usn::record::{
+        FILE_ATTRIBUTE_DIRECTORY, USN_REASON_CLOSE, USN_REASON_RENAME_OLD_NAME,
+    };
 
     /// Reason bit not in any of our decision-table sets
     /// (`USN_REASON_SECURITY_CHANGE`).
@@ -208,13 +196,12 @@ mod tests {
         );
     }
 
+    /// The OLD record names the file's previous name and parent; upserting
+    /// from it would move the entry back until the NEW record arrives.
     #[test]
-    fn rename_old_alone_is_telemetry_only() {
+    fn rename_old_alone_emits_nothing() {
         let r = rec(USN_REASON_RENAME_OLD_NAME, 0x20);
-        assert_eq!(
-            ops_for(&r).into_vec(),
-            vec![UsnOp::RenameOldSeen { frn: Frn(7) }]
-        );
+        assert!(ops_for(&r).is_empty());
     }
 
     #[test]
@@ -288,21 +275,6 @@ mod tests {
         assert_eq!(
             ops_for(&r).into_vec(),
             vec![upsert(false), UsnOp::StatDirty { frn: Frn(7) }]
-        );
-    }
-
-    #[test]
-    fn rename_old_plus_hard_link_emits_both() {
-        let r = rec(
-            USN_REASON_RENAME_OLD_NAME | USN_REASON_HARD_LINK_CHANGE,
-            0x20,
-        );
-        assert_eq!(
-            ops_for(&r).into_vec(),
-            vec![
-                UsnOp::RenameOldSeen { frn: Frn(7) },
-                UsnOp::LinkDirty { frn: Frn(7) },
-            ]
         );
     }
 

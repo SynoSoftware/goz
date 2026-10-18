@@ -1,16 +1,12 @@
 //! USN journal byte-level machinery: record parsing, output-buffer walking,
-//! reason-bit normalization, and cursor validation.
+//! and reason-bit normalization.
 //!
 //! Everything here is pure: the Win32 layer (`gozler-winfs`) hands over raw
 //! `FSCTL_ENUM_USN_DATA` / `FSCTL_READ_USN_JOURNAL` output buffers and this
-//! module turns them into typed records ([`record`]), normalizes accumulated
-//! reason bitmasks into idempotent index ops ([`ops`]), and provides
-//! the pure replay-vs-full-rescan decision a caller would make from a saved
-//! cursor ([`cursor`]; deliberately unwired while v1 cold-bootstraps, see its
-//! module docs). The whole module is testable from fixture buffers on any OS
-//! ([`fixtures`]).
+//! module turns them into typed records ([`record`]) and normalizes
+//! accumulated reason bitmasks into idempotent index ops ([`ops`]). The whole
+//! module is testable from fixture buffers on any OS ([`fixtures`]).
 
-pub mod cursor;
 pub mod ops;
 pub mod record;
 
@@ -20,9 +16,7 @@ pub mod record;
 #[cfg(any(test, doc))]
 pub mod fixtures;
 
-pub use cursor::{JournalInfo, RescanReason, Resync, SavedCursor, validate_cursor};
 pub use ops::{UsnOp, ops_for};
 pub use record::{
-    EnumWalk, JournalWalk, ParsedUsnRecord, SkipCounts, WalkError, walk_enum_buffer,
-    walk_journal_buffer,
+    EnumWalk, JournalWalk, ParsedUsnRecord, WalkError, walk_enum_buffer, walk_journal_buffer,
 };

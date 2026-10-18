@@ -54,7 +54,10 @@ pub use working_set::{SelfMemory, pin_working_set, self_memory, trim_working_set
 pub use elevation::{enable_volume_privileges, is_elevated};
 
 #[cfg(windows)]
-pub use volume::{VolumeHandle, VolumeInfo, enumerate_volumes, open_volume, volume_total_bytes};
+pub use volume::{
+    ERROR_ACCESS_DENIED, VolumeHandle, VolumeInfo, enumerate_volumes, open_volume,
+    volume_total_bytes,
+};
 
 #[cfg(windows)]
 pub use journal::{
@@ -64,7 +67,7 @@ pub use journal::{
 };
 
 #[cfg(windows)]
-pub use file_layout::{query_file_layout, query_file_layout_raw};
+pub use file_layout::query_file_layout;
 
 #[cfg(windows)]
 pub use links::link_paths;

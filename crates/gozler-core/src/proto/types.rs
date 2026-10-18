@@ -255,10 +255,6 @@ pub enum ProtoError {
     /// The query cannot run as sent: the query string failed to parse, or its
     /// scope is on no indexed volume.
     BadQuery,
-    /// Unexpected server-side failure.
-    Internal,
-    /// A frame exceeded the receiver's size cap.
-    TooLarge,
     /// The client requested an unsupported protocol version or feature.
     Unsupported,
 }
@@ -422,12 +418,7 @@ mod tests {
 
     #[test]
     fn response_error_round_trips_every_code() {
-        for code in [
-            ProtoError::BadQuery,
-            ProtoError::Internal,
-            ProtoError::TooLarge,
-            ProtoError::Unsupported,
-        ] {
+        for code in [ProtoError::BadQuery, ProtoError::Unsupported] {
             rt_response(&Response::Error {
                 code,
                 message: format!("{code:?} happened"),

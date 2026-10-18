@@ -6,8 +6,8 @@
 //! gives sub-100 ms freshness and a clean, `CancelSynchronousIo`-free shutdown
 //! (the blocking `BytesToWaitFor=1` push variant is a post-v1 refinement). It
 //! applies structural changes (create / rename / delete) immediately and
-//! collects `NeedsStat` side effects for the enricher, which refreshes the
-//! size/date a USN record does not carry.
+//! collects the `ApplyOutcome::needs_stat` side effects for the enricher,
+//! which refreshes the size/date a USN record does not carry.
 //!
 //! Hard links are reconciled out of band: a `HARD_LINK_CHANGE` record names one
 //! link and may name a dead one, so the real set comes from a Win32 link walk
@@ -30,7 +30,7 @@ use gozler_core::usn::record::{
     USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
     USN_REASON_RENAME_OLD_NAME,
 };
-use gozler_core::usn::{RescanReason, walk_journal_buffer};
+use gozler_core::usn::walk_journal_buffer;
 use gozler_winfs::{
     ERROR_JOURNAL_DELETE_IN_PROGRESS, ERROR_JOURNAL_ENTRY_DELETED, ERROR_JOURNAL_NOT_ACTIVE,
     JournalInfo, VolumeHandle, read_usn_journal, stat_file,
@@ -52,6 +52,32 @@ const REASON_MASK: u32 = USN_REASON_FILE_CREATE
     | USN_REASON_DATA_EXTEND
     | USN_REASON_DATA_TRUNCATION
     | USN_REASON_CLOSE;
+
+/// Why the tail rebuilds its volume's index. The log names it, and a volume
+/// whose rebuild fails shows it in its `Failed` reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RescanReason {
+    /// `ERROR_JOURNAL_NOT_ACTIVE` (1179): no journal on the volume.
+    JournalNotActive,
+    /// `ERROR_JOURNAL_DELETE_IN_PROGRESS` (1178): a deletion is running;
+    /// wait for it, then rescan.
+    JournalDeleteInProgress,
+    /// `ERROR_JOURNAL_ENTRY_DELETED` (1181) from a read: our `StartUsn` was
+    /// purged before the read.
+    EntryDeletedError,
+    /// A corrupt buffer or cycle was detected while parsing/applying; we
+    /// cannot prove what was missed.
+    ParserAnomaly,
+    /// The tail started without a journal cursor, so nothing proves the index
+    /// is in sync with the journal: its supervisor revived it after the
+    /// previous tail exited, or bootstrap could not read the journal.
+    NoCursor,
+    /// Journal reads kept failing past the escalation window with codes no
+    /// arm maps (observed live: `ERROR_INVALID_PARAMETER` against a cursor
+    /// whose journal was deleted mid-read); whatever the cause, a journal that
+    /// will not stop failing cannot be trusted.
+    ReadsKeptFailing,
+}
 
 /// 512 KiB journal read buffer (~5k records per fill).
 const READ_BUFFER_BYTES: usize = 512 * 1024;

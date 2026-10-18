@@ -168,13 +168,6 @@ struct StopFlag {
 pub(crate) struct Supervisor {
     stop: Arc<StopFlag>,
     join: Option<JoinHandle<()>>,
-    /// Real handle to the supervision thread, so `shutdown` can cancel any
-    /// blocked synchronous call it might be inside. Defensive: blocking
-    /// revival I/O lives on worker threads and the supervisor's own waits
-    /// are bounded, but a rescue that costs one no-op cancel per poll is
-    /// cheap insurance against a future blocking call slipping in. `None`
-    /// only if duplication failed, which merely forfeits that rescue.
-    io: Option<gozler_winfs::ThreadIoHandle>,
     volumes: Arc<VolumeRegistry>,
 }
 
@@ -205,35 +198,20 @@ impl Supervisor {
         let slot = Arc::new(Mutex::new(Some(fleet)));
         let thread_slot = slot.clone();
         let thread_stop = stop.clone();
-        let (io_tx, io_rx) = std::sync::mpsc::sync_channel(1);
         match std::thread::Builder::new()
             .name("goz-volume-supervisor".into())
             .spawn(move || {
-                // Same per-thread duplication the tails perform, and for the
-                // same reason: shutdown may need to cancel this thread's own
-                // blocked volume I/O. Unlike a tail, a failure here is not
-                // fatal to the thread; it only forfeits that one rescue.
-                let _ = io_tx.send(gozler_winfs::current_thread_io_handle());
                 let fleet = thread_slot
                     .lock()
                     .take()
                     .expect("the supervisor's fleet is taken exactly once");
                 supervise(fleet, &thread_stop);
             }) {
-            Ok(join) => {
-                let io = io_rx.recv().ok().and_then(Result::ok);
-                if io.is_none() {
-                    tracing::warn!(
-                        "no real handle to the supervisor thread; shutdown cannot cancel its blocked I/O"
-                    );
-                }
-                Ok(Supervisor {
-                    stop,
-                    join: Some(join),
-                    io,
-                    volumes,
-                })
-            }
+            Ok(join) => Ok(Supervisor {
+                stop,
+                join: Some(join),
+                volumes,
+            }),
             Err(e) => {
                 if let Some(fleet) = slot.lock().take() {
                     fleet.stop_all();
@@ -251,29 +229,22 @@ impl Supervisor {
     /// Stops supervision and every tail, joining all of it. The supervision
     /// thread stops the tails itself (it owns them).
     ///
-    /// The supervisor's join is bounded and cancel-assisted for the same
-    /// reason its tails' joins are: a revive in flight can be blocked in
-    /// `open_volume` against a sick device, and a bare join on that would
-    /// hang teardown forever.
+    /// The join is bounded by [`SUPERVISOR_JOIN_WAIT`], which is sized past
+    /// what the thread's exit legitimately takes: stopping its tails
+    /// ([`stop_tails`]) and resolving in-flight revivals ([`drain_pending`]).
     pub(crate) fn shutdown(mut self) {
         *self.stop.stopped.lock() = true;
         self.stop.wake.notify_all();
         if let Some(join) = self.join.take() {
             let deadline = Instant::now() + SUPERVISOR_JOIN_WAIT;
             while !join.is_finished() && Instant::now() < deadline {
-                // A no-op (ERROR_NOT_FOUND) unless the thread really is
-                // blocked in a syscall; its sleeps and lock waits are not
-                // cancellable I/O and are unaffected.
-                if let Some(io) = &self.io {
-                    let _ = gozler_winfs::cancel_synchronous_io(io);
-                }
                 std::thread::sleep(TEARDOWN_POLL);
             }
             if join.is_finished() {
                 let _ = join.join();
             } else {
                 tracing::error!(
-                    "volume supervisor survived its stop signal and every I/O cancel; abandoning it to process exit"
+                    "volume supervisor survived its stop signal; abandoning it to process exit"
                 );
             }
         }
@@ -777,8 +748,8 @@ impl Supervised {
                 // Duplicated ON the worker (the pseudo-handle is per-thread)
                 // so the supervisor can cancel an open a sick device pends.
                 let _ = io_tx.send(gozler_winfs::current_thread_io_handle());
-                let outcome = gozler_winfs::open_volume(&state.guid)
-                    .map_err(|e| std::io::Error::other(format!("opening the volume: {e}")))
+                let outcome = bootstrap::open_volume(&state.guid)
+                    .map_err(|e| std::io::Error::other(format!("{e:#}")))
                     .and_then(|handle| tail::spawn(state, handle, None));
                 if let Err(returned) = result_tx.send(outcome) {
                     // The supervisor stopped listening (teardown abandoned

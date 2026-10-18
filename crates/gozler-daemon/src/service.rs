@@ -1,4 +1,4 @@
-//! Windows service integration (M8).
+//! Windows service integration.
 //!
 //! `install` registers `gozlerd` as a LocalSystem auto-start service so the index
 //! is warm from boot for every user (admin or standard) with no per-session
@@ -34,7 +34,7 @@ use crate::{run, server};
 pub(crate) const SERVICE_NAME: &str = "goz";
 const DISPLAY_NAME: &str = "goz file index";
 const DESCRIPTION: &str =
-    "Indexes NTFS volumes (MFT + USN journal) for instant file search in arsivle.";
+    "Indexes NTFS volumes (MFT + USN journal) for instant file search with gozler.";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 // Win32 error codes we treat as non-fatal for idempotent install/uninstall.

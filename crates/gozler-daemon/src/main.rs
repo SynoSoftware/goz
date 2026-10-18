@@ -94,65 +94,24 @@ fn tune_allocator() {
     }
 }
 
-/// Off Windows there is no mimalloc global allocator to tune (the daemon only
-/// runs on Windows anyway), so this is a no-op that keeps `main` platform-free.
-#[cfg(not(windows))]
-fn tune_allocator() {}
-
+#[cfg(windows)]
 fn main() -> anyhow::Result<()> {
     tune_allocator();
     let cli = Cli::parse();
     match cli.command {
         Command::Scan { query } => run_scan(query),
-        Command::Run { service, .. } => run_daemon(service),
-        Command::Install => do_install(),
-        Command::Uninstall => do_uninstall(),
-        Command::Status => do_status(),
-    }
-}
-
-#[cfg(windows)]
-fn run_daemon(service: bool) -> anyhow::Result<()> {
-    if service {
-        service::run()
-    } else {
-        run::run_console()
+        Command::Run { service: true, .. } => service::run(),
+        Command::Run { .. } => run::run_console(),
+        Command::Install => service::install(),
+        Command::Uninstall => service::uninstall(),
+        Command::Status => service::status(),
     }
 }
 
 #[cfg(not(windows))]
-fn run_daemon(_service: bool) -> anyhow::Result<()> {
-    anyhow::bail!("goz requires Windows (it reads the NTFS MFT and USN journal)")
-}
-
-#[cfg(windows)]
-fn do_install() -> anyhow::Result<()> {
-    service::install()
-}
-
-#[cfg(windows)]
-fn do_uninstall() -> anyhow::Result<()> {
-    service::uninstall()
-}
-
-#[cfg(windows)]
-fn do_status() -> anyhow::Result<()> {
-    service::status()
-}
-
-#[cfg(not(windows))]
-fn do_install() -> anyhow::Result<()> {
-    anyhow::bail!("the goz service requires Windows")
-}
-
-#[cfg(not(windows))]
-fn do_uninstall() -> anyhow::Result<()> {
-    anyhow::bail!("the goz service requires Windows")
-}
-
-#[cfg(not(windows))]
-fn do_status() -> anyhow::Result<()> {
-    anyhow::bail!("the goz service requires Windows")
+fn main() -> anyhow::Result<()> {
+    let _ = Cli::parse();
+    anyhow::bail!("gozlerd requires Windows (it reads the NTFS MFT and USN journal)")
 }
 
 #[cfg(windows)]
@@ -219,7 +178,6 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
             &parsed,
             None,
             SortSpec::default(),
-            0,
             Some(20),
         );
         let ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -244,9 +202,4 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
         }
     }
     Ok(())
-}
-
-#[cfg(not(windows))]
-fn run_scan(_query: Option<String>) -> anyhow::Result<()> {
-    anyhow::bail!("goz requires Windows (it reads the NTFS MFT and USN journal)")
 }

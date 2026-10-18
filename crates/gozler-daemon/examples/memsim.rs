@@ -19,7 +19,7 @@ fn main() {
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(windows)]
-use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
+use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 #[cfg(windows)]
 use gozler_core::types::Frn;
 #[cfg(windows)]
@@ -129,7 +129,7 @@ fn main() {
 
     // Insert everything, exactly as bootstrap ENUM would.
     let t1 = std::time::Instant::now();
-    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+    let mut idx = VolumeIndex::new();
     for (rec_no, row) in (1000_u64..).zip(rows.iter()) {
         let r = ParsedUsnRecord {
             major_version: 3,
@@ -201,7 +201,6 @@ fn main() {
         &parsed,
         None,
         gozler_core::types::SortSpec::default(),
-        0,
         Some(5),
     );
     eprintln!(

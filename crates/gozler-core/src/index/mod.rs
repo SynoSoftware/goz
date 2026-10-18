@@ -8,14 +8,14 @@
 //! idempotent apply, orphan placeholders, slot-reuse safety).
 
 // `pub(crate)`, not `pub`: the doc above designates `volume` as the policy layer
-// over these primitives, and `NameArena::kill` / `EntryTable::set_parent` reach
-// past every invariant it maintains. Not `mod`, which query::engine's tests
-// (not a descendant of `index`) would fail to reach. The `pub use` below keeps
-// the three types that are genuinely part of the index's vocabulary public.
+// over these primitives, and `NameStore::release` / `EntryTable::set_parent`
+// reach past every invariant it maintains. Not `mod`, which query::engine's
+// tests (not a descendant of `index`) would fail to reach. The `pub use` below
+// keeps the types that are genuinely part of the index's vocabulary public.
 pub(crate) mod store;
 pub mod volume;
 
-pub use store::{ComponentBytes, EntryFlags, FrnMap, NameRef};
+pub use store::{ComponentBytes, EntryFlags};
 pub use volume::{
     Anomaly, ApplyOutcome, EntryView, IndexMemory, IndexStats, LinkTarget, NTFS_ROOT_FRN,
     PathStatus, VolumeIndex, WtfName,

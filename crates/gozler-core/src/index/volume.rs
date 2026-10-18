@@ -114,7 +114,6 @@ pub enum Anomaly {
 pub struct IndexStats {
     pub placeholders_created: u64,
     pub delete_of_unknown: u64,
-    pub rename_old_seen: u64,
     pub stale_slots: u64,
     /// Hard-link changes the daemon saw but could not reconcile.
     ///
@@ -200,6 +199,7 @@ pub struct VolumeIndex {
     generation: u64,
     stats: IndexStats,
     /// Entries structurally mutated since the last [`Self::take_write_count`].
+    #[cfg(test)]
     dirty: u64,
     /// Persistent `(parent entry, hash of folded name) → entry` index over
     /// real DIRECTORIES only, maintained on every mutation. Turns `-path`
@@ -218,17 +218,24 @@ pub struct VolumeIndex {
     dir_children: FxHashMap<(EntryIdx, u64), SmallVec<[EntryIdx; 1]>>,
 }
 
+impl Default for VolumeIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VolumeIndex {
-    /// Builds an empty index with a root (FRN `root_frn`) and a lost+found
-    /// root. `frn_map` picks the backing storage; every caller today,
-    /// the real-volume bootstrap included, passes `FrnMap::sparse()`.
-    pub fn new(root_frn: Frn, mut frn_map: FrnMap) -> Self {
+    /// Builds an empty index with the NTFS root folder ([`NTFS_ROOT_FRN`]) and
+    /// a lost+found root. The FRN map starts sparse;
+    /// [`Self::optimize_storage`] makes it dense when that is smaller.
+    pub fn new() -> Self {
         let mut entries = EntryTable::new();
         let mut names = NameStore::new();
+        let mut by_frn = FrnMap::sparse();
 
         let root_name = names.intern(b"");
         let root = entries.alloc(
-            root_frn,
+            NTFS_ROOT_FRN,
             NIL,
             root_name,
             EntryFlags::DIR,
@@ -236,7 +243,7 @@ impl VolumeIndex {
             MTIME_UNKNOWN,
             NIL,
         );
-        frn_map.set(root_frn.record_number(), root);
+        by_frn.set(NTFS_ROOT_FRN.record_number(), root);
 
         // Lost+found: synthetic, not in the FRN map (never a USN target).
         let lf_name = names.intern(LOST_FOUND_NAME);
@@ -253,11 +260,12 @@ impl VolumeIndex {
         let mut this = Self {
             entries,
             names,
-            by_frn: frn_map,
+            by_frn,
             root,
             lost_found,
             generation: 0,
             stats: IndexStats::default(),
+            #[cfg(test)]
             dirty: 0,
             dir_children: FxHashMap::default(),
         };
@@ -279,9 +287,6 @@ impl VolumeIndex {
     pub fn root(&self) -> EntryIdx {
         self.root
     }
-    pub fn lost_found(&self) -> EntryIdx {
-        self.lost_found
-    }
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -297,13 +302,9 @@ impl VolumeIndex {
         self.len() == 0
     }
 
-    /// Total allocated entry slots (live + reusable tombstones).
-    pub fn allocated(&self) -> usize {
-        self.entries.capacity()
-    }
-
     /// Entries structurally mutated since the previous call. The
     /// directory-rename test asserts this is exactly 1.
+    #[cfg(test)]
     pub fn take_write_count(&mut self) -> u64 {
         core::mem::take(&mut self.dirty)
     }
@@ -363,20 +364,8 @@ impl VolumeIndex {
             }
         }
 
-        // Set size/mtime on EVERY link of the file, not just the head: a query
-        // may return any of a hard-linked file's names, and they all describe
-        // the same bytes. (Directories keep unknown size.)
-        if let Some(chain_head) = self.head_of(file.frn) {
-            let mut cur = chain_head;
-            while cur != NIL {
-                if !is_dir && let Some(sz) = file.size {
-                    self.entries.set_size(cur, sz);
-                }
-                if let Some(mt) = file.mtime_ft {
-                    self.entries.set_mtime(cur, mt);
-                }
-                cur = self.entries.next_link(cur);
-            }
+        if let Some(head) = self.head_of(file.frn) {
+            self.set_chain_stat(head, is_dir, file.size, file.mtime_ft);
         }
     }
 
@@ -412,7 +401,6 @@ impl VolumeIndex {
                     }
                     UsnOp::LinkDirty { frn } => outcome.needs_link_reconcile.push(frn),
                     UsnOp::StatDirty { frn } => outcome.needs_stat.push(frn),
-                    UsnOp::RenameOldSeen { .. } => self.stats.rename_old_seen += 1,
                 }
             }
         }
@@ -455,12 +443,28 @@ impl VolumeIndex {
             return;
         };
         let is_dir = self.entries.flags(head).contains(EntryFlags::DIR);
+        self.set_chain_stat(head, is_dir, Some(size), Some(mtime));
+    }
+
+    /// Sets `size` and `mtime` on EVERY link of the file whose chain starts at
+    /// `head`, not just the head: a query may return any of a hard-linked
+    /// file's names, and they all describe the same bytes. A folder keeps an
+    /// unknown size; `None` leaves that value as it was.
+    fn set_chain_stat(
+        &mut self,
+        head: EntryIdx,
+        is_dir: bool,
+        size: Option<u64>,
+        mtime: Option<i64>,
+    ) {
         let mut cur = head;
         while cur != NIL {
-            if !is_dir {
+            if !is_dir && let Some(size) = size {
                 self.entries.set_size(cur, size);
             }
-            self.entries.set_mtime(cur, mtime);
+            if let Some(mtime) = mtime {
+                self.entries.set_mtime(cur, mtime);
+            }
             cur = self.entries.next_link(cur);
         }
     }
@@ -691,6 +695,30 @@ impl VolumeIndex {
         self.entries.set_first_child(dir, NIL);
     }
 
+    /// Adds one entry: interns its name and links it into its same-name chain,
+    /// its parent's child chain and the scope index. The caller links it into
+    /// its file's hard-link chain and the FRN map.
+    fn alloc_entry(
+        &mut self,
+        frn: Frn,
+        parent: EntryIdx,
+        name: &[u8],
+        flags: EntryFlags,
+        size: u64,
+        mtime: i64,
+    ) -> EntryIdx {
+        let id = self.names.intern(name);
+        let idx = self.entries.alloc(frn, parent, id, flags, size, mtime, NIL);
+        self.link_same_name(idx, id);
+        self.link_child(idx);
+        self.dir_index_insert(idx);
+        #[cfg(test)]
+        {
+            self.dirty += 1;
+        }
+        idx
+    }
+
     /// Removes one entry: takes it out of every chain and the scope index,
     /// moves its children to lost+found, releases its name and frees its slot.
     fn remove_entry(&mut self, idx: EntryIdx) {
@@ -700,7 +728,10 @@ impl VolumeIndex {
         self.orphan_children(idx);
         self.names.release(self.entries.name_id(idx));
         self.entries.tombstone(idx);
-        self.dirty += 1;
+        #[cfg(test)]
+        {
+            self.dirty += 1;
+        }
     }
 
     /// O(1) removal from the doubly-linked same-name chain. Must run BEFORE
@@ -788,18 +819,11 @@ impl VolumeIndex {
             self.reclaim_stale_slot(record, head);
         }
 
-        let id = self.names.intern(name);
         let flags = EntryFlags::EMPTY
             .with(EntryFlags::DIR, is_dir)
             .with(EntryFlags::NON_UNICODE_NAME, name_lossy);
-        let idx = self
-            .entries
-            .alloc(frn, parent_idx, id, flags, SIZE_UNKNOWN, MTIME_UNKNOWN, NIL);
-        self.link_same_name(idx, id);
-        self.link_child(idx);
+        let idx = self.alloc_entry(frn, parent_idx, name, flags, SIZE_UNKNOWN, MTIME_UNKNOWN);
         self.by_frn.set(record, idx);
-        self.dir_index_insert(idx);
-        self.dirty += 1;
         UpsertResult::Ok
     }
 
@@ -833,7 +857,10 @@ impl VolumeIndex {
             .with(EntryFlags::PLACEHOLDER, false);
         self.entries.set_flags(idx, flags);
         self.dir_index_insert(idx);
-        self.dirty += 1;
+        #[cfg(test)]
+        {
+            self.dirty += 1;
+        }
     }
 
     /// Reclaims a record number NTFS has re-tenanted: tombstones the stale chain
@@ -869,21 +896,16 @@ impl VolumeIndex {
             // queries and its slots never return to the free list.
             self.reclaim_stale_slot(record, idx);
         }
-        let id = self.names.intern(PLACEHOLDER_NAME);
-        let idx = self.entries.alloc(
+        let idx = self.alloc_entry(
             parent_frn,
             self.lost_found,
-            id,
+            PLACEHOLDER_NAME,
             EntryFlags::DIR.with(EntryFlags::PLACEHOLDER, true),
             SIZE_UNKNOWN,
             MTIME_UNKNOWN,
-            NIL,
         );
-        self.link_same_name(idx, id);
-        self.link_child(idx);
         self.by_frn.set(record, idx);
         self.stats.placeholders_created += 1;
-        self.dirty += 1;
         idx
     }
 
@@ -929,13 +951,8 @@ impl VolumeIndex {
     /// Appends a new link (a file's additional hard-link name) to the tail of
     /// `frn`'s chain, leaving the existing head, and its identity, untouched.
     fn add_link(&mut self, frn: Frn, parent_idx: EntryIdx, name: &[u8], name_lossy: bool) {
-        let id = self.names.intern(name);
         let flags = EntryFlags::EMPTY.with(EntryFlags::NON_UNICODE_NAME, name_lossy);
-        let idx = self
-            .entries
-            .alloc(frn, parent_idx, id, flags, SIZE_UNKNOWN, MTIME_UNKNOWN, NIL);
-        self.link_same_name(idx, id);
-        self.link_child(idx);
+        let idx = self.alloc_entry(frn, parent_idx, name, flags, SIZE_UNKNOWN, MTIME_UNKNOWN);
         let record = frn.record_number();
         if let Some(head) = self.by_frn.get(record) {
             let mut tail = head;
@@ -946,7 +963,6 @@ impl VolumeIndex {
         } else {
             self.by_frn.set(record, idx);
         }
-        self.dirty += 1;
     }
 
     /// Makes the hard-link chain for `frn` exactly `desired`, preserving
@@ -990,18 +1006,12 @@ impl VolumeIndex {
                 used[pos] = true;
                 kept.push(current[pos]);
             } else {
-                let id = self.names.intern(&target.name.bytes);
                 let flags = EntryFlags::EMPTY
                     .with(EntryFlags::DIR, is_dir)
                     .with(EntryFlags::NON_UNICODE_NAME, target.name.lossy);
-                let idx = self
-                    .entries
-                    .alloc(frn, target.parent, id, flags, size, mtime, NIL);
-                self.link_same_name(idx, id);
-                self.link_child(idx);
-                self.dir_index_insert(idx);
+                let idx =
+                    self.alloc_entry(frn, target.parent, &target.name.bytes, flags, size, mtime);
                 kept.push(idx);
-                self.dirty += 1;
             }
         }
 
@@ -1096,8 +1106,9 @@ impl VolumeIndex {
         self.names.shrink_with_headroom();
         self.dir_children.shrink_to_fit();
         if let FrnMap::Dense(v) = &mut self.by_frn {
-            // Dense map growth is resize-to-record-number, not doubling, so
-            // exact fit is safe here.
+            // The dense map grows only when the journal brings a record number
+            // past its end, which the MFT does rarely, so an exact fit costs at
+            // most one reallocation then.
             v.shrink_to_fit();
         }
     }

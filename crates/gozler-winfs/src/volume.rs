@@ -20,6 +20,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use crate::error::{WinError, last_error};
 use crate::util::{from_wide_nul, to_wide_nul};
 
+pub use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+
 /// `GetDriveType` return value for a fixed disk (winbase.h `DRIVE_FIXED`).
 /// Defined locally so we needn't pull in `Win32_System_WindowsProgramming`.
 const DRIVE_FIXED: u32 = 3;
@@ -168,11 +170,6 @@ fn split_multi_sz(buf: &[u16]) -> Vec<String> {
 pub struct VolumeHandle(HANDLE);
 
 impl VolumeHandle {
-    /// The underlying Win32 `HANDLE` as an integer (diagnostics / FFI).
-    pub fn raw(&self) -> isize {
-        self.0 as isize
-    }
-
     /// The raw `HANDLE`, for this crate's own FSCTL calls.
     pub(crate) fn as_handle(&self) -> HANDLE {
         self.0
@@ -197,8 +194,7 @@ unsafe impl Send for VolumeHandle {}
 /// [`enumerate_volumes`]). The trailing backslash is stripped first: opening
 /// `\\?\Volume{GUID}\` yields the root directory, not the volume device.
 ///
-/// `ERROR_ACCESS_DENIED` surfaces as a [`WinError`] so the daemon can map it to
-/// a "run elevated" message.
+/// A process that is not elevated fails with [`ERROR_ACCESS_DENIED`].
 pub fn open_volume(guid_path: &str) -> Result<VolumeHandle, WinError> {
     let trimmed = guid_path.strip_suffix('\\').unwrap_or(guid_path);
     let wide = to_wide_nul(trimmed);

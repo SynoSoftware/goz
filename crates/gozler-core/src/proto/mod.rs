@@ -7,8 +7,8 @@
 //! compact binary encoding of [`binary`] for results pages.
 //!
 //! - [`types`]: serde payload types and protocol constants.
-//! - [`frame`]: [`encode_frame`] / [`FrameDecoder`] plus the
-//!   `encode_request`/`decode_response`-style JSON helpers.
+//! - [`frame`]: [`encode_frame`] / [`FrameDecoder`], the request JSON helpers
+//!   and the tagged response frames.
 
 pub mod binary;
 pub mod frame;
@@ -19,8 +19,8 @@ pub use binary::{
     push_results_header,
 };
 pub use frame::{
-    FrameDecoder, FrameError, RespFrameError, decode_request, decode_response,
-    decode_response_frame, encode_frame, encode_request, encode_response, encode_response_frame,
+    FrameDecoder, FrameError, RespFrameError, decode_request, decode_response_frame, encode_frame,
+    encode_request, encode_response_frame,
 };
 pub use types::{
     DaemonStatus, MAX_CLIENT_FRAME, MAX_SERVER_FRAME, MemPair, PAGE_ROWS, PIPE_NAME, PROTO_VERSION,

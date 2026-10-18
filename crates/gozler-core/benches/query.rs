@@ -10,8 +10,8 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::query::{parse_query, run_query, run_query_unsorted};
+use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
+use gozler_core::query::{parse_query, run_query, run_query_deferrable};
 use gozler_core::types::{Frn, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::hint::black_box;
@@ -46,7 +46,7 @@ fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
 /// names). Every 10,000th file's name contains the rare token "kernel32" so a
 /// rare query returns a realistic ~200 hits.
 fn build_index() -> (VolumeIndex, usize) {
-    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+    let mut idx = VolumeIndex::new();
     let mut next: u64 = 1000;
     let mut count = 0usize;
 
@@ -120,7 +120,6 @@ fn bench_query(c: &mut Criterion) {
                     black_box(&parsed),
                     None,
                     SortSpec::default(),
-                    0,
                     Some(100),
                 );
                 black_box(out.total)
@@ -147,7 +146,6 @@ fn bench_query(c: &mut Criterion) {
                     black_box(&parsed),
                     None,
                     SortSpec::default(),
-                    0,
                     None,
                 );
                 black_box(out.hits.len())
@@ -175,7 +173,6 @@ fn bench_query(c: &mut Criterion) {
                     black_box(&parsed),
                     None,
                     SortSpec::default(),
-                    0,
                     None,
                 );
                 black_box(out.hits.len())
@@ -183,7 +180,14 @@ fn bench_query(c: &mut Criterion) {
         });
         broad.bench_function("common(document) LOCKED: sort outside (new)", |b| {
             b.iter(|| {
-                let out = run_query_unsorted(black_box(&idx), r"C:\", black_box(&parsed), None);
+                let out = run_query_deferrable(
+                    black_box(&idx),
+                    r"C:\",
+                    black_box(&parsed),
+                    None,
+                    SortSpec::default(),
+                    None,
+                );
                 black_box(out.hits.len())
             })
         });

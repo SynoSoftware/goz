@@ -3,7 +3,6 @@
 //! bootstrap race (shuffled ENUM snapshot + forward journal replay).
 
 use super::*;
-use crate::index::store::FrnMap;
 use crate::types::Frn;
 use crate::usn::record::{
     FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
@@ -57,7 +56,7 @@ fn delete(frn: Frn) -> ParsedUsnRecord {
 }
 
 fn new_index() -> VolumeIndex {
-    VolumeIndex::new(root_frn(), FrnMap::sparse())
+    VolumeIndex::new()
 }
 
 /// Builds an index from ENUM records (bootstrap ingest) in the given order.

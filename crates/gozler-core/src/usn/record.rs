@@ -16,9 +16,9 @@
 //!   nonzero high half is silently dropped at runtime (never a hard failure);
 //!   fixture tests assert the zero-extension invariant instead.
 //! - V4: extent-range records with no file name; skipped via
-//!   `RecordLength` and counted in [`SkipCounts::v4`].
-//! - Unknown major version: skipped via `RecordLength` and counted in
-//!   [`SkipCounts::unknown_version`] (forward compatibility).
+//!   `RecordLength`.
+//! - Unknown major version: skipped via `RecordLength` (forward
+//!   compatibility).
 
 use zerocopy::byteorder::little_endian::{I64, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
@@ -122,16 +122,6 @@ pub enum WalkError {
     MalformedName { offset: usize },
 }
 
-/// Counts of records skipped (not parsed, not errors) during one walk.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SkipCounts {
-    /// `USN_RECORD_V4` extent records (no file name; irrelevant to a name
-    /// index).
-    pub v4: u32,
-    /// Records with a `MajorVersion` other than 2/3/4.
-    pub unknown_version: u32,
-}
-
 /// Result of walking one `FSCTL_ENUM_USN_DATA` output buffer.
 #[derive(Debug)]
 pub struct EnumWalk {
@@ -140,8 +130,6 @@ pub struct EnumWalk {
     pub next_start_frn: u64,
     /// Parsed V2/V3 records in buffer order.
     pub records: Vec<ParsedUsnRecord>,
-    /// Records skipped by version.
-    pub skipped: SkipCounts,
 }
 
 /// Result of walking one `FSCTL_READ_USN_JOURNAL` output buffer.
@@ -152,8 +140,6 @@ pub struct JournalWalk {
     pub next_usn: i64,
     /// Parsed V2/V3 records in buffer order.
     pub records: Vec<ParsedUsnRecord>,
-    /// Records skipped by version.
-    pub skipped: SkipCounts,
 }
 
 /// Walks one `FSCTL_ENUM_USN_DATA` output buffer: a leading `u64` (the next
@@ -166,11 +152,10 @@ pub struct JournalWalk {
 pub fn walk_enum_buffer(buf: &[u8]) -> Result<EnumWalk, WalkError> {
     let (lead, _) =
         U64::read_from_prefix(buf).map_err(|_| WalkError::TruncatedHeader { offset: 0 })?;
-    let (records, skipped) = walk_records(buf)?;
+    let records = walk_records(buf)?;
     Ok(EnumWalk {
         next_start_frn: lead.get(),
         records,
-        skipped,
     })
 }
 
@@ -184,11 +169,10 @@ pub fn walk_enum_buffer(buf: &[u8]) -> Result<EnumWalk, WalkError> {
 pub fn walk_journal_buffer(buf: &[u8]) -> Result<JournalWalk, WalkError> {
     let (lead, _) =
         I64::read_from_prefix(buf).map_err(|_| WalkError::TruncatedHeader { offset: 0 })?;
-    let (records, skipped) = walk_records(buf)?;
+    let records = walk_records(buf)?;
     Ok(JournalWalk {
         next_usn: lead.get(),
         records,
-        skipped,
     })
 }
 
@@ -250,14 +234,13 @@ struct RawV3 {
 /// Records start 8-byte aligned relative to the buffer start; the offset
 /// advances by `RecordLength` rounded up to the next multiple of 8
 /// (`RecordLength` is normally already padded; the rounding is defensive).
-fn walk_records(buf: &[u8]) -> Result<(Vec<ParsedUsnRecord>, SkipCounts), WalkError> {
+fn walk_records(buf: &[u8]) -> Result<Vec<ParsedUsnRecord>, WalkError> {
     // Upper-bounded hint: every parsed V2/V3 record consumes >= 60 bytes
     // (`size_of::<RawV2>()`), so `buf.len() / 60` is a safe overestimate of the
     // push count. `buf.len()` is the real slice length (not a wire field), and
     // `.min(4096)` caps over-allocation on skip-heavy buffers, matching
     // `walk_layout_buffer`'s convention.
     let mut records = Vec::with_capacity((buf.len() / size_of::<RawV2>()).min(4096));
-    let mut skipped = SkipCounts::default();
     let mut off = LEADING_VALUE_LEN;
     // Fewer than one common header's worth of bytes remaining = normal end.
     while off + size_of::<RawCommonHeader>() <= buf.len() {
@@ -277,8 +260,8 @@ fn walk_records(buf: &[u8]) -> Result<(Vec<ParsedUsnRecord>, SkipCounts), WalkEr
         match common.major_version.get() {
             2 => records.push(parse_v2(rec, off)?),
             3 => records.push(parse_v3(rec, off)?),
-            4 => skipped.v4 += 1,
-            _ => skipped.unknown_version += 1,
+            // V4 extent records carry no name; other versions are unknown.
+            _ => {}
         }
         // `off` is 8-aligned, so rounding the record end up to a multiple of
         // 8 equals `off + round8(rec_len)`. Overflow here (only possible
@@ -289,7 +272,7 @@ fn walk_records(buf: &[u8]) -> Result<(Vec<ParsedUsnRecord>, SkipCounts), WalkEr
             None => break,
         };
     }
-    Ok((records, skipped))
+    Ok(records)
 }
 
 /// Parses one `USN_RECORD_V2` from its exact record slice.
@@ -404,7 +387,6 @@ mod tests {
         let buf = build_enum_buffer(0x99, &[fx]);
         let walk = walk_enum_buffer(&buf).unwrap();
         assert_eq!(walk.next_start_frn, 0x99);
-        assert_eq!(walk.skipped, SkipCounts::default());
         assert_eq!(walk.records.len(), 1);
         let r = &walk.records[0];
         assert_eq!(r.major_version, 2);
@@ -557,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_records_are_skipped_and_counted() {
+    fn v4_records_are_skipped() {
         let mut buf = 7u64.to_le_bytes().to_vec();
         buf.extend_from_slice(&build_v4_record_bytes());
         buf.extend_from_slice(&record_bytes(&RecordFixture::file(1, 2, "after.txt")));
@@ -565,17 +547,10 @@ mod tests {
         assert_eq!(walk.next_start_frn, 7);
         assert_eq!(walk.records.len(), 1);
         assert_eq!(walk.records[0].name, b"after.txt");
-        assert_eq!(
-            walk.skipped,
-            SkipCounts {
-                v4: 1,
-                unknown_version: 0
-            }
-        );
     }
 
     #[test]
-    fn unknown_major_version_is_skipped_and_counted() {
+    fn unknown_major_version_is_skipped() {
         let mut unk = Vec::new();
         unk.extend_from_slice(&24u32.to_le_bytes()); // RecordLength
         unk.extend_from_slice(&9u16.to_le_bytes()); // MajorVersion 9
@@ -586,13 +561,6 @@ mod tests {
         buf.extend_from_slice(&record_bytes(&RecordFixture::file(1, 2, "ok")));
         let walk = walk_enum_buffer(&buf).unwrap();
         assert_eq!(walk.records.len(), 1);
-        assert_eq!(
-            walk.skipped,
-            SkipCounts {
-                v4: 0,
-                unknown_version: 1
-            }
-        );
     }
 
     #[test]
@@ -697,7 +665,6 @@ mod tests {
         let walk = walk_enum_buffer(&buf).unwrap();
         assert_eq!(walk.next_start_frn, 0xF00);
         assert!(walk.records.is_empty());
-        assert_eq!(walk.skipped, SkipCounts::default());
     }
 
     #[test]
@@ -787,7 +754,6 @@ mod tests {
                     let walk = walk_enum_buffer(&buf).expect("fixture buffers must walk");
                     prop_assert_eq!(walk.next_start_frn, lead);
                     prop_assert_eq!(walk.records.len(), fixed.len());
-                    prop_assert_eq!(walk.skipped, SkipCounts::default());
                     for (r, f) in walk.records.iter().zip(&fixed) {
                         prop_assert_eq!(r.major_version, version);
                         prop_assert_eq!(r.frn, Frn(f.frn));

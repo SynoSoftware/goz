@@ -10,12 +10,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
+use gozler_core::index::VolumeIndex;
 use gozler_core::layout::{RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer};
 use gozler_core::usn::walk_enum_buffer;
 use gozler_winfs::{
-    JournalInfo, JournalQuery, VolumeHandle, VolumeInfo, WinError, create_usn_journal,
-    enum_usn_data, enumerate_volumes, query_file_layout, query_usn_journal, volume_total_bytes,
+    ERROR_ACCESS_DENIED, JournalInfo, JournalQuery, VolumeHandle, VolumeInfo, WinError,
+    create_usn_journal, enum_usn_data, enumerate_volumes, query_file_layout, query_usn_journal,
+    volume_total_bytes,
 };
 
 /// Floor for the USN journal: large enough that routine churn does not wrap it
@@ -139,15 +140,24 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
     Ok(ok)
 }
 
+/// Opens a volume for the journal and MFT reads. Only `ERROR_ACCESS_DENIED`
+/// gets the elevation hint: a missing, offline or not-ready volume fails with
+/// another code, and the hint would send the reader the wrong way.
+pub(crate) fn open_volume(guid_path: &str) -> Result<VolumeHandle> {
+    gozler_winfs::open_volume(guid_path).map_err(|e| {
+        let hint = if e.code == ERROR_ACCESS_DENIED {
+            " (must run elevated for raw volume access)"
+        } else {
+            ""
+        };
+        anyhow::Error::new(e).context(format!("opening the volume{hint}"))
+    })
+}
+
 /// Bootstraps a single volume: journal setup → MFT enumeration → FILE_LAYOUT
 /// enrichment.
 fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
-    let handle = gozler_winfs::open_volume(&vol.guid_path).with_context(|| {
-        format!(
-            "opening {} (must run elevated for raw volume access)",
-            vol.guid_path
-        )
-    })?;
+    let handle = open_volume(&vol.guid_path)?;
 
     // The journal is only needed for the live tail; a one-shot scan reads the
     // MFT directly, so an unavailable journal is not fatal here.
@@ -195,7 +205,7 @@ pub(crate) fn build_index(
     stop: Option<&AtomicBool>,
 ) -> Result<Option<BuiltIndex>> {
     let cancelled = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
-    let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+    let mut index = VolumeIndex::new();
     let mut buf = vec![0u8; IO_BUFFER_BYTES];
 
     // --- MFT enumeration ------------------------------------------------
@@ -445,7 +455,7 @@ mod tests {
     #[test]
     fn layout_pass_reports_a_failed_read_as_stopped() {
         let pass = |result: Result<Option<usize>, WinError>| {
-            let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+            let mut index = VolumeIndex::new();
             enrich_from_layout(&mut index, &mut [0u8; 16], || false, |_, _| result.clone())
                 .expect("no page is parsed")
         };

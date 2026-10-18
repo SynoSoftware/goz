@@ -14,7 +14,7 @@ use super::{decode_frames, dir_record, set, volume};
 use crate::server::encode_query_binary;
 use crate::volume_state::VolumeSet;
 use gozler_core::escompat::{Answer, Command, EsPlan, parse_argv};
-use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
+use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::layout::{LayoutFile, LayoutName};
 use gozler_core::proto::{QueryRequest, Response};
 use gozler_core::types::{Frn, VolumePhase};
@@ -473,7 +473,7 @@ const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 /// The index of the volume mounted at `mount`, built from `entries` in order,
 /// so a folder comes before what it holds.
 fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
-    let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+    let mut index = VolumeIndex::new();
     let mut folders: HashMap<&str, Frn> = HashMap::new();
     for (frn, entry) in (100..).map(Frn).zip(entries) {
         let (links, size, day) = match entry {

@@ -3,12 +3,12 @@
 //! optimization. Guards the scan-hit -> name-id -> chain expansion pipeline.
 #[test]
 fn interned_shared_names_are_found() {
-    use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
+    use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::types::Frn;
     use gozler_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
     };
-    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+    let mut idx = VolumeIndex::new();
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
         major_version: 3,
         frn: Frn(frn | (1u64 << 48)),
@@ -37,7 +37,6 @@ fn interned_shared_names_are_found() {
         &parsed,
         None,
         gozler_core::types::SortSpec::default(),
-        0,
         None,
     );
     assert_eq!(out.total, 2, "both index.js files must match");
@@ -48,7 +47,6 @@ fn interned_shared_names_are_found() {
         &parsed,
         None,
         gozler_core::types::SortSpec::default(),
-        0,
         None,
     );
     assert_eq!(out2.total, 2, "matches must survive optimize_storage");
@@ -59,13 +57,13 @@ fn interned_shared_names_are_found() {
 /// total, regardless of which internal path answered.
 #[test]
 fn scoped_results_equal_prefix_filtered_unscoped_results() {
-    use gozler_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
+    use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::types::Frn;
     use gozler_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
     };
 
-    let mut idx = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+    let mut idx = VolumeIndex::new();
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
         major_version: 3,
         frn: Frn(frn | (1u64 << 48)),
@@ -108,7 +106,6 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
         &parsed,
         Some(scope),
         gozler_core::types::SortSpec::default(),
-        0,
         None,
     );
     let unscoped = gozler_core::query::run_query(
@@ -117,7 +114,6 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
         &parsed,
         None,
         gozler_core::types::SortSpec::default(),
-        0,
         None,
     );
 

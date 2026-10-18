@@ -15,6 +15,8 @@ gozler indexes fixed NTFS volumes; removable drives and non-NTFS filesystems (Re
 
 The daemon answers queries from the moment it starts. A volume is `bootstrapping` until its first build finishes, and like `rescanning` it marks results incomplete; a volume that cannot be opened is retried on the same budget as a tail that exits, then reported `failed`.
 
+Every start builds each index from the MFT, because nothing is saved between runs. A saved journal cursor on its own must never skip that build: it would tell a fresh, empty index that it is current, and the daemon would serve an empty volume as `live`. Saving state between runs is safe only when the index and its cursor are saved and replaced together.
+
 The index is a cache of the filesystem, and a cache that cannot prove it is coherent must rebuild itself. Every sync-loss path (journal wrap, a parse anomaly, a journal that cannot be read at startup, reads that stop answering, even a sick disk that leaves a journal read pending forever, which a supervisor cancels, or a tail thread that exits outright, which the same supervisor revives on a bounded budget) ends in one of three states:
 
 - **in sync**, provably (phase `live`);
