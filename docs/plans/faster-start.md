@@ -39,8 +39,7 @@ results decide whether stages 1 and 2 happen at all.
 - **Journal size.** The change journal must cover the time gozlerd is down,
   or a saved cursor is useless. Mustafa's fixes that size the journal by
   volume (`f99fb35`, `1ba28b5`, `3b37318`) are in gozler. C: has a 250 MiB
-  journal. How many hours of changes that holds on the owner's machine is
-  not measured.
+  journal, which held about 20.5 hours of changes (stage 0 results).
 - **Drift that a restart heals.** `--status` on C: shows 126 hard-link
   changes not reconciled and 44,770 placeholders. These do not start a
   rescan; a restart clears them, because it builds the index again.
@@ -50,10 +49,10 @@ results decide whether stages 1 and 2 happen at all.
 
 ## What we do not know
 
-- **How often gozlerd restarts.** Windows Fast Startup normally hibernates
-  services with the kernel at shutdown, so gozlerd may survive most
-  shutdowns and rebuild only after update restarts and upgrades. Not
-  measured on the owner's machine.
+- **Whether gozlerd survives a Fast Startup boot.** Windows Fast Startup
+  normally hibernates services with the kernel at shutdown. On the owner's
+  machine most boots are full starts anyway (stage 0 results), so this
+  changes little there.
 - **Whether one MFT pass can do the work of two.** `FSCTL_QUERY_FILE_LAYOUT`
   can return name entries with their parent folder. Whether those are
   complete enough to replace the enumeration pass is not checked.
@@ -63,8 +62,7 @@ results decide whether stages 1 and 2 happen at all.
 
 ## Stage 0: measure
 
-- Count gozlerd starts per week on the owner's machine, from the "gozler
-  service starting" lines in `%SystemRoot%\Logs\gozler\gozlerd.log`.
+- Count gozlerd starts per week on the owner's machine.
 - Try a build that reads the MFT once with `FSCTL_QUERY_FILE_LAYOUT` and
   compare its index with today's two-pass index over the same volume.
 - Measure how many hours of changes the 250 MiB journal on C: holds.
@@ -73,6 +71,32 @@ results decide whether stages 1 and 2 happen at all.
 and whether its index equals the two-pass index, and the journal horizon in
 hours. With these numbers the owner decides whether stage 1, stage 2 or
 neither happens.
+
+### Results so far (2026-10-18)
+
+- **Starts.** gozlerd's log began on 2026-10-18, and Windows does not log
+  service starts here (no Service Control Manager event 7036), so starts are
+  counted from boots: the System log's Kernel-Boot event 27 records 32 boots
+  since 2026-08-31, of which 26 were full starts, 4 Fast Startup boots and 2
+  resumes from hibernation. Each full start rebuilds every index: about 3.8
+  a week, plus each gozler upgrade. Fast Startup is on, but it rarely
+  applies here. Whether gozlerd survives a Fast Startup boot is not yet
+  seen in its log.
+- **The two passes.** `gozlerd scan` on C: (2,016,090 entries), run while the
+  service was also running: enumeration 12.47 s, file layout 10.46 s, 22.97 s
+  in all. If the file layout alone builds the same index, one pass saves up
+  to 12.5 s of the 23 s.
+- **Why two passes today.** The file-layout pass is best-effort: a failed
+  read stops it and leaves the remaining sizes and dates unknown, while the
+  enumeration pass has already given every name (`enrich_from_layout`). A
+  single pass keeps that guarantee by reading the file layout first and
+  running the enumeration only when the file layout stopped part way.
+- **Journal horizon.** The oldest change in the C: journal was from
+  2026-10-17 20:36, read on 2026-10-18 17:05: about 20.5 hours on a
+  development day. A saved index would therefore cover a night off, but not
+  a weekend, after which a start builds from the MFT anyway.
+- **Still open:** the single-pass build and its comparison with the two-pass
+  index, which needs code and an elevated `gozlerd scan` run.
 
 ## Stage 1: build with one MFT pass
 
