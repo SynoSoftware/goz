@@ -1,5 +1,7 @@
 //! gozler's exit codes: one code per outcome a caller handles differently.
 
+use crate::output::style::ColorToken;
+
 /// The outcome of one gozler run, as its process exit code.
 ///
 /// Codes 4 to 8 keep their goz v0.2.0 meanings. The help lists every code with
@@ -59,25 +61,39 @@ impl ExitCode {
         self as u8
     }
 
+    /// The color the help shows the code in: an answer that is complete, an
+    /// answer with a caveat, or a failure.
+    pub fn token(self) -> ColorToken {
+        match self {
+            ExitCode::Complete => ColorToken::Success,
+            ExitCode::Incomplete | ExitCode::NoMatches | ExitCode::Truncated => ColorToken::Warning,
+            ExitCode::Internal
+            | ExitCode::Untrusted
+            | ExitCode::InvalidInput
+            | ExitCode::OutputFailed
+            | ExitCode::UnknownSwitch
+            | ExitCode::Communication
+            | ExitCode::DaemonNotRunning => ColorToken::Danger,
+        }
+    }
+
     /// What the code tells a script, as the help prints it.
     pub fn meaning(self) -> &'static str {
         match self {
             ExitCode::Complete => "Complete results, including no matches",
             ExitCode::Internal => "Internal error",
             ExitCode::Incomplete => {
-                "Results may be incomplete: a volume in scope is not ready, or the \
-                 search uses sizes or dates that could not be read"
+                "Results may be incomplete: a volume is not ready or lacks sizes and dates"
             }
             ExitCode::Untrusted => "The pipe server is not the trusted gozlerd",
             ExitCode::InvalidInput => "Invalid input: a missing or bad value, or a bad query",
             ExitCode::OutputFailed => "Could not write the output or the export file",
             ExitCode::UnknownSwitch => "Unknown option",
             ExitCode::Communication => {
-                "gozlerd is not ready, communication with it failed or timed out, or it \
-                 is older than gozler"
+                "gozlerd is not ready, did not answer correctly, or is older than gozler"
             }
             ExitCode::DaemonNotRunning => "gozlerd is not running",
-            ExitCode::NoMatches => "No matches, with -no-result-error",
+            ExitCode::NoMatches => "No matches, with `-no-result-error`",
             ExitCode::Truncated => "The result limit left out some matches",
         }
     }

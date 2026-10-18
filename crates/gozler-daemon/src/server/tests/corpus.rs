@@ -428,7 +428,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 4,
                 "/ab is not an attribute option: write /a and attribute letters, with - \
                  before a letter to leave that attribute out, such as /ah or /a-h; gozler \
-                 --help-full lists the letters",
+                 --help lists the letters",
             ),
         ),
         (
@@ -710,9 +710,10 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 10,
             ),
         ),
-        // The default limit: 20 rows when more match.
+        // The default limit: 20 rows when more match. Bare gozler prints the
+        // overview, so the default sort stands in for an empty command line.
         (
-            &[],
+            &["-sort", "name"],
             prints_then(
                 &[
                     r"C:\repo\docs\agents",
@@ -865,6 +866,7 @@ fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
         Ok(Command::Run(plan)) => plan,
         Ok(Command::Help(_)) => return Printed::Help,
         Ok(Command::Version) => panic!("{args:?}: no row asks for the version"),
+        Ok(Command::Overview) => panic!("no row runs gozler without arguments"),
         Err(fatal) => return Printed::ArgvError(fatal.exit_code.code(), fatal.message),
     };
     let search = match search(&plan) {

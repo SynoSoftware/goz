@@ -1,12 +1,14 @@
-//! The quick help and the full reference, generated from the vocabulary
-//! tables: [`SWITCHES`], [`SORT_KEYS`], [`SEARCH_FUNCTIONS`], the attribute
-//! [`LETTERS`] and [`ExitCode::ALL`], and from this module's examples, search
-//! terms and notes. A row added to a table is a line of the full reference;
-//! a row marked quick is also a line of the quick help.
+//! The quick help and the full reference. The quick help is the examples
+//! marked quick, so it fits one console screen. The full reference is
+//! generated from the vocabulary tables: [`SWITCHES`], [`SORT_KEYS`],
+//! [`SEARCH_FUNCTIONS`], the attribute [`LETTERS`] and [`ExitCode::ALL`], and
+//! from this module's examples, search terms and notes, so a row added to a
+//! table is a line of the full reference.
 
 use super::ExitCode;
 use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling};
 use crate::attributes::LETTERS;
+use crate::output::style::{ColorToken, paint};
 use crate::query::parse::SEARCH_FUNCTIONS;
 
 /// gozler's version, as `-version` prints it; `build.rs` appends the build
@@ -15,76 +17,96 @@ pub fn version() -> &'static str {
     env!("GOZLER_VERSION")
 }
 
-/// The help screen a [`Command::Help`](super::Command::Help) asks for.
-pub fn help(screen: HelpScreen) -> String {
-    let mut out = format!(
-        "gozler {} - Instant file search for Windows NTFS\n\n\
-         Usage: gozler [options] [search terms]\n\n",
-        version()
+/// The help screen a [`Command::Help`](super::Command::Help) asks for, with
+/// ANSI colors when `color` is set.
+pub fn help(screen: HelpScreen, color: bool) -> String {
+    let mut out = String::new();
+    paint(
+        &mut out,
+        ColorToken::Strong,
+        &format!("gozler {}", version()),
+        color,
     );
-    wrap_into(&mut out, "  ", INTRO, 2);
+    out.push_str(
+        " - Instant file search for Windows NTFS\nUsage: gozler [options] [search terms]\n",
+    );
     match screen {
         HelpScreen::Quick => {
-            for section in quick_sections() {
-                render_section(&mut out, &section);
-            }
-            render_section(&mut out, &exit_codes(&QUICK_EXIT_CODES));
-            wrap_into(&mut out, "  ", QUICK_EXIT_NOTE, 2);
             out.push('\n');
-            wrap_into(&mut out, "", QUICK_FOOTER, 0);
+            let examples: Vec<Entry> = EXAMPLES
+                .iter()
+                .filter(|example| example.quick)
+                .map(|example| entry(example.usage.to_string(), example.text))
+                .collect();
+            render(&mut out, &examples, QUICK_EXAMPLE_COLUMN, color);
+            out.push('\n');
+            wrap(&mut out, 0, QUICK_QUOTING, 0, color);
+            quick_exit_codes(&mut out, color);
+            out.push_str("For every option, search function and exit code, run ");
+            paint(&mut out, ColorToken::Primary, "gozler --help", color);
+            out.push_str(".\n");
         }
         HelpScreen::Full => {
+            out.push_str("\n  ");
+            wrap(&mut out, 2, INTRO, 2, color);
             for section in full_sections() {
-                render_section(&mut out, &section);
+                render_section(&mut out, &section, color);
             }
-            out.push_str("\nNotes:\n");
+            out.push('\n');
+            paint(&mut out, ColorToken::Strong, "Notes:", color);
+            out.push('\n');
             for note in NOTES {
-                wrap_into(&mut out, "  - ", note, 4);
+                out.push_str("  - ");
+                wrap(&mut out, 4, note, 4, color);
             }
-            render_section(&mut out, &exit_codes(&ExitCode::ALL));
+            render_section(&mut out, &exit_codes(&ExitCode::ALL), color);
         }
     }
+    // A blank line before the shell's next prompt.
+    out.push('\n');
     out
 }
 
-/// The quick help lists no precedence rule, so a script that sees 2 must
-/// still learn from stderr that the list was also cut.
-const QUICK_EXIT_NOTE: &str = "When 2 and 10 both apply, gozler exits 2; stderr still \
-     reports every warning, including the shown and total counts.";
+/// When to quote a term for the shell, which the examples show.
+const QUICK_QUOTING: &str = "Put quotes around a term that contains `|`, `<`, `>` or `;`.";
+
+/// Writes the exit codes a script checks after a search that ran, in short;
+/// the full reference gives each one's whole meaning.
+fn quick_exit_codes(out: &mut String, color: bool) {
+    let code = |out: &mut String, code: ExitCode| {
+        paint(out, code.token(), &code.code().to_string(), color);
+    };
+    out.push_str("gozler exits ");
+    code(out, ExitCode::Complete);
+    out.push_str(" when done, ");
+    code(out, ExitCode::Incomplete);
+    out.push_str(" if results may be incomplete, ");
+    code(out, ExitCode::Truncated);
+    out.push_str(" if some are hidden.\n");
+}
 
 const INTRO: &str = "Find files and folders by name, path, size, date or attribute. \
      Search terms combine with AND. By default gozler prints one full path per line, \
-     at most 20 unless -n says otherwise, and writes warnings and errors to stderr.";
+     at most 20 unless `-n` says otherwise, and writes warnings and errors to stderr.";
 
-const QUICK_FOOTER: &str = "Run gozler --help-full for every option, search function, \
-     attribute letter, note and exit code.";
-
-/// The exit codes the quick help lists: the ones a script checks after a
-/// search that ran.
-const QUICK_EXIT_CODES: [ExitCode; 3] = [
-    ExitCode::Complete,
-    ExitCode::Incomplete,
-    ExitCode::Truncated,
-];
-
-/// One line of the examples, the search syntax or the quoting.
-struct Line {
+/// One example: a complete command line and what it finds.
+struct Example {
     usage: &'static str,
     text: &'static str,
-    /// Whether the quick help lists it too.
+    /// Whether the quick help lists it.
     quick: bool,
 }
 
-const fn quick(usage: &'static str, text: &'static str) -> Line {
-    Line {
+const fn quick(usage: &'static str, text: &'static str) -> Example {
+    Example {
         usage,
         text,
         quick: true,
     }
 }
 
-const fn full_only(usage: &'static str, text: &'static str) -> Line {
-    Line {
+const fn full_only(usage: &'static str, text: &'static str) -> Example {
+    Example {
         usage,
         text,
         quick: false,
@@ -92,29 +114,48 @@ const fn full_only(usage: &'static str, text: &'static str) -> Line {
 }
 
 /// Complete command lines that work as typed in cmd and in PowerShell.
-const EXAMPLES: &[Line] = &[
+const EXAMPLES: &[Example] = &[
     quick("gozler report", "Find names that contain report"),
-    quick("gozler *.cs", "Find .cs files"),
     quick(
-        r"gozler -path C:\repo ext:cs",
-        r"Find .cs files below C:\repo",
+        "gozler readme*.txt",
+        "Find .txt files that start with readme",
+    ),
+    quick(
+        "gozler report !draft",
+        "Find names with report but not draft",
+    ),
+    quick(r#"gozler "ext:cs;txt""#, "Find .cs and .txt files"),
+    quick(
+        r"gozler C:\repo\ *.cs",
+        r"Find .cs files anywhere in C:\repo",
     ),
     quick(
         "gozler *.log dm:7days",
-        "Find .log files modified in the last 7 days",
+        "Find .log files changed in the last 7 days",
     ),
     quick(r#"gozler "size:>1gb""#, "Find files larger than 1 GB"),
+    quick(r#"gozler "*.jpg|*.png""#, "Find .jpg and .png files"),
     quick(
         "gozler *.iso -sort size -n 10",
         "Show the 10 largest .iso files",
     ),
     quick(
         "gozler -n all report",
-        "Show every match, not only the first 20",
+        "Show every match, not just the first 20",
+    ),
+    quick("gozler -i README", "Find README but not readme"),
+    quick(
+        "gozler -export-csv out.csv ext:cs",
+        "Save the .cs files to out.csv",
+    ),
+    quick("gozler --status", "Check whether the index is ready"),
+    full_only(
+        r"gozler -path C:\repo ext:cs",
+        r"Find .cs files anywhere in C:\repo, with -path",
     ),
     full_only(
         "gozler /a-d report",
-        "Find only files whose names contain report",
+        "Find files, not folders, that contain report",
     ),
     full_only(
         r"gozler -parent C:\repo -n all",
@@ -126,16 +167,16 @@ const EXAMPLES: &[Line] = &[
     ),
     full_only(
         r"gozler /ah -attributes -path C:\repo",
-        r"Find hidden items below C:\repo, with their attributes",
+        r"Find hidden items anywhere in C:\repo, with their attributes",
     ),
     full_only(
-        "gozler -export-csv files.csv -size -dm ext:cs",
-        "Write every .cs file to files.csv, with sizes and dates",
+        "gozler -export-csv out.csv -size -dm ext:cs",
+        "Save every .cs file to out.csv, with sizes and dates",
     ),
     full_only("gozler -get-result-count ext:cs", "Count the .cs files"),
     full_only(
         r"gozler -get-folder-size C:\repo",
-        r"Show the total size of the files below C:\repo",
+        r"Show the total size of everything in C:\repo",
     ),
     full_only("gozler --json report", "Print the matches as JSON"),
     full_only(
@@ -145,34 +186,34 @@ const EXAMPLES: &[Line] = &[
 ];
 
 /// Search terms as gozler receives them, after the shell removes its quotes.
-const SEARCH_TERMS: &[Line] = &[
-    quick("report", "Name contains report"),
-    quick("*.cs", "Whole name matches a wildcard (* and ?)"),
-    quick("\"two words\"", "Name contains the phrase"),
-    quick("!test", "Exclude names that contain test"),
-    quick("a|b", "Either term; | binds tighter than a space"),
-    quick(r"C:\repo\", "Everything below that folder"),
-    quick("ext:cs;txt", "Extension is cs or txt"),
-    quick("dm:7days", "Modified in the last 7 days"),
-    quick("size:>1mb", "Larger than 1 MB"),
-    full_only(
+const SEARCH_TERMS: &[(&str, &str)] = &[
+    ("report", "Name contains report"),
+    ("*.cs", "Whole name matches a wildcard, `*` or `?`"),
+    ("\"two words\"", "Name contains the phrase"),
+    ("!test", "Name does not contain test"),
+    ("a|b", "Either term; `|` binds tighter than a space"),
+    (r"C:\repo\", "Everything below that folder"),
+    ("ext:cs;txt", "Extension is cs or txt"),
+    ("dm:7days", "Modified in the last 7 days"),
+    ("size:>1mb", "Larger than 1 MB"),
+    (
         r"docs\agents",
-        r"Full path contains docs\agents; / works as \ too",
+        r"Full path contains `docs\agents`; `/` works as `\` too",
     ),
-    full_only(r"C:\repo\*.cs", ".cs files below that folder"),
-    full_only(
+    (r"C:\repo\*.cs", ".cs files below that folder"),
+    (
         r".\src\",
-        r"Everything below src in the current folder; ..\ works too",
+        r"Everything below src in the current folder; `..\` works too",
     ),
-    full_only(
+    (
         r#""C:\Program Files (x86)\Microsoft""#,
         "A quoted path keeps its spaces",
     ),
-    full_only(
+    (
         r"*\node_modules\*",
         r"A wildcard with \ matches the whole full path",
     ),
-    full_only(
+    (
         r#"path:"C:\Program Files""#,
         "Quotes keep the spaces in a function's value",
     ),
@@ -180,53 +221,53 @@ const SEARCH_TERMS: &[Line] = &[
 
 /// How to type in cmd and PowerShell the search terms that a shell would
 /// otherwise change.
-const QUOTING: &[Line] = &[
-    quick(
+const QUOTING: &[(&str, &str)] = &[
+    (
         r#"gozler "a|b""#,
         "Quote a term with |, < or > in cmd and PowerShell",
     ),
-    quick(
+    (
         r#"gozler \"two words\""#,
         "Search for a phrase in cmd or Windows PowerShell 5.1",
     ),
-    quick(
+    (
         r#"gozler '"two words"'"#,
         "Search for a phrase in PowerShell 7.3 or later",
     ),
 ];
 
 const NOTES: &[&str] = &[
-    "Options start with - or /, and dashes inside an option name are \
+    "Options start with `-` or `/`, and dashes inside an option name are \
      optional. A token that starts with / and names an option is that \
-     option, as /p is -p, so write a relative path without a leading /: \
-     docs/agents.",
+     option, as `/p` is `-p`, so write a relative path without a leading `/`: \
+     `docs/agents`.",
     "gozler joins its arguments with spaces and splits them into terms again, \
-     so the single argument \"ext:cs report\" is two terms.",
-    "Without -n, gozler shows 20 results. When the limit hides matches, gozler \
-     writes the shown and total counts to stderr and exits 10. -export-* writes \
-     every match unless -n is given, and -get-result-count and the size totals \
+     so the single argument `\"ext:cs report\"` is two terms.",
+    "Without `-n`, gozler shows 20 results. When the limit hides matches, gozler \
+     writes the shown and total counts to stderr and exits 10. `-export-*` writes \
+     every match unless `-n` is given, and `-get-result-count` and the size totals \
      count every match.",
     "When a volume in scope is not ready (indexing, rescanning, offline or \
-     failed), gozler prints the results it has, warns on stderr and exits 2. With -path, only the \
-     volume of that folder is in scope. --status exits 2 when any volume is not \
+     failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, only the \
+     volume of that folder is in scope. `--status` exits 2 when any volume is not \
      ready or its sizes and dates could not be read.",
     "When several exit codes apply, the most serious wins: a failure, then 2, \
      then 9 or 10, then 0. So no matches while a volume in scope is indexing \
      exits 2, because the matches may still appear.",
-    "Files whose size or date Windows did not report never match size: or dm:, \
+    "Files whose size or date Windows did not report never match `size:` or `dm:`, \
      even negated, and add nothing to the size totals. When reading sizes and \
      dates failed on a volume in scope, a search that uses them warns and exits \
      2. When the read succeeded, a file it could not read is rare and is left \
      out without a warning.",
-    "dm:today, dm:yesterday and dm:YYYY-MM-DD are calendar days in the local \
-     time zone. 7days is the 7 times 24 hours before the search starts, and dm:<30days finds files older than 30 \
+    "`dm:today`, `dm:yesterday` and `dm:YYYY-MM-DD` are calendar days in the local \
+     time zone. `7days` is the 7 times 24 hours before the search starts, and `dm:<30days` finds files older than 30 \
      days.",
-    r"regex: and -r use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with -p, or when it contains \\, it matches the full path, whose separators are \, so write \\ or [\\/] for a separator. | and ! inside a pattern belong to the expression.",
+    r"`regex:` and `-r` use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with `-p`, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator. `|` and `!` inside a pattern belong to the expression.",
     "Dates print as ISO 8601 in local time, whatever the locale. Plain output \
      groups the digits of a size with commas; CSV and TSV print plain bytes. \
      Attributes print as letters, such as HA, and in CSV and TSV as their \
      FILE_ATTRIBUTE_* number, such as 34.",
-    "An unknown search function, such as dc:, and an unquoted < or > outside a \
+    "An unknown search function, such as `dc:`, and an unquoted `<` or `>` outside a \
      function value are invalid input and exit 4.",
 ];
 
@@ -251,54 +292,36 @@ struct Section {
 struct Entry {
     usage: String,
     text: &'static str,
-}
-
-/// The examples, the search syntax and the quoting, which open both screens;
-/// the quick help lists only their quick lines.
-fn opening_sections(screen: HelpScreen) -> Vec<Section> {
-    let listed = |table: &[Line]| -> Vec<Entry> {
-        table
-            .iter()
-            .filter(|line| screen == HelpScreen::Full || line.quick)
-            .map(|line| entry(line.usage.to_string(), line.text))
-            .collect()
-    };
-    vec![
-        Section {
-            usage_column: EXAMPLE_COLUMN,
-            ..section("Examples:", listed(EXAMPLES))
-        },
-        section(
-            "Search syntax (what gozler receives; quote it for the shell as shown below):",
-            listed(SEARCH_TERMS),
-        ),
-        Section {
-            usage_column: EXAMPLE_COLUMN,
-            ..section("Quoting in the shell:", listed(QUOTING))
-        },
-    ]
-}
-
-/// The quick help's sections above its exit codes.
-fn quick_sections() -> Vec<Section> {
-    let options = SWITCHES
-        .iter()
-        .filter(|switch| switch.quick)
-        .map(|switch| {
-            entry(
-                switch_usage(&switch.spelling, HelpScreen::Quick),
-                switch.help,
-            )
-        })
-        .collect();
-    let mut sections = opening_sections(HelpScreen::Quick);
-    sections.push(section("Common options:", options));
-    sections
+    /// The color of the usage.
+    token: ColorToken,
 }
 
 /// The full reference's sections above its notes and exit codes.
 fn full_sections() -> Vec<Section> {
-    let mut sections = opening_sections(HelpScreen::Full);
+    let pairs = |table: &[(&str, &'static str)]| -> Vec<Entry> {
+        table
+            .iter()
+            .map(|&(usage, text)| entry(usage.to_string(), text))
+            .collect()
+    };
+    let examples = EXAMPLES
+        .iter()
+        .map(|example| entry(example.usage.to_string(), example.text))
+        .collect();
+    let mut sections = vec![
+        Section {
+            usage_column: EXAMPLE_COLUMN,
+            ..section("Examples:", examples)
+        },
+        section(
+            "Search syntax (what gozler receives; quote it for the shell as shown below):",
+            pairs(SEARCH_TERMS),
+        ),
+        Section {
+            usage_column: EXAMPLE_COLUMN,
+            ..section("Quoting in the shell:", pairs(QUOTING))
+        },
+    ];
     sections.push(section(
         "Search functions:",
         SEARCH_FUNCTIONS
@@ -324,12 +347,7 @@ fn full_sections() -> Vec<Section> {
         let options = SWITCHES
             .iter()
             .filter(|switch| switch.group == group)
-            .map(|switch| {
-                entry(
-                    switch_usage(&switch.spelling, HelpScreen::Full),
-                    switch.help,
-                )
-            })
+            .map(|switch| entry(switch_usage(&switch.spelling), switch.help))
             .collect();
         sections.push(section(title, options));
         if group == Group::LimitAndSort {
@@ -350,13 +368,21 @@ fn exit_codes(codes: &[ExitCode]) -> Section {
         "Exit codes:",
         codes
             .iter()
-            .map(|code| entry(code.code().to_string(), code.meaning()))
+            .map(|&code| Entry {
+                token: code.token(),
+                ..entry(code.code().to_string(), code.meaning())
+            })
             .collect(),
     )
 }
 
+/// An entry whose usage is text the reader types.
 fn entry(usage: String, text: &'static str) -> Entry {
-    Entry { usage, text }
+    Entry {
+        usage,
+        text,
+        token: ColorToken::Primary,
+    }
 }
 
 fn section(title: &'static str, entries: Vec<Entry>) -> Section {
@@ -367,17 +393,12 @@ fn section(title: &'static str, entries: Vec<Entry>) -> Section {
     }
 }
 
-/// The forms of a switch the help lists, such as `-n N, -max-results N`; the
-/// quick help lists only the first.
-fn switch_usage(spelling: &Spelling, screen: HelpScreen) -> String {
+/// The forms of a switch the help lists, such as `-n N, -max-results N`.
+fn switch_usage(spelling: &Spelling) -> String {
     match spelling {
         Spelling::Es { names, action } => {
             let param = action.param().map(|p| format!(" {p}")).unwrap_or_default();
-            let listed = match screen {
-                HelpScreen::Quick => &names[..1],
-                HelpScreen::Full => &names[..],
-            };
-            let forms: Vec<String> = listed.iter().map(|n| format!("-{n}{param}")).collect();
+            let forms: Vec<String> = names.iter().map(|n| format!("-{n}{param}")).collect();
             forms.join(", ")
         }
         Spelling::Family { usage, .. } => (*usage).to_string(),
@@ -392,19 +413,23 @@ fn switch_usage(spelling: &Spelling, screen: HelpScreen) -> String {
 const USAGE_COLUMN: usize = 24;
 /// [`USAGE_COLUMN`] for the examples, whose usage is a whole command line.
 const EXAMPLE_COLUMN: usize = 30;
+/// [`EXAMPLE_COLUMN`] for the quick help, which is only examples, so every
+/// one of them keeps its text on its line.
+const QUICK_EXAMPLE_COLUMN: usize = 36;
 /// The width the help wraps text to, so it fits an 80-column console.
 const LINE_WIDTH: usize = 79;
 
 /// Writes the section's title and its entries, after a blank line.
-fn render_section(out: &mut String, section: &Section) {
+fn render_section(out: &mut String, section: &Section, color: bool) {
     out.push('\n');
-    out.push_str(section.title);
+    paint(out, ColorToken::Strong, section.title, color);
     out.push('\n');
-    render(out, &section.entries, section.usage_column);
+    render(out, &section.entries, section.usage_column, color);
 }
 
-/// Writes `entries` as two columns: the usage, and its text wrapped beside it.
-fn render(out: &mut String, entries: &[Entry], usage_column: usize) {
+/// Writes `entries` as two columns: the usage, in its token's color when
+/// `color` is set, and its text wrapped beside it.
+fn render(out: &mut String, entries: &[Entry], usage_column: usize, color: bool) {
     let width = entries
         .iter()
         .map(|e| e.usage.len())
@@ -413,30 +438,30 @@ fn render(out: &mut String, entries: &[Entry], usage_column: usize) {
         .unwrap_or(0)
         + 2;
     for entry in entries {
-        let usage = format!("  {}", entry.usage);
+        out.push_str("  ");
+        paint(out, entry.token, &entry.usage, color);
         if entry.usage.len() < width {
-            wrap_into(
-                out,
-                &format!("{usage:<w$}", w = 2 + width),
-                entry.text,
-                2 + width,
-            );
+            out.push_str(&" ".repeat(width - entry.usage.len()));
         } else {
-            out.push_str(&usage);
             out.push('\n');
-            wrap_into(out, &" ".repeat(2 + width), entry.text, 2 + width);
+            out.push_str(&" ".repeat(2 + width));
         }
+        wrap(out, 2 + width, entry.text, 2 + width, color);
     }
 }
 
-/// Appends `start` and then `text` word-wrapped to [`LINE_WIDTH`], with every
-/// line after the first indented by `indent` spaces.
-fn wrap_into(out: &mut String, start: &str, text: &str, indent: usize) {
-    out.push_str(start);
-    let mut column = start.len();
+/// Appends `text` word-wrapped to [`LINE_WIDTH`], starting at `column` of the
+/// current line, with every line after the first indented by `indent` spaces.
+///
+/// Text between backticks is text the reader types, such as `` `-n` ``: the
+/// backticks are dropped, and the text is colored when `color` is set.
+fn wrap(out: &mut String, column: usize, text: &str, indent: usize, color: bool) {
+    let mut column = column;
     let mut at_line_start = true;
+    let mut typed = false;
     for word in text.split(' ') {
-        if !at_line_start && column + 1 + word.len() > LINE_WIDTH {
+        let width = word.chars().filter(|&c| c != '`').count();
+        if !at_line_start && column + 1 + width > LINE_WIDTH {
             out.push('\n');
             out.push_str(&" ".repeat(indent));
             column = indent;
@@ -446,8 +471,17 @@ fn wrap_into(out: &mut String, start: &str, text: &str, indent: usize) {
             out.push(' ');
             column += 1;
         }
-        out.push_str(word);
-        column += word.len();
+        for (i, part) in word.split('`').enumerate() {
+            if i > 0 {
+                typed = !typed;
+            }
+            if typed {
+                paint(out, ColorToken::Primary, part, color);
+            } else {
+                out.push_str(part);
+            }
+        }
+        column += width;
         at_line_start = false;
     }
     out.push('\n');
@@ -532,6 +566,7 @@ mod tests {
                 );
             }
             Ok(Command::Help(_) | Command::Version) => {}
+            Ok(Command::Overview) => panic!("the help lists no empty command line"),
             Err(fatal) => panic!("{tokens:?}: {fatal}"),
         }
     }
@@ -630,6 +665,37 @@ mod tests {
                 }
                 other => panic!("{example}: {other:?}"),
             }
+        }
+    }
+
+    /// The quick help fits an 80 by 25 console with the command above it, a
+    /// blank line and the next prompt below, so it never scrolls.
+    #[test]
+    fn the_quick_help_fits_one_console_screen() {
+        let text = help(HelpScreen::Quick, false);
+        assert!(text.lines().count() <= 22, "{text}");
+        assert!(
+            text.lines().all(|line| line.chars().count() <= 80),
+            "{text}"
+        );
+    }
+
+    /// Color adds only ANSI codes: the columns line up as they do in plain
+    /// text, because the padding is measured on the text alone.
+    #[test]
+    fn color_changes_no_text_or_alignment() {
+        for screen in [HelpScreen::Quick, HelpScreen::Full] {
+            let mut stripped = String::new();
+            let mut in_code = false;
+            for c in help(screen, true).chars() {
+                match c {
+                    '\x1b' => in_code = true,
+                    'm' if in_code => in_code = false,
+                    c if !in_code => stripped.push(c),
+                    _ => {}
+                }
+            }
+            assert_eq!(stripped, help(screen, false), "{screen:?}");
         }
     }
 }

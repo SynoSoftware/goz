@@ -13,6 +13,9 @@ says when it is scheduled, so read the plans before you act on an issue. When
 a plan is done, its rules move into `docs/DESIGN.md` and the help, and the plan
 is deleted, because a finished plan read as current misleads.
 
+`docs/WRITING.md` says how the help, the messages and the exit-code meanings
+read. Read it before you change any of them.
+
 Use the vocabulary in `CONTEXT.md`.
 
 ## Writing code

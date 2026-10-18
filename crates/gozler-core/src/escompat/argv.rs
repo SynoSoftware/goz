@@ -47,6 +47,9 @@ use std::time::Duration;
 /// What a command line asks gozler to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    /// No arguments: print the overview, which says what gozler is, whether
+    /// gozlerd runs and how to start.
+    Overview,
     /// Print a help screen.
     Help(HelpScreen),
     /// `-version`: print the version.
@@ -58,11 +61,11 @@ pub enum Command {
 /// Which help screen a command line asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HelpScreen {
-    /// `-h`, `-help`, `-?` or `--help`: common tasks, with one spelling of
-    /// each common option.
+    /// `-h`, `-?` or `--h`: common tasks, with one spelling of each common
+    /// option.
     Quick,
-    /// `--help-full`: every option and alias, search function, attribute
-    /// letter, note and exit code.
+    /// `--help` or `-help`: every option and alias, search function,
+    /// attribute letter, note and exit code.
     Full,
 }
 
@@ -294,8 +297,6 @@ impl EsFatal {
 pub(super) struct Switch {
     pub(super) spelling: Spelling,
     pub(super) group: Group,
-    /// Whether the quick help lists the switch, by its first name only.
-    pub(super) quick: bool,
     pub(super) help: &'static str,
 }
 
@@ -313,7 +314,7 @@ pub(super) enum Group {
 /// How a [`Switch`] is spelled.
 pub(super) enum Spelling {
     /// `-name` or `/name`, each dash inside a name optional. The first name is
-    /// the one the help lists first, and the only one the quick help lists.
+    /// the one the help lists first.
     Es {
         names: &'static [&'static str],
         action: SwitchAction,
@@ -395,8 +396,8 @@ pub(super) enum SwitchAction {
     Status,
     /// `--insecure-no-server-check`: skip the pipe server's trust check.
     InsecureNoServerCheck,
-    /// `-h` / `-help` / `-?` / `--help` / `--help-full`: stop parsing and
-    /// print that help screen.
+    /// `-h` / `-?` / `--h` / `-help` / `--help`: stop parsing and print that
+    /// help screen.
     Help(HelpScreen),
     /// `-version`: stop parsing and print the version.
     Version,
@@ -446,7 +447,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Scope,
         },
         group: Group::Search,
-        quick: true,
         help: "Search only below DIR",
     },
     Switch {
@@ -455,7 +455,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::ParentPath,
         },
         group: Group::Search,
-        quick: false,
         help: "Search below the folder that contains PATH",
     },
     Switch {
@@ -464,7 +463,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Parent,
         },
         group: Group::Search,
-        quick: false,
         help: "Find only the files and folders directly in DIR",
     },
     Switch {
@@ -473,7 +471,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::MatchCase,
         },
         group: Group::Search,
-        quick: true,
         help: "Match case",
     },
     Switch {
@@ -482,7 +479,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::MatchPath,
         },
         group: Group::Search,
-        quick: true,
         help: "Match text against the full path, not only the name",
     },
     Switch {
@@ -491,7 +487,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::WholeWord,
         },
         group: Group::Search,
-        quick: false,
         help: "Match whole words only",
     },
     Switch {
@@ -500,8 +495,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Regex,
         },
         group: Group::Search,
-        quick: false,
-        help: "Also match PATTERN as a regular expression, as regex: does; spaces \
+        help: "Also match PATTERN as a regular expression, as `regex:` does; spaces \
                and quotes in PATTERN are part of it",
     },
     Switch {
@@ -510,9 +504,8 @@ pub(super) const SWITCHES: &[Switch] = &[
             parse: parse_attribute_switch,
         },
         group: Group::Search,
-        quick: false,
         help: "Find results that have every attribute in LETTERS and none of the \
-               attributes after a -; /ad finds folders, /a-d files",
+               attributes after a `-`; `/ad` finds folders, `/a-d` files",
     },
     Switch {
         spelling: Spelling::Es {
@@ -520,8 +513,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Limit,
         },
         group: Group::LimitAndSort,
-        quick: true,
-        help: "Show at most N results (default 20); -n all shows every result",
+        help: "Show at most N results (default 20); `-n all` shows every result",
     },
     Switch {
         spelling: Spelling::Es {
@@ -529,9 +521,8 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::SortParam,
         },
         group: Group::LimitAndSort,
-        quick: true,
-        help: "Sort by KEY: name, path, size, dm or extension; add -ascending \
-               or -descending to KEY to set the order, as in size-ascending",
+        help: "Sort by KEY: name, path, size, dm or extension; add `-ascending` \
+               or `-descending` to KEY to set the order, as in `size-ascending`",
     },
     Switch {
         spelling: Spelling::Family {
@@ -539,8 +530,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             parse: parse_sort_switch,
         },
         group: Group::LimitAndSort,
-        quick: false,
-        help: "Same as -sort KEY, as in -sort-size-ascending",
+        help: "Same as `-sort KEY`, as in `-sort-size-ascending`",
     },
     Switch {
         spelling: Spelling::Family {
@@ -548,9 +538,8 @@ pub(super) const SWITCHES: &[Switch] = &[
             parse: parse_order_switch,
         },
         group: Group::LimitAndSort,
-        quick: false,
         help: "Sort as dir does by name, size, date or extension: A to Z, smallest \
-               or oldest first; /o- reverses the order",
+               or oldest first; `/o-` reverses the order",
     },
     Switch {
         spelling: Spelling::Es {
@@ -558,7 +547,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Format(Format::Csv),
         },
         group: Group::Output,
-        quick: true,
         help: "Print the results as CSV",
     },
     Switch {
@@ -567,7 +555,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Format(Format::Tsv),
         },
         group: Group::Output,
-        quick: false,
         help: "Print the results as tab-separated values",
     },
     Switch {
@@ -576,7 +563,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Format(Format::Txt),
         },
         group: Group::Output,
-        quick: false,
         help: "Print only the full paths, with CRLF line endings",
     },
     Switch {
@@ -585,8 +571,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Json,
         },
         group: Group::Output,
-        quick: true,
-        help: "Print the results, or the --status report, as JSON",
+        help: "Print the results, or the `--status` report, as JSON",
     },
     Switch {
         spelling: Spelling::Es {
@@ -594,8 +579,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Export(Format::Csv),
         },
         group: Group::Output,
-        quick: true,
-        help: "Write all results to FILE as CSV, or the first N with -n",
+        help: "Write all results to FILE as CSV, or the first N with `-n`",
     },
     Switch {
         spelling: Spelling::Es {
@@ -603,9 +587,8 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Export(Format::Tsv),
         },
         group: Group::Output,
-        quick: false,
         help: "Write all results to FILE as tab-separated values, or the first \
-               N with -n",
+               N with `-n`",
     },
     Switch {
         spelling: Spelling::Es {
@@ -613,8 +596,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Export(Format::Txt),
         },
         group: Group::Output,
-        quick: false,
-        help: "Write all full paths to FILE, or the first N with -n",
+        help: "Write all full paths to FILE, or the first N with `-n`",
     },
     Switch {
         spelling: Spelling::Es {
@@ -622,7 +604,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::Name),
         },
         group: Group::Output,
-        quick: false,
         help: "Add a Name column: the name without its folder",
     },
     Switch {
@@ -631,7 +612,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::Path),
         },
         group: Group::Output,
-        quick: false,
         help: "Add a Path column: the folder that contains the result",
     },
     Switch {
@@ -640,9 +620,8 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::FullPath),
         },
         group: Group::Output,
-        quick: false,
         help: "Put the Filename column (the full path) here; without this option, \
-               gozler adds it last unless -name or -path-column is given",
+               gozler adds it last unless `-name` or `-path-column` is given",
     },
     Switch {
         spelling: Spelling::Es {
@@ -650,7 +629,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::Extension),
         },
         group: Group::Output,
-        quick: false,
         help: "Add an Extension column",
     },
     Switch {
@@ -659,7 +637,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::Size),
         },
         group: Group::Output,
-        quick: false,
         help: "Add a Size column, in bytes; empty for a folder",
     },
     Switch {
@@ -668,7 +645,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::DateModified),
         },
         group: Group::Output,
-        quick: false,
         help: "Add a Date Modified column",
     },
     Switch {
@@ -677,7 +653,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::Attributes),
         },
         group: Group::Output,
-        quick: false,
         help: "Add an Attributes column",
     },
     Switch {
@@ -686,7 +661,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Utf8Bom,
         },
         group: Group::Output,
-        quick: false,
         help: "Start an export file with a UTF-8 byte order mark (default)",
     },
     Switch {
@@ -695,7 +669,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::NoUtf8Bom,
         },
         group: Group::Output,
-        quick: false,
         help: "Leave out the byte order mark",
     },
     Switch {
@@ -704,7 +677,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::NoHeader,
         },
         group: Group::Output,
-        quick: false,
         help: "Leave out the CSV or TSV header row",
     },
     Switch {
@@ -713,7 +685,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::NoDoubleQuote,
         },
         group: Group::Output,
-        quick: false,
         help: "Quote CSV text only when it needs quotes",
     },
     Switch {
@@ -722,7 +693,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Count(Count::Results),
         },
         group: Group::Totals,
-        quick: false,
         help: "Print only the number of matches",
     },
     Switch {
@@ -731,7 +701,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Count(Count::TotalSize),
         },
         group: Group::Totals,
-        quick: false,
         help: "Print only the total size of the matching files, in bytes",
     },
     Switch {
@@ -740,7 +709,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::FolderSize,
         },
         group: Group::Totals,
-        quick: false,
         help: "Print only the total size of the files below DIR, in bytes",
     },
     Switch {
@@ -749,7 +717,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Status,
         },
         group: Group::Other,
-        quick: true,
         help: "Show whether gozlerd and each volume are ready, instead of searching",
     },
     Switch {
@@ -758,7 +725,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Timeout,
         },
         group: Group::Other,
-        quick: false,
         help: "Wait up to MS milliseconds for indexing to finish, then search",
     },
     Switch {
@@ -767,44 +733,55 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::NoResultError,
         },
         group: Group::Other,
-        quick: false,
         help: "Exit 9 when nothing matches",
     },
     Switch {
         spelling: Spelling::Es {
-            names: &["h", "help", "?"],
+            names: &["h", "?"],
             action: SwitchAction::Help(HelpScreen::Quick),
         },
         group: Group::Other,
-        quick: true,
         help: "Show the quick help",
     },
     Switch {
         spelling: Spelling::Native {
-            name: "help",
+            name: "h",
             action: SwitchAction::Help(HelpScreen::Quick),
         },
         group: Group::Other,
-        quick: false,
-        help: "Same as -h",
+        help: "Same as `-h`",
     },
     Switch {
         spelling: Spelling::Native {
-            name: "help-full",
+            name: "help",
             action: SwitchAction::Help(HelpScreen::Full),
         },
         group: Group::Other,
-        quick: true,
         help: "Show the full reference",
     },
     Switch {
         spelling: Spelling::Es {
-            names: &["version"],
+            names: &["help"],
+            action: SwitchAction::Help(HelpScreen::Full),
+        },
+        group: Group::Other,
+        help: "Same as `--help`",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["v", "version"],
             action: SwitchAction::Version,
         },
         group: Group::Other,
-        quick: true,
         help: "Show the version",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "version",
+            action: SwitchAction::Version,
+        },
+        group: Group::Other,
+        help: "Same as `-v`",
     },
     Switch {
         spelling: Spelling::Native {
@@ -812,7 +789,6 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::InsecureNoServerCheck,
         },
         group: Group::Other,
-        quick: false,
         help: "Skip the check that the pipe server is gozlerd (testing only)",
     },
 ];
@@ -875,6 +851,9 @@ pub(super) const SORT_KEYS: &[SortKeyName] = &[
 /// assert_eq!(plan.row_limit(), Some(10));
 /// ```
 pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
+    if args.is_empty() {
+        return Ok(Command::Overview);
+    }
     let mut plan = EsPlan::default();
     let mut query: Vec<Cow<str>> = Vec::new();
     let mut rest = args.iter();
@@ -986,7 +965,7 @@ fn parse_order_switch(name: &str) -> Option<SwitchAction> {
 fn parse_attribute_switch(name: &str) -> Option<SwitchAction> {
     const NOT_ATTRIBUTES: SwitchAction = SwitchAction::Refused(
         "is not an attribute option: write /a and attribute letters, with - before a \
-         letter to leave that attribute out, such as /ah or /a-h; gozler --help-full \
+         letter to leave that attribute out, such as /ah or /a-h; gozler --help \
          lists the letters",
     );
     let mut chars = name.strip_prefix('a')?.chars();
@@ -1246,10 +1225,17 @@ mod tests {
         }
     }
 
+    /// Bare `gozler` prints the overview instead of listing every file; a
+    /// command line of options alone still searches.
     #[test]
-    fn empty_argv_yields_default_plan() {
-        let parsed = plan(&[]);
-        assert_eq!(parsed, EsPlan::default());
+    fn empty_argv_is_the_overview() {
+        assert_eq!(parse(&[]), Ok(Command::Overview));
+        assert_eq!(plan(&["-n", "all"]).query, "");
+    }
+
+    #[test]
+    fn default_plan() {
+        let parsed = EsPlan::default();
         assert_eq!(parsed.query, "");
         assert_eq!(parsed.sort, SortSpec::default());
         assert!(parsed.bom);
@@ -1707,9 +1693,12 @@ mod tests {
     #[test]
     fn help_and_version_end_parsing_where_they_appear() {
         let quick = Ok(Command::Help(HelpScreen::Quick));
-        assert_eq!(parse(&["report", "-help", "-bogus"]), quick);
+        let full = Ok(Command::Help(HelpScreen::Full));
+        assert_eq!(parse(&["report", "-help", "-bogus"]), full);
+        assert_eq!(parse(&["--help"]), full);
         assert_eq!(parse(&["/h", "-n"]), quick);
         assert_eq!(parse(&["/?"]), quick);
+        assert_eq!(parse(&["--h"]), quick);
         assert_eq!(parse(&["-version", "-path"]), Ok(Command::Version));
         assert_eq!(fatal(&["-bogus", "-h"]).exit_code, ExitCode::UnknownSwitch);
     }

@@ -73,7 +73,7 @@ gozler --json kernel32.dll
 gozler --status
 ```
 
-`gozler` accepts a subset of `es.exe` options (`-path`, `-n` / `-max-results`, the `-sort` family, `-size`, `-dm`, `-export-csv`, and the CSV-shape options) and keeps `es.exe`'s exit codes 4 to 9; codes 1, 2, 3 and 10 are its own, and `gozler --help-full` lists them all. Unsupported options exit `6`, the same as `es.exe`.
+`gozler` accepts a subset of `es.exe` options (`-path`, `-n` / `-max-results`, the `-sort` family, `-size`, `-dm`, `-export-csv`, and the CSV-shape options) and keeps `es.exe`'s exit codes 4 to 9; codes 1, 2, 3 and 10 are its own, and `gozler --help` lists them all. Unsupported options exit `6`, the same as `es.exe`.
 
 ## Performance
 

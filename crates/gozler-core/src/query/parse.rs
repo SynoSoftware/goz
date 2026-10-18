@@ -359,27 +359,27 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["ext"],
         function: Function::Ext,
         example: "cs;txt",
-        help: "Extension is one in the list; ext: alone finds files without one",
+        help: "Extension is one in the list; `ext:` alone finds files without one",
     },
     SearchFunction {
         names: &["size"],
         function: Function::Size,
         example: ">1mb",
-        help: "File size; also <, <=, >=, =, ranges such as 1mb..10mb, and empty, \
-               tiny, small, medium, large, huge or gigantic",
+        help: "File size; also `<`, `<=`, `>=`, `=`, ranges such as `1mb..10mb`, and `empty`, \
+               `tiny`, `small`, `medium`, `large`, `huge` or `gigantic`",
     },
     SearchFunction {
         names: &["dm", "datemodified", "date-modified"],
         function: Function::DateModified,
         example: "today",
-        help: "Date modified: today, yesterday, YYYY-MM-DD or Ndays; also <, <=, >, \
-               >= and ranges such as 2026-01-01..2026-03-31",
+        help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD` or `Ndays`; also `<`, `<=`, `>`, \
+               `>=` and ranges such as `2026-01-01..2026-03-31`",
     },
     SearchFunction {
         names: &["path"],
         function: Function::Path,
         example: "text",
-        help: "Full path contains text; with * or ?, the whole full path must match",
+        help: "Full path contains text; with `*` or `?`, the whole full path must match",
     },
     SearchFunction {
         names: &["parent"],
@@ -392,14 +392,14 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["nopath"],
         function: Function::NoPath,
         example: "text",
-        help: "Name contains text, even with -p; with * or ?, the whole name must match",
+        help: "Name contains text, even with `-p`; with `*` or `?`, the whole name must match",
     },
     SearchFunction {
         names: &["ww"],
         function: Function::WholeWord,
         example: "word",
         help: "Name contains word, with no letter or digit right before or after it; \
-               with \\ or / in the value, the full path must contain it",
+               with `\\` or `/` in the value, the full path must contain it",
     },
     SearchFunction {
         names: &["regex"],
@@ -412,25 +412,25 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::Attributes,
         example: "hs",
         help: "Has every attribute in the value, here hidden and system; letters in \
-               either case; !attrib:h excludes hidden items",
+               either case; `!attrib:h` excludes hidden items",
     },
     SearchFunction {
         names: &["file"],
         function: Function::File,
         example: "",
-        help: "Files only; file:text also matches text",
+        help: "Files only; `file:text` also matches text",
     },
     SearchFunction {
         names: &["folder", "dir"],
         function: Function::Folder,
         example: "",
-        help: "Folders only; folder:text also matches text",
+        help: "Folders only; `folder:text` also matches text",
     },
     SearchFunction {
         names: &["case"],
         function: Function::Case,
         example: "",
-        help: "Match case; case:0 turns it off",
+        help: "Match case; `case:0` turns it off",
     },
 ];
 

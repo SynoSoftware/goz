@@ -100,3 +100,8 @@ _Avoid_: now (in prose)
 The order gozler prints matches in: by the sort key, then folded name, volume,
 file ID, parent file ID and raw name, so the same query over the same index
 prints the same list, and a limited list is the start of the full one.
+
+**Color token**:
+What a piece of text means, which decides its color wherever gozler shows it:
+Strong, Muted, Primary for what the person types, Success, Warning and Danger.
+_Avoid_: a color name, such as green, for a meaning

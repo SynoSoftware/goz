@@ -76,7 +76,7 @@ impl Failure {
             Failure::Argv(fatal) => {
                 eprintln!("gozler: {fatal}");
                 if fatal.exit_code == ExitCode::UnknownSwitch {
-                    eprintln!("gozler: run gozler --help-full for every option");
+                    eprintln!("gozler: run gozler --help for every option");
                 }
             }
             Failure::ArgumentNotUnicode(arg) => {
@@ -85,7 +85,7 @@ impl Failure {
             Failure::Query(error) => {
                 eprintln!("gozler: {error}");
                 if matches!(error, QueryError::UnknownFunction(_)) {
-                    eprintln!("gozler: run gozler --help-full for every search function");
+                    eprintln!("gozler: run gozler --help for every search function");
                 }
             }
             Failure::MissingFolder(folder) => eprintln!("gozler: {folder} does not exist"),
@@ -132,48 +132,87 @@ pub(crate) enum NotRunning {
 /// Where the gozler setup is published.
 const RELEASES: &str = "https://github.com/SynoSoftware/goz/releases";
 
+/// How to start a service that is not running: what the lines below do, then
+/// each command or link alone on its line, so that it can be copied.
+pub(crate) struct Repair {
+    pub(crate) how: &'static str,
+    pub(crate) lines: Vec<String>,
+}
+
 impl NotRunning {
-    /// Writes what is wrong to stderr, and below it the commands that fix it,
-    /// each alone on its line so that it can be copied.
-    fn report(&self) {
+    /// The state in a word or two, as the card for bare `gozler` shows it.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn state(&self) -> &'static str {
         match self {
-            NotRunning::Stopped => eprintln!(
-                "gozler: the {SERVICE_NAME} service is stopped\n\
-                 To start it, open a terminal as administrator and run:\n  \
-                 net start {SERVICE_NAME}"
-            ),
+            NotRunning::Stopped => "Stopped",
+            NotRunning::Disabled => "Disabled",
+            NotRunning::NotInstalled { .. } => "Not installed",
+            NotRunning::Unknown(_) => "Not running",
+        }
+    }
+
+    /// What is wrong, as the first line of the message says it.
+    pub(crate) fn problem(&self) -> String {
+        match self {
+            NotRunning::Stopped => format!("the {SERVICE_NAME} service is stopped"),
+            NotRunning::Disabled => format!("the {SERVICE_NAME} service is disabled"),
+            NotRunning::NotInstalled { .. } => {
+                format!("the {SERVICE_NAME} service is not installed")
+            }
+            NotRunning::Unknown(error) => {
+                format!("gozlerd is not running, and gozler could not find out why: {error}")
+            }
+        }
+    }
+
+    /// What starts the service, or `None` when gozler does not know why it
+    /// is not running.
+    pub(crate) fn repair(&self) -> Option<Repair> {
+        let repair = match self {
+            NotRunning::Stopped => Repair {
+                how: "To start it, open a terminal as administrator and run:",
+                lines: vec![format!("net start {SERVICE_NAME}")],
+            },
             // `sc.exe`, because PowerShell reads `sc` as Set-Content, and two
             // lines, because Windows PowerShell 5.1 has no `&&`.
-            NotRunning::Disabled => eprintln!(
-                "gozler: the {SERVICE_NAME} service is disabled\n\
-                 To turn it on, open a terminal as administrator and run:\n  \
-                 sc.exe config {SERVICE_NAME} start= auto\n  \
-                 net start {SERVICE_NAME}"
-            ),
+            NotRunning::Disabled => Repair {
+                how: "To turn it on, open a terminal as administrator and run:",
+                lines: vec![
+                    format!("sc.exe config {SERVICE_NAME} start= auto"),
+                    format!("net start {SERVICE_NAME}"),
+                ],
+            },
             // An administrator terminal opens in System32, and the folder is
             // not always on PATH. pushd also changes the drive in cmd.
             NotRunning::NotInstalled {
                 folder,
                 gozlerd_beside: true,
-            } => eprintln!(
-                "gozler: the {SERVICE_NAME} service is not installed\n\
-                 To install it, open a terminal as administrator and run:\n  \
-                 pushd \"{}\"\n  \
-                 .\\gozlerd.exe install",
-                folder.display()
-            ),
+            } => Repair {
+                how: "To install it, open a terminal as administrator and run:",
+                lines: vec![
+                    format!("pushd \"{}\"", folder.display()),
+                    r".\gozlerd.exe install".to_string(),
+                ],
+            },
             NotRunning::NotInstalled {
-                folder,
                 gozlerd_beside: false,
-            } => eprintln!(
-                "gozler: could not find gozlerd.exe in {}\n\
-                 To install gozler, run its setup from {RELEASES}",
-                folder.display()
-            ),
-            NotRunning::Unknown(error) => {
-                eprintln!(
-                    "gozler: gozlerd is not running, and gozler could not find out why: {error}"
-                )
+                ..
+            } => Repair {
+                how: "To install it, run the gozler setup from:",
+                lines: vec![RELEASES.to_string()],
+            },
+            NotRunning::Unknown(_) => return None,
+        };
+        Some(repair)
+    }
+
+    /// Writes what is wrong to stderr, and below it what starts the service.
+    fn report(&self) {
+        eprintln!("gozler: {}", self.problem());
+        if let Some(repair) = self.repair() {
+            eprintln!("{}", repair.how);
+            for line in &repair.lines {
+                eprintln!("  {line}");
             }
         }
     }

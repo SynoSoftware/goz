@@ -17,6 +17,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(windows)]
 mod client;
 mod failure;
+#[cfg(windows)]
+mod overview;
 
 use failure::{Failure, output};
 use gozler_core::escompat::{Command, ExitCode, help, parse_argv, version};
@@ -50,7 +52,8 @@ fn run() -> Result<ExitCode, Failure> {
         })
         .collect::<Result<Vec<String>, Failure>>()?;
     match parse_argv(&args).map_err(Failure::Argv)? {
-        Command::Help(screen) => print(&help(screen)),
+        Command::Overview => overview(),
+        Command::Help(screen) => print(&help(screen, console_color())),
         Command::Version => print(&format!("{}\n", version())),
         Command::Run(plan) => execute(plan),
     }
@@ -72,13 +75,32 @@ fn execute(_plan: gozler_core::escompat::EsPlan) -> Result<ExitCode, Failure> {
     Err(Failure::NotWindows)
 }
 
+/// Whether to color the help and the overview: stdout is a console that
+/// draws ANSI colors, and `NO_COLOR` is not set.
 #[cfg(windows)]
-use win::execute;
+fn console_color() -> bool {
+    std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+        && gozler_winfs::enable_console_color()
+}
+
+#[cfg(not(windows))]
+fn console_color() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn overview() -> Result<ExitCode, Failure> {
+    Err(Failure::NotWindows)
+}
+
+#[cfg(windows)]
+use win::{execute, overview};
 
 #[cfg(windows)]
 mod win {
     use super::client::Client;
     use super::failure::{Failure, output};
+    use super::overview::{Index, Service, render};
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
     use gozler_core::output::table::grouped;
     use gozler_core::output::{TableWriter, filetime_to_unix_ms};
@@ -92,6 +114,61 @@ mod win {
     /// How often `-timeout` asks gozlerd whether the volumes in scope are
     /// complete.
     const STATUS_POLL: Duration = Duration::from_millis(250);
+
+    /// Bare `gozler`: prints the overview, in color when stdout is a console
+    /// that draws it and `NO_COLOR` is not set, and exits with the code of
+    /// the failure that keeps gozlerd from answering, if any.
+    pub(crate) fn overview() -> Result<ExitCode, Failure> {
+        let failure = match Client::connect(false) {
+            Ok(mut connection) => {
+                let index = index(&mut connection)?;
+                print_overview(&Service::Running(index))?;
+                return Ok(ExitCode::Complete);
+            }
+            Err(failure) => failure,
+        };
+        let service = match &failure {
+            Failure::DaemonNotReady => Service::NotReady,
+            Failure::DaemonNotRunning(why) => Service::NotRunning(why),
+            _ => return Err(failure),
+        };
+        print_overview(&service)?;
+        Ok(failure.exit_code())
+    }
+
+    fn print_overview(service: &Service) -> Result<(), Failure> {
+        let text = render(service, super::console_color());
+        let mut out = std::io::stdout().lock();
+        output(
+            out.write_all(text.as_bytes()).and_then(|()| out.flush()),
+            "stdout",
+        )
+    }
+
+    /// The size of the index, with the total size of every file.
+    fn index(connection: &mut Client) -> Result<Index, Failure> {
+        let status = connection.status()?;
+        let plan = EsPlan {
+            count: Some(Count::TotalSize),
+            ..EsPlan::default()
+        };
+        let start = QueryStart {
+            now: jiff::Timestamp::now(),
+            time_zone: jiff::tz::TimeZone::system(),
+        };
+        let request = build_search(&plan, &working_dir()?, &start).map_err(Failure::Query)?;
+        let totals = connection.totals(request)?;
+        Ok(Index {
+            volumes: status.volumes.len(),
+            ready: status
+                .volumes
+                .iter()
+                .filter(|v| v.phase.is_complete())
+                .count(),
+            entries: status.volumes.iter().map(|v| v.entries).sum(),
+            size: (!totals.metadata_pending).then_some(totals.size),
+        })
+    }
 
     pub(crate) fn execute(plan: EsPlan) -> Result<ExitCode, Failure> {
         if plan.status {
@@ -460,7 +537,7 @@ mod win {
 
     /// A byte count in the largest decimal unit that keeps it at least 1:
     /// `950 B`, `4.2 KB`, `192.0 MB`, `1.3 GB`.
-    fn bytes(n: u64) -> String {
+    pub(crate) fn bytes(n: u64) -> String {
         match n {
             0..1_000 => format!("{n} B"),
             1_000..1_000_000 => format!("{:.1} KB", n as f64 / 1e3),
