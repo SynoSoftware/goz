@@ -41,6 +41,22 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const ERROR_SERVICE_EXISTS: i32 = 1073;
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 const ERROR_SERVICE_ALREADY_RUNNING: i32 = 1056;
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// `error` under `context`, or, when Windows refused access, the advice to
+/// run `gozlerd {command}` elevated: only an administrator may change a
+/// service.
+fn refused(error: windows_service::Error, command: &str, context: &str) -> anyhow::Error {
+    match &error {
+        windows_service::Error::Winapi(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            anyhow::anyhow!(
+                "{command} needs an elevated terminal: open PowerShell as administrator \
+                 and run gozlerd {command} again"
+            )
+        }
+        _ => anyhow::Error::new(error).context(context.to_owned()),
+    }
+}
 
 /// `ServiceInfo` describing how the SCM should launch us. `current_exe()`
 /// resolves to the installed `gozlerd.exe`, and `run --service` is the argv the
@@ -69,7 +85,7 @@ pub(crate) fn install() -> Result<()> {
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
     )
-    .context("opening the service control manager (are you elevated?)")?;
+    .map_err(|e| refused(e, "install", "opening the service control manager"))?;
 
     let info = service_info()?;
     let access = ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::QUERY_STATUS;
@@ -105,7 +121,7 @@ pub(crate) fn install() -> Result<()> {
 /// installed, so an installer's uninstall step is safe to run unconditionally.
 pub(crate) fn uninstall() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-        .context("opening the service control manager (are you elevated?)")?;
+        .context("opening the service control manager")?;
 
     let service = match manager.open_service(
         SERVICE_NAME,
@@ -118,7 +134,7 @@ pub(crate) fn uninstall() -> Result<()> {
             println!("gozler service is not installed; nothing to remove.");
             return Ok(());
         }
-        Err(e) => return Err(e).context("opening the gozler service"),
+        Err(e) => return Err(refused(e, "uninstall", "opening the gozler service")),
     };
 
     // Stop first so the record is deleted immediately rather than being marked
@@ -144,13 +160,22 @@ pub(crate) fn status() -> Result<()> {
             let status = service
                 .query_status()
                 .context("querying the gozler service")?;
-            println!("gozler service: {:?}", status.current_state);
+            let state = match status.current_state {
+                ServiceState::Stopped => "stopped",
+                ServiceState::StartPending => "starting",
+                ServiceState::StopPending => "stopping",
+                ServiceState::Running => "running",
+                ServiceState::ContinuePending => "resuming",
+                ServiceState::PausePending => "pausing",
+                ServiceState::Paused => "paused",
+            };
+            println!("gozler service: {state}");
             Ok(())
         }
         Err(windows_service::Error::Winapi(e))
             if e.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST) =>
         {
-            println!("gozler service: NotInstalled");
+            println!("gozler service: not installed");
             Ok(())
         }
         Err(e) => Err(e).context("opening the gozler service"),

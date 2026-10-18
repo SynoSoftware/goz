@@ -33,7 +33,11 @@ mod volume_state;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "gozlerd", version, about = "gozler indexing daemon")]
+#[command(
+    name = "gozlerd",
+    version,
+    about = "Keeps an index of every fixed NTFS volume and answers gozler's searches"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -41,13 +45,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Bootstrap every fixed NTFS volume once and print index stats, then exit
-    /// (no daemon). Pass a query to search the freshly-built index end-to-end.
+    /// Index every fixed NTFS volume once, print the statistics and exit.
+    ///
+    /// No daemon runs. With a query, also search each new index with it.
     Scan {
         /// Optional query to run against each volume after bootstrap.
         query: Option<String>,
     },
-    /// Run the daemon (console mode by default).
+    /// Run the daemon in this console.
     Run {
         /// Run attached to the console with Ctrl+C handling (the default).
         #[arg(long)]
@@ -57,11 +62,11 @@ enum Command {
         #[arg(long)]
         service: bool,
     },
-    /// Install and start the auto-start Windows service (requires elevation).
+    /// Register and start the gozler service (needs an elevated terminal).
     Install,
-    /// Stop and remove the Windows service (requires elevation).
+    /// Stop and remove the gozler service (needs an elevated terminal).
     Uninstall,
-    /// Report whether the Windows service is installed and running.
+    /// Show whether the gozler service is installed and running.
     Status,
 }
 
@@ -95,16 +100,25 @@ fn tune_allocator() {
 }
 
 #[cfg(windows)]
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
     tune_allocator();
     let cli = Cli::parse();
-    match cli.command {
+    let result = match cli.command {
         Command::Scan { query } => run_scan(query),
         Command::Run { service: true, .. } => service::run(),
         Command::Run { .. } => run::run_console(),
         Command::Install => service::install(),
         Command::Uninstall => service::uninstall(),
         Command::Status => service::status(),
+    };
+    // One line with every cause, as gozler writes its errors, instead of
+    // anyhow's multi-line `Error: ... Caused by:` report.
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("gozlerd: {error:#}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 
