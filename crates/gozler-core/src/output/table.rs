@@ -126,7 +126,7 @@ impl TableWriter {
                 EsColumn::Name => name.into(),
                 EsColumn::Path => folder.into(),
                 EsColumn::FullPath => item.path.as_str().into(),
-                EsColumn::Extension => extension(name.as_bytes())
+                EsColumn::Extension => extension(name.as_bytes(), item.is_dir)
                     .map(|ext| {
                         std::str::from_utf8(ext).expect("a split at an ASCII dot keeps UTF-8 whole")
                     })

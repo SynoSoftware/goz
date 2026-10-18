@@ -305,7 +305,7 @@ impl Check {
             Check::NameWildcard(wildcard) => {
                 wildcard.matches_into(subject.name, &mut scratch.code_points)
             }
-            Check::Extension(exts) => match extension(subject.raw_name) {
+            Check::Extension(exts) => match extension(subject.raw_name, subject.is_dir) {
                 Some(ext) => {
                     scratch.extension.clear();
                     crate::fold::fold_into(ext, &mut scratch.extension);
@@ -727,10 +727,14 @@ impl<'q, 'i> Scan<'q, 'i> {
     }
 }
 
-/// The extension of an entry's name, folder or file: what follows its last
-/// `.`, or `None` when the name has no dot. `ext:` matches it, and the
-/// Extension column prints it.
-pub fn extension(name: &[u8]) -> Option<&[u8]> {
+/// The extension of an entry: what follows the last `.` of a file's name, or
+/// `None` for a name without a dot and for every folder, as in Everything,
+/// so `ext:d` does not find a folder named `conf.d`. `ext:` matches it, and
+/// the Extension column prints it.
+pub fn extension(name: &[u8], is_dir: bool) -> Option<&[u8]> {
+    if is_dir {
+        return None;
+    }
     let dot = name.iter().rposition(|&b| b == b'.')?;
     Some(&name[dot + 1..])
 }
@@ -1089,11 +1093,14 @@ mod tests {
             enum_rec(frn(100), NTFS_ROOT_FRN, "src", true),
             enum_rec(frn(101), NTFS_ROOT_FRN, "LICENSE", false),
             enum_rec(frn(102), NTFS_ROOT_FRN, "main.rs", false),
+            enum_rec(frn(103), NTFS_ROOT_FRN, "conf.rs", true),
         ] {
             idx.insert_enum(&r);
         }
         assert_eq!(run(&idx, "ext:"), ["LICENSE"]);
-        assert_eq!(run(&idx, "!ext:"), ["main.rs", "src"]);
+        // A folder has no extension, whatever its name.
+        assert_eq!(run(&idx, "ext:rs"), ["main.rs"]);
+        assert_eq!(run(&idx, "!ext:"), ["conf.rs", "main.rs", "src"]);
         assert_eq!(run(&idx, "ext:|ext:rs"), ["LICENSE", "main.rs"]);
     }
 
