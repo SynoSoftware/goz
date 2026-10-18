@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
   # A new advisory against a static lockfile arrives without anyone pushing, and
   # `dtolnay/rust-toolchain@stable` moves under us between releases. Note GitHub
   # disables cron on a repo with 60 days of no activity (it emails first), so
