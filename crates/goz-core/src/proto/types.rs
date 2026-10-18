@@ -112,8 +112,8 @@ pub struct QueryResults {
     /// `true` → at least one volume is bootstrapping/rescanning/failed, so
     /// results may be incomplete. The honesty bit: never presented silently.
     pub volumes_incomplete: bool,
-    /// `true` → size/mtime enrichment has not finished; requested metadata
-    /// columns may still be `None`.
+    /// `true` → the size and date pass failed or stopped on at least one
+    /// volume in scope; requested size and date columns may be `None`.
     pub metadata_pending: bool,
     /// Index generation the results were computed against.
     pub generation: u64,
@@ -191,7 +191,8 @@ pub struct VolumeStatus {
     pub entries: u64,
     /// Index generation for the volume.
     pub generation: u64,
-    /// `true` → size/mtime enrichment still running for this volume.
+    /// `true` → the size and date pass failed or stopped for this volume, so
+    /// some sizes and dates are unknown.
     pub metadata_pending: bool,
     /// Maximum size of the volume's USN journal in bytes; `None` for a volume
     /// without one (or from daemons predating the field). It bounds how long

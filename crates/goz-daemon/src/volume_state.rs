@@ -26,7 +26,8 @@ pub(crate) struct VolumeState {
     pub mounts: Vec<String>,
     pub index: RwLock<VolumeIndex>,
     pub phase: RwLock<VolumePhase>,
-    /// Whether size/date enrichment finished (else `-size`/`-dm` are unknown).
+    /// The size and date pass of the index's last build failed or stopped, so
+    /// some sizes and dates are unknown. Set at bootstrap and by every rescan.
     pub metadata_pending: RwLock<bool>,
     /// Maximum size of the volume's USN journal at bootstrap, `None` without a
     /// journal. Surfaced by `--status` because the journal's size bounds how

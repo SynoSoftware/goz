@@ -665,8 +665,8 @@ fn rescan(
 
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full MFT scan.
-    let new_index = match bootstrap::build_index(handle, Some(stop)) {
-        Ok(Some((index, _enum_secs, _layout_secs))) => index,
+    let built = match bootstrap::build_index(handle, Some(stop)) {
+        Ok(Some(built)) => built,
         // Aborted by shutdown: leave the old index in place and stop cleanly;
         // this is NOT a failure, so do not mark the volume Failed.
         Ok(None) => return None,
@@ -678,7 +678,10 @@ fn rescan(
 
     {
         let mut index = state.index.write();
-        *index = new_index;
+        *index = built.index;
+        // Set before the phase returns to Live, so a query that reads Live
+        // also reads the new index's flag rather than the old one's.
+        *state.metadata_pending.write() = built.metadata_pending;
         // Invalidate the scope cache while the index write lock is held: its
         // EntryIdx values belong to the old generation. Clearing it here (rather
         // than after the lock drops) guarantees a reader never sees the new,

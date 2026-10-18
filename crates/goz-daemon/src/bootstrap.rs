@@ -14,8 +14,8 @@ use goz_core::index::{FrnMap, NTFS_ROOT_FRN, VolumeIndex};
 use goz_core::layout::{RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer};
 use goz_core::usn::walk_enum_buffer;
 use goz_winfs::{
-    JournalInfo, JournalQuery, VolumeHandle, VolumeInfo, create_usn_journal, enum_usn_data,
-    enumerate_volumes, query_file_layout, query_usn_journal, volume_total_bytes,
+    JournalInfo, JournalQuery, VolumeHandle, VolumeInfo, WinError, create_usn_journal,
+    enum_usn_data, enumerate_volumes, query_file_layout, query_usn_journal, volume_total_bytes,
 };
 
 /// Floor for the USN journal: large enough that routine churn does not wrap it
@@ -41,6 +41,8 @@ pub(crate) struct BootstrappedVolume {
     /// only the live tail would be unavailable).
     pub cursor: Option<JournalInfo>,
     pub index: VolumeIndex,
+    /// See [`BuiltIndex::metadata_pending`].
+    pub metadata_pending: bool,
     /// Kept open for the live tail (moved into the tail thread by the daemon).
     pub handle: VolumeHandle,
 }
@@ -163,29 +165,48 @@ fn bootstrap_volume(vol: &VolumeInfo) -> Result<BootstrappedVolume> {
     // MFT directly, so an unavailable journal is not fatal here.
     let cursor = ensure_journal(&handle, &vol.guid_path);
     // First-time bootstrap passes no stop flag, so the rebuild can never abort.
-    let (index, enum_secs, layout_secs) =
-        build_index(&handle, None)?.expect("build_index cannot abort without a stop flag");
+    let built = build_index(&handle, None)?.expect("build_index cannot abort without a stop flag");
 
     Ok(BootstrappedVolume {
         guid_path: vol.guid_path.clone(),
         mounts: vol.mounts.clone(),
-        enum_secs,
-        layout_secs,
+        enum_secs: built.enum_secs,
+        layout_secs: built.layout_secs,
         cursor,
-        index,
+        index: built.index,
+        metadata_pending: built.metadata_pending,
         handle,
     })
+}
+
+/// A freshly built index and how its two passes went.
+pub(crate) struct BuiltIndex {
+    pub index: VolumeIndex,
+    pub enum_secs: f64,
+    pub layout_secs: f64,
+    /// The size and date pass failed or stopped, so some files' sizes and
+    /// dates are unknown. The volume stores it as
+    /// [`VolumeState::metadata_pending`](crate::volume_state::VolumeState::metadata_pending).
+    pub metadata_pending: bool,
+}
+
+/// How the size and date pass (FILE_LAYOUT enrichment) ended.
+#[derive(Debug, PartialEq, Eq)]
+enum LayoutPass {
+    Complete,
+    Stopped,
+    Cancelled,
 }
 
 /// Builds a fresh [`VolumeIndex`] for an already-open volume handle: a full MFT
 /// enumeration followed by FILE_LAYOUT enrichment. Shared by first-time
 /// bootstrap and the live tail's rescan (after a USN journal wrap/deletion),
-/// which rebuilds the index on the handle it already owns. Returns the index
-/// plus the enum/layout wall-clock timings. The journal is the caller's concern.
+/// which rebuilds the index on the handle it already owns. Returns `None` when
+/// `stop` aborts the build. The journal is the caller's concern.
 pub(crate) fn build_index(
     handle: &VolumeHandle,
     stop: Option<&AtomicBool>,
-) -> Result<Option<(VolumeIndex, f64, f64)>> {
+) -> Result<Option<BuiltIndex>> {
     let cancelled = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
     let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
     let mut buf = vec![0u8; IO_BUFFER_BYTES];
@@ -215,18 +236,45 @@ pub(crate) fn build_index(
     }
     let enum_secs = enum_start.elapsed().as_secs_f64();
 
-    // --- FILE_LAYOUT enrichment (sizes, mtimes, hard-link names) --------
-    //
-    // Best-effort: a failure warns and continues, leaving sizes "unknown" which
-    // the query engine and CSV writer handle safely. Degrading beats failing the
-    // whole bootstrap, since names alone still answer most queries.
     let layout_start = Instant::now();
+    let pass = enrich_from_layout(&mut index, &mut buf, cancelled, |restart, buf| {
+        query_file_layout(handle, RECOMMENDED_LAYOUT_FLAGS, restart, buf)
+    })?;
+    let metadata_pending = match pass {
+        LayoutPass::Complete => false,
+        LayoutPass::Stopped => true,
+        LayoutPass::Cancelled => return Ok(None),
+    };
+    let layout_secs = layout_start.elapsed().as_secs_f64();
+
+    Ok(Some(BuiltIndex {
+        index,
+        enum_secs,
+        layout_secs,
+        metadata_pending,
+    }))
+}
+
+/// The size and date pass: enriches `index` with sizes, dates and hard-link
+/// names from each FILE_LAYOUT page `read_page` writes into `buf`, where
+/// `read_page(restart, buf)` behaves as [`query_file_layout`].
+///
+/// Best-effort: a failed read stops the pass and leaves the remaining sizes
+/// and dates unknown, which the query engine and CSV writer handle safely.
+/// Degrading beats failing the whole bootstrap, since names alone still answer
+/// most queries.
+fn enrich_from_layout(
+    index: &mut VolumeIndex,
+    buf: &mut [u8],
+    cancelled: impl Fn() -> bool,
+    mut read_page: impl FnMut(bool, &mut [u8]) -> Result<Option<usize>, WinError>,
+) -> Result<LayoutPass> {
     let mut restart = true;
     loop {
         if cancelled() {
-            return Ok(None); // shutdown arrived mid-enrichment: abort cooperatively
+            return Ok(LayoutPass::Cancelled);
         }
-        match query_file_layout(handle, RECOMMENDED_LAYOUT_FLAGS, restart, &mut buf) {
+        match read_page(restart, buf) {
             Ok(Some(bytes)) => {
                 let files =
                     walk_layout_buffer(&buf[..bytes]).context("parsing FILE_LAYOUT buffer")?;
@@ -235,19 +283,16 @@ pub(crate) fn build_index(
                 }
                 restart = false;
             }
-            Ok(None) => break, // end of scan
+            Ok(None) => return Ok(LayoutPass::Complete),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "FILE_LAYOUT enrichment stopped; sizes and dates may be incomplete"
                 );
-                break;
+                return Ok(LayoutPass::Stopped);
             }
         }
     }
-    let layout_secs = layout_start.elapsed().as_secs_f64();
-
-    Ok(Some((index, enum_secs, layout_secs)))
 }
 
 /// How large the USN journal on a volume should be, given the volume's total
@@ -391,5 +436,23 @@ mod tests {
         assert_eq!(journal_target_bytes(Some(2048 * GIB)), 512 * MIB);
         assert_eq!(journal_target_bytes(Some(4096 * GIB)), GIB);
         assert_eq!(journal_target_bytes(Some(16 * 1024 * GIB)), GIB);
+    }
+
+    /// A failed FILE_LAYOUT read must end the pass as stopped, not complete.
+    /// When it ended as complete (issue #5), `--status` and every results page
+    /// claimed sizes and dates were complete on a volume where they were not.
+    #[test]
+    fn layout_pass_reports_a_failed_read_as_stopped() {
+        let pass = |result: Result<Option<usize>, WinError>| {
+            let mut index = VolumeIndex::new(NTFS_ROOT_FRN, FrnMap::sparse());
+            enrich_from_layout(&mut index, &mut [0u8; 16], || false, |_, _| result.clone())
+                .expect("no page is parsed")
+        };
+        let failed = Err(WinError {
+            code: 1, // ERROR_INVALID_FUNCTION: the volume refuses the query
+            context: "FSCTL_QUERY_FILE_LAYOUT",
+        });
+        assert_eq!(pass(failed), LayoutPass::Stopped);
+        assert_eq!(pass(Ok(None)), LayoutPass::Complete);
     }
 }
