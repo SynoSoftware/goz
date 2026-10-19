@@ -6,7 +6,7 @@
 //! changed.
 
 use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation, SelectionAsk};
-use gozler_client::Repair;
+use gozler_client::{ClientError, Repair};
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{MatchedParts, QueryError};
 use gozler_core::search::Search;
@@ -84,7 +84,7 @@ impl ListMessage {
                 DaemonFailure::NotRunning(why) => {
                     Some(why.repair().map_or(Fix::OpenServices, Fix::Repair))
                 }
-                DaemonFailure::TooOld => Some(Fix::Repair(Repair::Download)),
+                DaemonFailure::TooOld => ClientError::TooOld.repair().map(Fix::Repair),
                 // The owner check is a security check, whose fix is not the
                 // window's; the others end by themselves or by a new search.
                 DaemonFailure::NotReady
@@ -275,26 +275,28 @@ impl Results {
 
     /// Gives each chunk of `cached` that the cache still holds the rows of
     /// `rows` inside it, which a selection reply read at one moment, and
-    /// returns the positions it replaced.
+    /// returns the positions it replaced. `cached` and `rows` are in
+    /// position order.
     pub(crate) fn replace_cached(
         &mut self,
         cached: &[Range<u64>],
-        rows: &[(u64, ResultItem)],
+        rows: Vec<(u64, ResultItem)>,
     ) -> Range<u64> {
         let Shown::Rows(shown) = &mut self.shown else {
             return 0..0;
         };
+        let mut rows = rows.into_iter().peekable();
         let mut replaced: Option<Range<u64>> = None;
         for range in cached {
+            let inside: Vec<ResultItem> =
+                std::iter::from_fn(|| rows.next_if(|(position, _)| *position < range.end))
+                    .filter(|(position, _)| *position >= range.start)
+                    .map(|(_, row)| row)
+                    .collect();
             let Some(chunk) = shown.chunks.iter_mut().find(|c| c.start == range.start) else {
                 continue;
             };
-            let first = rows.partition_point(|(position, _)| *position < range.start);
-            let last = rows.partition_point(|(position, _)| *position < range.end);
-            chunk.rows = rows[first..last]
-                .iter()
-                .map(|(_, row)| row.clone())
-                .collect();
+            chunk.rows = inside;
             let all = replaced.get_or_insert(range.clone());
             *all = all.start.min(range.start)..all.end.max(range.end);
         }

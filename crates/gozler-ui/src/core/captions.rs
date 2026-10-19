@@ -10,7 +10,7 @@
 //! A catalogue key is written whole, as a literal, so the test below finds
 //! every key the code uses in `en.json`.
 
-use super::commands::{self, MenuNode};
+use super::commands::{self, INSPECTOR_BUTTONS, MenuNode};
 use super::fetch::DaemonFailure;
 use super::ids::{ControlId, DialogId};
 use super::layout::WIDEST_TOTAL;
@@ -20,9 +20,10 @@ use super::query::{
     RangeItem, SizeFilter, SizeRange, SizeUnit, SizeWord, date_items, size_items,
 };
 use super::results::{LIST_LIMIT, ListMessage, Shown};
-use super::selection::{Selection, sums};
+use super::selection::{FolderContents, Selection, Sums};
 use super::text::{self, Numbers, Strings};
 use gozler_client::NotRunning;
+use gozler_core::proto::ResultItem;
 use gozler_core::query::{Malformed, QueryError};
 use gozler_core::types::VolumePhase;
 
@@ -40,6 +41,12 @@ pub(crate) struct WindowCaptions {
     pub(crate) filters: FilterCaptions,
     /// In [`Model::columns`]' order.
     pub(crate) headers: Vec<String>,
+    /// The inspector's Open, Open file location and Copy as path.
+    pub(crate) inspector_buttons: [String; 3],
+    /// Every label an inspector field can have, which the layout sizes the
+    /// label column for, so the values keep their place in every state.
+    pub(crate) inspector_labels: [String; 8],
+    pub(crate) inspector: InspectorCaptions,
     pub(crate) status: StatusCaptions,
     pub(crate) message: Option<ListCaption>,
     /// The texts each fixed status part can show at its widest, which the
@@ -375,6 +382,9 @@ impl WindowCaptions {
                 .iter()
                 .map(|c| header(strings, *c))
                 .collect(),
+            inspector_buttons: INSPECTOR_BUTTONS.map(|(_, key)| strings.text(key).to_owned()),
+            inspector_labels: FIELD_LABELS.map(|key| strings.text(key).to_owned()),
+            inspector: InspectorCaptions::new(model, numbers),
             status: StatusCaptions::new(model, numbers),
             message: list_message(model),
             status_widest: status_widest(strings, numbers),
@@ -397,12 +407,214 @@ impl StatusCaptions {
     }
 }
 
+/// The labels of the inspector's fields: one entry's, in the pane's order,
+/// then the several entries' Total size.
+const FIELD_LABELS: [&str; 8] = [
+    "inspector.folder",
+    "inspector.full_path",
+    "inspector.type",
+    "inspector.size",
+    "inspector.date_modified",
+    "inspector.attributes",
+    "inspector.volume",
+    "inspector.total_size",
+];
+
+/// What the inspector shows for the selection (spec: Inspector pane).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct InspectorCaptions {
+    pub(crate) heading: String,
+    /// The one selected entry's name and whether it is a folder, whose icon
+    /// the heading shows.
+    pub(crate) icon: Option<(String, bool)>,
+    /// Each field's label and value, in the pane's order.
+    pub(crate) fields: Vec<(String, String)>,
+}
+
+impl InspectorCaptions {
+    pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> InspectorCaptions {
+        let strings = model.strings();
+        let label = |key: &'static str| strings.text(key).to_owned();
+        match model.selection() {
+            // The number of matches.
+            Selection::None => InspectorCaptions {
+                heading: match model.results().shown() {
+                    Shown::Rows(_) => {
+                        strings.count("status.results", model.results().total(), numbers, &[])
+                    }
+                    Shown::Nothing | Shown::Message(_) => String::new(),
+                },
+                ..InspectorCaptions::default()
+            },
+            Selection::Reading { .. } => {
+                let reading = label("status.reading");
+                InspectorCaptions {
+                    heading: reading.clone(),
+                    icon: None,
+                    fields: vec![(label("inspector.total_size"), reading)],
+                }
+            }
+            Selection::Files(files) => match files.as_slice() {
+                [file] => entry(model, numbers, file, None),
+                files => several(strings, numbers, Sums::of(files)),
+            },
+            Selection::Folder { folder, contents } => entry(model, numbers, folder, Some(contents)),
+        }
+    }
+}
+
+/// One selected entry; `contents` is a folder's.
+fn entry(
+    model: &Model,
+    numbers: &dyn Numbers,
+    entry: &ResultItem,
+    contents: Option<&FolderContents>,
+) -> InspectorCaptions {
+    let strings = model.strings();
+    let unknown = || strings.text("cell.unknown").to_owned();
+    let exact = |bytes: u64| exact_size(strings, numbers, bytes);
+    let name = text::name_of(&entry.path);
+    let kind = if entry.is_dir {
+        strings.text("inspector.folder_type").to_owned()
+    } else {
+        match gozler_core::query::extension(name.as_bytes(), false) {
+            Some(extension) => strings.format(
+                "inspector.file_type",
+                &[&String::from_utf8_lossy(extension)],
+            ),
+            None => strings.text("inspector.file").to_owned(),
+        }
+    };
+    let size = match contents {
+        Some(FolderContents::Calculating(_)) => strings.text("inspector.calculating").to_owned(),
+        Some(FolderContents::Counted(totals)) => {
+            let key = if totals.volumes_incomplete || totals.metadata_pending {
+                "inspector.folder_size_at_least"
+            } else {
+                "inspector.folder_size"
+            };
+            strings.count(key, totals.count, numbers, &[&exact(totals.size)])
+        }
+        None => entry.size.map_or_else(unknown, exact),
+    };
+    let attributes = entry.attributes.map_or_else(unknown, |attributes| {
+        let words: Vec<&str> = attributes
+            .letters()
+            .chars()
+            .filter_map(attribute_word)
+            .map(|key| strings.text(key))
+            .collect();
+        if words.is_empty() {
+            strings.text("inspector.no_attributes").to_owned()
+        } else {
+            words.join(", ")
+        }
+    });
+    let volume = model
+        .volume_of(&entry.path)
+        .map(|volume| {
+            let prefix = volume.mounted().display_prefix();
+            let key = match volume.phase {
+                VolumePhase::Live => "inspector.volume_live",
+                VolumePhase::Snapshot => "inspector.volume_snapshot",
+                VolumePhase::Bootstrapping | VolumePhase::Rescanning => "filter.location_indexing",
+                VolumePhase::Offline => "filter.location_offline",
+                VolumePhase::Failed { .. } => "filter.location_failed",
+            };
+            strings.format(key, &[prefix])
+        })
+        .unwrap_or_default();
+    let values = [
+        gozler_core::winpath::parent_of(&entry.path),
+        entry.path.clone(),
+        kind,
+        size,
+        entry
+            .mtime_ft
+            .map_or_else(unknown, |ft| numbers.date_time_seconds(ft)),
+        attributes,
+        volume,
+    ];
+    InspectorCaptions {
+        heading: name.to_owned(),
+        icon: Some((name.to_owned(), entry.is_dir)),
+        fields: FIELD_LABELS
+            .iter()
+            .zip(values)
+            .map(|(key, value)| (strings.text(key).to_owned(), value))
+            .collect(),
+    }
+}
+
+/// Several selected entries: how many files and folders, and the size of
+/// the files.
+fn several(strings: &Strings, numbers: &dyn Numbers, sums: Sums) -> InspectorCaptions {
+    let files = strings.count("inspector.files", sums.files, numbers, &[]);
+    let folders = strings.count("inspector.folders", sums.folders, numbers, &[]);
+    let heading = match (sums.files, sums.folders) {
+        (_, 0) => files,
+        (0, _) => folders,
+        _ => strings.format("inspector.files_and_folders", &[&files, &folders]),
+    };
+    let total = if sums.files == 0 {
+        strings.text("inspector.no_files").to_owned()
+    } else {
+        let size = exact_size(strings, numbers, sums.bytes);
+        if sums.unknown == 0 {
+            size
+        } else {
+            strings.count("inspector.unknown", sums.unknown, numbers, &[&size])
+        }
+    };
+    InspectorCaptions {
+        heading,
+        icon: None,
+        fields: vec![(strings.text("inspector.total_size").to_owned(), total)],
+    }
+}
+
+/// A size as the inspector shows it, with its exact bytes, as File
+/// Explorer's Properties does: "1.20 KB (1,234 bytes)".
+fn exact_size(strings: &Strings, numbers: &dyn Numbers, bytes: u64) -> String {
+    strings.format(
+        "inspector.size_exact",
+        &[
+            &text::bytes(strings, numbers, bytes),
+            &strings.count("size.bytes", bytes, numbers, &[]),
+        ],
+    )
+}
+
+/// The catalogue key of an attribute letter's word, as `attrib:` names the
+/// letters. D has none, because the Type field already says Folder.
+fn attribute_word(letter: char) -> Option<&'static str> {
+    Some(match letter {
+        'R' => "attribute.r",
+        'H' => "attribute.h",
+        'S' => "attribute.s",
+        'A' => "attribute.a",
+        'V' => "attribute.v",
+        'X' => "attribute.x",
+        'N' => "attribute.n",
+        'T' => "attribute.t",
+        'L' => "attribute.l",
+        'C' => "attribute.c",
+        'O' => "attribute.o",
+        'I' => "attribute.i",
+        'E' => "attribute.e",
+        'U' => "attribute.u",
+        'P' => "attribute.p",
+        'M' => "attribute.m",
+        _ => return None,
+    })
+}
+
 fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> [Vec<String>; 3] {
     let limit = numbers.integer(LIST_LIMIT);
     let showing = strings.format("status.showing", &[&limit, &numbers.integer(WIDEST_TOTAL)]);
     // Which size is widest depends on the font and the language, so every
-    // unit's widest forms are measured: 1,023 bytes, then 9.99, 99.9 and 999
-    // of each unit.
+    // unit's widest forms are measured: 1,023 bytes, then a three-digit size
+    // with two, one and no decimals in each unit.
     let sizes = std::iter::once(1023).chain(
         (1..=4)
             .flat_map(|unit| [9.99, 99.9, 999.0].map(|value| (value * 1024f64.powi(unit)) as u64)),
@@ -482,13 +694,13 @@ pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     match model.selection() {
         Selection::None => String::new(),
         Selection::Reading { .. } => strings.text("status.reading").to_owned(),
-        Selection::Files(files) => {
-            let (count, bytes) = sums(files);
+        Selection::Files(_) | Selection::Folder { .. } => {
+            let sums = Sums::of(model.selected_files().unwrap_or_default());
             strings.format(
                 "status.selected",
                 &[
-                    &numbers.integer(count),
-                    &text::bytes(strings, numbers, bytes),
+                    &numbers.integer(sums.entries()),
+                    &text::bytes(strings, numbers, sums.bytes),
                 ],
             )
         }
@@ -502,11 +714,8 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
         Export::Idle => String::new(),
         Export::Running { rows, .. } => strings.count("status.exporting", *rows, numbers, &[]),
         Export::Done { path, rows } => {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            strings.count("status.exported", *rows, numbers, &[&name])
+            let path = path.to_string_lossy();
+            strings.count("status.exported", *rows, numbers, &[text::name_of(&path)])
         }
     }
 }
@@ -649,6 +858,20 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// An attribute letter without a word is left out of the inspector, and
+    /// no compiler sees a letter that `gozler-core` adds to its table.
+    #[test]
+    fn every_attribute_letter_but_d_has_its_word() {
+        let strings = Strings::load(&LANGUAGES[0]);
+        for letter in gozler_core::attributes::Attributes::all_letters().chars() {
+            let key = attribute_word(letter);
+            assert!(
+                letter == 'D' || key.is_some_and(|key| strings.text(key) != key),
+                "{letter} has no word in en.json"
+            );
         }
     }
 

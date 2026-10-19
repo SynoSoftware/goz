@@ -51,18 +51,18 @@ impl Px {
             .div_euclid(i64::from(from.get()));
         Px(i32::try_from(scaled).expect("a scaled size fits in i32"))
     }
+
+    /// A size on a monitor of `dpi`, as it is saved: in DIP, so a column or
+    /// the inspector keeps its size on a monitor with another DPI.
+    pub(crate) fn to_dip(self, dpi: Dpi) -> Dip {
+        Dip(self.rescale(dpi, Dpi::new(96).expect("96 is not zero")).0)
+    }
 }
 
 /// The width of `column` on a monitor of `dpi`: its `saved` width, or else
 /// its default width.
 pub(crate) fn column_width(column: Column, saved: Option<Dip>, dpi: Dpi) -> Px {
     saved.unwrap_or(column.default_width()).to_px(dpi)
-}
-
-/// A column `width` wide on a monitor of `dpi`, as it is saved: in DIP, so
-/// the column keeps its size on a monitor with another DPI.
-pub(crate) fn saved_width(width: Px, dpi: Dpi) -> Dip {
-    Dip(width.rescale(dpi, Dpi::new(96).expect("96 is not zero")).0)
 }
 
 /// Where the list draws a cell's text after the left edge of the cell's
@@ -160,6 +160,14 @@ const ROW_PADDING: Dip = Dip(7);
 /// The header and three rows stay visible at the minimum size.
 const LIST_MIN_ROWS: i32 = 4;
 const INSPECTOR_MIN_HEIGHT: Dip = Dip(90);
+/// The inspector's icon, the shell's large icon at 100 %.
+const ICON: Dip = Dip(32);
+/// The inspector's heading keeps room for a short name when the window is
+/// narrow; a longer name ends in an ellipsis.
+const HEADING_MIN_WIDTH: Dip = Dip(100);
+/// A read-only value is this much taller than its font, the room a
+/// borderless edit control gives its text.
+const VALUE_PADDING: Dip = Dip(2);
 /// A status bar part's borders and text inset.
 const STATUS_PART_PADDING: Dip = Dip(13);
 /// Part 4 takes the rest, at least this much.
@@ -198,6 +206,10 @@ pub(crate) struct CaptionWidths {
     match_case: Px,
     match_path: Px,
     filters: FilterWidths,
+    /// The inspector's Open, Open file location and Copy as path.
+    inspector_buttons: [Px; 3],
+    /// The widest label of an inspector field.
+    inspector_labels: Px,
     /// The widest text of each fixed status bar part.
     status: [Px; 3],
 }
@@ -248,6 +260,8 @@ impl CaptionWidths {
                 attribute_names: widest(&filters.attribute_names),
                 attribute_choices: widest(&filters.attribute_choices),
             },
+            inspector_buttons: captions.inspector_buttons.each_ref().map(|b| measure(b)),
+            inspector_labels: widest(&captions.inspector_labels),
             status: captions.status_widest.each_ref().map(|texts| widest(texts)),
         }
     }
@@ -519,6 +533,134 @@ impl FilterLayout {
     }
 }
 
+/// The inspector's controls in the client area (spec: Inspector pane). The
+/// heading's row holds the icon, the heading and the buttons; the fields
+/// follow, a label and a value in each row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InspectorLayout {
+    /// The band between the list and the pane that the person drags.
+    pub(crate) splitter: Rect,
+    pub(crate) icon: Rect,
+    pub(crate) heading: Rect,
+    /// Open, Open file location and Copy as path.
+    pub(crate) buttons: [Rect; 3],
+    /// Each field row's label and value, as many as the pane's height
+    /// shows.
+    pub(crate) fields: Vec<(Rect, Rect)>,
+    /// The pane's height, and the heights the splitter can give it.
+    height: Px,
+    min_height: Px,
+    max_height: Px,
+    dpi: Dpi,
+}
+
+impl InspectorLayout {
+    /// The rows of one entry, the most that any selection shows.
+    const FIELD_ROWS: usize = 7;
+
+    /// The controls of a pane `area`, with the splitter above it.
+    fn compute(
+        area: Rect,
+        max_height: Px,
+        dpi: Dpi,
+        font_height: Px,
+        captions: &CaptionWidths,
+    ) -> InspectorLayout {
+        let px = |dip: Dip| dip.to_px(dpi);
+        let related = px(RELATED);
+        let row = Rect {
+            height: px(ICON).max(font_height + px(CONTROL_PADDING)),
+            ..area
+        };
+        let icon = Rect {
+            y: row.y + Px((row.height.0 - px(ICON).0) / 2),
+            width: px(ICON),
+            height: px(ICON),
+            ..row
+        };
+        // The buttons from the right edge, so they keep their place.
+        let mut right = area.right();
+        let mut buttons = [Rect::default(); 3];
+        for (button, caption) in buttons.iter_mut().zip(captions.inspector_buttons).rev() {
+            let height = font_height + px(CONTROL_PADDING);
+            let width = button_width(caption, dpi);
+            *button = Rect {
+                x: right - width,
+                y: row.y + Px((row.height.0 - height.0) / 2),
+                width,
+                height,
+            };
+            right = button.x - related;
+        }
+        let heading_x = icon.right() + related;
+        let heading = Rect {
+            x: heading_x,
+            width: (right - heading_x).max(px(HEADING_MIN_WIDTH)),
+            ..row
+        };
+        let value_height = font_height + px(VALUE_PADDING);
+        let value_x = area.x + captions.inspector_labels + px(GROUP);
+        let mut fields = Vec::new();
+        let mut y = row.bottom() + related;
+        while fields.len() < Self::FIELD_ROWS && y + value_height <= area.bottom() {
+            let label = Rect {
+                x: area.x,
+                y,
+                width: captions.inspector_labels,
+                height: value_height,
+            };
+            let value = Rect {
+                x: value_x,
+                width: (area.right() - value_x).max(Px(0)),
+                ..label
+            };
+            fields.push((label, value));
+            y = label.bottom() + px(LABEL_GAP);
+        }
+        InspectorLayout {
+            splitter: Rect {
+                y: area.y - px(GROUP),
+                height: px(GROUP),
+                ..area
+            },
+            icon,
+            heading,
+            buttons,
+            fields,
+            height: area.height,
+            min_height: px(INSPECTOR_MIN_HEIGHT),
+            max_height: max_height.max(px(INSPECTOR_MIN_HEIGHT)),
+            dpi,
+        }
+    }
+
+    /// The narrowest pane whose heading's row fits.
+    fn min_width(dpi: Dpi, captions: &CaptionWidths) -> Px {
+        let px = |dip: Dip| dip.to_px(dpi);
+        captions
+            .inspector_buttons
+            .iter()
+            .fold(px(ICON) + px(HEADING_MIN_WIDTH), |sum, caption| {
+                sum + px(RELATED) + button_width(*caption, dpi)
+            })
+            + px(RELATED)
+    }
+
+    /// The pane's height after the person dragged the splitter `moved`
+    /// down from where the drag started at `start`, the height then, kept
+    /// between the pane's and the list's minimum heights.
+    pub(crate) fn dragged(&self, start: Px, moved: Px) -> Dip {
+        (start - moved)
+            .clamp(self.min_height, self.max_height)
+            .to_dip(self.dpi)
+    }
+
+    /// The pane's height, where a drag starts.
+    pub(crate) fn height(&self) -> Px {
+        self.height
+    }
+}
+
 /// Every control's rectangle in the client area, the status bar's part
 /// widths, and the smallest client size at which every control fits.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -531,6 +673,8 @@ pub(crate) struct Layout {
     /// `None` while the pane is hidden.
     pub(crate) filters: Option<FilterLayout>,
     pub(crate) list: Rect,
+    /// `None` while the pane is hidden.
+    pub(crate) inspector: Option<InspectorLayout>,
     /// The one-pixel lines between the panes.
     pub(crate) dividers: Vec<Rect>,
     /// The widths of the first three parts; the fourth takes the rest.
@@ -621,29 +765,43 @@ impl Layout {
             FilterLayout::compute(pane, dpi, font_height, &captions.filters)
         });
         let list_min_height = Px((font_height + px(ROW_PADDING)).0 * LIST_MIN_ROWS);
-        let mut list_bottom = bottom;
-        if panes.inspector {
+        let inspector_height = panes.inspector.then(|| {
             let room = bottom - top - list_min_height - group;
-            let inspector = px(panes.inspector_height)
-                .min(room)
-                .max(px(INSPECTOR_MIN_HEIGHT));
-            list_bottom = bottom - inspector - group;
-            dividers.push(Rect {
-                x: left,
-                y: list_bottom + Px((group.0 - 1) / 2),
-                width: (client.width - margin - left).max(Px(0)),
-                height: Px(1),
-            });
-        }
+            (
+                px(panes.inspector_height)
+                    .min(room)
+                    .max(px(INSPECTOR_MIN_HEIGHT)),
+                room,
+            )
+        });
         let list = Rect {
             x: left,
             y: top,
             width: (client.width - margin - left).max(px(LIST_MIN_WIDTH)),
-            height: (list_bottom - top).max(list_min_height),
+            height: (bottom - top - inspector_height.map_or(Px(0), |(height, _)| height + group))
+                .max(list_min_height),
         };
+        let inspector = inspector_height.map(|(height, room)| {
+            dividers.push(Rect {
+                y: list.bottom() + Px((group.0 - 1) / 2),
+                height: Px(1),
+                ..list
+            });
+            let area = Rect {
+                y: list.bottom() + group,
+                height,
+                ..list
+            };
+            InspectorLayout::compute(area, room, dpi, font_height, captions)
+        });
 
         let status_parts = captions.status.map(|width| width + px(STATUS_PART_PADDING));
-        let body_width = left + px(LIST_MIN_WIDTH) + margin;
+        let body_width =
+            left + if panes.inspector {
+                px(LIST_MIN_WIDTH).max(InspectorLayout::min_width(dpi, captions))
+            } else {
+                px(LIST_MIN_WIDTH)
+            } + margin;
         let status_width = status_parts
             .iter()
             .fold(px(STATUS_REST_MIN_WIDTH), |sum, w| sum + *w);
@@ -670,6 +828,7 @@ impl Layout {
             match_path,
             filters,
             list,
+            inspector,
             dividers,
             status_parts,
             min_client,
@@ -771,6 +930,21 @@ mod tests {
                             layout.list,
                         ];
                         controls.extend(&layout.dividers);
+                        if let Some(inspector) = &layout.inspector {
+                            controls.extend([inspector.icon, inspector.heading]);
+                            controls.extend(inspector.buttons);
+                            for (label, value) in &inspector.fields {
+                                controls.extend([*label, *value]);
+                            }
+                            // The first height shows one entry's every field
+                            // (spec: Inspector pane).
+                            assert!(
+                                client == min
+                                    || inspector.fields.len() == InspectorLayout::FIELD_ROWS,
+                                "{} fields show at {dpi:?}",
+                                inspector.fields.len()
+                            );
+                        }
                         if let Some(filters) = &layout.filters {
                             controls.push(filters.pane);
                             // The pane scrolls instead of setting the

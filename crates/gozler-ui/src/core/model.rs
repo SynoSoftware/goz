@@ -8,18 +8,20 @@
 
 use super::fetch::{
     Ask, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose, WriteFailure,
+    inside,
 };
 use super::layout::{Dip, Panes};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{ListButton, ListMessage, Results, RowsChange, Shown};
-use super::selection::Selection;
+use super::selection::{FolderContents, Selection};
 use super::settings::{Placement, SavedColumn, Settings};
-use super::text::Strings;
+use super::text::{self, Strings};
 use gozler_core::escompat::EsPlan;
 use gozler_core::output::Format;
 use gozler_core::proto::{DaemonStatus, ResultItem, VolumeStatus};
-use gozler_core::query::QueryStart;
+use gozler_core::query::{ParsedQuery, QueryStart};
 use gozler_core::scope::{Coverage, leaves_matches_out};
+use gozler_core::search::Search;
 use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
 use serde::{Deserialize, Serialize};
@@ -67,7 +69,9 @@ pub(crate) enum Then {
     /// The search, once the person has stopped typing for a moment.
     SearchSoon,
     /// [`Model::read_selection`], once the selection has stopped changing
-    /// for a moment, so one request serves a run of Shift+Down presses.
+    /// for a moment, so one request serves a run of Shift+Down presses. The
+    /// live `Selection` request ends now, because it reads an older
+    /// selection (spec: T6).
     ReadSelectionSoon,
     /// Ends the live request of the purpose; its reply would be stale.
     Cancel(Purpose),
@@ -82,7 +86,7 @@ pub(crate) enum Change {
     Choice,
     /// A filter, which the filter pane shows.
     Filters,
-    /// The filter pane was shown or hidden.
+    /// A pane was shown or hidden, or the inspector's height changed.
     Panes,
     /// The column at `index` of [`Model::columns`] was added.
     ColumnShown {
@@ -116,6 +120,9 @@ pub(crate) enum Change {
     SelectionRead {
         rows: Range<u64>,
     },
+    /// The selected folder's contents were counted, which only the
+    /// inspector shows.
+    FolderCounted,
     /// The export started, wrote more rows, ended or was cancelled.
     Export,
     /// The export to `path` failed and its partial file is deleted.
@@ -181,10 +188,12 @@ impl ExportFormat {
     /// The format a chosen file's name asks for, or `chosen`, the type the
     /// save dialog shows, when its extension is none of the formats.
     pub(crate) fn of(path: &Path, chosen: ExportFormat) -> ExportFormat {
-        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let path = path.to_string_lossy();
+        let extension =
+            gozler_core::query::extension(text::name_of(&path).as_bytes(), false).unwrap_or(b"");
         ExportFormat::ALL
             .into_iter()
-            .find(|f| f.extension().eq_ignore_ascii_case(extension))
+            .find(|f| f.extension().as_bytes().eq_ignore_ascii_case(extension))
             .unwrap_or(chosen)
     }
 
@@ -253,9 +262,11 @@ impl Model {
     }
 
     pub(crate) fn panes(&self) -> Panes {
+        let window = &self.settings.window;
         Panes {
-            filters: self.settings.window.filter_pane,
-            ..Panes::default()
+            filters: window.filter_pane,
+            inspector: window.inspector,
+            inspector_height: window.inspector_height,
         }
     }
 
@@ -271,6 +282,13 @@ impl Model {
     /// The volumes of the latest status reply.
     fn volumes(&self) -> &[VolumeStatus] {
         self.status.as_ref().map_or(&[], |s| &s.volumes)
+    }
+
+    /// The volume that holds `path`, as the latest status reply names it.
+    pub(crate) fn volume_of(&self, path: &str) -> Option<&VolumeStatus> {
+        Coverage::of(self.volumes(), Some(path), false)
+            .volumes()
+            .next()
     }
 
     /// The Location list's items.
@@ -425,6 +443,24 @@ impl Model {
         Accepted::only(Change::Panes)
     }
 
+    /// Shows or hides the inspector (spec: C14).
+    pub(crate) fn toggle_inspector(&mut self) -> Accepted {
+        let window = &mut self.settings.window;
+        window.inspector = !window.inspector;
+        Accepted::only(Change::Panes)
+    }
+
+    /// The person dragged the splitter to `height`, which the layout
+    /// clamped.
+    pub(crate) fn set_inspector_height(&mut self, height: Dip) -> Accepted {
+        let window = &mut self.settings.window;
+        if window.inspector_height == height {
+            return Accepted::only(Change::Nothing);
+        }
+        window.inspector_height = height;
+        Accepted::only(Change::Panes)
+    }
+
     /// Shows or hides `column` (spec: C15). A shown column joins at the
     /// end; Name cannot be hidden.
     pub(crate) fn toggle_column(&mut self, column: Column) -> Accepted {
@@ -505,23 +541,58 @@ impl Model {
     /// those rows, the files the person sees; otherwise it is read
     /// (design: The selection).
     pub(crate) fn set_selection(&mut self, positions: Vec<Range<u64>>) -> Accepted {
+        let older = self.selection.asked();
         let positions: Vec<Range<u64>> = positions.into_iter().filter(|r| !r.is_empty()).collect();
-        self.selection = if positions.is_empty() || self.results.shown_ask().is_none() {
-            Selection::None
+        let then = if positions.is_empty() || self.results.shown_ask().is_none() {
+            self.selection = Selection::None;
+            None
         } else {
             match self.results.cached_rows(&positions) {
-                Some(files) => Selection::Files(files),
-                None => Selection::Reading {
-                    positions,
-                    asked: None,
-                },
+                Some(files) => self.select(files),
+                None => {
+                    self.selection = Selection::Reading {
+                        positions,
+                        asked: None,
+                    };
+                    Some(Then::ReadSelectionSoon)
+                }
             }
         };
+        // The request for the older selection reads other files (spec: T6,
+        // T7); a new request of the purpose ends it too.
+        let then = then.or_else(|| older.map(|_| Then::Cancel(Purpose::Selection)));
         Accepted {
             change: Change::Selection,
-            then: matches!(self.selection, Selection::Reading { .. })
-                .then_some(Then::ReadSelectionSoon),
+            then,
         }
+    }
+
+    /// Selects `files`, which are read; one folder alone also asks for its
+    /// contents, which the inspector shows (spec: Inspector pane).
+    fn select(&mut self, mut files: Vec<ResultItem>) -> Option<Then> {
+        let folder = match files.as_slice() {
+            [entry] if entry.is_dir => files.pop().expect("the selection is one folder"),
+            _ => {
+                self.selection = Selection::Files(files);
+                return None;
+            }
+        };
+        let generation = self.generation();
+        let search = Search {
+            query: ParsedQuery {
+                clauses: Vec::new(),
+                match_case: false,
+            },
+            scope: Some(folder.path.clone()),
+        };
+        self.selection = Selection::Folder {
+            folder,
+            contents: FolderContents::Calculating(generation),
+        };
+        Some(Then::Fetch(Fetch {
+            generation,
+            ask: Ask::FolderSize(search),
+        }))
     }
 
     /// The request for the selection's rows, if it waits for one.
@@ -669,7 +740,7 @@ impl Model {
             Purpose::Status if self.status_asked == Some(generation) => {
                 self.accept_status(fetched.outcome)
             }
-            Purpose::Selection if matches!(self.selection, Selection::Reading { asked: Some(g), .. } if g == generation) => {
+            Purpose::Selection if self.selection.asked() == Some(generation) => {
                 self.accept_selection(fetched.outcome)
             }
             Purpose::Export if matches!(self.export, Export::Running { generation: g, .. } if g == generation) => {
@@ -764,35 +835,58 @@ impl Model {
     }
 
     fn accept_selection(&mut self, outcome: Outcome) -> Accepted {
-        let Selection::Reading { positions, .. } =
-            std::mem::replace(&mut self.selection, Selection::None)
-        else {
-            unreachable!("accept checked that the selection is read")
-        };
-        match outcome {
-            Outcome::Selection(reply) => {
-                let files: Vec<ResultItem> = positions
-                    .iter()
-                    .flat_map(Range::clone)
-                    .filter_map(|position| {
-                        let at = reply
-                            .rows
-                            .binary_search_by_key(&position, |(p, _)| *p)
-                            .ok()?;
-                        Some(reply.rows[at].1.clone())
-                    })
-                    .collect();
-                let rows = self.results.replace_cached(&reply.cached, &reply.rows);
-                if !files.is_empty() {
-                    self.selection = Selection::Files(files);
+        match (
+            std::mem::replace(&mut self.selection, Selection::None),
+            outcome,
+        ) {
+            (Selection::Reading { positions, .. }, Outcome::Selection(reply)) => {
+                // Each row moves to the files or to the cache, and only a row
+                // that is both is copied, so a selection of 100,000 rows is
+                // held once (spec: Memory budget).
+                let selected = positions.iter().map(|r| r.end - r.start).sum::<u64>();
+                let mut files = Vec::with_capacity(usize::try_from(selected).unwrap_or(0));
+                let mut cached = Vec::new();
+                for (position, row) in reply.rows {
+                    match (
+                        inside(&positions, position),
+                        inside(&reply.cached, position),
+                    ) {
+                        (true, true) => {
+                            files.push(row.clone());
+                            cached.push((position, row));
+                        }
+                        (true, false) => files.push(row),
+                        (false, _) => cached.push((position, row)),
+                    }
                 }
-                Accepted::only(Change::SelectionRead { rows })
+                let rows = self.results.replace_cached(&reply.cached, cached);
+                let then = if files.is_empty() {
+                    None
+                } else {
+                    self.select(files)
+                };
+                Accepted {
+                    change: Change::SelectionRead { rows },
+                    then,
+                }
             }
-            Outcome::Failed(failure) if !self.results.searching() => self.show_failure(failure),
+            (Selection::Folder { folder, .. }, Outcome::Totals(totals)) => {
+                self.selection = Selection::Folder {
+                    folder,
+                    contents: FolderContents::Counted(totals),
+                };
+                Accepted::only(Change::FolderCounted)
+            }
+            (_, Outcome::Failed(failure)) if !self.results.searching() => {
+                self.show_failure(failure)
+            }
             // A search in flight shows its own reply, which clears the
             // list's selection.
-            Outcome::Failed(_) => Accepted::only(Change::Selection),
-            other => unreachable!("a selection request's reply is rows or a failure: {other:?}"),
+            (_, Outcome::Failed(_)) => Accepted::only(Change::Selection),
+            (selection, other) => unreachable!(
+                "a selection request's reply is its rows, its folder's totals or a failure: \
+                 {selection:?}, {other:?}"
+            ),
         }
     }
 
@@ -1427,7 +1521,11 @@ pub(crate) mod tests {
         let mut model = showing(50_000);
         model.set_selection(vec![40_000..40_001]);
         let older = model.read_selection().expect("the selection is read");
-        model.set_selection(vec![40_000..40_002]);
+        // The window ends the older read when it schedules the new one.
+        assert_eq!(
+            model.set_selection(vec![40_000..40_002]).then,
+            Some(Then::ReadSelectionSoon)
+        );
         assert_eq!(
             model.accept(selection_reply(&older, "D:")).change,
             Change::Nothing
@@ -1435,6 +1533,77 @@ pub(crate) mod tests {
         assert_eq!(paths(&model), Vec::<&str>::new());
         let newer = model.read_selection().expect("the new selection is read");
         assert!(newer.generation > older.generation);
+    }
+
+    /// The request for one selected folder's contents, which `accepted`
+    /// starts.
+    fn folder_size(accepted: Accepted) -> Fetch {
+        match accepted.then {
+            Some(Then::Fetch(
+                fetch @ Fetch {
+                    ask: Ask::FolderSize(_),
+                    ..
+                },
+            )) => fetch,
+            other => panic!("a folder size request: {other:?}"),
+        }
+    }
+
+    fn totals(fetch: &Fetch, count: u64) -> Fetched {
+        Fetched {
+            purpose: Purpose::Selection,
+            generation: fetch.generation,
+            outcome: Outcome::Totals(gozler_core::proto::QueryTotals {
+                count,
+                size: 2048,
+                volumes_incomplete: false,
+                metadata_pending: false,
+            }),
+        }
+    }
+
+    /// T7: the size of a folder the person has left names another folder,
+    /// and a selection that needs no count must still end the older one.
+    #[test]
+    fn t7_a_selection_changed_while_a_folder_is_counted_drops_the_older_count() {
+        let mut model = model();
+        let fetch = search(&mut model, "report");
+        let mut reply = rows(&fetch, 10);
+        if let Outcome::Rows(chunk) = &mut reply.outcome {
+            chunk.rows[0].is_dir = true;
+            chunk.rows[1].is_dir = true;
+        }
+        model.accept(reply);
+        let size = |model: &Model| {
+            captions::InspectorCaptions::new(model, &English).fields[3]
+                .1
+                .clone()
+        };
+
+        let first = folder_size(model.set_selection(vec![0..1]));
+        assert_eq!(size(&model), "Calculating…");
+        let second = folder_size(model.set_selection(vec![1..2]));
+        let Ask::FolderSize(search) = &second.ask else {
+            unreachable!("folder_size returns a folder size request")
+        };
+        assert_eq!(search.scope.as_deref(), Some(r"C:\row1"));
+        assert_eq!(model.accept(totals(&first, 5)).change, Change::Nothing);
+        assert_eq!(size(&model), "Calculating…");
+        assert_eq!(
+            model.accept(totals(&second, 7)),
+            Accepted::only(Change::FolderCounted)
+        );
+        assert_eq!(size(&model), "2.00 KB (2,048 bytes) in 7 items");
+
+        let _third = folder_size(model.set_selection(vec![0..1]));
+        assert_eq!(
+            model.set_selection(vec![2..3]).then,
+            Some(Then::Cancel(Purpose::Selection))
+        );
+        assert_eq!(
+            captions::InspectorCaptions::new(&model, &English).heading,
+            "row2"
+        );
     }
 
     /// A failed read left unread would say "Reading the selection…", with

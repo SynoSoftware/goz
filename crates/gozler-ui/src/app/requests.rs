@@ -9,7 +9,7 @@ use crate::core::fetch::{
 use crate::win::wake::Waker;
 use gozler_client::{CancelToken, Client, ClientError};
 use gozler_core::output::ResultWriter;
-use gozler_core::proto::{PIPE_NAME, QueryResults};
+use gozler_core::proto::{PIPE_NAME, QueryResults, Returns};
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, BufWriter};
@@ -139,6 +139,9 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
             Ask::Status => client.status().map(Outcome::Status),
             Ask::Rows(ask) => rows(&mut client, &ask).map(Outcome::Rows),
             Ask::Selection(ask) => selection(&mut client, ask).map(Outcome::Selection),
+            Ask::FolderSize(search) => client
+                .totals(search.request(Returns::Totals))
+                .map(Outcome::Totals),
             Ask::Export(ask) => Ok(export(&mut client, &ask, cancel, reply)),
         });
     match result {
@@ -173,7 +176,15 @@ fn rows(client: &mut Client, ask: &ChunkAsk) -> Result<Chunk, ClientError> {
 /// row as its page arrives, so it holds at most the selection and the
 /// cache.
 fn selection(client: &mut Client, ask: SelectionAsk) -> Result<SelectionRows, ClientError> {
-    let mut rows = Vec::new();
+    // Sized up front, because growing a vector of 100,000 rows copies it
+    // and holds both copies for a moment (spec: Memory budget).
+    let kept: u64 = ask
+        .positions
+        .iter()
+        .chain(&ask.cached)
+        .map(|r| r.end - r.start)
+        .sum();
+    let mut rows = Vec::with_capacity(usize::try_from(kept).unwrap_or(0));
     let mut position = ask.span.start;
     client.query(ask.span.request(), |page| {
         for item in page.items {

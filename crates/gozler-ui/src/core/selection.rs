@@ -3,7 +3,7 @@
 //! them once per user action (docs/plans/ui-design.md: The selection).
 
 use super::fetch::Generation;
-use gozler_core::proto::ResultItem;
+use gozler_core::proto::{QueryTotals, ResultItem};
 use std::ops::Range;
 
 /// Open and Open file location stop here, because File Explorer asks before
@@ -20,8 +20,23 @@ pub(crate) enum Selection {
         positions: Vec<Range<u64>>,
         asked: Option<Generation>,
     },
-    /// In position order, each at most once.
+    /// In position order, each at most once; never one folder alone, which
+    /// is [`Selection::Folder`].
     Files(Vec<ResultItem>),
+    /// One folder alone, whose contents the inspector shows (spec:
+    /// Inspector pane).
+    Folder {
+        folder: ResultItem,
+        contents: FolderContents,
+    },
+}
+
+/// What the inspector knows of the contents of the one selected folder.
+#[derive(Debug, PartialEq)]
+pub(crate) enum FolderContents {
+    /// Its one request is in flight as this generation.
+    Calculating(Generation),
+    Counted(QueryTotals),
 }
 
 impl Selection {
@@ -30,21 +45,65 @@ impl Selection {
     pub(crate) fn files(&self) -> Option<&[ResultItem]> {
         match self {
             Selection::Files(files) => Some(files),
+            Selection::Folder { folder, .. } => Some(std::slice::from_ref(folder)),
             Selection::None | Selection::Reading { .. } => None,
+        }
+    }
+
+    /// The request in flight for the selection: its rows, or the contents of
+    /// its folder.
+    pub(crate) fn asked(&self) -> Option<Generation> {
+        match self {
+            Selection::Reading { asked, .. } => *asked,
+            Selection::Folder {
+                contents: FolderContents::Calculating(generation),
+                ..
+            } => Some(*generation),
+            Selection::None
+            | Selection::Files(_)
+            | Selection::Folder {
+                contents: FolderContents::Counted(_),
+                ..
+            } => None,
         }
     }
 }
 
-/// How many entries are selected, and the size of the selected files whose
-/// size is known; a folder's size counts only through the files below it, so
-/// it is left out (spec: Status bar).
-pub(crate) fn sums(files: &[ResultItem]) -> (u64, u64) {
-    let bytes = files
-        .iter()
-        .filter(|file| !file.is_dir)
-        .filter_map(|file| file.size)
-        .sum();
-    (files.len() as u64, bytes)
+/// What status part 2 and the inspector sum from the selected entries
+/// (spec: Status bar, Inspector pane).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sums {
+    pub(crate) files: u64,
+    pub(crate) folders: u64,
+    /// The size of the files whose size is known. A folder's size counts only
+    /// through the files below it, so a selected folder and a selected file
+    /// below it would count twice; it is left out.
+    pub(crate) bytes: u64,
+    /// The files whose size is unknown.
+    pub(crate) unknown: u64,
+}
+
+impl Sums {
+    pub(crate) fn of(entries: &[ResultItem]) -> Sums {
+        entries.iter().fold(Sums::default(), |mut sums, entry| {
+            match (entry.is_dir, entry.size) {
+                (true, _) => sums.folders += 1,
+                (false, Some(size)) => {
+                    sums.files += 1;
+                    sums.bytes += size;
+                }
+                (false, None) => {
+                    sums.files += 1;
+                    sums.unknown += 1;
+                }
+            }
+            sums
+        })
+    }
+
+    pub(crate) fn entries(self) -> u64 {
+        self.files + self.folders
+    }
 }
 
 /// The full path of `file` as UTF-16, exactly as Windows names it, also

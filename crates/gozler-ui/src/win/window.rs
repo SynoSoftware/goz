@@ -13,26 +13,29 @@ use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
+    ScreenToClient,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_F12, VK_MENU,
-    VK_OEM_COMMA, VK_RETURN, VK_SHIFT,
+    GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE,
+    VK_F1, VK_F12, VK_MENU, VK_OEM_COMMA, VK_RETURN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-    GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW, HICON, IDC_ARROW, IMAGE_ICON,
-    IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
-    PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
-    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_TRACKPOS, SM_CXICON,
-    SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SendMessageW, SetTimer, SetWindowLongPtrW,
-    SetWindowPlacement, TranslateAcceleratorW, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT,
-    WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
+    GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW, HICON, HTCLIENT,
+    IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW,
+    LoadImageW, MINMAXINFO, MSG, PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN,
+    SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT,
+    SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
+    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement,
+    TranslateAcceleratorW, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
     WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ENDSESSION, WM_GETMINMAXINFO,
-    WM_INITMENUPOPUP, WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
-    WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
+    WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CLIPCHILDREN, WS_EX_LEFT,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -91,6 +94,26 @@ pub(crate) enum Message<'a> {
         /// In screen coordinates.
         point: (i32, i32),
     },
+    /// Windows asks for the cursor over `over`, in its client area when
+    /// `client` is set; a handler that sets one answers 1.
+    SetCursor {
+        over: Hwnd,
+        client: bool,
+    },
+    /// The left button went down on the window itself, not on a control,
+    /// at `point` in client coordinates.
+    LeftButtonDown {
+        point: (i32, i32),
+    },
+    /// The mouse moved over the window, or anywhere while the window has
+    /// the mouse captured, to `point` in client coordinates.
+    MouseMove {
+        point: (i32, i32),
+    },
+    LeftButtonUp,
+    /// The window lost the mouse capture, by its own release or another
+    /// window's.
+    CaptureChanged,
     InitMenuPopup,
     CtlColorStatic(super::gdi::StaticColors),
     Paint,
@@ -475,6 +498,18 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                 i32::from(high(lparam.0 as usize) as i16),
             ),
         },
+        WM_SETCURSOR => Message::SetCursor {
+            over: Hwnd(HWND(wparam.0 as *mut _)),
+            client: u32::from(low(lparam.0 as usize)) == HTCLIENT,
+        },
+        WM_LBUTTONDOWN => Message::LeftButtonDown {
+            point: client_point(lparam),
+        },
+        WM_MOUSEMOVE => Message::MouseMove {
+            point: client_point(lparam),
+        },
+        WM_LBUTTONUP => Message::LeftButtonUp,
+        WM_CAPTURECHANGED => Message::CaptureChanged,
         WM_INITMENUPOPUP => Message::InitMenuPopup,
         WM_CTLCOLORSTATIC => Message::CtlColorStatic(super::gdi::StaticColors::from_wparam(wparam)),
         WM_PAINT => Message::Paint,
@@ -492,6 +527,16 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_DESTROY => Message::Destroy,
         _ => Message::Other(msg),
     }
+}
+
+/// A mouse message's point, two signed words, because a captured mouse can
+/// be left of or above the window.
+fn client_point(lparam: LPARAM) -> (i32, i32) {
+    let value = lparam.0 as usize;
+    (
+        i32::from((value & 0xffff) as u16 as i16),
+        i32::from(((value >> 16) & 0xffff) as u16 as i16),
+    )
 }
 
 /// What the `WM_VSCROLL` code `code` asks of `from`'s vertical scroll bar;
@@ -564,5 +609,40 @@ impl Hwnd {
     pub(crate) fn kill_timer(self, id: usize) {
         // SAFETY: plain values; a timer that does not run is no error here.
         let _ = unsafe { KillTimer(Some(self.0), id) };
+    }
+
+    /// Sends the window every mouse message until [`release_mouse`], as a
+    /// drag needs.
+    pub(crate) fn capture_mouse(self) {
+        // SAFETY: plain values.
+        unsafe { SetCapture(self.0) };
+    }
+
+    /// Where the cursor is, in the window's client coordinates.
+    pub(crate) fn cursor_point(self) -> Option<(i32, i32)> {
+        let mut point = POINT::default();
+        // SAFETY: `point` is a local each call fills in or converts.
+        unsafe {
+            GetCursorPos(&mut point).ok()?;
+            ScreenToClient(self.0, &mut point).ok().ok()?;
+        }
+        Some((point.x, point.y))
+    }
+}
+
+/// Ends this thread's mouse capture, which sends `WM_CAPTURECHANGED`.
+pub(crate) fn release_mouse() {
+    // SAFETY: no parameters; releasing a capture nobody holds is no error
+    // here.
+    let _ = unsafe { ReleaseCapture() };
+}
+
+/// Shows the cursor that resizes up and down, as over a splitter.
+pub(crate) fn show_resize_cursor() {
+    // SAFETY: IDC_SIZENS is a predefined cursor, which is never destroyed.
+    unsafe {
+        if let Ok(cursor) = LoadCursorW(None, IDC_SIZENS) {
+            SetCursor(Some(cursor));
+        }
     }
 }

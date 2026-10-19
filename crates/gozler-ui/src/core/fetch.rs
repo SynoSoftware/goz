@@ -5,7 +5,7 @@
 
 use gozler_client::NotRunning;
 use gozler_core::output::ResultFormat;
-use gozler_core::proto::{DaemonStatus, ResultItem, Returns, Rows, SearchRequest};
+use gozler_core::proto::{DaemonStatus, QueryTotals, ResultItem, Returns, Rows, SearchRequest};
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
 use std::io;
@@ -20,7 +20,8 @@ pub(crate) enum Purpose {
     /// The list's rows: a new search's first chunk, or a chunk of the shown
     /// search.
     Results,
-    /// The selected rows that the cache lacks.
+    /// The selected rows that the cache lacks, or the contents of the one
+    /// selected folder.
     Selection,
     Status,
     Export,
@@ -52,6 +53,10 @@ pub(crate) enum Ask {
     /// One chunk of rows, gathered from all its pages.
     Rows(ChunkAsk),
     Selection(SelectionAsk),
+    /// The entries below the one selected folder and the summed size of its
+    /// files: the totals of an empty search scoped to it, as `gozler
+    /// -get-folder-size` asks.
+    FolderSize(Search),
     Export(ExportAsk),
     Status,
 }
@@ -99,12 +104,14 @@ pub(crate) struct SelectionAsk {
 impl SelectionAsk {
     /// Whether the row at `position` is one the reply carries.
     pub(crate) fn keeps(&self, position: u64) -> bool {
-        let inside = |ranges: &[Range<u64>]| {
-            let after = ranges.partition_point(|r| r.end <= position);
-            ranges.get(after).is_some_and(|r| r.contains(&position))
-        };
-        inside(&self.positions) || inside(&self.cached)
+        inside(&self.positions, position) || inside(&self.cached, position)
     }
+}
+
+/// Whether `position` is in one of `ranges`, which are sorted and apart.
+pub(crate) fn inside(ranges: &[Range<u64>], position: u64) -> bool {
+    let after = ranges.partition_point(|r| r.end <= position);
+    ranges.get(after).is_some_and(|r| r.contains(&position))
 }
 
 /// Every match of `search` in the order `sort`, written to `path` as
@@ -137,7 +144,7 @@ impl Fetch {
     pub(crate) fn purpose(&self) -> Purpose {
         match self.ask {
             Ask::Rows(_) => Purpose::Results,
-            Ask::Selection(_) => Purpose::Selection,
+            Ask::Selection(_) | Ask::FolderSize(_) => Purpose::Selection,
             Ask::Export(_) => Purpose::Export,
             Ask::Status => Purpose::Status,
         }
@@ -157,6 +164,8 @@ pub(crate) struct Fetched {
 pub(crate) enum Outcome {
     Rows(Chunk),
     Selection(SelectionRows),
+    /// The reply to [`Ask::FolderSize`].
+    Totals(QueryTotals),
     Status(DaemonStatus),
     /// The rows an export has written so far.
     ExportProgress {

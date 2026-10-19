@@ -9,7 +9,7 @@ use windows::Win32::Globalization::{
     DATE_SHORTDATE, GetDateFormatEx, GetLocaleInfoEx, GetNumberFormatEx, GetTimeFormatEx,
     GetUserPreferredUILanguages, LOCALE_ILZERO, LOCALE_INEGNUMBER, LOCALE_RETURN_NUMBER,
     LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND, MUI_LANGUAGE_NAME, NUMBERFMTW,
-    TIME_NOSECONDS,
+    TIME_FORMAT_FLAGS, TIME_NOSECONDS,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -79,28 +79,12 @@ impl Numbers for WindowsNumbers {
         self.format(&format!("{n:.*}", usize::from(digits)), digits)
     }
 
-    /// Empty for a time that `jiff` cannot hold.
     fn date_time(&self, filetime: i64) -> String {
-        let Ok(at) =
-            jiff::Timestamp::from_millisecond(gozler_core::output::filetime_to_unix_ms(filetime))
-        else {
-            return String::new();
-        };
-        let local = at.to_zoned(jiff::tz::TimeZone::system()).datetime();
-        let time = system_time(local);
-        let mut clock = [0u16; 64];
-        // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most
-        // its buffer's length.
-        let clock_len = unsafe {
-            GetTimeFormatEx(
-                PCWSTR::null(),
-                TIME_NOSECONDS,
-                Some(&time),
-                PCWSTR::null(),
-                Some(&mut clock),
-            )
-        };
-        format!("{} {}", short_date(&time), text(&clock, clock_len))
+        date_time(filetime, TIME_NOSECONDS)
+    }
+
+    fn date_time_seconds(&self, filetime: i64) -> String {
+        date_time(filetime, TIME_FORMAT_FLAGS(0))
     }
 
     fn date(&self, date: jiff::civil::Date) -> String {
@@ -112,6 +96,31 @@ impl Numbers for WindowsNumbers {
     fn decimal_separator(&self) -> &str {
         &self.decimal_text
     }
+}
+
+/// A FILETIME in the short date and the time format with `time_flags`;
+/// empty for a time that `jiff` cannot hold.
+fn date_time(filetime: i64, time_flags: TIME_FORMAT_FLAGS) -> String {
+    let Ok(at) =
+        jiff::Timestamp::from_millisecond(gozler_core::output::filetime_to_unix_ms(filetime))
+    else {
+        return String::new();
+    };
+    let local = at.to_zoned(jiff::tz::TimeZone::system()).datetime();
+    let time = system_time(local);
+    let mut clock = [0u16; 64];
+    // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most its
+    // buffer's length.
+    let clock_len = unsafe {
+        GetTimeFormatEx(
+            PCWSTR::null(),
+            time_flags,
+            Some(&time),
+            PCWSTR::null(),
+            Some(&mut clock),
+        )
+    };
+    format!("{} {}", short_date(&time), text(&clock, clock_len))
 }
 
 fn system_time(local: jiff::civil::DateTime) -> SYSTEMTIME {

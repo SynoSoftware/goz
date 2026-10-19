@@ -127,7 +127,7 @@ impl CommandId {
                 C::Inspector => (
                     "command.inspector",
                     &[],
-                    never,
+                    always,
                     Some(|s| s.model.panes().inspector),
                 ),
                 C::Columns => ("command.columns", &[], always, None),
@@ -206,6 +206,11 @@ pub(crate) enum Focus {
     /// The Date modified or Size list, closed, whose `Enter` opens the
     /// custom range's dialog when Custom… is selected (spec: Filter pane).
     RangeFilter,
+    /// One of the inspector's read-only values, whose text Copy and Select
+    /// all act on (spec: Inspector pane).
+    Value {
+        text_selected: bool,
+    },
     Other,
 }
 
@@ -249,7 +254,7 @@ fn one_file(state: &State) -> bool {
 /// Copy acts on the focused control (spec: C8).
 fn copy(state: &State) -> bool {
     match state.focus {
-        Focus::SearchBox { text_selected } => text_selected,
+        Focus::SearchBox { text_selected } | Focus::Value { text_selected } => text_selected,
         Focus::List => files(state),
         Focus::RangeFilter | Focus::Other => false,
     }
@@ -372,7 +377,7 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
             }
         }
         Focus::RangeFilter => const { &[(Keystroke::plain(Key::Enter), KeyAction::ChooseCustom)] },
-        Focus::Other => &[],
+        Focus::Value { .. } | Focus::Other => &[],
     };
     table
         .iter()
@@ -626,6 +631,15 @@ pub(crate) fn row_menu() -> Vec<Vec<MenuItem>> {
     ]
 }
 
+/// The inspector's buttons: each runs its command, and its caption differs
+/// from the command's menu label only in an access key that the main
+/// window's other controls leave free (spec: Inspector pane).
+pub(crate) const INSPECTOR_BUTTONS: [(CommandId, &str); 3] = [
+    (CommandId::Open, "inspector.open"),
+    (CommandId::OpenFileLocation, "inspector.open_file_location"),
+    (CommandId::CopyAsPath, "inspector.copy_as_path"),
+];
+
 /// The item that File shows in Export results…' place: Cancel export while
 /// an export runs (spec: Menus).
 pub(crate) fn export_slot(model: &Model) -> MenuItem {
@@ -816,6 +830,8 @@ mod tests {
                 "filter.size",
                 "filter.attributes",
             ]
+            .into_iter()
+            .chain(INSPECTOR_BUTTONS.map(|(_, key)| key))
             .map(|key| strings.text(key));
             assert_unique(language.tag, window, &mut bar_keys);
             // The list's message offers Clear filters and Choose folder…

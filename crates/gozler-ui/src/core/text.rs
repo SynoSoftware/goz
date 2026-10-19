@@ -98,6 +98,8 @@ pub(crate) trait Numbers {
     /// A FILETIME as local date and time in the short date and time
     /// formats, as File Explorer's Date modified column shows it.
     fn date_time(&self, filetime: i64) -> String;
+    /// [`Numbers::date_time`] with the seconds, as the inspector shows it.
+    fn date_time_seconds(&self, filetime: i64) -> String;
     /// A day in the short date format.
     fn date(&self, date: jiff::civil::Date) -> String;
     /// The separator of a number's decimals, such as `.` or `,`.
@@ -335,29 +337,33 @@ pub(crate) fn parse_catalogue(text: &str) -> Result<Vec<(String, String)>, serde
 
 /// A size as the selection and the inspector show it: bytes below 1 KB,
 /// then three significant digits in KB, MB, GB or TB, as File Explorer's
-/// Properties does. A value that rounds to 1,000 moves to the next unit, so
-/// 999.6 KB shows as 0.98 MB.
+/// Properties does. The further digits are dropped, not rounded, so 1,340
+/// bytes show as 1.30 KB, and 1,000 of a unit shows in the next one, so
+/// 1,000 KB shows as 0.97 MB.
 pub(crate) fn bytes(strings: &Strings, numbers: &dyn Numbers, n: u64) -> String {
     if n < 1024 {
         return strings.count("size.bytes", n, numbers, &[]);
     }
     const UNITS: [&str; 4] = ["size.kb", "size.mb", "size.gb", "size.tb"];
-    let mut value = n as f64 / 1024.0;
+    // Whole numbers, so no float rounding can add a digit.
+    let n = u128::from(n);
+    let mut unit_bytes: u128 = 1024;
     let mut unit = 0;
-    while value.round() >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
+    while n / unit_bytes >= 1000 && unit < UNITS.len() - 1 {
+        unit_bytes *= 1024;
         unit += 1;
     }
-    // The most decimals that keep three significant digits after rounding:
-    // 9.996 rounds to 10.00, which has four, so it shows as 10.0.
-    let digits = [2u8, 1]
-        .into_iter()
-        .find(|&digits| {
-            let scale = 10f64.powi(i32::from(digits));
-            (value * scale).round() / scale < 10f64.powi(3 - i32::from(digits))
-        })
-        .unwrap_or(0);
-    strings.format(UNITS[unit], &[&numbers.decimal(value, digits)])
+    let digits: u8 = match n / unit_bytes {
+        0..=9 => 2,
+        10..=99 => 1,
+        _ => 0,
+    };
+    let scale = 10u128.pow(u32::from(digits));
+    let kept = n * scale / unit_bytes;
+    strings.format(
+        UNITS[unit],
+        &[&numbers.decimal(kept as f64 / scale as f64, digits)],
+    )
 }
 
 /// The bytes of a full path that the Name or Path cell shows, `None` for
@@ -372,6 +378,13 @@ pub(crate) fn path_part(column: Column, path: &str) -> Option<Range<usize>> {
     }
 }
 
+/// The name at the end of a Windows path, after its last `\`, as the Name
+/// cell shows it. `std::path` would split at `/` alone on another OS, where
+/// the core's tests also run.
+pub(crate) fn name_of(path: &str) -> &str {
+    &path[path_part(Column::Name, path).expect("Name is a part of the path")]
+}
+
 /// One cell of the results list, as File Explorer shows its columns (spec:
 /// Results list).
 pub(crate) fn cell(
@@ -380,12 +393,11 @@ pub(crate) fn cell(
     column: Column,
     row: &ResultItem,
 ) -> String {
-    let part = |column| {
-        &row.path[path_part(column, &row.path).expect("Name and Path are parts of the path")]
-    };
-    let name = part(Column::Name);
+    let name = name_of(&row.path);
     match column {
-        Column::Name | Column::Path => part(column).to_owned(),
+        Column::Name | Column::Path => row.path
+            [path_part(column, &row.path).expect("Name and Path are parts of the path")]
+        .to_owned(),
         Column::Size => match row.size {
             // In KB, rounded up, so sizes line up for comparison.
             Some(size) => strings.format("size.kb", &[&numbers.integer(size.div_ceil(1024))]),
@@ -454,6 +466,10 @@ pub(crate) mod tests {
 
         fn date_time(&self, filetime: i64) -> String {
             gozler_core::output::format_date_local(filetime, &jiff::tz::TimeZone::UTC)
+        }
+
+        fn date_time_seconds(&self, filetime: i64) -> String {
+            self.date_time(filetime)
         }
 
         fn date(&self, date: jiff::civil::Date) -> String {
@@ -571,9 +587,10 @@ pub(crate) mod tests {
     fn a_size_keeps_three_significant_digits() {
         let strings = english();
         let shown = |n| bytes(&strings, &English, n);
-        // 999.51 KB rounds to 1,000 KB.
-        assert_eq!(shown(1_023_500), "0.98 MB");
-        // 9.9955 MB rounds to 10.00 MB.
-        assert_eq!(shown(10_481_000), "10.0 MB");
+        // 1.3086 KB and 22.955 KB, whose last digits File Explorer drops.
+        assert_eq!(shown(1_340), "1.30 KB");
+        assert_eq!(shown(23_506), "22.9 KB");
+        // 1,000 KB moves to the next unit.
+        assert_eq!(shown(1_024_000), "0.97 MB");
     }
 }

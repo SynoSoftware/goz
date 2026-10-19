@@ -9,14 +9,18 @@ use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
 use super::icons::Icons;
 use super::requests::Requests;
 use crate::core::captions::{
-    self, DialogCaptions, FilterCaptions, ListCaption, StatusCaptions, WindowCaptions,
+    self, DialogCaptions, FilterCaptions, InspectorCaptions, ListCaption, StatusCaptions,
+    WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat};
-use crate::core::commands::{self, CommandId, Focus, KeyAction, Keystroke, Menu, MenuItem, State};
-use crate::core::fetch::{Fetch, WriteFailure};
+use crate::core::commands::{
+    self, CommandId, Focus, INSPECTOR_BUTTONS, KeyAction, Keystroke, Menu, MenuItem, State,
+};
+use crate::core::fetch::{Fetch, Purpose, WriteFailure};
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::layout::{
-    self, CaptionWidths, Dpi, FilterLayout, Layout, MessageArea, Px, Rect, ScrollRequest, Size,
+    self, CaptionWidths, Dpi, FilterLayout, InspectorLayout, Layout, MessageArea, Px, Rect,
+    ScrollRequest, Size,
 };
 use crate::core::model::{
     Accepted, Change, Column, ExportError, ExportFormat, Model, ScopeCheck, Then,
@@ -83,6 +87,7 @@ struct Controls {
     /// In [`Model::list_buttons`]' order.
     message_buttons: [Button; 2],
     list: ListView,
+    inspector: Inspector,
     status: StatusBar,
 }
 
@@ -103,6 +108,7 @@ impl Controls {
                 Button::create(parent, ControlId::MessageButton2.id())?,
             ],
             list: ListView::create(parent, ControlId::List.id())?,
+            inspector: Inspector::create(parent)?,
             status: StatusBar::create(parent, ControlId::Status.id())?,
         };
         controls.message.hwnd().set_visible(false);
@@ -128,9 +134,11 @@ impl Controls {
             self.status.hwnd(),
         ];
         let pane = self.filters.controls();
-        for control in controls.into_iter().chain(pane) {
+        let inspector = self.inspector.controls();
+        for control in controls.into_iter().chain(pane).chain(inspector) {
             control.set_font(&fonts.ui);
         }
+        self.inspector.heading.hwnd().set_font(&fonts.heading);
         // Rows as tall as the Kind list's, which Windows draws.
         let height = TextMeter::new(&fonts.ui).height();
         self.filters.location.set_item_height(height);
@@ -280,17 +288,88 @@ impl FilterPane {
     }
 }
 
-/// The controls' font, and its bold form for the matched part of a cell.
+/// The inspector's controls, in Tab order (spec: Inspector pane). Its icon
+/// is painted by the window.
+struct Inspector {
+    heading: Label,
+    /// In [`INSPECTOR_BUTTONS`]' order.
+    buttons: [Button; 3],
+    /// Each field row's label and value.
+    fields: Vec<(Label, Edit)>,
+}
+
+/// The controls of each inspector field row's label and value.
+const FIELD_CONTROLS: [(ControlId, ControlId); 7] = [
+    (ControlId::InspectorLabel1, ControlId::InspectorValue1),
+    (ControlId::InspectorLabel2, ControlId::InspectorValue2),
+    (ControlId::InspectorLabel3, ControlId::InspectorValue3),
+    (ControlId::InspectorLabel4, ControlId::InspectorValue4),
+    (ControlId::InspectorLabel5, ControlId::InspectorValue5),
+    (ControlId::InspectorLabel6, ControlId::InspectorValue6),
+    (ControlId::InspectorLabel7, ControlId::InspectorValue7),
+];
+
+impl Inspector {
+    fn create(parent: Hwnd) -> windows::core::Result<Inspector> {
+        let button = |id: ControlId| Button::create(parent, id.id());
+        let mut inspector = Inspector {
+            heading: Label::create_heading(parent, ControlId::InspectorHeading.id())?,
+            buttons: [
+                button(ControlId::InspectorOpen)?,
+                button(ControlId::InspectorOpenFileLocation)?,
+                button(ControlId::InspectorCopyAsPath)?,
+            ],
+            fields: Vec::new(),
+        };
+        for (label, value) in FIELD_CONTROLS {
+            inspector.fields.push((
+                Label::create(parent, label.id())?,
+                Edit::create_read_only(parent, value.id())?,
+            ));
+        }
+        Ok(inspector)
+    }
+
+    /// Every control but the heading, which has a font of its own.
+    fn controls(&self) -> Vec<Hwnd> {
+        let fields = self
+            .fields
+            .iter()
+            .flat_map(|(label, value)| [label.hwnd(), value.hwnd()]);
+        self.buttons
+            .iter()
+            .map(|b| b.hwnd())
+            .chain(fields)
+            .collect()
+    }
+
+    fn contains(&self, control: Hwnd) -> bool {
+        control == self.heading.hwnd() || self.controls().contains(&control)
+    }
+
+    /// The value that `control` is, if it is one.
+    fn value(&self, control: Hwnd) -> Option<Edit> {
+        self.fields
+            .iter()
+            .map(|(_, value)| *value)
+            .find(|value| value.hwnd() == control)
+    }
+}
+
+/// The controls' font, its bold form for the matched part of a cell, and
+/// the inspector's heading font.
 struct Fonts {
     ui: Font,
     bold: Font,
+    heading: Font,
 }
 
 impl Fonts {
     fn new(dpi: Dpi) -> windows::core::Result<Fonts> {
         let ui = Font::message(dpi)?;
         let bold = ui.bold()?;
-        Ok(Fonts { ui, bold })
+        let heading = ui.heading()?;
+        Ok(Fonts { ui, bold, heading })
     }
 }
 
@@ -325,6 +404,8 @@ struct Created {
     layout: RefCell<Option<Layout>>,
     requests: Requests,
     images: Option<ImageList>,
+    /// The inspector's icons; their indexes are those of `images`.
+    large_images: Option<ImageList>,
 }
 
 pub(crate) struct MainWindow {
@@ -352,6 +433,12 @@ pub(crate) struct MainWindow {
     /// dialog in [`Message::Deferred`], after the list has said which item
     /// it closed on, in whichever order it sends that.
     range_closed: Cell<Option<RangeFilter>>,
+    /// What the inspector shows, so a reply that changes none of it sets no
+    /// text, and the index of its icon in the system image lists.
+    inspector_shown: RefCell<(InspectorCaptions, Option<i32>)>,
+    /// While the person drags the splitter: the pointer's client `y` and the
+    /// inspector's height when the drag started.
+    splitter_drag: Cell<Option<(i32, Px)>>,
 }
 
 impl MainWindow {
@@ -379,6 +466,8 @@ impl MainWindow {
             filter_scroll: Cell::new(Px(0)),
             range_closing: Cell::new(None),
             range_closed: Cell::new(None),
+            inspector_shown: RefCell::new((InspectorCaptions::default(), None)),
+            splitter_drag: Cell::new(None),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -437,6 +526,7 @@ impl MainWindow {
             layout: RefCell::new(None),
             requests: Requests::new(Waker::new(hwnd)),
             images,
+            large_images: ImageList::system_large(),
         });
         self.apply_text(hwnd, &captions);
         self.layout(hwnd);
@@ -476,6 +566,15 @@ impl MainWindow {
         for (index, header) in captions.headers.iter().enumerate() {
             controls.list.set_header(index, header);
         }
+        for (button, caption) in controls
+            .inspector
+            .buttons
+            .iter()
+            .zip(&captions.inspector_buttons)
+        {
+            button.hwnd().set_text(caption);
+        }
+        self.show_inspector(hwnd, captions.inspector.clone());
         self.show_status(&captions.status);
         self.show_message(captions.message.as_ref());
         self.update_bound_controls();
@@ -541,10 +640,11 @@ impl MainWindow {
 
     /// Gives the controls bound to a command the command's state and
     /// choice, after every change (design rule 9): the match controls, the
-    /// pane's Clear filters and the header's sort arrow.
+    /// pane's Clear filters, the inspector's buttons and the header's sort
+    /// arrow.
     fn update_bound_controls(&self) {
         let controls = &self.created().controls;
-        let (enabled, can_clear, matching) = {
+        let (enabled, can_clear, buttons, matching) = {
             let model = self.model.borrow();
             let state = State {
                 model: &model,
@@ -553,10 +653,14 @@ impl MainWindow {
             (
                 (CommandId::Match.row().enabled)(&state),
                 (CommandId::ClearFilters.row().enabled)(&state),
+                INSPECTOR_BUTTONS.map(|(command, _)| (command.row().enabled)(&state)),
                 model.matching(),
             )
         };
         controls.filters.clear.hwnd().set_enabled(can_clear);
+        for (button, enabled) in controls.inspector.buttons.iter().zip(buttons) {
+            button.hwnd().set_enabled(enabled);
+        }
         for control in [
             controls.match_label.hwnd(),
             controls.match_mode.hwnd(),
@@ -574,6 +678,56 @@ impl MainWindow {
     fn update_status(&self) {
         let status = StatusCaptions::new(&self.model.borrow(), &*self.numbers.borrow());
         self.show_status(&status);
+    }
+
+    /// Shows the selection in the inspector, if anything it shows changed.
+    fn update_inspector(&self, hwnd: Hwnd) {
+        let captions = InspectorCaptions::new(&self.model.borrow(), &*self.numbers.borrow());
+        if self.inspector_shown.borrow().0 != captions {
+            self.show_inspector(hwnd, captions);
+        }
+    }
+
+    fn show_inspector(&self, hwnd: Hwnd, captions: InspectorCaptions) {
+        let inspector = &self.created().controls.inspector;
+        inspector.heading.hwnd().set_text(&captions.heading);
+        for (index, (label, value)) in inspector.fields.iter().enumerate() {
+            let (label_text, value_text) = captions
+                .fields
+                .get(index)
+                .map_or(("", ""), |(l, v)| (l.as_str(), v.as_str()));
+            label.hwnd().set_text(label_text);
+            value.hwnd().set_text(value_text);
+        }
+        // The shell call can dispatch messages, so no borrow is held
+        // (design rule 1).
+        let icon = captions
+            .icon
+            .as_ref()
+            .map(|(name, is_folder)| self.icons.index(name, *is_folder));
+        let icon_changed = self.inspector_shown.borrow().1 != icon;
+        self.inspector_shown.replace((captions, icon));
+        self.show_fields();
+        if icon_changed {
+            hwnd.invalidate();
+        }
+    }
+
+    /// Shows each field row that has a field and room in the pane, and
+    /// hides the others, so Tab skips them.
+    fn show_fields(&self) {
+        let rows = {
+            let layout = self.created().layout.borrow();
+            let room = layout
+                .as_ref()
+                .and_then(|l| l.inspector.as_ref())
+                .map_or(0, |i| i.fields.len());
+            room.min(self.inspector_shown.borrow().0.fields.len())
+        };
+        for (index, (label, value)) in self.created().controls.inspector.fields.iter().enumerate() {
+            label.hwnd().set_visible(index < rows);
+            value.hwnd().set_visible(index < rows);
+        }
     }
 
     fn show_status(&self, status: &StatusCaptions) {
@@ -664,8 +818,27 @@ impl MainWindow {
         }
         controls.filters.pane.set_visible(layout.filters.is_some());
         controls.list.hwnd().set_rect(layout.list);
+        let inspector = &controls.inspector;
+        if let Some(placed) = &layout.inspector {
+            inspector.heading.hwnd().set_rect(placed.heading);
+            for (button, rect) in inspector.buttons.iter().zip(placed.buttons) {
+                button.hwnd().set_rect(rect);
+            }
+            for ((label, value), (label_rect, value_rect)) in
+                inspector.fields.iter().zip(&placed.fields)
+            {
+                label.hwnd().set_rect(*label_rect);
+                value.hwnd().set_rect(*value_rect);
+            }
+        }
+        let shown = layout.inspector.is_some();
+        inspector.heading.hwnd().set_visible(shown);
+        for button in inspector.buttons {
+            button.hwnd().set_visible(shown);
+        }
         controls.status.set_parts(&layout.status_parts);
         created.layout.replace(Some(layout));
+        self.show_fields();
         self.update_message();
         hwnd.invalidate();
     }
@@ -753,6 +926,11 @@ impl MainWindow {
     /// Which control of the window `control` is, as the command table asks.
     fn focus_of(&self, control: Option<Hwnd>) -> Focus {
         let controls = &self.created().controls;
+        if let Some(value) = control.and_then(|c| controls.inspector.value(c)) {
+            return Focus::Value {
+                text_selected: value.has_selected_text(),
+            };
+        }
         match control {
             Some(control) if control == controls.search.hwnd() => Focus::SearchBox {
                 text_selected: controls.search.has_selected_text(),
@@ -773,6 +951,11 @@ impl MainWindow {
 
     fn focus(&self) -> Focus {
         self.focus_of(Hwnd::focused())
+    }
+
+    /// The inspector value that has the focus, if one has it.
+    fn focused_value(&self) -> Option<Edit> {
+        Hwnd::focused().and_then(|focused| self.created().controls.inspector.value(focused))
     }
 
     /// Each item's ID, whether it is enabled and whether it is checked, from
@@ -849,6 +1032,12 @@ impl MainWindow {
                 CommandId::CancelExport => self.model.borrow_mut().cancel_export(),
                 CommandId::Copy => match focus {
                     Focus::SearchBox { .. } => return controls.search.copy(),
+                    Focus::Value { .. } => {
+                        if let Some(value) = self.focused_value() {
+                            value.copy();
+                        }
+                        return;
+                    }
                     Focus::List | Focus::RangeFilter | Focus::Other => {
                         return self.copy(hwnd, ClipboardFormat::Files);
                     }
@@ -857,6 +1046,12 @@ impl MainWindow {
                 CommandId::CopyName => return self.copy(hwnd, ClipboardFormat::Names),
                 CommandId::SelectAll => match focus {
                     Focus::SearchBox { .. } => return controls.search.select_all(),
+                    Focus::Value { .. } => {
+                        if let Some(value) = self.focused_value() {
+                            value.select_all();
+                        }
+                        return;
+                    }
                     Focus::List | Focus::RangeFilter | Focus::Other => {
                         return controls.list.select_all();
                     }
@@ -872,9 +1067,9 @@ impl MainWindow {
                 }
                 CommandId::SearchInThisFolder => self.model.borrow_mut().search_in_this_folder(),
                 CommandId::Filters => self.model.borrow_mut().toggle_filter_pane(),
+                CommandId::Inspector => self.model.borrow_mut().toggle_inspector(),
                 CommandId::ClearFilters => self.model.borrow_mut().clear_filters(),
                 CommandId::Settings
-                | CommandId::Inspector
                 | CommandId::Columns
                 | CommandId::Language
                 | CommandId::Match
@@ -1038,19 +1233,25 @@ impl MainWindow {
             Some(Then::Fetch(fetch)) => self.start(fetch),
             Some(Then::SearchAgain) => self.search(hwnd),
             Some(Then::SearchSoon) => hwnd.set_timer(timer::SEARCH, SEARCH_DELAY_MS),
-            Some(Then::ReadSelectionSoon) => hwnd.set_timer(timer::SELECTION, SELECTION_DELAY_MS),
+            Some(Then::ReadSelectionSoon) => {
+                created.requests.cancel(Purpose::Selection);
+                hwnd.set_timer(timer::SELECTION, SELECTION_DELAY_MS);
+            }
             Some(Then::Cancel(purpose)) => created.requests.cancel(purpose),
             None => {}
         }
         let mut failed_export = None;
         match accepted.change {
-            Change::Nothing | Change::Choice => {}
+            Change::Nothing | Change::Choice | Change::FolderCounted => {}
             Change::Filters => self.update_filters(),
             Change::Panes => {
-                let shown = self.model.borrow().panes().filters;
-                let pane = controls.filters.pane;
+                let panes = self.model.borrow().panes();
                 // A hidden control keeps the focus but takes no key.
-                if !shown && Hwnd::focused().is_some_and(|f| pane.is_parent_of(f)) {
+                let hidden = |focused: Hwnd| {
+                    !panes.filters && controls.filters.pane.is_parent_of(focused)
+                        || !panes.inspector && controls.inspector.contains(focused)
+                };
+                if Hwnd::focused().is_some_and(hidden) {
                     controls.search.hwnd().focus();
                 }
                 self.layout(hwnd);
@@ -1118,6 +1319,7 @@ impl MainWindow {
             }
         }
         self.update_bound_controls();
+        self.update_inspector(hwnd);
         self.update_poll(hwnd);
         // Last, because the message box runs its own message loop.
         if let Some((path, error)) = failed_export {
@@ -1194,6 +1396,15 @@ impl MainWindow {
                 None => {}
             }
             return;
+        } else if let Some(index) = controls
+            .inspector
+            .buttons
+            .iter()
+            .position(|button| button.clicked(event))
+        {
+            // The button runs its menu item's command (design rule 9).
+            self.read_list_selection(hwnd);
+            return self.run(hwnd, MenuItem::Run(INSPECTOR_BUTTONS[index].0));
         } else {
             return self.on_filter(hwnd, event);
         };
@@ -1477,6 +1688,17 @@ impl MainWindow {
         true
     }
 
+    /// Whether `point`, in client coordinates, is on the splitter above the
+    /// inspector.
+    fn on_splitter(&self, point: (i32, i32)) -> bool {
+        self.created()
+            .layout
+            .borrow()
+            .as_ref()
+            .and_then(|l| l.inspector.as_ref())
+            .is_some_and(|inspector| inspector.splitter.contains(point))
+    }
+
     /// Whether `point`, in screen coordinates, is on the list's header.
     fn on_header(&self, point: (i32, i32)) -> bool {
         self.created()
@@ -1661,7 +1883,7 @@ impl MainWindow {
             .filter_map(|index| {
                 Some(SavedColumn {
                     column: *columns.get(index)?,
-                    width: layout::saved_width(list.column_width(index), dpi),
+                    width: list.column_width(index).to_dip(dpi),
                 })
             })
             .collect()
@@ -1886,16 +2108,74 @@ impl WindowProc for MainWindow {
                 self.update_menu(hwnd);
                 Some(LRESULT(0))
             }
-            Message::CtlColorStatic(colors) => Some(colors.window_background()),
-            Message::Paint => {
-                let dividers = self
+            Message::SetCursor { over, client: true }
+                if over == hwnd
+                    && hwnd
+                        .cursor_point()
+                        .is_some_and(|point| self.on_splitter(point)) =>
+            {
+                win::window::show_resize_cursor();
+                Some(LRESULT(1))
+            }
+            Message::SetCursor { .. } => None,
+            Message::LeftButtonDown { point } if self.on_splitter(point) => {
+                let height = self
                     .created()
                     .layout
                     .borrow()
                     .as_ref()
-                    .map(|l| l.dividers.clone())
-                    .unwrap_or_default();
-                hwnd.paint_dividers(&dividers);
+                    .and_then(|l| l.inspector.as_ref())
+                    .map(InspectorLayout::height);
+                if let Some(height) = height {
+                    self.splitter_drag.set(Some((point.1, height)));
+                    hwnd.capture_mouse();
+                }
+                Some(LRESULT(0))
+            }
+            Message::LeftButtonDown { .. } => None,
+            Message::MouseMove { point } => {
+                let (start, height) = self.splitter_drag.get()?;
+                let dragged = self
+                    .created()
+                    .layout
+                    .borrow()
+                    .as_ref()
+                    .and_then(|l| l.inspector.as_ref())
+                    .map(|inspector| inspector.dragged(height, Px(point.1 - start)));
+                if let Some(dragged) = dragged {
+                    let accepted = self.model.borrow_mut().set_inspector_height(dragged);
+                    self.apply(hwnd, accepted);
+                }
+                Some(LRESULT(0))
+            }
+            // A drag ends when the button goes up, also when the window had
+            // no capture to release.
+            Message::LeftButtonUp if self.splitter_drag.take().is_some() => {
+                win::window::release_mouse();
+                Some(LRESULT(0))
+            }
+            Message::LeftButtonUp => None,
+            Message::CaptureChanged => {
+                self.splitter_drag.set(None);
+                None
+            }
+            Message::CtlColorStatic(colors) => Some(colors.window_background()),
+            Message::Paint => {
+                let created = self.created();
+                let (dividers, icon) = {
+                    let layout = created.layout.borrow();
+                    let layout = layout.as_ref();
+                    let icon = self.inspector_shown.borrow().1;
+                    (
+                        layout.map(|l| l.dividers.clone()).unwrap_or_default(),
+                        created
+                            .large_images
+                            .zip(icon)
+                            .zip(layout.and_then(|l| l.inspector.as_ref()))
+                            .map(|((images, index), inspector)| (images, index, inspector.icon)),
+                    )
+                };
+                hwnd.paint_window(&dividers, icon);
                 Some(LRESULT(0))
             }
             Message::SettingChange {

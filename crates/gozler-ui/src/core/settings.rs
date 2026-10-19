@@ -3,7 +3,7 @@
 //! format, so renaming one needs a migration. A value that is missing or
 //! damaged falls back to its default, and every other value still loads.
 
-use super::layout::Dip;
+use super::layout::{Dip, Panes};
 use super::model::Column;
 use super::query::{Filters, Matching};
 use super::text::LanguageChoice;
@@ -60,6 +60,16 @@ pub(crate) struct WindowState {
     pub(crate) filter_pane: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) filters: Filters,
+    /// Whether the inspector shows (spec: C14).
+    #[serde(default = "shown", deserialize_with = "shown_or_default")]
+    pub(crate) inspector: bool,
+    /// The height the person dragged the splitter to; the layout keeps it
+    /// between the inspector's and the list's minimum heights.
+    #[serde(
+        default = "inspector_height",
+        deserialize_with = "inspector_height_or_default"
+    )]
+    pub(crate) inspector_height: Dip,
 }
 
 impl Default for WindowState {
@@ -71,6 +81,8 @@ impl Default for WindowState {
             columns: Vec::new(),
             filter_pane: shown(),
             filters: Filters::default(),
+            inspector: shown(),
+            inspector_height: inspector_height(),
         }
     }
 }
@@ -132,6 +144,20 @@ fn shown() -> bool {
 
 fn shown_or_default<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
     Ok(or_default::<D, Option<bool>>(deserializer)?.unwrap_or_else(shown))
+}
+
+fn inspector_height() -> Dip {
+    Panes::default().inspector_height
+}
+
+/// A height that is not positive, or taller than any screen, is damaged,
+/// because the layout converts it to pixels, which a huge height overflows.
+fn inspector_height_or_default<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Dip, D::Error> {
+    Ok(or_default::<D, Option<Dip>>(deserializer)?
+        .filter(|height| (1..=16_384).contains(&height.0))
+        .unwrap_or_else(inspector_height))
 }
 
 /// A placement whose width or height is not a positive `i32` is damaged,
@@ -204,6 +230,11 @@ mod tests {
         let text = r#"{ "window": { "placement": { "left": -2147483648, "top": 0, "right": 2147483647, "bottom": 10, "maximized": false } } }"#;
         let settings: Settings = serde_json::from_str(text).expect("the file is an object");
         assert_eq!(settings.window.placement, None);
+
+        // So would an inspector taller than `i32` pixels at 200 %.
+        let text = r#"{ "window": { "inspector_height": 2147483647 } }"#;
+        let settings: Settings = serde_json::from_str(text).expect("the file is an object");
+        assert_eq!(settings.window.inspector_height, inspector_height());
     }
 
     /// The keys written must be the keys read, and the second save must
@@ -251,6 +282,8 @@ mod tests {
                     size: SizeFilter::Word(SizeWord::Large),
                     ..Filters::default()
                 },
+                inspector: false,
+                inspector_height: Dip(250),
             },
         };
         Settings::default()

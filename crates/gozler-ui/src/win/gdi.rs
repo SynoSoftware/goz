@@ -20,8 +20,8 @@ use windows::Win32::UI::Controls::{
     HIMAGELIST, ILD_TRANSPARENT, ImageList_Draw, ImageList_GetIconSize,
 };
 use windows::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_FLAGS, SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
-    SHGetFileInfoW,
+    SHFILEINFOW, SHGFI_FLAGS, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_SYSICONINDEX,
+    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
@@ -51,6 +51,15 @@ impl Font {
             )
         }?;
         Font::from_logfont(&metrics.lfMessageFont)
+    }
+
+    /// This font in semibold and a quarter larger, for the inspector's
+    /// heading (spec: Look).
+    pub(crate) fn heading(&self) -> windows::core::Result<Font> {
+        let mut logfont = logfont(self.0)?;
+        logfont.lfWeight = FW_SEMIBOLD.0 as i32;
+        logfont.lfHeight = logfont.lfHeight * 5 / 4;
+        Font::from_logfont(&logfont)
     }
 
     /// `hwnd`'s font in semibold, as the About dialog shows the version.
@@ -115,21 +124,31 @@ impl Drop for Font {
     }
 }
 
-/// The shell's system image list of small icons, which Windows owns and
-/// shares with every program, so it is never destroyed.
+/// A shell's system image list, of small or of large icons, which Windows
+/// owns and shares with every program, so it is never destroyed.
 #[derive(Clone, Copy)]
 pub(crate) struct ImageList(HIMAGELIST);
 
 impl ImageList {
-    /// The system image list, from `SHGetFileInfoW`.
+    /// The system image list of small icons, from `SHGetFileInfoW`.
     pub(crate) fn system_small() -> Option<ImageList> {
-        let handle = system_icon_info(w!("file"), FILE_ATTRIBUTE_NORMAL, SHGFI_SMALLICON).0;
+        ImageList::system(SHGFI_SMALLICON)
+    }
+
+    /// The system image list of large icons, whose indexes are the small
+    /// list's.
+    pub(crate) fn system_large() -> Option<ImageList> {
+        ImageList::system(SHGFI_LARGEICON)
+    }
+
+    fn system(size: SHGFI_FLAGS) -> Option<ImageList> {
+        let handle = system_icon_info(w!("file"), FILE_ATTRIBUTE_NORMAL, size).0;
         (handle != 0).then_some(ImageList(HIMAGELIST(handle as isize)))
     }
 
-    /// The index in [`ImageList::system_small`] of the icon for an item
-    /// named `name`, from its extension, without reading the item: a
-    /// folder's icon, or the icon of the file type.
+    /// The index in the system image lists of the icon for an item named
+    /// `name`, from its extension, without reading the item: a folder's
+    /// icon, or the icon of the file type.
     pub(crate) fn system_index(name: &str, is_folder: bool) -> i32 {
         let attributes = if is_folder {
             FILE_ATTRIBUTE_DIRECTORY
@@ -206,9 +225,10 @@ impl Hwnd {
         HFONT(font.0 as *mut _)
     }
 
-    /// Paints the window's background and fills `dividers` with the divider
-    /// colour.
-    pub(crate) fn paint_dividers(self, dividers: &[Rect]) {
+    /// Paints the window's background, fills `dividers` with the divider
+    /// colour, and draws `icon`, an icon of an image list, in the middle of
+    /// its rectangle.
+    pub(crate) fn paint_window(self, dividers: &[Rect], icon: Option<(ImageList, i32, Rect)>) {
         let mut paint = PAINTSTRUCT::default();
         // SAFETY: BeginPaint and EndPaint pair on the same window and
         // structure; the brushes are system brushes, which are never freed.
@@ -217,6 +237,9 @@ impl Hwnd {
             let brush = GetSysColorBrush(COLOR_3DLIGHT);
             for divider in dividers {
                 FillRect(dc, &to_rect(*divider), brush);
+            }
+            if let Some((images, index, area)) = icon {
+                images.draw(dc, index, to_rect(area));
             }
             let _ = EndPaint(self.0, &paint);
         }

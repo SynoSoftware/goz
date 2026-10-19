@@ -41,12 +41,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
     CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
-    CreateWindowExW, EN_CHANGE, ES_AUTOHSCROLL, GetWindowRect, HMENU, LB_ADDSTRING, LB_GETCOUNT,
-    LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT, LB_GETTEXTLEN, LB_ITEMFROMPOINT, LB_RESETCONTENT,
-    LB_SETCURSEL, LB_SETITEMHEIGHT, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
-    LBS_NOTIFY, LBS_OWNERDRAWFIXED, SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY,
-    WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE,
-    WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, EN_CHANGE, ES_AUTOHSCROLL, ES_READONLY, GetWindowRect, HMENU, LB_ADDSTRING,
+    LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT, LB_GETTEXTLEN, LB_ITEMFROMPOINT,
+    LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMHEIGHT, LBN_SELCHANGE, LBS_HASSTRINGS,
+    LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, SendMessageW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_COPY, WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_SIZE, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -161,7 +161,7 @@ fn item_text(list: Hwnd, length: u32, text: u32, index: usize) -> String {
     String::from_utf16_lossy(&buffer[..copied.clamp(0, length as isize) as usize])
 }
 
-/// The search box.
+/// A text box: the search box, or an inspector value.
 #[derive(Clone, Copy)]
 pub(crate) struct Edit(Hwnd);
 
@@ -172,6 +172,19 @@ impl Edit {
             w!("EDIT"),
             WS_TABSTOP.0 | ES_AUTOHSCROLL as u32,
             WS_EX_CLIENTEDGE,
+            id,
+        )
+        .map(Edit)
+    }
+
+    /// A value that reads as text but whose every part the person can
+    /// select and copy, as File Explorer's Properties shows a location.
+    pub(crate) fn create_read_only(parent: Hwnd, id: u16) -> windows::core::Result<Edit> {
+        child(
+            parent,
+            w!("EDIT"),
+            WS_TABSTOP.0 | (ES_AUTOHSCROLL | ES_READONLY) as u32,
+            WINDOW_EX_STYLE(0),
             id,
         )
         .map(Edit)
@@ -228,12 +241,28 @@ impl Label {
     /// A text that wraps at word ends and shows `&` as itself, such as a
     /// message that can quote the typed search.
     pub(crate) fn create_message(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
-        // SS_NOPREFIX, which the windows crate has only in a feature for
-        // system services.
-        const SS_NOPREFIX: u32 = 0x80;
         child(parent, w!("STATIC"), SS_NOPREFIX, WINDOW_EX_STYLE(0), id).map(Label)
     }
+
+    /// One line, centred in its height, that shows `&` as itself and ends
+    /// in an ellipsis when it is too long, such as a file's name.
+    pub(crate) fn create_heading(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        const SS_CENTERIMAGE: u32 = 0x200;
+        const SS_ENDELLIPSIS: u32 = 0x4000;
+        child(
+            parent,
+            w!("STATIC"),
+            SS_NOPREFIX | SS_CENTERIMAGE | SS_ENDELLIPSIS,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Label)
+    }
 }
+
+/// The static control styles, which the windows crate has only in a feature
+/// for system services.
+const SS_NOPREFIX: u32 = 0x80;
 
 /// A push button.
 #[derive(Clone, Copy)]
