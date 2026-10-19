@@ -15,6 +15,10 @@
 //! - Slot reuse can never alias. On NTFS the FRN map is keyed by record
 //!   number and every hit is re-checked against the full FRN (sequence
 //!   included); on ReFS it is keyed by the whole file ID.
+//! - Folder sizes stay exact. From [`VolumeIndex::compute_folder_sizes`] on,
+//!   a folder's size slot holds the sum of the known sizes of the files below
+//!   it, and every change adds its difference to each folder above it, so a
+//!   folder's size costs no memory and no walk of its contents.
 
 use super::store::{
     ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId, NamePair, NameStore,
@@ -25,7 +29,7 @@ use crate::layout::LayoutFile;
 use crate::types::{EntryIdx, Frn, NIL};
 use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, USN_REASON_RENAME_NEW_NAME};
 use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 /// NTFS reserves MFT record 5 for the volume root directory. The daemon reads
@@ -175,6 +179,17 @@ pub struct ApplyOutcome {
     pub wants_compact: bool,
 }
 
+/// Whether the index keeps a size for each folder yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FolderSizes {
+    /// The size and date pass has not ended, so every folder's size is
+    /// unknown, as its files' sizes are.
+    Unknown,
+    /// Each folder's size slot holds the sum of the known sizes of the files
+    /// below it, and every change keeps it exact.
+    Kept,
+}
+
 enum UpsertResult {
     Ok,
     /// The FRN has multiple links; a rename cannot be localized from the NEW
@@ -191,6 +206,8 @@ pub struct VolumeIndex {
     lost_found: EntryIdx,
     generation: u64,
     stats: IndexStats,
+    /// Set by [`Self::compute_folder_sizes`].
+    folder_sizes: FolderSizes,
     /// Entries structurally mutated since the last [`Self::take_write_count`].
     #[cfg(test)]
     dirty: u64,
@@ -257,6 +274,7 @@ impl VolumeIndex {
             lost_found,
             generation: 0,
             stats: IndexStats::default(),
+            folder_sizes: FolderSizes::Unknown,
             #[cfg(test)]
             dirty: 0,
             dir_children: FxHashMap::default(),
@@ -350,7 +368,7 @@ impl VolumeIndex {
         }
 
         if let Some(head) = self.head_of(file.frn) {
-            self.set_chain_stat(head, is_dir, file.size, file.mtime_ft);
+            self.set_chain_stat(head, file.size, file.mtime_ft);
         }
         self.set_attributes(file.frn, file.attributes);
     }
@@ -479,14 +497,41 @@ impl VolumeIndex {
     /// Live enricher: sets a file's fresh `size`/`mtime` on every entry in its
     /// hard-link chain (a query may return any of its names). USN records carry
     /// neither, so the daemon stats the FRN after a create/data/basic-info
-    /// change and applies it here. Directories keep unknown size (mtime only).
-    /// A no-op if the FRN is unknown (e.g. deleted between apply and stat).
+    /// change and applies it here. A folder takes only the date, because its
+    /// size is the sum of its files. A no-op if the FRN is unknown (e.g.
+    /// deleted between apply and stat).
     pub fn set_stat(&mut self, frn: Frn, size: u64, mtime: i64) {
         let Some(head) = self.head_of(frn) else {
             return;
         };
-        let is_dir = self.entries.flags(head).contains(EntryFlags::DIR);
-        self.set_chain_stat(head, is_dir, Some(size), Some(mtime));
+        self.set_chain_stat(head, Some(size), Some(mtime));
+    }
+
+    /// Ends the size and date pass: gives every folder the sum of the known
+    /// sizes of the files below it, each name of a hard-linked file counted,
+    /// and from then on every change keeps each sum exact. Until it runs,
+    /// every folder's size is unknown. The daemon calls it when a build's
+    /// pass completes, and never after a pass that failed or stopped, whose
+    /// sums would be short. The index calls it again for the two changes that move more
+    /// than one entry's size: a move that opens or closes a loop in the
+    /// parent links, and a file that becomes a folder.
+    ///
+    /// A folder counts each file whose parent links pass through it once, so
+    /// inside a loop every folder of the loop holds the whole loop's files.
+    pub fn compute_folder_sizes(&mut self) {
+        self.folder_sizes = FolderSizes::Kept;
+        let slots = 0..self.entries.capacity() as EntryIdx;
+        for idx in slots.clone() {
+            if !self.entries.is_tombstone(idx) && self.entries.flags(idx).contains(EntryFlags::DIR)
+            {
+                self.entries.set_size(idx, 0);
+            }
+        }
+        for idx in slots {
+            if !self.entries.is_tombstone(idx) {
+                self.add_to_folders_from(self.entries.parent(idx), self.counted_size(idx));
+            }
+        }
     }
 
     /// Sets the attributes of a record's `FILE_ATTRIBUTE_*` bits on every link
@@ -502,19 +547,19 @@ impl VolumeIndex {
 
     /// Sets `size` and `mtime` on EVERY link of the file whose chain starts at
     /// `head`, not just the head: a query may return any of a hard-linked
-    /// file's names, and they all describe the same bytes. A folder keeps an
-    /// unknown size; `None` leaves that value as it was.
-    fn set_chain_stat(
-        &mut self,
-        head: EntryIdx,
-        is_dir: bool,
-        size: Option<u64>,
-        mtime: Option<i64>,
-    ) {
+    /// file's names, and they all describe the same bytes. `size` reaches
+    /// files only, because a folder's size slot holds its sum; `None` leaves
+    /// that value as it was.
+    fn set_chain_stat(&mut self, head: EntryIdx, size: Option<u64>, mtime: Option<i64>) {
         let mut cur = head;
         while cur != NIL {
-            if !is_dir && let Some(size) = size {
+            if let Some(size) = size
+                && !self.entries.flags(cur).contains(EntryFlags::DIR)
+            {
+                let before = self.counted_size(cur);
                 self.entries.set_size(cur, size);
+                let change = self.counted_size(cur).wrapping_sub(before);
+                self.add_to_folders_from(self.entries.parent(cur), change);
             }
             if let Some(mtime) = mtime {
                 self.entries.set_mtime(cur, mtime);
@@ -736,17 +781,116 @@ impl VolumeIndex {
         while cur != NIL {
             let next = self.entries.next_child(cur);
             self.dir_index_remove(cur);
-            self.entries.set_parent(cur, self.lost_found);
-            self.link_child(cur);
+            self.move_entry(cur, self.lost_found);
             self.dir_index_insert(cur);
             cur = next;
         }
-        self.entries.set_first_child(dir, NIL);
+    }
+
+    /// Makes `new_parent` the parent of `idx`, and moves the size of `idx`
+    /// and of everything below it from the folders above the old parent to
+    /// the folders above `new_parent`.
+    fn move_entry(&mut self, idx: EntryIdx, new_parent: EntryIdx) {
+        let old_parent = self.entries.parent(idx);
+        let folders = (self.folder_sizes == FolderSizes::Kept && old_parent != new_parent)
+            .then(|| (self.chain_up(old_parent), self.chain_up(new_parent)));
+        self.unlink_child(idx);
+        self.entries.set_parent(idx, new_parent);
+        self.link_child(idx);
+        let Some((old_folders, new_folders)) = folders else {
+            return;
+        };
+        if old_folders.contains(&idx) || new_folders.contains(&idx) {
+            // The move opens or closes a loop in the parent links, which
+            // changes each folder of the loop by more than what moved.
+            self.compute_folder_sizes();
+            return;
+        }
+        let moved = self.size_with_contents(idx);
+        self.add_to_folders(&old_folders, moved.wrapping_neg());
+        self.add_to_folders(&new_folders, moved);
+    }
+
+    /// What `idx` adds by itself to the size of each folder above it: its
+    /// size when it is a file whose size is known, and otherwise nothing.
+    fn counted_size(&self, idx: EntryIdx) -> u64 {
+        let size = self.entries.size(idx);
+        if self.entries.flags(idx).contains(EntryFlags::DIR) || size == SIZE_UNKNOWN {
+            0
+        } else {
+            size
+        }
+    }
+
+    /// What `idx` and everything below it add to the size of each folder
+    /// above it, while folder sizes are kept. No loop in the parent links may
+    /// pass through `idx`.
+    fn size_with_contents(&self, idx: EntryIdx) -> u64 {
+        if self.entries.flags(idx).contains(EntryFlags::DIR) {
+            return self.entries.size(idx);
+        }
+        // A file holds entries only after a journal record named it as a
+        // folder, which only corrupt data does.
+        self.subtree_entries(idx)
+            .fold(self.counted_size(idx), |sum, e| {
+                sum.wrapping_add(self.counted_size(e))
+            })
+    }
+
+    /// `start` and every entry above it, each once: up to the top, or once
+    /// around a loop in the parent links, which a journal replay can close
+    /// for a while ([`PathStatus::CycleDetected`]).
+    fn chain_up(&self, start: EntryIdx) -> SmallVec<[EntryIdx; 32]> {
+        // Deeper than almost every real folder tree, and few enough that an
+        // entry below a loop costs little more than its own depth, which
+        // matters when a recompute walks up from every entry under the lock.
+        const HOPS_BEFORE_LOOP_CHECK: usize = 64;
+        let mut chain = SmallVec::new();
+        let mut cur = start;
+        while cur != NIL && chain.len() < HOPS_BEFORE_LOOP_CHECK {
+            chain.push(cur);
+            cur = self.entries.parent(cur);
+        }
+        if cur != NIL {
+            // A loop, or a deep tree: walk again, and stop at the first entry
+            // met twice.
+            chain.clear();
+            let mut seen = FxHashSet::default();
+            cur = start;
+            while cur != NIL && seen.insert(cur) {
+                chain.push(cur);
+                cur = self.entries.parent(cur);
+            }
+        }
+        chain
+    }
+
+    /// Adds `delta` to the size of `start` and of each folder above it, while
+    /// folder sizes are kept.
+    fn add_to_folders_from(&mut self, start: EntryIdx, delta: u64) {
+        if self.folder_sizes == FolderSizes::Kept && delta != 0 {
+            let chain = self.chain_up(start);
+            self.add_to_folders(&chain, delta);
+        }
+    }
+
+    /// Adds `delta` to the size of each folder of `chain`. A size is taken
+    /// away as its `wrapping_neg`: wrapping sums reverse exactly and never
+    /// panic, and only a corrupt size can bring one near 2^64.
+    fn add_to_folders(&mut self, chain: &[EntryIdx], delta: u64) {
+        for &e in chain {
+            if self.entries.flags(e).contains(EntryFlags::DIR) {
+                let sum = self.entries.size(e).wrapping_add(delta);
+                self.entries.set_size(e, sum);
+            }
+        }
     }
 
     /// Adds one entry: interns its name and links it into its same-name chain,
-    /// its parent's child chain and the scope index. The caller links it into
-    /// its file's hard-link chain and the FRN map.
+    /// its parent's child chain and the scope index, and adds a file's known
+    /// `size` to the folders above it. A folder ignores `size`: it holds
+    /// nothing yet. The caller links the entry into its file's hard-link
+    /// chain and the FRN map.
     #[allow(clippy::too_many_arguments)]
     fn alloc_entry(
         &mut self,
@@ -758,6 +902,11 @@ impl VolumeIndex {
         mtime: i64,
         attributes: PackedAttributes,
     ) -> EntryIdx {
+        let size = match (flags.contains(EntryFlags::DIR), self.folder_sizes) {
+            (false, _) => size,
+            (true, FolderSizes::Unknown) => SIZE_UNKNOWN,
+            (true, FolderSizes::Kept) => 0,
+        };
         let id = self.names.intern(name);
         let idx = self
             .entries
@@ -765,6 +914,7 @@ impl VolumeIndex {
         self.link_same_name(idx, id);
         self.link_child(idx);
         self.dir_index_insert(idx);
+        self.add_to_folders_from(parent, self.counted_size(idx));
         #[cfg(test)]
         {
             self.dirty += 1;
@@ -773,12 +923,16 @@ impl VolumeIndex {
     }
 
     /// Removes one entry: takes it out of every chain and the scope index,
-    /// moves its children to lost+found, releases its name and frees its slot.
+    /// moves its children to lost+found, takes its size from the folders above
+    /// it, releases its name and frees its slot.
     fn remove_entry(&mut self, idx: EntryIdx) {
         self.dir_index_remove(idx); // while the name/parent are still readable
         self.unlink_same_name(idx);
         self.unlink_child(idx);
         self.orphan_children(idx);
+        // It holds nothing now, so only its own size leaves those folders.
+        let parent = self.entries.parent(idx);
+        self.add_to_folders_from(parent, self.counted_size(idx).wrapping_neg());
         self.names.release(self.entries.name_id(idx));
         self.entries.tombstone(idx);
         #[cfg(test)]
@@ -887,17 +1041,24 @@ impl VolumeIndex {
         let id = self.names.intern(name);
         self.entries.set_name_id(idx, id);
         self.link_same_name(idx, id);
-        // Unlink from the OLD parent's child chain while `parent` still
-        // points there, then relink under the new parent.
-        self.unlink_child(idx);
-        self.entries.set_parent(idx, parent_idx);
-        self.link_child(idx);
+        self.move_entry(idx, parent_idx);
+        let was_dir = self.entries.flags(idx).contains(EntryFlags::DIR);
         let flags = self
             .entries
             .flags(idx)
             .with(EntryFlags::DIR, is_dir)
             .with(EntryFlags::PLACEHOLDER, false);
         self.entries.set_flags(idx, flags);
+        if was_dir != is_dir {
+            // A folder's size slot holds its sum and a file's its own size,
+            // so neither carries over. A folder that becomes a file of
+            // unknown size leaves the sums above it as they are; a file that
+            // becomes a folder takes its size from them and needs its own sum.
+            self.entries.set_size(idx, SIZE_UNKNOWN);
+            if is_dir && self.folder_sizes == FolderSizes::Kept {
+                self.compute_folder_sizes();
+            }
+        }
         self.dir_index_insert(idx);
         #[cfg(test)]
         {
@@ -1236,7 +1397,6 @@ impl VolumeIndex {
     /// every applied op.
     #[cfg(test)]
     pub fn child_chains_match_rebuild(&self) -> bool {
-        use rustc_hash::FxHashSet;
         let mut want: FxHashMap<EntryIdx, FxHashSet<EntryIdx>> = FxHashMap::default();
         for idx in self.entries.iter_live() {
             let p = self.entries.parent(idx);
@@ -1260,12 +1420,45 @@ impl VolumeIndex {
         want.is_empty()
     }
 
+    /// The invariant [`Self::compute_folder_sizes`] sets up and every later
+    /// change keeps: before it runs every folder's size is unknown, and after
+    /// it each folder's size is the sum of the known sizes of the files the
+    /// child chains reach below it, each once. The folder-size proptest
+    /// asserts this after every change.
+    #[cfg(test)]
+    pub fn folder_sizes_match_rebuild(&self) -> bool {
+        let rebuilt = |dir: EntryIdx| {
+            let mut seen: FxHashSet<EntryIdx> = FxHashSet::from_iter([dir]);
+            let mut heads = vec![self.entries.first_child(dir)];
+            let mut sum = 0u64;
+            while let Some(mut cur) = heads.pop() {
+                while cur != NIL {
+                    if seen.insert(cur) {
+                        let entry = self.entry(cur);
+                        if !entry.is_dir() {
+                            sum = sum.wrapping_add(entry.size().unwrap_or(0));
+                        }
+                        heads.push(self.entries.first_child(cur));
+                    }
+                    cur = self.entries.next_child(cur);
+                }
+            }
+            sum
+        };
+        self.entries
+            .iter_live()
+            .filter(|&e| self.entry(e).is_dir())
+            .all(|dir| {
+                let want = (self.folder_sizes == FolderSizes::Kept).then(|| rebuilt(dir));
+                self.entry(dir).size() == want
+            })
+    }
+
     /// The invariant the same-name chains must uphold: walking every name's
     /// chain visits exactly the live entries bearing that name, each once.
     /// The model-op-tape proptest asserts this after every applied op.
     #[cfg(test)]
     pub fn name_chains_match_rebuild(&self) -> bool {
-        use rustc_hash::FxHashSet;
         let mut want: FxHashMap<NameId, FxHashSet<EntryIdx>> = FxHashMap::default();
         for idx in self.entries.iter_live() {
             want.entry(self.entries.name_id(idx))

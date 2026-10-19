@@ -2,7 +2,8 @@
 //!
 //! Builds a tree resembling a real volume (nested directories, varied file
 //! names, a known fraction containing a rare token) and measures `run_query`
-//! for rare, medium, and wildcard needles. Run with `cargo bench -p gozler-core`.
+//! for rare, medium, and wildcard needles, then what keeping folder sizes
+//! costs over the same tree. Run with `cargo bench -p gozler-core`.
 
 // Measure the effect of a thread-caching allocator on the alloc-heavy broad
 // reconstruction. Toggle by commenting this out to compare against the system heap.
@@ -231,9 +232,39 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
     broad.finish();
 }
 
+/// What folder sizes cost: summing every folder once, when a build's size and
+/// date pass ends, and a file's size change while the folder sizes are still
+/// unknown and once they are kept, which is the extra each journal change
+/// pays.
+fn bench_folder_sizes(c: &mut Criterion<measure::Measure>) {
+    let (mut idx, _) = build_index();
+    // The first file `build_index` makes, with five folders above it, the
+    // root included, as every file of the index has.
+    let file = frn(1004);
+    let mut size = 0u64;
+    let mut group = c.benchmark_group("folder_sizes_2M");
+    group.sample_size(10);
+    group.bench_function("set_stat, sizes unknown", |b| {
+        b.iter(|| {
+            size ^= 1;
+            idx.set_stat(black_box(file), size, 0);
+        })
+    });
+    group.bench_function("compute_folder_sizes", |b| {
+        b.iter(|| idx.compute_folder_sizes())
+    });
+    group.bench_function("set_stat, sizes kept", |b| {
+        b.iter(|| {
+            size ^= 1;
+            idx.set_stat(black_box(file), size, 0);
+        })
+    });
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = measure::criterion();
-    targets = bench_query
+    targets = bench_query, bench_folder_sizes
 }
 criterion_main!(benches);

@@ -134,7 +134,10 @@ const EXAMPLES: &[Example] = &[
         "gozler *.log dm:7days",
         "Find .log files changed in the last 7 days",
     ),
-    quick(r#"gozler "size:>1gb""#, "Find files larger than 1 GB"),
+    quick(
+        r#"gozler "size:>1gb""#,
+        "Find files and folders larger than 1 GB",
+    ),
     quick(r#"gozler "*.jpg|*.png""#, "Find .jpg and .png files"),
     quick(
         "gozler *.iso -sort size -n 10",
@@ -260,6 +263,10 @@ const NOTES: &[&str] = &[
      dates failed on a volume in scope, a search that uses them warns and exits \
      2. When the read succeeded, a file it could not read is rare and is left \
      out without a warning.",
+    "A folder's size is the total of the known sizes of the files below it, \
+     each name of a hard-linked file counted; `size:`, `-size` and `-sort size` \
+     use it. `-get-total-size` and `-get-folder-size` add only files, so no file \
+     is counted twice.",
     "`dm:today`, `dm:yesterday` and `dm:YYYY-MM-DD` are calendar days in the local \
      time zone. `7days` is the 7 times 24 hours before the search starts, and `dm:<30days` finds files older than 30 \
      days.",

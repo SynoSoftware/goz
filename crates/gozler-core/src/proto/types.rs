@@ -181,8 +181,9 @@ pub struct QueryResults {
 pub struct QueryTotals {
     /// Every match, files and folders.
     pub count: u64,
-    /// The summed size of the matching files in bytes. A folder has no size,
-    /// and a file whose size is unknown adds nothing.
+    /// The summed size of the matching files in bytes. A folder adds nothing,
+    /// because its size is the sum of its files, and a file whose size is
+    /// unknown adds nothing.
     pub size: u64,
     /// As [`QueryResults::volumes_incomplete`].
     pub volumes_incomplete: bool,

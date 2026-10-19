@@ -59,8 +59,8 @@ pub struct QueryOutcome {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Totals {
     pub count: u64,
-    /// Bytes. A file whose size is unknown adds nothing, and a folder has no
-    /// size.
+    /// Bytes. A file whose size is unknown adds nothing, and a folder adds
+    /// nothing, because its size is the sum of its files.
     pub size: u64,
 }
 
@@ -409,7 +409,8 @@ impl Check {
             Check::Attributes { packed, folder } => {
                 entry.packed_attributes().contains(*packed) && (entry.is_dir() || !*folder)
             }
-            // A folder's size is always unknown, so a size test skips folders.
+            // A folder's size is the sum of its files, and unknown until the
+            // size and date pass ends.
             Check::Size(range) => range.contains(entry.size()?),
             Check::DateModified(range) => range.contains(entry.mtime()?),
             Check::Extension(exts) => match extension(entry.name(), entry.is_dir()) {
@@ -1284,6 +1285,46 @@ mod tests {
         let mut tiny = run(&idx, "size:tiny");
         tiny.sort();
         assert_eq!(tiny, vec!["docs\\notes.txt", "docs\\sub\\Report.PDF"]);
+    }
+
+    /// Once the size and date pass ends, a folder has the size of the files
+    /// below it: `docs` holds 4,096 + 200 bytes, more than any file in it.
+    /// The totals still add only files, so a folder and its files count each
+    /// file once.
+    #[test]
+    fn a_folder_is_as_large_as_the_files_below_it() {
+        let mut idx = sample_index();
+        idx.compute_folder_sizes();
+        assert_eq!(run(&idx, "size:>4kb"), ["docs", "photo.JPG"]);
+
+        let parsed = compiled("");
+        let by_size = run_query(
+            &idx,
+            "",
+            &parsed,
+            None,
+            SortSpec::default_for(SortKey::Size),
+            None,
+        );
+        let order: Vec<String> = by_size
+            .hits
+            .iter()
+            .map(|h| crate::wtf8::to_string_lossy(&h.path))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "photo.JPG",
+                "docs",
+                "docs\\sub\\Report.PDF",
+                "docs\\sub",
+                "docs\\notes.txt"
+            ]
+        );
+
+        let docs = resolve_scope(&idx, b"docs", false).unwrap();
+        let totals = run_totals(&idx, "", &parsed, Some(docs)).unwrap();
+        assert_eq!((totals.count, totals.size), (3, 4096 + 200));
     }
 
     #[test]

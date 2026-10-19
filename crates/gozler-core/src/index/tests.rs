@@ -1,7 +1,8 @@
-//! Tests for the index core: targeted unit cases plus three property tests
+//! Tests for the index core: targeted unit cases plus the property tests
 //! that carry most of the correctness weight: a model-based op tape, the
-//! bootstrap race (shuffled ENUM snapshot + forward journal replay) and the
-//! walk race (a folder walk that changes run through + the same replay).
+//! bootstrap race (shuffled ENUM snapshot + forward journal replay), the
+//! walk race (a folder walk that changes run through + the same replay) and
+//! the folder sizes under arbitrary index changes.
 
 use super::*;
 use crate::types::Frn;
@@ -1322,5 +1323,182 @@ fn model_names_are_path_unique() {
     ]);
     for p in idx.collect_real_paths() {
         assert!(seen.insert(p), "paths must be unique");
+    }
+}
+
+// -- folder sizes ----------------------------------------------------------
+
+/// One change to an index. Each `u8` selects from a small pool of file IDs,
+/// so that changes meet the same entries often.
+#[derive(Clone, Debug)]
+enum IndexChange {
+    /// A create record, also for an ID the index already holds.
+    Create {
+        target: u8,
+        parent: u8,
+        is_dir: bool,
+    },
+    /// A rename record into any folder, the entry's own descendants and files
+    /// included, so loops in the parent links and files that hold entries
+    /// happen.
+    Rename {
+        target: u8,
+        parent: u8,
+    },
+    Delete {
+        target: u8,
+    },
+    /// The stat that follows a change of size.
+    Stat {
+        target: u8,
+        size: u16,
+    },
+    /// A hard-link reconcile to one name in each of these folders.
+    Links {
+        target: u8,
+        parents: Vec<u8>,
+    },
+    /// One name a folder walk lists, as the tail lists a folder it missed.
+    Listed {
+        target: u8,
+        parent: u8,
+        is_dir: bool,
+        size: u16,
+    },
+}
+
+/// Twelve record numbers, each with two sequence numbers, so that a create
+/// can reuse a record number as NTFS does.
+fn pool_id(sel: u8) -> Frn {
+    frn_seq(1000 + u64::from(sel % 12), 1 + u16::from(sel / 12 % 2))
+}
+
+/// A folder of the pool, or the root.
+fn pool_parent(sel: u8) -> Frn {
+    if sel.is_multiple_of(5) {
+        root_frn()
+    } else {
+        pool_id(sel)
+    }
+}
+
+fn index_change_strategy() -> impl Strategy<Value = IndexChange> {
+    prop_oneof![
+        (any::<u8>(), any::<u8>(), any::<bool>()).prop_map(|(target, parent, is_dir)| {
+            IndexChange::Create {
+                target,
+                parent,
+                is_dir,
+            }
+        }),
+        (any::<u8>(), any::<u8>())
+            .prop_map(|(target, parent)| IndexChange::Rename { target, parent }),
+        any::<u8>().prop_map(|target| IndexChange::Delete { target }),
+        (any::<u8>(), any::<u16>()).prop_map(|(target, size)| IndexChange::Stat { target, size }),
+        (any::<u8>(), prop::collection::vec(any::<u8>(), 0..3))
+            .prop_map(|(target, parents)| IndexChange::Links { target, parents }),
+        (any::<u8>(), any::<u8>(), any::<bool>(), any::<u16>()).prop_map(
+            |(target, parent, is_dir, size)| IndexChange::Listed {
+                target,
+                parent,
+                is_dir,
+                size,
+            }
+        ),
+    ]
+}
+
+fn apply_change(idx: &mut VolumeIndex, change: &IndexChange) {
+    // A parent with the entry's own record number and another sequence number
+    // is that record's previous tenant, which only corrupt data names, and
+    // which `upsert_link` frees before it links the entry under it (#77).
+    // Remove this skip when #77 is fixed.
+    if let IndexChange::Create { target, parent, .. }
+    | IndexChange::Rename { target, parent }
+    | IndexChange::Listed { target, parent, .. } = *change
+        && pool_id(target) != pool_parent(parent)
+        && pool_id(target).record_number() == pool_parent(parent).record_number()
+    {
+        return;
+    }
+    match *change {
+        IndexChange::Create {
+            target,
+            parent,
+            is_dir,
+        } => {
+            let name = format!("c{target}");
+            idx.apply_batch(&[create(pool_id(target), pool_parent(parent), &name, is_dir)]);
+        }
+        IndexChange::Rename { target, parent } => {
+            let id = pool_id(target);
+            let is_dir = idx.head_of(id).is_some_and(|h| idx.entry(h).is_dir());
+            let name = format!("r{target}");
+            idx.apply_batch(&[rename(id, pool_parent(parent), &name, is_dir)]);
+        }
+        IndexChange::Delete { target } => {
+            idx.apply_batch(&[delete(pool_id(target))]);
+        }
+        IndexChange::Stat { target, size } => idx.set_stat(pool_id(target), size.into(), 0),
+        IndexChange::Links {
+            target,
+            ref parents,
+        } => {
+            let id = pool_id(target);
+            if idx.head_of(id).is_some_and(|h| !idx.entry(h).is_dir()) {
+                let mut folders: Vec<_> = parents
+                    .iter()
+                    .filter_map(|&p| idx.head_of(pool_parent(p)))
+                    .collect();
+                folders.sort_unstable();
+                folders.dedup();
+                let links: Vec<LinkTarget> = folders
+                    .into_iter()
+                    .map(|parent| LinkTarget {
+                        parent,
+                        name: b"link".to_vec(),
+                    })
+                    .collect();
+                idx.reconcile_links(id, &links);
+            }
+        }
+        IndexChange::Listed {
+            target,
+            parent,
+            is_dir,
+            size,
+        } => idx.insert_listed(&LayoutFile {
+            size: (!is_dir).then_some(size.into()),
+            ..listed(
+                pool_id(target),
+                pool_parent(parent),
+                &format!("l{target}"),
+                is_dir,
+            )
+        }),
+    }
+}
+
+proptest! {
+    /// After the size and date pass ends, every way the journal changes the
+    /// index keeps each folder's size equal to the sum recomputed from the
+    /// files below it: creates, deletes, size changes, moves of files and of
+    /// folders, hard links added and removed, placeholders, record numbers
+    /// reused, deletes of unknown IDs, and loops in the parent links. Before
+    /// the pass ends, every folder's size is unknown.
+    #[test]
+    fn folder_sizes_stay_the_sum_of_their_files(
+        changes in prop::collection::vec(index_change_strategy(), 0..60),
+        pass_end in 0usize..20,
+    ) {
+        let mut idx = new_index();
+        for (i, change) in changes.iter().enumerate() {
+            if i == pass_end {
+                idx.compute_folder_sizes();
+            }
+            apply_change(&mut idx, change);
+            prop_assert!(idx.child_chains_match_rebuild(), "child chains drifted after {:?}", change);
+            prop_assert!(idx.folder_sizes_match_rebuild(), "folder sizes drifted after {:?}", change);
+        }
     }
 }

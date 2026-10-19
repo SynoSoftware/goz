@@ -47,8 +47,13 @@ _Avoid_: flags, attribute bits (in prose)
 
 **Unknown size or date**:
 A file's size or date that gozler did not read, because the size and date pass
-failed or stopped, or could not read that file. A folder has no size, which is
-not the same as an unknown size.
+failed or stopped, or could not read that file. A folder's size is unknown
+until its volume's size and date pass completes, and stays unknown when the
+pass failed or stopped.
+
+**Folder size**:
+The sum of the known sizes of every file below a folder, each hard link
+counted; what `-get-folder-size` gives for that folder.
 
 ## Command line
 

@@ -19,9 +19,9 @@
 //!   `_es_should_quote`). TSV quotes a text column only when it contains a
 //!   tab, `"`, CR or LF, as es does without `-double-quote`. Plain text and
 //!   TXT never quote.
-//! - Size is empty for a folder and for an unknown size, and Date Modified for
-//!   an unknown date; neither is quoted. CSV and TSV print the size in bytes.
-//!   Plain text separates columns with a space, as es's console does: it
+//! - A folder's Size is the size of the files below it. Size is empty for an
+//!   unknown size, and Date Modified for an unknown date; neither is quoted.
+//!   CSV and TSV print the size in bytes. Plain text separates columns with a space, as es's console does: it
 //!   groups the size's digits, right-aligns the size and pads the date and
 //!   the attributes to es's widths, except after the last value of a line.
 //! - Attributes print as letters in plain text (`HA`) and as their
@@ -139,7 +139,7 @@ impl TableWriter {
                     })
                     .unwrap_or("")
                     .into(),
-                EsColumn::Size => match item.size.filter(|_| !item.is_dir) {
+                EsColumn::Size => match item.size {
                     Some(size) if plain => grouped(size).into(),
                     Some(size) => size.to_string().into(),
                     None => "".into(),
@@ -413,13 +413,9 @@ mod tests {
                     "Filename".into(),
                 ]);
             }
-            for (path, size, mtime, is_dir) in &rows {
-                let size_field = match (is_dir, size) {
-                    (false, Some(s)) => s.to_string(),
-                    _ => String::new(),
-                };
+            for (path, size, mtime, _) in &rows {
                 expected.push(vec![
-                    size_field,
+                    size.map(|s| s.to_string()).unwrap_or_default(),
                     mtime
                         .map(|ft| format_date_local(ft, &TimeZone::UTC))
                         .unwrap_or_default(),

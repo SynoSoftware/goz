@@ -269,6 +269,7 @@ pub(crate) fn build_index(
         if !walked {
             return Ok(None);
         }
+        index.compute_folder_sizes();
         index.optimize_storage();
         return Ok(Some(BuiltIndex {
             index,
@@ -314,6 +315,11 @@ pub(crate) fn build_index(
         }
     };
 
+    // A stopped pass left some files' sizes unknown, so a folder's sum would
+    // look exact while it was short: folder sizes stay unknown then.
+    if pass == LayoutPass::Complete {
+        index.compute_folder_sizes();
+    }
     // Every record has been seen, so the FRN map can densify against its true
     // maximum, and the growth slack of the build goes back.
     index.optimize_storage();

@@ -18,9 +18,10 @@ use gozler_core::types::EsColumn;
 /// 2026-10-17T12:34:56 UTC.
 const MODIFIED_UNIX_MS: i64 = 1_792_240_496_000;
 
-/// The result set every row prints: a file, a folder, a file with an unknown
-/// size and date, and a file whose name needs CSV quoting. [`print`] drops
-/// the attributes unless the row asks for their column, as the daemon does.
+/// The result set every row prints: a file, a folder with the size of the
+/// files below it, a file with an unknown size and date, and a file whose
+/// name needs CSV quoting. [`print`] drops the attributes unless the row asks
+/// for their column, as the daemon does.
 fn results() -> QueryResults {
     let modified = Some(unix_ms_to_filetime(MODIFIED_UNIX_MS));
     let item = |path: &str, size, mtime_ft, is_dir, letters| ResultItem {
@@ -35,7 +36,7 @@ fn results() -> QueryResults {
         total: 4,
         items: vec![
             item(r"C:\repo\report.txt", Some(4096), modified, false, "a"),
-            item(r"C:\repo\docs", None, modified, true, "d"),
+            item(r"C:\repo\docs", Some(8192), modified, true, "d"),
             item(r"C:\tmp\unread.bin", None, None, false, "n"),
             item(r#"C:\repo\a, "b".txt"#, Some(7), modified, false, "rhsa"),
         ],
@@ -74,7 +75,7 @@ const ROWS: &[Row] = &[
         prints: concat!(
             r"         4,096 2026-10-17T12:34:56 C:\repo\report.txt",
             "\n",
-            r"               2026-10-17T12:34:56 C:\repo\docs",
+            r"         8,192 2026-10-17T12:34:56 C:\repo\docs",
             "\n",
             r"                                   C:\tmp\unread.bin",
             "\n",
@@ -88,7 +89,7 @@ const ROWS: &[Row] = &[
         prints: concat!(
             "report.txt          4,096",
             "\n",
-            "docs",
+            "docs          8,192",
             "\n",
             "unread.bin",
             "\n",
@@ -109,6 +110,7 @@ const ROWS: &[Row] = &[
     },
     {
       "path": "C:\\repo\\docs",
+      "size": 8192,
       "mtime_ft": 134367140960000000,
       "is_dir": true
     },
@@ -145,15 +147,15 @@ const ROWS: &[Row] = &[
             "\r\n",
         ),
     },
-    // A folder and an unknown size print an empty Size; an unknown date an
-    // empty Date Modified.
+    // A folder prints the size of the files below it, an unknown size an
+    // empty Size, and an unknown date an empty Date Modified.
     Row {
         args: &["-export-csv", "out.csv", "-size", "-dm", "report"],
         prints: concat!(
             "\u{FEFF}Size,Date Modified,Filename\r\n",
             r#"4096,2026-10-17T12:34:56,"C:\repo\report.txt""#,
             "\r\n",
-            r#",2026-10-17T12:34:56,"C:\repo\docs""#,
+            r#"8192,2026-10-17T12:34:56,"C:\repo\docs""#,
             "\r\n",
             r#",,"C:\tmp\unread.bin""#,
             "\r\n",
@@ -168,7 +170,7 @@ const ROWS: &[Row] = &[
             "\u{FEFF}Date Modified,Size,Filename\r\n",
             r#"2026-10-17T12:34:56,4096,"C:\repo\report.txt""#,
             "\r\n",
-            r#"2026-10-17T12:34:56,,"C:\repo\docs""#,
+            r#"2026-10-17T12:34:56,8192,"C:\repo\docs""#,
             "\r\n",
             r#",,"C:\tmp\unread.bin""#,
             "\r\n",
@@ -191,7 +193,7 @@ const ROWS: &[Row] = &[
         prints: concat!(
             r"4096,C:\repo\report.txt",
             "\r\n",
-            r",C:\repo\docs",
+            r"8192,C:\repo\docs",
             "\r\n",
             r",C:\tmp\unread.bin",
             "\r\n",
@@ -236,7 +238,7 @@ const ROWS: &[Row] = &[
         prints: concat!(
             "Size\tFilename\r\n",
             "4096\tC:\\repo\\report.txt\r\n",
-            "\tC:\\repo\\docs\r\n",
+            "8192\tC:\\repo\\docs\r\n",
             "\tC:\\tmp\\unread.bin\r\n",
             "7\t\"C:\\repo\\a, \"\"b\"\".txt\"\r\n",
         ),

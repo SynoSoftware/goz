@@ -477,14 +477,22 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"D:\backup\report.txt",
             ]),
         ),
-        (&["size:>1mb"], prints(&[r"C:\Program Files\app.exe"])),
+        // A folder's size is the sum of the files below it: 2,000,000 bytes
+        // in C:\Program Files, 100 in C:\docs, and 0 in C:\tmp, whose one
+        // file has an unknown size.
+        (
+            &["size:>1mb"],
+            prints(&[r"C:\Program Files\app.exe", r"C:\Program Files"]),
+        ),
         (
             &["size:..500"],
             prints(&[
+                r"C:\docs",
                 r"C:\repo\docs\link.md",
                 r"C:\repo\src\link.md",
                 r"C:\repo\notes.md.bak",
                 r"C:\docs\readme.txt",
+                r"C:\tmp",
             ]),
         ),
         (
@@ -636,7 +644,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\repo\DESIGN.md",
             ]),
         ),
-        // Unknown sizes, a folder's included, sort last.
+        // An unknown size sorts last; D:\backup sorts by its 5,000 bytes.
         (
             &["-sort-size-ascending", "b"],
             prints(&[
@@ -769,7 +777,8 @@ const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 
 /// The index of the volume mounted at `mount`, built from `entries` in order,
-/// so a folder comes before what it holds.
+/// so a folder comes before what it holds, with its folder sizes summed as at
+/// the end of a build.
 fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
     let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
     let mut folders: HashMap<&str, Frn> = HashMap::new();
@@ -822,6 +831,7 @@ fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
             names,
         });
     }
+    index.compute_folder_sizes();
     index
 }
 

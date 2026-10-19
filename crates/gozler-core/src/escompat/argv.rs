@@ -637,7 +637,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::Size),
         },
         group: Group::Output,
-        help: "Add a Size column, in bytes; empty for a folder",
+        help: "Add a Size column, in bytes; for a folder, the files below it",
     },
     Switch {
         spelling: Spelling::Es {

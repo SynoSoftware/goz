@@ -148,9 +148,9 @@ impl Clause {
 }
 
 /// One test, or with `negated` its opposite. A size test never matches an
-/// entry whose size is unknown or a folder, and a date test an entry whose
-/// date is unknown, negated or not, so a negated size test does not report an
-/// unread file as small.
+/// entry whose size is unknown, and a date test an entry whose date is
+/// unknown, negated or not, so a negated size test does not report an unread
+/// file as small.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Term {
     pub negated: bool,
@@ -366,8 +366,9 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["size"],
         function: Function::Size,
         example: ">1mb",
-        help: "File size; also `<`, `<=`, `>=`, `=`, ranges such as `1mb..10mb`, and `empty`, \
-               `tiny`, `small`, `medium`, `large`, `huge` or `gigantic`",
+        help: "Size of a file, or of the files below a folder; also `<`, `<=`, `>=`, `=`, \
+               ranges such as `1mb..10mb`, and `empty`, `tiny`, `small`, `medium`, `large`, \
+               `huge` or `gigantic`",
     },
     SearchFunction {
         names: &["dm", "datemodified", "date-modified"],
