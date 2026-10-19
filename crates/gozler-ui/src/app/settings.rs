@@ -1,8 +1,8 @@
-//! The Settings dialog and its command shortcut dialog (spec: Settings
-//! dialog; design: Settings). The dialog edits its own copy of the
+//! The Settings dialog and its command shortcut dialog (DESIGN.md:
+//! Settings dialog). The dialog edits its own copy of the
 //! settings, a [`SettingsDraft`], and OK or Apply gives it to the main
-//! window, so no model borrow is held while its modal loop runs (design
-//! rule 1). Each page is a child dialog of its own template, whose
+//! window, so no model borrow is held while its modal loop runs (DESIGN.md:
+//! window rule 1). Each page is a child dialog of its own template, whose
 //! controls this dialog's procedure handles.
 
 use super::main_window::MainWindow;
@@ -114,7 +114,7 @@ fn is(id: u16, control: ControlId) -> bool {
     id == control.id()
 }
 
-/// The Settings dialog (spec: Settings dialog).
+/// The Settings dialog (DESIGN.md: Settings dialog).
 pub(super) struct SettingsDialog<'a> {
     main: &'a MainWindow,
     /// The main window, which applies the settings.
@@ -367,7 +367,7 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Keeps the shortcut the controls hold, when it can be one; one that
-    /// cannot is refused when OK or Apply is pressed (spec: Dialogs).
+    /// cannot is refused when OK or Apply is pressed (DESIGN.md: Dialogs).
     fn shortcut_changed(&self) {
         if let Ok(shortcut) = self.read_shortcut() {
             self.draft.borrow_mut().edited.choices.show_shortcut = shortcut;
@@ -394,7 +394,7 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Apply is enabled while a value differs from what was applied
-    /// (spec: Dialogs), a refused shortcut included.
+    /// (DESIGN.md: Dialogs), a refused shortcut included.
     fn update_apply(&self, dialog: Hwnd) {
         let changed = self.draft.borrow().can_apply() || self.read_shortcut().is_err();
         if let Some(apply) = dialog::item(dialog, ControlId::SettingsApply.id()) {
@@ -403,7 +403,7 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Shows `page`, and has the main window follow the service while the
-    /// Index page shows (design: Settings).
+    /// Index page shows (DESIGN.md: Settings dialog).
     fn show_page(&self, dialog: Hwnd, page: SettingsPage) {
         let previous = self.shown.replace(Some(page));
         if previous == Some(page) {
@@ -462,7 +462,7 @@ impl<'a> SettingsDialog<'a> {
 
     /// Gives the edited values to the main window, and answers whether they
     /// were applied; a shortcut that cannot be one, or that another program
-    /// holds, keeps the dialog open (spec: Dialogs).
+    /// holds, keeps the dialog open (DESIGN.md: Dialogs).
     fn apply(&self, dialog: Hwnd) -> bool {
         if let Err(message) = self.read_shortcut() {
             self.refuse(
@@ -708,7 +708,7 @@ impl DialogProc for SettingsDialog<'_> {
         let text = |key: &'static str| self.strings.text(key);
         if let Some(list) = self.language_list() {
             // As the Language menu lists them, each language by its own
-            // name (spec: Language).
+            // name (DESIGN.md: Language).
             let names = LANGUAGES
                 .iter()
                 .map(|language| without_access_key(language.name));
@@ -796,7 +796,7 @@ impl DialogProc for SettingsDialog<'_> {
 }
 
 /// The command shortcut dialog: one shortcut of one command, which
-/// Settings > Keyboard's Add… and Edit… open (spec: The Keyboard page).
+/// Settings > Keyboard's Add… and Edit… open (DESIGN.md: The Keyboard page).
 struct CommandShortcut<'a> {
     strings: &'a Strings,
     command: CommandId,

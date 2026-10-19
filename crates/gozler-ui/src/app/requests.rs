@@ -1,6 +1,6 @@
 //! The requests to the gozler service: one thread per [`Fetch`], each with
 //! its own connection and cancel token, and one channel for the replies
-//! (design rules 3 to 5).
+//! (DESIGN.md: window rules 3 to 5).
 
 use crate::core::fetch::{
     Ask, Chunk, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Outcome, Purpose, SelectionAsk,
@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How often an export reports the rows it has written, which status part
-/// 3 shows (design: Export).
+/// 3 shows (DESIGN.md: Export).
 const EXPORT_PROGRESS: Duration = Duration::from_millis(500);
 
 struct Running {
@@ -98,7 +98,7 @@ impl Requests {
 
     /// Cancels every request and joins every thread. Each thread checks its
     /// token every 5 ms while it waits for the service, so this returns
-    /// within one poll (design: Exit during a search).
+    /// within one poll (DESIGN.md: Requests).
     pub(super) fn shut_down(&self) {
         let mut all: Vec<Running> = self.cancelled.borrow_mut().drain(..).collect();
         all.extend(self.live.borrow_mut().iter_mut().filter_map(Option::take));
@@ -177,7 +177,7 @@ fn rows(client: &mut Client, ask: &ChunkAsk) -> Result<Chunk, ClientError> {
 /// cache.
 fn selection(client: &mut Client, ask: SelectionAsk) -> Result<SelectionRows, ClientError> {
     // Sized up front, because growing a vector of 100,000 rows copies it
-    // and holds both copies for a moment (spec: Memory budget).
+    // and holds both copies for a moment (DESIGN.md: Memory budget).
     let kept: u64 = ask
         .positions
         .iter()
@@ -216,7 +216,7 @@ impl From<ClientError> for ExportStop {
 /// Writes every page to the export's file as it arrives, and reports the
 /// rows written about twice a second. The file is created first, as
 /// `gozler -export-csv` creates it, and a cancelled or failed export
-/// deletes it (design: Export).
+/// deletes it (DESIGN.md: Export).
 fn export(
     client: &mut Client,
     ask: &ExportAsk,
@@ -258,7 +258,7 @@ fn export(
     }
 }
 
-/// The failure the window shows for the client's error (design: Shared
+/// The failure the window shows for the client's error (DESIGN.md: Shared
 /// code); a pipe that cannot be opened or read shows as a lost connection.
 fn failure(error: ClientError) -> DaemonFailure {
     match error {

@@ -1,7 +1,7 @@
-//! The command table: one row for each command of the spec's Commands table,
-//! and the menu bar built from the rows (design rule 9). Every surface reads
-//! a command's label, shortcut, enabled state and check mark from here, so
-//! the menus, the keys and the controls cannot disagree.
+//! The command table: one row for each command of DESIGN.md's Commands table,
+//! and the menu bar built from the rows (DESIGN.md: window rule 9). Every
+//! surface reads a command's label, shortcut, enabled state and check mark from
+//! here, so the menus, the keys and the controls cannot disagree.
 
 use super::model::{Column, Model};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
@@ -11,7 +11,7 @@ use super::text::{LANGUAGES, LanguageChoice, Strings, menu_label};
 use gozler_core::types::{SortDir, SortKey};
 use serde::{Deserialize, Serialize};
 
-/// One command of the spec's Commands table. Its names are `ui.json`'s,
+/// One command of DESIGN.md's Commands table. Its names are `ui.json`'s,
 /// where the person's command shortcuts are saved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -213,10 +213,10 @@ pub(crate) enum Focus {
     },
     List,
     /// The Date modified or Size list, closed, whose `Enter` opens the
-    /// custom range's dialog when Custom… is selected (spec: Filter pane).
+    /// custom range's dialog when Custom… is selected (DESIGN.md: Filter pane).
     RangeFilter,
     /// One of the inspector's read-only values, whose text Copy and Select
-    /// all act on (spec: Inspector pane).
+    /// all act on (DESIGN.md: Inspector pane).
     Value {
         text_selected: bool,
     },
@@ -227,17 +227,17 @@ fn always(_: &State) -> bool {
     true
 }
 
-/// Refresh runs the shown search again (spec: C17).
+/// Refresh runs the shown search again (DESIGN.md: C17).
 fn searched(state: &State) -> bool {
     state.model.results.has_searched()
 }
 
-/// The selected entries, once the selection is read (spec: The selection).
+/// The selected entries, once the selection is read (DESIGN.md: The selection).
 fn files(state: &State) -> bool {
     state.model.selected_files().is_some()
 }
 
-/// Open and Open file location (spec: C1, C2).
+/// Open and Open file location (DESIGN.md: C1, C2).
 fn open(state: &State) -> bool {
     state
         .model
@@ -246,7 +246,7 @@ fn open(state: &State) -> bool {
 }
 
 /// Properties shows one entry, and Search in this folder searches its
-/// folder (spec: C3, C12).
+/// folder (DESIGN.md: C3, C12).
 fn one_file(state: &State) -> bool {
     state
         .model
@@ -254,7 +254,7 @@ fn one_file(state: &State) -> bool {
         .is_some_and(|files| files.len() == 1)
 }
 
-/// Copy acts on the focused control (spec: C8).
+/// Copy acts on the focused control (DESIGN.md: C8).
 fn copy(state: &State) -> bool {
     match state.focus {
         Focus::SearchBox { text_selected } | Focus::Value { text_selected } => text_selected,
@@ -264,7 +264,7 @@ fn copy(state: &State) -> bool {
 }
 
 /// A pressed key combination: a command's shortcut, or a key the focused
-/// control gives a meaning (design rule 8).
+/// control gives a meaning (DESIGN.md: window rule 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Keystroke {
     pub(crate) ctrl: bool,
@@ -480,7 +480,7 @@ impl Keystroke {
     }
 }
 
-/// What a key does in the focused control (design rule 8).
+/// What a key does in the focused control (DESIGN.md: window rule 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyAction {
     Run(CommandId),
@@ -668,7 +668,7 @@ pub(crate) struct Menu {
     pub(crate) aligned_right: bool,
 }
 
-/// The menu bar, in the spec's order and groups (spec: Menus).
+/// The menu bar, in its order and groups (DESIGN.md: Menus).
 pub(crate) fn menu_bar() -> Vec<Menu> {
     use CommandId as C;
     let run = |commands: &[CommandId]| {
@@ -755,12 +755,12 @@ pub(crate) enum MenuNode {
     },
 }
 
-/// The header's context menu: View > Columns' items (spec: C15).
+/// The header's context menu: View > Columns' items (DESIGN.md: C15).
 pub(crate) fn header_menu() -> Vec<Vec<MenuItem>> {
     vec![Column::ALL.into_iter().map(MenuItem::Column).collect()]
 }
 
-/// A row's context menu (spec: Menus). Its first item, Open, is the
+/// A row's context menu (DESIGN.md: Menus). Its first item, Open, is the
 /// default, which a double-click and `Enter` also run.
 pub(crate) fn row_menu() -> Vec<Vec<MenuItem>> {
     use CommandId as C;
@@ -773,7 +773,7 @@ pub(crate) fn row_menu() -> Vec<Vec<MenuItem>> {
     ]
 }
 
-/// The tray icon's menu (spec: Window lifetime). Its first item, Show
+/// The tray icon's menu (DESIGN.md: Window lifetime). Its first item, Show
 /// window, is the default, which a click on the icon also runs.
 pub(crate) fn tray_menu() -> Vec<Vec<MenuItem>> {
     vec![
@@ -784,7 +784,7 @@ pub(crate) fn tray_menu() -> Vec<Vec<MenuItem>> {
 
 /// The inspector's buttons: each runs its command, and its caption differs
 /// from the command's menu label only in an access key that the main
-/// window's other controls leave free (spec: Inspector pane).
+/// window's other controls leave free (DESIGN.md: Inspector pane).
 pub(crate) const INSPECTOR_BUTTONS: [(CommandId, &str); 3] = [
     (CommandId::Open, "inspector.open"),
     (CommandId::OpenFileLocation, "inspector.open_file_location"),
@@ -792,7 +792,7 @@ pub(crate) const INSPECTOR_BUTTONS: [(CommandId, &str); 3] = [
 ];
 
 /// The item that File shows in Export results…' place: Cancel export while
-/// an export runs (spec: Menus).
+/// an export runs (DESIGN.md: Menus).
 pub(crate) fn export_slot(model: &Model) -> MenuItem {
     MenuItem::Run(if model.exporting() {
         CommandId::CancelExport
@@ -802,7 +802,7 @@ pub(crate) fn export_slot(model: &Model) -> MenuItem {
 }
 
 /// `groups` as a context menu in the language of `strings`. A context menu
-/// shows no shortcuts, as File Explorer's does (spec: Menus).
+/// shows no shortcuts, as File Explorer's does (DESIGN.md: Menus).
 pub(crate) fn render_popup(groups: &[Vec<MenuItem>], strings: &Strings) -> Vec<MenuNode> {
     separated(groups, |item| MenuNode::Item {
         id: item.id(),
@@ -932,7 +932,7 @@ mod tests {
 
     /// An access key that two items of one menu share opens the first only,
     /// and a main-window letter that a menu also uses never opens that menu
-    /// (spec: Words). Every shipped language chooses its own letters.
+    /// (DESIGN.md: Words). Every shipped language chooses its own letters.
     #[test]
     fn access_keys_are_unique_in_every_menu_and_language() {
         fn assert_unique<'a>(
@@ -1028,7 +1028,7 @@ mod tests {
 
     /// File Explorer asks before it opens more than 15 items, and a command
     /// that acts on rows not read yet would act on files nobody chose
-    /// (spec: C1, C2, C3, S12).
+    /// (DESIGN.md: C1, C2, C3, S12).
     #[test]
     fn the_selection_commands_follow_the_number_of_files_read() {
         let mut model = showing(50_000);

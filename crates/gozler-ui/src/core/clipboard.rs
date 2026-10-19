@@ -1,7 +1,7 @@
-//! What Copy, Copy as path and Copy name put on the clipboard (spec: C8,
+//! What Copy, Copy as path and Copy name put on the clipboard (DESIGN.md: C8,
 //! C9, C10). [`ClipboardData`] knows each format's exact size before it
 //! writes a byte, so `win::clipboard` allocates one block of that size and
-//! the files are written into it once (docs/plans/ui-design.md: Copy).
+//! the files are written into it once (DESIGN.md: Copy).
 
 use gozler_core::proto::ResultItem;
 

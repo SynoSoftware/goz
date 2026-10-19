@@ -1,6 +1,5 @@
 //! gozler-ui: the gozler window, a native Win32 search window over gozlerd
-//! (docs/plans/ui-spec.md describes what it does, docs/plans/ui-design.md
-//! how it is built).
+//! (DESIGN.md: The window).
 //!
 //! Three modules divide the work. [`core`] decides everything and holds no
 //! Win32 type, so its tests run on every OS. `win` wraps the Win32 calls and

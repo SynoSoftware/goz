@@ -1,10 +1,10 @@
-//! The shortcut that shows Gozler from any program (design: The shortcut).
-//! A shortcut with `Ctrl`, `Alt` and `Shift` only is a `RegisterHotKey` on
-//! the main window, which then receives `WM_HOTKEY`. A shortcut with the
+//! The shortcut that shows Gozler from any program (DESIGN.md: The Keyboard
+//! page). A shortcut with `Ctrl`, `Alt` and `Shift` only is a `RegisterHotKey`
+//! on the main window, which then receives `WM_HOTKEY`. A shortcut with the
 //! Windows key is a low-level keyboard hook on a thread of its own, because
 //! Explorer registers most Windows-key combinations, and Windows removes a
-//! low-level hook whose callback waits for a busy window thread. The hook
-//! posts the show message to the window.
+//! low-level hook whose callback waits for a busy window thread. The hook posts
+//! the show message to the window.
 
 use super::Hwnd;
 use super::keys::virtual_key;
@@ -52,7 +52,7 @@ enum Kind {
 /// Why Windows did not let Gozler use a shortcut.
 #[derive(Debug)]
 pub(crate) enum RegisterError {
-    /// Another program holds the shortcut (spec: Dialogs).
+    /// Another program holds the shortcut (DESIGN.md: Dialogs).
     Taken,
     /// Windows refused it for another reason, which the error gives.
     Failed(windows::core::Error),

@@ -1,6 +1,6 @@
 //! The Windows regional format and display languages. Windows formats the
-//! numbers, so its regional rules have one owner (docs/plans/ui-design.md:
-//! Text and languages).
+//! numbers, so its regional rules have one owner (DESIGN.md:
+//! Language).
 
 use super::wide;
 use crate::core::text::Numbers;

@@ -1,4 +1,4 @@
-//! The open commands of Settings > General (spec: The General page): Open
+//! The open commands of Settings > General (DESIGN.md: The General page): Open
 //! folders, Open files and Open file location, in which `%1` is the
 //! entry's full path, as in Everything and in Windows' own commands. An
 //! empty command does what File Explorer does, which `app` runs instead.

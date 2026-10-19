@@ -1,4 +1,4 @@
-//! The person's shortcuts (spec: The Keyboard page): the shortcuts of the
+//! The person's shortcuts (DESIGN.md: The Keyboard page): the shortcuts of the
 //! window's commands, which the menus and the accelerator table read, and
 //! the one shortcut that shows Gozler from any program. Both are saved in
 //! `ui.json` by the names of [`Keystroke::name`], which are the same in
@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 /// Every command that takes a shortcut, each with the catalogue key of the
 /// menu that holds it: each command of the menu bar, Cancel export in
 /// Export results…' place, and the context menu's commands that no menu of
-/// the bar holds (spec: The Keyboard page). A submenu of choices, the match
-/// controls, Clear filters and the tray's Show window take none.
+/// the bar holds (DESIGN.md: The Keyboard page). A submenu of choices, the
+/// match controls, Clear filters and the tray's Show window take none.
 pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
     let mut listed: Vec<(CommandId, &'static str)> = Vec::new();
     for menu in menu_bar() {
@@ -63,7 +63,7 @@ pub(crate) struct CommandRow {
 }
 
 /// The listed commands whose place or shortcuts contain `filter`, ignoring
-/// case, so `ctrl+e` finds the command that has it (spec: The Keyboard
+/// case, so `ctrl+e` finds the command that has it (DESIGN.md: The Keyboard
 /// page).
 pub(crate) fn command_rows(
     strings: &Strings,
@@ -89,7 +89,7 @@ pub(crate) fn command_rows(
         .collect()
 }
 
-/// Why a command cannot have a shortcut (spec: The Keyboard page).
+/// Why a command cannot have a shortcut (DESIGN.md: The Keyboard page).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// The key belongs to the search box or the list, such as `Ctrl+V`.
@@ -291,7 +291,7 @@ impl<'de> Deserialize<'de> for CommandShortcuts {
     }
 }
 
-/// The shortcut that shows Gozler from any program (spec: The Keyboard
+/// The shortcut that shows Gozler from any program (DESIGN.md: The Keyboard
 /// page): a key with the Windows key, or with two of `Ctrl`, `Alt` and
 /// `Shift`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

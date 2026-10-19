@@ -1,6 +1,7 @@
-//! The selection: a set of files, built at one moment (design rule 10). The
-//! list owns which positions are selected; the model builds the files from
-//! them once per user action (docs/plans/ui-design.md: The selection).
+//! The selection: a set of files, built at one moment (DESIGN.md:
+//! window rule 10). The list owns which positions are selected; the model
+//! builds the files from them once per user action (DESIGN.md: The
+//! selection).
 
 use super::fetch::Generation;
 use gozler_core::proto::{QueryTotals, ResultItem};
@@ -8,7 +9,7 @@ use std::ops::Range;
 
 /// Open and Open file location stop here, because File Explorer asks before
 /// it opens more items, and many windows opened by accident are worse
-/// (spec: Commands).
+/// (DESIGN.md: Commands).
 pub(crate) const OPEN_LIMIT: usize = 15;
 
 #[derive(Debug, PartialEq)]
@@ -23,7 +24,7 @@ pub(crate) enum Selection {
     /// In position order, each at most once; never one folder alone, which
     /// is [`Selection::Folder`].
     Files(Vec<ResultItem>),
-    /// One folder alone, whose contents the inspector shows (spec:
+    /// One folder alone, whose contents the inspector shows (DESIGN.md:
     /// Inspector pane).
     Folder {
         folder: ResultItem,
@@ -70,7 +71,7 @@ impl Selection {
 }
 
 /// What status part 2 and the inspector sum from the selected entries
-/// (spec: Status bar, Inspector pane).
+/// (DESIGN.md: Status bar, Inspector pane).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Sums {
     pub(crate) files: u64,

@@ -144,7 +144,7 @@ mod ids {
 
 /// The pseudo-language: Windows' own long-text pseudo-locale tag, with every
 /// message lengthened and accented so that clipping and untranslated text
-/// show in a screenshot (docs/plans/ui-design.md: Text and languages).
+/// show in a screenshot (DESIGN.md: Language).
 #[cfg(feature = "pseudo-language")]
 mod pseudo {
     use serde_json::Value;

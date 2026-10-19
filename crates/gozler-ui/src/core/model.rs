@@ -1,10 +1,10 @@
 //! The window's facts: the loaded language, the saved settings, what the
 //! controls ask for, what the list shows, the selection, the export and what
 //! the service said last. Captions are built from these facts when they are
-//! shown, never stored (design rule 12). The fields are private to the core:
-//! every reply passes through [`Model::accept`], and every change the person
-//! makes through a method of its own, and each says what changed and which
-//! request that makes necessary.
+//! shown, never stored (DESIGN.md: window rule 12). The fields are private to
+//! the core: every reply passes through [`Model::accept`], and every change the
+//! person makes through a method of its own, and each says what changed and
+//! which request that makes necessary.
 
 use super::fetch::{
     Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose,
@@ -54,7 +54,7 @@ pub(crate) struct Model {
     /// Use Total Commander's search in flight.
     program_asked: Option<Generation>,
     /// Whether Settings shows its Index page, which follows the service's
-    /// state every 2 seconds (spec: The Index page).
+    /// state every 2 seconds (DESIGN.md: The Index page).
     index_page_shown: bool,
     /// The newer release that Check for updates found, such as `0.4.0`.
     newer_release: Option<String>,
@@ -80,7 +80,7 @@ pub(crate) enum Then {
     /// [`Model::read_selection`], once the selection has stopped changing
     /// for a moment, so one request serves a run of Shift+Down presses. The
     /// live `Selection` request ends now, because it reads an older
-    /// selection (spec: T6).
+    /// selection (DESIGN.md: T6).
     ReadSelectionSoon,
     /// Ends the live request of the purpose; its reply would be stale.
     Cancel(Purpose),
@@ -154,7 +154,7 @@ pub(crate) enum ExportError {
     Daemon(DaemonFailure),
 }
 
-/// The export, which status part 3 shows (spec: Status bar).
+/// The export, which status part 3 shows (DESIGN.md: Status bar).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Export {
     Idle,
@@ -302,7 +302,7 @@ impl Model {
 
     /// Replaces the language with `strings` and records `choice`, which the
     /// settings file saves. It starts no request, because the results do
-    /// not depend on the language (spec: Language, `T12`).
+    /// not depend on the language (DESIGN.md: Language, `T12`).
     pub(crate) fn set_language(&mut self, choice: LanguageChoice, strings: Strings) {
         self.settings.choices.language = choice;
         self.strings = strings;
@@ -347,7 +347,7 @@ impl Model {
     }
 
     /// Use Total Commander's search, which cancels an earlier one: every
-    /// `totalcmd*.exe`, newest first (design: Use Total Commander).
+    /// `totalcmd*.exe`, newest first (DESIGN.md: The General page).
     pub(crate) fn find_total_commander(&mut self) -> Fetch {
         let search = query::search(
             TOTAL_COMMANDER_SEARCH,
@@ -427,7 +427,7 @@ impl Model {
     }
 
     /// The buttons below the list's message: the failure's fix, or the ways
-    /// out of a search that the filters leave without results (spec: S5,
+    /// out of a search that the filters leave without results (DESIGN.md: S5,
     /// S8).
     pub(crate) fn list_buttons(&self) -> Vec<ListButton> {
         let filters = self.filters();
@@ -487,7 +487,7 @@ impl Model {
     }
 
     /// The person typed `text`; its search runs once they pause, or with
-    /// search as you type off, when they press `Enter` (spec: C6).
+    /// search as you type off, when they press `Enter` (DESIGN.md: C6).
     pub(crate) fn set_typed_search(&mut self, text: String) -> Accepted {
         if text == self.text {
             return Accepted::only(Change::Nothing);
@@ -511,7 +511,7 @@ impl Model {
         }
     }
 
-    /// The person chose a sort; the search runs again (spec: C20).
+    /// The person chose a sort; the search runs again (DESIGN.md: C20).
     pub(crate) fn sort_by(&mut self, sort: SortSpec) -> Accepted {
         self.settings.window.sort = sort;
         Accepted {
@@ -536,7 +536,7 @@ impl Model {
         }
     }
 
-    /// Every filter group at its first choice (spec: C21).
+    /// Every filter group at its first choice (DESIGN.md: C21).
     pub(crate) fn clear_filters(&mut self) -> Accepted {
         self.set_filters(self.filters().cleared())
     }
@@ -560,7 +560,7 @@ impl Model {
     }
 
     /// Location the one selected folder, or the folder that holds the one
-    /// selected file (spec: C12).
+    /// selected file (DESIGN.md: C12).
     pub(crate) fn search_in_this_folder(&mut self) -> Accepted {
         let folder = match self.selected_files() {
             Some([entry]) if entry.is_dir => entry.path.clone(),
@@ -570,14 +570,14 @@ impl Model {
         self.choose_folder(folder)
     }
 
-    /// Shows or hides the filter pane (spec: C13).
+    /// Shows or hides the filter pane (DESIGN.md: C13).
     pub(crate) fn toggle_filter_pane(&mut self) -> Accepted {
         let window = &mut self.settings.window;
         window.filter_pane = !window.filter_pane;
         Accepted::only(Change::Panes)
     }
 
-    /// Shows or hides the inspector (spec: C14).
+    /// Shows or hides the inspector (DESIGN.md: C14).
     pub(crate) fn toggle_inspector(&mut self) -> Accepted {
         let window = &mut self.settings.window;
         window.inspector = !window.inspector;
@@ -595,7 +595,7 @@ impl Model {
         Accepted::only(Change::Panes)
     }
 
-    /// Shows or hides `column` (spec: C15). A shown column joins at the
+    /// Shows or hides `column` (DESIGN.md: C15). A shown column joins at the
     /// end; Name cannot be hidden.
     pub(crate) fn toggle_column(&mut self, column: Column) -> Accepted {
         if !column.can_hide() {
@@ -618,8 +618,8 @@ impl Model {
     /// The search that the typed text and the controls ask for, or the
     /// message that says why it cannot run, which starts no request: the
     /// text does not parse, `scope` says the Location folder is missing, or
-    /// the search is empty and the settings say to show nothing (spec: S6).
-    /// The shown rows and the selection stay until the new search's first
+    /// the search is empty and the settings say to show nothing (DESIGN.md:
+    /// S6). The shown rows and the selection stay until the new search's first
     /// rows arrive.
     pub(crate) fn start_search(&mut self, query_start: &QueryStart, scope: ScopeCheck) -> Accepted {
         let search = query::search(&self.text, self.matching(), self.filters(), query_start);
@@ -678,7 +678,7 @@ impl Model {
     /// The positions the list says are selected, sorted and apart, read once
     /// per user action. When the cache holds every one, the selection is
     /// those rows, the files the person sees; otherwise it is read
-    /// (design: The selection).
+    /// (DESIGN.md: The selection).
     pub(crate) fn set_selection(&mut self, positions: Vec<Range<u64>>) -> Accepted {
         let older = self.selection.asked();
         let positions: Vec<Range<u64>> = positions.into_iter().filter(|r| !r.is_empty()).collect();
@@ -697,7 +697,7 @@ impl Model {
                 }
             }
         };
-        // The request for the older selection reads other files (spec: T6,
+        // The request for the older selection reads other files (DESIGN.md: T6,
         // T7); a new request of the purpose ends it too.
         let then = then.or_else(|| older.map(|_| Then::Cancel(Purpose::Selection)));
         Accepted {
@@ -707,7 +707,7 @@ impl Model {
     }
 
     /// Selects `files`, which are read; one folder alone also asks for its
-    /// contents, which the inspector shows (spec: Inspector pane).
+    /// contents, which the inspector shows (DESIGN.md: Inspector pane).
     fn select(&mut self, mut files: Vec<ResultItem>) -> Option<Then> {
         let folder = match files.as_slice() {
             [entry] if entry.is_dir => files.pop().expect("the selection is one folder"),
@@ -760,7 +760,7 @@ impl Model {
     }
 
     /// Whether Export results… can run: the list shows results and no
-    /// export runs (spec: C4).
+    /// export runs (DESIGN.md: C4).
     pub(crate) fn can_export(&self) -> bool {
         self.results.shown_ask().is_some() && self.results.total() > 0 && !self.exporting()
     }
@@ -773,7 +773,7 @@ impl Model {
         &self.export
     }
 
-    /// Exports every match of the shown search to `path` (spec: Export).
+    /// Exports every match of the shown search to `path` (DESIGN.md: Export).
     /// The file holds the full path and each shown Size, Date modified,
     /// Extension and Attributes column in `display_order`, the list's order
     /// of [`Model::columns`], so it holds the bytes of `gozler -export-csv`
@@ -819,7 +819,7 @@ impl Model {
         }
     }
 
-    /// Ends the running export; its thread deletes the partial file (spec:
+    /// Ends the running export; its thread deletes the partial file (DESIGN.md:
     /// C5).
     pub(crate) fn cancel_export(&mut self) -> Accepted {
         if !self.exporting() {
@@ -915,7 +915,7 @@ impl Model {
                 let change = match self.results.accept(generation, chunk) {
                     RowsChange::Stale => Change::Nothing,
                     RowsChange::NewSearch { count } => {
-                        // A new search's rows are other files (spec: T2).
+                        // A new search's rows are other files (DESIGN.md: T2).
                         self.selection = Selection::None;
                         Change::NewSearch { count }
                     }
@@ -942,8 +942,8 @@ impl Model {
 
     /// The service failed while rows are shown: the list shows the failure
     /// instead of the rows, nothing is selected, and the status poll runs
-    /// the search again once a failure that ends by itself has ended (spec:
-    /// T3, T4).
+    /// the search again once a failure that ends by itself has ended
+    /// (DESIGN.md: T3, T4).
     fn show_failure(&mut self, failure: DaemonFailure) -> Accepted {
         self.failure = Some(failure.clone());
         self.results.show_message(ListMessage::Failure(failure));
@@ -997,7 +997,7 @@ impl Model {
             (Selection::Reading { positions, .. }, Outcome::Selection(reply)) => {
                 // Each row moves to the files or to the cache, and only a row
                 // that is both is copied, so a selection of 100,000 rows is
-                // held once (spec: Memory budget).
+                // held once (DESIGN.md: Memory budget).
                 let selected = positions.iter().map(|r| r.end - r.start).sum::<u64>();
                 let mut files = Vec::with_capacity(usize::try_from(selected).unwrap_or(0));
                 let mut cached = Vec::new();
@@ -1138,7 +1138,7 @@ impl Model {
     }
 }
 
-/// A column of the results list (spec: Results list). Its names are
+/// A column of the results list (DESIGN.md: Results list). Its names are
 /// `ui.json`'s.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1200,7 +1200,7 @@ impl Column {
     }
 
     /// Name cannot be hidden, because the list would show rows that name
-    /// nothing (spec: C15).
+    /// nothing (DESIGN.md: C15).
     pub(crate) fn can_hide(self) -> bool {
         self != Column::Name
     }
@@ -1224,7 +1224,7 @@ impl Column {
     }
 
     /// Its column in an export; Name and Path are parts of the full path,
-    /// which every export holds (spec: Export).
+    /// which every export holds (DESIGN.md: Export).
     fn export_column(self) -> Option<EsColumn> {
         match self {
             Column::Name | Column::Path => None,
@@ -1377,7 +1377,7 @@ pub(crate) mod tests {
     }
 
     /// Without it, the person must search again by hand after the service
-    /// starts or a volume finishes indexing (spec: J8, J9).
+    /// starts or a volume finishes indexing (DESIGN.md: Requests).
     #[test]
     fn t4_the_search_runs_again_when_the_service_answers_or_the_index_completes() {
         let mut model = model();
@@ -1466,7 +1466,7 @@ pub(crate) mod tests {
     }
 
     /// A status failure that emptied the list would hide rows that are
-    /// still right; a results failure must replace them (design: Requests).
+    /// still right; a results failure must replace them (DESIGN.md: Requests).
     #[test]
     fn a_status_failure_leaves_the_rows_and_a_results_failure_replaces_them() {
         let mut model = showing(10);
@@ -1603,7 +1603,7 @@ pub(crate) mod tests {
     }
 
     /// The cached rows are the files the person sees, so reading them again
-    /// from the service could name other files (design rule 10).
+    /// from the service could name other files (DESIGN.md: window rule 10).
     #[test]
     fn a_selection_of_cached_rows_is_built_from_the_cache() {
         let mut model = showing(50_000);
@@ -1763,7 +1763,7 @@ pub(crate) mod tests {
 
     /// A failed read left unread would say "Reading the selection…", with
     /// its commands disabled, until the person selected again, and nothing
-    /// would say why (spec: T3, T4); showing the failure over a search in
+    /// would say why (DESIGN.md: T3, T4); showing the failure over a search in
     /// flight would drop that search's reply.
     #[test]
     fn a_selection_read_that_fails_shows_the_failure_and_polls() {
@@ -1842,7 +1842,7 @@ pub(crate) mod tests {
 
     /// The export must write what `gozler -export-csv` writes with the
     /// switches of the shown columns, or the two disagree for one search
-    /// (spec: Export).
+    /// (DESIGN.md: Export).
     #[test]
     fn an_export_writes_as_gozler_with_the_shown_columns() {
         let mut model = showing(10);
@@ -1883,7 +1883,7 @@ pub(crate) mod tests {
 
     /// T10: the Index page must show that the service stopped while it is
     /// open, so the poll it starts goes on through the failure; the list
-    /// keeps its rows, as a failed status request always does (design:
+    /// keeps its rows, as a failed status request always does (DESIGN.md:
     /// Requests).
     #[test]
     fn t10_a_failure_while_settings_shows_the_index_page_keeps_the_poll() {

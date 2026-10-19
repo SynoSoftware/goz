@@ -1,6 +1,6 @@
 //! The window's Win32 layer: every `unsafe` block of `gozler-ui` is in this
 //! module, each the smallest that needs it and behind a safe function
-//! (docs/plans/ui-design.md: Where the unsafe lives). It decides nothing:
+//! (DESIGN.md: Where the unsafe lives). It decides nothing:
 //! `core` decides, and `app` turns messages into calls on both.
 //!
 //! A handle is a plain value here. A Win32 call on a stale handle fails or
@@ -216,7 +216,7 @@ impl Hwnd {
 
     pub(crate) fn destroy(self) {
         // SAFETY: the window procedure keeps its state alive while this
-        // delivers WM_DESTROY and WM_NCDESTROY (design rule 2).
+        // delivers WM_DESTROY and WM_NCDESTROY (DESIGN.md: window rule 2).
         let _ = unsafe { DestroyWindow(self.0) };
     }
 

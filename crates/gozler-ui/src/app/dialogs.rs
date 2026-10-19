@@ -1,7 +1,7 @@
 //! The window's dialogs. Each copies the text it shows before it opens, so
-//! no model borrow is held while its modal loop runs (design rule 1).
-//! `MainWindow::open_dialog` runs each, and the dialog module sets its
-//! fixed captions from `core::captions::CaptionTable`.
+//! no model borrow is held while its modal loop runs (DESIGN.md:
+//! window rule 1). `MainWindow::open_dialog` runs each, and the dialog module
+//! sets its fixed captions from `core::captions::CaptionTable`.
 
 use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
@@ -13,7 +13,7 @@ use crate::win::gdi::Font;
 use crate::win::{self, Hwnd};
 use std::cell::{Cell, OnceCell};
 
-/// The About Gozler dialog (spec: C23).
+/// The About Gozler dialog (DESIGN.md: C23).
 pub(super) struct About {
     version: String,
 }
@@ -67,8 +67,8 @@ impl DialogProc for About {
     }
 }
 
-/// The Search syntax dialog (spec: C22): `gozler`'s search syntax, which is
-/// English in every language, as the syntax itself is.
+/// The Search syntax dialog (DESIGN.md: C22): `gozler`'s search syntax, which
+/// is English in every language, as the syntax itself is.
 pub(super) struct SearchSyntax;
 
 impl DialogProc for SearchSyntax {
@@ -96,7 +96,7 @@ impl DialogProc for SearchSyntax {
 }
 
 /// The Custom date dialog: From and To, either of which may be left open
-/// (spec: Filter pane, Dialogs).
+/// (DESIGN.md: Filter pane, Dialogs).
 pub(super) struct CustomDate {
     /// The range the dialog opens with; a new range starts today.
     shown: Option<DateRange>,
@@ -134,7 +134,7 @@ impl CustomDate {
         DateRange::new(from.day().map(Day), to.day().map(Day))
     }
 
-    /// OK stays disabled while neither check box is on (spec: Dialogs).
+    /// OK stays disabled while neither check box is on (DESIGN.md: Dialogs).
     fn update_ok(dialog: Hwnd) {
         if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
             ok.set_enabled(!matches!(Self::read(dialog), Err(DateRangeError::Neither)));
@@ -200,7 +200,7 @@ impl DialogProc for CustomDate {
 }
 
 /// The Custom size dialog: Minimum and Maximum, either of which may stay
-/// empty, in one unit (spec: Filter pane, Dialogs).
+/// empty, in one unit (DESIGN.md: Filter pane, Dialogs).
 pub(super) struct CustomSize {
     /// The range the dialog opens with.
     shown: Option<SizeRange>,

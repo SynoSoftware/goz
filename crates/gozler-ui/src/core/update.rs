@@ -1,4 +1,4 @@
-//! Check for updates (spec: The General page): which release GitHub names
+//! Check for updates (DESIGN.md: The General page): which release GitHub names
 //! as the latest, and whether it is newer than this window.
 
 use serde::Deserialize;
@@ -13,8 +13,8 @@ pub(crate) const CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 
 /// The version GitHub's latest release names, such as `0.4.0` for the tag
 /// `v0.4.0`, when it is newer than `current`; `None` for a reply that is not
-/// a release, because no update is worth a message (design: Check for
-/// updates).
+/// a release, because no update is worth a message (DESIGN.md: The General
+/// page).
 pub(crate) fn newer_release(reply: &str, current: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct Release {

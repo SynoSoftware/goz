@@ -1,6 +1,6 @@
 //! The requests the model asks for and the replies it accepts, in the core's
 //! terms, so the model's handling of replies and failures is tested without
-//! a daemon (docs/plans/ui-design.md: Requests). `app::requests` runs each
+//! a daemon (DESIGN.md: Requests). `app::requests` runs each
 //! [`Fetch`] on its own thread and answers with a [`Fetched`].
 
 use gozler_client::NotRunning;
@@ -13,8 +13,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 /// What a request is for. At most one request of each purpose is live, so
-/// starting one cancels the live one of its purpose and no other (design
-/// rule 4).
+/// starting one cancels the live one of its purpose and no other (DESIGN.md:
+/// window rule 4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Purpose {
     /// The list's rows: a new search's first chunk, or a chunk of the shown
@@ -97,7 +97,7 @@ impl ChunkAsk {
 /// position to the last, widened to the cached chunks it overlaps. The
 /// thread keeps only the rows at `positions` and inside `cached`, so a
 /// Ctrl+click on row 0 and on row 99,999 carries two files and at most the
-/// cache, not 100,000 rows (design: The selection).
+/// cache, not 100,000 rows (DESIGN.md: The selection).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SelectionAsk {
     pub(crate) span: ChunkAsk,
@@ -227,7 +227,7 @@ pub(crate) struct Chunk {
     pub(crate) metadata_pending: bool,
 }
 
-/// The failures the window shows differently (spec: Daemon failures);
+/// The failures the window shows differently (DESIGN.md: Daemon failures);
 /// `app::requests` maps the client's error to them. A pipe that cannot be
 /// opened or read shows as [`DaemonFailure::Lost`], because both mean the
 /// pipe failed after the service was found.

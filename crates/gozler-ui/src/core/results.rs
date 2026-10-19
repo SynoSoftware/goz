@@ -1,5 +1,5 @@
 //! What the results list shows, and the chunk of rows asked for
-//! (docs/plans/ui-design.md: Rows on demand). The list keeps the shown rows
+//! (DESIGN.md: Rows on demand). The list keeps the shown rows
 //! until the new search's first chunk arrives, so it does not empty on every
 //! keystroke, and every chunk is asked for with the shown search, so it
 //! names the rows the person sees even while the typed text has already
@@ -13,7 +13,7 @@ use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
 use std::ops::Range;
 
-/// The list reaches the first 100,000 rows of a search (spec: Searching).
+/// The list reaches the first 100,000 rows of a search (DESIGN.md: Searching).
 pub(crate) const LIST_LIMIT: u64 = 100_000;
 
 /// The rows of one request. Every request scans every match before it
@@ -22,7 +22,7 @@ pub(crate) const LIST_LIMIT: u64 = 100_000;
 pub(crate) const CHUNK_ROWS: u64 = 16_384;
 
 /// The most rows the cache keeps, in whole chunks, so memory stays the same
-/// for any number of matches (spec: Memory budget).
+/// for any number of matches (DESIGN.md: Memory budget).
 const CACHE_ROWS: u64 = 32_768;
 
 /// What the list area shows. Rows and a message never show together.
@@ -35,20 +35,20 @@ pub(crate) enum Shown {
 }
 
 /// Why the list shows a message instead of rows; each has its own text and
-/// buttons (spec: States).
+/// buttons (DESIGN.md: States).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ListMessage {
     Parse(QueryError),
     /// The Location folder does not exist, so the window does not search,
-    /// as `gozler` refuses the same search (spec: S8).
+    /// as `gozler` refuses the same search (DESIGN.md: S8).
     MissingFolder(String),
     Failure(DaemonFailure),
-    /// The search is empty, and Settings says to show nothing then (spec:
+    /// The search is empty, and Settings says to show nothing then (DESIGN.md:
     /// S6).
     TypeToSearch,
 }
 
-/// The button a message offers for its fix (spec: Daemon failures).
+/// The button a message offers for its fix (DESIGN.md: Daemon failures).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Fix {
     Repair(Repair),
@@ -57,7 +57,7 @@ pub(crate) enum Fix {
     OpenServices,
 }
 
-/// A button below the list's message (spec: S5, S8, S9).
+/// A button below the list's message (DESIGN.md: S5, S8, S9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ListButton {
     Fix(Fix),
@@ -248,7 +248,7 @@ impl Results {
 
     /// The request for the rows at `positions`, from the first to the last,
     /// widened to the cached chunks that it overlaps, so the reply replaces
-    /// them whole (design: The selection). `None` while no rows are shown.
+    /// them whole (DESIGN.md: The selection). `None` while no rows are shown.
     pub(crate) fn selection_ask(&self, positions: Vec<Range<u64>>) -> Option<SelectionAsk> {
         let Shown::Rows(shown) = &self.shown else {
             return None;

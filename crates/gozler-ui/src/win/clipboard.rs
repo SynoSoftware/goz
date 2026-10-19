@@ -1,6 +1,6 @@
 //! The clipboard: one `GMEM_MOVEABLE` block per copy, which
 //! `SetClipboardData` requires and which Windows owns once it is set
-//! (docs/plans/ui-design.md: Copy).
+//! (DESIGN.md: Copy).
 
 use super::Hwnd;
 use crate::core::clipboard::{ClipboardData, ClipboardFormat};
@@ -17,7 +17,7 @@ const CF_HDROP: u32 = 15;
 const CF_UNICODETEXT: u32 = 13;
 
 /// How often a copy asks for the clipboard that another program holds, and
-/// how long it waits between, so it gives up after 100 ms (design: Copy).
+/// how long it waits between, so it gives up after 100 ms (DESIGN.md: Copy).
 const OPEN_TRIES: u32 = 5;
 const OPEN_WAIT: Duration = Duration::from_millis(20);
 
@@ -34,7 +34,7 @@ pub(crate) struct ClipboardBusy;
 impl ClipboardBlock {
     /// A block holding `data`, or `None` when Windows has no memory for it.
     /// It makes no call that sends a message, so the model may be borrowed
-    /// while `data` writes into it (design rule 1).
+    /// while `data` writes into it (DESIGN.md: window rule 1).
     pub(crate) fn new(data: &ClipboardData) -> Option<ClipboardBlock> {
         let len = data.len();
         // SAFETY: plain values; the block is this value's until the

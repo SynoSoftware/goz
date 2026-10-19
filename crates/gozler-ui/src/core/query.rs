@@ -44,7 +44,7 @@ pub(crate) fn search(
 }
 
 /// How the typed name terms match; one choice, because the modes exclude
-/// each other (spec: Search box). Its names are `ui.json`'s.
+/// each other (DESIGN.md: Search box). Its names are `ui.json`'s.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MatchMode {
@@ -85,7 +85,7 @@ pub(crate) struct Matching {
     pub(crate) path: bool,
 }
 
-/// The filter pane's choices (spec: Filter pane). Each group but Location
+/// The filter pane's choices (DESIGN.md: Filter pane). Each group but Location
 /// stands for query text that the parser reads on its own, so the window
 /// and `gozler` read a filter alike. Its names are `ui.json`'s.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +109,7 @@ pub(crate) struct Filters {
 
 impl Filters {
     /// Whether a group is set to another choice than its first, which
-    /// Clear filters undoes (spec: C21).
+    /// Clear filters undoes (DESIGN.md: C21).
     pub(crate) fn is_set(&self) -> bool {
         *self
             != Filters {
@@ -204,7 +204,7 @@ impl Kind {
 }
 
 /// An item of the Location list: Everywhere, each indexed volume by its
-/// mount prefix, then the chosen folder (spec: Filter pane).
+/// mount prefix, then the chosen folder (DESIGN.md: Filter pane).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum LocationItem<'a> {
     Everywhere,
@@ -316,7 +316,7 @@ pub(crate) enum DateRange {
     Between(Day, Day),
 }
 
-/// Why the Custom date dialog's input is not a range (spec: Dialogs).
+/// Why the Custom date dialog's input is not a range (DESIGN.md: Dialogs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DateRangeError {
     /// Neither check box is on.
@@ -499,7 +499,7 @@ pub(crate) struct SizeRange {
     pub(crate) unit: SizeUnit,
 }
 
-/// Why the Custom size dialog's input is not a range (spec: Dialogs).
+/// Why the Custom size dialog's input is not a range (DESIGN.md: Dialogs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SizeRangeError {
     MinimumNotANumber,
@@ -620,7 +620,7 @@ impl AttributeChoice {
 }
 
 /// The attributes the pane offers, with their `attrib:` letter and label;
-/// other letters are left to `attrib:` in the search box (spec: Filter
+/// other letters are left to `attrib:` in the search box (DESIGN.md: Filter
 /// pane).
 pub(crate) const ATTRIBUTES: [(char, &str); 6] = [
     ('h', "filter.hidden"),
@@ -671,7 +671,7 @@ mod tests {
 
     /// A filter that the window reads otherwise than the `gozler` query it
     /// stands for shows other files than the command line, and no other
-    /// check compares the two for every group (spec: Goal).
+    /// check compares the two for every group (DESIGN.md: The window).
     #[test]
     fn each_filter_group_searches_as_its_gozler_query() {
         let start = QueryStart {

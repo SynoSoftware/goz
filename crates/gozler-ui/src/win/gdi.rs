@@ -54,7 +54,7 @@ impl Font {
     }
 
     /// This font in semibold and a quarter larger, for the inspector's
-    /// heading (spec: Look).
+    /// heading (DESIGN.md: Look).
     pub(crate) fn heading(&self) -> windows::core::Result<Font> {
         let mut logfont = logfont(self.0)?;
         logfont.lfWeight = FW_SEMIBOLD.0 as i32;
@@ -325,8 +325,8 @@ impl StaticColors {
     }
 
     /// Draws the control on the window colour instead of the grey dialog
-    /// colour (spec: Look), and returns the brush the message answers with.
-    /// It sets the text colour too: when the parent answers the message,
+    /// colour (DESIGN.md: Look), and returns the brush the message answers
+    /// with. It sets the text colour too: when the parent answers the message,
     /// Windows sets none, and the default black can match a high contrast
     /// theme's window colour.
     pub(crate) fn window_background(self) -> LRESULT {

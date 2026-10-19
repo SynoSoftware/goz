@@ -23,7 +23,7 @@ file. The setup puts the user who installs gozler on it, so on a PC with one
 person nothing changes. An administrator can add other users or groups, or
 Everyone, which turns the filter off.
 
-The Include page that [the window spec](ui-spec.md#the-include-page) plans
+The Include page that [the service settings plan](service-settings.md#the-include-page) holds
 does not solve this. It lets an administrator leave folders out of the index
 for everyone. It cannot let ana find her own files while it hides them from
 ben.

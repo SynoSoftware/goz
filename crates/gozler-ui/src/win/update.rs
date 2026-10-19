@@ -1,5 +1,5 @@
 //! The one network request Gozler makes: GitHub's latest release, for Check
-//! for updates (design: Check for updates).
+//! for updates (DESIGN.md: The General page).
 
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,

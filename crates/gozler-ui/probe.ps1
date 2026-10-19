@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
 Drives a built gozler-ui window the way a person does, and prints what it
-finds as JSON (docs/plans/ui-plan.md: The probe).
+finds as JSON.
 
 .DESCRIPTION
 Each window it starts uses --data-dir in the probe's fixture folder, so the
@@ -597,7 +597,7 @@ function Save-ScreenArea($hwnd, $popups, [string] $name) {
 
 # --- Menus -----------------------------------------------------------------
 
-# The menu bar in the spec's order and groups (spec: Menus). Each line is a
+# The menu bar in its order and groups (DESIGN.md: Menus). Each line is a
 # catalogue key, or = and a literal text; two more spaces of indent put it in
 # the submenu above it; after | come its shortcut, whether it is enabled
 # after the first search with the search box empty and nothing selected, and
@@ -965,7 +965,7 @@ function Marked-Items($process, [string] $key) {
     @($marked)
 }
 
-# The process's memory, as the spec's budget counts it.
+# The process's memory, as DESIGN.md's Memory budget counts it.
 function Memory-Of($process) {
     $process.Refresh()
     [ordered]@{
@@ -1840,8 +1840,8 @@ try {
         # --- The selection and the actions ----------------------------------
         if (Runs 'selection') {
             # One, two and 16 selected rows enable Open, Open file location and
-            # Properties as the spec says. The probe reads the menus and runs none
-            # of the commands (C1, C2, C3).
+            # Properties as C1, C2 and C3 say. The probe reads the menus and
+            # runs none of the commands.
             [void](Search-For $window $F)
             $counted = foreach ($n in 1, 2, 16) {
                 Select-Rows $window (0..($n - 1))
@@ -1917,7 +1917,7 @@ try {
             else { Report 'Select all' 'not run' 'the window was not in front, so the probe did not move the focus' }
 
             # Shift+F10 opens the row's context menu, with Open as its default
-            # item (spec: Results list).
+            # item (DESIGN.md: Results list).
             if (Is-InFront $window) {
                 Select-Rows $window @(0)
                 # LVIS_FOCUSED | LVIS_SELECTED
@@ -1956,16 +1956,16 @@ try {
             else { Report 'Shift+F10 opens the row menu' 'not run' 'the window was not in front, so no key was pressed' }
 
             # The marquee needs the real mouse, which the probe never moves,
-            # because the person at the machine uses it (design: Not verified).
+            # because the person at the machine uses it.
             Report 'the marquee selects rows' 'not run' 'the probe never moves the mouse; the owner checks the marquee'
 
             # A selection of every row of the empty search holds its files while
-            # it lasts, and no message waits more than 100 ms meanwhile (spec:
-            # Memory budget). The probe selects every row as Select all does,
-            # while a watcher asks the window for WM_NULL without a pause, until
-            # part 2 shows the files. The memory while they are held stays within
-            # the budget and the selection's allowance, and falls back once they
-            # are dropped.
+            # it lasts, and no message waits more than 100 ms meanwhile
+            # (DESIGN.md: Memory budget). The probe selects every row as Select
+            # all does, while a watcher asks the window for WM_NULL without a
+            # pause, until part 2 shows the files. The memory while they are
+            # held stays within the budget and the selection's allowance, and
+            # falls back once they are dropped.
             [void](Search-For $window '')
             $rows = Row-Count $window
             $before = Memory-Of $window
@@ -1992,7 +1992,7 @@ try {
 
         if (Runs 'export') {
             # Export results… writes the bytes gozler writes with the switches
-            # of the shown columns, and part 3 says how many rows (C4, J6).
+            # of the shown columns, and part 3 says how many rows (C4).
             [void](Search-For $window "$F ext:cs")
             $extension = Caption 'column.extension'; $attributes = Caption 'column.attributes'
             $formats = @(
@@ -2092,7 +2092,7 @@ try {
             if (Test-Path -LiteralPath $all) { Remove-Item -LiteralPath $all }
 
             # An export into the folder whose ACL denies creating files shows the
-            # spec's message box and leaves no file (T9).
+            # export's message box and leaves no file (T9).
             [void](Search-For $window "$F ext:cs")
             $denied = Join-Path $files 'denied\export.csv'
             $closed = Export-To $window $denied
@@ -2113,7 +2113,7 @@ try {
             $reading = Caption 'status.reading'
 
             # A selected fixture file's fields show the size, date and
-            # attributes the probe gave it, and what gozler gives for it (J3).
+            # attributes the probe gave it, and what gozler gives for it.
             # The date is in the user's short date and long time, as .NET
             # formats them from the same settings.
             $attributeBits = [ordered]@{
@@ -2399,12 +2399,12 @@ try {
             Check 'Search in this folder' ($location -eq $files) ([ordered]@{ location = $location; expected = $files })
 
             # Each filter gives the fixture's own count and the count of the
-            # gozler query it stands for (J3, J4).
+            # gozler query it stands for.
             $entries = @(Expected-Rows $files | ForEach-Object {
                     $size, $date, $attributes, $path = $_.Split(',', 4)
                     [pscustomobject]@{ size = [long]$size; date = [datetime]$date; attributes = [int]$attributes; path = $path.Trim('"') }
                 })
-            # The spec's Documents list.
+            # The Kind filter's Documents list.
             $documents = 'pdf;doc;docx;xls;xlsx;ppt;pptx;odt;ods;odp;rtf;txt;md;csv'
             $documentList = $documents.Split(';')
             $weekAgo = (Get-Date).AddDays(-7)
@@ -2502,7 +2502,7 @@ try {
 
             # Custom… reached with the arrow keys opens nothing and keeps the
             # previous filter; Enter opens the dialog, a Minimum above the
-            # Maximum shows the spec's balloon and keeps the dialog open, and
+            # Maximum shows its balloon and keeps the dialog open, and
             # Cancel shows the previous choice again.
             [void](Search-For $window '')
             Select-PaneItem $window $ids.IDC_SIZE 5 $true
@@ -2625,7 +2625,7 @@ try {
         Check 'regex:( shows the refusal' ("$message".StartsWith($refused) -and (Row-Count $window) -eq 0) ([ordered]@{ status = $answer; message = $message })
 
         # A typing mistake in a date, the parser's message (S7), then the
-        # correction (J7).
+        # correction.
         $answer = Search-For $window 'dm:yesterdy'
         $wrong = Message-Text $window
         Start-Sleep -Milliseconds 500
@@ -2697,8 +2697,8 @@ try {
 
     # --- Switching the language (stage 8) -----------------------------------
     # Language > the pseudo-language changes every caption at once and keeps
-    # the typed text, the selected row, the focus and the top row (T12, J10);
-    # a parser message then shows in it (S7, J7); the window opens in it
+    # the typed text, the selected row, the focus and the top row (T12);
+    # a parser message then shows in it (S7); the window opens in it
     # after a restart; the Language menu and Settings' Language list hold the
     # same choices, and a choice in one shows in the other (C16). Only the
     # build with the pseudo-language ships a second language.
@@ -2890,7 +2890,7 @@ try {
                 without_shortcut = $withoutShortcut; with_shortcut = $withShortcut
             })
 
-        # A shortcut that another program holds shows the spec's message
+        # A shortcut that another program holds shows its message
         # and keeps the dialog open (C6); held before the start, the window
         # says so when it first shows, and the tray icon still shows it.
         # The probe holds Ctrl+Alt+Shift+F11 itself.

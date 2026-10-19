@@ -1,5 +1,5 @@
 //! The menu bar and the accelerator table, built from what
-//! `core::commands` says (design rule 9).
+//! `core::commands` says (DESIGN.md: window rule 9).
 
 use super::keys::virtual_key;
 use super::{Hwnd, wide};
@@ -147,8 +147,8 @@ impl Menu {
     /// Shows `items` as a context menu at `point`, in screen coordinates,
     /// with the item `default` in bold, and returns the ID of the item
     /// chosen. The menu runs its own message loop, so the caller holds no
-    /// borrow across this call (design rule 1) and acts on the choice after
-    /// it returns (design rule 9).
+    /// borrow across this call (DESIGN.md: window rule 1) and acts on the
+    /// choice after it returns (DESIGN.md: window rule 9).
     pub(crate) fn track_popup(
         owner: Hwnd,
         items: &[MenuNode],

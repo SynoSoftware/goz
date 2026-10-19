@@ -406,7 +406,7 @@ pub(crate) fn name_of(path: &str) -> &str {
     &path[path_part(Column::Name, path).expect("Name is a part of the path")]
 }
 
-/// One cell of the results list, as File Explorer shows its columns (spec:
+/// One cell of the results list, as File Explorer shows its columns (DESIGN.md:
 /// Results list).
 pub(crate) fn cell(
     strings: &Strings,

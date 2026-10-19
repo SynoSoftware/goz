@@ -97,7 +97,7 @@ pub(crate) enum ListNotify<'a> {
     /// `LVIS_SELECTED`, item -1 (every row) included, and
     /// `LVN_ODSTATECHANGED`, which a virtual list sends for a range such as
     /// a Shift+click. The handler reads the selection from the list once
-    /// per user action (docs/plans/ui-design.md: The selection).
+    /// per user action (DESIGN.md: The selection).
     SelectionChanged,
     /// A double-click on a row.
     Activated,

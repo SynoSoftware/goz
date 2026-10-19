@@ -1,8 +1,8 @@
 //! The main window and its message handlers.
 //!
-//! Design rule 1: a handler changes the model in a statement of its own, or
-//! binds a borrow with `let` only in a block that makes no Win32 call, and
-//! calls Win32 after the borrow ends, because many calls send messages back
+//! Window rule 1 (DESIGN.md): a handler changes the model in a statement of its
+//! own, or binds a borrow with `let` only in a block that makes no Win32 call,
+//! and calls Win32 after the borrow ends, because many calls send messages back
 //! to this window before they return.
 
 use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
@@ -83,7 +83,7 @@ const SELECTION_DELAY_MS: u32 = 150;
 /// Status part 4, which names a newer release that a click then opens.
 const INDEX_PART: usize = 3;
 
-/// What Settings' OK or Apply applied (design: Settings).
+/// What Settings' OK or Apply applied (DESIGN.md: Settings dialog).
 pub(super) struct Applied {
     /// The values now in effect: the edited ones, except a registry
     /// setting whose write failed, which keeps its earlier value.
@@ -96,7 +96,7 @@ pub(super) struct Applied {
 /// a WinHTTP call cannot be ended at once and joining it would hold Exit for
 /// as long as the network waits. Instead it wakes the window only while
 /// `window_open`, which `WM_DESTROY` clears under the lock, so no wake-up
-/// reaches a reused handle (design rule 5).
+/// reaches a reused handle (DESIGN.md: window rule 5).
 #[derive(Default)]
 struct UpdateCheck {
     window_open: bool,
@@ -128,7 +128,7 @@ impl Controls {
         let controls = Controls {
             search: Edit::create(parent, ControlId::Search.id())?,
             // The label comes right before its list, so its access key
-            // focuses the list (spec: C19).
+            // focuses the list (DESIGN.md: C19).
             match_label: Label::create(parent, ControlId::MatchLabel.id())?,
             match_mode: DropDownList::create(parent, ControlId::MatchMode.id())?,
             match_case: CheckBox::create(parent, ControlId::MatchCase.id())?,
@@ -179,7 +179,7 @@ impl Controls {
 
 /// The filter pane's window and its controls, in Tab order. Each label
 /// comes right before its control, so its access key focuses the control
-/// (spec: Filter pane).
+/// (DESIGN.md: Filter pane).
 struct FilterPane {
     pane: Hwnd,
     clear: Button,
@@ -320,7 +320,7 @@ impl FilterPane {
     }
 }
 
-/// The inspector's controls, in Tab order (spec: Inspector pane). Its icon
+/// The inspector's controls, in Tab order (DESIGN.md: Inspector pane). Its icon
 /// is painted by the window.
 struct Inspector {
     heading: Label,
@@ -454,7 +454,7 @@ pub(crate) struct MainWindow {
     /// Whether the status timer runs.
     polling: Cell<bool>,
     /// Whether a [`Message::Deferred`] is posted to read the list's
-    /// selection, so one user action reads it once (design: The selection).
+    /// selection, so one user action reads it once (DESIGN.md: The selection).
     selection_pending: Cell<bool>,
     /// The filter pane's scroll position.
     filter_scroll: Cell<Px>,
@@ -499,7 +499,7 @@ pub(crate) struct MainWindow {
 impl MainWindow {
     /// Creates the window, starts the first search and the first status
     /// request, and shows the window, or with `sign_in` starts as the `Run`
-    /// value asks (spec: Window lifetime). The window owns its state; the
+    /// value asks (DESIGN.md: Window lifetime). The window owns its state; the
     /// message loop reads its accelerators.
     pub(crate) fn open(
         class: &str,
@@ -545,7 +545,7 @@ impl MainWindow {
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
         // Only a status reply names the volumes, so it is asked for beside
-        // the first search (design: Requests).
+        // the first search (DESIGN.md: Requests).
         window.search(hwnd);
         window.ask_status();
         window.register_saved_shortcut(hwnd);
@@ -621,7 +621,7 @@ impl MainWindow {
     }
 
     /// Every caption, from the model's facts and the current strings
-    /// (design rule 12).
+    /// (DESIGN.md: window rule 12).
     fn captions(&self) -> WindowCaptions {
         WindowCaptions::new(&self.model.borrow(), &*self.numbers.borrow())
     }
@@ -641,7 +641,7 @@ impl MainWindow {
     }
 
     /// Loads the language of `choice`, gives it to the model and sets every
-    /// caption in it (design: "Switching the language"). The Language menu
+    /// caption in it (DESIGN.md: Language). The Language menu
     /// and Settings' OK and Apply call it; the typed text, the results, the
     /// selection and the focus stay as they are.
     fn set_language(&self, hwnd: Hwnd, choice: LanguageChoice) {
@@ -742,9 +742,9 @@ impl MainWindow {
     }
 
     /// Gives the controls bound to a command the command's state and
-    /// choice, after every change (design rule 9): the match controls, the
-    /// pane's Clear filters, the inspector's buttons and the header's sort
-    /// arrow.
+    /// choice, after every change (DESIGN.md: window rule 9): the match
+    /// controls, the pane's Clear filters, the inspector's buttons and the
+    /// header's sort arrow.
     fn update_bound_controls(&self) {
         let controls = &self.created().controls;
         let (enabled, can_clear, buttons, matching) = {
@@ -803,7 +803,7 @@ impl MainWindow {
             value.hwnd().set_text(value_text);
         }
         // The shell call can dispatch messages, so no borrow is held
-        // (design rule 1).
+        // (DESIGN.md: window rule 1).
         let icon = captions
             .icon
             .as_ref()
@@ -892,7 +892,8 @@ impl MainWindow {
         }
     }
 
-    /// Places every control where `Layout::compute` says (design rule 7).
+    /// Places every control where `Layout::compute` says (DESIGN.md:
+    /// window rule 7).
     fn layout(&self, hwnd: Hwnd) {
         let created = self.created();
         let controls = &created.controls;
@@ -1105,9 +1106,10 @@ impl MainWindow {
         }
     }
 
-    /// Runs one menu item or shortcut; every surface calls this (design
-    /// rule 9). It asks the command table again whether the item is enabled,
-    /// because the state can change while a menu is open (spec: T11).
+    /// Runs one menu item or shortcut; every surface calls this (DESIGN.md:
+    /// window rule 9). It asks the command table again whether the item is
+    /// enabled, because the state can change while a menu is open (DESIGN.md:
+    /// T11).
     fn run(&self, hwnd: Hwnd, item: MenuItem) {
         let focus = self.focus();
         let enabled = {
@@ -1245,7 +1247,7 @@ impl MainWindow {
     }
 
     /// Asks for a folder with the Windows folder picker and sets Location
-    /// to it; Cancel keeps the Location (spec: Filter pane).
+    /// to it; Cancel keeps the Location (DESIGN.md: Filter pane).
     fn choose_folder(&self, hwnd: Hwnd) {
         let start = self.model.borrow().location().map(str::to_owned);
         let Some(folder) = win::shell::pick_folder(hwnd, start.as_deref()) else {
@@ -1257,7 +1259,7 @@ impl MainWindow {
 
     /// Opens the custom range dialog of `range` when its list shows
     /// Custom…; OK sets the range, and Cancel shows the previous choice
-    /// again (spec: Filter pane).
+    /// again (DESIGN.md: Filter pane).
     fn choose_custom(&self, hwnd: Hwnd, range: RangeFilter) {
         let custom = {
             let model = self.model.borrow();
@@ -1321,7 +1323,7 @@ impl MainWindow {
     }
 
     /// Asks for the chunk that the rows on screen still lack, so every
-    /// chunk request comes from the rows visible now (design: Rows on
+    /// chunk request comes from the rows visible now (DESIGN.md: Rows on
     /// demand).
     fn fetch_visible(&self) {
         let visible = self.created().controls.list.visible_rows();
@@ -1390,7 +1392,7 @@ impl MainWindow {
             }
             Change::NewSearch { count } => {
                 // A new search shows its results from the top, with nothing
-                // selected (spec: T2).
+                // selected (DESIGN.md: T2).
                 controls.list.select_only(None);
                 controls.list.set_count(count);
                 if count > 0 {
@@ -1454,7 +1456,7 @@ impl MainWindow {
         }
     }
 
-    /// Starts or stops the one status timer as the model says (design:
+    /// Starts or stops the one status timer as the model says (DESIGN.md:
     /// Requests).
     fn update_poll(&self, hwnd: Hwnd) {
         let polls = self.model.borrow().polls_status();
@@ -1549,7 +1551,8 @@ impl MainWindow {
             .iter()
             .position(|button| button.clicked(event))
         {
-            // The button runs its menu item's command (design rule 9).
+            // The button runs its menu item's command (DESIGN.md:
+            // window rule 9).
             self.read_list_selection(hwnd);
             return self.run(hwnd, MenuItem::Run(INSPECTOR_BUTTONS[index].0));
         } else {
@@ -1629,7 +1632,7 @@ impl MainWindow {
         }
     }
 
-    /// The arrow on the sorted column's header (spec: Results list).
+    /// The arrow on the sorted column's header (DESIGN.md: Results list).
     fn show_sort(&self) {
         let (count, sorted) = {
             let model = self.model.borrow();
@@ -1647,7 +1650,7 @@ impl MainWindow {
     }
 
     /// A context menu of `groups` at `point`; the chosen item runs after
-    /// the menu closes (design rule 9).
+    /// the menu closes (DESIGN.md: window rule 9).
     fn context_menu(
         &self,
         hwnd: Hwnd,
@@ -1667,7 +1670,7 @@ impl MainWindow {
 
     /// The context menu of a row, at `point`, or at the focused row for the
     /// Menu key and Shift+F10. A right-click below the last row shows none
-    /// (spec: Results list).
+    /// (DESIGN.md: Results list).
     fn row_menu(&self, hwnd: Hwnd, point: Option<(i32, i32)>) {
         let list = self.created().controls.list;
         let point = match point {
@@ -1682,7 +1685,7 @@ impl MainWindow {
     }
 
     /// Reads the list's selection, if it changed since it was last read
-    /// (design: The selection).
+    /// (DESIGN.md: The selection).
     fn read_list_selection(&self, hwnd: Hwnd) {
         if !self.selection_pending.replace(false) {
             return;
@@ -1741,8 +1744,8 @@ impl MainWindow {
     }
 
     /// Formats a cell when the list asks for it, so a redraw shows the
-    /// current language and regional format (design rule 12). This block
-    /// borrows the model while it formats, which makes no Win32 call; an
+    /// current language and regional format (DESIGN.md: window rule 12). This
+    /// block borrows the model while it formats, which makes no Win32 call; an
     /// icon not asked for yet is looked up after the borrow ends.
     fn fill_cell(&self, info: &mut DispInfo) {
         let (text, icon) = {
@@ -1769,7 +1772,7 @@ impl MainWindow {
     }
 
     /// Draws a Name or Path cell whose text the search matched, with the
-    /// matched parts in bold (spec: Results list); the list draws every
+    /// matched parts in bold (DESIGN.md: Results list); the list draws every
     /// other cell.
     fn draw_cell(&self, draw: &CustomDraw, dpi: Dpi, row: u64, column: usize) -> DrawAnswer {
         let cell = {
@@ -1803,8 +1806,8 @@ impl MainWindow {
         DrawAnswer::Drawn
     }
 
-    /// A key that the control `target` gives a meaning (design rule 8).
-    /// Returns whether the window took it.
+    /// A key that the control `target` gives a meaning (DESIGN.md:
+    /// window rule 8). Returns whether the window took it.
     fn on_key(&self, hwnd: Hwnd, target: Hwnd, keystroke: Keystroke) -> bool {
         let Some(action) = commands::control_key(self.focus_of(Some(target)), keystroke) else {
             return false;
@@ -1815,7 +1818,7 @@ impl MainWindow {
                 self.read_list_selection(hwnd);
                 self.run(hwnd, MenuItem::Run(command));
             }
-            // The focus moves to the first row (spec: Search box).
+            // The focus moves to the first row (DESIGN.md: Search box).
             KeyAction::FocusList => {
                 let count = self.model.borrow().results().count();
                 controls.list.hwnd().focus();
@@ -1871,7 +1874,7 @@ impl MainWindow {
     }
 
     /// Opens each selected entry with the Open folders or Open files
-    /// command, or as File Explorer does when it is empty (spec: C1).
+    /// command, or as File Explorer does when it is empty (DESIGN.md: C1).
     fn open_selected(&self, hwnd: Hwnd) {
         let (present, missing) = present(self.selected_entries());
         let (folders, files) = {
@@ -1895,7 +1898,7 @@ impl MainWindow {
 
     /// Opens the folder of each selected entry with the entries selected,
     /// one File Explorer window for each folder, or runs the Open file
-    /// location command for each entry (spec: C2).
+    /// location command for each entry (DESIGN.md: C2).
     fn show_selected(&self, hwnd: Hwnd) {
         let (present, missing) = present(self.selected_entries());
         let command = self.model.borrow().choices().open_file_location.clone();
@@ -1938,7 +1941,7 @@ impl MainWindow {
         false
     }
 
-    /// The shell's Properties of the selected entry (spec: C3).
+    /// The shell's Properties of the selected entry (DESIGN.md: C3).
     fn show_properties(&self, hwnd: Hwnd) {
         let (present, missing) = present(self.selected_entries());
         for entry in &present {
@@ -1947,8 +1950,8 @@ impl MainWindow {
         self.report_missing(hwnd, missing);
     }
 
-    /// Says that `missing`, which the person chose, no longer exists (spec:
-    /// Feedback).
+    /// Says that `missing`, which the person chose, no longer exists
+    /// (DESIGN.md: Feedback).
     fn report_missing(&self, hwnd: Hwnd, missing: Option<Vec<u16>>) {
         let Some(path) = missing else { return };
         let path = String::from_utf16_lossy(&path);
@@ -1960,7 +1963,7 @@ impl MainWindow {
         self.error_box(hwnd, &text);
     }
 
-    /// Puts the selected files on the clipboard in `format` (spec: C8, C9,
+    /// Puts the selected files on the clipboard in `format` (DESIGN.md: C8, C9,
     /// C10). The block is filled while the model is borrowed, which no call
     /// that sends a message interrupts, and given to the clipboard after.
     fn copy(&self, hwnd: Hwnd, format: ClipboardFormat) {
@@ -1983,7 +1986,7 @@ impl MainWindow {
         }
     }
 
-    /// Asks where to export the shown search, and starts the export (spec:
+    /// Asks where to export the shown search, and starts the export (DESIGN.md:
     /// Export).
     fn export(&self, hwnd: Hwnd) {
         let (title, file_name, names) = {
@@ -2018,7 +2021,7 @@ impl MainWindow {
         self.apply(hwnd, accepted);
     }
 
-    /// The spec's message box for an export that failed (spec: T9).
+    /// The message box for an export that failed (DESIGN.md: T9).
     fn show_export_failure(&self, hwnd: Hwnd, path: &Path, error: &ExportError) {
         let text = {
             let model = self.model.borrow();
@@ -2048,7 +2051,7 @@ impl MainWindow {
     }
 
     /// Brings the window forward with the search box focused and its text
-    /// selected, so the person types the next search at once (spec: Window
+    /// selected, so the person types the next search at once (DESIGN.md: Window
     /// lifetime, C24). While a dialog is open, the dialog keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
         if self.unshown.replace(false) {
@@ -2066,7 +2069,7 @@ impl MainWindow {
 
     /// Closing hides the window while Gozler keeps running in the
     /// notification area, the first time with a notification that says so,
-    /// and exits otherwise (spec: Window lifetime).
+    /// and exits otherwise (DESIGN.md: Window lifetime).
     fn close(&self, hwnd: Hwnd) {
         if !self.model.borrow().choices().keep_running {
             return self.exit(hwnd);
@@ -2092,14 +2095,14 @@ impl MainWindow {
         self.save_settings(hwnd, true);
     }
 
-    /// Saves the settings and ends Gozler (spec: C7, T14).
+    /// Saves the settings and ends Gozler (DESIGN.md: C7, T14).
     fn exit(&self, hwnd: Hwnd) {
         self.save_settings(hwnd, true);
         hwnd.destroy();
     }
 
     /// Adds the tray icon while Gozler keeps running in the notification
-    /// area, and removes it otherwise (design: The tray).
+    /// area, and removes it otherwise (DESIGN.md: Window lifetime).
     fn update_tray(&self, hwnd: Hwnd) {
         let keeps_running = self.model.borrow().choices().keep_running;
         if keeps_running == self.tray.borrow().is_some() {
@@ -2191,7 +2194,7 @@ impl MainWindow {
     }
 
     /// Asks GitHub for the latest release on a thread of its own, when
-    /// Check for updates is on and the last check is a day old (spec: The
+    /// Check for updates is on and the last check is a day old (DESIGN.md: The
     /// General page).
     fn check_for_updates(&self, hwnd: Hwnd) {
         let now = jiff::Timestamp::now().as_second();
@@ -2218,7 +2221,7 @@ impl MainWindow {
     }
 
     /// A click on status part 4 opens the release page while the part
-    /// names a newer release (spec: The General page).
+    /// names a newer release (DESIGN.md: The General page).
     fn on_status_click(&self) {
         let shows_update = captions::shows_update(&self.model.borrow());
         if shows_update {
@@ -2227,8 +2230,8 @@ impl MainWindow {
     }
 
     /// File > Settings…: the dialog edits a copy of the settings, which OK
-    /// and Apply give back through [`MainWindow::apply_settings`] (design:
-    /// Settings).
+    /// and Apply give back through [`MainWindow::apply_settings`] (DESIGN.md:
+    /// Settings dialog).
     fn open_settings(&self, hwnd: Hwnd) {
         let (choices, strings) = {
             let model = self.model.borrow();
@@ -2249,11 +2252,11 @@ impl MainWindow {
     }
 
     /// Applies what Settings edited, `edited`, which was `last` before; OK
-    /// and Apply call it (design: Settings). A shortcut that Windows refuses
-    /// applies nothing and returns its message, so the dialog stays open.
-    /// The registry is written only for a value that changed, so a page
-    /// that was not touched never changes what Task Manager or File
-    /// Explorer show.
+    /// and Apply call it (DESIGN.md: Settings dialog). A shortcut that Windows
+    /// refuses applies nothing and returns its message, so the dialog stays
+    /// open. The registry is written only for a value that changed, so a page
+    /// that was not touched never changes what Task Manager or File Explorer
+    /// show.
     pub(super) fn apply_settings(
         &self,
         hwnd: Hwnd,
@@ -2335,7 +2338,7 @@ impl MainWindow {
     }
 
     /// Settings shows or hides its Index page, which follows the service's
-    /// state while it shows (spec: The Index page).
+    /// state while it shows (DESIGN.md: The Index page).
     pub(super) fn show_index_page(&self, hwnd: Hwnd, shown: bool) {
         self.model.borrow_mut().show_index_page(shown);
         self.update_poll(hwnd);
@@ -2358,7 +2361,8 @@ impl MainWindow {
                 })
                 .unwrap_or_default()
         };
-        // Windows reads the labels with no borrow held (design rule 1).
+        // Windows reads the labels with no borrow held (DESIGN.md:
+        // window rule 1).
         let labels: Vec<(String, Option<String>)> = prefixes
             .into_iter()
             .map(|prefix| {
@@ -2376,8 +2380,8 @@ impl MainWindow {
     }
 
     /// Use Total Commander: searches the index for Total Commander, whose
-    /// answer goes to the Settings dialog `dialog` (design: Use Total
-    /// Commander).
+    /// answer goes to the Settings dialog `dialog` (DESIGN.md: The General
+    /// page).
     pub(super) fn find_total_commander(&self, dialog: Hwnd) {
         self.settings_dialog.set(Some(dialog));
         let fetch = self.model.borrow_mut().find_total_commander();
@@ -2460,7 +2464,7 @@ struct Selected {
 }
 
 /// The `entries` that still exist, and the first path that does not. An
-/// action on the selection acts on every entry it can (spec: The
+/// action on the selection acts on every entry it can (DESIGN.md: The
 /// selection).
 fn present(entries: Vec<Selected>) -> (Vec<Selected>, Option<Vec<u16>>) {
     let mut missing = None;
@@ -2507,8 +2511,8 @@ fn windows_reason(failure: WriteFailure) -> String {
 }
 
 /// Runs a failure's fix: the commands that `gozler` prints for it, in one
-/// `cmd /c` as administrator, so Windows asks for permission once (design:
-/// Feedback and fixes).
+/// `cmd /c` as administrator, so Windows asks for permission once (DESIGN.md:
+/// Daemon failures).
 fn run_fix(hwnd: Hwnd, fix: &Fix) {
     match fix {
         Fix::Repair(repair) => match repair.commands() {
@@ -2750,8 +2754,8 @@ impl WindowProc for MainWindow {
             }
             // Every request thread is joined, and the update check stops
             // waking the window, while the window's handle is still valid,
-            // so no wake-up reaches a reused handle (design rule 5). The
-            // shortcut and the tray icon go with the window, so Windows'
+            // so no wake-up reaches a reused handle (DESIGN.md: window rule 5).
+            // The shortcut and the tray icon go with the window, so Windows'
             // own use of the shortcut's keys returns at once.
             Message::Destroy => {
                 self.update
@@ -2773,7 +2777,7 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             // A second start with `--location`, from File Explorer's
-            // "Search with Gozler" (spec: Window lifetime).
+            // "Search with Gozler" (DESIGN.md: Window lifetime).
             Message::CopyData { tag, text } if tag == self.show_message as usize => {
                 let accepted = self.model.borrow_mut().choose_folder(text);
                 self.apply(hwnd, accepted);

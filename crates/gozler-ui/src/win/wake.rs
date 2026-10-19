@@ -1,4 +1,4 @@
-//! Wakes the main window from a request thread (design rule 5).
+//! Wakes the main window from a request thread (DESIGN.md: window rule 5).
 
 use super::Hwnd;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};

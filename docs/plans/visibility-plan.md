@@ -14,8 +14,7 @@ changes.
   on the owner's machine, elevated, and changes no product code.
 - **Stage 1** starts after stage 0. It changes no answer.
 - **Stage 2** starts after stage 1. It changes how `gozler-client` opens the
-  pipe, and the window uses the same client (`docs/plans/ui-plan.md`), so it
-  lands between two window stages, not during one.
+  pipe, and the window uses the same client.
 - Stages 1 and 2 land in one release. Stage 1 alone shows nothing new. Within
   stage 2, filtered rows and unknown folder sizes land together, because
   filtered rows with full folder sizes still show how much a hidden folder
@@ -741,8 +740,7 @@ total.
   filtering by permissions is removed.
 - `gozler-client/src/lib.rs`: the doc comment of `folder_is_missing` says the
   same as "Paths".
-- `docs/plans/ui-spec.md`: "Folder sizes", the Size column and the details
-  pane's Size field say that a user who does not see every file gets no
+- `docs/DESIGN.md`: "Results list" and "Inspector pane" say that a user who does not see every file gets no
   folder sizes (spec `V6`), and that the window leaves a folder's size empty,
   in the column and in the pane, whenever it is unknown. A result carries no reason for an unknown size, and spec `V12`
   adds none, so the window cannot tell this rule from a size pass still

@@ -1,5 +1,5 @@
 //! `ui.json`: the person's settings and the window's state, which only the
-//! window writes (spec: Where settings are saved). The keys are the file
+//! window writes (DESIGN.md: Where settings are saved). The keys are the file
 //! format, so renaming one needs a migration. A value that is missing or
 //! damaged falls back to its default, and every other value still loads.
 
@@ -24,7 +24,7 @@ pub(crate) struct Settings {
     pub(crate) window: WindowState,
 }
 
-/// The person's settings of Settings > General, Search and Keyboard (spec:
+/// The person's settings of Settings > General, Search and Keyboard (DESIGN.md:
 /// Settings dialog). Start at sign-in and Search with Gozler are not here:
 /// the registry holds them, because Task Manager and the uninstaller change
 /// them there.
@@ -41,10 +41,10 @@ pub(crate) struct Choices {
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) check_for_updates: bool,
     /// Closing the window hides it, and Gozler keeps running in the
-    /// notification area (spec: Window lifetime).
+    /// notification area (DESIGN.md: Window lifetime).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) keep_running: bool,
-    /// The open commands; empty does what File Explorer does (spec: The
+    /// The open commands; empty does what File Explorer does (DESIGN.md: The
     /// General page).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) open_folders: String,
@@ -55,7 +55,7 @@ pub(crate) struct Choices {
     /// Off: only `Enter` runs the search.
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) search_as_you_type: bool,
-    /// Off: an empty search shows "Type to search." (spec: S6).
+    /// Off: an empty search shows "Type to search." (DESIGN.md: S6).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) show_all_when_empty: bool,
     #[serde(default = "on", deserialize_with = "on_or_default")]
@@ -107,7 +107,7 @@ pub(crate) enum SettingsPage {
     Search,
     Keyboard,
     /// The service's index, which the page shows and does not change yet
-    /// (spec: Window settings and service settings).
+    /// (DESIGN.md: Settings dialog).
     Index,
 }
 
@@ -132,7 +132,7 @@ impl SettingsPage {
 
 impl SettingsValues {
     /// Sets `page`'s settings to their defaults, which Apply or OK then
-    /// applies (spec: Settings dialog).
+    /// applies (DESIGN.md: Settings dialog).
     pub(crate) fn restore_defaults(&mut self, page: SettingsPage) {
         let defaults = Choices::default();
         let choices = &mut self.choices;
@@ -163,7 +163,7 @@ impl SettingsValues {
 }
 
 /// The values the dialog shows and the values Apply last applied, so Apply
-/// is enabled exactly while they differ (spec: Dialogs).
+/// is enabled exactly while they differ (DESIGN.md: Dialogs).
 pub(crate) struct SettingsDraft {
     applied: SettingsValues,
     pub(crate) edited: SettingsValues,
@@ -213,12 +213,12 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub(crate) columns: Vec<SavedColumn>,
-    /// Whether the filter pane shows (spec: C13).
+    /// Whether the filter pane shows (DESIGN.md: C13).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) filter_pane: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) filters: Filters,
-    /// Whether the inspector shows (spec: C14).
+    /// Whether the inspector shows (DESIGN.md: C14).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) inspector: bool,
     /// The height the person dragged the splitter to; the layout keeps it
@@ -229,7 +229,7 @@ pub(crate) struct WindowState {
     )]
     pub(crate) inspector_height: Dip,
     /// Whether the notification of the first hide to the notification area
-    /// has shown, which it does once (spec: Window lifetime).
+    /// has shown, which it does once (DESIGN.md: Window lifetime).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) tray_notice_shown: bool,
     /// When Gozler last asked for the latest release, in seconds since
@@ -410,7 +410,7 @@ mod tests {
     }
 
     /// Apply that stays enabled after Apply, or is disabled while a value
-    /// differs, misleads about what OK and Cancel do (spec: Dialogs).
+    /// differs, misleads about what OK and Cancel do (DESIGN.md: Dialogs).
     #[test]
     fn apply_follows_the_edited_values_and_restore_defaults_resets_one_page() {
         let values = SettingsValues {

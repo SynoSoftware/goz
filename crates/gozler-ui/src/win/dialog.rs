@@ -291,7 +291,7 @@ pub(crate) fn item(dialog: Hwnd, id: u16) -> Option<Hwnd> {
 }
 
 /// Shows an error message box. With no owner it blocks only the calling
-/// thread, as the panic hook needs (design rule 11).
+/// thread, as the panic hook needs (DESIGN.md: window rule 11).
 pub(crate) fn error_box(owner: Option<Hwnd>, text: &str, title: &str) {
     let text = wide(text);
     // SAFETY: both texts are NUL-terminated and outlive the call.

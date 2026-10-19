@@ -64,7 +64,7 @@ mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 windows-service = "0.8"
 # ui: the window's Win32 calls, with the COM interfaces that windows-sys lacks
-# (docs/plans/ui-design.md: Decisions).
+# (DESIGN.md: Where the unsafe lives).
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Globalization",

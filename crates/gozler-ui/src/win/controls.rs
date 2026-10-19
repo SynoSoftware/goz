@@ -749,7 +749,7 @@ impl DatePicker {
 }
 
 /// A balloon tip that points at a control and says what to enter there
-/// (spec: Dialogs). Windows destroys it with its owner.
+/// (DESIGN.md: Dialogs). Windows destroys it with its owner.
 pub(crate) struct Balloon {
     tip: Hwnd,
     owner: Hwnd,
@@ -870,7 +870,7 @@ impl CheckBox {
 }
 
 /// The results list: a list view in report and virtual mode, drawn as File
-/// Explorer draws its list (spec: Look). Only [`ListView::create`] makes
+/// Explorer draws its list (DESIGN.md: Look). Only [`ListView::create`] makes
 /// one, so its handle is a list view's, which decoding its notifications
 /// relies on.
 #[derive(Clone, Copy)]
@@ -1067,7 +1067,7 @@ impl ListView {
         }
     }
 
-    /// Selects every row (spec: C11).
+    /// Selects every row (DESIGN.md: C11).
     pub(crate) fn select_all(self) {
         self.set_state(usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
     }

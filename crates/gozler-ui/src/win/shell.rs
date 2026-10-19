@@ -131,7 +131,7 @@ pub(crate) struct FileType<'a> {
 /// Shows the Windows save dialog, which asks before it replaces a file, and
 /// returns the chosen file and the index of the type it showed, or `None`
 /// when the person cancels. It runs its own message loop, so the caller
-/// holds no borrow across it (design rule 1).
+/// holds no borrow across it (DESIGN.md: window rule 1).
 pub(crate) fn save_dialog(
     owner: Hwnd,
     title: &str,
@@ -188,7 +188,7 @@ pub(crate) fn save_dialog(
 /// Shows the Windows folder picker, open at `start` when that folder
 /// exists, and returns the chosen folder, or `None` when the person
 /// cancels. It runs its own message loop, so the caller holds no borrow
-/// across it (design rule 1).
+/// across it (DESIGN.md: window rule 1).
 pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
     // SAFETY: every string outlives the call that reads it; the chosen
     // path is copied, then freed as the call requires.
@@ -223,7 +223,7 @@ pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
 /// Shows the Windows file dialog for programs, titled `title`, whose file
 /// type is named `programs`, and returns the chosen program, or `None` when
 /// the person cancels. It runs its own message loop, so the caller holds no
-/// borrow across it (design rule 1).
+/// borrow across it (DESIGN.md: window rule 1).
 pub(crate) fn pick_program(owner: Hwnd, title: &str, programs: &str) -> Option<String> {
     let name = HSTRING::from(format!("{programs} (*.exe)"));
     let filter = [COMDLG_FILTERSPEC {
@@ -254,7 +254,7 @@ pub(crate) fn pick_program(owner: Hwnd, title: &str, programs: &str) -> Option<S
 }
 
 /// Runs `program` with `parameters`, an open command of Settings > General
-/// (spec: The General page). Windows shows no message of its own; a
+/// (DESIGN.md: The General page). Windows shows no message of its own; a
 /// program that cannot start gives Windows' reason.
 pub(crate) fn run_command(owner: Hwnd, program: &str, parameters: &str) -> io::Result<()> {
     let program = HSTRING::from(program);
@@ -389,7 +389,7 @@ fn delete_value(key: &str, name: &str) -> io::Result<()> {
 
 /// Whether Windows starts Gozler at sign-in: the `Run` value exists, and
 /// Task Manager did not turn it off. An odd first byte of the
-/// `StartupApproved` value is off (design: Start at sign-in).
+/// `StartupApproved` value is off (DESIGN.md: The General page).
 pub(crate) fn starts_at_sign_in() -> bool {
     if get_value(RUN_KEY, Some(GOZLER), RRF_RT_REG_SZ, None).is_none() {
         return false;
@@ -450,7 +450,7 @@ pub(crate) fn set_search_with(on: bool, program: &Path, label: &str) -> io::Resu
 
 /// Runs `program` with `parameters` as administrator, without a console
 /// window, after Windows asks the person for permission. The window never
-/// sees or passes credentials (docs/plans/ui-design.md: Feedback and fixes).
+/// sees or passes credentials (DESIGN.md: Daemon failures).
 pub(crate) fn run_as_administrator(owner: Hwnd, program: &str, parameters: &str) {
     // SAFETY: every string outlives the call; `owner` only owns the prompt.
     unsafe {

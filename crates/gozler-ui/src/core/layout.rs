@@ -1,8 +1,9 @@
-//! Where every control of the main window goes (design rule 7). Sizes are
-//! designed in [`Dip`] and become [`Px`] only here, so a size can never mix
-//! the two (rule 6). The spacing follows Microsoft's Windows desktop layout
-//! guidelines at 96 DPI: 11 px margins and gaps between groups, 7 px between
-//! related controls, 23 px tall text boxes and lists, 17 px check boxes.
+//! Where every control of the main window goes (DESIGN.md: window rule 7).
+//! Sizes are designed in [`Dip`] and become [`Px`] only here, so a size can
+//! never mix the two (rule 6). The spacing follows Microsoft's Windows desktop
+//! layout guidelines at 96 DPI: 11 px margins and gaps between groups, 7 px
+//! between related controls, 23 px tall text boxes and lists, 17 px check
+//! boxes.
 
 use super::captions::WindowCaptions;
 use super::model::Column;
@@ -174,7 +175,7 @@ const STATUS_PART_PADDING: Dip = Dip(13);
 const STATUS_REST_MIN_WIDTH: Dip = Dip(100);
 
 /// The largest result count the status bar is sized for; a larger one ends
-/// in an ellipsis instead of moving the parts (spec: Look).
+/// in an ellipsis instead of moving the parts (DESIGN.md: Look).
 pub(crate) const WIDEST_TOTAL: u64 = 9_999_999;
 
 /// Which panes the window shows, and the inspector's height.
@@ -186,8 +187,8 @@ pub(crate) struct Panes {
 }
 
 impl Default for Panes {
-    /// The first height fits the seven fields of one entry (spec: Inspector
-    /// pane).
+    /// The first height fits the seven fields of one entry (DESIGN.md:
+    /// Inspector pane).
     fn default() -> Panes {
         Panes {
             filters: true,
@@ -354,7 +355,7 @@ pub(crate) enum ScrollRequest {
 
 /// The filter pane's window, and its controls in the pane's coordinates
 /// before it scrolls. When the pane is shorter than its controls, it shows
-/// a scroll bar and the part of them from its scroll position down (spec:
+/// a scroll bar and the part of them from its scroll position down (DESIGN.md:
 /// Filter pane).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FilterLayout {
@@ -533,7 +534,7 @@ impl FilterLayout {
     }
 }
 
-/// The inspector's controls in the client area (spec: Inspector pane). The
+/// The inspector's controls in the client area (DESIGN.md: Inspector pane). The
 /// heading's row holds the icon, the heading and the buttons; the fields
 /// follow, a label and a value in each row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -937,7 +938,7 @@ mod tests {
                                 controls.extend([*label, *value]);
                             }
                             // The first height shows one entry's every field
-                            // (spec: Inspector pane).
+                            // (DESIGN.md: Inspector pane).
                             assert!(
                                 client == min
                                     || inspector.fields.len() == InspectorLayout::FIELD_ROWS,

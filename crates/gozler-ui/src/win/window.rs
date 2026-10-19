@@ -77,8 +77,9 @@ pub(crate) enum Message<'a> {
     },
     /// A key that [`run_message_loop`] offers the window before
     /// `IsDialogMessageW`, sent to the focused control `target`. A handler
-    /// that takes it answers 1, and no `WM_CHAR` follows (design rule 8).
-    /// A key that no [`Key`] names arrives as [`Message::Other`].
+    /// that takes it answers 1, and no `WM_CHAR` follows (DESIGN.md:
+    /// window rule 8). A key that no [`Key`] names arrives as
+    /// [`Message::Other`].
     KeyDown {
         target: Hwnd,
         keystroke: Keystroke,
@@ -371,9 +372,9 @@ const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
 /// Runs the thread's message loop until `WM_QUIT`. The accelerators come
 /// first, then the keys the main window takes for its focused control, then
 /// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
-/// main window's controls (design rule 8). A key that `IsDialogMessageW`
-/// moves the focus with is reported to the main window, which no control
-/// notifies of it.
+/// main window's controls (DESIGN.md: window rule 8). A key that
+/// `IsDialogMessageW` moves the focus with is reported to the main window,
+/// which no control notifies of it.
 ///
 /// `accelerators` gives the table of the moment, because Settings replaces
 /// it; the loop holds each table until the command it sent returns.
@@ -445,8 +446,8 @@ unsafe extern "system" fn procedure<W: WindowProc>(
     if msg == WM_NCDESTROY {
         // SAFETY: the window's own reference is taken back exactly once, and
         // GWLP_USERDATA is cleared first so no later message finds it. A
-        // handler still running, such as Exit's, holds its own clone (design
-        // rule 2).
+        // handler still running, such as Exit's, holds its own clone
+        // (DESIGN.md: window rule 2).
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             drop(Rc::from_raw(raw));

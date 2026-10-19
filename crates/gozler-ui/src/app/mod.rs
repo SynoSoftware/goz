@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Named for the session, so a second start finds the first process
-/// (spec: Window lifetime); a window with `--data-dir` adds
+/// (DESIGN.md: Window lifetime); a window with `--data-dir` adds
 /// [`instance_suffix`].
 const INSTANCE_MUTEX: &str = r"Local\gozler.ui";
 const WINDOW_CLASS: &str = "gozler.ui";
@@ -79,7 +79,7 @@ pub(crate) fn run() {
 
 /// The command line: `--data-dir <folder>`, `--sign-in`, which the `Run`
 /// value passes, and `--location <folder>`, which File Explorer's "Search
-/// with Gozler" passes (spec: The General page).
+/// with Gozler" passes (DESIGN.md: The General page).
 struct Arguments {
     /// The folder of `ui.json` and `ui-error.log`; without it, `run` uses
     /// `%LOCALAPPDATA%\Gozler`.
@@ -161,9 +161,9 @@ fn set_panic_report(change: impl FnOnce(&mut PanicReport)) {
 
 /// A panic cannot unwind out of a window procedure, and the window's state
 /// may be half changed, so the hook writes the panic to `ui-error.log`, says
-/// so in a message box, and aborts (design rule 11). The message box has no
-/// owner and runs on its own thread, so this thread dispatches no message
-/// meanwhile and nothing waits for it.
+/// so in a message box, and aborts (DESIGN.md: window rule 11). The message box
+/// has no owner and runs on its own thread, so this thread dispatches no
+/// message meanwhile and nothing waits for it.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let (folder, language) = {

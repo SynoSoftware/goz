@@ -1,8 +1,9 @@
 //! Every caption of the main window, built from the model's facts and its
-//! strings when it is shown (design rule 12). [`WindowCaptions::new`] calls
-//! every caption function: `app` sets its result at creation and after a
-//! change to the regional format, and `layout::CaptionWidths` measures the
-//! same value. A handler that updates one caption calls the same function.
+//! strings when it is shown (DESIGN.md: window rule 12).
+//! [`WindowCaptions::new`] calls every caption function: `app` sets its result
+//! at creation and after a change to the regional format, and
+//! `layout::CaptionWidths` measures the same value. A handler that updates one
+//! caption calls the same function.
 //!
 //! A dialog's fixed captions come from its [`CaptionTable`], which
 //! [`DialogCaptions::new`] reads in the language of the moment.
@@ -51,11 +52,11 @@ pub(crate) struct WindowCaptions {
     pub(crate) message: Option<ListCaption>,
     /// The texts each fixed status part can show at its widest, which the
     /// layout sizes the part for, so a part never moves with its text
-    /// (spec: Look).
+    /// (DESIGN.md: Look).
     pub(crate) status_widest: [Vec<String>; 3],
 }
 
-/// The status bar's four parts (spec: Status bar).
+/// The status bar's four parts (DESIGN.md: Status bar).
 pub(crate) struct StatusCaptions {
     pub(crate) results: String,
     pub(crate) selection: String,
@@ -149,7 +150,7 @@ impl FilterCaptions {
 }
 
 /// The Location list's items: Everywhere, each volume by its mount prefix
-/// with its state when it is not complete (spec: Filter pane), and the
+/// with its state when it is not complete (DESIGN.md: Filter pane), and the
 /// chosen folder.
 pub(crate) fn location_items(model: &Model) -> Vec<String> {
     let strings = model.strings();
@@ -385,7 +386,7 @@ impl CaptionTable {
                         Control(C::GeneralFileExplorer),
                         "settings_general.file_explorer",
                     ),
-                    // One letter cannot name three buttons (spec: The
+                    // One letter cannot name three buttons (DESIGN.md: The
                     // General page).
                     (
                         Control(C::GeneralOpenFoldersBrowse),
@@ -490,7 +491,7 @@ impl CaptionTable {
     }
 }
 
-/// What Settings > Index shows (spec: The Index page): each drive by its
+/// What Settings > Index shows (DESIGN.md: The Index page): each drive by its
 /// mount prefix and label, its state and its entry count, and the
 /// service's state and memory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -637,7 +638,7 @@ const FIELD_LABELS: [&str; 8] = [
     "inspector.total_size",
 ];
 
-/// What the inspector shows for the selection (spec: Inspector pane).
+/// What the inspector shows for the selection (DESIGN.md: Inspector pane).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct InspectorCaptions {
     pub(crate) heading: String,
@@ -876,7 +877,7 @@ pub(crate) fn header(strings: &Strings, column: Column) -> String {
 }
 
 /// Status part 1: how many results, or that a search runs. A filter that
-/// the hidden pane cannot show adds "· Filtered" (spec: S10).
+/// the hidden pane cannot show adds "· Filtered" (DESIGN.md: S10).
 pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     let results = model.results();
@@ -939,9 +940,9 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
 
 /// Status part 4: the service's failure while the list shows rows or
 /// another message, so the window says that the service stopped also when
-/// it keeps its rows (spec: T10); else the index state, only when it
-/// affects the answer (spec: Status bar); else a newer release that Check
-/// for updates found (spec: The General page).
+/// it keeps its rows (DESIGN.md: T10); else the index state, only when it
+/// affects the answer (DESIGN.md: Status bar); else a newer release that Check
+/// for updates found (DESIGN.md: The General page).
 pub(crate) fn index_status(model: &Model) -> String {
     let strings = model.strings();
     if let (_, Some(failure)) = model.service()
@@ -980,7 +981,7 @@ fn update_text(strings: &Strings, version: &str) -> String {
 }
 
 /// Whether status part 4 names a newer release, which a click on it then
-/// opens (spec: The General page).
+/// opens (DESIGN.md: The General page).
 pub(crate) fn shows_update(model: &Model) -> bool {
     model
         .newer_release()
@@ -1010,7 +1011,7 @@ pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
     Some((text, buttons))
 }
 
-/// What a failure of the service means for the person (spec: Daemon
+/// What a failure of the service means for the person (DESIGN.md: Daemon
 /// failures).
 pub(crate) fn failure_text(strings: &Strings, failure: &DaemonFailure) -> String {
     match failure {
@@ -1086,7 +1087,7 @@ mod tests {
 
     /// An access key that two controls of a dialog share focuses the first
     /// only, and a label without one leaves its control out of reach of the
-    /// keyboard (spec: Words). Every shipped language chooses its own
+    /// keyboard (DESIGN.md: Words). Every shipped language chooses its own
     /// letters.
     #[test]
     fn every_dialog_label_has_its_own_access_key() {

@@ -91,6 +91,51 @@ change must keep passing, so a test earns its place by the failure it watches.
 - **Drive tests with fixture buffers,** and keep every test independent of a
   running daemon, because a developer machine usually has one.
 
+## Writing a plan
+
+What a plan asks for around the code decides how long the work takes. The
+window's plan took about 2 hours for each of stages 3 to 5, while the es
+superset plan built a feature about every 25 minutes and the ReFS plan landed
+1,456 lines 1.5 hours after it was written. A plan does not ask for these:
+
+1. **A new set of agents for every stage.** Each new agent first reads the
+   spec, the design, the plan and the growing code, and an implementer, a
+   reviewer that fixed its own findings and rebuilt, and a third agent that
+   checked those fixes used about 11 builds in one stage. Write instead: one
+   implementer keeps its context through the stages and fixes the review's
+   findings; the reviewer reads and reports.
+2. **A slow end-to-end check as the proof of every item.** A check that drives
+   the window through UI Automation takes minutes per run, and rerunning every
+   earlier stage's checks multiplies that. Write instead: a rule that the core
+   decides is proven by a unit test, which runs in seconds, and the rest as
+   item 7 says.
+3. **Checks that depend on the machine's speed or on the foreground.** A fixed
+   3.5-second delay assumed that an export takes under 4 seconds, and it took
+   8.7; a check read the status text after the reply had replaced it; checks
+   needed the window in front while the owner used the machine. Each cost a
+   fix round for a defect in the check, not in the product. Write instead: a
+   check reads the state at the moment it tests it, and never waits a fixed
+   time.
+4. **Restructuring inside feature stages.** Restructuring items before a
+   stage's features make the stage and its review larger. Write instead:
+   restructuring before the plan, or as its own stage with its own proof.
+5. **A stage that waits for the owner.** A screenshot approval stopped the
+   work for about 8 hours. Write instead: what only the owner can check goes
+   into an After install list, and screenshots are saved for the owner to
+   review later, so no stage waits.
+6. **A screenshot of every state in every stage.** Screenshots of states that
+   no change touched cost review rounds and judge nothing new. Write instead:
+   each stage saves the screenshots of the states it adds.
+7. **A probe written as a regression suite.** A probe that reruns every few
+   seconds and opens every menu keeps windows flashing in front of the owner,
+   once for about an hour. Write instead: a screenshot set for the design,
+   code review for behavior, and one run for an API whose behavior is in
+   doubt.
+
+A build script runs every step and lists each failure, because a script that
+stops at its first failure hides every test result behind one formatting
+error, and finding them then takes a full run for each.
+
 ## Contracts
 
 - **`gozler-core` runs on any OS.** Everything that interprets bytes lives there.

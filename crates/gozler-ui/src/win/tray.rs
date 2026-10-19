@@ -1,5 +1,5 @@
-//! The icon in the notification area, its menu and its notification (spec:
-//! Window lifetime; design: The tray).
+//! The icon in the notification area, its menu and its notification (DESIGN.md:
+//! Window lifetime).
 
 use super::Hwnd;
 use super::menu::Menu;

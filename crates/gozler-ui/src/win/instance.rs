@@ -1,5 +1,5 @@
 //! One window per user session: a named mutex decides which process is
-//! first, and a second start hands over to the first window (spec: Window
+//! first, and a second start hands over to the first window (DESIGN.md: Window
 //! lifetime).
 
 use super::Hwnd;

@@ -1,5 +1,5 @@
 //! The system image list's index for each extension, asked of Windows once
-//! per extension (spec: Results list).
+//! per extension (DESIGN.md: Results list).
 
 use crate::win::gdi::ImageList;
 use std::cell::RefCell;
@@ -14,8 +14,8 @@ pub(super) struct Icons(RefCell<HashMap<Kind, i32>>);
 
 impl Icons {
     /// The icon of an item named `name`. A new extension asks Windows with
-    /// no borrow held, because the shell call can dispatch messages (design
-    /// rule 1).
+    /// no borrow held, because the shell call can dispatch messages (DESIGN.md:
+    /// window rule 1).
     pub(super) fn index(&self, name: &str, is_folder: bool) -> i32 {
         let kind: Kind = (!is_folder).then(|| {
             gozler_core::query::extension(name.as_bytes(), false)
