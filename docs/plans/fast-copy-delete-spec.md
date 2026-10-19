@@ -289,9 +289,9 @@ page or from `ui.json` never reaches a copy.
 
 | Setting | Range | What it decides |
 | --- | --- | --- |
-| Large-file limit | 0 to 1,024 MiB | from this size, a file between two local volumes without a seek penalty is large; 0 makes every file large |
+| Large-file limit | 1 to 1,024 MiB | from this size, a file between two local volumes is large: the Windows copy function copies it unbuffered and one at a time, and between SSDs the next row may give it to the ring |
 | Large files between SSDs | Windows copy function, unbuffered; or the ring's SSD profile | the first case where the engines differ |
-| A hard disk at either end | Windows copy function; or the ring's hard-disk profile | the second case |
+| A hard disk at either end | Windows copy function; or the ring's hard-disk profile, for every file | the second case |
 | Workers for files that are not large | 1 to 64, set separately for SSD, USB and hard disk | how many files Windows' copy function copies at once |
 | Ring, SSD profile | blocks of 64 KiB to 64 MiB, a power of two; 1 to 64 in flight | a power of two keeps every block aligned to any sector size |
 | Ring, hard-disk profile | the same, and a buffer of 16 to 1,024 MiB | |
@@ -304,16 +304,18 @@ code and a copier's name would promise that copier's exact behavior.
 
 | Preset, as shown | Large-file limit | Large files between SSDs | Hard disk | Workers SSD / USB / hard disk | Ring SSD | Ring hard disk | Delete workers | From |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Automatic (default) | stage D | stage D | stage D | stage D | stage D | stage D | stage D | the fastest values stage D measured for each case |
+| Automatic (default) | 32 MiB | Windows | Windows | 16 / 2 / 1 | 8 MiB × 8 | 2 MB × 8, 256 MB | one per processor | starts as Parallel copy's values; stage D replaces each value it measures, and the After install checks replace the hard-disk and USB values |
 | Parallel copy | 32 MiB | Windows | Windows | 16 / 2 / 1 | — | — | one per processor | TinyTorrent2's `Payload::Move`; delete from rmbrr |
 | Ring copy | 32 MiB | ring | ring | 16 / 2 / 1 | 8 MiB × 8 | 2 MB × 8, 256 MB | one per processor | AngelCOPY's ring and FastCopy v5's hard-disk mode |
 | Ring for large files, many small files at once | 32 MiB | ring | Windows | 16 / 16 / 16 | 8 MiB × 8 | — | 8 | AngelCOPY 1.6.0 |
-| Ring for every file | 0 | ring | ring | — | 2 MB × 8 | 2 MB × 8, 256 MB | one per processor | FastCopy v5's defaults |
 | Windows copy function, unbuffered from 256 MiB | 256 MiB | Windows | Windows | 16 / 2 / 1 | — | — | one per processor | BetterCopy |
 
 A dash is a value the preset does not use; it keeps the Automatic value.
-Ultracopier's buffered ring and TeraCopy, whose method is not published,
-have no preset, because the engine cannot reproduce them.
+Three copiers have no preset, because the engine cannot reproduce them:
+FastCopy, which on an SSD runs its reader and writer at once over its
+large buffer, a mode the ring has only for hard disks; Ultracopier's
+buffered ring; and TeraCopy, whose method is not published. FastCopy's
+hard-disk mode is in Ring copy.
 
 ## Move
 

@@ -187,8 +187,10 @@ that tests Windows.
 The owner checks these, because they need a second disk or a share. No stage
 waits for them.
 
-- Stage D's copy cases between two disks, and on a hard disk with two
-  partitions, where the ring's hard-disk profile should help most.
+- Stage D's copy cases between two disks, on a hard disk with two
+  partitions, where the ring's hard-disk profile should help most, and to a
+  USB drive. Their winners replace the Automatic preset's hard-disk and USB
+  values.
 - A move across volumes, for example to a USB drive: the sources go, the
   progress shows bytes, and a cancel leaves each file in one place.
 - A copy from a share whose server is switched off during the copy: the

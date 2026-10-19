@@ -278,21 +278,52 @@ picker as the destination:
 - **Cut and Paste move files with Gozler's engine.** Cut puts the selected
   files on the clipboard as File Explorer's Cut does (`CF_HDROP` with the
   move effect), and Copy already puts them there as File Explorer's Copy
-  does. Paste on a selected folder row moves files that were cut, in
-  Gozler or in File Explorer, and copies files that were copied, with the
-  engine and its conflict question. After a move it tells the program that
-  cut them that the paste moved them, and empties the clipboard, as File
-  Explorer does, so that program deletes nothing. Pasting Gozler's files
-  in File Explorer works too, but then File Explorer's engine moves them.
+  does, with `CFSTR_PREFERREDDROPEFFECT` set to move or copy. Paste on a
+  selected folder row moves files that were cut, in Gozler or in File
+  Explorer, and copies files that were copied, with the engine and its
+  conflict question. When the move is submitted, and only if the clipboard
+  still holds the data that Paste read (`GetClipboardSequenceNumber`), Paste
+  sets `CFSTR_PASTESUCCEEDED` to move on that data and empties the
+  clipboard, as File Explorer does after its own paste; then it releases
+  the data. It never sets `CFSTR_PERFORMEDDROPEFFECT` to move, because that
+  value tells the program that cut the files to delete them itself
+  ("Handling Shell Data Transfer Scenarios", delete-on-paste). Checking the
+  sequence number keeps anything the person copied since. Pasting Gozler's
+  files in File Explorer works too, but then File Explorer's engine moves
+  them.
   `Ctrl+X` and `Ctrl+V` are keys of the list (window rule 8); in the search
   box they keep cutting and pasting text. Cut rows are not dimmed, because
   the clipboard can change from any program at any time.
 - **Files dropped on a folder row** from File Explorer or another program
   are copied or moved into that folder, with File Explorer's rules: a move
   when the files are on the folder's volume, a copy otherwise, `Ctrl`
-  forces a copy and `Shift` a move. The row under the cursor is
-  highlighted, and the cursor shows "not allowed" over a file row or empty
-  space. Conflicts are asked as for Copy to folder….
+  forces a copy and `Shift` a move, each only where the source allows that
+  effect (`DragEnter`'s effect mask). The row under the cursor is
+  highlighted, and the cursor shows "not allowed" over a file row, over
+  empty space, and for data without `CF_HDROP`, such as an e-mail
+  attachment, because the engine copies paths. Conflicts are asked as for Copy to folder….
+  - **A move is reported as optimized.** Gozler moves the files later, in
+    the background, so `Drop` returns copy, not move, and, unless the source
+    works asynchronously (next point), sets `CFSTR_PERFORMEDDROPEFFECT` to
+    none. Reporting move would make the
+    source delete the originals as soon as the drop returns, before the
+    queued move has read them ("Handling Shell Data Transfer Scenarios",
+    optimized move).
+  - **A source that extracts files for the drag keeps them.** When the data
+    supports `IDataObjectAsyncCapability` with asynchronous mode on, `Drop`
+    calls `StartOperation`, sets no `CFSTR_PERFORMEDDROPEFFECT`, and the
+    window keeps the data object under the operation's id until the
+    operation ends; the engine holds no COM object. Without that, a source such as an
+    archiver's window deletes its temporary files when the drop returns,
+    before the queued copy has read them. When the operation ends, Gozler
+    sets `CFSTR_PERFORMEDDROPEFFECT` and calls `EndOperation` with the same
+    effect: none for a move, so the source deletes nothing, also not the
+    files the move skipped or could not move; copy for a copy. The result
+    code says whether the operation succeeded. `EndOperation`'s effect has
+    the meaning of `CFSTR_PERFORMEDDROPEFFECT`, so move there would tell
+    the source to delete its originals.
+  - **The UI thread calls `OleInitialize`,** which `RegisterDragDrop` and the
+    OLE clipboard require; the window initializes COM today.
 - **Copy to folder… and Move to folder… have no default key.** File
   Explorer has none, and `F5` is Refresh in Search.
 - **The folder picker** has the title "Copy to folder" or "Move to folder",
