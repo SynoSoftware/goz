@@ -98,9 +98,9 @@ fn help_exits_0() {
     assert!(!out.stdout.is_empty(), "the help goes to stdout");
 }
 
-/// Issue #29: an argument that is not valid Unicode, such as an unpaired
-/// surrogate from a shell glob, exits 4 instead of panicking. Arguments are
-/// read before any daemon contact.
+/// An argument that is not valid Unicode, such as an unpaired surrogate from
+/// a shell glob, exits 4 instead of panicking. Arguments are read before any
+/// daemon contact.
 ///
 /// Windows-only: a lone surrogate is a Windows argument; other targets
 /// spell arguments as bytes.

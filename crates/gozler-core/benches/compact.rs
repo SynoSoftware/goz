@@ -1,16 +1,11 @@
 //! Name-arena compaction benchmark: how long do queries actually stay blocked?
 //!
-//! Compaction rebuilds both name arenas. It used to run inline inside
-//! `apply_batch`, under the index write lock, so its whole cost was time every
-//! query on the volume spent blocked.
-//!
-//! It is now split: [`VolumeIndex::plan_compaction`] takes `&self` and does the
-//! copying (the expensive part) while queries keep reading, and
+//! Compaction rebuilds both name arenas in two halves:
+//! [`VolumeIndex::plan_compaction`] takes `&self` and does the copying (the
+//! expensive part) while queries keep reading, and
 //! [`VolumeIndex::apply_compaction`] takes `&mut self` and only writes columns.
-//! Only the second half blocks anyone.
-//!
-//! `plan` + `install` should sum to roughly the old inline cost. The number that
-//! matters is `install` on its own, because that is the new stall.
+//! Only the second half blocks queries, so the number that matters is
+//! `install` on its own.
 //!
 //! Run with `cargo bench -p gozler-core --bench compact`.
 

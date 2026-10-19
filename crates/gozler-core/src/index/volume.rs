@@ -1256,10 +1256,9 @@ impl VolumeIndex {
     /// are not dirty enough to be worth it.
     ///
     /// Takes `&self` on purpose. This is the expensive half (it copies every
-    /// live name into fresh arenas, hundreds of MB on a large volume) and it
-    /// used to run inline inside `apply_batch`, under the write lock, blocking
-    /// every query for as long as it took. Callers plan here, off the exclusive
-    /// lock, then [`Self::apply_compaction`] the result.
+    /// live name into fresh arenas, hundreds of MB on a large volume), so
+    /// callers plan here, off the exclusive lock, where queries keep reading,
+    /// then [`Self::apply_compaction`] the result.
     ///
     /// The plan is only valid while the index has not changed. That is not a
     /// hazard in practice because a volume has exactly one writer (its tail

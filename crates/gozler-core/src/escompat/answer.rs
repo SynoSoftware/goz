@@ -155,9 +155,9 @@ mod tests {
         }
     }
 
-    /// Bug 4 and the owner's default limit: a list the limit cut, `-n 0`
-    /// included, exits 10 with the shown and total counts on stderr, and an
-    /// incomplete volume outranks it.
+    /// Bug 4 and the default limit: a list the limit cut, `-n 0` included,
+    /// exits 10 with the shown and total counts on stderr, and an incomplete
+    /// volume outranks it.
     #[test]
     fn a_cut_list_warns_and_exits_10() {
         let cut = answer(1_234_567, 20, false);

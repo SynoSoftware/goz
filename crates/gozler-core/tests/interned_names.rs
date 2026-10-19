@@ -1,6 +1,6 @@
-//! Shared-name regression: entries that share an interned name must all be
-//! found by the folded-arena fast path, before and after storage
-//! optimization. Guards the scan-hit -> name-id -> chain expansion pipeline.
+//! Entries that share an interned name must all be found by the folded-arena
+//! fast path, before and after storage optimization. Guards the scan-hit ->
+//! name-id -> chain expansion pipeline.
 #[test]
 fn interned_shared_names_are_found() {
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};

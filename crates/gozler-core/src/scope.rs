@@ -94,9 +94,9 @@ mod tests {
         list.iter().map(ToString::to_string).collect()
     }
 
-    /// Issue #13: a scope on a folder mount or on a volume's second mount
-    /// reaches that volume, not the drive whose mount comes first in the
-    /// list, whose index holds only an empty mount folder there.
+    /// A scope on a folder mount or on a volume's second mount reaches that
+    /// volume, not the drive whose mount comes first in the list, whose index
+    /// holds only an empty mount folder there.
     #[test]
     fn the_longest_mount_owns_the_scope() {
         let c = mounts(&[r"C:\"]);

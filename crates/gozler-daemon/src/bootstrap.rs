@@ -576,9 +576,9 @@ mod tests {
         assert_eq!(journal_target_bytes(Some(16 * 1024 * GIB)), GIB);
     }
 
-    /// A failed FILE_LAYOUT read must end the pass as stopped, not complete.
-    /// When it ended as complete (issue #5), `--status` and every results page
-    /// claimed sizes and dates were complete on a volume where they were not.
+    /// A failed FILE_LAYOUT read must end the pass as stopped, not complete;
+    /// otherwise `--status` and every results page claim sizes and dates are
+    /// complete on a volume where they are not.
     #[test]
     fn layout_pass_reports_a_failed_read_as_stopped() {
         let pass = |result: Result<Option<usize>, WinError>| {

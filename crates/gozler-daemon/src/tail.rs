@@ -2,12 +2,12 @@
 //! volume's index, then reads the change journal from the build's cursor
 //! forward and applies each batch to the shared index, keeping it live.
 //!
-//! v1 polls with a non-blocking drain and a short sleep when caught up, which
-//! gives sub-100 ms freshness and a clean, `CancelSynchronousIo`-free shutdown
-//! (the blocking `BytesToWaitFor=1` push variant is a post-v1 refinement). It
-//! applies structural changes (create / rename / delete) immediately and
-//! collects the `ApplyOutcome::needs_stat` side effects for the enricher,
-//! which refreshes the size/date a USN record does not carry.
+//! It polls with a non-blocking drain and a short sleep when caught up, which
+//! gives sub-100 ms freshness and a clean, `CancelSynchronousIo`-free shutdown,
+//! unlike a blocking read with `BytesToWaitFor=1`. It applies structural
+//! changes (create / rename / delete) immediately and collects the
+//! `ApplyOutcome::needs_stat` side effects for the enricher, which refreshes
+//! the size/date a USN record does not carry.
 //!
 //! Hard links are reconciled out of band: a `HARD_LINK_CHANGE` record names one
 //! link and may name a dead one, so the real set comes from a Win32 link walk
@@ -318,11 +318,9 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     // Hold the write lock only for the mutation; the owned
                     // `ApplyOutcome` needs no lock, so build the dirty list after
                     // releasing it (keeps the query-blocking window minimal).
-                    //
-                    // The lock covers only the mutation. Arena compaction, which is
-                    // the one thing here that used to run long (~184 ms on a large
-                    // index), is no longer inline: `apply_batch` reports it and
-                    // `compact_index` does the copying off the exclusive lock.
+                    // Arena compaction, the one long step, is not part of it:
+                    // `apply_batch` reports it and `compact_index` does the
+                    // copying off the exclusive lock.
                     let mut outcome = {
                         let mut index = state.index.write();
                         index.apply_batch(&walk.records)
@@ -456,9 +454,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
 /// Compacts the name arenas, blocking queries only for the install.
 ///
 /// The expensive half copies every live name into fresh arenas (hundreds of MB
-/// on a large volume, measured at ~184 ms), and it used to run inline in
-/// `apply_batch` under the write lock, so a single journal batch froze every
-/// query for that long.
+/// on a large volume), so it runs while queries keep reading.
 ///
 /// The plan is only valid while the index does not change, which is safe here
 /// for a specific reason: a volume has exactly one writer, this tail thread. An
@@ -477,8 +473,8 @@ fn compact_index(state: &VolumeState) {
     index.apply_compaction(plan);
     drop(index);
 
-    // A ~184 ms query stall used to be completely invisible. `blocked_ms` is the
-    // only part that stops queries; `planned_ms` runs alongside them.
+    // `blocked_ms` is the only part that stops queries; `planned_ms` runs
+    // alongside them.
     tracing::debug!(
         volume = %state.mount_prefix(),
         planned_ms = planned.as_millis() as u64,

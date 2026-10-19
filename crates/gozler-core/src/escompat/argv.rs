@@ -1443,7 +1443,7 @@ mod tests {
 
     #[test]
     fn slash_token_with_match_is_a_switch() {
-        // Research: es_check_param treats `-` and `/` prefixes identically,
+        // es's es_check_param treats `-` and `/` prefixes identically,
         // so /n is the -n switch, not search text.
         let parsed = plan(&["/n", "50"]);
         assert_eq!(parsed.limit, Limit::Rows(50));
@@ -1476,9 +1476,8 @@ mod tests {
         );
     }
 
-    /// The owner's default limit: stdout gets 20 rows unless -n says
-    /// otherwise, and an export file every match; -n all lifts the limit, and
-    /// -count is es's alias of -n.
+    /// Stdout gets 20 rows unless -n says otherwise, and an export file every
+    /// match; -n all lifts the limit, and -count is es's alias of -n.
     #[test]
     fn the_limit_defaults_to_20_rows_on_stdout() {
         let row_limit = |tokens: &[&str]| plan(tokens).row_limit();

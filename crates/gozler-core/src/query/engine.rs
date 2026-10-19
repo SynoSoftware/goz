@@ -591,9 +591,8 @@ pub fn run_totals(
 /// scope), the walk aborts and the ordinary scan+ancestry-filter path runs:
 /// pointer-chasing millions of entries is slower than the SIMD arena scan.
 /// The cutoff makes a Downloads-sized scope independent of disk size: the
-/// old path cost ~300 ms on a broad query over 3.9M entries because every
-/// candidate on the volume paid an ancestry check; the walk touches only
-/// the folder.
+/// scan path makes every candidate on the volume pay an ancestry check,
+/// while the walk touches only the folder.
 const SUBTREE_WALK_MAX: usize = 200_000;
 
 /// Finds every match of `query` over `index`, as unordered candidates.
@@ -1058,8 +1057,6 @@ pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Opti
     if !match_case {
         let mut cur = index.root();
         for comp in components {
-            // Move the folded bytes into the lookup key instead of re-cloning
-            // them inside `child_dir` (which previously took `&[u8]`).
             cur = index.child_dir(cur, crate::fold::fold(comp))?;
         }
         return Some(cur);
@@ -1421,13 +1418,9 @@ mod tests {
     /// slices the match set: picking the survivors needs the index, and only
     /// that many paths get reconstructed. A page that already covers every
     /// match has nothing to pick, so the executor must hand the ordering back
-    /// rather than do it while the caller holds the lock.
-    ///
-    /// Regression: the daemon chose by `limit.is_none()`, so a client asking for
-    /// everything as a NUMBER (`-n 4294967295`, or any limit at or above the
-    /// match count) took the in-lock path and sorted the entire set with the
-    /// volume's tail thread blocked behind it. The protection was one number
-    /// away from being skipped.
+    /// rather than do it while the caller holds the lock. That includes a
+    /// limit given as a number at or above the match count, such as
+    /// `-n 4294967295`, not only no limit.
     #[test]
     fn a_page_covering_every_match_defers_the_sort() {
         let idx = sample_index();
@@ -1472,8 +1465,8 @@ mod tests {
 
     #[test]
     fn ext_filter_is_case_insensitive_even_under_case_directive() {
-        // Regression: Report.PDF has an uppercase extension; ext: is always
-        // case-insensitive, even when the query is otherwise case-sensitive.
+        // Report.PDF has an uppercase extension; ext: is case-insensitive
+        // even when the query is otherwise case-sensitive.
         let idx = sample_index();
         assert_eq!(
             run(&idx, "Report ext:pdf case:"),

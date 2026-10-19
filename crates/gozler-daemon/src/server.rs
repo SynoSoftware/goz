@@ -34,8 +34,8 @@ use crate::volume_state::{VolumeRegistry, VolumeSet, VolumeState};
 const MAX_CONNECTIONS: usize = 64;
 /// Pages in flight between the query encoder and the pipe writer. Each page
 /// is ~[`gozler_core::proto::PAGE_ROWS`] rows (~450 KB), so the backlog
-/// bounds a full export's buffered bytes at ~2 MB where it used to buffer the
-/// entire response.
+/// bounds a full export's buffered bytes at ~2 MB instead of the entire
+/// response.
 const QUERY_PAGE_BACKLOG: usize = 4;
 /// Idle/half-open connections are dropped after this long with no request, so a
 /// connected-but-silent client cannot block a task forever. The one-shot CLI
@@ -1073,7 +1073,7 @@ mod tests {
 
     /// A client of protocol 1 sends its text query without a `Hello`, and
     /// reads the binary results page it always has; an installed client of
-    /// stage 3 must keep working against this daemon. The request is the
+    /// that protocol must keep working against this daemon. The request is the
     /// exact JSON that client writes.
     #[test]
     fn a_protocol_1_text_query_without_hello_is_answered_as_before() {

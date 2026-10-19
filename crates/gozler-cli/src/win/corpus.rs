@@ -253,8 +253,8 @@ const ROWS: &[Row] = &[
             "\"C:\\repo\\a, \"\"b\"\".txt\"\r\n",
         ),
     },
-    // Stage 9: plain output prints the attribute letters, padded to es's
-    // width of 4, and CSV their FILE_ATTRIBUTE_* number, as es does.
+    // Plain output prints the attribute letters, padded to es's width of 4,
+    // and CSV their FILE_ATTRIBUTE_* number, as es does.
     Row {
         args: &["report", "-attributes"],
         prints: concat!(

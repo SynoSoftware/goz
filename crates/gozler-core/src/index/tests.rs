@@ -219,9 +219,9 @@ fn slot_reuse_never_aliases() {
 /// The same reuse, reached through the PARENT side.
 ///
 /// `upsert_link` reclaims a re-tenanted record; `resolve_or_placeholder_parent`
-/// must too. It used to just overwrite the `by_frn` entry, which left the old
+/// must too. Overwriting the `by_frn` entry alone would leave the old
 /// directory's whole subtree live in the entry table but unreachable from the
-/// map: ghost files that kept matching queries forever and whose slots could
+/// map: ghost files that keep matching queries forever and whose slots can
 /// never be reclaimed. Nothing else covers this path, because the child-side
 /// test above never resolves a stale record as a parent.
 #[test]
@@ -257,13 +257,13 @@ fn parent_slot_reuse_never_leaks_the_stale_chain() {
     );
 }
 
-/// The same reuse, reached through the FILE_LAYOUT pass (issue #48).
+/// The same reuse, reached through the FILE_LAYOUT pass.
 ///
 /// A file the MFT enumeration saw is deleted, and NTFS gives its record to a
-/// new file before the layout pass reaches it. The layout pass used to build
-/// the new tenant's chain over the map entry without removing the old one, so
-/// the deleted file stayed live but unreachable by FRN: the replayed delete
-/// could not find it, and it stayed in results until the next rescan.
+/// new file before the layout pass reaches it. The layout pass must remove the
+/// old chain before it builds the new tenant's; otherwise the deleted file
+/// stays live but unreachable by FRN, the replayed delete cannot find it, and
+/// it stays in results until the next rescan.
 #[test]
 fn layout_pass_never_leaks_a_retenanted_record() {
     let gone = frn_seq(100, 3);
@@ -1274,9 +1274,9 @@ fn a_walk_keeps_hard_links_and_adds_a_folder_listed_twice_once() {
 
 #[test]
 fn enrich_with_renamed_directory_never_orphans_children() {
-    // Regression: the ENUM pass sees dir "docs" (frn 100) with child "a.txt";
-    // a rename to "documents" is applied (in place) before the FILE_LAYOUT
-    // pass, whose snapshot still reports the old name "docs". Enrichment must
+    // The ENUM pass sees dir "docs" (frn 100) with child "a.txt"; a rename to
+    // "documents" is applied (in place) before the FILE_LAYOUT pass, whose
+    // snapshot still reports the old name "docs". Enrichment must
     // NOT tombstone the directory entry (which would orphan the child under a
     // reused slot).
     let mut idx = index_from_enum(&[

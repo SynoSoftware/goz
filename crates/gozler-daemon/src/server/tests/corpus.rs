@@ -200,8 +200,8 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\repo\docs\agents\testing.md",
             ]),
         ),
-        // Bug 11, and `!`, which was refused before stage 5: every entry
-        // but the one below node_modules, 26 of 27.
+        // Bug 11, with `!`: every entry but the one below node_modules, 26 of
+        // 27.
         (
             &[r"!*\node_modules\*"],
             prints_then(
@@ -231,17 +231,17 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 10,
             ),
         ),
-        // Bug 9: fixed, `/` is a separator, as `\` is.
+        // Bug 9: `/` is a separator, as `\` is.
         (
             &["docs/agents/testing"],
             prints(&[r"C:\repo\docs\agents\testing.md"]),
         ),
-        // Bug 9: fixed.
+        // Bug 9.
         (
             &["path:docs/agents"],
             prints(&[r"C:\repo\docs\agents", r"C:\repo\docs\agents\testing.md"]),
         ),
-        // Bug 9: fixed.
+        // Bug 9.
         (
             &["C:/repo/docs/testing.md"],
             prints(&[r"C:\repo\docs\testing.md"]),
@@ -359,7 +359,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\repo\docs\agents\testing.md",
             ]),
         ),
-        // Bug 10: fixed, quotes delimit a function's value, which matches as
+        // Bug 10: quotes delimit a function's value, which matches as
         // a substring, so `Program Files (x86)` matches too.
         (
             &[r#"path:"C:\Program Files""#],
@@ -371,7 +371,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\Program Files (x86)",
             ]),
         ),
-        // Bug 10: fixed, a quoted term with a separator is a path term.
+        // Bug 10: a quoted term with a separator is a path term.
         (
             &[r#""C:\Program Files (x86)\Microsoft""#],
             prints(&[
@@ -386,7 +386,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         ),
         // Bug 10: a query in one argument splits into terms.
         (&["ext:rs size:>1kb"], prints(&[r"C:\repo\src\argv.rs"])),
-        // Bug 3: fixed, /a-d is file: and /ad is folder:.
+        // Bug 3: /a-d is file: and /ad is folder:.
         (
             &["/a-d", "report"],
             prints(&[
@@ -404,7 +404,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             ]),
         ),
         (&["/ad", "b"], prints(&[r"D:\backup"])),
-        // Stage 9 adds the other attribute letters, which exited 4 before.
+        // The other attribute letters.
         (&["/aH"], prints(&[r"C:\repo\notes.md.bak"])),
         (
             &["/a-h", "b"],
@@ -438,7 +438,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                  RHSDAVXNTLCOIEUPM",
             ),
         ),
-        // Operators. `!` and `|` were refused before stage 5.
+        // Operators.
         (
             &["report", "!2026"],
             prints(&[r"C:\repo\report.txt", r"D:\backup\report.txt"]),
@@ -459,8 +459,8 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             &["DESIGN", "|", "argv", "rs"],
             prints(&[r"C:\repo\src\argv.rs"]),
         ),
-        // An unquoted `<` was searched as text before stage 5, which no
-        // Windows name contains.
+        // An unquoted `<` is refused, because no Windows name contains it, so
+        // as text it would match nothing.
         (
             &["a<b"],
             query_error("'<' is not supported: gozler does not group terms with < and >"),
@@ -533,7 +533,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             ]),
         ),
         (&["dir:docs"], prints(&[r"C:\docs", r"C:\repo\docs"])),
-        // Bug 2: stage 8 adds `dm:`. Each day of the fixture is a day after
+        // Bug 2: `dm:`. Each day of the fixture is a day after
         // 1601-01-01, and every row starts at noon UTC on day 7, 1601-01-08.
         (&["dm:today"], prints(&[r"C:\repo\src\argv.rs"])),
         // The last 3 days end at the query start, so day 8 is in the future
@@ -662,8 +662,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\repo\report.txt",
             ]),
         ),
-        // Stage 8 adds /oe: no extension first, then by extension, and ties
-        // by name.
+        // /oe: no extension first, then by extension, and ties by name.
         (
             &["/oe", "-path", r"C:\repo"],
             prints(&[
@@ -684,7 +683,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
                 r"C:\repo\report.txt",
             ]),
         ),
-        // Stage 8 adds /o-e, which reverses the extensions, not the ties.
+        // /o-e reverses the extensions, not the ties.
         (
             &["/o-e", "-path", r"C:\repo\docs"],
             prints(&[

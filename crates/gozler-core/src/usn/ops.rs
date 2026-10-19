@@ -124,9 +124,9 @@ mod tests {
         );
     }
 
-    /// The regression that motivated the row-5 CREATE bit: a file created and
-    /// never written emits CREATE (plus CLOSE) and no DATA_* bit will ever
-    /// follow, so this record is the only chance to learn its size.
+    /// Why row 5 includes the CREATE bit: a file created and never written
+    /// emits CREATE (plus CLOSE) and no DATA_* bit will ever follow, so this
+    /// record is the only chance to learn its size.
     #[test]
     fn created_but_never_written_file_is_still_stat_dirty() {
         let r = rec(USN_REASON_FILE_CREATE | USN_REASON_CLOSE);

@@ -1231,8 +1231,8 @@ mod tests {
 
     #[test]
     fn case_directive_variants_are_consumed_not_searched() {
-        // Regression: `case:0` must be recognized (and disable case
-        // sensitivity), never leak as a literal "case:0" search term.
+        // `case:0` must be recognized (and disable case sensitivity), never
+        // leak as a literal "case:0" search term.
         assert!(q("Report case:").match_case);
         assert!(!q("Report case:0").match_case);
         assert_eq!(tests("Report case:0"), [name("Report")]);
@@ -1310,9 +1310,8 @@ mod tests {
         );
     }
 
-    /// A later `ext:`, `size:` or kind replaces an earlier one, as before the
-    /// query had clauses; AND-ing them would make `ext:cs ext:txt` match
-    /// nothing.
+    /// A later `ext:`, `size:` or kind replaces an earlier one; AND-ing them
+    /// would make `ext:cs ext:txt` match nothing.
     #[test]
     fn a_later_filter_replaces_an_earlier_one() {
         assert_eq!(
@@ -1447,9 +1446,9 @@ mod tests {
         assert_eq!(tests("\"a<b\""), [name("a<b")]);
     }
 
-    /// An unknown function was searched as text, which no name contains, so
-    /// it answered nothing that looked valid (bug 2). A drive letter is not a
-    /// function.
+    /// Bug 2: an unknown function is refused, because searched as text it
+    /// would match no name and the empty answer would look valid. A drive
+    /// letter is not a function.
     #[test]
     fn an_unknown_function_is_refused() {
         assert_eq!(
