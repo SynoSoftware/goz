@@ -29,10 +29,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY,
     FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileBasicInfo,
-    FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo, FileIdInfo,
-    GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
-    VOLUME_NAME_DOS, VOLUME_NAME_GUID,
+    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo,
+    FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo, FileIdInfo,
+    FileStandardInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW, OPEN_EXISTING,
+    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
 };
 
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -117,6 +117,13 @@ pub struct AttributeTag {
 pub struct FileIdentity {
     pub volume_serial: u64,
     pub file_id: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryStat {
+    pub size: u64,
+    /// As a `FILETIME`, in 100 ns units.
+    pub last_write: i64,
 }
 
 /// An open file, folder or link.
@@ -289,6 +296,64 @@ impl Entry {
         };
         path.pop(); // the NUL
         Ok(path)
+    }
+
+    /// The entry's size and last write time, as a listing gives them.
+    pub fn stat(&self) -> Result<EntryStat, WinError> {
+        // SAFETY: as in `attribute_tag`, for each class's struct.
+        unsafe {
+            let mut basic: FILE_BASIC_INFO = zeroed();
+            if GetFileInformationByHandleEx(
+                self.0.as_handle(),
+                FileBasicInfo,
+                ptr::from_mut(&mut basic).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            ) == 0
+            {
+                return Err(last_error("GetFileInformationByHandleEx (FileBasicInfo)"));
+            }
+            let mut standard: FILE_STANDARD_INFO = zeroed();
+            if GetFileInformationByHandleEx(
+                self.0.as_handle(),
+                FileStandardInfo,
+                ptr::from_mut(&mut standard).cast(),
+                size_of::<FILE_STANDARD_INFO>() as u32,
+            ) == 0
+            {
+                return Err(last_error(
+                    "GetFileInformationByHandleEx (FileStandardInfo)",
+                ));
+            }
+            Ok(EntryStat {
+                size: standard.EndOfFile.max(0).unsigned_abs(),
+                last_write: basic.LastWriteTime,
+            })
+        }
+    }
+
+    /// The flags of the file system that holds the entry
+    /// (`GetVolumeInformationByHandleW`), such as
+    /// `FILE_SUPPORTS_BLOCK_REFCOUNTING` and `FILE_SUPPORTS_SPARSE_FILES`.
+    pub fn volume_flags(&self) -> Result<u32, WinError> {
+        let mut flags = 0u32;
+        // SAFETY: the handle is live; `flags` is a live out-param, and the
+        // unused buffers are null with zero sizes, which the API permits.
+        let ok = unsafe {
+            GetVolumeInformationByHandleW(
+                self.0.as_handle(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut flags,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error("GetVolumeInformationByHandleW"));
+        }
+        Ok(flags)
     }
 
     /// Reads the next page of this folder's listing into `buf`: a chain of

@@ -18,8 +18,14 @@
 //! a symbolic link or a mount point is deleted, never entered. Paths are
 //! compared by what they name on disk (`identity`), not by their text.
 //!
-//! The decisions (names, identities, retries, the speed settings) build
-//! and are tested on every OS. The disk work is Windows only, and every
+//! A file being copied is written under a temporary name and renamed when
+//! complete, so a file at its final name is always complete, and a name
+//! that another program took meanwhile is never replaced without the
+//! person's choice.
+//!
+//! The decisions (names, conflicts, identities, the waits between
+//! operations, taken entries, retries, the saved file and the speed
+//! settings) build and are tested on every OS. The disk work is Windows only, and every
 //! Win32 call goes through `gozler-winfs`, so this crate holds no `unsafe`.
 //!
 //! The design and its evidence are in `docs/plans/fast-copy-delete-spec.md`
@@ -29,27 +35,53 @@
 // The decisions are called only by the Windows disk work.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod conflicts;
+#[cfg(windows)]
+mod copy;
 mod delete;
 mod identity;
-// Stage B's copy names its files with these.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(windows)]
+mod io_threads;
+#[cfg(windows)]
+mod listing;
+#[cfg(windows)]
+mod moves;
 mod names;
 mod operation;
+#[cfg(windows)]
+mod place;
+mod pool;
+#[cfg(windows)]
+mod prepare;
 #[cfg(windows)]
 mod queue;
 #[cfg(windows)]
 mod receive;
 mod retry;
+mod saved;
 mod settings;
+#[cfg(windows)]
+mod survey;
+mod taken;
+#[cfg(windows)]
+mod tree;
+mod volumes;
+mod waits;
 mod win32;
 
-pub use operation::{End, Failure, OperationId, Outcome, Refusal, Request, State};
-#[cfg(windows)]
-pub use queue::{NotPrepared, Queue};
-pub use settings::{
-    CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, RingBlock, RingBuffer, RingHardDisk,
-    RingSsd, SettingError, SpeedSettings,
+pub use conflicts::Choice;
+pub use operation::{
+    End, Listed, OperationId, Outcome, Prepared, Reason, Refusal, Request, State, Survey, Wait,
 };
+#[cfg(windows)]
+pub use queue::{NotInterrupted, NotPrepared, Queue};
+pub use settings::{
+    CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, Preset, RingBlock, RingBuffer,
+    RingHardDisk, RingSsd, SettingError, SpeedSettings,
+};
+#[cfg(windows)]
+pub use survey::{Measured, measure};
+pub use taken::Taken;
 
 #[cfg(all(test, windows))]
 mod tests;

@@ -214,6 +214,10 @@ waits for them.
   within 3 seconds, leaving the copy Interrupted.
 - A delete of a tree with read-only files on a FAT32 USB drive, which takes
   D1's classic fallback.
+- A copy of a folder symbolic link and of a file symbolic link by an
+  elevated Gozler, which holds the right to create them, and by Gozler
+  without elevation with Developer Mode off: each arrives as the same link,
+  or is listed with `ERROR_PRIVILEGE_NOT_HELD` (the spec's "Not verified").
 - One share folder reached through two drive mappings: a copy from one into
   the other is refused as a copy into itself (D12).
 - A move to another drive of a OneDrive folder whose files are only in the

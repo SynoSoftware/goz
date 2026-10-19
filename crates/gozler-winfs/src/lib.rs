@@ -24,6 +24,8 @@ mod clock;
 #[cfg(windows)]
 mod console;
 #[cfg(windows)]
+mod copy;
+#[cfg(windows)]
 mod elevation;
 #[cfg(windows)]
 mod entry;
@@ -43,6 +45,8 @@ mod pipe_sd;
 mod pipe_trust;
 #[cfg(windows)]
 mod service;
+#[cfg(windows)]
+mod storage;
 #[cfg(windows)]
 mod volume;
 #[cfg(windows)]
@@ -77,7 +81,16 @@ pub use journal::{
 };
 
 #[cfg(windows)]
-pub use entry::{Access, AttributeTag, Entry, FileIdentity, Reparse, open_entry};
+pub use copy::{
+    CopyOptions, CopySource, Existing, allocated_size, copy_file, create_folder, free_space,
+    path_attributes, rename, set_path_attributes,
+};
+
+#[cfg(windows)]
+pub use storage::{StorageDevice, VolumeStorage, volume_storage, windows_build};
+
+#[cfg(windows)]
+pub use entry::{Access, AttributeTag, Entry, EntryStat, FileIdentity, Reparse, open_entry};
 
 #[cfg(windows)]
 pub use file_id::{Folder, open_folder, root_folder_id};

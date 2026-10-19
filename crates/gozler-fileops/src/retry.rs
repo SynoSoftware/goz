@@ -37,15 +37,26 @@ fn waits() -> impl Iterator<Item = Duration> {
 /// pass, the waits run out, or `cancel` is set. Returns its last result.
 pub(crate) fn retry<T>(
     cancel: &AtomicBool,
+    attempt: impl FnMut() -> Result<T, u32>,
+) -> Result<T, u32> {
+    retry_also(cancel, |_| false, attempt)
+}
+
+/// [`retry`], which also retries the refusals that `also` names.
+pub(crate) fn retry_also<T>(
+    cancel: &AtomicBool,
+    also: impl Fn(u32) -> bool,
     mut attempt: impl FnMut() -> Result<T, u32>,
 ) -> Result<T, u32> {
     let mut waits = waits();
     loop {
         match attempt() {
-            Err(code) if is_brief(code) && !cancel.load(Ordering::Relaxed) => match waits.next() {
-                Some(wait) => std::thread::sleep(wait),
-                None => return Err(code),
-            },
+            Err(code) if (is_brief(code) || also(code)) && !cancel.load(Ordering::Relaxed) => {
+                match waits.next() {
+                    Some(wait) => std::thread::sleep(wait),
+                    None => return Err(code),
+                }
+            }
             result => return result,
         }
     }

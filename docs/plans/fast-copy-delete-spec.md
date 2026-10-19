@@ -167,8 +167,10 @@ failure, never a copy that nothing waited for or counted.
    probe per name: a folder that holds `index (2).html` to
    `index (500).html` costs no 500 probes. A name taken after the listing is
    caught at the final rename (step 6). Two selected entries with one name
-   are also a conflict. Folders with one name merge, as in File Explorer.
-   Prepare counts conflicts the same way.
+   are also a conflict. Folders with one name merge, as in File Explorer,
+   but never into a junction or folder link at the destination: that is a
+   listed failure, because writing through it would write outside the
+   destination. Prepare counts conflicts the same way.
 3. **Free space.** A copy that needs more bytes than the destination volume
    has free is refused at prepare, as File Explorer refuses it. The run
    compares prepare's byte count with the free space again before it
@@ -218,12 +220,21 @@ robocopy.
 | Every other case | `CopyFile2`, buffered, one file at a time. A volume whose seek penalty is unknown counts as a hard disk |
 
 The 32 MiB limit and the worker counts are speed settings; the table shows
-the values of the Parallel copy preset.
+the values of the Parallel copy preset. A selection from several volumes,
+such as a Search selection, copies with the method of the slowest volume
+class involved.
 
-A link, an entry whose reparse tag is a name surrogate, is copied with
-`COPY_FILE_OPEN_AND_COPY_REPARSE_POINT` (Windows 10 build 19041 and later):
-"Always copy the reparse point regardless of type", junctions included
-(D21). Every other file is copied without it, because a OneDrive
+A link, an entry whose reparse tag is a name surrogate, is copied as a link
+(D21), with `COPY_FILE_DIRECTORY` added for a folder. A symbolic link is
+copied with `COPY_FILE_COPY_SYMLINK`, which needs the right to create
+symbolic links and otherwise fails with `ERROR_PRIVILEGE_NOT_HELD`, a listed
+failure. Every other link, a junction or a mount point, is copied with
+`COPY_FILE_OPEN_AND_COPY_REPARSE_POINT` (Windows 10 build 19041 and later),
+which does not need that right. A symbolic link never gets
+`COPY_FILE_OPEN_AND_COPY_REPARSE_POINT`: without the right, `CopyFile2`
+then succeeds without the link, copying a file link's target's data and
+making a folder link an empty folder ("Not verified" has the run). Every
+other file is copied without either flag, because a OneDrive
 placeholder, a compressed (WOF) or a deduplicated file also has a reparse
 point, and copying that point instead of reading through its filter gives
 a file without its data. A sparse file stays sparse with
@@ -390,7 +401,11 @@ hard-disk mode is in Ring copy.
   Prepare counts the conflicts of those merged folders as it does for a
   copy.
 - **Across volumes** it is a copy as the speed settings choose, and each source
-  file is deleted when its copy has its final name. A source folder is
+  file is deleted when its copy has its final name, and only when it is
+  still the file that was copied: the same file ID, size and last write
+  time as before the copy. Otherwise it stays and is listed, because the
+  Windows engine copies a file another program has open for writing, and
+  a program can replace a file by renaming a new one over it. A source folder is
   deleted when it is empty (D3). A cancel takes effect before a file's
   final rename or after its source's delete, never between them, so a
   cancel or a failure leaves each file in one place.
@@ -624,13 +639,34 @@ is in the plan's "After install".
   included.
 - That `GetFinalPathNameByHandleW` with `VOLUME_NAME_DOS` gives one path for
   one share folder reached two ways (D12). After install.
-- Whether `CopyFile2` copies a file that another program has open for
-  writing. Stage B runs it once; the spec then says what the Windows engine
-  does about it.
-- How `CopyFile2` with `COPY_FILE_OPEN_AND_COPY_REPARSE_POINT` copies a
-  folder junction, a folder symbolic link and a file symbolic link without
-  Developer Mode. A link that Windows refuses to create is a failure with
-  Windows' error (D21).
+- `CopyFile2` copies a file that another program has open for writing,
+  when that program shares reading, as a log writer does; it fails with
+  `ERROR_SHARING_VIOLATION` only when the writer shares nothing (stage B,
+  run once on 2026-10-19). The Windows engine does nothing about it, as
+  File Explorer and robocopy do not: refusing such a file needs one more
+  open of every file, without the write sharing, held through the copy.
+  The ring refuses it, as "The ring engine" says.
+- How `CopyFile2` copies links, run once on 2026-10-19 without elevation,
+  with Developer Mode on (the owner's machine has it; turning it off is not
+  the engine's to do):
+  - A folder junction with `COPY_FILE_OPEN_AND_COPY_REPARSE_POINT`: refused
+    with `ERROR_ACCESS_DENIED`; with `COPY_FILE_DIRECTORY` added, copied as
+    a junction to the same target.
+  - A folder symbolic link: with `COPY_FILE_OPEN_AND_COPY_REPARSE_POINT` and
+    `COPY_FILE_DIRECTORY`, an empty folder, without the link; with
+    `COPY_FILE_COPY_SYMLINK` and `COPY_FILE_DIRECTORY`,
+    `ERROR_PRIVILEGE_NOT_HELD`.
+  - A file symbolic link: with `COPY_FILE_OPEN_AND_COPY_REPARSE_POINT`, a
+    plain file holding its target's data; with `COPY_FILE_COPY_SYMLINK`,
+    `ERROR_PRIVILEGE_NOT_HELD`.
+
+  Developer Mode does not let `CopyFile2` create a symbolic link without the
+  right. Not run: a symbolic link copied by an elevated Gozler, which holds
+  the right, and Developer Mode off. After install.
+- `GetDiskFreeSpaceExW` takes a folder path with the `\\?\` prefix and a
+  trailing backslash, locally and as `\\?\UNC\localhost\C$\...` (stage B,
+  run once on 2026-10-19), so the free-space check reads the destination
+  as the copy writes it.
 - Whether `COPY_FILE_NO_BUFFERING` stops `CopyFile2`'s own clone within one
   volume that can clone blocks. Stage D's Dev Drive row shows it: if it
   does, the Windows engine leaves the flag off within such a volume.

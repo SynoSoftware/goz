@@ -21,8 +21,30 @@ impl Identity {
         Identity(final_path)
     }
 
-    fn components(&self) -> impl Iterator<Item = &[u16]> {
+    pub(crate) fn components(&self) -> impl Iterator<Item = &[u16]> {
         self.0.split(|&unit| unit == BACKSLASH)
+    }
+
+    /// The folder that holds the entry; `None` for a volume root.
+    pub(crate) fn parent(&self) -> Option<Identity> {
+        let at = self.0.iter().rposition(|&unit| unit == BACKSLASH)?;
+        let parent = Identity(self.0[..at].to_vec());
+        (parent.0.len() >= self.volume().len()).then_some(parent)
+    }
+
+    /// The entry `name` in this folder.
+    pub(crate) fn child(&self, name: &[u16]) -> Identity {
+        let mut path = self.0.clone();
+        path.push(BACKSLASH);
+        path.extend_from_slice(name);
+        Identity(path)
+    }
+
+    /// The entry's name, its last component.
+    pub(crate) fn name(&self) -> &[u16] {
+        self.components()
+            .last()
+            .expect("split gives at least one part")
     }
 
     /// The volume part: `\\?\Volume{...}` or `\\?\UNC\server\share`.

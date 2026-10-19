@@ -1,7 +1,8 @@
 //! Delete: every delete is permanent (owner ruling: no Recycle Bin).
 //!
 //! The walk is in [`walk`]. This module holds the choice of D1's method,
-//! which builds and is tested on every OS.
+//! which builds and is tested on every OS, and the delete of one entry,
+//! which the copy uses too.
 
 #[cfg(windows)]
 pub(crate) mod walk;
@@ -38,6 +39,35 @@ impl Disposition {
             }
         }
         classic()
+    }
+
+    /// Deletes the open `entry` as [`Disposition::delete`] does.
+    #[cfg(windows)]
+    pub(crate) fn delete_entry(&self, entry: &gozler_winfs::Entry) -> Result<(), u32> {
+        self.delete(
+            || entry.delete_posix().map_err(|error| error.code),
+            || entry.delete_classic().map_err(|error| error.code),
+        )
+    }
+}
+
+/// Opens and deletes one entry with the short retries, which end early when
+/// `cancel` is set. An entry already gone counts as deleted. The handle
+/// closes before this returns, so a name deleted with POSIX semantics has
+/// left its folder.
+#[cfg(windows)]
+pub(crate) fn remove(
+    cancel: &AtomicBool,
+    disposition: &Disposition,
+    open: impl Fn() -> Result<gozler_winfs::Entry, gozler_winfs::WinError>,
+) -> Result<(), u32> {
+    let removed = crate::retry::retry(cancel, || {
+        let entry = open().map_err(|error| error.code)?;
+        disposition.delete_entry(&entry)
+    });
+    match removed {
+        Err(error) if crate::win32::is_gone(error) => Ok(()),
+        removed => removed,
     }
 }
 

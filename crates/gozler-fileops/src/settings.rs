@@ -188,6 +188,43 @@ impl SpeedSettings {
     }
 }
 
+/// The presets that the Settings page offers. Each sets every value; a
+/// value it does not use keeps the Automatic value. It is shown by what it
+/// does, not by the copier it comes from, because Gozler uses none of their
+/// code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preset {
+    Automatic,
+    /// TinyTorrent2's `Payload::Move`, with BetterCopy's share workers and
+    /// rmbrr's delete workers.
+    ParallelCopy,
+    /// BetterCopy's: the Windows copy function, unbuffered from 256 MiB.
+    WindowsUnbufferedFrom256MiB,
+}
+
+impl Preset {
+    pub fn settings(self) -> SpeedSettings {
+        let windows = |limit_mib| SpeedSettings {
+            large_file_limit: LargeFileLimit(limit_mib),
+            large_between_ssds: Engine::Windows,
+            hard_disk: Engine::Windows,
+            workers: CopyWorkers {
+                ssd: Count(16),
+                usb: Count(2),
+                hard_disk: Count(1),
+                share: Count(2),
+            },
+            delete_workers: DeleteWorkers::PerProcessor,
+            ..SpeedSettings::automatic()
+        };
+        match self {
+            Preset::Automatic => SpeedSettings::automatic(),
+            Preset::ParallelCopy => windows(32),
+            Preset::WindowsUnbufferedFrom256MiB => windows(256),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
