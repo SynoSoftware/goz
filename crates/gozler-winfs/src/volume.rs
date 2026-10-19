@@ -1,9 +1,8 @@
 //! Volume discovery and owned volume handles.
 //!
 //! `enumerate_volumes` classifies every volume on the machine; the daemon
-//! indexes the fixed NTFS ones. `open_volume` turns a volume
-//! GUID path into a `\\.\`-style device handle usable with the journal/MFT
-//! FSCTLs.
+//! indexes the fixed NTFS and ReFS ones. `open_volume` turns a volume GUID path
+//! into a `\\.\`-style device handle usable with the journal/MFT FSCTLs.
 
 use core::ptr;
 
@@ -23,7 +22,6 @@ use crate::util::{from_wide_nul, to_wide_nul};
 pub use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 
 /// `GetDriveType` return value for a fixed disk (winbase.h `DRIVE_FIXED`).
-/// Defined locally so we needn't pull in `Win32_System_WindowsProgramming`.
 const DRIVE_FIXED: u32 = 3;
 
 /// One classified volume.
@@ -53,7 +51,6 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, WinError> {
     let mut volumes = Vec::new();
     let mut error: Option<WinError> = None;
     loop {
-        // `buf` currently holds a NUL-terminated volume GUID path.
         volumes.push(classify_volume(&buf));
 
         // SAFETY: `find` is a live volume-search handle; `buf` is writable for

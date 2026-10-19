@@ -2,18 +2,18 @@
 //!
 //! Two tiers: an ASCII fast path (`A..=Z` → `+0x20`) and, for non-ASCII,
 //! canonical decomposition, a simple 1:1 Unicode lowercase of each scalar (the
-//! first scalar of `char::to_lowercase`), then canonical RECOMPOSITION. NFD makes the same text fold
-//! identically whether it arrived precomposed (NFC, `é` = U+00E9) or decomposed
-//! (NFD, `e` + U+0301): a filename copied from macOS matches a query
-//! typed on Windows. Combining marks are KEPT, so unifying the normalization
-//! form never merges genuinely distinct letters (Cyrillic `й` stays distinct
-//! from `и`); accent-insensitivity is deliberately NOT done here. The result is
-//! close to, but not identical to, NTFS's own `$UpCase` comparison: `$UpCase` is
-//! a per-code-unit table and does not normalize, so gozler additionally treats NFC
-//! and NFD spellings of the same text as equal (any precomposed letter with a
-//! canonical decomposition). Matching never affects index integrity. Both the
-//! needle and each candidate name are folded with the same function, so
-//! comparisons stay consistent.
+//! first scalar of `char::to_lowercase`), then canonical RECOMPOSITION. NFD
+//! makes the same text fold identically whether it arrived precomposed (NFC,
+//! `é` = U+00E9) or decomposed (NFD, `e` + U+0301): a filename copied from
+//! macOS matches a query typed on Windows. Combining marks are KEPT, so
+//! unifying the normalization form never merges genuinely distinct letters
+//! (Cyrillic `й` stays distinct from `и`); accent-insensitivity is deliberately
+//! NOT done here. The result is close to, but not identical to, NTFS's own
+//! `$UpCase` comparison: `$UpCase` is a per-code-unit table and does not
+//! normalize, so gozler additionally treats NFC and NFD spellings of the same
+//! text as equal (any precomposed letter with a canonical decomposition).
+//! Matching never affects index integrity. Both the needle and each candidate
+//! name are folded with the same function, so comparisons stay consistent.
 //!
 //! Input and output are WTF-8. Unpaired surrogates (code points `U+D800..=
 //! U+DFFF`, which a real text needle can never contain) pass through
@@ -148,18 +148,16 @@ mod tests {
         assert_ne!(nfc.as_bytes(), nfd.as_bytes(), "inputs differ byte-wise");
         assert_eq!(fold(nfc.as_bytes()), fold(nfd.as_bytes()));
         // Combining marks are kept (not accent-stripped): "cafe" ≠ "café".
-        // Byte inequality is too weak on its own: see
-        // folding_is_not_accent_insensitive for the invariant that matters.
+        // `folding_is_not_accent_insensitive` checks the stronger invariant.
         assert_ne!(fold("cafe".as_bytes()), fold(nfc.as_bytes()));
     }
 
     /// Unifying the normalization form must not smuggle in accent-insensitivity.
     ///
-    /// Byte inequality was too weak to catch that: emitting the DECOMPOSED form
-    /// left the folded name as "cafe" + U+0301, which is unequal to "cafe" while
-    /// still CONTAINING it, so every substring query for "cafe" matched it. The
-    /// invariant that matters is that the folded needle does not OCCUR in the
-    /// folded haystack.
+    /// Byte inequality is too weak a check: a decomposed result "cafe" +
+    /// U+0301 is unequal to "cafe" while still CONTAINING it, so every
+    /// substring query for "cafe" would match it. The invariant that matters is
+    /// that the folded needle does not OCCUR in the folded haystack.
     #[test]
     fn folding_is_not_accent_insensitive() {
         let needle = fold("cafe".as_bytes());
@@ -177,8 +175,7 @@ mod tests {
     }
 
     /// A precomposed character folds to ONE code point, so `?` (which matches
-    /// exactly one) keeps counting visible characters. The decomposed form made
-    /// a 4-character name 5 code points and quietly broke `????`.
+    /// exactly one) keeps counting visible characters.
     #[test]
     fn folding_preserves_code_point_arity() {
         for spelling in ["caf\u{00E9}", "cafe\u{0301}"] {

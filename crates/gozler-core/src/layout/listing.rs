@@ -176,8 +176,8 @@ mod tests {
         assert_eq!(size_of::<RawDirEntry>(), 88);
     }
 
-    /// A ReFS listing as V: returns it: the folder's own `.` and `..`, a
-    /// folder and a file, with 128-bit IDs that use both halves.
+    /// A ReFS listing: the folder's own `.` and `..`, a folder and a file,
+    /// with 128-bit IDs that use both halves.
     #[test]
     fn listing_gives_names_ids_sizes_and_dates() {
         let folder = Frn(0x702 << 64);

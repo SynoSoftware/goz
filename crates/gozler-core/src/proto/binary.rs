@@ -6,8 +6,7 @@
 //! re-scanning every byte on parse, and a `String` allocation per item. A page
 //! is instead encoded as length-prefixed raw path bytes plus a flag byte, so
 //! the daemon encodes with `memcpy`s straight from its stored path bytes and the
-//! client reconstructs (or streams) paths without any JSON work. Measured at
-//! ~12x faster encode+decode than JSON on a multi-million-path result set.
+//! client reconstructs (or streams) paths without any JSON work.
 //!
 //! One frame payload is `[tag: u8][body]`. The tag lets the client dispatch a
 //! frame without guessing: [`RESP_TAG_JSON`] bodies are JSON `Response`s (all

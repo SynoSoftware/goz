@@ -2,11 +2,11 @@
 //!
 //! The index stores no paths, so a full path is the mount prefix plus the
 //! names on the walk up to the root. Walking to the root for every candidate
-//! cost a path-term query over a whole volume about 1.4 s of index read lock
-//! on a 1.95M-entry `C:`. [`DirPaths`] instead builds each folder's path once
-//! per query, from its parent's, and an entry's path is its folder's path,
-//! a separator and its name. Its cache is bounded, because the folders a local
-//! user creates decide how large it would grow.
+//! would hold the index read lock for seconds on a large volume, so
+//! [`DirPaths`] builds each folder's path once per query, from its parent's,
+//! and an entry's path is its folder's path, a separator and its name. Its
+//! cache is bounded, because the folders a local user creates decide how large
+//! it would grow.
 
 use crate::index::VolumeIndex;
 use crate::index::volume::MAX_PATH_HOPS;
@@ -42,9 +42,9 @@ struct Folder {
 const CACHED_PATH_MAX: usize = 1024;
 
 /// Arena size past which [`DirPaths`] starts its cache over. A real volume's
-/// folder paths fit (about 40 MB for every folder of a 1.95M-entry `C:`),
-/// but a local user can create enough folders to add up to gigabytes, and the
-/// cache must not hold that under the index read lock.
+/// folder paths fit (about 40 MB for every folder of a two-million-entry
+/// system volume), but a local user can create enough folders to add up to
+/// gigabytes, and the cache must not hold that under the index read lock.
 const CACHE_LIMIT: usize = 64 << 20;
 
 /// Builds the full paths of entries, caching each folder's path the first

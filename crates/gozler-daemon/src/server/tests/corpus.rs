@@ -246,7 +246,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             &["C:/repo/docs/testing.md"],
             prints(&[r"C:\repo\docs\testing.md"]),
         ),
-        // An unknown `/` token is search text, as in es, and now a path term.
+        // An unknown `/` token is search text, as in es, and is a path term.
         (
             &["/docs"],
             prints(&[

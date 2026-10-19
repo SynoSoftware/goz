@@ -34,7 +34,7 @@ const JOURNAL_MAX_SIZE: u64 = 1024 * 1024 * 1024;
 /// 8 MiB trimmed from the front when the journal is full. Kept small on
 /// purpose: NTFS trims slowly, and a large delta stalls the writer.
 const JOURNAL_ALLOC_DELTA: u64 = 8 * 1024 * 1024;
-/// 1 MiB ioctl buffer: ~100 ENUM round-trips per million files.
+/// 1 MiB ioctl buffer, which keeps the number of ENUM round-trips low.
 const IO_BUFFER_BYTES: usize = 1024 * 1024;
 /// 64 KiB listing buffer, as `u64`s because the entries are 8-byte aligned.
 /// It holds several hundred names, so one read lists most folders.
@@ -124,14 +124,12 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
         bail!("no fixed NTFS or ReFS volumes found");
     }
 
-    // One thread per volume. The MFT scans are independent, so a USB disk
-    // waking from spin-down or a second SSD no longer queues behind the
-    // largest volume (measured: the non-system volumes were 21% of a 36 s
-    // bootstrap, all of it now overlapped). Results are collected in
-    // enumeration order so the volume set is deterministic whichever thread
-    // finishes first. Two large partitions on one spinning disk would
-    // interleave their MFT reads; accepted, since such layouts are rare and
-    // the cost is bounded by the 1 MiB ioctl buffer per seek.
+    // One thread per volume. The MFT scans are independent, so a slow disk
+    // (a USB disk waking from spin-down) does not queue the others. Results
+    // are collected in enumeration order so the volume set is deterministic
+    // whichever thread finishes first. Two large partitions on one spinning
+    // disk would interleave their MFT reads; accepted, since such layouts are
+    // rare and the cost is bounded by the 1 MiB ioctl buffer per seek.
     let results: Vec<Result<BootstrappedVolume>> = std::thread::scope(|s| {
         let threads: Vec<_> = targets
             .iter()
@@ -293,7 +291,7 @@ pub(crate) fn build_index(
             let mut next_frn: u64 = 0;
             loop {
                 if cancelled() {
-                    return Ok(None); // shutdown arrived mid-rebuild: abort cooperatively
+                    return Ok(None);
                 }
                 let Some(bytes) =
                     enum_usn_data(handle, next_frn, &mut buf).context("FSCTL_ENUM_USN_DATA")?
@@ -428,21 +426,16 @@ fn layout_pass(
 ///
 /// The journal is the only thing that lets a restart replay instead of
 /// rescan, so its size sets the longest downtime gozler can recover from without
-/// a full MFT scan. Measured on a busy development C: (2 TB, ~4M entries):
-/// about 4.5 MB of journal per hour, so Windows' default 32 MB holds roughly
-/// nine hours and a cursor saved at night is purged by morning. The cost is
-/// disk: the journal never shrinks, and its maximum is real space once the
-/// volume has churned that much. Every other journal consumer (Windows Search,
-/// backup tools) shares it and is only helped by a larger one.
+/// a full MFT scan. On a busy volume Windows' default 32 MB holds only hours of
+/// changes, so a cursor saved at night is purged by morning. The cost is disk:
+/// the journal never shrinks, and its maximum is real space once the volume has
+/// churned that much. Every other journal consumer (Windows Search, backup
+/// tools) shares it and is only helped by a larger one.
 ///
 /// Policy: 1/4096 of the volume, clamped to [[`JOURNAL_MIN_SIZE`], 1 GiB].
-/// A 256 GB laptop disk gets 64 MiB, a 2 TB disk 512 MiB (about four days of
-/// the churn above), anything from 4 TB up the 1 GiB cap. Everything leaves
-/// the system's 32 MB in place and makes the user find the setting; its author
-/// runs 128 MiB himself and suggests 256 MiB to 1 GiB for large busy volumes,
-/// so this automates what he does by hand. `FSCTL_CREATE_USN_JOURNAL` treats a
-/// value below the current maximum as a no-op, so no clamp against it is
-/// needed.
+/// A 256 GB laptop disk gets 64 MiB, a 2 TB disk 512 MiB, anything from 4 TB
+/// up the 1 GiB cap. `FSCTL_CREATE_USN_JOURNAL` treats a value below the
+/// current maximum as a no-op, so no clamp against it is needed.
 fn journal_target_bytes(volume_bytes: Option<u64>) -> u64 {
     volume_bytes
         .map_or(JOURNAL_MIN_SIZE, |bytes| bytes / 4096)
@@ -465,9 +458,9 @@ pub(crate) enum JournalSetup {
 ///
 /// Never fatal: a one-shot scan reads the MFT directly and does not need the
 /// journal. An active journal smaller than [`journal_target_bytes`] is grown
-/// in place; a failure to grow is an error (not a warning: it went unread as a
-/// warning for months while every restart fell back to a full scan) but the
-/// journal is still used at its current size. An absent journal is created on
+/// in place; a failure to grow is logged as an error, because every restart
+/// then falls back to a full scan, but the journal is still used at its
+/// current size. An absent journal is created on
 /// the spot and used if creation succeeds. Every other outcome logs a note and
 /// leaves live updates unavailable.
 pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> JournalSetup {

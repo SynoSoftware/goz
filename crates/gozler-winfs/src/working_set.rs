@@ -13,8 +13,7 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 use crate::error::{WinError, last_error};
 
-// SetProcessWorkingSetSizeEx flags (winnt.h). Defined locally, matching this
-// crate's convention of not pulling constant-only symbols from windows-sys.
+// SetProcessWorkingSetSizeEx flags (winnt.h).
 const QUOTA_LIMITS_HARDWS_MIN_ENABLE: u32 = 0x0000_0001;
 const QUOTA_LIMITS_HARDWS_MAX_DISABLE: u32 = 0x0000_0008;
 
@@ -49,10 +48,10 @@ pub fn self_memory() -> Result<SelfMemory, WinError> {
 
 /// One-shot working-set trim: releases every resident page to the standby
 /// list. Pages fault back in on first touch as SOFT faults (no disk I/O while
-/// memory is uncontended), so the cost is a one-time ~0.2 ms/MB re-touch
-/// spread over the first queries; the benefit is that the process's visible
-/// memory (Task Manager's default column) drops to what queries actually
-/// touch instead of the bootstrap peak.
+/// memory is uncontended), a one-time cost spread over the first queries; the
+/// benefit is that the process's visible memory (Task Manager's default
+/// column) drops to what queries actually touch instead of the bootstrap
+/// peak.
 ///
 /// Call ONCE per phase transition (after bootstrap / a full rescan), never
 /// periodically: habitual trimming evicts hot pages and manufactures paging

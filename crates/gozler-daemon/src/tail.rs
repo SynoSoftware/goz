@@ -9,12 +9,8 @@
 //! `ApplyOutcome::needs_stat` side effects for the enricher, which refreshes
 //! the size/date a USN record does not carry.
 //!
-//! Hard links are reconciled out of band: a `HARD_LINK_CHANGE` record names one
-//! link and may name a dead one, so the real set comes from a Win32 link walk
-//! (`gozler_winfs::file_links`) fed to `VolumeIndex::reconcile_links`. A walk that
-//! cannot be resolved is skipped, never applied as an empty set (which would
-//! delete a live file), and counted as `IndexStats::link_reconciles_dropped` so
-//! `--status` shows it rather than hiding it.
+//! Hard links are reconciled out of band, from a Win32 link walk (see
+//! [`reconcile_links`]).
 //!
 //! A rename can also bring in a folder the index lacks, because a folder walk
 //! is not a snapshot (see `ApplyOutcome::needs_walk`). The tail lists such a
@@ -75,17 +71,16 @@ enum RescanReason {
     /// index is in sync with the journal: the volume was never indexed, or its
     /// supervisor revived the tail after the previous one exited.
     NoCursor,
-    /// Journal reads kept failing past the escalation window with codes no
-    /// arm maps (observed live: `ERROR_INVALID_PARAMETER` against a cursor
-    /// whose journal was deleted mid-read); whatever the cause, a journal that
-    /// will not stop failing cannot be trusted.
+    /// Journal reads kept failing past [`ESCALATE_AFTER`] with codes no arm
+    /// maps; whatever the cause, a journal that will not stop failing cannot be
+    /// trusted.
     ReadsKeptFailing,
     /// A folder the index missed could not be listed, so its contents stay
     /// missing.
     WalkFailed,
 }
 
-/// 512 KiB journal read buffer (~5k records per fill).
+/// 512 KiB journal read buffer.
 const READ_BUFFER_BYTES: usize = 512 * 1024;
 /// Poll interval when the journal is caught up.
 const IDLE_POLL: Duration = Duration::from_millis(50);
@@ -97,9 +92,9 @@ const IDLE_POLL: Duration = Duration::from_millis(50);
 const DEGRADE_AFTER: Duration = Duration::from_secs(5);
 /// How long journal reads may keep failing before retrying stops and a
 /// bounded rescan takes over. Long enough that a spin-up's `ERROR_NOT_READY`
-/// window (~15 s worst observed) never triggers a needless rebuild, short
-/// enough that an unmappable error (see the escalation comment in the read
-/// loop) costs seconds of zombie time, not forever.
+/// window (up to about 15 s) never triggers a needless rebuild, short enough
+/// that an unmappable error (see the escalation comment in the read loop)
+/// costs seconds of zombie time, not forever.
 const ESCALATE_AFTER: Duration = Duration::from_secs(30);
 /// Read-retry backoff bounds. The ceiling is what keeps a permanently sick
 /// volume from writing a log line every 500 ms for the life of the service.
@@ -120,10 +115,7 @@ pub(crate) struct TailHandle {
     pub(crate) mount: String,
     /// The tail's self-reported liveness: beating, busy in a rebuild, or
     /// retired. The supervisor's stall decisions read only this, never
-    /// `state.phase`, which is user-facing honesty state; the phase is
-    /// consulted only for what it says about the volume: whether it is served
-    /// (the supervisor's `accrue_health`) and whether a retired tail left a
-    /// snapshot that needs no revival.
+    /// `state.phase`, which reports the volume's state to users.
     pub(crate) pulse: Arc<TailPulse>,
     /// Real handle to the tail thread, target of `cancel_synchronous_io`.
     pub(crate) io_handle: gozler_winfs::ThreadIoHandle,
@@ -163,9 +155,9 @@ pub(crate) fn spawn(state: Arc<VolumeState>, handle: VolumeHandle) -> std::io::R
     // must happen ON the thread (the pseudo-handle is per-thread), so the
     // thread sends it back before entering the loop.
     let (io_tx, io_rx) = std::sync::mpsc::sync_channel(1);
-    // OS thread creation can fail on a machine near its thread/handle limit.
-    // Propagate it so the supervisor retries this one volume rather than
-    // panic the whole daemon.
+    // Thread creation can fail near the machine's thread or handle limit.
+    // Propagate it so the supervisor retries this volume instead of the
+    // daemon panicking.
     let join = std::thread::Builder::new()
         .name(format!("gozler-tail-{mount}"))
         .spawn(move || {
@@ -174,20 +166,15 @@ pub(crate) fn spawn(state: Arc<VolumeState>, handle: VolumeHandle) -> std::io::R
             let _ = io_tx.send(io);
             if !usable {
                 // `spawn` is about to report failure and drop this thread's
-                // stop flag and join handle. Running on anyway would leak a
-                // live index writer that nobody can stop, join, supervise,
-                // or ever rescue from a wedge; and a caller that retries the
-                // spawn (the supervisor's revive) would then stack a second
-                // writer on the same volume. No tail beats a ghost tail.
+                // stop flag and join handle. Running on would leave a live
+                // index writer that nobody can stop or supervise, and the
+                // supervisor's retry would stack a second writer on the same
+                // volume.
                 return;
             }
-            // Publishes `Retired` on ANY exit: the stop flag, a give-up
-            // return, or a panic unwind. This is what lets the supervisor
-            // trust silence: the only way to stop stamping without retiring
-            // is to be genuinely wedged in a syscall. The handle moves INTO
-            // tail_loop so its CloseHandle runs before this guard fires;
-            // `Retired` is a promise that joining is instant, and a close is
-            // itself an IRP a sick device can pend.
+            // Publishes `Retired` on any exit, a panic unwind included. The
+            // handle moves into tail_loop so that it closes before this guard
+            // fires.
             let _retired = pulse_thread.retire_on_drop();
             tail_loop(&state, handle, &stop_thread, &pulse_thread)
         })?;
@@ -242,9 +229,11 @@ struct ReadFailures {
 
 fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse: &TailPulse) {
     // Owned so it drops in THIS frame, on return and on unwind alike, before
-    // the spawning closure's retire guard publishes `Retired`. A thread that
-    // claimed Retired while still wedged in its handle's CloseHandle would
-    // draw an unbounded join from the supervisor's give-up or revive path.
+    // the spawning closure's retire guard publishes `Retired`. `Retired`
+    // promises that joining is instant, and a close is itself an IRP a sick
+    // device can pend; a thread that claimed it while wedged in CloseHandle
+    // would draw an unbounded join from the supervisor's give-up or revive
+    // path.
     let handle = &handle;
     let mut rescans: u32 = 0;
     // A starting tail cannot prove the index is in sync: a new volume has no
@@ -294,9 +283,6 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     }
                     let walk = match walk_journal_buffer(&buf[..bytes]) {
                         Ok(w) => w,
-                        // A corrupt buffer means we cannot prove what we
-                        // missed, so rebuild the index from the MFT rather
-                        // than drift.
                         Err(e) => break 'rescan (RescanReason::ParserAnomaly, format!("{e:?}")),
                     };
                     if walk.records.is_empty() {
@@ -310,17 +296,11 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         std::thread::sleep(IDLE_POLL);
                         continue 'tail;
                     }
-                    // Apply structural changes under the write lock, then collect
-                    // the FRNs whose size/date must be refreshed (USN records carry
-                    // neither). Hard-link-dirty FRNs are stat'd too, which refreshes
-                    // their size/date but does NOT reconcile their names.
-                    //
                     // Hold the write lock only for the mutation; the owned
-                    // `ApplyOutcome` needs no lock, so build the dirty list after
-                    // releasing it (keeps the query-blocking window minimal).
-                    // Arena compaction, the one long step, is not part of it:
-                    // `apply_batch` reports it and `compact_index` does the
-                    // copying off the exclusive lock.
+                    // `ApplyOutcome` needs no lock. Arena compaction, the one
+                    // long step, is not part of it: `apply_batch` reports it
+                    // and `compact_index` does the copying off the exclusive
+                    // lock.
                     let mut outcome = {
                         let mut index = state.index.write();
                         index.apply_batch(&walk.records)
@@ -351,6 +331,9 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     if let Err(e) = walk_missed(state, handle, &outcome.needs_walk, stop, pulse) {
                         break 'rescan (RescanReason::WalkFailed, format!("{e:#}"));
                     }
+                    // USN records carry no size or date, so these FRNs are stat'd.
+                    // Link-dirty FRNs are stat'd too; that does not refresh
+                    // their names.
                     let mut dirty: Vec<Frn> = outcome
                         .needs_stat
                         .iter()
@@ -360,30 +343,23 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     dirty.sort_unstable();
                     dirty.dedup();
                     enrich_stats(state, handle, &dirty, stop, pulse);
-                    // A hard-link change also alters the file's NAMES, which no stat
-                    // can refresh and which the record itself cannot be trusted for
-                    // (it may name a link that is already dead).
                     reconcile_links(state, handle, &outcome.needs_link_reconcile, stop, pulse);
                     if outcome.wants_compact {
                         compact_index(state);
                     }
                     pos.start_usn = walk.next_usn;
-                    rescans = 0; // a healthy batch resets the rescan storm guard
+                    rescans = 0;
                     continue 'tail;
                 }
                 Err(e) if e.code == ERROR_JOURNAL_ENTRY_DELETED => {
-                    // Our cursor fell off the end of the journal (wrap / deletion):
-                    // the index can no longer prove it is in sync, so rebuild it in
-                    // place and resume tailing from a fresh cursor.
                     (RescanReason::EntryDeletedError, e.to_string())
                 }
                 Err(e)
                     if e.code == ERROR_JOURNAL_NOT_ACTIVE
                         || e.code == ERROR_JOURNAL_DELETE_IN_PROGRESS =>
                 {
-                    // The journal we were tailing is gone or being deleted. Retrying
-                    // the same cursor against it can never succeed, so rebuild from
-                    // the MFT and pick up a fresh one.
+                    // Retrying the same cursor against a gone or dying journal
+                    // can never succeed.
                     let reason = if e.code == ERROR_JOURNAL_NOT_ACTIVE {
                         RescanReason::JournalNotActive
                     } else {
@@ -396,11 +372,10 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     // up answers ERROR_NOT_READY for a moment), so keep retrying
                     // rather than abandoning the volume.
                     //
-                    // What we must never do is retry silently while still claiming
-                    // `Live`: that is the third state the design forbids, where the
-                    // index has stopped tracking the volume and every query still
-                    // reports it complete. Past `DEGRADE_AFTER` the drift is real, so
-                    // say so and let `--status`, `Hello.ready`, and every result page
+                    // Never retry silently while still claiming `Live`: the index
+                    // has stopped tracking the volume, yet every query would report
+                    // it complete. Past `DEGRADE_AFTER` the drift is real, so say
+                    // so and let `--status`, `Hello.ready`, and every result page
                     // carry it.
                     let failures = pos.failures.get_or_insert_with(|| ReadFailures {
                         since: Instant::now(),
@@ -408,16 +383,15 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         degraded: false,
                     });
                     let since = failures.since;
-                    // Nor may we retry FOREVER: deleting the journal mid-read was
-                    // observed to answer the stale cursor with
-                    // ERROR_INVALID_PARAMETER (87), a code no arm maps, and no
-                    // retry of that can ever succeed, so the volume sat Offline
-                    // permanently while its tail beat away and the supervisor
-                    // (correctly) saw nothing to revive. Past `ESCALATE_AFTER`
-                    // the code no longer matters: reads that will not stop
-                    // failing mean the journal cannot be trusted, so rebuild.
-                    // Bounded: a rescan that fails retires the tail into the
-                    // supervisor's revival budget instead of looping here.
+                    // Nor may we retry forever: deleting the journal mid-read can
+                    // answer the stale cursor with ERROR_INVALID_PARAMETER (87), a
+                    // code no arm maps, and no retry of that can succeed. The
+                    // volume would sit Offline while its tail beat away and the
+                    // supervisor saw nothing to revive. Past `ESCALATE_AFTER` the
+                    // code no longer matters: reads that will not stop failing mean
+                    // the journal cannot be trusted, so rebuild. A rescan that fails
+                    // retires the tail into the supervisor's revival budget instead
+                    // of looping here.
                     if since.elapsed() >= ESCALATE_AFTER {
                         break 'rescan (RescanReason::ReadsKeptFailing, e.to_string());
                     }
@@ -433,10 +407,6 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     } else {
                         tracing::warn!(volume = %state.mount_prefix(), error = %e, "journal read failed; retrying");
                     }
-                    // Growing backoff, so a permanently sick volume costs one line
-                    // per RETRY_BACKOFF_MAX instead of one every 500 ms forever.
-                    // Interruptible: a stop arriving mid-backoff must not wait out
-                    // up to 30 s, or teardown would mistake this tail for wedged.
                     sleep_unless_stopped(stop, failures.backoff);
                     failures.backoff = (failures.backoff * 2).min(RETRY_BACKOFF_MAX);
                     continue 'tail;
@@ -487,17 +457,14 @@ fn compact_index(state: &VolumeState) {
 /// actually reports.
 ///
 /// A `HARD_LINK_CHANGE` record names one link and may name a dead one, so the
-/// index cannot learn the real set from the journal. Without this a rename of a
-/// file with several hard links was dropped entirely: the old name kept matching
-/// and the new one never appeared.
+/// index cannot learn the real set from the journal. The set comes from a Win32
+/// link walk (`gozler_winfs::file_links`) fed to `VolumeIndex::reconcile_links`.
 ///
-/// Mirrors [`enrich_stats`]'s lock discipline, and for the same reason: the
-/// Win32 walk is a blocking file open and must never run under the index write
-/// lock that every query contends on. Only the apply takes the lock.
+/// Mirrors [`enrich_stats`]'s lock discipline: only the apply takes the lock.
 ///
 /// An FRN whose walk fails is SKIPPED, never reconciled to an empty set:
-/// `reconcile_links` treats empty as a delete, so a transient lock would
-/// otherwise erase a live file from the index.
+/// `VolumeIndex::reconcile_links` treats empty as a delete, so a transient lock
+/// would otherwise erase a live file from the index.
 fn reconcile_links(
     state: &VolumeState,
     handle: &VolumeHandle,
@@ -590,12 +557,10 @@ fn enrich_stats(
     }
     let mut stats: Vec<(Frn, u64, i64)> = Vec::with_capacity(frns.len());
     for &frn in frns {
-        // Same teardown escape as `reconcile_links`: a large dirty batch of
-        // blocking opens must not make a healthy tail look wedged.
+        // Same teardown escape and per-file stamp as `reconcile_links`.
         if stop.load(Ordering::Relaxed) {
             break; // apply what was already gathered
         }
-        // Per-file liveness stamp, same reason as `reconcile_links`.
         pulse.beat();
         match stat_file(handle, frn.0) {
             Ok(Some(s)) => stats.push((frn, s.size, s.mtime_ft)),
@@ -617,8 +582,7 @@ fn enrich_stats(
 /// Lists each folder in `folders`, which the index lacked until a rename
 /// brought it in, and everything under it, and inserts what it lists.
 ///
-/// Mirrors [`reconcile_links`]'s lock discipline: the folder opens run with
-/// the index lock released, beating the pulse for each folder, and the whole
+/// Mirrors [`reconcile_links`]'s lock discipline and per-folder pulse. The whole
 /// listing is applied under one short lock. A stop ends the walk and applies
 /// nothing, because the daemon is exiting.
 fn walk_missed(
@@ -693,9 +657,8 @@ fn rescan(
     detail: &str,
     stop: &AtomicBool,
 ) -> Option<ReadPosition> {
-    // The rebuild rereads the whole volume without stamping the pulse.
-    // `Busy` tells the supervisor this silence is legitimate; the guard
-    // restores a fresh beat on every way out of this function.
+    // The rebuild stamps no pulse; `Busy` tells the supervisor that silence
+    // is legitimate.
     let _busy = pulse.busy_scope();
     // A volume's first build keeps the phase `Bootstrapping`, so `--status`
     // tells a volume that was never indexed from one being rebuilt.
@@ -762,10 +725,9 @@ fn rescan(
             None
         }
         JournalSetup::Unavailable => {
-            // Rebuilt and correct, but no journal to tail right now: fresh as
-            // of now but will not receive live updates. Report Offline so
-            // Status/query responses flag the volume incomplete instead of
-            // falsely Live; the tail stops and the supervisor revives it.
+            // Rebuilt, but nothing to tail right now. Offline makes status and
+            // query responses flag the volume incomplete instead of falsely
+            // Live; the tail stops and the supervisor revives it.
             *state.phase.write() = VolumePhase::Offline;
             tracing::warn!(volume = %state.mount_prefix(), "index built but no journal is available; live updates paused");
             None
@@ -788,9 +750,7 @@ fn sleep_unless_stopped(stop: &AtomicBool, total: Duration) {
 }
 
 fn mark_failed(state: &VolumeState, reason: RescanReason, detail: &str) {
-    // The tail is about to exit for good. Without this line the volume died
-    // silently: nothing else announces the exit, and the supervisor's later
-    // revival attempts were the first evidence anything happened.
+    // The tail is about to exit for good, and nothing else announces it.
     tracing::error!(
         volume = %state.mount_prefix(),
         ?reason,
@@ -845,10 +805,8 @@ mod tests {
         }
     }
 
-    /// The read-retry policy exists to stop the one state the design forbids: a
-    /// volume whose journal reads keep failing while it still reports `Live`, so
-    /// `--status`, `Hello.ready`, and every result page call the index current
-    /// when it has stopped tracking the volume entirely.
+    /// The read-retry policy keeps a volume whose journal reads keep failing
+    /// from reporting `Live`.
     ///
     /// The loop itself needs a real `VolumeHandle` and cannot be unit-tested, so
     /// this pins the constants that bound it. The behaviour they drive is
@@ -867,18 +825,17 @@ mod tests {
             "a volume that stopped tracking must be reported promptly"
         );
         // Backoff must actually grow, or a permanently sick volume writes a log
-        // line every RETRY_BACKOFF_MIN forever (this is what produced ~96k
-        // identical lines in one run).
+        // line every RETRY_BACKOFF_MIN forever.
         assert!(RETRY_BACKOFF_MAX > RETRY_BACKOFF_MIN);
         // The first retry must be prompt enough that a blip costs no freshness.
         assert!(RETRY_BACKOFF_MIN <= Duration::from_secs(1));
-        // Escalation must announce Offline first (honesty precedes surgery)
-        // and outlast a spin-up's NOT_READY window (~15 s worst observed), or
-        // every sleepy drive would eat a full MFT rebuild on wake.
+        // Escalation must announce Offline first and outlast a spin-up's
+        // NOT_READY window, or every sleepy drive would eat a full MFT rebuild
+        // on wake.
         assert!(ESCALATE_AFTER > DEGRADE_AFTER);
         assert!(ESCALATE_AFTER >= Duration::from_secs(20));
-        // But not so patient that an unmappable read error (the observed
-        // ERROR_INVALID_PARAMETER zombie) parks a volume for minutes.
+        // But not so patient that an unmappable read error parks a volume for
+        // minutes.
         assert!(ESCALATE_AFTER <= Duration::from_secs(120));
     }
 

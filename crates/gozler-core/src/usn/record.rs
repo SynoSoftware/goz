@@ -220,11 +220,9 @@ struct RawV3 {
 /// advances by `RecordLength` rounded up to the next multiple of 8
 /// (`RecordLength` is normally already padded; the rounding is defensive).
 fn walk_records(buf: &[u8]) -> Result<Vec<ParsedUsnRecord>, WalkError> {
-    // Upper-bounded hint: every parsed V2/V3 record consumes >= 60 bytes
-    // (`size_of::<RawV2>()`), so `buf.len() / 60` is a safe overestimate of the
-    // push count. `buf.len()` is the real slice length (not a wire field), and
-    // `.min(4096)` caps over-allocation on skip-heavy buffers, matching
-    // `walk_layout_buffer`'s convention.
+    // Every parsed V2/V3 record consumes at least `size_of::<RawV2>()` bytes,
+    // so this overestimates the push count; `.min(4096)` caps the allocation
+    // on skip-heavy buffers, as `walk_layout_buffer` does.
     let mut records = Vec::with_capacity((buf.len() / size_of::<RawV2>()).min(4096));
     let mut off = LEADING_VALUE_LEN;
     // Fewer than one common header's worth of bytes remaining = normal end.
@@ -385,9 +383,9 @@ mod tests {
 
     #[test]
     fn v3_keeps_the_whole_refs_file_id() {
-        // A ReFS file ID as V: gives it: bytes 8..15 hold the folder's number
-        // and bytes 0..7 the file's number within it, which is 0 for every
-        // folder. Keeping only bytes 0..7 gave every ReFS folder the ID 0.
+        // A ReFS file ID holds the folder's number in bytes 8..15 and the
+        // file's number within it in bytes 0..7, which is 0 for every folder.
+        // Keeping only bytes 0..7 would give every ReFS folder the ID 0.
         let folder = 0x702u128 << 64;
         let fx = RecordFixture::file(folder | 0x84, folder, "hi").with_version(3);
         let buf = build_journal_buffer(0, &[fx]);
@@ -475,9 +473,9 @@ mod tests {
         assert_eq!(wtf8::to_utf16(&r.name), name_units);
     }
 
-    /// The layout parser rejected names past the NTFS limit, but the journal
-    /// parser took any even length up to 65534 bytes, and the index stored a
-    /// name over 64 KiB in WTF-8 with a wrapped length.
+    /// A name past the NTFS limit is an error, as in the layout parser;
+    /// otherwise the index would store a name over 64 KiB in WTF-8 with a
+    /// wrapped length.
     #[test]
     fn name_longer_than_ntfs_allows_is_an_error() {
         let fx = RecordFixture::file(1, 2, "").with_name_units(vec![0x0078u16; 256]);
@@ -590,9 +588,7 @@ mod tests {
     fn name_offset_into_fixed_header_is_an_error() {
         let mut buf = build_enum_buffer(0, &[RecordFixture::file(1, 2, "abc")]);
         // FileNameOffset lives at record offset 58 -> buffer offset 66. Point it
-        // at byte 24 (the Usn field), inside the fixed V2 header: reconstructing
-        // a "name" from header bytes must be rejected, not silently stored under
-        // a valid FRN.
+        // at byte 24 (the Usn field), inside the fixed V2 header.
         buf[66..68].copy_from_slice(&24u16.to_le_bytes());
         assert_eq!(
             walk_enum_buffer(&buf).unwrap_err(),

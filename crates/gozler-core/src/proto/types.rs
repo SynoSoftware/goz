@@ -201,7 +201,8 @@ pub struct ResultItem {
     /// exact fidelity reconstruct the `OsString` from this.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path_u16: Option<Vec<u16>>,
-    /// File size in bytes; `None` = unknown, not requested, or a directory.
+    /// Size in bytes, a folder's being the size of the files below it; `None`
+    /// = unknown or not requested.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub size: Option<u64>,
     /// Raw FILETIME modification stamp; `None` = unknown or not requested.

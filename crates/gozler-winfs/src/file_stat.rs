@@ -14,7 +14,6 @@ use crate::error::{WinError, last_error};
 use crate::file_id::open_by_id;
 use crate::volume::VolumeHandle;
 
-/// `FILE_ATTRIBUTE_DIRECTORY`, defined locally per this crate's convention.
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
 
 /// The live size/mtime of one file.

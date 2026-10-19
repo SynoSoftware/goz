@@ -1,8 +1,8 @@
 //! Tests for the index core: targeted unit cases plus the property tests
 //! that carry most of the correctness weight: a model-based op tape, the
 //! bootstrap race (shuffled ENUM snapshot + forward journal replay), the
-//! walk race (a folder walk that changes run through + the same replay) and
-//! the folder sizes under arbitrary index changes.
+//! walk race (a folder walk during which the filesystem keeps changing, then
+//! the same replay) and the folder sizes under arbitrary index changes.
 
 use super::*;
 use crate::types::Frn;
@@ -1276,21 +1276,19 @@ fn a_walk_keeps_hard_links_and_adds_a_folder_listed_twice_once() {
 fn enrich_with_renamed_directory_never_orphans_children() {
     // The ENUM pass sees dir "docs" (frn 100) with child "a.txt"; a rename to
     // "documents" is applied (in place) before the FILE_LAYOUT pass, whose
-    // snapshot still reports the old name "docs". Enrichment must
-    // NOT tombstone the directory entry (which would orphan the child under a
+    // snapshot still reports the old name "docs". Enrichment must NOT
+    // tombstone the directory entry (which would orphan the child under a
     // reused slot).
     let mut idx = index_from_enum(&[
         create(frn(100), root_frn(), "docs", true),
         create(frn(101), frn(100), "a.txt", false),
     ]);
-    // Rename applied live before enrichment.
     idx.apply_batch(&[rename(frn(100), root_frn(), "documents", true)]);
     assert_eq!(
         path_of_frn(&idx, frn(101)).as_deref(),
         Some("documents\\a.txt")
     );
 
-    // Stale FILE_LAYOUT snapshot reports the pre-rename name "docs".
     idx.enrich(&LayoutFile {
         frn: frn(100),
         attributes: FILE_ATTRIBUTE_DIRECTORY,

@@ -1,15 +1,9 @@
 //! FILETIME conversion helpers, and the date format of the output.
 //!
 //! Windows FILETIME counts 100-nanosecond ticks since 1601-01-01T00:00:00
-//! UTC. Everything's IPC, the USN/MFT records, and gozler's own wire protocol all speak
-//! FILETIME; these helpers are the single conversion point for the date
-//! arithmetic that needs Unix milliseconds.
-//!
-//! All functions are total: negative ticks (pre-1601) and pre-1970 inputs
-//! never panic. Conversions use floor (Euclidean) division, so pre-epoch
-//! values map to the correct earlier millisecond rather than rounding
-//! toward zero; only at the extreme ends of the `i64` domain (where the
-//! result would not be representable) do the linear conversions saturate.
+//! UTC. The USN and MFT records and gozler's wire protocol all speak FILETIME;
+//! these helpers are the single conversion point for the date arithmetic that
+//! needs Unix milliseconds. All functions are total: no input panics.
 
 /// Ticks (100 ns units) from 1601-01-01T00:00:00 UTC to 1970-01-01T00:00:00
 /// UTC, the offset between the FILETIME epoch and the Unix epoch.

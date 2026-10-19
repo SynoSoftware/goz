@@ -1,6 +1,6 @@
 //! What the benches measure. On Windows it is the CPU cycles of the bench
 //! thread, because the machine they run on is rarely idle and other work
-//! changes wall-clock timings by tens of percent. Elsewhere it is wall time.
+//! moves wall-clock timings. Elsewhere it is wall time.
 
 use criterion::Criterion;
 

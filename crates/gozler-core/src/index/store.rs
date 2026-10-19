@@ -3,8 +3,8 @@
 //! owns the apply/rename/link rules; this file just stores bytes and columns
 //! compactly.
 //!
-//! Names are INTERNED: only ~31% of the names on a real Windows volume are
-//! unique (node_modules alone contributes tens of thousands of copies of
+//! Names are INTERNED: most names on a real Windows volume repeat
+//! (node_modules alone contributes tens of thousands of copies of
 //! `index.js`), so each distinct name is stored once and every entry carries a
 //! 4-byte [`NameId`]. Entries sharing a name are linked through a doubly-linked
 //! same-name chain (`next_same` / `prev_same` columns, head in the store), which
@@ -21,7 +21,7 @@ use rustc_hash::FxHashMap;
 pub(crate) type NameId = u32;
 
 /// A slice of a `NameStore` byte buffer: byte offset + byte length. Names are
-/// capped at 64 KiB (an NTFS component is ≤ 255 UTF-16 units ≈ ≤ 1020 WTF-8
+/// capped at 64 KiB (an NTFS component is ≤ 255 UTF-16 units, so ≤ 765 WTF-8
 /// bytes) and the arenas are assumed to stay under 2 GiB (bit 31 of `off` is
 /// a buffer selector; nothing enforces the bound, `push` truncates if it ever
 /// did not hold), so `u32`/`u16` are ample.
@@ -60,8 +60,7 @@ const _: () = assert!(size_of::<EntryIdx>() == 4);
 const _: () = assert!(size_of::<NameId>() == 4);
 
 /// Freshly compacted name storage, with its intern table, plus the id remap
-/// for every kept name, built WITHOUT touching the index so the expensive copy
-/// and hashing run off the exclusive lock. Apply with
+/// for every kept name. Built by [`NameStore::plan_compact`], applied with
 /// [`NameStore::install_compacted`].
 pub(crate) struct CompactedNames {
     raw: Vec<u8>,
@@ -86,7 +85,7 @@ pub(crate) struct CompactedNames {
 /// order), which is what lets a scan map hit offsets back to ids with a
 /// forward merge-walk instead of a per-hit binary search.
 ///
-/// When a name case-folds to itself (56% of real-world names), the raw bytes
+/// When a name case-folds to itself (most real-world names do), the raw bytes
 /// are NOT stored: the raw ref points into the folded arena via
 /// [`RAW_IN_FOLDED`].
 #[derive(Debug, Default)]
@@ -293,8 +292,7 @@ impl NameStore {
     /// Builds compacted storage keeping only live (refcount > 0) names, in id
     /// order, WITHOUT mutating `self`: the copy and the intern table are the
     /// whole cost of a compaction and must not run while queries are blocked.
-    /// The caller applies with [`Self::install_compacted`] under a brief
-    /// exclusive lock.
+    /// The caller applies the result with [`Self::install_compacted`].
     pub(crate) fn plan_compact(&self) -> CompactedNames {
         let live = self.refcount.iter().filter(|&&c| c > 0).count();
         let mut c = CompactedNames {
@@ -336,12 +334,9 @@ impl NameStore {
 
     /// Installs storage built by [`Self::plan_compact`], returning the id
     /// remap (`remap[old_id]` = new id or [`NIL`]). The caller must rewrite
-    /// every entry's name id through it. Only buffer swaps; this is the half
-    /// that runs under the exclusive lock.
-    ///
-    /// The plan is only valid if the index has not changed since it was
-    /// built; the volume's single-writer discipline (one tail thread, which
-    /// plans and applies back to back under an upgradable lock) provides that.
+    /// every entry's name id through it. Only buffer swaps. The plan is valid
+    /// only if the store has not changed since it was built (see
+    /// [`super::volume::VolumeIndex::plan_compaction`]).
     pub(crate) fn install_compacted(&mut self, c: CompactedNames) -> Vec<NameId> {
         self.raw = c.raw;
         self.folded = c.folded;
@@ -379,8 +374,7 @@ impl NameStore {
     /// ninth of their allocation, and all of the intern table's power-of-two
     /// overshoot, can be slack. NOT an exact-fit shrink: a Vec shrunk to
     /// exactly its length reallocates, copying the whole buffer, on the very
-    /// next journal append. The headroom absorbs live churn instead (tens of
-    /// thousands of new names on a large volume before any buffer regrows).
+    /// next journal append. The headroom absorbs live churn instead.
     pub(crate) fn shrink_with_headroom(&mut self) {
         shrink_vec(&mut self.raw);
         shrink_vec(&mut self.folded);
@@ -481,7 +475,7 @@ pub(crate) const MTIME_UNKNOWN: i64 = i64::MIN;
 
 /// The entries' file IDs. NTFS IDs fit in 64 bits, so the column holds `u64`s
 /// until it stores its first wide ID, as a ReFS volume's root is, and holds
-/// `u128`s from then on: an NTFS index keeps 8 bytes per entry.
+/// `u128`s from then on, so an NTFS index never pays for the wider ID.
 #[derive(Debug)]
 enum FrnColumn {
     Narrow(Vec<u64>),
@@ -576,9 +570,7 @@ pub(crate) struct EntryTable {
     /// enumerable, which turns a folder-scoped query from an O(volume) scan
     /// with a per-candidate ancestry check into an O(subtree) walk.
     first_child: Vec<EntryIdx>,
-    /// Doubly-linked sibling chain (same discipline as `next_same`: exact,
-    /// eagerly unlinked, because a lazily-repaired singly-linked chain can
-    /// cycle through reused slots).
+    /// Doubly-linked sibling chain, kept exact like `next_same`.
     next_child: Vec<EntryIdx>,
     prev_child: Vec<EntryIdx>,
     free: Vec<EntryIdx>,
@@ -804,9 +796,9 @@ impl EntryTable {
             + ComponentBytes::of_vec(&self.free)
     }
 
-    /// Returns growth slack to the OS, keeping ~1.6% headroom so live churn
-    /// does not reallocate every column at once (see
-    /// `NameStore::shrink_with_headroom`). Called once post-bootstrap.
+    /// Returns growth slack to the OS, keeping headroom so live churn does not
+    /// reallocate every column at once (see `NameStore::shrink_with_headroom`).
+    /// Called once post-bootstrap.
     pub(crate) fn shrink_with_headroom(&mut self) {
         self.frn.shrink_with_headroom();
         shrink_vec(&mut self.parent);
@@ -836,9 +828,9 @@ const DENSE_GROWTH_SLACK: u64 = 1 << 16;
 /// full ID and, on a sequence mismatch, treats the slot as free. Bootstrap
 /// builds the `Sparse` variant (record numbers arrive before their density is
 /// known); [`FrnMap::densify_if_smaller`] swaps to `Dense` at publish when the
-/// record space is compact, which on a real NTFS volume it essentially always
-/// is. A ReFS ID has no record number, so a ReFS volume's map is `Wide`,
-/// keyed by the whole ID, and the re-check always finds the same ID.
+/// record space is compact. A ReFS ID has no record number, so a ReFS
+/// volume's map is `Wide`, keyed by the whole ID, and the re-check always
+/// finds the same ID.
 #[derive(Debug)]
 pub(crate) enum FrnMap {
     /// `Vec` indexed by record number; [`NIL`] marks an empty slot.
@@ -927,8 +919,8 @@ impl FrnMap {
     /// MFT record numbers are dense by construction (record N sits at byte
     /// N x 1024 of the MFT, and NTFS reuses freed records before extending),
     /// so on a real volume the record space is barely larger than the live
-    /// file count and the dense form wins by ~5x: 4 bytes per record versus
-    /// ~17 per hash bucket at power-of-two capacity. The size check keeps a
+    /// file count and the dense form wins: 4 bytes per record versus 17 per
+    /// hash bucket at power-of-two capacity. The size check keeps a
     /// pathological space (sparse snapshots, non-NTFS IDs) on the hash map.
     ///
     /// Called once per volume when it goes live: bootstrap has seen every

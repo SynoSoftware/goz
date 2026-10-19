@@ -101,23 +101,18 @@ pub struct IndexStats {
     pub placeholders_created: u64,
     pub delete_of_unknown: u64,
     pub stale_slots: u64,
-    /// Hard-link changes the daemon saw but could not reconcile.
-    ///
-    /// Reconciling walks the file's real link set from Win32 and applies it
-    /// (see [`VolumeIndex::reconcile_links`]). This counts only the walks that could
-    /// NOT complete (the walk failed, or a link's folder is not indexed yet):
-    /// those are skipped rather than reconciled to a partial set, so a few
-    /// names may be stale until the next rescan. Counted so the gap is visible
-    /// in `Status` rather than silent. A file that is gone is not counted,
-    /// because its delete record removes it.
+    /// Hard-link changes the daemon saw but could not reconcile: the link walk
+    /// failed, or a link's folder is not indexed yet. Such a walk is skipped
+    /// rather than reconciled to a partial set, so a few names may be stale
+    /// until the next rescan. A file that is gone is not counted, because its
+    /// delete record removes it.
     pub link_reconciles_dropped: u64,
 }
 
 /// Where one volume index's heap bytes live, component by component.
-/// `used` is live data; `allocated` includes capacity slack. The point of
-/// this existing at all: memory work is a fight between components measured
-/// in hundreds of MB, and without a per-component breakdown every change is
-/// guesswork against a single opaque process number.
+/// `used` is live data; `allocated` includes capacity slack. The breakdown
+/// lets a memory change be judged against one component instead of a single
+/// opaque process number.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IndexMemory {
     /// Struct-of-arrays entry columns (frn/parent/name/flags/size/mtime/
@@ -159,8 +154,7 @@ pub struct ApplyOutcome {
     ///
     /// The daemon resolves each FRN's real link set with a Win32 link walk and
     /// applies it through [`VolumeIndex::reconcile_links`]. A walk that cannot
-    /// complete is skipped and counted in `IndexStats::link_reconciles_dropped`
-    /// rather than applied as a partial set.
+    /// complete is counted in `IndexStats::link_reconciles_dropped`.
     pub needs_link_reconcile: Vec<Frn>,
     /// Folders the index did not hold until a rename brought them in, so
     /// their contents are missing, each once.
@@ -216,10 +210,9 @@ pub struct VolumeIndex {
     /// scope resolution into an O(depth) walk instead of an O(all-entries)
     /// scan. Keyed by the folded name's [`hash_bytes`] (insert, remove and
     /// lookup must agree, or the index silently loses directories) rather
-    /// than owned name bytes: the bytes live once in the interned name store,
-    /// and duplicating them here cost ~13 MB of key heap on a large volume.
+    /// than owned name bytes: the bytes live once in the interned name store.
     /// Lookups verify the candidate's actual folded name, so a hash collision
-    /// can never resolve a scope to the wrong directory. Directories are ~10x
+    /// can never resolve a scope to the wrong directory. Directories are far
     /// rarer than files, so this stays small; placeholders and
     /// root/lost+found are excluded (they are never a scope component).
     /// Values are a 1-inline SmallVec: a genuine 64-bit hash collision
@@ -379,8 +372,7 @@ impl VolumeIndex {
     /// [`Self::enrich`] adds the other hard-link names, the size and the date.
     /// An ENUM record ingested later for the same file rewrites a single-name
     /// entry in place and leaves a hard-link chain as it is. The root folder's
-    /// own
-    /// record names itself as its parent, unlike any ENUM record; it only
+    /// own record names itself as its parent, unlike any ENUM record; it only
     /// enriches the root that [`Self::new`] made, because taking its name and
     /// parent would make the root its own parent and leave no entry a path.
     pub fn insert_layout(&mut self, file: &LayoutFile) {
@@ -414,8 +406,8 @@ impl VolumeIndex {
     // -- live apply -------------------------------------------------------
 
     /// Applies a batch of journal records, returning the side effects the
-    /// daemon must service. Bumps the generation once and compacts the arena
-    /// if it has accumulated too much garbage.
+    /// daemon must service. Bumps the generation once and reports through
+    /// [`ApplyOutcome::wants_compact`] whether the arenas need compacting.
     pub fn apply_batch(&mut self, records: &[ParsedUsnRecord]) -> ApplyOutcome {
         let mut outcome = ApplyOutcome::default();
         for rec in records {
@@ -467,8 +459,7 @@ impl VolumeIndex {
         outcome.needs_walk.dedup();
         self.generation += 1;
         // Compaction is NOT performed here: it is reported so the caller can do
-        // the expensive part off the write lock. Doing it inline made a single
-        // journal batch block every query for ~184 ms.
+        // the expensive part off the write lock, where it would block queries.
         outcome.wants_compact = self.names.should_compact();
         outcome
     }
@@ -512,9 +503,9 @@ impl VolumeIndex {
     /// and from then on every change keeps each sum exact. Until it runs,
     /// every folder's size is unknown. The daemon calls it when a build's
     /// pass completes, and never after a pass that failed or stopped, whose
-    /// sums would be short. The index calls it again for the two changes that move more
-    /// than one entry's size: a move that opens or closes a loop in the
-    /// parent links, and a file that becomes a folder.
+    /// sums would be short. The index calls it again for the two changes that
+    /// move more than one entry's size: a move that opens or closes a loop in
+    /// the parent links, and a file that becomes a folder.
     ///
     /// A folder counts each file whose parent links pass through it once, so
     /// inside a loop every folder of the loop holds the whole loop's files.
@@ -732,8 +723,7 @@ impl VolumeIndex {
 
     /// Pushes `idx` onto the front of its parent's child chain. Every entry
     /// allocation (and every parent change) must pair with exactly one of
-    /// these; the chains make a scope subtree enumerable, so a folder-scoped
-    /// query walks the folder instead of scanning the volume.
+    /// these.
     fn link_child(&mut self, idx: EntryIdx) {
         let parent = self.entries.parent(idx);
         if parent == NIL {
@@ -1071,8 +1061,10 @@ impl VolumeIndex {
     /// return to the free list.
     ///
     /// Every site that finds a live `by_frn` entry whose FRN does not match must
-    /// call this before overwriting the map. It exists as one function precisely
-    /// so the callers cannot drift apart again.
+    /// call this before overwriting the map. Skipping it leaves the stale chain
+    /// live in the entry table but unreachable from `by_frn`, so its names keep
+    /// matching queries and its slots never return to the free list.
+    ///
     /// Reported through `IndexStats::stale_slots` rather than an `Anomaly`: the
     /// callers are deep helpers with no access to the batch's
     /// `ApplyOutcome`, and buffering per-event anomalies on the index would grow
@@ -1092,11 +1084,7 @@ impl VolumeIndex {
             if self.entries.frn(idx) == parent_frn {
                 return idx;
             }
-            // NTFS handed this record number to a different file. Reclaim it the
-            // same way `upsert_link` does before overwriting the map entry
-            // below: skipping this leaves the stale chain live in the entry
-            // table but unreachable from `by_frn`, so its names keep matching
-            // queries and its slots never return to the free list.
+            // NTFS handed this record number to a different file.
             self.reclaim_stale_slot(idx);
         }
         let idx = self.alloc_entry(
@@ -1211,7 +1199,6 @@ impl VolumeIndex {
             },
         );
 
-        // Match each desired link to an existing entry, else allocate.
         let mut kept: SmallVec<[EntryIdx; 4]> = SmallVec::new();
         let mut used: SmallVec<[bool; 4]> = SmallVec::from_elem(false, current.len());
         for target in desired {
@@ -1237,14 +1224,12 @@ impl VolumeIndex {
             }
         }
 
-        // Tombstone entries that no desired link matched.
         for (i, &e) in current.iter().enumerate() {
             if !used[i] {
                 self.remove_entry(e);
             }
         }
 
-        // Relink the surviving chain and repoint the FRN map at the new head.
         for w in 0..kept.len() {
             let next = if w + 1 < kept.len() { kept[w + 1] } else { NIL };
             self.entries.set_next_link(kept[w], next);
@@ -1256,9 +1241,9 @@ impl VolumeIndex {
     /// are not dirty enough to be worth it.
     ///
     /// Takes `&self` on purpose. This is the expensive half (it copies every
-    /// live name into fresh arenas, hundreds of MB on a large volume), so
-    /// callers plan here, off the exclusive lock, where queries keep reading,
-    /// then [`Self::apply_compaction`] the result.
+    /// live name into fresh arenas), so callers plan here, off the exclusive
+    /// lock, where queries keep reading, then [`Self::apply_compaction`] the
+    /// result.
     ///
     /// The plan is only valid while the index has not changed. That is not a
     /// hazard in practice because a volume has exactly one writer (its tail
@@ -1317,8 +1302,8 @@ impl VolumeIndex {
     }
 
     /// Returns growth slack (column growth, hash-map overshoot) to the
-    /// allocator, keeping ~1.6% headroom so post-publish journal churn does
-    /// not immediately reallocate every column. Called once when a volume
+    /// allocator, keeping headroom so post-publish journal churn does not
+    /// immediately reallocate every column. Called once when a volume
     /// goes live: the hash maps grow by doubling, so up to half their
     /// allocation at that moment is slack that would otherwise be pinned for
     /// the daemon's lifetime.
@@ -1336,8 +1321,8 @@ impl VolumeIndex {
 
     /// One-shot storage optimization for a freshly bootstrapped volume:
     /// swap the FRN map to its cheaper dense backing when the record space
-    /// allows it, then return all growth slack. Runs under the write lock in
-    /// tens of milliseconds; do not call it per batch.
+    /// allows it, then return all growth slack. Runs under the write lock; call
+    /// it once per volume, not per batch.
     pub fn optimize_storage(&mut self) {
         self.by_frn.densify_if_smaller();
         self.shrink_to_fit();

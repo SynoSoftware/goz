@@ -276,9 +276,9 @@ mod tests {
     }
 
     /// Each way a request to the daemon fails, and a scope folder that does
-    /// not exist, exit with the code and say the first line that scripts and
-    /// readers know: the client's errors decide them, so a new error or a
-    /// changed mapping shows here.
+    /// not exist, exits with its code and starts its message with the line
+    /// that scripts and readers know. A new client error or a changed mapping
+    /// shows here.
     #[test]
     fn each_client_error_exits_with_its_code_and_message() {
         let not_installed = |gozlerd_beside| NotRunning::NotInstalled {

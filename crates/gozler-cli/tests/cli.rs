@@ -23,7 +23,7 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// es exit code 6. Parsing rejects the option before any daemon contact.
+/// es exit code 6.
 #[test]
 fn unknown_option_exits_6() {
     let out = gozler(["-bogus-option", "foo"]);
@@ -71,8 +71,8 @@ fn unwritable_export_path_exits_5() {
     );
 }
 
-/// A missing `-path` folder exits 4 before any daemon contact, where es
-/// answers nothing with exit 0 and an agent reads that as "no such file".
+/// A missing `-path` folder exits 4, where es answers nothing with exit 0 and
+/// an agent reads that as "no such file".
 #[cfg(windows)]
 #[test]
 fn a_missing_path_folder_exits_4() {
@@ -89,8 +89,7 @@ fn a_missing_path_folder_exits_4() {
     );
 }
 
-/// Bug 7: `-help` prints the help to stdout and exits 0, before any daemon
-/// contact.
+/// Bug 7: `-help` prints the help to stdout and exits 0.
 #[test]
 fn help_exits_0() {
     let out = gozler(["-help"]);
@@ -99,8 +98,7 @@ fn help_exits_0() {
 }
 
 /// An argument that is not valid Unicode, such as an unpaired surrogate from
-/// a shell glob, exits 4 instead of panicking. Arguments are read before any
-/// daemon contact.
+/// a shell glob, exits 4 instead of panicking.
 ///
 /// Windows-only: a lone surrogate is a Windows argument; other targets
 /// spell arguments as bytes.

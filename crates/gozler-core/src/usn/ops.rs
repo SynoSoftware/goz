@@ -32,8 +32,7 @@ pub enum UsnOp {
     /// Reconciling the file's actual link set needs an external link-set walk
     /// fed to [`crate::index::VolumeIndex::reconcile_links`]. The daemon does
     /// that walk (`gozler_winfs::file_links`) and applies the result, so names
-    /// added or removed by a hard-link change are reconciled live. A walk that
-    /// cannot complete is skipped and counted rather than applied.
+    /// added or removed by a hard-link change are reconciled live.
     LinkDirty,
     /// Size and/or timestamps may have changed; USN records carry neither,
     /// so the entry needs an external re-stat.
@@ -56,13 +55,13 @@ pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 3]> {
     let mut ops = SmallVec::new();
     let reason = rec.reason;
 
-    // Row 1: delete wins over everything accumulated in the window.
+    // Row 1.
     if reason & USN_REASON_FILE_DELETE != 0 {
         ops.push(UsnOp::Delete);
         return ops;
     }
 
-    // Row 2: the record's name/parent are the file's current state.
+    // Row 2.
     if reason & (USN_REASON_RENAME_NEW_NAME | USN_REASON_FILE_CREATE) != 0 {
         ops.push(UsnOp::Upsert);
     }
@@ -113,8 +112,7 @@ mod tests {
     }
 
     /// A create carries no size or mtime, so it must be stat-dirty as well as an
-    /// upsert. Without the StatDirty a file created and never written keeps an
-    /// unknown size forever, and the es CSV renders that as a folder.
+    /// upsert.
     #[test]
     fn create_emits_upsert_and_stat() {
         let r = rec(USN_REASON_FILE_CREATE);
@@ -124,9 +122,8 @@ mod tests {
         );
     }
 
-    /// Why row 5 includes the CREATE bit: a file created and never written
-    /// emits CREATE (plus CLOSE) and no DATA_* bit will ever follow, so this
-    /// record is the only chance to learn its size.
+    /// Row 4 includes the CREATE bit because a file created and never written
+    /// emits CREATE (plus CLOSE) and no DATA_* bit will ever follow.
     #[test]
     fn created_but_never_written_file_is_still_stat_dirty() {
         let r = rec(USN_REASON_FILE_CREATE | USN_REASON_CLOSE);

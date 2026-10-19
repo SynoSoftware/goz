@@ -17,6 +17,10 @@ is deleted, because a finished plan read as current misleads.
 `docs/WRITING.md` says how the help, the messages and the exit-code meanings
 read. Read it before you change any of them.
 
+`docs/COMMENTS.md` says when code earns a comment and what a doc comment
+holds. Read it before you add, change or review a comment, and check every
+comment your diff adds against it before you finish.
+
 Use the vocabulary in `CONTEXT.md`.
 
 ## Writing code
@@ -61,8 +65,6 @@ Use the vocabulary in `CONTEXT.md`.
   timings by tens of percent.
 - **Use plain code.** Use `std` and the workspace's existing dependencies. Add
   a trait, a generic or a macro when it removes real duplication.
-- **Link code in doc comments** with intra-doc links (``[`Frn`]``), so the CI
-  doc build fails when a name changes.
 
 ## Tests
 

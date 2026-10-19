@@ -7,11 +7,10 @@
 //! ([`VolumeIndex`]). See `volume` for the invariants (O(1) directory rename,
 //! idempotent apply, orphan placeholders, slot-reuse safety).
 
-// `pub(crate)`, not `pub`: the doc above designates `volume` as the policy layer
-// over these primitives, and `NameStore::release` / `EntryTable::set_parent`
-// reach past every invariant it maintains. Not `mod`, which query::engine's
-// tests (not a descendant of `index`) would fail to reach. The `pub use` below
-// keeps the types that are genuinely part of the index's vocabulary public.
+// `pub(crate)`, not `pub`: `NameStore::release` and `EntryTable::set_parent`
+// reach past every invariant `volume` maintains. Not `mod`, which
+// query::engine's tests (not a descendant of `index`) would fail to reach.
+// The `pub use` below keeps the types of the index's vocabulary public.
 pub(crate) mod store;
 pub mod volume;
 

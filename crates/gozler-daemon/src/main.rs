@@ -75,8 +75,8 @@ enum Command {
 ///
 /// mimalloc's default purge runs `purge_delay` ms after a free, but only on
 /// later allocator activity; an idle daemon never ticks, so the freed
-/// bootstrap transients (sparse FRN maps, enumeration buffers) stayed
-/// COMMITTED for the daemon's lifetime (~100 MB against a ~490 MB process).
+/// bootstrap transients (sparse FRN maps, enumeration buffers) would stay
+/// committed for the daemon's lifetime.
 ///
 /// The option indexes are the bundled mimalloc v2 enum, which the sys crate
 /// does not export. Each is verified by reading back its documented default

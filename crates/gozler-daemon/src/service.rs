@@ -92,7 +92,6 @@ pub(crate) fn install() -> Result<()> {
         Err(windows_service::Error::Winapi(e))
             if e.raw_os_error() == Some(ERROR_SERVICE_EXISTS) =>
         {
-            // Already installed → open and refresh config (upgrade-safe).
             let service = manager
                 .open_service(SERVICE_NAME, access)
                 .context("opening the existing gozler service")?;

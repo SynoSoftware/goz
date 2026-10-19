@@ -3,9 +3,9 @@
 //! Emits exactly what `FSCTL_ENUM_USN_DATA` / `FSCTL_READ_USN_JOURNAL`
 //! produce: a leading 8-byte value followed by packed records, each starting
 //! 8-byte aligned relative to buffer start, with `RecordLength` padded to a
-//! multiple of 8 and the padding filled with [`PAD_BYTE`] garbage (so tests
-//! can prove padding never leaks into parsed names). Gated `#[cfg(any(test, doc))]`: compiled
-//! for tests and for rustdoc, never in a release build.
+//! multiple of 8 and the padding filled with [`PAD_BYTE`] garbage. Gated
+//! `#[cfg(any(test, doc))]`: compiled for tests and for rustdoc, never in a
+//! release build.
 
 use super::record::{FILE_ATTRIBUTE_DIRECTORY, USN_REASON_DATA_EXTEND};
 

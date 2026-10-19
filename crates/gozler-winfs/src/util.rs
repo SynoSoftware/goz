@@ -1,9 +1,8 @@
 //! Small UTF-16 <-> Rust string helpers for the Win32 boundary.
 //!
-//! Manual conversion (as sanctioned by the research notes) keeps the crate
-//! dependency-light; NTFS names are handled as bytes by `gozler-core`, so lossy
-//! decoding here only touches short, well-formed system strings (volume
-//! GUID paths, filesystem names, mount points).
+//! NTFS names are handled as bytes by `gozler-core`, so lossy decoding here
+//! only touches short, well-formed system strings (volume GUID paths,
+//! filesystem names, mount points).
 
 /// Encodes `s` as a NUL-terminated UTF-16 buffer for a `PCWSTR`.
 pub(crate) fn to_wide_nul(s: &str) -> Vec<u16> {

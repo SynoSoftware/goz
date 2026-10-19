@@ -1,6 +1,5 @@
-//! The connection: framed messages over the pipe, with the codec of
-//! `gozler_core::proto`: JSON requests, and tagged responses whose results
-//! pages carry a binary body.
+//! The connection: JSON requests and tagged responses over the pipe, whose
+//! results pages carry a binary body.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -106,8 +105,7 @@ impl Client {
                     Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
                         return Err(missing_pipe());
                     }
-                    // All instances momentarily busy: brief backoff and retry
-                    // (~500 ms budget) before giving up.
+                    // All instances momentarily busy: brief backoff and retry.
                     Some(ERROR_PIPE_BUSY) if attempts < 20 => {
                         if cancel.is_cancelled() {
                             return Err(ClientError::Cancelled);
@@ -127,11 +125,9 @@ impl Client {
             }
         };
 
-        // Authenticate the server BEFORE sending any request: a non-elevated
-        // local user can pre-create `\\.\pipe\gozler-v1` before the daemon
-        // starts and serve spoofed results. Require the pipe be owned by
-        // SYSTEM / Administrators (created by the elevated daemon). Fail closed
-        // on error.
+        // Authenticate the server BEFORE sending any request, because a
+        // non-elevated user can squat the pipe name (the `pipe_trust` module
+        // of gozler-winfs describes the threat). Fail closed on error.
         if check_owner {
             match gozler_winfs::pipe_server_is_trusted(pipe.as_handle()) {
                 Ok(true) => {}

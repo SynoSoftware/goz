@@ -69,13 +69,12 @@ pub const QUERY_FILE_LAYOUT_SINGLE_INSTANCED: u32 = 0x0000_0001;
 /// `FILE_LAYOUT_INFO_ENTRY`. Its `BasicInformation` block carries only the
 /// four timestamps and `FileAttributes`, followed by `OwnerId`, `SecurityId`,
 /// `Usn`, and (RS5+) `StorageReserveId`. There is no `EndOfFile`, verified
-/// against the verbatim struct in `winioctl.h` (Windows SDK 10.0.26100.0).
-/// Sizes are per-stream: `STREAM_LAYOUT_ENTRY.EndOfFile` of the unnamed
-/// `$DATA` stream, which requires `QUERY_FILE_LAYOUT_INCLUDE_STREAMS` (the
-/// entry↔flag mapping is documented at
-/// <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_query_file_layout_output>),
-/// plus `..._WITH_NO_CLUSTERS_ALLOCATED` so resident/empty/sparse-only
-/// streams (i.e. most small files) are reported too.
+/// against the struct in `winioctl.h`. Sizes are per-stream:
+/// `STREAM_LAYOUT_ENTRY.EndOfFile` of the unnamed `$DATA` stream, which
+/// requires `QUERY_FILE_LAYOUT_INCLUDE_STREAMS` (the entry↔flag mapping is on
+/// the output-struct page linked in the module docs), plus
+/// `..._WITH_NO_CLUSTERS_ALLOCATED` so resident/empty/sparse-only streams
+/// (i.e. most small files) are reported too.
 pub const RECOMMENDED_LAYOUT_FLAGS: u32 = QUERY_FILE_LAYOUT_INCLUDE_NAMES
     | QUERY_FILE_LAYOUT_INCLUDE_STREAMS
     | QUERY_FILE_LAYOUT_INCLUDE_EXTRA_INFO
@@ -412,10 +411,7 @@ fn parse_file(
         loop {
             let raw: RawNameEntry = read_struct(buf, name_off, "FILE_LAYOUT_NAME_ENTRY")?;
             let name_len = raw.file_name_length.get();
-            // `FileNameLength` is a u32; without this cap a corrupt buffer of
-            // over-long, 24-byte-spaced overlapping name entries amplifies
-            // retained memory quadratically (OOM-aborting the daemon instead
-            // of cleanly scheduling a rescan). Cap before allocating.
+            // Cap before allocating; see `LayoutWalkError::NameTooLong`.
             if name_len as usize > MAX_NAME_UTF16_BYTES {
                 return Err(LayoutWalkError::NameTooLong {
                     what: "FILE_LAYOUT_NAME_ENTRY.FileName",
@@ -977,9 +973,8 @@ mod tests {
 
     #[test]
     fn implausibly_long_name_length_errors() {
-        // A FileNameLength beyond the 510-byte NTFS component limit signals a
-        // corrupt buffer; it is rejected before allocating (guards against
-        // quadratic retained-memory amplification), not parsed.
+        // A FileNameLength beyond the 510-byte NTFS component limit is
+        // rejected before allocating, not parsed.
         let mut buf = build_layout_buffer(std::slice::from_ref(&one_file()));
         patch_u32(&mut buf, NAME_FILE_NAME_LENGTH, 700);
         assert_eq!(
@@ -994,8 +989,8 @@ mod tests {
     }
 
     /// Every file entry may point its `FirstNameOffset` at one shared chain,
-    /// so a corrupt buffer of N entries and N names yielded N^2 names: about
-    /// 270M from 1 MiB, and the allocation aborted the daemon.
+    /// so a corrupt buffer of N entries and N names would yield N^2 names and
+    /// abort the daemon on allocation.
     #[test]
     fn file_entries_sharing_one_name_chain_error() {
         let bare = |frn| LayoutFileFixture {

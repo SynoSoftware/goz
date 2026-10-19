@@ -33,9 +33,8 @@ use crate::volume_state::{VolumeRegistry, VolumeSet, VolumeState};
 /// cannot pin more than this many tasks + read buffers + pipe instances.
 const MAX_CONNECTIONS: usize = 64;
 /// Pages in flight between the query encoder and the pipe writer. Each page
-/// is ~[`gozler_core::proto::PAGE_ROWS`] rows (~450 KB), so the backlog
-/// bounds a full export's buffered bytes at ~2 MB instead of the entire
-/// response.
+/// holds [`gozler_core::proto::PAGE_ROWS`] rows, so the backlog bounds a full
+/// export's buffered bytes instead of buffering the entire response.
 const QUERY_PAGE_BACKLOG: usize = 4;
 /// Idle/half-open connections are dropped after this long with no request, so a
 /// connected-but-silent client cannot block a task forever. The one-shot CLI
@@ -49,8 +48,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Pause after a failed pipe connect before listening again. When connects
 /// keep failing (a broken pipe, or a local user who connects and closes in a
-/// loop), it holds the accept loop to about 100 turns a second instead of a
-/// busy loop. A client that connects during the pause waits for it, not
+/// loop), it holds the accept loop to a bounded rate instead of a busy
+/// loop. A client that connects during the pause waits for it, not
 /// longer: the next instance already exists, and its connect completes at once.
 const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(10);
 /// At most one log line per this period for failed connects; it counts the
@@ -123,7 +122,7 @@ async fn accept_loop(
                     }
                     Err(_) => {
                         tracing::warn!(max = MAX_CONNECTIONS, "connection limit reached; dropping client");
-                        drop(connected); // closes/disconnects this pipe instance
+                        drop(connected);
                     }
                 }
             }
@@ -132,7 +131,6 @@ async fn accept_loop(
                 return Ok(());
             }
             changed = shutdown.changed() => {
-                // Err = all senders dropped; either way, honour the stop.
                 if changed.is_err() || *shutdown.borrow() {
                     tracing::info!("stop requested; shutting down");
                     return Ok(());
@@ -180,11 +178,10 @@ async fn handle_connection(
             // Query execution plus result serialization is the heaviest CPU
             // work in the process and holds a read lock, so every request runs
             // on the blocking pool rather than stalling an async worker (and
-            // thus the accept loop). Replies STREAM through a bounded channel:
-            // a multi-million-row export never exists as one buffer (it peaked
-            // at ~600 MB of response bytes), at most QUERY_PAGE_BACKLOG pages
-            // are in flight, and encoding overlaps the pipe writes instead of
-            // preceding them.
+            // thus the accept loop). Replies stream through a bounded channel:
+            // a large export never exists as one buffer, at most
+            // QUERY_PAGE_BACKLOG pages are in flight, and encoding overlaps the
+            // pipe writes instead of preceding them.
             let vols = volumes.current();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
             let encoder = tokio::task::spawn_blocking(move || {
@@ -326,8 +323,7 @@ fn run_on_volumes<'t, T>(
     for (vol, scope) in targets {
         coverage.volumes_incomplete |= !vol.phase.read().is_complete();
         coverage.metadata_pending |= *vol.metadata_pending.read();
-        // Resolve the scope and run the query under ONE read guard, so a
-        // concurrent rescan cannot swap the index between the two steps.
+        // Resolve and run under ONE read guard; see `VolScope`.
         let index = vol.index.read();
         let scope_entry = match scope {
             VolScope::All => None,
@@ -350,10 +346,7 @@ fn run_on_volumes<'t, T>(
 ///
 /// Pages are encoded straight from each matched hit's full path bytes by
 /// [`ResultsPage`], so a match never allocates an intermediate
-/// `ResultItem`/`String`, and the set is never cloned for paging or
-/// re-serialized as JSON. This is the whole point of the binary wire: on a
-/// multi-million-path result set it is ~12x less serialization work than the old
-/// JSON path.
+/// `ResultItem`/`String`, and the set is never cloned for paging.
 fn stream_rows(
     targets: &[(Arc<VolumeState>, VolScope)],
     query: &CompiledQuery,
@@ -369,17 +362,16 @@ fn stream_rows(
     //
     // When the page covers every match there is nothing to pick, so ordering
     // is pure post-processing over owned rows and every sort key comes from
-    // the hit itself (`order_hits` touches no index). Sorting a million
-    // rows under the read lock blocked this volume's tail thread from
-    // applying a single journal record for the whole sort; doing it after
-    // the guard drops blocks nobody.
+    // the hit itself (`order_hits` touches no index). A large sort under the
+    // read lock blocks this volume's tail thread from applying any journal
+    // record for the whole sort; doing it after the guard drops blocks nobody.
     //
     // Which case applies depends on the match count, which is not known
     // until the scan has run, so the executor decides and reports back via
-    // `outcome.sorted`. Testing `limit.is_none()` here instead meant a
-    // client asking for everything as a NUMBER (`-n 4294967295`, or any
-    // limit at or above the match count) took the in-lock path and
-    // re-introduced the very stall the deferral exists to prevent.
+    // `outcome.sorted`. Testing `limit.is_none()` here instead would send a
+    // client asking for everything as a number (`-n 4294967295`, or any limit
+    // at or above the match count) down the in-lock path, bringing back the
+    // stall the deferral prevents.
     let mut total: u64 = 0;
     let (runs, coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
         let outcome = run_query_deferrable(
@@ -550,12 +542,10 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
 }
 
 /// A query's per-volume scope: the whole volume, or a relative folder path not
-/// yet resolved to an `EntryIdx`. Resolution is deferred into
-/// [`run_on_volumes`] so it shares the SAME index read guard as the query.
-/// Otherwise a
-/// concurrent rescan between resolving the scope and running the query could
-/// swap the index and leave the resolved `EntryIdx` stale (wrong/empty results
-/// or an out-of-bounds panic).
+/// yet resolved to an `EntryIdx`. [`run_on_volumes`] resolves it under the same
+/// index read guard as the query. Otherwise a concurrent rescan between the two
+/// could swap the index and leave the resolved `EntryIdx` stale (wrong or empty
+/// results, or an out-of-bounds panic).
 enum VolScope {
     All,
     Rel(Vec<u8>),
@@ -650,10 +640,9 @@ mod tests {
     ///
     /// It has no USN journal and never can (Windows refuses to create one on a
     /// recovery partition), so its index is finished: no waiting improves it and
-    /// no action fixes it. Counting it as incomplete printed "results may be
-    /// incomplete" on every query forever on any machine with a recovery
-    /// partition, which is nearly all of them, and an always-on warning is one
-    /// nobody reads when it finally matters.
+    /// no action fixes it. Flagging it would put an always-on "results may be
+    /// incomplete" warning on every query, which nobody reads when it finally
+    /// matters.
     #[test]
     fn snapshot_volumes_do_not_taint_results() {
         let vols = set(&[
@@ -1006,10 +995,7 @@ mod tests {
     ///
     /// The deferral that makes the covering-limit case cheap changes WHERE the
     /// ordering happens (off the index lock instead of under it). This pins that
-    /// it does not change WHAT comes back. Before the fix the two spellings took
-    /// different code paths entirely, the engine's comparator versus the
-    /// server's, which is exactly how their tie-ordering could drift apart
-    /// unnoticed.
+    /// it does not change WHAT comes back.
     #[test]
     fn a_covering_limit_returns_the_same_page_as_no_limit() {
         use gozler_core::types::SortDir;
@@ -1140,8 +1126,8 @@ mod tests {
             other => panic!("a floor above this version must be refused, got {other:?}"),
         }
 
-        // Ceiling below us: no overlap either. Without the check this answered
-        // `proto: 0`, a version neither side implements.
+        // Ceiling below us: no overlap either, and `proto: 0` would be a
+        // version neither side implements.
         match answer(&vols, hello_request(0, 0)) {
             Response::Error { code, .. } => assert_eq!(code, ProtoError::Unsupported),
             other => panic!("proto_max: 0 must be refused, got {other:?}"),

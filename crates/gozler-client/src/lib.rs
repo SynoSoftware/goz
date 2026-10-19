@@ -3,13 +3,13 @@
 //!
 //! `Client`, on Windows, opens the pipe, checks that its server is the
 //! elevated daemon, agrees on the protocol version and exchanges framed
-//! messages with the codec of `gozler_core::proto`. Every failure that a caller handles differently is
-//! its own [`ClientError`]; when the pipe does not exist, the error carries the
-//! state of the gozler service as Windows reports it. Each request waits for
-//! its reply by polling the pipe, so a [`CancelToken`] that another thread
-//! sets ends the wait at the next poll. [`folder_is_missing`] is the rule that
-//! refuses a scope folder that does not exist, which both callers check before
-//! they send a scoped search.
+//! messages with the codec of `gozler_core::proto`. Every failure that a
+//! caller handles differently is its own [`ClientError`]; when the pipe does
+//! not exist, the error carries the state of the gozler service as Windows
+//! reports it. Each request waits for its reply by polling the pipe, so a
+//! [`CancelToken`] that another thread sets ends the wait at the next poll.
+//! [`folder_is_missing`] is the rule that refuses a scope folder that does not
+//! exist, which both callers check before they send a scoped search.
 //!
 //! The error types and the folder check build on every OS, so each caller's
 //! handling of every failure is tested on Ubuntu too; the pipe is Windows

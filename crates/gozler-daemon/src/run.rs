@@ -21,11 +21,10 @@ pub(crate) fn start_engine() -> Result<Supervisor> {
 /// Best-effort post-bootstrap memory settling, which the supervisor runs once
 /// no volume is `Bootstrapping`. Never fatal: logs and continues.
 ///
-/// Default: purge the allocator and TRIM the working set once, the same
-/// one-shot mem_trim Everything performs after indexing. Pages return on
-/// first touch as soft faults, so the one-time cost is ~0.2 ms/MB spread over
-/// the first queries, and the process's visible memory drops to what queries
-/// actually touch instead of the bootstrap peak.
+/// Default: purge the allocator and trim the working set once. Pages return
+/// on first touch as soft faults, spread over the first queries, and the
+/// process's visible memory drops to what queries actually touch instead of
+/// the bootstrap peak.
 ///
 /// `GOZLER_PIN_WORKING_SET=1` opts into the opposite trade: pin the resident set
 /// as a hard minimum so a low-memory burst can never page the index out and

@@ -1,12 +1,10 @@
 //! Cross-thread cancellation of a stuck synchronous I/O.
 //!
 //! A synchronous `DeviceIoControl` can block forever when a device pends the
-//! IRP and never completes it; observed live on `FSCTL_READ_USN_JOURNAL`
-//! against a spinning-down HDD, which froze that volume's tail thread for
-//! good (no error, no return, phase stuck at Offline). `CancelSynchronousIo`
-//! exists for exactly this: it aborts the blocked call from another thread,
-//! making it return `ERROR_OPERATION_ABORTED`, and the caller's normal retry
-//! path takes over.
+//! IRP and never completes it, as `FSCTL_READ_USN_JOURNAL` does on a
+//! spinning-down HDD. `CancelSynchronousIo` aborts the blocked call from
+//! another thread, making it return `ERROR_OPERATION_ABORTED`, and the
+//! caller's normal retry path takes over.
 
 use windows_sys::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, ERROR_NOT_FOUND, HANDLE};
 use windows_sys::Win32::System::IO::CancelSynchronousIo;

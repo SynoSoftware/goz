@@ -1,7 +1,7 @@
 //! The golden corpus for output: command lines run through `parse_argv` and
 //! [`ResultWriter`] over one fixed result set, with the exact text gozler
-//! writes to stdout or to the `-export-csv` file, as the code behaves today.
-//! Dates render in UTC, so every row passes in any time zone.
+//! writes to stdout or to the `-export-csv` file. Dates render in UTC, so
+//! every row passes in any time zone.
 //!
 //! A row records today's behavior, right or wrong. A row that a fix changed
 //! on purpose carries a comment with its bug number from the "Golden corpus"

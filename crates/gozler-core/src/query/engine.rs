@@ -544,10 +544,10 @@ pub fn run_query(
 ///
 /// It matters because of who is waiting. The caller holds the volume's index
 /// READ lock for as long as this runs, and the volume's tail thread cannot apply
-/// a single journal record until that lock is released. Sorting a million rows
-/// inside the lock stalled live updates for ~1.7 s; sorting them after it is
-/// released stalls nothing. Every key of the result order is in the returned
-/// [`QueryHit`], so ordering after the lock needs no index.
+/// a single journal record until that lock is released, so a large sort inside
+/// the lock stalls live updates and one after it stalls nothing. Every key of
+/// the result order is in the returned [`QueryHit`], so ordering after the
+/// lock needs no index.
 ///
 /// The caller MUST check [`QueryOutcome::sorted`] and pass the hits through
 /// [`super::order_hits`] when it is `false`.
@@ -633,8 +633,8 @@ fn scan<'q, 'i>(
     {
         let driver = memmem::Finder::new(needle);
         // The haystack holds each distinct name ONCE (names are interned), so
-        // the scan cost is proportional to the unique-name bytes (~1/3 of the
-        // total on a real volume) and a hit fans out to every entry bearing
+        // the scan cost is proportional to the unique-name bytes and a hit fans
+        // out to every entry bearing
         // the name through its same-name chain. The chains are exact, so no
         // per-candidate staleness guard is needed.
         let hay = index.folded_bytes();
@@ -714,15 +714,11 @@ fn run_query_impl(
         None => candidates.len(),
     };
 
-    // A page that covers every match has nothing to select, so ordering it here
-    // buys nothing the caller cannot do itself once it has released the index
-    // lock. Dropping the sort in that case is the whole point of
-    // `run_query_deferrable`, whose doc says who is waiting on that lock. `end`
-    // is already clamped to the match count, so this is exactly "the page is
-    // the whole set".
-    //
-    // Everything below keys off the rebound `sort`, so a deferred query also
-    // skips the path-key precompute it would never consult.
+    // A page that covers every match is left unsorted for the caller, as
+    // [`run_query_deferrable`] explains; `end` is already clamped to the match
+    // count, so this is exactly "the page is the whole set". Everything below
+    // keys off the rebound `sort`, so a deferred query also skips the path-key
+    // precompute it would never consult.
     let sort = (!(allow_defer && end == candidates.len())).then_some(sort);
     let sorted = sort.is_some();
 
@@ -864,11 +860,8 @@ impl<'q, 'i> Scan<'q, 'i> {
         // Asks the very memo the page loop uses rather than re-deriving its
         // rules, so the two cannot drift. Gated on `has_orphans` because an
         // index with nothing under lost+found cannot contain an unpresentable
-        // entry: `has_orphans` is a single load, while the walk it guards is
-        // one path build per distinct parent folder, which on a broad limited
-        // query is tens of thousands of builds the page (100 rows) would never
-        // have needed. Paying it unconditionally cost a broad limited query
-        // ~20%.
+        // entry, and the walk it guards is one path build per distinct parent
+        // folder, which a broad limited query would mostly never need.
         if index.has_orphans() && !self.dirs.entry_has_path(index, idx) {
             return None;
         }
@@ -1022,10 +1015,9 @@ fn order_top(
     if end < cands.len() {
         cands.select_nth_unstable_by(end - 1, cmp);
         // The selected prefix is not always small: a page asking for all but a
-        // handful of matches selects nearly everything, and ordering that
-        // serially held the index read lock ~6x longer than the parallel branch
-        // below does for the same row count, stalling the volume's tail thread
-        // for the difference. Same threshold, same work, just not on one core.
+        // handful of matches selects nearly everything, and ordering that on
+        // one core holds the index read lock, and so the volume's tail thread,
+        // much longer than the parallel branch does.
         if end >= PARALLEL_SORT_MIN {
             cands[..end].par_sort_unstable_by(cmp);
         } else {
@@ -1414,13 +1406,9 @@ mod tests {
         assert_eq!(out.hits.len(), 2);
     }
 
-    /// Ordering under the index lock earns its keep only when the limit really
-    /// slices the match set: picking the survivors needs the index, and only
-    /// that many paths get reconstructed. A page that already covers every
-    /// match has nothing to pick, so the executor must hand the ordering back
-    /// rather than do it while the caller holds the lock. That includes a
-    /// limit given as a number at or above the match count, such as
-    /// `-n 4294967295`, not only no limit.
+    /// [`run_query_deferrable`] hands the ordering back for a page that covers
+    /// every match, also when the limit is a number at or above the match
+    /// count, such as `-n 4294967295`, not only when there is no limit.
     #[test]
     fn a_page_covering_every_match_defers_the_sort() {
         let idx = sample_index();

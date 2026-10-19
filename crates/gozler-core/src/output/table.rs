@@ -21,9 +21,10 @@
 //!   TXT never quote.
 //! - A folder's Size is the size of the files below it. Size is empty for an
 //!   unknown size, and Date Modified for an unknown date; neither is quoted.
-//!   CSV and TSV print the size in bytes. Plain text separates columns with a space, as es's console does: it
-//!   groups the size's digits, right-aligns the size and pads the date and
-//!   the attributes to es's widths, except after the last value of a line.
+//!   CSV and TSV print the size in bytes. Plain text separates columns with a
+//!   space, as es's console does: it groups the size's digits, right-aligns
+//!   the size and pads the date and the attributes to es's widths, except
+//!   after the last value of a line.
 //! - Attributes print as letters in plain text (`HA`) and as their
 //!   `FILE_ATTRIBUTE_*` number in CSV and TSV (`34`), as es prints them;
 //!   empty when the daemon did not send them.

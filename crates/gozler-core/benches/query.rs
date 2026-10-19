@@ -167,7 +167,7 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
 
     // Broad limit=None: reconstructs and sorts the ENTIRE match set (~2M paths),
     // the "dump everything" workload (export / `gozler foo | wc`) where path
-    // reconstruction dominates. This is the case the perf work targets.
+    // reconstruction dominates.
     let mut broad = c.benchmark_group("query_2M_broad_none");
     broad.sample_size(10);
     for (label, query) in [
@@ -193,12 +193,12 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
     // The export lock-hold question: of the work above, how much has to happen
     // while the volume's index READ lock is held?
     //
-    // "sort inside" is the old shape: the whole thing, including the O(n log n)
-    // sort of ~2M rows, ran under the lock, so the tail thread could not apply a
-    // single journal record for its whole duration.
+    // "sort inside" runs the whole thing, including the O(n log n) sort of ~2M
+    // rows, under the lock, so the tail thread could not apply a single journal
+    // record for its whole duration.
     //
-    // "sort outside (locked part)" is what the daemon now holds the lock for.
-    // The difference is the stall removed from live updates. The sort still
+    // "sort outside (locked part)" is what the daemon holds the lock for. The
+    // difference is the stall removed from live updates. The sort still
     // happens, just after the guard drops.
     {
         let parsed = compiled("document");

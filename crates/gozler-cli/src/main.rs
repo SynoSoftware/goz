@@ -113,9 +113,9 @@ mod win {
     /// complete.
     const STATUS_POLL: Duration = Duration::from_millis(250);
 
-    /// Bare `gozler`: prints the overview, in color when stdout is a console
-    /// that draws it and `NO_COLOR` is not set, and exits with the code of
-    /// the failure that keeps gozlerd from answering, if any.
+    /// Bare `gozler`: prints the overview, colored as [`super::console_color`]
+    /// decides, and exits with the code of the failure that keeps gozlerd
+    /// from answering, if any.
     pub(crate) fn overview() -> Result<ExitCode, Failure> {
         let error = match connect(false) {
             Ok(mut connection) => {
@@ -537,9 +537,9 @@ mod win {
             }
         }
 
-        /// `--status` exits 2, with a warning, when a volume is not live or its
-        /// size and date pass failed or stopped, so a script can tell that
-        /// sizes and dates are missing; a warning means exit 2.
+        /// `--status` warns, and so exits 2, when a volume is not complete (a
+        /// snapshot is) or its size and date pass did not finish, so a script
+        /// can tell that results or sizes and dates are missing.
         #[test]
         fn status_warns_for_each_way_a_volume_is_incomplete() {
             let warnings = |volumes| {

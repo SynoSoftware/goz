@@ -207,7 +207,7 @@ fn main() {
     // SAFETY: prints stats via the callback; no retained pointers.
     unsafe { libmimalloc_sys::mi_stats_print_out(Some(out), core::ptr::null_mut()) };
 
-    // Sanity: a couple of queries against the built index.
+    // Sanity: one query against the built index.
     let parsed = gozler_core::query::parse_query("index.js").expect("parse");
     let parsed = gozler_core::query::CompiledQuery::new(&parsed).expect("compiles");
     let t2 = std::time::Instant::now();

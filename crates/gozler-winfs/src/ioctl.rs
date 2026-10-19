@@ -34,10 +34,9 @@ pub(crate) const FSCTL_QUERY_USN_JOURNAL: u32 = ctl_code(
     METHOD_BUFFERED,
     FILE_ANY_ACCESS,
 );
-/// `METHOD_NEITHER`, like the other journal controls. It was `METHOD_BUFFERED`
-/// for months: NTFS does not recognise that code at all and answers
-/// `STATUS_INVALID_DEVICE_REQUEST` (Win32 error 1), so every journal create
-/// and grow silently failed. The unit test pins the header value.
+/// `METHOD_NEITHER`, like the other journal controls. With `METHOD_BUFFERED`
+/// NTFS does not recognise the code and answers `STATUS_INVALID_DEVICE_REQUEST`
+/// (Win32 error 1). The unit test pins the header value.
 pub(crate) const FSCTL_CREATE_USN_JOURNAL: u32 =
     ctl_code(FILE_DEVICE_FILE_SYSTEM, 57, METHOD_NEITHER, FILE_ANY_ACCESS);
 pub(crate) const FSCTL_READ_USN_JOURNAL: u32 =
@@ -53,12 +52,12 @@ pub(crate) const FSCTL_QUERY_FILE_LAYOUT: u32 = ctl_code(
 //
 // These are `#[repr(C)]` mirrors of Win32 structs. The kernel reads (inputs)
 // or writes (outputs) their fields through the pointer we hand
-// `DeviceIoControl`; Rust never reads most input fields, so `dead_code` would
-// otherwise fire on them.
+// `DeviceIoControl`; Rust never reads most of them, so `dead_code` would
+// otherwise fire.
 
 /// Win32 `MFT_ENUM_DATA_V0`, input to `FSCTL_ENUM_USN_DATA`.
 #[repr(C)]
-#[allow(dead_code)] // fields are consumed by the kernel via the ioctl pointer
+#[allow(dead_code)]
 pub(crate) struct MftEnumDataV0 {
     pub start_file_reference_number: u64,
     pub low_usn: i64,
@@ -67,7 +66,7 @@ pub(crate) struct MftEnumDataV0 {
 
 /// Win32 `READ_USN_JOURNAL_DATA_V0`, input to `FSCTL_READ_USN_JOURNAL`.
 #[repr(C)]
-#[allow(dead_code)] // fields are consumed by the kernel via the ioctl pointer
+#[allow(dead_code)]
 pub(crate) struct ReadUsnJournalDataV0 {
     pub start_usn: i64,
     pub reason_mask: u32,
@@ -80,7 +79,7 @@ pub(crate) struct ReadUsnJournalDataV0 {
 /// Win32 `READ_USN_JOURNAL_DATA_V1`, input to `FSCTL_READ_USN_JOURNAL`: the
 /// V0 fields, then the range of record versions the caller accepts.
 #[repr(C)]
-#[allow(dead_code)] // fields are consumed by the kernel via the ioctl pointer
+#[allow(dead_code)]
 pub(crate) struct ReadUsnJournalDataV1 {
     pub v0: ReadUsnJournalDataV0,
     pub min_major_version: u16,
@@ -89,7 +88,7 @@ pub(crate) struct ReadUsnJournalDataV1 {
 
 /// Win32 `CREATE_USN_JOURNAL_DATA`, input to `FSCTL_CREATE_USN_JOURNAL`.
 #[repr(C)]
-#[allow(dead_code)] // fields are consumed by the kernel via the ioctl pointer
+#[allow(dead_code)]
 pub(crate) struct CreateUsnJournalData {
     pub maximum_size: u64,
     pub allocation_delta: u64,
@@ -100,7 +99,7 @@ pub(crate) struct CreateUsnJournalData {
 /// `allocation_delta` is populated by the driver but unused by `JournalInfo`.
 #[repr(C)]
 #[derive(Default)]
-#[allow(dead_code)] // some fields are written by the kernel but unused Rust-side
+#[allow(dead_code)]
 pub(crate) struct UsnJournalDataV0 {
     pub usn_journal_id: u64,
     pub first_usn: i64,
@@ -121,7 +120,7 @@ pub(crate) struct UsnJournalDataV0 {
 /// `ERROR_INVALID_PARAMETER` (87). Four `u32`s pack with no padding, so the
 /// `[u64; 2]` union lands at offset 16 and the struct is 32 bytes.
 #[repr(C)]
-#[allow(dead_code)] // fields are consumed by the kernel via the ioctl pointer
+#[allow(dead_code)]
 pub(crate) struct QueryFileLayoutInput {
     pub filter_entry_count: u32,
     pub flags: u32,

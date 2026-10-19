@@ -102,7 +102,7 @@ fn dirty_index() -> VolumeIndex {
     }
 
     // Churn: renames leave the old name dead in the arena, deletes tombstone a
-    // whole chain. This is what makes the arenas worth compacting.
+    // whole chain.
     let mut batch = Vec::new();
     for (i, &f) in files.iter().enumerate() {
         if i % 3 == 0 {
@@ -142,8 +142,7 @@ fn bench_compact(c: &mut Criterion<measure::Measure>) {
         b.iter(|| black_box(idx.plan_compaction()));
     });
 
-    // The half that holds the exclusive lock. THIS is the query stall, and the
-    // whole point of the split is that it is only column writes.
+    // The half that holds the exclusive lock: the query stall.
     g.bench_function("install (blocks queries)", |b| {
         b.iter_batched(
             || {
@@ -156,8 +155,8 @@ fn bench_compact(c: &mut Criterion<measure::Measure>) {
         );
     });
 
-    // What the old inline path cost: plan + install together, all of it under
-    // the write lock.
+    // Plan and install together, all of it under the write lock: what
+    // compacting inline would cost.
     g.bench_function("plan+install (the old inline stall)", |b| {
         b.iter_batched(
             dirty_index,

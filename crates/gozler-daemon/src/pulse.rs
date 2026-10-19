@@ -1,14 +1,11 @@
 //! A tail thread's self-reported liveness, packed into one atomic word.
 //!
-//! The old watchdog inferred the tail's state from a bare heartbeat timestamp,
-//! so "silent" had two indistinguishable causes: wedged in a syscall, or
-//! returned for good. A tail that gave up (journal permanently lost, rescan
-//! budget exhausted) then looked exactly like the stuck-IRP case the watchdog
-//! exists for, and it error-logged and cancelled I/O on the dead thread every
-//! scan, forever. The pulse makes the tail say which it is, and makes the
-//! "returned for good" report impossible to forget: it is published by a
-//! [`Drop`] guard, so every exit path, including a panic unwind and any
-//! `return` added later, retires the pulse.
+//! A bare heartbeat timestamp cannot tell a tail wedged in a syscall from one
+//! that returned for good (journal permanently lost, rescan budget exhausted).
+//! The supervisor's watchdog must act on the first and leave the second alone,
+//! so the tail reports which it is. The "returned for good" report is
+//! published by a [`Drop`] guard, so every exit path, including a panic unwind
+//! and any `return` added later, retires the pulse.
 //!
 //! State and timestamp share one `u64` (tag in the top two bits, seconds of
 //! [`awake_secs`] below) so a reader always sees a consistent pair; two
@@ -76,10 +73,8 @@ impl TailPulse {
         BusyGuard(self)
     }
 
-    /// Publishes `Retired` when the returned guard drops. Held across the
-    /// whole `tail_loop` call so every exit, panic unwinds included, reports
-    /// the thread as gone rather than leaving a heartbeat that merely went
-    /// quiet.
+    /// Publishes `Retired` when the returned guard drops. Hold it across the
+    /// whole `tail_loop` call.
     pub(crate) fn retire_on_drop(&self) -> RetireGuard<'_> {
         RetireGuard(self)
     }
@@ -139,9 +134,7 @@ mod tests {
         assert!(matches!(p.load(), Pulse::Beat(_)));
     }
 
-    /// The design pillar: retirement is published by unwinding, not by
-    /// remembering to call something, so a panicking tail still reports
-    /// itself gone instead of leaving a heartbeat that merely went quiet.
+    /// A panicking tail still reports itself gone.
     #[test]
     fn a_panicking_thread_still_retires() {
         let p = std::sync::Arc::new(TailPulse::new());
@@ -155,16 +148,14 @@ mod tests {
         assert_eq!(p.load(), Pulse::Retired);
     }
 
-    /// Guard drop order is the whole ordering story: a busy scope inside the
-    /// retire guard must end first, so `Retired` is the final word even
-    /// though nothing enforces it atomically.
+    /// A busy scope inside the retire guard ends first, so `Retired` is the
+    /// final word.
     #[test]
     fn retire_wins_over_an_unwinding_busy_scope() {
         let p = TailPulse::new();
         {
             let _retired = p.retire_on_drop();
             let _busy = p.busy_scope();
-            // _busy drops first (restores Beat), then _retired publishes.
         }
         assert_eq!(p.load(), Pulse::Retired);
     }

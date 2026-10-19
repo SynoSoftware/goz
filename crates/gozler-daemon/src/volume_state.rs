@@ -29,15 +29,15 @@ pub(crate) struct VolumeState {
     /// Maximum size of the volume's USN journal as of the index's last build,
     /// `None` without a journal. Set at bootstrap and by every rescan.
     /// Surfaced by `--status` because the journal's size bounds how long a
-    /// downtime can be replayed instead of rescanned, and a journal that could
-    /// not be grown was invisible for months when only the log knew.
+    /// downtime can be replayed instead of rescanned.
     pub journal_max_bytes: RwLock<Option<u64>>,
 }
 
 impl VolumeState {
     /// A volume that is not indexed yet: an empty index, phase `Bootstrapping`.
-    /// The empty index's root ID is never read; the first build replaces the
-    /// index with one rooted at the volume's own root.
+    /// The first build replaces the index with one rooted at the volume's own
+    /// root. Until then, `--status` reports the NTFS root's map kind, even on
+    /// ReFS.
     pub(crate) fn new(guid: String, mounts: Vec<String>, filesystem: Filesystem) -> Self {
         Self {
             guid,

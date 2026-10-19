@@ -14,9 +14,9 @@
 //! per pulse state:
 //!
 //! - a **stale beat** means the thread is wedged in a synchronous journal
-//!   read (observed live: a spinning-down HDD pended one
-//!   `FSCTL_READ_USN_JOURNAL` IRP forever), so its I/O is cancelled and the
-//!   tail's ordinary retry path takes over;
+//!   read (a spinning-down HDD can pend one `FSCTL_READ_USN_JOURNAL` IRP
+//!   forever), so its I/O is cancelled and the tail's ordinary retry path
+//!   takes over;
 //! - **busy** (a full MFT rebuild) is legitimate silence and is left alone,
 //!   up to a far larger bound of its own, because a rebuild blocks in the
 //!   same kind of syscall and can wedge the same way;
@@ -56,9 +56,9 @@ const BEAT_STALL: Duration = Duration::from_secs(300);
 
 /// How long `Busy` (a full MFT rebuild) may run before it too is presumed
 /// wedged. Rebuilds block in the same synchronous ioctls as journal reads
-/// and can wedge the same way, so exempting them forever would leave the
-/// founding failure unrescuable whenever it struck mid-rescan. Generous:
-/// a healthy rebuild is tens of seconds, minutes on a huge slow disk.
+/// and can wedge the same way, so exempting them forever would leave a wedge
+/// unrescuable whenever it struck mid-rescan. Generous: a healthy rebuild
+/// takes minutes on a huge slow disk.
 const BUSY_STALL: Duration = Duration::from_secs(30 * 60);
 
 /// Revival attempts a tail gets before the supervisor stops trying. The
@@ -424,11 +424,10 @@ struct Supervised {
 /// every OTHER volume its stall rescue and revival, so the supervisor never
 /// blocks on it.
 struct PendingRevival {
-    /// Delivers the worker's outcome over a RENDEZVOUS channel: the send can
-    /// only complete into a live receive, never into a buffer, so there is
-    /// no window where a tail sits sent-but-unowned. Once this receiver
-    /// drops, the worker's send fails and the worker shuts down any tail it
-    /// built; abandoning a wedged worker can never leak a live writer.
+    /// Delivers the worker's outcome over a rendezvous channel (see
+    /// [`Supervised::launch`]). Once this receiver drops, the worker's send
+    /// fails and the worker shuts down any tail it built, so abandoning a
+    /// wedged worker can never leak a live writer.
     rx: mpsc::Receiver<std::io::Result<TailHandle>>,
     /// Real handle to the worker thread, so a wedged `open_volume` can be
     /// cancelled; `None` only if duplication failed on the worker.
@@ -541,10 +540,7 @@ fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
                 i += 1;
             } else if let Some(tail) = supervised.swap_remove(i).tail {
                 // Given up on, or a snapshot: its thread already retired, so
-                // this join is immediate. Dropping the entry releases the
-                // pulse and the duplicated thread handle, which the old
-                // watchdog held (and alarmed through) for the life of the
-                // process.
+                // this join is immediate.
                 tail.shutdown();
             }
         }
@@ -557,10 +553,8 @@ fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
 
 /// Stops every tail, rescuing wedged ones: flag them all first, then
 /// repeatedly cancel blocked synchronous I/O until each thread exits. A
-/// thread inside a pended IRP can never observe its stop flag (the founding
-/// failure), so a bare join here would hang teardown forever. The old design
-/// got this rescue by accident, from a detached watchdog that outlived
-/// teardown; this makes it explicit. A thread whose IRP ignores every cancel
+/// thread inside a pended IRP can never observe its stop flag, so a bare join
+/// here would hang teardown forever. A thread whose IRP ignores every cancel
 /// is abandoned with an error at the deadline rather than hanging shutdown;
 /// process exit reclaims it.
 fn stop_tails(mut tails: Vec<TailHandle>) {
@@ -655,12 +649,9 @@ impl Supervised {
             // nothing to tail, so reviving it would only rebuild it again.
             return false;
         }
-        // Track the unbroken run of healthy observations this incarnation
-        // has shown. Sampled at scan granularity, which can only
-        // under-count health, never fake it. The anchor is only ever
-        // consulted for a refund, so a never-revived original skips the
-        // bookkeeping (and the phase read) entirely; the common path costs
-        // exactly the one atomic load the old watchdog cost.
+        // Sampled at scan granularity, which can only under-count health,
+        // never fake it. The anchor is only consulted for a refund, so a
+        // never-revived original skips the bookkeeping and the phase read.
         if self.revive_attempts > 0 {
             let live = matches!(*self.state.phase.read(), VolumePhase::Live);
             self.beating_since =
@@ -909,18 +900,14 @@ mod tests {
         Pulse::Busy(NOW - secs)
     }
 
-    /// The decision table, exhaustively. This is the fix for the bug where
-    /// the watchdog could not tell a wedged tail from an exited one: each
-    /// pulse state maps to exactly one family of actions, and Retired never
-    /// reaches CancelIo.
+    /// The decision table, exhaustively: each pulse state maps to exactly one
+    /// family of actions, and Retired never reaches CancelIo.
     #[test]
     fn assess_decides_by_pulse_state() {
-        // A fresh beat is left alone.
         assert_eq!(assess(beat_ago(0), NOW, 0, false), Action::Nothing);
-        // A beat inside the stall window is left alone even at the edge.
+        // Left alone even at the edge of the stall window.
         let edge = BEAT_STALL.as_secs() - 1;
         assert_eq!(assess(beat_ago(edge), NOW, 0, false), Action::Nothing);
-        // Past the window: presumed wedged, cancel.
         let past = BEAT_STALL.as_secs();
         assert_eq!(
             assess(beat_ago(past), NOW, 0, false),
@@ -965,12 +952,8 @@ mod tests {
         );
     }
 
-    /// Health accrual: only a FRESH `Beat` observed while the volume is
-    /// `Live` starts or extends the run. An Offline beat is a turning retry
-    /// loop that tracks nothing, and a stale beat is a loop that stopped
-    /// turning (a wedge the stall threshold has not yet declared); either
-    /// refunding would make give-up unreachable and revive a dead volume
-    /// forever, one full MFT rebuild per cycle.
+    /// Only a fresh `Beat` observed while the volume is `Live` starts or
+    /// extends the run (see [`accrue_health`]).
     #[test]
     fn health_accrues_only_on_fresh_live_beats() {
         let t0 = Instant::now();
@@ -1049,30 +1032,20 @@ mod tests {
         );
     }
 
-    /// The stall threshold must comfortably exceed the tail's longest
-    /// legitimate silence: a retry sleeping out its full backoff, observed a
-    /// scan interval late. Shrinking either constant past the other would
-    /// shoot healthy tails mid-backoff.
+    /// Pins the couplings between the timing constants that their docs state.
     #[test]
     fn beat_stall_tolerates_a_full_backoff_sleep() {
         assert!(
             BEAT_STALL >= tail::RETRY_BACKOFF_MAX + SCAN_INTERVAL + SCAN_INTERVAL,
             "a tail sleeping out RETRY_BACKOFF_MAX must never look stalled"
         );
-        // And busy tolerance dwarfs beat tolerance: a rebuild is minutes of
-        // legitimate silence, not seconds.
         assert!(BUSY_STALL > BEAT_STALL);
-        // Freshness must cover one scan interval (an observed beat is up to
-        // one scan old on a healthy tail) yet declare staleness well before
-        // the stall threshold, or the refund window reopens.
         assert!(BEAT_FRESH >= SCAN_INTERVAL);
         assert!(BEAT_FRESH < BEAT_STALL);
-        // Shutdown must outwait the supervisor's own legitimate worst case,
-        // draining pending revivals then stopping its tails, with slack;
-        // anything tighter would abandon a supervisor that was merely busy.
+        // Shutdown outwaits draining pending revivals, then stopping the
+        // tails, with slack.
         assert!(SUPERVISOR_JOIN_WAIT >= TEARDOWN_WAIT + PENDING_DRAIN_WAIT + TEARDOWN_WAIT);
-        // A zero budget would turn every retirement into instant give-up and
-        // make revival dead code.
+        // A zero budget would make revival dead code.
         const { assert!(MAX_REVIVES > 0) };
     }
 }
