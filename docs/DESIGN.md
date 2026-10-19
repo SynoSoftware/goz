@@ -2,13 +2,14 @@
 
 ## Workspace
 
-gozler is five crates:
+gozler is six crates:
 
 - **`gozler-core`**: pure, OS-agnostic. USN, MFT and folder-listing parsing, the index, the query engine, the wire protocol, CSV output, and `es`-compatible argv parsing. Tests run on any OS.
 - **`gozler-winfs`**: the thin `unsafe` Win32 layer (`windows-sys` only). Buffers, typed structs, and opaque handles; it never parses an ioctl record payload. It depends on nothing else in the workspace, enforced by cargo-deny.
 - **`gozler-daemon`** (`gozlerd`): bootstrap, USN journal tail, the tokio named-pipe server, and Windows service integration.
 - **`gozler-client`**: the blocking named-pipe client, with the state of the gozler service and the scope-folder check, which `gozler` and the window share. Its error types build on every OS; the pipe is Windows only.
 - **`gozler-cli`** (`gozler`): the `es`-compatible CLI.
+- **`gozler-ui`** (`gozler-ui`): the gozler window, a native Win32 search window. Its `core` module decides what the window shows and holds no Win32 type, so its tests run on any OS; its `win` module holds every Win32 call; `app` joins them. `docs/plans/ui-design.md` describes it.
 
 The command line splits by one rule: what asks the operating system is in `gozler-cli` and `gozler-client`, and everything else is in `gozler-core`, where CI tests it on Ubuntu. `gozler-core` owns the parsing, the vocabulary tables, the help text, the date resolver, the request built from a working directory and a query start it is given, the evaluation, and the output rows. `gozler-cli` reads the arguments, the working directory, the clock and the time zone, resolves drive-relative folders, talks to the pipe through `gozler-client`, and writes to stdout or the export file.
 

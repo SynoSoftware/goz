@@ -655,6 +655,9 @@ named mutex `Local\gozler.ui`. When the mutex already exists, `main` finds the
 first window by its class name, calls `AllowSetForegroundWindow` for its
 process, posts it a registered message and exits; the first window shows
 itself and focuses the search box (`MainWindow::show_window`, command C24).
+With `--data-dir`, the mutex and the class name end in an FNV-1a hash of the
+canonical folder (`app::instance_suffix`), because a mutex name allows no
+backslash after `Local\`.
 
 **The shortcut.** `win::shortcut` owns it, and `MainWindow` sees only "show
 the window". Two ways reach the same handler:
@@ -881,16 +884,11 @@ waits for it, and aborts (rule 11). No handler runs with half-changed state.
 
 Each item is checked by the stage named in the plan before code depends on it.
 
-- That `embed-resource` has an allowed licence and builds with the workspace's
-  minimum Rust version, and that `rc.exe` is on the owner's machine and the
-  Windows CI runner.
-- That UI Automation exposes the virtual list's visible rows and the status
-  bar's parts. If it does not expose the rows' cells, the probe reads them
-  with `LVM_GETITEMTEXTW` through memory it allocates in the window's
-  process. Stage 3 decides this, with the first rows on screen, before its
-  live checks.
-- That `IsDialogMessageW` in a main window that is not a dialog still lets
-  `Alt` and an access key open the menu bar.
+- That `rc.exe` is on the Windows CI runner.
+- That UI Automation exposes the virtual list's visible rows. If it does not
+  expose the rows' cells, the probe reads them with `LVM_GETITEMTEXTW`
+  through memory it allocates in the window's process. Stage 3 decides
+  this, with the first rows on screen, before its live checks.
 - That the keyboard hook takes `Win+S` before Windows Search opens, that the
   unassigned key keeps Start closed, and that `SetForegroundWindow` from the
   show message brings the window to the front after a swallowed key. If the
@@ -911,7 +909,6 @@ Each item is checked by the stage named in the plan before code depends on it.
   while a click moves only between checked and unchecked. If a click also
   reaches the partial state, the window handles the click itself and sets
   the state. Stage 7 checks this.
-- The exact spacing numbers in Microsoft's Windows desktop layout guidelines.
 - File Explorer's wording for the commands the window shares with it, such as
   "Open file location".
 - Whether clipboard memory that Windows owns after a copy still counts in the

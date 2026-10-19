@@ -1,0 +1,113 @@
+{
+  "window": {
+    "title": "gozler"
+  },
+  "menu": {
+    "file": "&File",
+    "edit": "&Edit",
+    "view": "&View",
+    "help": "&Help",
+    "language": "La&nguage"
+  },
+  "command": {
+    "open": "&Open",
+    "open_file_location": "Open file &location",
+    "properties": "Propert&ies",
+    "export_results": "&Export results…",
+    "cancel_export": "&Cancel export",
+    "settings": "&Settings…",
+    "exit": "E&xit",
+    "copy": "&Copy",
+    "copy_as_path": "Copy as &path",
+    "copy_name": "Copy &name",
+    "select_all": "Select &all",
+    "search_in_this_folder": "&Search in this folder",
+    "filters": "&Filters",
+    "inspector": "&Inspector",
+    "columns": "&Columns",
+    "refresh": "&Refresh",
+    "find": "&Find",
+    "sort_by": "Sort &by",
+    "clear_filters": "C&lear filters",
+    "search_syntax": "&Search syntax",
+    "about": "&About gozler",
+    "show_window": "&Show window",
+    "windows_default": "&Windows default"
+  },
+  "column": {
+    "name": "&Name",
+    "path": "&Path",
+    "size": "&Size",
+    "date_modified": "&Date modified",
+    "extension": "&Extension",
+    "attributes": "&Attributes"
+  },
+  "header": {
+    "name": "Name",
+    "path": "Path",
+    "size": "Size",
+    "date_modified": "Date modified",
+    "extension": "Extension",
+    "attributes": "Attributes"
+  },
+  "sort": {
+    "name": "&Name",
+    "path": "&Path",
+    "size": "&Size",
+    "date_modified": "&Date modified",
+    "extension": "&Extension",
+    "ascending": "&Ascending",
+    "descending": "Des&cending"
+  },
+  "match": {
+    "label": "M&atch:",
+    "start_of_words": "Start of words",
+    "start_of_name": "Start of name",
+    "anywhere": "Anywhere",
+    "whole_words": "Whole words",
+    "regular_expression": "Regular expression",
+    "case": "Match &case",
+    "path": "Match &path"
+  },
+  "search": {
+    "cue": "Find files and folders"
+  },
+  "key": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "enter": "Enter"
+  },
+  "status": {
+    "showing": "Showing the first {0} of {1} results",
+    "filtered": "{0} · Filtered",
+    "searching": "Searching…",
+    "selected": "{0} selected · {1}",
+    "reading": "Reading the selection…",
+    "exporting_one": "Exporting… {0} row",
+    "exporting_other": "Exporting… {0} rows",
+    "exported_one": "Exported {0} row to {1}",
+    "exported_other": "Exported {0} rows to {1}"
+  },
+  "size": {
+    "bytes_one": "{0} byte",
+    "bytes_other": "{0} bytes",
+    "kb": "{0} KB",
+    "mb": "{0} MB",
+    "gb": "{0} GB",
+    "tb": "{0} TB"
+  },
+  "about": {
+    "title": "About gozler",
+    "version": "gozler {0}",
+    "description": "Instant filename search for Windows NTFS and ReFS volumes.",
+    "copyright": "Copyright © 2026 Mustafa Ahci and synapse.sr. MIT licence."
+  },
+  "button": {
+    "close": "Close"
+  },
+  "message": {
+    "internal_error": "gozler stopped because of an internal error. The details are in {0}.",
+    "settings_not_saved": "gozler could not save its settings to {0}. {1} Your changes apply until gozler exits."
+  }
+}

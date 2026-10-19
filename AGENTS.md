@@ -43,7 +43,8 @@ Use the vocabulary in `CONTEXT.md`.
   separate variant for each failure a caller handles differently. `anyhow` is
   for the daemon binary.
 - **Keep Win32 `unsafe` in `gozler-winfs`,** in the smallest block that needs it,
-  behind a safe function. The daemon's few allocator and pipe-constructor calls
+  behind a safe function. `gozler-ui` keeps its Win32 `unsafe` in its `win`
+  module the same way. The daemon's few allocator and pipe-constructor calls
   are the only `unsafe` elsewhere.
 - **Keep the async runtime free.** Tokio serves the pipe. Blocking calls and
   heavy work go to their own thread or `spawn_blocking`, as the journal tail and

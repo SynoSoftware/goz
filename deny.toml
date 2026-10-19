@@ -35,7 +35,7 @@ multiple-versions = "warn"
 # dependents turns a gozler-winfs → gozler-core edge into a hard error.
 [[bans.deny]]
 crate = "gozler-core"
-wrappers = ["gozler-cli", "gozler-client", "gozler-daemon"]
+wrappers = ["gozler-cli", "gozler-client", "gozler-daemon", "gozler-ui"]
 
 [advisories]
 yanked = "deny"

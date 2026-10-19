@@ -13,7 +13,13 @@ param(
     # Runs only the criterion benchmarks whose names match this filter, such as
     # query_2M. --bench '*' selects the bench targets alone; plain cargo bench
     # would also build every library under the fat-LTO bench profile.
-    [string] $Bench
+    [string] $Bench,
+    # Builds the release executables, which the probe measures, because the
+    # memory budget is measured on what ships.
+    [switch] $Release,
+    # With -Release, adds the window's pseudo-language qps-ploc, which the
+    # probe's screenshots use to show where a longer translation clips.
+    [switch] $Pseudo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,6 +38,10 @@ try {
     $process.PriorityClass = 'BelowNormal'
     if ($Test) {
         Invoke-Cargo test --workspace --no-fail-fast $Test
+    }
+    elseif ($Release) {
+        $features = if ($Pseudo) { @('--features', 'gozler-ui/pseudo-language') } else { @() }
+        Invoke-Cargo build --release --workspace @features
     }
     elseif ($Bench) {
         Invoke-Cargo bench --workspace --bench '*' --no-run

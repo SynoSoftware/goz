@@ -1,0 +1,49 @@
+// The window's resources. Every caption is empty here: WM_INITDIALOG sets
+// them from en.json or the chosen language, so English has one source.
+// The resource and control IDs match the constants in src/win/resources.rs.
+
+#include <windows.h>
+#include <commctrl.h>
+#include "version.rh"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "gozler-ui.manifest"
+
+1 ICON "gozler-ui.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION GOZLER_VERSION_NUMBERS
+PRODUCTVERSION GOZLER_VERSION_NUMBERS
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "000004b0"
+        BEGIN
+            VALUE "FileDescription", "gozler"
+            VALUE "FileVersion", GOZLER_VERSION
+            VALUE "InternalName", "gozler-ui"
+            VALUE "OriginalFilename", "gozler-ui.exe"
+            VALUE "ProductName", "gozler"
+            VALUE "ProductVersion", GOZLER_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0000, 0x04b0
+    END
+END
+
+// About gozler: the icon, the version, what gozler is, the copyright and the
+// repository link. The two-line texts leave room for longer translations.
+100 DIALOGEX 0, 0, 240, 95
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    ICON            1, 1001, 7, 7, 21, 20
+    LTEXT           "", 1002, 36, 7, 197, 8, SS_NOPREFIX
+    LTEXT           "", 1003, 36, 15, 197, 16, SS_NOPREFIX
+    LTEXT           "", 1004, 36, 35, 197, 16, SS_NOPREFIX
+    CONTROL         "", 1005, "SysLink", WS_TABSTOP, 36, 55, 197, 8
+    DEFPUSHBUTTON   "", IDCANCEL, 183, 74, 50, 14
+END

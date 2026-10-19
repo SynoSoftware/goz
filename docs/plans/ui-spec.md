@@ -306,7 +306,10 @@ Part 4:
 - One window per user session. A second start brings the first window
   forward, restored when it was minimized and still maximized when it was
   maximized; a named mutex (`Local\gozler.ui`) decides which process is
-  first. The `Local\` namespace is already one per session.
+  first. The `Local\` namespace is already one per session. A window started
+  with `--data-dir` has its own mutex and window class, named with a hash of
+  that folder, so a test's window and the person's window never hand over to
+  each other.
 - A second start and the shortcut from Settings > Keyboard both bring the
   window forward with the search box focused and its text selected, so the
   person types the next search at once. A second start with
