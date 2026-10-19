@@ -6,11 +6,15 @@
 use super::model::{Column, Model};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
 use super::selection::OPEN_LIMIT;
+use super::shortcuts::CommandShortcuts;
 use super::text::{LANGUAGES, LanguageChoice, Strings, menu_label};
 use gozler_core::types::{SortDir, SortKey};
+use serde::{Deserialize, Serialize};
 
-/// One command of the spec's Commands table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One command of the spec's Commands table. Its names are `ui.json`'s,
+/// where the person's command shortcuts are saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum CommandId {
     Open,
     OpenFileLocation,
@@ -94,7 +98,7 @@ impl CommandId {
                 C::Settings => (
                     "command.settings",
                     const { &[Keystroke::ctrl(Key::Comma)] },
-                    never,
+                    always,
                     None,
                 ),
                 C::Exit => ("command.exit", &[], always, None),
@@ -164,7 +168,12 @@ impl CommandId {
                     None,
                 ),
                 C::About => ("command.about", &[], always, None),
-                C::ShowWindow => ("command.show_window", &[], never, None),
+                C::ShowWindow => (
+                    "command.show_window",
+                    &[],
+                    |s| s.model.choices().keep_running,
+                    None,
+                ),
             };
         Command {
             label,
@@ -270,16 +279,122 @@ pub(crate) struct Keystroke {
     pub(crate) key: Key,
 }
 
+/// A key that a shortcut or a control's key can be. A key that Windows names
+/// differently on each keyboard layout, such as `;`, is none of them,
+/// because its name would differ between a menu and the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Key {
     /// An ASCII capital letter, which is also its virtual-key code.
     Letter(u8),
-    /// F1 to F12.
+    /// An ASCII digit, which is also its virtual-key code.
+    Digit(u8),
+    /// F1 to F24.
     Function(u8),
     Enter,
-    Comma,
-    Down,
     Escape,
+    Tab,
+    Space,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Left,
+    Up,
+    Right,
+    Down,
+    Comma,
+    Period,
+}
+
+impl Key {
+    /// Every key without a number, for reading a key's name back.
+    const NAMED: [Key; 17] = [
+        Key::Enter,
+        Key::Escape,
+        Key::Tab,
+        Key::Space,
+        Key::Backspace,
+        Key::Delete,
+        Key::Insert,
+        Key::Home,
+        Key::End,
+        Key::PageUp,
+        Key::PageDown,
+        Key::Left,
+        Key::Up,
+        Key::Right,
+        Key::Down,
+        Key::Comma,
+        Key::Period,
+    ];
+
+    /// Its name in `ui.json`, the same in every language, such as "PageUp".
+    pub(crate) fn name(self) -> String {
+        match self {
+            Key::Letter(c) | Key::Digit(c) => char::from(c).to_string(),
+            Key::Function(n) => format!("F{n}"),
+            Key::Enter => "Enter".into(),
+            Key::Escape => "Esc".into(),
+            Key::Tab => "Tab".into(),
+            Key::Space => "Space".into(),
+            Key::Backspace => "Backspace".into(),
+            Key::Delete => "Delete".into(),
+            Key::Insert => "Insert".into(),
+            Key::Home => "Home".into(),
+            Key::End => "End".into(),
+            Key::PageUp => "PageUp".into(),
+            Key::PageDown => "PageDown".into(),
+            Key::Left => "Left".into(),
+            Key::Up => "Up".into(),
+            Key::Right => "Right".into(),
+            Key::Down => "Down".into(),
+            Key::Comma => ",".into(),
+            Key::Period => ".".into(),
+        }
+    }
+
+    /// The key whose [`Key::name`] is `name`.
+    pub(crate) fn from_name(name: &str) -> Option<Key> {
+        match name.as_bytes() {
+            [c @ b'A'..=b'Z'] => Some(Key::Letter(*c)),
+            [c @ b'0'..=b'9'] => Some(Key::Digit(*c)),
+            [b'F', number @ ..] if !number.is_empty() => std::str::from_utf8(number)
+                .ok()?
+                .parse()
+                .ok()
+                .filter(|n| (1..=24).contains(n))
+                .map(Key::Function),
+            _ => Key::NAMED.into_iter().find(|key| key.name() == name),
+        }
+    }
+
+    /// As a menu shows it, in the language of `strings`.
+    pub(crate) fn text(self, strings: &Strings) -> String {
+        let named = |key: &'static str| strings.text(key).to_owned();
+        match self {
+            Key::Letter(_) | Key::Digit(_) | Key::Function(_) | Key::Comma | Key::Period => {
+                self.name()
+            }
+            Key::Enter => named("key.enter"),
+            Key::Escape => named("key.escape"),
+            Key::Tab => named("key.tab"),
+            Key::Space => named("key.space"),
+            Key::Backspace => named("key.backspace"),
+            Key::Delete => named("key.delete"),
+            Key::Insert => named("key.insert"),
+            Key::Home => named("key.home"),
+            Key::End => named("key.end"),
+            Key::PageUp => named("key.page_up"),
+            Key::PageDown => named("key.page_down"),
+            Key::Left => named("key.left"),
+            Key::Up => named("key.up"),
+            Key::Right => named("key.right"),
+            Key::Down => named("key.down"),
+        }
+    }
 }
 
 impl Keystroke {
@@ -292,21 +407,21 @@ impl Keystroke {
         }
     }
 
-    const fn ctrl(key: Key) -> Keystroke {
+    pub(crate) const fn ctrl(key: Key) -> Keystroke {
         Keystroke {
             ctrl: true,
             ..Keystroke::plain(key)
         }
     }
 
-    const fn alt(key: Key) -> Keystroke {
+    pub(crate) const fn alt(key: Key) -> Keystroke {
         Keystroke {
             alt: true,
             ..Keystroke::plain(key)
         }
     }
 
-    const fn ctrl_shift(key: Key) -> Keystroke {
+    pub(crate) const fn ctrl_shift(key: Key) -> Keystroke {
         Keystroke {
             ctrl: true,
             shift: true,
@@ -317,25 +432,57 @@ impl Keystroke {
     /// As a menu shows it, such as "Ctrl+Shift+C", with the modifier names
     /// of the language, because German Windows writes "Strg".
     pub(crate) fn text(self, strings: &Strings) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        for (on, key) in [
-            (self.ctrl, "key.ctrl"),
-            (self.alt, "key.alt"),
-            (self.shift, "key.shift"),
-        ] {
-            if on {
-                parts.push(strings.text(key).to_owned());
+        let mut parts: Vec<String> = self
+            .modifiers()
+            .into_iter()
+            .map(|(_, key)| strings.text(key).to_owned())
+            .collect();
+        parts.push(self.key.text(strings));
+        parts.join("+")
+    }
+
+    /// Its name in `ui.json`, such as "Ctrl+Shift+F12", the same in every
+    /// language.
+    pub(crate) fn name(self) -> String {
+        let mut parts: Vec<String> = self
+            .modifiers()
+            .into_iter()
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        parts.push(self.key.name());
+        parts.join("+")
+    }
+
+    /// The keystroke whose [`Keystroke::name`] is `name`.
+    pub(crate) fn from_name(name: &str) -> Option<Keystroke> {
+        // The key comes last; no key's name holds a `+`.
+        let (modifiers, key) = name.rsplit_once('+').unwrap_or(("", name));
+        let mut keystroke = Keystroke::plain(Key::from_name(key)?);
+        for modifier in modifiers.split('+').filter(|m| !m.is_empty()) {
+            let held = match modifier {
+                "Ctrl" => &mut keystroke.ctrl,
+                "Alt" => &mut keystroke.alt,
+                "Shift" => &mut keystroke.shift,
+                _ => return None,
+            };
+            if std::mem::replace(held, true) {
+                return None;
             }
         }
-        parts.push(match self.key {
-            Key::Letter(letter) => char::from(letter).to_string(),
-            Key::Function(n) => format!("F{n}"),
-            Key::Enter => strings.text("key.enter").to_owned(),
-            Key::Comma => ",".to_owned(),
-            Key::Down => strings.text("key.down").to_owned(),
-            Key::Escape => strings.text("key.escape").to_owned(),
-        });
-        parts.join("+")
+        Some(keystroke)
+    }
+
+    /// The `ui.json` name and the catalogue key of each modifier it holds,
+    /// in the order Windows writes them.
+    fn modifiers(self) -> Vec<(&'static str, &'static str)> {
+        [
+            (self.ctrl, "Ctrl", "key.ctrl"),
+            (self.alt, "Alt", "key.alt"),
+            (self.shift, "Shift", "key.shift"),
+        ]
+        .into_iter()
+        .filter_map(|(held, name, key)| held.then_some((name, key)))
+        .collect()
     }
 }
 
@@ -454,10 +601,12 @@ impl MenuItem {
         }
     }
 
-    /// The shortcut the menu shows after the label.
-    pub(crate) fn shortcut(self) -> Option<Keystroke> {
+    /// The shortcut the menu shows after the label: the first of the
+    /// command's shortcuts in `shortcuts`, the table its accelerators come
+    /// from.
+    pub(crate) fn shortcut(self, shortcuts: &CommandShortcuts) -> Option<Keystroke> {
         match self {
-            MenuItem::Run(command) => command.row().shortcuts.first().copied(),
+            MenuItem::Run(command) => shortcuts.of(command).first().copied(),
             _ => None,
         }
     }
@@ -631,6 +780,15 @@ pub(crate) fn row_menu() -> Vec<Vec<MenuItem>> {
     ]
 }
 
+/// The tray icon's menu (spec: Window lifetime). Its first item, Show
+/// window, is the default, which a click on the icon also runs.
+pub(crate) fn tray_menu() -> Vec<Vec<MenuItem>> {
+    vec![
+        vec![MenuItem::Run(CommandId::ShowWindow)],
+        vec![MenuItem::Run(CommandId::Exit)],
+    ]
+}
+
 /// The inspector's buttons: each runs its command, and its caption differs
 /// from the command's menu label only in an access key that the main
 /// window's other controls leave free (spec: Inspector pane).
@@ -660,21 +818,26 @@ pub(crate) fn render_popup(groups: &[Vec<MenuItem>], strings: &Strings) -> Vec<M
     })
 }
 
-/// A menu bar item, with its shortcut after its label.
-pub(crate) fn node(item: &MenuItem, strings: &Strings) -> MenuNode {
+/// A menu bar item, with its first shortcut in `shortcuts` after its label.
+pub(crate) fn node(item: &MenuItem, strings: &Strings, shortcuts: &CommandShortcuts) -> MenuNode {
     MenuNode::Item {
         id: item.id(),
         text: menu_label(
             item.label(strings),
-            item.shortcut().map(|s| s.text(strings)),
+            item.shortcut(shortcuts).map(|s| s.text(strings)),
         ),
         mark: item.mark(),
     }
 }
 
-/// The menu bar `menus` in the language of `strings`.
-pub(crate) fn render(menus: &[Menu], strings: &Strings) -> Vec<MenuNode> {
-    let item = |item: &MenuItem| node(item, strings);
+/// The menu bar `menus` in the language of `strings`, with the shortcuts of
+/// `shortcuts`.
+pub(crate) fn render(
+    menus: &[Menu],
+    strings: &Strings,
+    shortcuts: &CommandShortcuts,
+) -> Vec<MenuNode> {
+    let item = |item: &MenuItem| node(item, strings, shortcuts);
     menus
         .iter()
         .map(|menu| MenuNode::Submenu {
@@ -715,11 +878,11 @@ pub(crate) fn items(menus: &[Menu]) -> Vec<MenuItem> {
         .collect()
 }
 
-/// Every command shortcut, with the item it runs.
-pub(crate) fn accelerators() -> Vec<(Keystroke, MenuItem)> {
+/// Every command shortcut of `shortcuts`, with the item it runs.
+pub(crate) fn accelerators(shortcuts: &CommandShortcuts) -> Vec<(Keystroke, MenuItem)> {
     CommandId::ALL
         .iter()
-        .flat_map(|c| c.row().shortcuts.iter().map(|s| (*s, MenuItem::Run(*c))))
+        .flat_map(|c| shortcuts.of(*c).iter().map(|s| (*s, MenuItem::Run(*c))))
         .collect()
 }
 
@@ -744,7 +907,11 @@ mod tests {
         let mut seen = std::collections::HashMap::new();
         let all: Vec<MenuItem> = items(&menu_bar())
             .into_iter()
-            .chain(accelerators().into_iter().map(|(_, item)| item))
+            .chain(
+                accelerators(&CommandShortcuts::default())
+                    .into_iter()
+                    .map(|(_, item)| item),
+            )
             .chain(CommandId::ALL.into_iter().map(MenuItem::Run))
             .collect();
         for item in all {
@@ -762,7 +929,7 @@ mod tests {
     #[test]
     fn no_two_commands_share_a_shortcut() {
         let mut seen = HashSet::new();
-        for (shortcut, item) in accelerators() {
+        for (shortcut, item) in accelerators(&CommandShortcuts::default()) {
             assert!(
                 seen.insert((shortcut.ctrl, shortcut.alt, shortcut.shift, shortcut.key)),
                 "{item:?} repeats {shortcut:?}"
@@ -814,9 +981,10 @@ mod tests {
                     }
                 }
             }
-            let row = row_menu().into_iter().flatten();
-            let labels = row.map(|item| item.label(&strings));
-            assert_unique(language.tag, labels, &mut HashSet::new());
+            for menu in [row_menu(), tray_menu()] {
+                let labels = menu.into_iter().flatten().map(|item| item.label(&strings));
+                assert_unique(language.tag, labels, &mut HashSet::new());
+            }
             let window = [
                 "match.label",
                 "match.case",

@@ -292,6 +292,9 @@ whatever changes in the index meanwhile. No action refuses.
 | 4. Index | the index state, only when it affects the answer | the rest |
 
 Part 4:
+- The service fails while the list shows rows or another message, such as
+  when a status request fails while the list keeps its rows: the failure's
+  message, so the window says that the service stopped (`T10`).
 - A volume in scope is not complete (`VolumePhase::is_complete`): "C:\ is
   indexing — results may be incomplete.", or the word for an offline or
   failed volume. While a volume in scope is bootstrapping or rescanning, the
@@ -663,7 +666,7 @@ appearance settings.
 | Search | Search box | Search as you type | check box | on; off: `Enter` runs the search |
 | | | Show every file and folder when the search is empty | check box | on, as in Everything; off: an empty search shows nothing (`S6`) |
 | | | Select the search text when I click the search box | check box | on |
-| | | Select the search text when Gozler is activated | check box | off; on: switching to Gozler puts the focus in the search box with its text selected |
+| | | Select the search text when Gozler is activated | check box | off; on: switching to Gozler from another program puts the focus in the search box with its text selected, while closing one of Gozler's own dialogs leaves the focus where it was |
 | Keyboard | Show Gozler | Shortcut to show Gozler from any program | hotkey control and a "Windows key" check box | none |
 | | Commands | Show commands containing | edit box that filters the list | empty |
 | | | every command of "Commands" that is one item of the menu bar or the context menu, as "Menu > Command" | list | — |
@@ -800,9 +803,9 @@ that works from any program, and the shortcuts of the window's commands.
   Windows. When another program holds it, the dialog says so; Gozler never
   takes such a shortcut from another program.
 - **After the window closes,** the shortcut works only while Gozler keeps
-  running in the notification area (Settings > General, on by default). With
-  that off, the page says so under the shortcut, so the person knows before
-  they close the window.
+  running in the notification area (Settings > General, on by default). The
+  page says under the shortcut whether it works after the window closes, so
+  the person knows before they close the window.
 
 **Command shortcuts**
 
@@ -825,8 +828,8 @@ that works from any program, and the shortcuts of the window's commands.
 - **A shortcut that another command has** is refused with its name, so two
   commands never share one: "Ctrl+E is the shortcut for Edit > Find. Remove
   it there first."
-- **The menus and the context menu show the person's shortcuts,** so what a
-  menu says is always what the key does. Restore defaults gives every
+- **The menu bar shows the person's shortcuts,** so what a menu says is
+  always what the key does. Restore defaults gives every
   command its "Key" from "Commands" again.
 - Keys that belong to a control, not to a command, keep their meaning and
   are refused with "{key} belongs to the search box or the list.": `Tab`,
@@ -843,8 +846,9 @@ that works from any program, and the shortcuts of the window's commands.
   works only while the window is open.
 - **Check for updates** asks GitHub for Gozler's latest release, at most once
   a day, when Gozler starts. When a newer one exists, the status bar's last
-  part says "Gozler 0.4.0 is available" with a link that opens the release
-  page; Gozler never downloads or installs anything itself. Off, Gozler
+  part says "Gozler 0.4.0 is available. Click here to open its page.", and a
+  click opens the release page; Gozler never downloads or installs anything
+  itself. Off, Gozler
   makes no network request at all.
 - **"Search with Gozler" on folders** adds that item to File Explorer's menu
   for folders and for a folder's background. It opens Gozler with Location

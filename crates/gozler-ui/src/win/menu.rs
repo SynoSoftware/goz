@@ -1,18 +1,17 @@
 //! The menu bar and the accelerator table, built from what
 //! `core::commands` says (design rule 9).
 
+use super::keys::virtual_key;
 use super::{Hwnd, wide};
-use crate::core::commands::{Key, Keystroke, Mark, MenuNode};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_DOWN, VK_ESCAPE, VK_F1, VK_OEM_COMMA, VK_RETURN,
-};
+use crate::core::commands::{Keystroke, Mark, MenuNode};
 use windows::Win32::UI::WindowsAndMessaging::{
     ACCEL, ACCEL_VIRT_FLAGS, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu,
     DestroyAcceleratorTable, DestroyMenu, DrawMenuBar, EnableMenuItem, FALT, FCONTROL, FSHIFT,
     FVIRTKEY, GetMenu, HACCEL, HMENU, InsertMenuItemW, MENU_ITEM_TYPE, MENUITEMINFOW, MF_BYCOMMAND,
     MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_UNCHECKED, MFT_RADIOCHECK, MFT_RIGHTJUSTIFY,
-    MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MIIM_SUBMENU, SetMenu,
+    MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MIIM_SUBMENU, MSG, SetMenu,
     SetMenuDefaultItem, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    TranslateAcceleratorW,
 };
 use windows::core::PWSTR;
 
@@ -225,8 +224,12 @@ impl Accelerators {
         Ok(Accelerators(unsafe { CreateAcceleratorTableW(&table) }?))
     }
 
-    pub(super) fn handle(&self) -> HACCEL {
-        self.0
+    /// Sends `window` the command of the shortcut that `msg` presses, and
+    /// answers whether it did.
+    pub(super) fn translate(&self, window: Hwnd, msg: &MSG) -> bool {
+        // SAFETY: `msg` is the message the loop read, and the table is this
+        // value's own.
+        unsafe { TranslateAcceleratorW(window.0, self.0, msg) != 0 }
     }
 }
 
@@ -234,17 +237,5 @@ impl Drop for Accelerators {
     fn drop(&mut self) {
         // SAFETY: the table is this value's own.
         let _ = unsafe { DestroyAcceleratorTable(self.0) };
-    }
-}
-
-fn virtual_key(key: Key) -> u16 {
-    match key {
-        // A capital letter's virtual-key code is its ASCII code.
-        Key::Letter(letter) => u16::from(letter),
-        Key::Function(n) => VK_F1.0 + u16::from(n) - 1,
-        Key::Enter => VK_RETURN.0,
-        Key::Comma => VK_OEM_COMMA.0,
-        Key::Down => VK_DOWN.0,
-        Key::Escape => VK_ESCAPE.0,
     }
 }

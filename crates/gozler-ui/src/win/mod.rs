@@ -11,25 +11,29 @@ pub(crate) mod controls;
 pub(crate) mod dialog;
 pub(crate) mod gdi;
 pub(crate) mod instance;
+pub(crate) mod keys;
 pub(crate) mod locale;
 pub(crate) mod menu;
 pub(crate) mod notify;
 pub(crate) mod pane;
 pub(crate) mod shell;
+pub(crate) mod shortcut;
+pub(crate) mod tray;
+pub(crate) mod update;
 pub(crate) mod wake;
 pub(crate) mod window;
 
 use crate::core::layout::{Px, Rect, Size};
 use crate::core::settings::Placement;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::InvalidateRect;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, MapWindowPoints};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW, GetWindowPlacement,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, PostMessageW, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, IsWindowVisible,
+    PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE, SW_SHOWNA,
+    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, SetWindowTextW,
+    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
 };
 use windows::core::HSTRING;
 
@@ -142,6 +146,68 @@ impl Hwnd {
             let _ = ShowWindow(self.0, command);
             let _ = SetForegroundWindow(self.0);
         }
+    }
+
+    /// Hides a top-level window, as closing it to the notification area
+    /// does.
+    pub(crate) fn hide(self) {
+        // SAFETY: plain values.
+        let _ = unsafe { ShowWindow(self.0, SW_HIDE) };
+    }
+
+    /// Shows a new window minimized, without taking the focus from the
+    /// program in front, as a program started at sign-in does.
+    pub(crate) fn show_minimized(self) {
+        // SAFETY: plain values.
+        let _ = unsafe { ShowWindow(self.0, SW_SHOWMINNOACTIVE) };
+    }
+
+    pub(crate) fn is_visible(self) -> bool {
+        // SAFETY: plain values.
+        unsafe { IsWindowVisible(self.0) }.as_bool()
+    }
+
+    /// Whether the window takes input, which a modal dialog it owns stops.
+    pub(crate) fn is_enabled(self) -> bool {
+        // SAFETY: plain values.
+        unsafe { IsWindowEnabled(self.0) }.as_bool()
+    }
+
+    /// Asks Windows to put the window in front without showing it, as a
+    /// tray icon's menu needs so that it closes on a click elsewhere.
+    pub(crate) fn set_foreground(self) {
+        // SAFETY: plain values.
+        let _ = unsafe { SetForegroundWindow(self.0) };
+    }
+
+    /// The window's rectangle in the client coordinates of `parent`.
+    pub(crate) fn rect_in(self, parent: Hwnd) -> Rect {
+        let mut rect = RECT::default();
+        // SAFETY: `rect` is a local the calls fill in and convert; it holds
+        // the two points MapWindowPoints converts.
+        unsafe {
+            let _ = GetWindowRect(self.0, &mut rect);
+            let points = std::slice::from_raw_parts_mut((&raw mut rect).cast::<POINT>(), 2);
+            MapWindowPoints(None, Some(parent.0), points);
+        }
+        from_rect(rect)
+    }
+
+    /// Moves and sizes a child window to `rect`, in its parent's client
+    /// coordinates, and puts it after `after` in the Tab order.
+    pub(crate) fn place_after(self, after: Hwnd, rect: Rect) {
+        // SAFETY: plain values; a stale handle only fails.
+        let _ = unsafe {
+            SetWindowPos(
+                self.0,
+                Some(after.0),
+                rect.x.0,
+                rect.y.0,
+                rect.width.0,
+                rect.height.0,
+                SWP_NOACTIVATE,
+            )
+        };
     }
 
     pub(crate) fn destroy(self) {

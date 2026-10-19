@@ -338,7 +338,224 @@ impl CaptionTable {
                 ],
                 plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
             },
+            DialogId::Settings => CaptionTable {
+                title: "settings.title",
+                keyed: &[(Control(C::SettingsApply), "settings.apply")],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
+            DialogId::SettingsGeneral => CaptionTable {
+                title: "settings.general",
+                keyed: &[
+                    (
+                        Control(C::GeneralLanguageLabel),
+                        "settings_general.language",
+                    ),
+                    (Control(C::GeneralSignIn), "settings_general.sign_in"),
+                    (Control(C::GeneralUpdates), "settings_general.updates"),
+                    (
+                        Control(C::GeneralKeepRunning),
+                        "settings_general.keep_running",
+                    ),
+                    (
+                        Control(C::GeneralSearchWith),
+                        "settings_general.search_with",
+                    ),
+                    (
+                        Control(C::GeneralOpenFoldersLabel),
+                        "settings_general.open_folders",
+                    ),
+                    (
+                        Control(C::GeneralOpenFilesLabel),
+                        "settings_general.open_files",
+                    ),
+                    (
+                        Control(C::GeneralOpenLocationLabel),
+                        "settings_general.open_file_location",
+                    ),
+                    (
+                        Control(C::GeneralTotalCommander),
+                        "settings_general.total_commander",
+                    ),
+                    (Control(C::GeneralRestore), "settings.restore_defaults"),
+                ],
+                plain: &[
+                    (Control(C::GeneralHeading), "settings.general"),
+                    (Control(C::GeneralStarting), "settings_general.starting"),
+                    (
+                        Control(C::GeneralFileExplorer),
+                        "settings_general.file_explorer",
+                    ),
+                    // One letter cannot name three buttons (spec: The
+                    // General page).
+                    (
+                        Control(C::GeneralOpenFoldersBrowse),
+                        "settings_general.browse",
+                    ),
+                    (
+                        Control(C::GeneralOpenFilesBrowse),
+                        "settings_general.browse",
+                    ),
+                    (
+                        Control(C::GeneralOpenLocationBrowse),
+                        "settings_general.browse",
+                    ),
+                ],
+            },
+            DialogId::SettingsSearch => CaptionTable {
+                title: "settings.search",
+                keyed: &[
+                    (Control(C::SearchAsYouType), "settings_search.as_you_type"),
+                    (Control(C::SearchShowAll), "settings_search.show_all"),
+                    (
+                        Control(C::SearchSelectOnClick),
+                        "settings_search.select_on_click",
+                    ),
+                    (
+                        Control(C::SearchSelectOnActivate),
+                        "settings_search.select_on_activate",
+                    ),
+                    (Control(C::SearchRestore), "settings.restore_defaults"),
+                ],
+                plain: &[
+                    (Control(C::SearchHeading), "settings.search"),
+                    (Control(C::SearchBoxGroup), "settings_search.search_box"),
+                ],
+            },
+            DialogId::SettingsKeyboard => CaptionTable {
+                title: "settings.keyboard",
+                keyed: &[
+                    (
+                        Control(C::KeyboardShortcutLabel),
+                        "settings_keyboard.shortcut",
+                    ),
+                    (
+                        Control(C::KeyboardWindowsKey),
+                        "settings_keyboard.windows_key",
+                    ),
+                    (Control(C::KeyboardFilterLabel), "settings_keyboard.filter"),
+                    (Control(C::KeyboardKeysLabel), "settings_keyboard.keys"),
+                    (Control(C::KeyboardAdd), "settings_keyboard.add"),
+                    (Control(C::KeyboardEdit), "settings_keyboard.edit"),
+                    (Control(C::KeyboardRemove), "settings_keyboard.remove"),
+                    (Control(C::KeyboardRestore), "settings.restore_defaults"),
+                ],
+                plain: &[
+                    (Control(C::KeyboardHeading), "settings.keyboard"),
+                    (
+                        Control(C::KeyboardShowGroup),
+                        "settings_keyboard.show_gozler",
+                    ),
+                    (
+                        Control(C::KeyboardCommandsGroup),
+                        "settings_keyboard.commands",
+                    ),
+                ],
+            },
+            DialogId::SettingsIndex => CaptionTable {
+                title: "settings.index",
+                keyed: &[],
+                plain: &[
+                    (Control(C::IndexHeading), "settings.index"),
+                    (Control(C::IndexDrivesGroup), "settings_index.drives"),
+                    (Control(C::IndexHoldsGroup), "settings_index.holds"),
+                    (Control(C::IndexHolds), "settings_index.holds_text"),
+                    (Control(C::IndexServiceGroup), "settings_index.service"),
+                    (Control(C::IndexStatusHint), "settings_index.status_hint"),
+                ],
+            },
+            DialogId::CommandShortcut => CaptionTable {
+                title: "command_shortcut.title",
+                keyed: &[(Control(C::CommandShortcutLabel), "command_shortcut.press")],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
         }
+    }
+
+    /// The dialog whose keyboard a page's controls share, because Windows
+    /// looks for an access key in the whole dialog.
+    #[cfg(test)]
+    fn shares_keys_with(dialog: DialogId) -> Option<DialogId> {
+        match dialog {
+            DialogId::SettingsGeneral
+            | DialogId::SettingsSearch
+            | DialogId::SettingsKeyboard
+            | DialogId::SettingsIndex => Some(DialogId::Settings),
+            DialogId::About
+            | DialogId::SearchSyntax
+            | DialogId::CustomDate
+            | DialogId::CustomSize
+            | DialogId::Settings
+            | DialogId::CommandShortcut => None,
+        }
+    }
+}
+
+/// What Settings > Index shows (spec: The Index page): each drive by its
+/// mount prefix and label, its state and its entry count, and the
+/// service's state and memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IndexCaptions {
+    /// Each drive's name, state and entry count, as the list's columns.
+    pub(crate) drives: Vec<[String; 3]>,
+    pub(crate) service: String,
+}
+
+impl IndexCaptions {
+    /// `label` gives the volume label of a mount prefix, such as "Windows"
+    /// for `C:\`, which only Windows knows.
+    pub(crate) fn new(
+        model: &Model,
+        numbers: &dyn Numbers,
+        label: &dyn Fn(&str) -> Option<String>,
+    ) -> IndexCaptions {
+        let strings = model.strings();
+        let (status, failure) = model.service();
+        if let Some(failure) = failure {
+            return IndexCaptions {
+                drives: Vec::new(),
+                service: failure_text(strings, failure),
+            };
+        }
+        let Some(status) = status else {
+            return IndexCaptions {
+                drives: Vec::new(),
+                service: strings.text("settings_index.asking").to_owned(),
+            };
+        };
+        let drives = status
+            .volumes
+            .iter()
+            .map(|volume| {
+                let prefix = volume.mounted().display_prefix();
+                let name = match label(prefix).filter(|label| !label.is_empty()) {
+                    Some(label) => format!("{prefix} {label}"),
+                    None => prefix.to_owned(),
+                };
+                let state = match volume.phase {
+                    VolumePhase::Live => "settings_index.live",
+                    VolumePhase::Snapshot => "settings_index.snapshot",
+                    VolumePhase::Bootstrapping | VolumePhase::Rescanning => {
+                        "settings_index.indexing"
+                    }
+                    VolumePhase::Offline => "settings_index.offline",
+                    VolumePhase::Failed { .. } => "settings_index.failed",
+                };
+                [
+                    name,
+                    strings.text(state).to_owned(),
+                    numbers.integer(volume.entries),
+                ]
+            })
+            .collect();
+        // 0 is a service that could not read its own memory.
+        let service = match status.process_private_bytes {
+            0 => strings.text("settings_index.running").to_owned(),
+            bytes => strings.format(
+                "settings_index.running_memory",
+                &[&text::bytes(strings, numbers, bytes)],
+            ),
+        };
+        IndexCaptions { drives, service }
     }
 }
 
@@ -370,7 +587,7 @@ impl WindowCaptions {
         let strings = model.strings();
         WindowCaptions {
             title: title(model),
-            menu_bar: commands::render(&commands::menu_bar(), strings),
+            menu_bar: commands::render(&commands::menu_bar(), strings, &model.choices().shortcuts),
             search_cue: strings.text("search.cue").to_owned(),
             match_label: strings.text("match.label").to_owned(),
             match_modes: MatchMode::ALL.map(|m| strings.text(m.label()).to_owned()),
@@ -720,10 +937,21 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// Status part 4: the index state, only when it affects the answer (spec:
-/// Status bar).
+/// Status part 4: the service's failure while the list shows rows or
+/// another message, so the window says that the service stopped also when
+/// it keeps its rows (spec: T10); else the index state, only when it
+/// affects the answer (spec: Status bar); else a newer release that Check
+/// for updates found (spec: The General page).
 pub(crate) fn index_status(model: &Model) -> String {
     let strings = model.strings();
+    if let (_, Some(failure)) = model.service()
+        && !matches!(
+            model.results().shown(),
+            Shown::Message(ListMessage::Failure(_))
+        )
+    {
+        return failure_text(strings, failure);
+    }
     let coverage = model.coverage();
     if let Some(volume) = coverage.incomplete() {
         let key = match volume.phase {
@@ -739,7 +967,24 @@ pub(crate) fn index_status(model: &Model) -> String {
     coverage
         .sizes_or_dates_unknown()
         .map(|volume| strings.format("status.metadata", &[volume.mounted().display_prefix()]))
+        .or_else(|| {
+            model
+                .newer_release()
+                .map(|version| update_text(strings, version))
+        })
         .unwrap_or_default()
+}
+
+fn update_text(strings: &Strings, version: &str) -> String {
+    strings.format("status.update_available", &[version])
+}
+
+/// Whether status part 4 names a newer release, which a click on it then
+/// opens (spec: The General page).
+pub(crate) fn shows_update(model: &Model) -> bool {
+    model
+        .newer_release()
+        .is_some_and(|version| index_status(model) == update_text(model.strings(), version))
 }
 
 /// What the list's empty area says instead of rows, if anything.
@@ -755,6 +1000,7 @@ pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
             strings.format("list.missing_folder", &[folder])
         }
         Shown::Message(ListMessage::Failure(failure)) => failure_text(strings, failure),
+        Shown::Message(ListMessage::TypeToSearch) => strings.text("list.type_to_search").to_owned(),
     };
     let buttons = model
         .list_buttons()
@@ -844,11 +1090,13 @@ mod tests {
     /// letters.
     #[test]
     fn every_dialog_label_has_its_own_access_key() {
+        let keyed = |dialog: DialogId| CaptionTable::of(dialog).keyed;
         for language in LANGUAGES {
             let strings = Strings::load(language);
             for dialog in DialogId::ALL {
                 let mut keys = HashSet::new();
-                for (_, key) in CaptionTable::of(dialog).keyed {
+                let shared = CaptionTable::shares_keys_with(dialog).map_or(&[][..], keyed);
+                for (_, key) in shared.iter().chain(keyed(dialog)) {
                     let caption = strings.text(key);
                     assert!(
                         access_key(caption).is_some_and(|k| keys.insert(k)),

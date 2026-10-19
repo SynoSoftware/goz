@@ -31,8 +31,8 @@ param(
     [int] $FixtureFiles = 40000,
     # The groups of checks to run, by the feature they check; every group
     # without it. Building the fixture and starting the window always run.
-    [ValidateSet('window', 'lifetime', 'language', 'search', 'selection', 'export', 'filters', 'inspector')]
-    [string[]] $Groups = @('window', 'lifetime', 'language', 'search', 'selection', 'export', 'filters', 'inspector')
+    [ValidateSet('window', 'lifetime', 'language', 'search', 'selection', 'export', 'filters', 'inspector', 'settings')]
+    [string[]] $Groups = @('window', 'lifetime', 'language', 'search', 'selection', 'export', 'filters', 'inspector', 'settings')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -204,6 +204,10 @@ public static class Win {
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+    /// The probe holds a shortcut itself, as another program would; the
+    /// thread that registers it must unregister it.
+    [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr h, int id, uint modifiers, uint key);
+    [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr h, int id);
     [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h, ref POINT p);
 
@@ -498,30 +502,44 @@ function AccessKeyOf([string] $text) {
 # --- Starting and closing windows -------------------------------------------
 
 $started = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
+# Each started process's main window, which Process.MainWindowHandle no
+# longer names once the window hides to the notification area.
+$windowOf = @{}
 $WM_CLOSE = 0x10
+$WM_COMMAND = 0x0111
 
-function Write-Settings([string] $json) {
-    $file = Join-Path $dataDir 'ui.json'
-    if ($json) { Set-Content -LiteralPath $file -Value $json -Encoding utf8NoBOM }
-    elseif (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file }
+# Writes `json` as the window's ui.json, or removes it. Each file says that
+# the notification of the first hide has shown, so no notification appears
+# on the owner's screen; `raw` writes the text as it is, such as a damaged
+# file.
+function Write-Settings([string] $json, [string] $folder = $dataDir, [switch] $Raw) {
+    $file = Join-Path $folder 'ui.json'
+    if ($Raw) { Set-Content -LiteralPath $file -Value $json -Encoding utf8NoBOM; return }
+    $settings = $json ? (ConvertFrom-Json $json -AsHashtable) : @{}
+    if (-not $settings.window) { $settings.window = @{} }
+    $settings.window.tray_notice_shown = $true
+    Set-Content -LiteralPath $file -Value (ConvertTo-Json $settings -Depth 6) -Encoding utf8NoBOM
 }
 
-function Start-Window {
-    $process = Start-Process -PassThru -FilePath $Exe -ArgumentList '--data-dir', "`"$dataDir`""
+function Start-Window([string] $folder = $dataDir) {
+    $process = Start-Process -PassThru -FilePath $Exe -ArgumentList '--data-dir', "`"$folder`""
     $started.Add($process)
     for ($i = 0; $i -lt 100 -and $process.MainWindowHandle -eq 0 -and -not $process.HasExited; $i++) {
         Start-Sleep -Milliseconds 100
         $process.Refresh()
     }
     if ($process.MainWindowHandle -eq 0) { throw "gozler-ui did not open its window" }
+    $windowOf[$process.Id] = $process.MainWindowHandle
     [void]$process.WaitForInputIdle(5000)
     return $process
 }
 
-# Asks the window to close as its close button does, and waits for its exit.
+# Runs File > Exit, which ends Gozler also while it keeps running in the
+# notification area, and waits for its exit.
 function Close-Window($process) {
     if ($process.HasExited) { return $true }
-    [void][GozlerProbe.Win]::PostMessageW($process.MainWindowHandle, $WM_CLOSE, 0, 0)
+    $hwnd = $windowOf[$process.Id] ?? $process.MainWindowHandle
+    [void][GozlerProbe.Win]::PostMessageW($hwnd, $WM_COMMAND, [IntPtr](Command-Id 'Exit'), 0)
     return $process.WaitForExit(10000)
 }
 
@@ -600,7 +618,7 @@ menu.file
   -
   command.export_results||on|
   -
-  command.settings|Ctrl+,|off|
+  command.settings|Ctrl+,|on|
   -
   command.exit||on|
 menu.edit
@@ -966,21 +984,27 @@ function Wait-Answer($process, [int] $seconds = 30) {
     }
 }
 
-# Types `text` into the search box through UI Automation and returns status
-# part 1 once the search has answered. The window searches 150 ms after the
-# last change, so the old answer counts until part 1 has said Searching… or
-# changed. A text that starts no search, such as the one already shown,
-# changes nothing, and the wait for it ends after 2 seconds. Part 1 is read
-# with one message to the status bar, which is fast enough to see a search
-# start.
-function Search-For($process, [string] $text) {
+# Runs `change`, which starts a search, and returns status part 1 once that
+# search has answered. The search can start later, such as 150 ms after the
+# last typed change, so the old answer counts until part 1 has said
+# Searching… or changed. A change that starts no search, such as typing the
+# text already shown, changes nothing, and the wait for it ends after 2
+# seconds. Part 1 is read with one message to the status bar, which is fast
+# enough to see a search start.
+function Wait-OwnSearch($process, [scriptblock] $change) {
     $status = Control-Hwnd $process $StatusBarId
     $before = [GozlerProbe.Win]::ControlText($status)
-    [GozlerProbe.Ui]::SetValue((Child-ById (Window-Element $process) $SearchBoxId), $text)
+    & $change
     $clock = [Diagnostics.Stopwatch]::StartNew()
     do { $part = [GozlerProbe.Win]::ControlText($status) } until (
         (Is-Searching $part) -or $part -ne $before -or $clock.ElapsedMilliseconds -gt 2000)
     return Wait-Answer $process
+}
+
+# Types `text` into the search box through UI Automation and returns status
+# part 1 once its search has answered.
+function Search-For($process, [string] $text) {
+    Wait-OwnSearch $process { [GozlerProbe.Ui]::SetValue((Child-ById (Window-Element $process) $SearchBoxId), $text) }
 }
 
 # The count in "3 results", or $null for any other text.
@@ -1217,6 +1241,7 @@ function Start-Searching([string] $language) {
         $process.Refresh()
     }
     if ($process.MainWindowHandle -eq 0) { throw "gozler-ui did not open its window" }
+    $windowOf[$process.Id] = $process.MainWindowHandle
     $status = [GozlerProbe.Win]::ChildById($process.MainWindowHandle, [int]$StatusBarId, 'msctls_statusbar32')
     Save-Screenshot $process.MainWindowHandle "searching-first-$language"
     return $process, [GozlerProbe.Win]::ControlText($status)
@@ -1258,6 +1283,158 @@ function Show-States($process, [string] $language, $menuIds) {
     return Open-Dialog $process $menuIds.syntax "search-syntax-$language"
 }
 
+# --- The Settings dialog -----------------------------------------------------
+
+# Whether `condition` holds within `seconds`; it is read again and again, so
+# the wait ends as soon as it holds.
+function Wait-Until([scriptblock] $condition, [double] $seconds = 10) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+    do {
+        if (& $condition) { return $true }
+        Start-Sleep -Milliseconds 20
+    } until ([DateTime]::UtcNow -gt $deadline)
+    return [bool](& $condition)
+}
+
+# A dialog of the process that is not one of `known`, once it opens, or
+# $null.
+function Wait-NewDialog($process, $known = @()) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $dialog = [GozlerProbe.Win]::Windows($process.Id, '#32770') | Where-Object { $_ -notin $known } | Select-Object -First 1
+        if ($dialog) { return $dialog }
+        Start-Sleep -Milliseconds 20
+    } until ([DateTime]::UtcNow -gt $deadline)
+    return $null
+}
+
+# Runs File > Settings… as its menu item does, and returns the dialog.
+function Open-Settings($process) {
+    [void][GozlerProbe.Win]::PostMessageW($windowOf[$process.Id], $WM_COMMAND, [IntPtr](Command-Id 'Settings'), 0)
+    return Wait-NewDialog $process
+}
+
+# The control `id`, a name from resources/ids.h or a number, of class `cls`
+# in `dialog` or in one of its pages.
+function Dialog-Control($dialog, $id, [string] $cls = 'Button') {
+    $number = $id -is [int] ? $id : [int]$ids[$id]
+    [GozlerProbe.Win]::ChildById($dialog, $number, $cls)
+}
+
+# The pages in the page list's order.
+$SettingsPages = @{ general = 0; search = 1; keyboard = 2; index = 3 }
+
+# Shows the Settings page `page` as a click in the page list does.
+function Show-SettingsPage($dialog, [string] $page) {
+    $list = Dialog-Control $dialog 'IDC_SETTINGS_PAGES' 'ListBox'
+    # LB_SETCURSEL, then LBN_SELCHANGE.
+    [void][GozlerProbe.Win]::SendMessageW($list, 0x0186, [IntPtr]$SettingsPages[$page], 0)
+    $command = [IntPtr]((1 -shl 16) -bor [int]$ids.IDC_SETTINGS_PAGES)
+    [void][GozlerProbe.Win]::SendMessageW($dialog, $WM_COMMAND, $command, $list)
+}
+
+# Sets the check box `id` to `on` through UI Automation's Toggle, a click.
+function Set-DialogCheck($dialog, [string] $id, [bool] $on) {
+    $box = [GozlerProbe.Ui]::FromHandle((Dialog-Control $dialog $id))
+    if (([GozlerProbe.Ui]::ToggleState($box) -eq 1) -ne $on) { [GozlerProbe.Ui]::Toggle($box) }
+}
+
+function Is-Checked($dialog, [string] $id) {
+    # BM_GETCHECK
+    [long][GozlerProbe.Win]::SendMessageW((Dialog-Control $dialog $id), 0x00F0, 0, 0) -eq 1
+}
+
+function Is-Enabled($dialog, $id) { [GozlerProbe.Win]::IsWindowEnabled((Dialog-Control $dialog $id)) }
+
+# Clicks the button `id` through UI Automation without waiting, because a
+# click can open a modal dialog or a message box.
+function Click-Button($dialog, $id) {
+    [GozlerProbe.Ui]::InvokeLater([GozlerProbe.Ui]::FromHandle((Dialog-Control $dialog $id)))
+}
+
+# Cancel, and whether the dialog then closed.
+function Cancel-Dialog($dialog) {
+    Click-Button $dialog 2
+    $closed = Wait-Until { -not [GozlerProbe.Win]::IsWindow($dialog) }
+    # A dialog left open would block the window's exit at the end.
+    if (-not $closed) { [void][GozlerProbe.Win]::PostMessageW($dialog, $WM_CLOSE, 0, 0) }
+    return $closed
+}
+
+# Puts a shortcut into the hotkey control `id` of `dialog`, as a person's
+# keys do: the virtual-key code `vk`, and `modifiers` of HOTKEYF_SHIFT 1,
+# HOTKEYF_CONTROL 2 and HOTKEYF_ALT 4. HKM_SETHOTKEY tells the dialog
+# nothing, so EN_CHANGE follows, as the control sends it for a key.
+function Set-Hotkey($dialog, [string] $id, [int] $vk, [int] $modifiers) {
+    $control = Dialog-Control $dialog $id 'msctls_hotkey32'
+    [void][GozlerProbe.Win]::SendMessageW($control, 0x0401, [IntPtr]($vk -bor ($modifiers -shl 8)), 0)
+    $command = [IntPtr]((0x0300 -shl 16) -bor [int]$ids[$id])
+    [void][GozlerProbe.Win]::SendMessageW($dialog, $WM_COMMAND, $command, $control)
+}
+
+# What the hotkey control `id` holds, as HKM_GETHOTKEY gives it.
+function Get-Hotkey($dialog, [string] $id) {
+    [long][GozlerProbe.Win]::SendMessageW((Dialog-Control $dialog $id 'msctls_hotkey32'), 0x0402, 0, 0) -band 0xffff
+}
+
+# The text of the process's shown balloon tip once it says `expected`, or
+# what a shown tip says after 5 seconds, and the tip's window for its
+# screenshot. Each dialog and the main window have their own tooltips.
+function Wait-Balloon($process, [string] $expected) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $shown = @([GozlerProbe.Win]::Windows($process.Id, 'tooltips_class32') | Where-Object { [GozlerProbe.Win]::IsWindowVisible($_) })
+        $tip = $shown | Where-Object { [GozlerProbe.Ui]::FromHandle($_).Name -eq $expected } | Select-Object -First 1
+        if ($tip) { return $expected, $tip }
+        Start-Sleep -Milliseconds 20
+    } until ([DateTime]::UtcNow -gt $deadline)
+    $tip = $shown | Select-Object -First 1
+    return ($tip ? [GozlerProbe.Ui]::FromHandle($tip).Name : $null), $tip
+}
+
+# Copies the screen area of `owner` with the balloon `tip` once Windows has
+# faded the balloon in, because a copy taken at once shows faint text.
+function Save-Balloon($owner, $tip, [string] $name) {
+    Start-Sleep -Milliseconds 400
+    Save-ScreenArea $owner @($tip) $name
+}
+
+# The cells of the report list `id`'s first rows, as UI Automation reads
+# them: a list of rows, each an array of cells, which the comma keeps from
+# being unrolled into its cells when it holds one row.
+function Report-Rows($dialog, [string] $id, [int] $count = 50) {
+    $list = [GozlerProbe.Ui]::FromHandle((Dialog-Control $dialog $id 'SysListView32'))
+    return , [GozlerProbe.Ui]::Rows($list, $count)
+}
+
+function Search-Hwnd($process) { [GozlerProbe.Win]::ChildById($windowOf[$process.Id], [int]$SearchBoxId, 'Edit') }
+
+# Where the search box's selection starts and ends, and its text's length.
+function Search-Selection($process) {
+    $search = Search-Hwnd $process
+    # EM_GETSEL gives the start in the low word and the end in the high one.
+    $selection = [long][GozlerProbe.Win]::SendMessageW($search, 0x00B0, 0, 0)
+    [ordered]@{ start = $selection -band 0xffff; end = ($selection -shr 16) -band 0xffff; length = ([GozlerProbe.Win]::ControlText($search)).Length }
+}
+
+function Is-AllSelected($selection) { $selection.length -gt 0 -and $selection.start -eq 0 -and $selection.end -eq $selection.length }
+
+# Closes the window, which hides it while Gozler keeps running in the
+# notification area, runs Show window, as the tray menu does, then File >
+# Exit (C7, C24). Returns what each step left.
+function Hide-Show-Exit($process) {
+    $hwnd = $windowOf[$process.Id]
+    [void][GozlerProbe.Win]::PostMessageW($hwnd, $WM_CLOSE, 0, 0)
+    $hidden = Wait-Until { -not [GozlerProbe.Win]::IsWindowVisible($hwnd) }
+    $running = -not $process.HasExited
+    [void][GozlerProbe.Win]::PostMessageW($hwnd, $WM_COMMAND, [IntPtr](Command-Id 'ShowWindow'), 0)
+    $selected = Wait-Until { [GozlerProbe.Win]::IsWindowVisible($hwnd) -and (Is-AllSelected (Search-Selection $process)) }
+    $shown = [GozlerProbe.Win]::IsWindowVisible($hwnd)
+    [void][GozlerProbe.Win]::PostMessageW($hwnd, $WM_COMMAND, [IntPtr](Command-Id 'Exit'), 0)
+    $ended = $process.WaitForExit(10000)
+    [ordered]@{ hidden = $hidden; still_running = $running; shown = $shown; text_selected = $selected; exit_ended = $ended }
+}
+
 # --- The fixture folder ------------------------------------------------------
 
 function Remove-Fixture([string] $folder) {
@@ -1294,6 +1471,9 @@ function New-Fixture([string] $files) {
         # filters; Large is above 1 MB.
         'large.bin'                  = 2MB
         'old.txt'                    = 5
+        # For Use Total Commander, which takes the newer one.
+        'tools\backup\TOTALCMD64.EXE' = 6
+        'tools\totalcmd\TOTALCMD64.EXE' = 7
     }
     foreach ($entry in $named.GetEnumerator()) {
         $path = Join-Path $files $entry.Key
@@ -1304,6 +1484,7 @@ function New-Fixture([string] $files) {
     [System.IO.File]::SetLastWriteTime((Join-Path $files 'docs\comparator.txt'), [datetime]'2020-01-01 00:00:00')
     # Outside Last 7 days and Last 30 days.
     [System.IO.File]::SetLastWriteTime((Join-Path $files 'old.txt'), (Get-Date).AddDays(-40))
+    [System.IO.File]::SetLastWriteTime((Join-Path $files 'tools\backup\TOTALCMD64.EXE'), [datetime]'2001-01-01 00:00:00')
     [System.IO.File]::SetAttributes((Join-Path $files 'attributes\hidden.txt'), 'Hidden, Archive')
     [System.IO.File]::SetAttributes((Join-Path $files 'attributes\read-only.txt'), 'ReadOnly, Archive')
     # NTFS ignores the read-only attribute on a folder, so the failed export
@@ -1753,10 +1934,21 @@ try {
                 @{ name = 'Match path'; mode = 2; path = $true; text = "$F upper"; cli = @('-p', $F, 'upper'); fixture = 2 }
                 @{ name = 'Regular expression'; mode = 4; text = $regex; cli = @('-r', $regex); fixture = $csCount }
             )
+            $modeHwnd = Control-Hwnd $window $MatchModeId
             $matched = foreach ($case in $cases) {
-                Set-MatchMode $window $case.mode
-                Set-CheckBox $window $MatchCaseId ([bool]$case.case)
-                Set-CheckBox $window $MatchPathId ([bool]$case.path)
+                # Each match control that changes searches again with the
+                # previous case's text, so its answer is awaited before the
+                # case's own text is typed; otherwise that stale answer
+                # could be read as the case's.
+                # CB_GETCURSEL
+                if ([long][GozlerProbe.Win]::SendMessageW($modeHwnd, 0x0147, 0, 0) -ne $case.mode) {
+                    [void](Wait-OwnSearch $window { Set-MatchMode $window $case.mode })
+                }
+                foreach ($box in @(@($MatchCaseId, [bool]$case.case), @($MatchPathId, [bool]$case.path))) {
+                    if (([GozlerProbe.Ui]::ToggleState((Child-ById (Window-Element $window) $box[0])) -eq 1) -ne $box[1]) {
+                        [void](Wait-OwnSearch $window { Set-CheckBox $window $box[0] $box[1] })
+                    }
+                }
                 $answer = Search-For $window $case.text
                 $cliArgs = $case.cli
                 [ordered]@{
@@ -2612,7 +2804,7 @@ try {
                 }
                 if ($tip) {
                     $balloon = [GozlerProbe.Ui]::FromHandle($tip).Name
-                    Save-ScreenArea $dialog @($tip) 'custom-size-balloon-en'
+                    Save-Balloon $dialog $tip 'custom-size-balloon-en'
                 }
                 $stayedOpen = [GozlerProbe.Win]::IsWindow($dialog)
                 $closed = Close-Dialog $dialog 2
@@ -2731,12 +2923,12 @@ try {
                 wrong = $wrong; corrected_status = $answer; corrected_message = $corrected
             })
 
-        # Closing while the empty search runs (T14).
+        # File > Exit while the empty search runs (T14).
         [GozlerProbe.Ui]::SetValue((Child-ById (Window-Element $window) $SearchBoxId), '')
         Start-Sleep -Milliseconds 200
         $part = Status-Part $window 0
         $clock = [Diagnostics.Stopwatch]::StartNew()
-        [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, $WM_CLOSE, 0, 0)
+        [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, $WM_COMMAND, [IntPtr](Command-Id 'Exit'), 0)
         $ended = $window.WaitForExit(10000)
         Check 'closing during a search' ($ended -and $clock.ElapsedMilliseconds -lt 1000) ([ordered]@{
                 status_when_closed = $part; ended = $ended; milliseconds = $clock.ElapsedMilliseconds
@@ -2744,9 +2936,10 @@ try {
     }
 
     if (Runs 'export') {
-        # Closing 0.5 s into an export of the empty search ends the process
-        # within two seconds and deletes the partial file (T14). The export takes
-        # several seconds, so one that ignores its cancel token fails the check.
+        # File > Exit 0.5 s into an export of the empty search ends the
+        # process within two seconds and deletes the partial file (T14). The
+        # export takes several seconds, so one that ignores its cancel token
+        # fails the check.
         Write-Settings $null
         $window = Start-Window
         [void](Wait-Answer $window)
@@ -2755,7 +2948,7 @@ try {
             Start-Sleep -Milliseconds 500
             $existed = Test-Path -LiteralPath $closing
             $clock = [Diagnostics.Stopwatch]::StartNew()
-            [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, $WM_CLOSE, 0, 0)
+            [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, $WM_COMMAND, [IntPtr](Command-Id 'Exit'), 0)
             $ended = $window.WaitForExit(2000)
             Check 'closing during an export' ($ended -and -not (Test-Path -LiteralPath $closing)) ([ordered]@{
                     ended = $ended; milliseconds = $clock.ElapsedMilliseconds; file_while_running = $existed; file_after = Test-Path -LiteralPath $closing
@@ -2784,6 +2977,457 @@ try {
             }
         }
         [void](Close-Window $window)
+    }
+
+    # --- The Settings dialog (stage 7) --------------------------------------
+    # It never presses Restore defaults on General with OK or Apply, which
+    # would delete the owner's Run value and File Explorer verb, never
+    # applies a Windows-key shortcut, which would take the owner's keys, and
+    # holds only shortcuts with Ctrl, Alt and Shift and F11 or F12.
+    if (Runs 'settings') {
+        $both = 1 -bor 2 -bor 4
+
+        # Apply is disabled until a value changes; search as you type off,
+        # Apply, then Cancel keeps it; typing then starts no search until
+        # Enter, and the setting is the same after a restart (C6).
+        Write-Settings $null
+        $window = Start-Window
+        [void](Wait-Answer $window)
+        $dialog = Open-Settings $window
+        $applyAtOpen = Is-Enabled $dialog 'IDC_SETTINGS_APPLY'
+        Start-Sleep -Milliseconds 300
+        Save-Screenshot $dialog 'settings-general-en'
+        Show-SettingsPage $dialog 'search'
+        Set-DialogCheck $dialog 'IDC_SEARCH_AS_YOU_TYPE' $false
+        $applyAfterChange = Wait-Until { Is-Enabled $dialog 'IDC_SETTINGS_APPLY' }
+        Start-Sleep -Milliseconds 300
+        Save-Screenshot $dialog 'settings-search-en'
+        Click-Button $dialog 'IDC_SETTINGS_APPLY'
+        $applied = Wait-Until { -not (Is-Enabled $dialog 'IDC_SETTINGS_APPLY') }
+        $cancelled = Cancel-Dialog $dialog
+        $status = Control-Hwnd $window $StatusBarId
+        $before = [GozlerProbe.Win]::ControlText($status)
+        [GozlerProbe.Ui]::SetValue((Child-ById (Window-Element $window) $SearchBoxId), "$files\ ext:cs")
+        # Watched for a second, six times the window's search delay; a
+        # search that starts shows Searching… or a new count.
+        $searchedWhileTyping = Wait-Until { $part = [GozlerProbe.Win]::ControlText($status); (Is-Searching $part) -or $part -ne $before } 1
+        # WM_KEYDOWN with VK_RETURN, as the keyboard queues it.
+        [void][GozlerProbe.Win]::PostMessageW((Search-Hwnd $window), 0x0100, [IntPtr]0x0D, 0)
+        $searchedOnEnter = Wait-Until { $part = [GozlerProbe.Win]::ControlText($status); $part -ne $before -and -not (Is-Searching $part) } 30
+        $afterEnter = [GozlerProbe.Win]::ControlText($status)
+
+        # Esc closes the dialog and changes nothing that Apply did not apply.
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'search'
+        $clickWas = Is-Checked $dialog 'IDC_SEARCH_SELECT_ON_CLICK'
+        Set-DialogCheck $dialog 'IDC_SEARCH_SELECT_ON_CLICK' (-not $clickWas)
+        $focus = [GozlerProbe.Win]::Focus($dialog)
+        # WM_KEYDOWN with VK_ESCAPE.
+        [void][GozlerProbe.Win]::PostMessageW(($focus -ne 0 ? $focus : $dialog), 0x0100, [IntPtr]0x1B, 0)
+        $escClosed = Wait-Until { -not [GozlerProbe.Win]::IsWindow($dialog) }
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'search'
+        $clickAfterEsc = Is-Checked $dialog 'IDC_SEARCH_SELECT_ON_CLICK'
+        [void](Cancel-Dialog $dialog)
+
+        # Keep running, the default, without a shortcut (C7, C24).
+        $withoutShortcut = Hide-Show-Exit $window
+        $window = Start-Window
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'search'
+        $afterRestart = Is-Checked $dialog 'IDC_SEARCH_AS_YOU_TYPE'
+        [void](Cancel-Dialog $dialog)
+        [void](Close-Window $window)
+        Check 'Apply, Cancel, and search as you type off' (-not $applyAtOpen -and $applyAfterChange -and $applied -and $cancelled -and
+            -not $searchedWhileTyping -and $searchedOnEnter -and -not $afterRestart) ([ordered]@{
+                apply_at_open = $applyAtOpen; apply_after_change = $applyAfterChange; apply_disabled_after_apply = $applied
+                cancel_closed = $cancelled; searched_while_typing = $searchedWhileTyping; status_after_enter = $afterEnter
+                checked_after_restart = $afterRestart
+            })
+        Check 'Esc changes nothing that Apply did not apply' ($escClosed -and $clickAfterEsc -eq $clickWas) ([ordered]@{
+                esc_closed = $escClosed; before = $clickWas; after_esc = $clickAfterEsc
+            })
+
+        # Ctrl+Alt+Shift+F12, chosen in the dialog, brings Gozler forward
+        # from another of the probe's windows with the search text selected
+        # (C6); with it, closing still hides the window (C7).
+        Write-Settings $null
+        $window = Start-Window
+        [void](Wait-Answer $window)
+        [void](Search-For $window "$files\")
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'keyboard'
+        Set-Hotkey $dialog 'IDC_KEYBOARD_SHORTCUT' 0x7B $both
+        Click-Button $dialog 1
+        $chosen = Wait-Until { -not [GozlerProbe.Win]::IsWindow($dialog) }
+        $otherData = Join-Path $fixture 'other'
+        New-Item -ItemType Directory -Force $otherData | Out-Null
+        Write-Settings '{ "settings": { "keep_running": false } }' $otherData
+        $other = Start-Window $otherData
+        if ($chosen -and (Is-InFront $other)) {
+            # VK_CONTROL, VK_MENU, VK_SHIFT, VK_F12
+            $pressed = [GozlerProbe.Win]::PressKeys($other.MainWindowHandle, 0x11, 0x12, 0x10, 0x7B)
+            $front = Wait-Until { [GozlerProbe.Win]::GetForegroundWindow() -eq $windowOf[$window.Id] }
+            $selection = Search-Selection $window
+            Check 'the shortcut brings Gozler forward' ($pressed -and $front -and (Is-AllSelected $selection)) ([ordered]@{
+                    pressed = $pressed; in_front = $front; selection = $selection
+                })
+        }
+        else {
+            Report 'the shortcut brings Gozler forward' 'not run' ([ordered]@{
+                    note = "the probe's second window was not in front, so no key was pressed"; shortcut_applied = $chosen
+                })
+        }
+        [void](Close-Window $other)
+        $withShortcut = Hide-Show-Exit $window
+        Check 'keep running: close hides, Show window, Exit' ($withoutShortcut.hidden -and $withoutShortcut.still_running -and
+            $withoutShortcut.text_selected -and $withoutShortcut.exit_ended -and $withShortcut.hidden -and
+            $withShortcut.still_running -and $withShortcut.text_selected -and $withShortcut.exit_ended) ([ordered]@{
+                without_shortcut = $withoutShortcut; with_shortcut = $withShortcut
+            })
+
+        # A shortcut that another program holds shows the spec's message
+        # and keeps the dialog open (C6); held before the start, the window
+        # says so when it first shows, and the tray icon still shows it.
+        # The probe holds Ctrl+Alt+Shift+F11 itself.
+        $held = [GozlerProbe.Win]::RegisterHotKey(0, 0x7A, $both, 0x7A)
+        try {
+            if (-not $held) {
+                Report 'a shortcut another program holds' 'not run' 'another program holds Ctrl+Alt+Shift+F11 already'
+                Report 'a shortcut held before the start' 'not run' 'another program holds Ctrl+Alt+Shift+F11 already'
+            }
+            else {
+                $takenText = (Caption 'settings_keyboard.shortcut_taken') -replace '\{0\}', 'Ctrl+Alt+Shift+F11'
+                Write-Settings $null
+                $window = Start-Window
+                $dialog = Open-Settings $window
+                Show-SettingsPage $dialog 'keyboard'
+                Start-Sleep -Milliseconds 300
+                Save-Screenshot $dialog 'settings-keyboard-en'
+                Set-Hotkey $dialog 'IDC_KEYBOARD_SHORTCUT' 0x7A $both
+                Click-Button $dialog 1
+                $balloon, $tip = Wait-Balloon $window $takenText
+                if ($tip) { Save-Balloon $dialog $tip 'settings-shortcut-taken-en' }
+                $stayedOpen = [GozlerProbe.Win]::IsWindow($dialog)
+                [void](Cancel-Dialog $dialog)
+                [void](Close-Window $window)
+                Check 'a shortcut another program holds' ($balloon -eq $takenText -and $stayedOpen) ([ordered]@{
+                        balloon = $balloon; stayed_open = $stayedOpen
+                    })
+
+                Write-Settings '{ "settings": { "show_shortcut": "Ctrl+Alt+Shift+F11" } }'
+                $window = Start-Window
+                $texts = @(Close-MessageBox $window 'shortcut-taken-at-start-en')
+                $expected = (Caption 'message.shortcut_taken') -replace '\{0\}', 'Ctrl+Alt+Shift+F11'
+                $hwnd = $windowOf[$window.Id]
+                [void][GozlerProbe.Win]::PostMessageW($hwnd, $WM_CLOSE, 0, 0)
+                $hidden = Wait-Until { -not [GozlerProbe.Win]::IsWindowVisible($hwnd) }
+                # The tray icon's message, WM_APP + 4, with NIN_SELECT, as
+                # Windows sends it for a click on the icon.
+                [void][GozlerProbe.Win]::PostMessageW($hwnd, 0x8004, 0, [IntPtr]0x400)
+                $shown = Wait-Until { [GozlerProbe.Win]::IsWindowVisible($hwnd) }
+                [void](Close-Window $window)
+                Check 'a shortcut held before the start' ($texts -contains $expected -and $hidden -and $shown) ([ordered]@{
+                        message = $texts; hidden = $hidden; shown_by_the_tray_icon = $shown
+                    })
+            }
+        }
+        finally { if ($held) { [void][GozlerProbe.Win]::UnregisterHotKey(0, 0x7A) } }
+
+        # Keep running off: closing ends Gozler, also with a shortcut, and
+        # the Keyboard page says that the shortcut works only while the
+        # window is open (C7).
+        Write-Settings '{ "settings": { "keep_running": false, "show_shortcut": "Ctrl+Alt+Shift+F12" } }'
+        $window = Start-Window
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'keyboard'
+        $note = Dialog-Control $dialog 'IDC_KEYBOARD_CLOSED_NOTE' 'Static'
+        $noteText = [GozlerProbe.Win]::ControlText($note)
+        Start-Sleep -Milliseconds 300
+        Save-Screenshot $dialog 'settings-keyboard-closed-note-en'
+        [void](Cancel-Dialog $dialog)
+        [void][GozlerProbe.Win]::PostMessageW($windowOf[$window.Id], $WM_CLOSE, 0, 0)
+        $ended = $window.WaitForExit(10000)
+        Check 'keep running off: closing ends Gozler' ($ended -and $noteText -eq (Caption 'settings_keyboard.closed_note')) ([ordered]@{
+                ended = $ended; note = $noteText
+            })
+
+        # Select the search text when Gozler is activated: on, activation
+        # from another program selects the search text, and activation from
+        # one of Gozler's own windows, as when its dialog closes, leaves the
+        # focus on the list; off, the focus stays on the list (C6).
+        # WM_ACTIVATE is sent as Windows sends it, because the probe never
+        # brings a window to the front; its lParam is the window that lost
+        # activation, none for another program's.
+        $activation = [ordered]@{}
+        foreach ($on in $true, $false) {
+            Write-Settings "{ `"settings`": { `"select_on_activate`": $($on.ToString().ToLowerInvariant()) } }"
+            $window = Start-Window
+            [void](Wait-Answer $window)
+            [void](Search-For $window "$files\")
+            $hwnd = $windowOf[$window.Id]
+            $listHwnd = Control-Hwnd $window $ListId
+            # WM_KEYDOWN with VK_DOWN in the search box moves to the list.
+            [void][GozlerProbe.Win]::PostMessageW((Search-Hwnd $window), 0x0100, [IntPtr]0x28, 0)
+            $inList = Wait-Until { [GozlerProbe.Win]::Focus($hwnd) -eq $listHwnd }
+            # WM_ACTIVATE with WA_INACTIVE, then WA_ACTIVE.
+            [void][GozlerProbe.Win]::SendMessageW($hwnd, 0x0006, [IntPtr]0, 0)
+            [void][GozlerProbe.Win]::SendMessageW($hwnd, 0x0006, [IntPtr]1, 0)
+            $focus = [GozlerProbe.Win]::Focus($hwnd)
+            $activation[$on ? 'on' : 'off'] = [ordered]@{
+                focus_in_list_before = $inList
+                focus                = $focus -eq $listHwnd ? 'list' : ($focus -eq (Search-Hwnd $window) ? 'search box' : "$focus")
+                selection            = Search-Selection $window
+            }
+            if ($on) {
+                [void][GozlerProbe.Win]::PostMessageW((Search-Hwnd $window), 0x0100, [IntPtr]0x28, 0)
+                $backInList = Wait-Until { [GozlerProbe.Win]::Focus($hwnd) -eq $listHwnd }
+                [void][GozlerProbe.Win]::SendMessageW($hwnd, 0x0006, [IntPtr]0, 0)
+                [void][GozlerProbe.Win]::SendMessageW($hwnd, 0x0006, [IntPtr]1, $hwnd)
+                $activation.on_from_gozler = [ordered]@{
+                    focus_in_list_before = $backInList
+                    focus                = [GozlerProbe.Win]::Focus($hwnd) -eq $listHwnd ? 'list' : 'elsewhere'
+                }
+            }
+            [void](Close-Window $window)
+        }
+        Check 'select the search text when activated' ($activation.on.focus_in_list_before -and $activation.on.focus -eq 'search box' -and
+            (Is-AllSelected $activation.on.selection) -and $activation.on_from_gozler.focus_in_list_before -and
+            $activation.on_from_gozler.focus -eq 'list' -and $activation.off.focus_in_list_before -and $activation.off.focus -eq 'list') $activation
+
+        # The hotkey control: without the Windows key, Ctrl+F becomes
+        # Ctrl+Alt+F; with it, S alone stays S (C6). These are the control's
+        # own rules, which no core test sees. Keys typed into the control
+        # need the dialog in front. Win+L's refusal is left to the core
+        # test: the probe never presses OK with a Windows-key shortcut, so a
+        # broken refusal cannot take the owner's keys.
+        Write-Settings $null
+        $window = Start-Window
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'keyboard'
+        $hotkey = Dialog-Control $dialog 'IDC_KEYBOARD_SHORTCUT' 'msctls_hotkey32'
+        if ([GozlerProbe.Win]::GetForegroundWindow() -eq $dialog) {
+            [GozlerProbe.Ui]::Focus([GozlerProbe.Ui]::FromHandle($hotkey))
+            # VK_CONTROL, F
+            $pressed = [GozlerProbe.Win]::PressKeys($dialog, 0x11, 0x46)
+            $ctrlF = Wait-Until { (Get-Hotkey $dialog 'IDC_KEYBOARD_SHORTCUT') -eq 0x646 } 2
+            Set-DialogCheck $dialog 'IDC_KEYBOARD_WINDOWS_KEY' $true
+            [GozlerProbe.Ui]::Focus([GozlerProbe.Ui]::FromHandle($hotkey))
+            $pressed = $pressed -and [GozlerProbe.Win]::PressKeys($dialog, 0x53)
+            $sAlone = Wait-Until { (Get-Hotkey $dialog 'IDC_KEYBOARD_SHORTCUT') -eq 0x53 } 2
+            Check 'the hotkey control takes keys by the rules' ($pressed -and $ctrlF -and $sAlone) ([ordered]@{
+                    pressed = $pressed; ctrl_f_became_ctrl_alt_f = $ctrlF; s_alone_with_the_windows_key = $sAlone
+                })
+        }
+        else { Report 'the hotkey control takes keys by the rules' 'not run' 'the dialog was not in front, so no key was pressed' }
+        [void](Cancel-Dialog $dialog)
+
+        # The Keyboard page: Ctrl+K added to Edit > Find focuses the search
+        # box, and Find keeps Ctrl+F in the menu; a refusal shows its message
+        # and keeps the command shortcut dialog open; Restore defaults
+        # refills the page (C6, C18). The core tests prove each refusal and
+        # every default, so one case of each is enough here.
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'keyboard'
+        $filter = Dialog-Control $dialog 'IDC_KEYBOARD_FILTER' 'Edit'
+        $keysList = Dialog-Control $dialog 'IDC_KEYBOARD_KEYS' 'ListBox'
+        [GozlerProbe.Win]::SetControlText($filter, 'ctrl+f')
+        $findRow = (Report-Rows $dialog 'IDC_KEYBOARD_COMMANDS' 1)[0]
+        Click-Button $dialog 'IDC_KEYBOARD_ADD'
+        $shortcutDialog = Wait-NewDialog $window @($dialog)
+        $added = $false
+        if ($shortcutDialog) {
+            Start-Sleep -Milliseconds 300
+            Save-Screenshot $shortcutDialog 'command-shortcut-en'
+            Set-Hotkey $shortcutDialog 'IDC_COMMAND_SHORTCUT_KEY' 0x4B 2
+            Click-Button $shortcutDialog 1
+            $added = Wait-Until { -not [GozlerProbe.Win]::IsWindow($shortcutDialog) }
+        }
+        $findKeys = @([GozlerProbe.Win]::ListItems($keysList))
+        [GozlerProbe.Win]::SetControlText($filter, 'Edit > Copy')
+        $copyRow = (Report-Rows $dialog 'IDC_KEYBOARD_COMMANDS' 1)[0]
+        Click-Button $dialog 'IDC_KEYBOARD_ADD'
+        $shortcutDialog = Wait-NewDialog $window @($dialog)
+        $refusal = $null
+        $refusedOpen = $false
+        $takenText = (Caption 'settings_keyboard.refused_taken') -replace '\{0\}', 'Ctrl+E' -replace '\{1\}', 'Edit > Find'
+        if ($shortcutDialog) {
+            Set-Hotkey $shortcutDialog 'IDC_COMMAND_SHORTCUT_KEY' 0x45 2
+            Click-Button $shortcutDialog 1
+            $refusal, $tip = Wait-Balloon $window $takenText
+            if ($tip) { Save-Balloon $shortcutDialog $tip 'command-shortcut-taken-en' }
+            $refusedOpen = [GozlerProbe.Win]::IsWindow($shortcutDialog)
+            [void](Cancel-Dialog $shortcutDialog)
+        }
+        Click-Button $dialog 1
+        $applied = Wait-Until { -not [GozlerProbe.Win]::IsWindow($dialog) }
+        $findMenu = @(Read-Menus $window) | Where-Object { $_.Trim().StartsWith("$(Plain (Caption 'command.find')) |") } | Select-Object -First 1
+        if (Is-InFront $window) {
+            [GozlerProbe.Ui]::Focus((Child-ById (Window-Element $window) $ListId))
+            # VK_CONTROL, K
+            $pressed = [GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x11, 0x4B)
+            $ctrlK = $pressed -and (Wait-Until { [GozlerProbe.Win]::Focus($windowOf[$window.Id]) -eq (Search-Hwnd $window) } 2)
+            $ctrlKResult = $pressed ? $ctrlK : 'not run'
+        }
+        else { $ctrlKResult = 'not run: the window was not in front' }
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'keyboard'
+        Click-Button $dialog 'IDC_KEYBOARD_RESTORE'
+        # The click arrives later; the defaults differ from the saved
+        # shortcuts, so Apply turns on once it has.
+        [void](Wait-Until { Is-Enabled $dialog 'IDC_SETTINGS_APPLY' })
+        $filter = Dialog-Control $dialog 'IDC_KEYBOARD_FILTER' 'Edit'
+        [GozlerProbe.Win]::SetControlText($filter, 'ctrl+f')
+        $restoredFind = @([GozlerProbe.Win]::ListItems((Dialog-Control $dialog 'IDC_KEYBOARD_KEYS' 'ListBox')))
+        [void](Cancel-Dialog $dialog)
+        [void](Close-Window $window)
+        $keyboard = [ordered]@{
+            find_row = $findRow -join ' | '; added = $added; find_keys = $findKeys; copy_row = $copyRow -join ' | '
+            refusal = $refusal; refusal_kept_the_dialog_open = $refusedOpen; applied = $applied; find_in_menu = $findMenu
+            ctrl_k_focuses_the_search_box = $ctrlKResult; find_keys_after_restore = $restoredFind
+        }
+        Check 'Settings > Keyboard command shortcuts' ($findRow[0] -eq 'Edit > Find' -and $added -and ($findKeys -join ', ') -eq 'Ctrl+F, Ctrl+E, Ctrl+K' -and
+            $copyRow[0] -eq 'Edit > Copy' -and $refusal -eq $takenText -and $refusedOpen -and $applied -and $findMenu -like '* | Ctrl+F | *' -and
+            $ctrlKResult -ne $false -and ($restoredFind -join ', ') -eq 'Ctrl+F, Ctrl+E') $keyboard
+
+        # Browse… beside Open files writes the chosen program in quotes and
+        # "%1"; Use Total Commander fills Open folders and Open files with
+        # the newer of the fixture's two (C6).
+        Write-Settings $null
+        $window = Start-Window
+        $dialog = Open-Settings $window
+        $openFolders = Dialog-Control $dialog 'IDC_GENERAL_OPEN_FOLDERS' 'Edit'
+        $openFiles = Dialog-Control $dialog 'IDC_GENERAL_OPEN_FILES' 'Edit'
+        $openLocation = Dialog-Control $dialog 'IDC_GENERAL_OPEN_LOCATION' 'Edit'
+        Click-Button $dialog 'IDC_GENERAL_OPEN_FILES_BROWSE'
+        $picker = Wait-NewDialog $window @($dialog)
+        $browsed = $null
+        if ($picker) {
+            # The file name box, inside a combo box, and Open, by the IDs the
+            # Windows dialog gives them.
+            $name = [IntPtr]::Zero
+            [void](Wait-Until { $script:name = [GozlerProbe.Win]::ChildById($picker, 1148, 'Edit'); if ($script:name -eq 0) { $script:name = [GozlerProbe.Win]::ChildById($picker, 1001, 'Edit') }; $script:name -ne 0 })
+            $name = $script:name
+            if ($name -ne 0) {
+                [GozlerProbe.Win]::SetControlText($name, '"C:\Windows\notepad.exe"')
+                Click-Button $picker 1
+            }
+            if (-not (Wait-Until { -not [GozlerProbe.Win]::IsWindow($picker) })) { [void](Cancel-Dialog $picker) }
+            [void](Wait-Until { [GozlerProbe.Win]::ControlText($openFiles) -ne '' } 2)
+            $browsed = [GozlerProbe.Win]::ControlText($openFiles)
+        }
+        $browseExpected = '"C:\Windows\notepad.exe" "%1"'
+        Check 'Browse… writes the quoted program' ($browsed -eq $browseExpected) ([ordered]@{ picker_opened = [bool]$picker; open_files = $browsed })
+        [void](Cancel-Dialog $dialog)
+
+        if (-not $filesListed) {
+            Report 'Use Total Commander' 'not run' 'gozler did not list the fixture'
+        }
+        else {
+            $dialog = Open-Settings $window
+            $openFolders = Dialog-Control $dialog 'IDC_GENERAL_OPEN_FOLDERS' 'Edit'
+            $openFiles = Dialog-Control $dialog 'IDC_GENERAL_OPEN_FILES' 'Edit'
+            $openLocation = Dialog-Control $dialog 'IDC_GENERAL_OPEN_LOCATION' 'Edit'
+            $newer = Join-Path $files 'tools\totalcmd\TOTALCMD64.EXE'
+            $tcExpected = "`"$newer`" /O /A /P=L /L=`"%1`""
+            Click-Button $dialog 'IDC_GENERAL_TOTAL_COMMANDER'
+            $filled = Wait-Until { [GozlerProbe.Win]::ControlText($openFolders) -eq $tcExpected } 15
+            $boxes = [ordered]@{
+                open_folders = [GozlerProbe.Win]::ControlText($openFolders)
+                open_files = [GozlerProbe.Win]::ControlText($openFiles)
+                open_file_location = [GozlerProbe.Win]::ControlText($openLocation)
+            }
+            Start-Sleep -Milliseconds 300
+            Save-Screenshot $dialog 'settings-total-commander-en'
+            Check 'Use Total Commander' ($filled -and $boxes.open_files -eq $tcExpected -and $boxes.open_file_location -eq '') $boxes
+
+            # With none in the index, its balloon, and the boxes keep their
+            # text. The owner's PC usually has one, so this runs only where
+            # the index holds no other.
+            $elsewhere = @(& $gozler -n 5 'file:' 'totalcmd*.exe' 2>$null | Where-Object { -not $_.StartsWith($files) })
+            if ($elsewhere) {
+                Report 'Use Total Commander finds none' 'not run' "the index holds a Total Commander outside the fixture: $($elsewhere[0])"
+            }
+            else {
+                Remove-Item -LiteralPath (Join-Path $files 'tools') -Recurse -Force
+                $gone = Wait-Until { -not @(& $gozler -n 5 'file:' 'totalcmd*.exe' 2>$null) } 60
+                Click-Button $dialog 'IDC_GENERAL_TOTAL_COMMANDER'
+                $noneText = Caption 'settings_general.no_total_commander'
+                $balloon, $tip = Wait-Balloon $window $noneText
+                if ($tip) { Save-Balloon $dialog $tip 'settings-no-total-commander-en' }
+                $kept = [GozlerProbe.Win]::ControlText($openFolders) -eq $tcExpected
+                Check 'Use Total Commander finds none' ($gone -and $balloon -eq $noneText -and $kept) ([ordered]@{
+                        index_lost_them = $gone; balloon = $balloon; boxes_kept = $kept
+                    })
+            }
+            Report 'Use Total Commander while the service is stopped' 'not run' 'the probe never stops the service; the core test use_total_commander_answers_the_dialog_only pins the failure reaching the dialog'
+            [void](Cancel-Dialog $dialog)
+        }
+
+        # The Index page lists the volumes and phases of
+        # gozler --status --json; entry counts change between two reads.
+        $dialog = Open-Settings $window
+        Show-SettingsPage $dialog 'index'
+        $phaseKeys = @{ Live = 'live'; Snapshot = 'snapshot'; Bootstrapping = 'indexing'; Rescanning = 'indexing'; Offline = 'offline'; Failed = 'failed' }
+        $volumes = @((& $gozler --status --json | ConvertFrom-Json).volumes)
+        $expectedDrives = @($volumes | ForEach-Object {
+                $prefix = $_.mounts.Count -gt 0 ? $_.mounts[0] : $_.guid
+                "$prefix | $(Caption "settings_index.$($phaseKeys[$_.phase.phase])")"
+            })
+        $drives = @()
+        [void](Wait-Until {
+                # A drive's name is its mount prefix, which holds no space,
+                # then its label, which only Windows knows.
+                $script:drives = @((Report-Rows $dialog 'IDC_INDEX_DRIVES') | ForEach-Object { "$(($_[0] -split ' ', 2)[0]) | $($_[1])" })
+                $script:drives.Count -eq $expectedDrives.Count
+            })
+        $drives = $script:drives
+        Start-Sleep -Milliseconds 300
+        Save-Screenshot $dialog 'settings-index-en'
+        [void](Cancel-Dialog $dialog)
+        [void](Close-Window $window)
+        Check 'the Index page lists the volumes' (($drives -join "`n") -eq ($expectedDrives -join "`n")) ([ordered]@{ page = $drives; gozler = $expectedDrives })
+
+        # Show every file and folder when the search is empty, off: the empty
+        # search shows "Type to search." (S6).
+        Write-Settings '{ "settings": { "show_all_when_empty": false } }'
+        $window = Start-Window
+        $typeToSearch = Wait-Until { (Message-Text $window) -eq (Caption 'list.type_to_search') }
+        $message = Message-Text $window
+        Start-Sleep -Milliseconds 300
+        Save-Screenshot $window.MainWindowHandle 'type-to-search-en'
+        [void](Close-Window $window)
+        Check 'the empty search shows nothing' $typeToSearch ([ordered]@{ message = $message })
+
+        # A damaged ui.json still opens the window; the core test
+        # a_damaged_settings_file_opens_with_the_defaults proves the values.
+        Write-Settings 'not json {' -Raw
+        $window = Start-Window
+        $answer = Wait-Answer $window
+        [void](Close-Window $window)
+        Check 'a damaged ui.json opens the window' ($answer -match (Caption-Pattern 'status.showing')) ([ordered]@{ status = $answer })
+
+        # The pages, and the command shortcut dialog, in the pseudo-language.
+        if ($Pseudo) {
+            Write-Settings '{ "settings": { "language": "qps-ploc" } }'
+            $window = Start-Window
+            $dialog = Open-Settings $window
+            foreach ($page in 'general', 'search', 'keyboard', 'index') {
+                Show-SettingsPage $dialog $page
+                Start-Sleep -Milliseconds 300
+                Save-Screenshot $dialog "settings-$page-pseudo"
+            }
+            Show-SettingsPage $dialog 'keyboard'
+            Click-Button $dialog 'IDC_KEYBOARD_ADD'
+            $shortcutDialog = Wait-NewDialog $window @($dialog)
+            if ($shortcutDialog) {
+                Start-Sleep -Milliseconds 300
+                Save-Screenshot $shortcutDialog 'command-shortcut-pseudo'
+                [void](Cancel-Dialog $shortcutDialog)
+            }
+            [void](Cancel-Dialog $dialog)
+            [void](Close-Window $window)
+        }
     }
 }
 catch {

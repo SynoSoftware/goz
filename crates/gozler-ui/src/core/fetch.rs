@@ -25,14 +25,17 @@ pub(crate) enum Purpose {
     Selection,
     Status,
     Export,
+    /// Settings' search for a program, which Use Total Commander sends.
+    Program,
 }
 
 impl Purpose {
-    pub(crate) const ALL: [Purpose; 4] = [
+    pub(crate) const ALL: [Purpose; 5] = [
         Purpose::Results,
         Purpose::Selection,
         Purpose::Status,
         Purpose::Export,
+        Purpose::Program,
     ];
 }
 
@@ -59,6 +62,9 @@ pub(crate) enum Ask {
     FolderSize(Search),
     Export(ExportAsk),
     Status,
+    /// The rows of a search for a program, answered with
+    /// [`Outcome::Rows`].
+    Program(ChunkAsk),
 }
 
 /// The rows of `search` in the order `sort` from the position `start`, at
@@ -147,6 +153,7 @@ impl Fetch {
             Ask::Selection(_) | Ask::FolderSize(_) => Purpose::Selection,
             Ask::Export(_) => Purpose::Export,
             Ask::Status => Purpose::Status,
+            Ask::Program(_) => Purpose::Program,
         }
     }
 }

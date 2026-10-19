@@ -1,9 +1,12 @@
-//! Modal dialogs from the .rc templates, and message boxes. Windows runs a
-//! template dialog's modal loop, its Tab order, `Enter` and `Esc`, and
-//! scales it to its monitor's DPI. [`run_modal`] sets the dialog's title
-//! and captions, focuses the control that its [`DialogProc`] names, keeps
-//! the fonts the dialog's controls use until it ends, and ends it on an OK
-//! or Cancel that its procedure leaves alone.
+//! Modal dialogs from the .rc templates, their pages, and message boxes.
+//! Windows runs a template dialog's modal loop, its Tab order, `Enter` and
+//! `Esc`, and scales it to its monitor's DPI. [`run_modal`] sets the
+//! dialog's title and captions, focuses the control that its
+//! [`DialogProc`] names, keeps the fonts the dialog's controls use until it
+//! ends, and ends it on an OK or Cancel that its procedure leaves alone. A
+//! page, such as Settings > General, is a child dialog of its own template
+//! inside the dialog ([`create_page`]), whose controls the dialog's
+//! procedure handles.
 
 use super::gdi::Font;
 use super::{Hwnd, wide};
@@ -12,11 +15,13 @@ use crate::core::ids::DialogId;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{DTN_DATETIMECHANGE, NM_CLICK, NM_RETURN, NMHDR};
+use windows::Win32::UI::Controls::{
+    DTN_DATETIMECHANGE, LVN_ITEMCHANGED, NM_CLICK, NM_RETURN, NMHDR,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CBN_SELCHANGE, DialogBoxParamW, EN_CHANGE, EndDialog, GetDlgItem, GetWindowLongPtrW, IDOK,
-    MB_ICONERROR, MB_OK, MessageBoxW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_COMMAND,
-    WM_INITDIALOG, WM_NOTIFY,
+    BN_CLICKED, CBN_SELCHANGE, CreateDialogParamW, DialogBoxParamW, EN_CHANGE, EndDialog,
+    GetDlgItem, GetParent, GetWindowLongPtrW, IDOK, MB_ICONERROR, MB_OK, MessageBoxW, SendMessageW,
+    SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_INITDIALOG, WM_NOTIFY, WM_TIMER,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -24,20 +29,33 @@ use windows::core::{HSTRING, PCWSTR};
 /// procedure.
 const DWLP_USER: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(2 * size_of::<isize>() as i32);
 
+/// The private message that tells a dialog that the main window holds a
+/// reply for it ([`DialogMessage::Reply`]).
+const REPLY: u32 = super::wake::WAKE + 6;
+
 /// A dialog message decoded for its handler.
 pub(crate) enum DialogMessage {
-    /// `WM_COMMAND` from the control `id`, such as a click on a button; OK
-    /// and Cancel are 1 and 2.
+    /// A click on the button or check box `id`, or OK and Cancel, which are
+    /// 1 and 2, from `Enter` and `Esc`.
     Command {
         id: u16,
     },
-    /// A control holds another value: an edit control's text, a drop-down
-    /// list's selection, or a date picker's date or check box.
-    Edited,
+    /// The control `id` holds another value: an edit control's or a hotkey
+    /// control's text, a list's selection, or a date picker's date or check
+    /// box.
+    Edited {
+        id: u16,
+    },
     /// A click or `Enter` on the SysLink control `id`.
     LinkActivated {
         id: u16,
     },
+    /// The dialog's timer `id`.
+    Timer {
+        id: usize,
+    },
+    /// [`post_reply`] said that a reply waits for the dialog.
+    Reply,
     Other,
 }
 
@@ -140,8 +158,10 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         WM_COMMAND => {
             let id = (wparam.0 & 0xffff) as u16;
             match ((wparam.0 >> 16) & 0xffff) as u32 {
-                EN_CHANGE | CBN_SELCHANGE => DialogMessage::Edited,
-                _ => DialogMessage::Command { id },
+                BN_CLICKED => DialogMessage::Command { id },
+                // A list box's LBN_SELCHANGE is a combo box's CBN_SELCHANGE.
+                EN_CHANGE | CBN_SELCHANGE => DialogMessage::Edited { id },
+                _ => DialogMessage::Other,
             }
         }
         WM_NOTIFY => {
@@ -150,15 +170,21 @@ unsafe extern "system" fn procedure<D: DialogProc>(
             let id = header.idFrom as u16;
             match header.code {
                 NM_CLICK | NM_RETURN => DialogMessage::LinkActivated { id },
-                DTN_DATETIMECHANGE => DialogMessage::Edited,
+                DTN_DATETIMECHANGE | LVN_ITEMCHANGED => DialogMessage::Edited { id },
                 _ => DialogMessage::Other,
             }
         }
+        WM_TIMER => DialogMessage::Timer { id: wparam.0 },
+        REPLY => DialogMessage::Reply,
         _ => DialogMessage::Other,
     };
     let command = match message {
         DialogMessage::Command { id, .. } => Some(id),
-        DialogMessage::Edited | DialogMessage::LinkActivated { .. } | DialogMessage::Other => None,
+        DialogMessage::Edited { .. }
+        | DialogMessage::LinkActivated { .. }
+        | DialogMessage::Timer { .. }
+        | DialogMessage::Reply
+        | DialogMessage::Other => None,
     };
     if running.state.message(dialog, message) {
         return 1;
@@ -185,6 +211,65 @@ fn open<D: DialogProc>(dialog: Hwnd, running: &Running<D>) {
     if let Some(control) = item(dialog, opened.focus) {
         control.focus();
     }
+}
+
+/// Creates the hidden page `page` inside `dialog`, with its captions set.
+/// The dialog's procedure receives the page's `WM_COMMAND` and `WM_NOTIFY`,
+/// so one [`DialogProc`] handles every page; the pages' control IDs differ
+/// from each other's and from the dialog's. The page lives until its
+/// dialog ends.
+pub(crate) fn create_page(
+    dialog: Hwnd,
+    page: DialogId,
+    captions: &DialogCaptions,
+) -> windows::core::Result<Hwnd> {
+    // SAFETY: the template is a resource of this module, a child dialog
+    // whose procedure reads no state.
+    let hwnd = unsafe {
+        CreateDialogParamW(
+            GetModuleHandleW(PCWSTR::null()).ok().map(Into::into),
+            PCWSTR(usize::from(page.id()) as *const u16),
+            Some(dialog.0),
+            Some(page_procedure),
+            LPARAM(0),
+        )
+    }?;
+    let page = Hwnd(hwnd);
+    for (id, text) in &captions.items {
+        if let Some(control) = item(page, *id) {
+            control.set_text(text);
+        }
+    }
+    Ok(page)
+}
+
+unsafe extern "system" fn page_procedure(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    match msg {
+        // False: the hidden page takes no focus when it is created.
+        WM_INITDIALOG => 0,
+        WM_COMMAND | WM_NOTIFY => {
+            // SAFETY: the dialog receives the message as the page did, with
+            // its pointer valid while this call runs.
+            unsafe {
+                match GetParent(hwnd) {
+                    Ok(dialog) => SendMessageW(dialog, msg, Some(wparam), Some(lparam)).0,
+                    Err(_) => 0,
+                }
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Tells `dialog` that the main window holds a reply for it, such as Use
+/// Total Commander's, which the dialog then reads.
+pub(crate) fn post_reply(dialog: Hwnd) {
+    dialog.post(REPLY);
 }
 
 /// Ends the dialog; [`run_modal`] returns `end`.

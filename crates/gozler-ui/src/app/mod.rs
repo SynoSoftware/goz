@@ -7,8 +7,8 @@ mod dialogs;
 mod icons;
 mod main_window;
 mod requests;
+mod settings;
 
-use crate::core::commands;
 use crate::core::ids::IconId;
 use crate::core::model::Model;
 use crate::core::settings::Settings;
@@ -28,14 +28,15 @@ const SHOW_MESSAGE: &str = "gozler.ui.show";
 
 pub(crate) fn run() {
     install_panic_hook();
-    let data_dir_argument = data_dir_argument();
-    let data_dir = data_dir_argument.clone().unwrap_or_else(|| {
+    let arguments = Arguments::read();
+    let data_dir = arguments.data_dir.clone().unwrap_or_else(|| {
         win::shell::local_app_data()
             .expect("Windows names the local application data folder")
             .join("Gozler")
     });
     set_panic_report(|report| report.folder = Some(data_dir.clone()));
-    let suffix = data_dir_argument
+    let suffix = arguments
+        .data_dir
         .as_deref()
         .map(instance_suffix)
         .unwrap_or_default();
@@ -44,7 +45,7 @@ pub(crate) fn run() {
     let Some(_instance) = win::instance::claim(&format!("{INSTANCE_MUTEX}{suffix}"))
         .expect("a named mutex can be created")
     else {
-        win::instance::hand_over(&window_class, show_message);
+        win::instance::hand_over(&window_class, show_message, arguments.location.as_deref());
         return;
     };
     win::shell::initialize_com();
@@ -57,31 +58,67 @@ pub(crate) fn run() {
         .language
         .resolve(&win::locale::display_languages());
     set_panic_report(|report| report.language = Some(language));
-    let model = Model::new(Strings::load(language), settings);
+    let mut model = Model::new(Strings::load(language), settings);
+    if let Some(folder) = arguments.location {
+        // The window's first search runs with it.
+        let _ = model.choose_folder(folder);
+    }
 
     win::window::register_class::<MainWindow>(&window_class, IconId::Gozler.id())
         .expect("the window class registers");
     win::pane::register().expect("the filter pane's window class registers");
-    let window = MainWindow::open(&window_class, model, settings_file, show_message);
-    let shortcuts: Vec<_> = commands::accelerators()
-        .into_iter()
-        .map(|(shortcut, item)| (shortcut, item.id()))
-        .collect();
-    let accelerators =
-        win::menu::Accelerators::new(&shortcuts).expect("the accelerator table builds");
-    win::window::run_message_loop(window, &accelerators);
+    let (hwnd, window) = MainWindow::open(
+        &window_class,
+        model,
+        settings_file,
+        show_message,
+        arguments.sign_in,
+    );
+    win::window::run_message_loop(hwnd, &|| window.accelerators());
 }
 
-/// The folder of `ui.json` and `ui-error.log` that `--data-dir <folder>`
-/// gives; without it, `run` uses `%LOCALAPPDATA%\Gozler`.
-fn data_dir_argument() -> Option<PathBuf> {
-    let mut args = std::env::args_os().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--data-dir" {
-            return args.next().map(PathBuf::from);
+/// The command line: `--data-dir <folder>`, `--sign-in`, which the `Run`
+/// value passes, and `--location <folder>`, which File Explorer's "Search
+/// with Gozler" passes (spec: The General page).
+struct Arguments {
+    /// The folder of `ui.json` and `ui-error.log`; without it, `run` uses
+    /// `%LOCALAPPDATA%\Gozler`.
+    data_dir: Option<PathBuf>,
+    sign_in: bool,
+    location: Option<String>,
+}
+
+impl Arguments {
+    fn read() -> Arguments {
+        let mut arguments = Arguments {
+            data_dir: None,
+            sign_in: false,
+            location: None,
+        };
+        let mut args = std::env::args_os().skip(1);
+        while let Some(arg) = args.next() {
+            if arg == "--data-dir" {
+                arguments.data_dir = args.next().map(PathBuf::from);
+            } else if arg == "--sign-in" {
+                arguments.sign_in = true;
+            } else if arg == "--location" {
+                arguments.location = args
+                    .next()
+                    .map(|folder| location(&folder.to_string_lossy()));
+            }
         }
+        arguments
     }
-    None
+}
+
+/// The folder of `--location "%V"`. File Explorer gives a drive's root as
+/// `C:\`, so the argument `"C:\"` reaches the program as `C:"`, because
+/// Windows reads `\"` as a quote; this gives back `C:\`.
+fn location(argument: &str) -> String {
+    match argument.strip_suffix('"') {
+        Some(drive) => format!(r"{drive}\"),
+        None => argument.to_owned(),
+    }
 }
 
 /// Gives a window with `--data-dir` its own mutex and class, so a test's
@@ -165,5 +202,18 @@ fn write_log(path: &Path, text: &str) {
             "gozler-ui {}\n{text}\n",
             gozler_core::escompat::version()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::location;
+
+    /// A drive's "Search with Gozler" would otherwise set Location to
+    /// `C:"`, which does not exist.
+    #[test]
+    fn location_of_a_drive_root_keeps_its_backslash() {
+        assert_eq!(location("C:\""), r"C:\");
+        assert_eq!(location(r"C:\Users\ana"), r"C:\Users\ana");
     }
 }

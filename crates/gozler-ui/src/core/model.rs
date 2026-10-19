@@ -7,15 +7,17 @@
 //! request that makes necessary.
 
 use super::fetch::{
-    Ask, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose, WriteFailure,
-    inside,
+    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose,
+    WriteFailure, inside,
 };
 use super::layout::{Dip, Panes};
+use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{ListButton, ListMessage, Results, RowsChange, Shown};
 use super::selection::{FolderContents, Selection};
-use super::settings::{Placement, SavedColumn, Settings};
+use super::settings::{Choices, Placement, SavedColumn, Settings};
 use super::text::{self, Strings};
+use super::update;
 use gozler_core::escompat::EsPlan;
 use gozler_core::output::Format;
 use gozler_core::proto::{DaemonStatus, ResultItem, VolumeStatus};
@@ -49,6 +51,13 @@ pub(crate) struct Model {
     failure: Option<DaemonFailure>,
     /// The status request in flight.
     status_asked: Option<Generation>,
+    /// Use Total Commander's search in flight.
+    program_asked: Option<Generation>,
+    /// Whether Settings shows its Index page, which follows the service's
+    /// state every 2 seconds (spec: The Index page).
+    index_page_shown: bool,
+    /// The newer release that Check for updates found, such as `0.4.0`.
+    newer_release: Option<String>,
     last_generation: u64,
 }
 
@@ -130,6 +139,12 @@ pub(crate) enum Change {
         path: PathBuf,
         error: ExportError,
     },
+    /// Settings applied new choices, which the menus, the accelerators and
+    /// the tray icon follow.
+    Settings,
+    /// Use Total Commander's search answered: the path of the Total
+    /// Commander it takes, none, or why the service could not search.
+    TotalCommander(Result<Option<String>, DaemonFailure>),
 }
 
 /// Why an export failed.
@@ -206,6 +221,10 @@ impl ExportFormat {
     }
 }
 
+/// The most `totalcmd*.exe` rows Use Total Commander reads, newest first;
+/// a PC with more copies than this keeps its newest among them.
+const PROGRAM_ROWS: u64 = 1_000;
+
 impl Accepted {
     fn only(change: Change) -> Accepted {
         Accepted { change, then: None }
@@ -249,12 +268,115 @@ impl Model {
             export: Export::Idle,
             failure: None,
             status_asked: None,
+            program_asked: None,
+            index_page_shown: false,
+            newer_release: None,
             last_generation: 0,
         }
     }
 
     pub(crate) fn strings(&self) -> &Strings {
         &self.strings
+    }
+
+    pub(crate) fn choices(&self) -> &Choices {
+        &self.settings.choices
+    }
+
+    /// The latest status reply, and how the latest status or results
+    /// request failed, which Settings > Index shows.
+    pub(crate) fn service(&self) -> (Option<&DaemonStatus>, Option<&DaemonFailure>) {
+        (self.status.as_ref(), self.failure.as_ref())
+    }
+
+    /// Settings applied `choices`. Showing every file for an empty search
+    /// changes what the empty search shows, so it runs again.
+    pub(crate) fn set_choices(&mut self, choices: Choices) -> Accepted {
+        let search_again = choices.show_all_when_empty != self.choices().show_all_when_empty;
+        self.settings.choices = choices;
+        Accepted {
+            change: Change::Settings,
+            then: search_again.then_some(Then::SearchAgain),
+        }
+    }
+
+    /// Settings shows or hides its Index page; while it shows, the window
+    /// asks for status every 2 seconds ([`Model::polls_status`]).
+    pub(crate) fn show_index_page(&mut self, shown: bool) {
+        self.index_page_shown = shown;
+    }
+
+    /// Whether the window hides to the notification area for the first
+    /// time, which shows a notification once; from then on, it does not.
+    pub(crate) fn first_hide(&mut self) -> bool {
+        !std::mem::replace(&mut self.settings.window.tray_notice_shown, true)
+    }
+
+    /// Whether Check for updates asks GitHub now, at `now` in seconds
+    /// since 1970: it is on, and the last check was a day ago or more, or
+    /// in the future of a clock that was set back. A check that is due
+    /// counts as done.
+    pub(crate) fn update_check_due(&mut self, now: i64) -> bool {
+        let window = &mut self.settings.window;
+        let due = self.settings.choices.check_for_updates
+            && window.last_update_check.is_none_or(|last| {
+                !(last..last.saturating_add(update::CHECK_INTERVAL_SECONDS)).contains(&now)
+            });
+        if due {
+            window.last_update_check = Some(now);
+        }
+        due
+    }
+
+    /// Check for updates found `version`, which status part 4 names.
+    pub(crate) fn set_newer_release(&mut self, version: String) -> Accepted {
+        self.newer_release = Some(version);
+        Accepted::only(Change::Status)
+    }
+
+    pub(crate) fn newer_release(&self) -> Option<&str> {
+        self.newer_release.as_deref()
+    }
+
+    /// Use Total Commander's search, which cancels an earlier one: every
+    /// `totalcmd*.exe`, newest first (design: Use Total Commander).
+    pub(crate) fn find_total_commander(&mut self) -> Fetch {
+        let search = query::search(
+            TOTAL_COMMANDER_SEARCH,
+            Matching::default(),
+            &Filters::default(),
+            &QueryStart {
+                now: jiff::Timestamp::UNIX_EPOCH,
+                time_zone: jiff::tz::TimeZone::UTC,
+            },
+        )
+        .expect("the Total Commander search parses");
+        let generation = self.generation();
+        self.program_asked = Some(generation);
+        Fetch {
+            generation,
+            ask: Ask::Program(ChunkAsk {
+                search,
+                sort: SortSpec {
+                    key: SortKey::DateModified,
+                    dir: SortDir::Desc,
+                },
+                start: 0,
+                len: PROGRAM_ROWS,
+            }),
+        }
+    }
+
+    /// Settings closed, so Use Total Commander's search has nobody to
+    /// answer; the window ends its request (rule 4).
+    pub(crate) fn forget_total_commander(&mut self) -> Accepted {
+        Accepted {
+            change: Change::Nothing,
+            then: self
+                .program_asked
+                .take()
+                .map(|_| Then::Cancel(Purpose::Program)),
+        }
     }
 
     pub(crate) fn columns(&self) -> &[Column] {
@@ -356,7 +478,8 @@ impl Model {
         Generation(self.last_generation)
     }
 
-    /// The person typed `text`; its search runs once they pause.
+    /// The person typed `text`; its search runs once they pause, or with
+    /// search as you type off, when they press `Enter` (spec: C6).
     pub(crate) fn set_typed_search(&mut self, text: String) -> Accepted {
         if text == self.text {
             return Accepted::only(Change::Nothing);
@@ -364,7 +487,10 @@ impl Model {
         self.text = text;
         Accepted {
             change: Change::Typed,
-            then: Some(Then::SearchSoon),
+            then: self
+                .choices()
+                .search_as_you_type
+                .then_some(Then::SearchSoon),
         }
     }
 
@@ -483,7 +609,8 @@ impl Model {
 
     /// The search that the typed text and the controls ask for, or the
     /// message that says why it cannot run, which starts no request: the
-    /// text does not parse, or `scope` says the Location folder is missing.
+    /// text does not parse, `scope` says the Location folder is missing, or
+    /// the search is empty and the settings say to show nothing (spec: S6).
     /// The shown rows and the selection stay until the new search's first
     /// rows arrive.
     pub(crate) fn start_search(&mut self, query_start: &QueryStart, scope: ScopeCheck) -> Accepted {
@@ -492,9 +619,13 @@ impl Model {
             .location()
             .filter(|_| scope == ScopeCheck::Missing)
             .map(str::to_owned);
+        let shows_nothing = !self.choices().show_all_when_empty
+            && self.text.trim().is_empty()
+            && !self.filters().is_set();
         let message = match (search, missing) {
             (Err(error), _) => ListMessage::Parse(error),
             (Ok(_), Some(folder)) => ListMessage::MissingFolder(folder),
+            (Ok(_), None) if shows_nothing => ListMessage::TypeToSearch,
             (Ok(search), None) => {
                 let generation = self.generation();
                 let ask = self.results.start_search(generation, search, self.sort());
@@ -694,12 +825,14 @@ impl Model {
     }
 
     /// Whether the window must ask for status every 2 seconds: the service
-    /// is not running, not ready or lost, or a volume in scope is indexing.
-    /// A refused request, a failed owner check, an older service and an
-    /// offline or failed volume end only by the person's action, so they
-    /// start no poll.
+    /// is not running, not ready or lost, a volume in scope is indexing, or
+    /// Settings shows its Index page. A refused request, a failed owner
+    /// check, an older service and an offline or failed volume end only by
+    /// the person's action, so they start no poll.
     pub(crate) fn polls_status(&self) -> bool {
-        self.failure.as_ref().is_some_and(DaemonFailure::recovers) || self.indexing_in_scope()
+        self.failure.as_ref().is_some_and(DaemonFailure::recovers)
+            || self.indexing_in_scope()
+            || self.index_page_shown
     }
 
     /// What the latest status says about the volumes the shown search
@@ -746,9 +879,23 @@ impl Model {
             Purpose::Export if matches!(self.export, Export::Running { generation: g, .. } if g == generation) => {
                 self.accept_export(fetched.outcome)
             }
-            Purpose::Results | Purpose::Status | Purpose::Selection | Purpose::Export => {
-                Accepted::only(Change::Nothing)
+            Purpose::Program if self.program_asked == Some(generation) => {
+                self.program_asked = None;
+                Accepted::only(Change::TotalCommander(match fetched.outcome {
+                    Outcome::Rows(chunk) => {
+                        Ok(newest_total_commander(&chunk.rows).map(str::to_owned))
+                    }
+                    Outcome::Failed(failure) => Err(failure),
+                    other => {
+                        unreachable!("a program search's reply is rows or a failure: {other:?}")
+                    }
+                }))
             }
+            Purpose::Results
+            | Purpose::Status
+            | Purpose::Selection
+            | Purpose::Export
+            | Purpose::Program => Accepted::only(Change::Nothing),
         }
     }
 
@@ -1709,6 +1856,114 @@ pub(crate) mod tests {
         );
         assert_eq!(captions::results_status(&model, &English), "Searching…");
         assert!(model.can_export());
+    }
+
+    /// T10: the Index page must show that the service stopped while it is
+    /// open, so the poll it starts goes on through the failure; the list
+    /// keeps its rows, as a failed status request always does (design:
+    /// Requests).
+    #[test]
+    fn t10_a_failure_while_settings_shows_the_index_page_keeps_the_poll() {
+        let mut model = showing(10);
+        assert!(!model.polls_status());
+        model.show_index_page(true);
+        assert!(model.polls_status(), "the page follows the service");
+        let ask = model.status_needed().expect("no status request runs");
+        let stopped = DaemonFailure::NotRunning(NotRunning::Stopped);
+        assert_eq!(model.accept(failed(&ask, stopped)).change, Change::Status);
+        assert_eq!(
+            captions::IndexCaptions::new(&model, &English, &|_| None).service,
+            english().text("failure.stopped")
+        );
+        assert_eq!(
+            captions::index_status(&model),
+            english().text("failure.stopped"),
+            "the main window shows the failure behind the dialog"
+        );
+        assert!(model.polls_status());
+        assert_eq!(model.results.count(), 10);
+        // The service answers again: the page shows its state, and the
+        // poll ends with the page.
+        let ask = model.status_needed().expect("no status request runs");
+        model.accept(status(&ask, VolumePhase::Live));
+        model.show_index_page(false);
+        assert!(!model.polls_status());
+    }
+
+    /// S6, and C6's search as you type: with them off, the empty search and
+    /// typing start no request, and `Enter` still searches.
+    #[test]
+    fn s6_with_both_search_settings_off_only_a_typed_search_runs_on_enter() {
+        let mut model = model();
+        let accepted = model.set_choices(Choices {
+            search_as_you_type: false,
+            show_all_when_empty: false,
+            ..Choices::default()
+        });
+        assert_eq!(accepted.then, Some(Then::SearchAgain));
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        assert_eq!(
+            model.start_search(&start, ScopeCheck::Exists),
+            Accepted::only(Change::Message)
+        );
+        assert_eq!(
+            list_message(&model),
+            Some(("Type to search.".to_owned(), vec![]))
+        );
+        assert_eq!(model.set_typed_search("report".into()).then, None);
+        assert!(matches!(
+            model.start_search(&start, ScopeCheck::Exists).then,
+            Some(Then::Fetch(_))
+        ));
+    }
+
+    /// Use Total Commander's reply goes to the dialog alone; a reply after
+    /// the dialog closed, or a failure, changes nothing the window shows.
+    #[test]
+    fn use_total_commander_answers_the_dialog_only() {
+        let mut model = showing(10);
+        let fetch = model.find_total_commander();
+        let mut reply = rows(&fetch_rows(&fetch), 1);
+        reply.purpose = Purpose::Program;
+        if let Outcome::Rows(chunk) = &mut reply.outcome {
+            chunk.rows[0].path = r"C:\TC\TOTALCMD64.EXE".into();
+        }
+        assert_eq!(
+            model.accept(reply.clone()).change,
+            Change::TotalCommander(Ok(Some(r"C:\TC\TOTALCMD64.EXE".into())))
+        );
+        assert_eq!(model.accept(reply).change, Change::Nothing, "answered once");
+        let fetch = model.find_total_commander();
+        assert_eq!(
+            model.accept(failed(&fetch, DaemonFailure::Lost)).change,
+            Change::TotalCommander(Err(DaemonFailure::Lost))
+        );
+        assert!(!model.polls_status());
+        assert_eq!(model.results.count(), 10);
+        let fetch = model.find_total_commander();
+        assert_eq!(
+            model.forget_total_commander().then,
+            Some(Then::Cancel(Purpose::Program))
+        );
+        assert_eq!(
+            model.accept(failed(&fetch, DaemonFailure::Lost)).change,
+            Change::Nothing
+        );
+    }
+
+    /// The rows fetch that `fetch`'s chunk ask stands for, so [`rows`]
+    /// answers a program search.
+    fn fetch_rows(fetch: &Fetch) -> Fetch {
+        let Ask::Program(ask) = &fetch.ask else {
+            panic!("a program search: {fetch:?}")
+        };
+        Fetch {
+            generation: fetch.generation,
+            ask: Ask::Rows(ask.clone()),
+        }
     }
 
     /// T9: the person must learn that the file was not written, and may

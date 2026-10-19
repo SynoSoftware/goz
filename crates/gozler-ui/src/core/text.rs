@@ -129,6 +129,7 @@ impl Message {
 /// One loaded language, with its fallback to the parent language and to
 /// English already applied. It does not change; a language switch loads a
 /// new one.
+#[derive(Clone)]
 pub(crate) struct Strings {
     messages: HashMap<String, Message>,
 }
@@ -412,6 +413,20 @@ pub(crate) fn cell(
             .unwrap_or_default(),
         Column::Attributes => row.attributes.map(|a| a.letters()).unwrap_or_default(),
     }
+}
+
+/// `text` without its access key's `&`, as a caption reads where it names a
+/// command, such as "Edit > Find"; `&&` stays one `&`.
+pub(crate) fn without_access_key(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '&' => out.extend(chars.next()),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The menu text of `label` with its first shortcut after a tab, as Windows

@@ -137,7 +137,7 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
     let result =
         Client::connect(PIPE_NAME, true, cancel.clone()).and_then(|mut client| match ask {
             Ask::Status => client.status().map(Outcome::Status),
-            Ask::Rows(ask) => rows(&mut client, &ask).map(Outcome::Rows),
+            Ask::Rows(ask) | Ask::Program(ask) => rows(&mut client, &ask).map(Outcome::Rows),
             Ask::Selection(ask) => selection(&mut client, ask).map(Outcome::Selection),
             Ask::FolderSize(search) => client
                 .totals(search.request(Returns::Totals))

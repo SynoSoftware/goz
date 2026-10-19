@@ -650,9 +650,10 @@ ones the owner accepted.
 - Each open command runs for its own case, emptying a box brings
   back File Explorer's way, and the dialog scales when it moves to a monitor
   with another DPI.
-- After a restart of Windows with "Start Gozler when I sign in" on: with no
-  shortcut, the window is running, minimized; with `Win+S` set, Gozler is in
-  the notification area with no window, and `Win+S` shows it. Turned off,
+- After a restart of Windows with "Start Gozler when I sign in" on: with
+  "Keep Gozler running in the notification area" off, the window starts
+  minimized; with it on, the default, Gozler starts in the notification area
+  with no window, and the shortcut or the tray icon shows it. Turned off,
   the `gozler` value under the current user's `Run` key is gone. Turned off
   in Task Manager's Startup apps, the check box shows off; turned on again,
   Task Manager shows the entry on. The owner checks this, because the `Run`

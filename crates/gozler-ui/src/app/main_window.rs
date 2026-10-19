@@ -8,16 +8,17 @@
 use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
 use super::icons::Icons;
 use super::requests::Requests;
+use super::settings::SettingsDialog;
 use crate::core::captions::{
-    self, DialogCaptions, FilterCaptions, InspectorCaptions, ListCaption, StatusCaptions,
-    WindowCaptions,
+    self, DialogCaptions, FilterCaptions, IndexCaptions, InspectorCaptions, ListCaption,
+    StatusCaptions, WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat};
 use crate::core::commands::{
     self, CommandId, Focus, INSPECTOR_BUTTONS, KeyAction, Keystroke, Menu, MenuItem, State,
 };
-use crate::core::fetch::{Fetch, Purpose, WriteFailure};
-use crate::core::ids::{ControlId, DialogId};
+use crate::core::fetch::{DaemonFailure, Fetch, Purpose, WriteFailure};
+use crate::core::ids::{ControlId, DialogId, IconId};
 use crate::core::layout::{
     self, CaptionWidths, Dpi, FilterLayout, InspectorLayout, Layout, MessageArea, Px, Rect,
     ScrollRequest, Size,
@@ -25,14 +26,17 @@ use crate::core::layout::{
 use crate::core::model::{
     Accepted, Change, Column, ExportError, ExportFormat, Model, ScopeCheck, Then,
 };
+use crate::core::open::{self, CommandLine};
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
     date_items, size_items,
 };
 use crate::core::results::{Fix, ListButton};
 use crate::core::selection::wide_path;
-use crate::core::settings::SavedColumn;
-use crate::core::text::Numbers;
+use crate::core::settings::{SavedColumn, SettingsValues};
+use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
+use crate::core::text::{Numbers, without_access_key};
+use crate::core::update;
 use crate::win::clipboard::ClipboardBlock;
 use crate::win::controls::{
     Button, CheckBox, DropDownList, Edit, Label, ListBox, ListClosing, ListColumn, ListView,
@@ -41,10 +45,13 @@ use crate::win::controls::{
 use crate::win::dialog::{DialogEnd, DialogProc};
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
+use crate::win::menu::Accelerators;
 use crate::win::notify::{
     Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify,
 };
 use crate::win::shell::{self, FileType};
+use crate::win::shortcut::{self, RegisterError, Registration};
+use crate::win::tray::{self, TrayEvent, TrayIcon};
 use crate::win::wake::Waker;
 use crate::win::window::{DEFERRED, Message, WindowProc};
 use crate::win::{self, Hwnd};
@@ -53,10 +60,12 @@ use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortSpec};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::OsString;
+use std::io;
 use std::ops::Range;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 use windows::Win32::Foundation::LRESULT;
 
 mod timer {
@@ -70,6 +79,29 @@ mod timer {
 const SEARCH_DELAY_MS: u32 = 150;
 const STATUS_POLL_MS: u32 = 2_000;
 const SELECTION_DELAY_MS: u32 = 150;
+
+/// Status part 4, which names a newer release that a click then opens.
+const INDEX_PART: usize = 3;
+
+/// What Settings' OK or Apply applied (design: Settings).
+pub(super) struct Applied {
+    /// The values now in effect: the edited ones, except a registry
+    /// setting whose write failed, which keeps its earlier value.
+    pub(super) values: SettingsValues,
+    /// The message of each registry write that failed.
+    pub(super) failures: Vec<String>,
+}
+
+/// What the update check's thread found. The thread is not joined, because
+/// a WinHTTP call cannot be ended at once and joining it would hold Exit for
+/// as long as the network waits. Instead it wakes the window only while
+/// `window_open`, which `WM_DESTROY` clears under the lock, so no wake-up
+/// reaches a reused handle (design rule 5).
+#[derive(Default)]
+struct UpdateCheck {
+    window_open: bool,
+    newer: Option<String>,
+}
 
 /// The controls, created in `WM_CREATE` in Tab order; Windows destroys them
 /// with the window.
@@ -439,18 +471,46 @@ pub(crate) struct MainWindow {
     /// While the person drags the splitter: the pointer's client `y` and the
     /// inspector's height when the drag started.
     splitter_drag: Cell<Option<(i32, Px)>>,
+    /// The person's command shortcuts, which Settings replaces; the message
+    /// loop translates with the table of the moment.
+    accelerators: RefCell<Rc<Accelerators>>,
+    /// The tray icon, while Gozler keeps running in the notification area.
+    tray: RefCell<Option<TrayIcon>>,
+    /// `TaskbarCreated`, after which the tray icon is added again.
+    taskbar_created: u32,
+    /// The shortcut to show Gozler, while Windows lets Gozler use it.
+    shortcut: RefCell<Option<Registration>>,
+    /// Why the saved shortcut could not be used at start, which the window
+    /// says the first time it shows.
+    shortcut_failure: RefCell<Option<RegisterError>>,
+    /// Whether the window has not shown yet, because Gozler started in the
+    /// notification area; its first show restores the saved placement.
+    unshown: Cell<bool>,
+    /// The open Settings dialog, which Use Total Commander's reply goes to,
+    /// and that reply until the dialog reads it.
+    settings_dialog: Cell<Option<Hwnd>>,
+    total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
+    /// Whether a click gave the search box the focus, so its text is
+    /// selected once the click is handled (Settings > Search).
+    select_search: Cell<bool>,
+    update: Arc<Mutex<UpdateCheck>>,
 }
 
 impl MainWindow {
-    /// Creates and shows the window, and starts the first search and the
-    /// first status request; the window owns its state.
+    /// Creates the window, starts the first search and the first status
+    /// request, and shows the window, or with `sign_in` starts as the `Run`
+    /// value asks (spec: Window lifetime). The window owns its state; the
+    /// message loop reads its accelerators.
     pub(crate) fn open(
         class: &str,
         model: Model,
         settings_file: PathBuf,
         show_message: u32,
-    ) -> Hwnd {
+        sign_in: bool,
+    ) -> (Hwnd, Rc<MainWindow>) {
         let placement = model.placement();
+        let accelerators =
+            accelerator_table(&model.choices().shortcuts).expect("the accelerator table builds");
         let window = Rc::new(MainWindow {
             created: OnceCell::new(),
             model: RefCell::new(model),
@@ -468,6 +528,19 @@ impl MainWindow {
             range_closed: Cell::new(None),
             inspector_shown: RefCell::new((InspectorCaptions::default(), None)),
             splitter_drag: Cell::new(None),
+            accelerators: RefCell::new(Rc::new(accelerators)),
+            tray: RefCell::new(None),
+            taskbar_created: win::instance::register_message("TaskbarCreated"),
+            shortcut: RefCell::new(None),
+            shortcut_failure: RefCell::new(None),
+            unshown: Cell::new(false),
+            settings_dialog: Cell::new(None),
+            total_commander: RefCell::new(None),
+            select_search: Cell::new(false),
+            update: Arc::new(Mutex::new(UpdateCheck {
+                window_open: true,
+                newer: None,
+            })),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -475,10 +548,24 @@ impl MainWindow {
         // the first search (design: Requests).
         window.search(hwnd);
         window.ask_status();
+        window.register_saved_shortcut(hwnd);
+        window.update_tray(hwnd);
+        window.check_for_updates(hwnd);
+        let keeps_running = window.model.borrow().choices().keep_running;
         // Showing the window activates it, and WM_ACTIVATE focuses the
         // search box.
-        win::window::show(hwnd, placement);
-        hwnd
+        match (sign_in, keeps_running) {
+            (true, true) => window.unshown.set(true),
+            (true, false) => win::window::show_minimized(hwnd, placement),
+            (false, _) => win::window::show(hwnd, placement),
+        }
+        (hwnd, window)
+    }
+
+    /// The accelerator table of the moment, which the message loop holds
+    /// until the command it sends returns.
+    pub(crate) fn accelerators(&self) -> Rc<Accelerators> {
+        Rc::clone(&self.accelerators.borrow())
     }
 
     fn created(&self) -> &Created {
@@ -984,7 +1071,8 @@ impl MainWindow {
         let (slot, node) = {
             let model = self.model.borrow();
             let slot = commands::export_slot(&model);
-            (slot, commands::node(&slot, model.strings()))
+            let node = commands::node(&slot, model.strings(), &model.choices().shortcuts);
+            (slot, node)
         };
         let export = [CommandId::ExportResults, CommandId::CancelExport]
             .map(|command| MenuItem::Run(command).id());
@@ -1069,12 +1157,11 @@ impl MainWindow {
                 CommandId::Filters => self.model.borrow_mut().toggle_filter_pane(),
                 CommandId::Inspector => self.model.borrow_mut().toggle_inspector(),
                 CommandId::ClearFilters => self.model.borrow_mut().clear_filters(),
-                CommandId::Settings
-                | CommandId::Columns
-                | CommandId::Language
-                | CommandId::Match
-                | CommandId::SortBy
-                | CommandId::ShowWindow => return,
+                CommandId::Settings => return self.open_settings(hwnd),
+                CommandId::ShowWindow => return self.show_window(hwnd),
+                CommandId::Columns | CommandId::Language | CommandId::Match | CommandId::SortBy => {
+                    return;
+                }
             },
             MenuItem::Column(column) => self.model.borrow_mut().toggle_column(column),
             MenuItem::SortKey(key) => {
@@ -1317,6 +1404,26 @@ impl MainWindow {
                 self.update_status();
                 failed_export = Some((path, error));
             }
+            Change::Settings => {
+                let (menu_bar, shortcuts) = {
+                    let model = self.model.borrow();
+                    let shortcuts = &model.choices().shortcuts;
+                    let menu_bar =
+                        commands::render(&commands::menu_bar(), model.strings(), shortcuts);
+                    (menu_bar, shortcuts.clone())
+                };
+                let _ = win::menu::replace_menu_bar(hwnd, &menu_bar);
+                if let Ok(table) = accelerator_table(&shortcuts) {
+                    self.accelerators.replace(Rc::new(table));
+                }
+                self.update_tray(hwnd);
+            }
+            Change::TotalCommander(found) => {
+                self.total_commander.replace(Some(found));
+                if let Some(dialog) = self.settings_dialog.get() {
+                    win::dialog::post_reply(dialog);
+                }
+            }
         }
         self.update_bound_controls();
         self.update_inspector(hwnd);
@@ -1340,10 +1447,21 @@ impl MainWindow {
         }
     }
 
-    /// Accepts every reply that has arrived.
+    /// Accepts every reply that has arrived, and the newer release that the
+    /// update check found.
     fn on_wake(&self, hwnd: Hwnd) {
         for fetched in self.created().requests.drain() {
             let accepted = self.model.borrow_mut().accept(fetched);
+            self.apply(hwnd, accepted);
+        }
+        let newer = self
+            .update
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .newer
+            .take();
+        if let Some(version) = newer {
+            let accepted = self.model.borrow_mut().set_newer_release(version);
             self.apply(hwnd, accepted);
         }
     }
@@ -1351,6 +1469,15 @@ impl MainWindow {
     /// A control's notification in `WM_COMMAND`.
     fn on_control(&self, hwnd: Hwnd, event: ControlEvent) {
         let controls = &self.created().controls;
+        if controls.search.focused(event) {
+            // The click places the caret after the focus arrives, so the
+            // text is selected once the click is handled.
+            let select = self.model.borrow().choices().select_on_click;
+            if select && win::window::left_button_down() && !self.select_search.replace(true) {
+                hwnd.post(DEFERRED);
+            }
+            return;
+        }
         let matching = || self.model.borrow().matching();
         let accepted = if controls.search.changed(event) {
             let text = controls.search.text();
@@ -1709,49 +1836,93 @@ impl MainWindow {
             .contains(point)
     }
 
-    /// The selected entries' paths as Windows names them.
-    fn selected_paths(&self) -> Vec<Vec<u16>> {
+    /// The selected entries.
+    fn selected_entries(&self) -> Vec<Selected> {
         let model = self.model.borrow();
         model
             .selected_files()
             .unwrap_or_default()
             .iter()
-            .map(wide_path)
+            .map(|file| Selected {
+                path: wide_path(file),
+                is_folder: file.is_dir,
+            })
             .collect()
     }
 
-    /// Opens each selected entry (spec: C1).
+    /// Opens each selected entry with the Open folders or Open files
+    /// command, or as File Explorer does when it is empty (spec: C1).
     fn open_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = present(self.selected_paths());
-        for path in &present {
-            shell::open_entry(hwnd, path);
+        let (present, missing) = present(self.selected_entries());
+        let (folders, files) = {
+            let model = self.model.borrow();
+            let choices = model.choices();
+            (choices.open_folders.clone(), choices.open_files.clone())
+        };
+        for entry in &present {
+            let command = if entry.is_folder { &folders } else { &files };
+            match open::expand(command, &String::from_utf16_lossy(&entry.path)) {
+                Some(line) => {
+                    if !self.run_open_command(hwnd, &line) {
+                        return;
+                    }
+                }
+                None => shell::open_entry(hwnd, &entry.path),
+            }
         }
         self.report_missing(hwnd, missing);
     }
 
-    /// Opens the folder of each selected entry with the entries selected
-    /// (spec: C2): one File Explorer window for each folder.
+    /// Opens the folder of each selected entry with the entries selected,
+    /// one File Explorer window for each folder, or runs the Open file
+    /// location command for each entry (spec: C2).
     fn show_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = present(self.selected_paths());
-        let mut folders: Vec<(Vec<u16>, Vec<Vec<u16>>)> = Vec::new();
-        for path in present {
-            let folder = folder_of(&path);
-            match folders.iter_mut().find(|(f, _)| *f == folder) {
-                Some((_, entries)) => entries.push(path),
-                None => folders.push((folder, vec![path])),
+        let (present, missing) = present(self.selected_entries());
+        let command = self.model.borrow().choices().open_file_location.clone();
+        if command.trim().is_empty() {
+            let mut folders: Vec<(Vec<u16>, Vec<Vec<u16>>)> = Vec::new();
+            for Selected { path, .. } in present {
+                let folder = folder_of(&path);
+                match folders.iter_mut().find(|(f, _)| *f == folder) {
+                    Some((_, entries)) => entries.push(path),
+                    None => folders.push((folder, vec![path])),
+                }
+            }
+            for (folder, entries) in &folders {
+                shell::show_in_folder(folder, entries);
+            }
+        } else {
+            for entry in &present {
+                if let Some(line) = open::expand(&command, &String::from_utf16_lossy(&entry.path))
+                    && !self.run_open_command(hwnd, &line)
+                {
+                    return;
+                }
             }
         }
-        for (folder, entries) in &folders {
-            shell::show_in_folder(folder, entries);
-        }
         self.report_missing(hwnd, missing);
+    }
+
+    /// Runs an open command of Settings > General, and answers whether it
+    /// started; one that cannot start says why, and the rest of the
+    /// selection is not tried, because it would fail the same way.
+    fn run_open_command(&self, hwnd: Hwnd, line: &CommandLine) -> bool {
+        let Err(error) = shell::run_command(hwnd, &line.program, &line.parameters) else {
+            return true;
+        };
+        let text = self.model.borrow().strings().format(
+            "message.open_failed",
+            &[&line.program, &win::error_text(&error)],
+        );
+        self.error_box(hwnd, &text);
+        false
     }
 
     /// The shell's Properties of the selected entry (spec: C3).
     fn show_properties(&self, hwnd: Hwnd) {
-        let (present, missing) = present(self.selected_paths());
-        for path in &present {
-            shell::properties(hwnd, path);
+        let (present, missing) = present(self.selected_entries());
+        for entry in &present {
+            shell::properties(hwnd, &entry.path);
         }
         self.report_missing(hwnd, missing);
     }
@@ -1858,18 +2029,341 @@ impl MainWindow {
 
     /// Brings the window forward with the search box focused and its text
     /// selected, so the person types the next search at once (spec: Window
-    /// lifetime).
+    /// lifetime, C24). While a dialog is open, the dialog keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
+        if self.unshown.replace(false) {
+            let placement = self.model.borrow().placement();
+            win::window::show(hwnd, placement);
+        }
         hwnd.bring_to_front();
+        if !hwnd.is_enabled() {
+            return;
+        }
         let search = self.created().controls.search;
         search.hwnd().focus();
         search.select_all();
+    }
+
+    /// Closing hides the window while Gozler keeps running in the
+    /// notification area, the first time with a notification that says so,
+    /// and exits otherwise (spec: Window lifetime).
+    fn close(&self, hwnd: Hwnd) {
+        if !self.model.borrow().choices().keep_running {
+            return self.exit(hwnd);
+        }
+        hwnd.hide();
+        if !self.model.borrow_mut().first_hide() {
+            return;
+        }
+        let (title, text) = {
+            let model = self.model.borrow();
+            let strings = model.strings();
+            let text = match model.choices().show_shortcut {
+                Some(shortcut) => {
+                    strings.format("tray.notice_shortcut", &[&shortcut.text(strings)])
+                }
+                None => strings.text("tray.notice").to_owned(),
+            };
+            (strings.text("window.title").to_owned(), text)
+        };
+        if let Some(tray) = self.tray.borrow().as_ref() {
+            tray.notify(&title, &text);
+        }
+        self.save_settings(hwnd, true);
     }
 
     /// Saves the settings and ends Gozler (spec: C7, T14).
     fn exit(&self, hwnd: Hwnd) {
         self.save_settings(hwnd, true);
         hwnd.destroy();
+    }
+
+    /// Adds the tray icon while Gozler keeps running in the notification
+    /// area, and removes it otherwise (design: The tray).
+    fn update_tray(&self, hwnd: Hwnd) {
+        let keeps_running = self.model.borrow().choices().keep_running;
+        if keeps_running == self.tray.borrow().is_some() {
+            return;
+        }
+        let tray = if keeps_running {
+            let tip = self
+                .model
+                .borrow()
+                .strings()
+                .text("window.title")
+                .to_owned();
+            TrayIcon::add(hwnd, IconId::Gozler.id(), &tip).ok()
+        } else {
+            None
+        };
+        self.tray.replace(tray);
+    }
+
+    /// A click on the tray icon, or its menu. While a dialog is open, the
+    /// menu shows the window and its dialog instead, because Exit would end
+    /// the window under the dialog.
+    fn on_tray(&self, hwnd: Hwnd, event: TrayEvent) {
+        match event {
+            TrayEvent::Menu { point } if hwnd.is_enabled() => {
+                let nodes =
+                    commands::render_popup(&commands::tray_menu(), self.model.borrow().strings());
+                let show = MenuItem::Run(CommandId::ShowWindow);
+                let chosen = tray::track_menu(hwnd, &nodes, point, Some(show.id()));
+                if let Some(item) = chosen.and_then(MenuItem::from_id) {
+                    self.run(hwnd, item);
+                }
+            }
+            TrayEvent::Show | TrayEvent::Menu { .. } => self.show_window(hwnd),
+        }
+    }
+
+    /// Registers the saved shortcut to show Gozler. One that Windows
+    /// refuses is said the first time the window shows, because a message
+    /// at sign-in would come before the person looks.
+    fn register_saved_shortcut(&self, hwnd: Hwnd) {
+        let Some(saved) = self.model.borrow().choices().show_shortcut else {
+            return;
+        };
+        match shortcut::register(hwnd, saved, self.show_message) {
+            Ok(registration) => {
+                self.shortcut.replace(Some(registration));
+            }
+            Err(error) => {
+                self.shortcut_failure.replace(Some(error));
+            }
+        }
+    }
+
+    /// What the window says when Windows refused `shortcut`: in Settings,
+    /// or at start, when the saved shortcut no longer works.
+    fn shortcut_message(
+        &self,
+        shortcut: ShowShortcut,
+        error: &RegisterError,
+        at_start: bool,
+    ) -> String {
+        let model = self.model.borrow();
+        let strings = model.strings();
+        let keys = shortcut.text(strings);
+        match error {
+            RegisterError::Taken if at_start => strings.format("message.shortcut_taken", &[&keys]),
+            RegisterError::Taken => strings.format("settings_keyboard.shortcut_taken", &[&keys]),
+            RegisterError::Failed(error) => strings.format(
+                "settings_keyboard.shortcut_failed",
+                &[&keys, error.message().trim()],
+            ),
+        }
+    }
+
+    /// Says why the saved shortcut does not work, once the window shows.
+    fn show_shortcut_failure(&self, hwnd: Hwnd) {
+        if !hwnd.is_visible() {
+            return;
+        }
+        let Some(error) = self.shortcut_failure.take() else {
+            return;
+        };
+        let saved = self.model.borrow().choices().show_shortcut;
+        if let Some(saved) = saved {
+            let text = self.shortcut_message(saved, &error, true);
+            self.error_box(hwnd, &text);
+        }
+    }
+
+    /// Asks GitHub for the latest release on a thread of its own, when
+    /// Check for updates is on and the last check is a day old (spec: The
+    /// General page).
+    fn check_for_updates(&self, hwnd: Hwnd) {
+        let now = jiff::Timestamp::now().as_second();
+        if !self.model.borrow_mut().update_check_due(now) {
+            return;
+        }
+        let found = Arc::clone(&self.update);
+        let waker = Waker::new(hwnd);
+        std::thread::spawn(move || {
+            let version = gozler_core::escompat::version();
+            let newer = win::update::get(
+                update::LATEST_RELEASE_HOST,
+                update::LATEST_RELEASE_PATH,
+                &format!("Gozler/{version}"),
+            )
+            .and_then(|reply| update::newer_release(&reply, version));
+            let Some(newer) = newer else { return };
+            let mut found = found.lock().unwrap_or_else(PoisonError::into_inner);
+            if found.window_open {
+                found.newer = Some(newer);
+                waker.wake();
+            }
+        });
+    }
+
+    /// A click on status part 4 opens the release page while the part
+    /// names a newer release (spec: The General page).
+    fn on_status_click(&self) {
+        let shows_update = captions::shows_update(&self.model.borrow());
+        if shows_update {
+            shell::open(update::RELEASES_PAGE);
+        }
+    }
+
+    /// File > Settings…: the dialog edits a copy of the settings, which OK
+    /// and Apply give back through [`MainWindow::apply_settings`] (design:
+    /// Settings).
+    fn open_settings(&self, hwnd: Hwnd) {
+        let (choices, strings) = {
+            let model = self.model.borrow();
+            (model.choices().clone(), model.strings().clone())
+        };
+        let values = SettingsValues {
+            choices,
+            start_at_sign_in: shell::starts_at_sign_in(),
+            search_with_gozler: shell::shows_search_with(),
+        };
+        let dialog = SettingsDialog::new(self, hwnd, strings, values);
+        self.open_dialog(hwnd, DialogId::Settings, &dialog);
+        self.settings_dialog.set(None);
+        self.total_commander.replace(None);
+        let accepted = self.model.borrow_mut().forget_total_commander();
+        self.apply(hwnd, accepted);
+        self.show_index_page(hwnd, false);
+    }
+
+    /// Applies what Settings edited, `edited`, which was `last` before; OK
+    /// and Apply call it (design: Settings). A shortcut that Windows refuses
+    /// applies nothing and returns its message, so the dialog stays open.
+    /// The registry is written only for a value that changed, so a page
+    /// that was not touched never changes what Task Manager or File
+    /// Explorer show.
+    pub(super) fn apply_settings(
+        &self,
+        hwnd: Hwnd,
+        edited: &SettingsValues,
+        last: &SettingsValues,
+    ) -> Result<Applied, String> {
+        let shortcut = edited.choices.show_shortcut;
+        if shortcut != last.choices.show_shortcut {
+            // The new shortcut is registered before the old one goes, so a
+            // refusal leaves the old one working.
+            let registration = match shortcut {
+                Some(shortcut) => Some(
+                    shortcut::register(hwnd, shortcut, self.show_message)
+                        .map_err(|error| self.shortcut_message(shortcut, &error, false))?,
+                ),
+                None => None,
+            };
+            self.shortcut.replace(registration);
+            self.shortcut_failure.replace(None);
+        }
+        let mut failures = Vec::new();
+        let verb = self
+            .model
+            .borrow()
+            .strings()
+            .text("settings_general.verb")
+            .to_owned();
+        let values = SettingsValues {
+            choices: edited.choices.clone(),
+            start_at_sign_in: self.write_registry(
+                (edited.start_at_sign_in, last.start_at_sign_in),
+                "settings_general.sign_in",
+                &mut failures,
+                |program| shell::set_start_at_sign_in(edited.start_at_sign_in, program),
+            ),
+            search_with_gozler: self.write_registry(
+                (edited.search_with_gozler, last.search_with_gozler),
+                "settings_general.search_with",
+                &mut failures,
+                |program| shell::set_search_with(edited.search_with_gozler, program, &verb),
+            ),
+        };
+        let accepted = self.model.borrow_mut().set_choices(values.choices.clone());
+        self.apply(hwnd, accepted);
+        self.save_settings(hwnd, true);
+        Ok(Applied { values, failures })
+    }
+
+    /// Writes a setting whose one copy is in the registry with `write`, if
+    /// it changed from `was` to `on`, and returns the value now in effect.
+    /// A failed write keeps `was` and adds its message, which names the
+    /// setting by the check box `label`, to `failures`.
+    fn write_registry(
+        &self,
+        (on, was): (bool, bool),
+        label: &str,
+        failures: &mut Vec<String>,
+        write: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> bool {
+        if on == was {
+            return on;
+        }
+        let Err(error) = std::env::current_exe().and_then(|program| write(&program)) else {
+            return on;
+        };
+        let model = self.model.borrow();
+        let strings = model.strings();
+        failures.push(strings.format(
+            "message.registry_failed",
+            &[
+                &without_access_key(strings.text(label)),
+                &win::error_text(&error),
+            ],
+        ));
+        was
+    }
+
+    /// Settings shows or hides its Index page, which follows the service's
+    /// state while it shows (spec: The Index page).
+    pub(super) fn show_index_page(&self, hwnd: Hwnd, shown: bool) {
+        self.model.borrow_mut().show_index_page(shown);
+        self.update_poll(hwnd);
+        if shown {
+            self.ask_status();
+        }
+    }
+
+    /// What the Index page shows of the service's latest state.
+    pub(super) fn index_captions(&self) -> IndexCaptions {
+        let prefixes: Vec<String> = {
+            let model = self.model.borrow();
+            let (status, _) = model.service();
+            status
+                .map(|status| {
+                    let volumes = status.volumes.iter();
+                    volumes
+                        .map(|volume| volume.mounted().display_prefix().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // Windows reads the labels with no borrow held (design rule 1).
+        let labels: Vec<(String, Option<String>)> = prefixes
+            .into_iter()
+            .map(|prefix| {
+                let label = shell::volume_label(&prefix);
+                (prefix, label)
+            })
+            .collect();
+        let label = |prefix: &str| {
+            labels
+                .iter()
+                .find(|(p, _)| p == prefix)
+                .and_then(|(_, label)| label.clone())
+        };
+        IndexCaptions::new(&self.model.borrow(), &*self.numbers.borrow(), &label)
+    }
+
+    /// Use Total Commander: searches the index for Total Commander, whose
+    /// answer goes to the Settings dialog `dialog` (design: Use Total
+    /// Commander).
+    pub(super) fn find_total_commander(&self, dialog: Hwnd) {
+        self.settings_dialog.set(Some(dialog));
+        let fetch = self.model.borrow_mut().find_total_commander();
+        self.start(fetch);
+    }
+
+    /// Use Total Commander's answer, once it arrived.
+    pub(super) fn take_total_commander(&self) -> Option<Result<Option<String>, DaemonFailure>> {
+        self.total_commander.take()
     }
 
     /// The shown columns in the header's order, with their widths in DIP.
@@ -1936,22 +2430,37 @@ fn within(ranges: &[Range<usize>], span: &Range<usize>) -> Vec<Range<usize>> {
         .collect()
 }
 
-/// `paths` that still exist, and the first that does not. An action on the
-/// selection acts on every entry it can (spec: The selection).
-fn present(paths: Vec<Vec<u16>>) -> (Vec<Vec<u16>>, Option<Vec<u16>>) {
+/// A selected entry, by its path as Windows names it.
+struct Selected {
+    path: Vec<u16>,
+    is_folder: bool,
+}
+
+/// The `entries` that still exist, and the first path that does not. An
+/// action on the selection acts on every entry it can (spec: The
+/// selection).
+fn present(entries: Vec<Selected>) -> (Vec<Selected>, Option<Vec<u16>>) {
     let mut missing = None;
-    let present = paths
+    let present = entries
         .into_iter()
-        .filter_map(|path| {
-            if std::fs::symlink_metadata(OsString::from_wide(&path)).is_ok() {
-                Some(path)
-            } else {
-                missing.get_or_insert(path);
-                None
+        .filter(|entry| {
+            let exists = std::fs::symlink_metadata(OsString::from_wide(&entry.path)).is_ok();
+            if !exists {
+                missing.get_or_insert_with(|| entry.path.clone());
             }
+            exists
         })
         .collect();
     (present, missing)
+}
+
+/// The accelerator table of the command shortcuts `shortcuts`.
+fn accelerator_table(shortcuts: &CommandShortcuts) -> windows::core::Result<Accelerators> {
+    let table: Vec<_> = commands::accelerators(shortcuts)
+        .into_iter()
+        .map(|(shortcut, item)| (shortcut, item.id()))
+        .collect();
+    Accelerators::new(&table)
 }
 
 /// The folder that holds `path`, a drive's root as `C:\`.
@@ -2012,15 +2521,27 @@ impl WindowProc for MainWindow {
             }
             // A window that is not a dialog keeps no focus of its own across
             // deactivation, so it gives it back to the control that had it.
-            Message::Activate { active: false } => {
+            Message::Deactivate => {
                 self.focus_on_activate.set(Hwnd::focused());
                 None
             }
-            Message::Activate { active: true } => {
-                self.focus_on_activate
-                    .take()
-                    .unwrap_or(self.created().controls.search.hwnd())
-                    .focus();
+            // "Select the search text when Gozler is activated" is about
+            // switching from another program; closing one of Gozler's own
+            // dialogs gives the focus back to the control that opened it.
+            Message::Activate {
+                from_another_program,
+            } => {
+                let search = self.created().controls.search;
+                let saved = self.focus_on_activate.take();
+                if from_another_program && self.model.borrow().choices().select_on_activate {
+                    search.hwnd().focus();
+                    search.select_all();
+                } else {
+                    saved.unwrap_or(search.hwnd()).focus();
+                }
+                if self.shortcut_failure.borrow().is_some() {
+                    hwnd.post(DEFERRED);
+                }
                 Some(LRESULT(0))
             }
             Message::Command(Command::Menu(id)) => {
@@ -2032,7 +2553,12 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::Notify(notification) => {
-                let list = self.created().controls.list.notification(notification)?;
+                let controls = &self.created().controls;
+                if controls.status.clicked_part(&notification) == Some(INDEX_PART) {
+                    self.on_status_click();
+                    return Some(LRESULT(0));
+                }
+                let list = controls.list.notification(notification)?;
                 self.on_list_notify(hwnd, list)
             }
             Message::Timer(timer::SEARCH) => {
@@ -2058,9 +2584,13 @@ impl WindowProc for MainWindow {
             }
             Message::Deferred => {
                 self.read_list_selection(hwnd);
+                if self.select_search.replace(false) {
+                    self.created().controls.search.select_all();
+                }
                 if let Some(range) = self.range_closed.take() {
                     self.choose_custom(hwnd, range);
                 }
+                self.show_shortcut_failure(hwnd);
                 Some(LRESULT(0))
             }
             Message::VerticalScroll { from, request }
@@ -2192,19 +2722,50 @@ impl WindowProc for MainWindow {
             }
             Message::EndSession { .. } => None,
             Message::Close => {
-                self.exit(hwnd);
+                self.close(hwnd);
                 Some(LRESULT(0))
             }
-            // Every request thread is joined while the window's handle is
-            // still valid, so no wake-up reaches a reused handle (design
-            // rule 5).
+            // Every request thread is joined, and the update check stops
+            // waking the window, while the window's handle is still valid,
+            // so no wake-up reaches a reused handle (design rule 5). The
+            // shortcut and the tray icon go with the window, so Windows'
+            // own use of the shortcut's keys returns at once.
             Message::Destroy => {
+                self.update
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .window_open = false;
+                self.shortcut.replace(None);
+                self.tray.replace(None);
                 self.created().requests.shut_down();
                 win::window::quit();
                 Some(LRESULT(0))
             }
+            Message::Hotkey => {
+                self.show_window(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::Tray(event) => {
+                self.on_tray(hwnd, event);
+                Some(LRESULT(0))
+            }
+            // A second start with `--location`, from File Explorer's
+            // "Search with Gozler" (spec: Window lifetime).
+            Message::CopyData { tag, text } if tag == self.show_message as usize => {
+                let accepted = self.model.borrow_mut().choose_folder(text);
+                self.apply(hwnd, accepted);
+                self.show_window(hwnd);
+                Some(LRESULT(1))
+            }
+            Message::CopyData { .. } => None,
             Message::Other(msg) if msg == self.show_message => {
                 self.show_window(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::Other(msg) if msg == self.taskbar_created => {
+                if let Some(tray) = self.tray.borrow().as_ref() {
+                    tray.add_again();
+                }
                 Some(LRESULT(0))
             }
             Message::Other(_) => None,

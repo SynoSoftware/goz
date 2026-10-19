@@ -2,8 +2,10 @@
 //! wrappers of the dialogs' controls, which their templates create.
 
 use super::gdi::{ImageList, draw_text};
+use super::keys::{is_extended, key_of, virtual_key};
 use super::notify::ControlEvent;
 use super::{Hwnd, wide};
+use crate::core::commands::Keystroke;
 use crate::core::layout::{Px, list_box_text_inset};
 use std::cell::RefCell;
 use std::ops::Range;
@@ -19,21 +21,23 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Controls::{
     BST_CHECKED, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETSEL, EM_SETCUEBANNER,
     EM_SETSEL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT, HDITEMW, HDM_GETITEMW,
-    HDM_SETITEMW, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
-    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
-    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO,
-    LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
+    HDM_SETITEMW, HKCOMB_A, HKCOMB_C, HKCOMB_NONE, HKCOMB_S, HKM_GETHOTKEY, HKM_SETHOTKEY,
+    HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT, ICC_BAR_CLASSES,
+    ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
+    INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT,
+    LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO, LVIF_TEXT, LVIR_BOUNDS,
+    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
     LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETHEADER,
     LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX,
-    LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
-    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
-    LVM_SETITEMSTATE, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_HEADERDRAGDROP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, ODS_FLAGS, ODS_FOCUS, ODS_NOFOCUSRECT,
-    ODS_SELECTED, ODT_LISTBOX, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW,
-    SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW,
-    TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW,
-    TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
+    LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY,
+    LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMCOUNT, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_EX_LABELTIP,
+    LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL,
+    LVSIL_SMALL, ODS_FLAGS, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, ODT_LISTBOX, SB_SETPARTS,
+    SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW, SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE,
+    TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
+    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -41,12 +45,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
     CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
-    CreateWindowExW, EN_CHANGE, ES_AUTOHSCROLL, ES_READONLY, GetWindowRect, HMENU, LB_ADDSTRING,
-    LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT, LB_GETTEXTLEN, LB_ITEMFROMPOINT,
-    LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMHEIGHT, LBN_SELCHANGE, LBS_HASSTRINGS,
-    LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, SendMessageW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_COPY, WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_SIZE, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, EN_CHANGE, EN_SETFOCUS, ES_AUTOHSCROLL, ES_READONLY, GetSystemMetrics,
+    GetWindowRect, HMENU, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT,
+    LB_GETTEXTLEN, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMHEIGHT,
+    LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED,
+    SM_CXVSCROLL, SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY, WM_GETFONT, WM_MOUSEMOVE,
+    WM_NCDESTROY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP,
+    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -58,7 +63,8 @@ pub(crate) fn initialize() {
             | ICC_LISTVIEW_CLASSES
             | ICC_BAR_CLASSES
             | ICC_LINK_CLASS
-            | ICC_DATE_CLASSES,
+            | ICC_DATE_CLASSES
+            | ICC_HOTKEY_CLASS,
     };
     // SAFETY: `classes` is complete.
     let _ = unsafe { InitCommonControlsEx(&classes) };
@@ -188,6 +194,16 @@ impl Edit {
             id,
         )
         .map(Edit)
+    }
+
+    /// The edit control `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<Edit> {
+        super::dialog::item(dialog, id).map(Edit)
+    }
+
+    /// Whether `event` says that the box got the focus.
+    pub(crate) fn focused(self, event: ControlEvent) -> bool {
+        event.is(self.0, EN_SETFOCUS)
     }
 
     /// The grey hint the empty box shows, also while it has the focus.
@@ -390,6 +406,11 @@ pub(crate) struct ListBox(Hwnd);
 impl ListBox {
     pub(crate) fn hwnd(self) -> Hwnd {
         self.0
+    }
+
+    /// The list box `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<ListBox> {
+        super::dialog::item(dialog, id).map(ListBox)
     }
 
     /// Its height is the layout's, not a whole number of rows.
@@ -820,6 +841,11 @@ impl CheckBox {
         event.is(self.0, BN_CLICKED)
     }
 
+    /// The check box `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<CheckBox> {
+        super::dialog::item(dialog, id).map(CheckBox)
+    }
+
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<CheckBox> {
         child(
             parent,
@@ -1200,4 +1226,184 @@ impl StatusBar {
         // copies it.
         unsafe { send_pointer(self.0, SB_SETTEXTW, part, text.as_ptr()) };
     }
+}
+
+/// What a hotkey control holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HotkeyValue {
+    Empty,
+    Keys(Keystroke),
+    /// A key that no [`crate::core::commands::Key`] names, such as `;`,
+    /// whose name differs between keyboard layouts.
+    Unsupported,
+}
+
+/// A hotkey control, which shows the keys the person presses, as the
+/// Shortcut key field of a Windows shortcut does. A dialog's template
+/// declares it.
+#[derive(Clone, Copy)]
+pub(crate) struct HotkeyControl(Hwnd);
+
+impl HotkeyControl {
+    /// The hotkey control `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<HotkeyControl> {
+        super::dialog::item(dialog, id).map(HotkeyControl)
+    }
+
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    pub(crate) fn value(self) -> HotkeyValue {
+        // The key's code is the low byte; its modifiers are the high one.
+        let word = send(self.0, HKM_GETHOTKEY, 0, 0) as u32 & 0xffff;
+        let (code, flags) = (word & 0xff, word >> 8);
+        if code == 0 {
+            return HotkeyValue::Empty;
+        }
+        match key_of(code as u16) {
+            Some(key) => HotkeyValue::Keys(Keystroke {
+                ctrl: flags & HOTKEYF_CONTROL != 0,
+                alt: flags & HOTKEYF_ALT != 0,
+                shift: flags & HOTKEYF_SHIFT != 0,
+                key,
+            }),
+            None => HotkeyValue::Unsupported,
+        }
+    }
+
+    /// Shows `keystroke`, or nothing.
+    pub(crate) fn set(self, keystroke: Option<Keystroke>) {
+        let word = keystroke.map_or(0, |keystroke| {
+            let mut flags = 0;
+            for (held, flag) in [
+                (keystroke.ctrl, HOTKEYF_CONTROL),
+                (keystroke.alt, HOTKEYF_ALT),
+                (keystroke.shift, HOTKEYF_SHIFT),
+                (is_extended(keystroke.key), HOTKEYF_EXT),
+            ] {
+                if held {
+                    flags |= flag;
+                }
+            }
+            u32::from(virtual_key(keystroke.key)) | flags << 8
+        });
+        send(self.0, HKM_SETHOTKEY, word as usize, 0);
+    }
+
+    /// With `required`, the control turns a key with fewer than two of
+    /// `Ctrl`, `Alt` and `Shift` into `Ctrl+Alt` and the key; without it,
+    /// it takes any key.
+    pub(crate) fn require_two_modifiers(self, required: bool) {
+        let (invalid, replacement) = if required {
+            (
+                HKCOMB_NONE | HKCOMB_S | HKCOMB_C | HKCOMB_A,
+                HOTKEYF_CONTROL | HOTKEYF_ALT,
+            )
+        } else {
+            (0, 0)
+        };
+        send(self.0, HKM_SETRULES, invalid as usize, replacement as isize);
+    }
+}
+
+/// A list view in report mode with its rows in it, which a dialog's
+/// template declares, such as Settings > Keyboard's commands.
+#[derive(Clone, Copy)]
+pub(crate) struct ReportList(Hwnd);
+
+impl ReportList {
+    /// The list view `id` of a dialog whose template declares one in
+    /// report mode.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<ReportList> {
+        super::dialog::item(dialog, id).map(ReportList)
+    }
+
+    /// Gives the list File Explorer's look and `columns`, each a header,
+    /// its share of the list's width in percent, and whether its cells are
+    /// right-aligned, as numbers are.
+    pub(crate) fn set_columns(self, columns: &[(&str, i32, bool)]) {
+        let extended = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP;
+        send(
+            self.0,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            extended as usize,
+            extended as isize,
+        );
+        // SAFETY: plain values; a missing theme leaves the classic look.
+        let _ = unsafe { SetWindowTheme(self.0.0, w!("Explorer"), PCWSTR::null()) };
+        // The vertical scroll bar takes its width when the rows fill the
+        // list.
+        let width = self.0.client_size().width.0 - scroll_bar_width();
+        for (index, (header, share, right_aligned)) in columns.iter().enumerate() {
+            let mut header = wide(header);
+            let column = LVCOLUMNW {
+                mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
+                fmt: if *right_aligned {
+                    LVCFMT_RIGHT
+                } else {
+                    LVCFMT_LEFT
+                },
+                cx: width * share / 100,
+                pszText: PWSTR(header.as_mut_ptr()),
+                ..Default::default()
+            };
+            // SAFETY: `column` and its header outlive the call, which copies
+            // them.
+            unsafe { send_pointer(self.0, LVM_INSERTCOLUMNW, index, &raw const column) };
+        }
+    }
+
+    /// Replaces the rows with `rows`, each its cells in the columns' order,
+    /// and selects `selected`.
+    pub(crate) fn set_rows<R: AsRef<[String]>>(self, rows: &[R], selected: Option<usize>) {
+        send(self.0, LVM_DELETEALLITEMS, 0, 0);
+        for (index, row) in rows.iter().enumerate() {
+            for (column, text) in row.as_ref().iter().enumerate() {
+                let mut text = wide(text);
+                let item = LVITEMW {
+                    mask: LVIF_TEXT,
+                    iItem: index as i32,
+                    iSubItem: column as i32,
+                    pszText: PWSTR(text.as_mut_ptr()),
+                    ..Default::default()
+                };
+                let message = if column == 0 {
+                    LVM_INSERTITEMW
+                } else {
+                    LVM_SETITEMTEXTW
+                };
+                // SAFETY: `item` and its text outlive the call, which copies
+                // them.
+                unsafe { send_pointer(self.0, message, index, &raw const item) };
+            }
+        }
+        if let Some(index) = selected.filter(|i| *i < rows.len()) {
+            let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+            let item = LVITEMW {
+                stateMask: both,
+                state: both,
+                ..Default::default()
+            };
+            // SAFETY: `item` outlives the call, which reads it.
+            unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
+            send(self.0, LVM_ENSUREVISIBLE, index, 0);
+        }
+    }
+
+    pub(crate) fn selected(self) -> Option<usize> {
+        usize::try_from(send(
+            self.0,
+            LVM_GETNEXTITEM,
+            usize::MAX,
+            LVNI_SELECTED as isize,
+        ))
+        .ok()
+    }
+}
+
+/// The width of a vertical scroll bar at the system's DPI.
+fn scroll_bar_width() -> i32 {
+    // SAFETY: plain values.
+    unsafe { GetSystemMetrics(SM_CXVSCROLL) }
 }

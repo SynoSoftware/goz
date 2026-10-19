@@ -4,7 +4,10 @@
 //! The trampoline decodes every message whose parameters carry a pointer, so
 //! no handler outside this module dereferences one.
 
+use super::keys::key_of;
+use super::menu::Accelerators;
 use super::notify::{Command, Notification};
+use super::tray::TrayEvent;
 use super::{Hwnd, from_rect, to_rect, wide};
 use crate::core::commands::{Key, Keystroke};
 use crate::core::layout::{Dpi, Px, Rect, ScrollRequest, Size};
@@ -15,27 +18,28 @@ use windows::Win32::Graphics::Gdi::{
     COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
     ScreenToClient,
 };
+use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE,
-    VK_F1, VK_F12, VK_MENU, VK_OEM_COMMA, VK_RETURN, VK_SHIFT,
+    GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON,
+    VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-    GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW, HICON, HTCLIENT,
-    IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW,
-    LoadImageW, MINMAXINFO, MSG, PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN,
-    SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT,
-    SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
-    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement,
-    TranslateAcceleratorW, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
-    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ENDSESSION, WM_GETMINMAXINFO,
-    WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WS_CLIPCHILDREN, WS_EX_LEFT,
-    WS_OVERLAPPEDWINDOW,
+    GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW,
+    KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG, PostQuitMessage,
+    RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
+    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON,
+    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer,
+    SetWindowLongPtrW, SetWindowPlacement, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT,
+    WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
+    WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_ENDSESSION, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL,
+    WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -43,9 +47,12 @@ use windows::core::{HSTRING, PCWSTR};
 /// [`Message::Other`] and go to `DefWindowProcW` unless the handler answers.
 pub(crate) enum Message<'a> {
     Create,
+    /// The window became the active one; `from_another_program` when the
+    /// window that lost activation was another program's, or none.
     Activate {
-        active: bool,
+        from_another_program: bool,
     },
+    Deactivate,
     Size,
     DpiChanged {
         dpi: Dpi,
@@ -122,6 +129,16 @@ pub(crate) enum Message<'a> {
     },
     EndSession {
         ending: bool,
+    },
+    /// The shortcut to show Gozler, registered with `RegisterHotKey`, was
+    /// pressed.
+    Hotkey,
+    /// The tray icon was clicked or its menu asked for.
+    Tray(TrayEvent),
+    /// Another process sent `text` with `WM_COPYDATA`, under `tag`.
+    CopyData {
+        tag: usize,
+        text: String,
     },
     Close,
     Destroy,
@@ -271,15 +288,30 @@ fn screen_rect(p: Placement) -> RECT {
 /// when it was, or where Windows puts a new window. A placement that no
 /// monitor shows any more is moved onto one by `SetWindowPlacement`.
 pub(crate) fn show(hwnd: Hwnd, placement: Option<Placement>) {
+    place(hwnd, placement, false);
+}
+
+/// Shows a window that [`create_window`] made minimized, without taking the
+/// focus from the program in front, as a program started at sign-in does;
+/// it restores to `placement`, maximized when it was.
+pub(crate) fn show_minimized(hwnd: Hwnd, placement: Option<Placement>) {
+    place(hwnd, placement, true);
+}
+
+fn place(hwnd: Hwnd, placement: Option<Placement>, minimized: bool) {
     match placement {
         Some(p) => {
             let placement = WINDOWPLACEMENT {
                 length: size_of::<WINDOWPLACEMENT>() as u32,
-                flags: WINDOWPLACEMENT_FLAGS(0),
-                showCmd: (if p.maximized {
-                    SW_SHOWMAXIMIZED
+                flags: if minimized && p.maximized {
+                    WPF_RESTORETOMAXIMIZED
                 } else {
-                    SW_SHOWNORMAL
+                    WINDOWPLACEMENT_FLAGS(0)
+                },
+                showCmd: (match (minimized, p.maximized) {
+                    (true, _) => SW_SHOWMINNOACTIVE,
+                    (false, true) => SW_SHOWMAXIMIZED,
+                    (false, false) => SW_SHOWNORMAL,
                 })
                 .0 as u32,
                 rcNormalPosition: RECT {
@@ -292,9 +324,14 @@ pub(crate) fn show(hwnd: Hwnd, placement: Option<Placement>) {
             };
             // SAFETY: `placement` is complete; a stale window only fails.
             if unsafe { SetWindowPlacement(hwnd.0, &placement) }.is_err() {
-                hwnd.show_normal();
+                if minimized {
+                    hwnd.show_minimized();
+                } else {
+                    hwnd.show_normal();
+                }
             }
         }
+        None if minimized => hwnd.show_minimized(),
         None => hwnd.show_default(),
     }
 }
@@ -337,12 +374,15 @@ const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
 /// main window's controls (design rule 8). A key that `IsDialogMessageW`
 /// moves the focus with is reported to the main window, which no control
 /// notifies of it.
-pub(crate) fn run_message_loop(main: Hwnd, accelerators: &super::menu::Accelerators) {
+///
+/// `accelerators` gives the table of the moment, because Settings replaces
+/// it; the loop holds each table until the command it sent returns.
+pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Accelerators>) {
     let mut msg = MSG::default();
     // SAFETY: `msg` is a local that each call fills in or reads.
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            if TranslateAcceleratorW(main.0, accelerators.handle(), &msg) != 0 {
+            if accelerators().translate(main, &msg) {
                 continue;
             }
             if msg.message == WM_KEYDOWN
@@ -430,13 +470,29 @@ unsafe extern "system" fn procedure<W: WindowProc>(
 
 /// # Safety
 /// `wparam` and `lparam` are the parameters Windows sent with `msg`.
+/// Whether `previous`, the window that lost activation, is another
+/// program's or none. A window that no longer exists counts as this
+/// program's, so a dialog of Gozler's that is already gone still gives the
+/// focus back to the control that opened it.
+fn from_another_program(previous: HWND) -> bool {
+    if previous.is_invalid() {
+        return true;
+    }
+    let mut process = 0;
+    // SAFETY: `process` is a local the call fills in; a handle that no
+    // longer exists gives thread 0.
+    let thread = unsafe { GetWindowThreadProcessId(previous, Some(&mut process)) };
+    thread != 0 && process != std::process::id()
+}
+
 unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
     let low = |v: usize| (v & 0xffff) as u16;
     let high = |v: usize| ((v >> 16) & 0xffff) as u16;
     match msg {
         WM_CREATE => Message::Create,
+        WM_ACTIVATE if u32::from(low(wparam.0)) == WA_INACTIVE => Message::Deactivate,
         WM_ACTIVATE => Message::Activate {
-            active: u32::from(low(wparam.0)) != WA_INACTIVE,
+            from_another_program: from_another_program(HWND(lparam.0 as *mut _)),
         },
         WM_SIZE => Message::Size,
         WM_DPICHANGED => match Dpi::new(u32::from(high(wparam.0))) {
@@ -523,6 +579,36 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_ENDSESSION => Message::EndSession {
             ending: wparam.0 != 0,
         },
+        WM_HOTKEY => Message::Hotkey,
+        super::tray::TRAY => match TrayEvent::decode(wparam, lparam) {
+            Some(event) => Message::Tray(event),
+            None => Message::Other(msg),
+        },
+        WM_COPYDATA => {
+            // SAFETY: WM_COPYDATA's lparam points to a COPYDATASTRUCT whose
+            // data, `cbData` bytes, lives while the message is sent.
+            let data = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+            let units = data.cbData as usize / 2;
+            let text = if units == 0 || data.lpData.is_null() {
+                String::new()
+            } else {
+                // SAFETY: as above; the sender writes UTF-16 code units, and
+                // an unaligned or odd buffer is read as bytes.
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(data.lpData as *const u8, units * 2) };
+                let units: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
+                    .collect();
+                String::from_utf16_lossy(&units)
+            };
+            Message::CopyData {
+                tag: data.dwData,
+                text,
+            }
+        }
         WM_CLOSE => Message::Close,
         WM_DESTROY => Message::Destroy,
         _ => Message::Other(msg),
@@ -568,27 +654,26 @@ fn scroll_request(from: Hwnd, code: u16) -> Option<ScrollRequest> {
 /// The key `key` with the modifiers held while its message was read, if a
 /// shortcut or a control's key can be it.
 fn keystroke(key: VIRTUAL_KEY) -> Option<Keystroke> {
-    let key = match key {
-        // A capital letter's virtual-key code is its ASCII code.
-        VIRTUAL_KEY(code @ 0x41..=0x5A) => Key::Letter(code as u8),
-        VIRTUAL_KEY(code) if (VK_F1.0..=VK_F12.0).contains(&code) => {
-            Key::Function((code - VK_F1.0 + 1) as u8)
-        }
-        VK_RETURN => Key::Enter,
-        VK_OEM_COMMA => Key::Comma,
-        VK_DOWN => Key::Down,
-        VK_ESCAPE => Key::Escape,
-        _ => return None,
-    };
-    // SAFETY: plain values; the high bit of the state is set while the key
-    // is down.
-    let held = |modifier: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(modifier.0)) } < 0;
+    let key: Key = key_of(key.0)?;
     Some(Keystroke {
         ctrl: held(VK_CONTROL),
         alt: held(VK_MENU),
         shift: held(VK_SHIFT),
         key,
     })
+}
+
+/// Whether `key` was down when the message being handled was read.
+fn held(key: VIRTUAL_KEY) -> bool {
+    // SAFETY: plain values; the high bit of the state is set while the key
+    // is down.
+    unsafe { GetKeyState(i32::from(key.0)) < 0 }
+}
+
+/// Whether the left mouse button was down when the message being handled
+/// was read, as it is while a click gives a control the focus.
+pub(crate) fn left_button_down() -> bool {
+    held(VK_LBUTTON)
 }
 
 impl Hwnd {

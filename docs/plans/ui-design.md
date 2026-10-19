@@ -379,9 +379,11 @@ The UI thread never waits for the pipe. Each request runs on its own thread
   shows its message in the list. A `Status` failure updates whether the
   daemon answers, and replaces a failure that the list shows for another
   reason, so the list never offers the fix for a state the service has left;
-  while a search is in flight, its own reply shows instead. A `Selection`
-  failure is the service failing while rows are shown, so it shows as a
-  `Results` failure does (spec `T3`): the list shows the failure and clears
+  while a search is in flight, its own reply shows instead. A `Status`
+  failure that leaves the rows shows in status part 4 (spec `T10`). A
+  `Selection` failure is the service failing while rows are shown, so it
+  shows as a `Results` failure does (spec `T3`): the list shows the failure
+  and clears
   the selection, and for a failure that ends by itself the status poll runs
   the search again once the service answers; while a search is in flight,
   its own reply shows instead. A selection left unread instead would keep

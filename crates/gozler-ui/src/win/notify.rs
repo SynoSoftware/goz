@@ -4,7 +4,7 @@
 //! so no handler can keep it past the message.
 
 use super::Hwnd;
-use super::controls::ListView;
+use super::controls::{ListView, StatusBar};
 use super::gdi::{Font, ImageList, draw_text};
 use crate::core::layout::Px;
 use std::marker::PhantomData;
@@ -19,8 +19,8 @@ use windows::Win32::UI::Controls::{
     CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON,
     LVIR_LABEL, LVIS_SELECTED, LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_COLUMNCLICK,
     LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED,
-    NM_CUSTOMDRAW, NMHDR, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW,
-    NMLVODSTATECHANGE,
+    NM_CLICK, NM_CUSTOMDRAW, NMHDR, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW,
+    NMLVODSTATECHANGE, NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
@@ -162,6 +162,21 @@ impl ListView {
             }
         };
         Some(list)
+    }
+}
+
+impl StatusBar {
+    /// The index of the part that `notification` says was clicked, if this
+    /// status bar sent it.
+    pub(crate) fn clicked_part(self, notification: &Notification) -> Option<usize> {
+        let header = notification.header();
+        if header.hwndFrom != self.hwnd().0 || header.code != NM_CLICK {
+            return None;
+        }
+        // SAFETY: a status bar sends NM_CLICK with an NMMOUSE, whose item
+        // is the part clicked, for the notification's lifetime.
+        let mouse = unsafe { &*notification.header.cast::<NMMOUSE>() };
+        Some(mouse.dwItemSpec)
     }
 }
 

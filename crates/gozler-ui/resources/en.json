@@ -78,8 +78,21 @@
     "alt": "Alt",
     "shift": "Shift",
     "enter": "Enter",
+    "escape": "Esc",
+    "tab": "Tab",
+    "space": "Space",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "insert": "Insert",
+    "home": "Home",
+    "end": "End",
+    "page_up": "Page Up",
+    "page_down": "Page Down",
+    "left": "Left",
+    "up": "Up",
+    "right": "Right",
     "down": "Down",
-    "escape": "Esc"
+    "windows": "Win"
   },
   "status": {
     "results_one": "{0} result",
@@ -96,12 +109,14 @@
     "volume_indexing": "{0} is indexing — results may be incomplete.",
     "volume_offline": "{0} is offline — results may be incomplete.",
     "volume_failed": "{0} could not be indexed — results may be incomplete.",
-    "metadata": "Some sizes and dates on {0} are unknown."
+    "metadata": "Some sizes and dates on {0} are unknown.",
+    "update_available": "Gozler {0} is available. Click here to open its page."
   },
   "list": {
     "no_results": "No files match.",
     "missing_folder": "The folder {0} does not exist.",
-    "search_everywhere": "Search every&where"
+    "search_everywhere": "Search every&where",
+    "type_to_search": "Type to search."
   },
   "filter": {
     "kind": "&Kind",
@@ -292,6 +307,93 @@
     "not_a_number": "Enter a number, such as {0}.",
     "order": "Minimum must not be larger than Maximum."
   },
+  "settings": {
+    "title": "Settings",
+    "apply": "&Apply",
+    "restore_defaults": "&Restore defaults",
+    "general": "General",
+    "search": "Search",
+    "keyboard": "Keyboard",
+    "index": "Index"
+  },
+  "settings_general": {
+    "language": "&Language:",
+    "windows_default": "Windows default",
+    "starting": "Starting and closing",
+    "sign_in": "Start Gozler when I &sign in to Windows",
+    "updates": "Check for &updates when Gozler starts",
+    "keep_running": "&Keep Gozler running in the notification area when I close its window",
+    "file_explorer": "File Explorer",
+    "search_with": "Show \"Search with Gozler\" on &folders",
+    "verb": "Search with Gozler",
+    "open_folders": "&Open folders:",
+    "open_files": "Open f&iles:",
+    "open_file_location": "Open file loca&tion:",
+    "browse": "Browse…",
+    "cue_explorer": "File Explorer",
+    "cue_default_program": "The file's default program",
+    "total_commander": "Use Total &Commander",
+    "no_total_commander": "Gozler found no Total Commander (TOTALCMD64.EXE or TOTALCMD.EXE). Choose it with Browse….",
+    "browse_title": "Choose a program",
+    "programs": "Programs"
+  },
+  "settings_search": {
+    "search_box": "Search box",
+    "as_you_type": "Search as you &type",
+    "show_all": "Show &every file and folder when the search is empty",
+    "select_on_click": "Select the search text when I &click the search box",
+    "select_on_activate": "Select the search text when Gozler is acti&vated"
+  },
+  "settings_keyboard": {
+    "show_gozler": "Show Gozler",
+    "shortcut": "S&hortcut to show Gozler from any program:",
+    "windows_key": "&Windows key",
+    "closed_note": "The shortcut works only while the window is open, because Gozler does not keep running in the notification area (General).",
+    "running_note": "The shortcut works from any program, also after you close the window, because Gozler keeps running in the notification area (General).",
+    "commands": "Commands",
+    "filter": "Show commands c&ontaining:",
+    "command_column": "Command",
+    "keys_column": "Shortcuts",
+    "keys": "Shortcuts for the &selected command:",
+    "add": "A&dd…",
+    "edit": "&Edit…",
+    "remove": "Re&move",
+    "context_menu": "Context menu",
+    "refused_control": "{0} belongs to the search box or the list.",
+    "refused_typing": "{0} is for typing or for the menus. Choose a shortcut with Ctrl, such as Ctrl+K, or a function key, such as F3.",
+    "refused_taken": "{0} is the shortcut for {1}. Remove it there first.",
+    "unsupported": "Gozler cannot use this key in a shortcut. Choose a letter, a digit or a function key, such as Ctrl+K or F3.",
+    "shortcut_taken": "Another program uses {0}. Choose another shortcut.",
+    "shortcut_failed": "Windows did not let Gozler use {0}. {1}",
+    "lock": "Windows keeps {0} for locking the computer. Choose another shortcut.",
+    "two_modifiers": "Choose a shortcut with two of Ctrl, Alt and Shift, or with the Windows key."
+  },
+  "settings_index": {
+    "drives": "Drives",
+    "drive_column": "Drive",
+    "state_column": "State",
+    "entries_column": "Entries",
+    "live": "Live",
+    "snapshot": "Does not update",
+    "indexing": "Indexing",
+    "offline": "Offline",
+    "failed": "Not indexed",
+    "holds": "What the index holds",
+    "holds_text": "Names, sizes, folder sizes, dates modified and attributes. The index always holds them, because the search, the filters and the Size column need them.",
+    "service": "Service",
+    "asking": "Gozler is asking the Gozler service for its state…",
+    "running": "The Gozler service is running.",
+    "running_memory": "The Gozler service is running and uses {0} of memory.",
+    "status_hint": "For the full report, run gozler --status."
+  },
+  "command_shortcut": {
+    "title": "Command shortcut",
+    "press": "&Press the new shortcut:"
+  },
+  "tray": {
+    "notice": "Gozler is still running. Click its icon in the notification area to show it. Choose Exit from its menu to stop it.",
+    "notice_shortcut": "Gozler is still running. Press {0} or click its icon in the notification area to show it. Choose Exit from its menu to stop it."
+  },
   "export": {
     "title": "Export results",
     "file_name": "results",
@@ -305,6 +407,9 @@
     "export_failed": "Gozler could not write {0}. {1} Choose another folder or free some space, then export again.",
     "export_stopped": "Gozler could not export to {0}. {1}",
     "clipboard_busy": "The clipboard is in use by another program. Try again in a moment.",
-    "no_longer_exists": "{0} no longer exists. Press F5 to search again."
+    "no_longer_exists": "{0} no longer exists. Press F5 to search again.",
+    "open_failed": "Gozler could not start {0}. {1} Check the command in File > Settings > General.",
+    "shortcut_taken": "Another program uses {0}, so it no longer shows Gozler. Choose another shortcut in File > Settings > Keyboard.",
+    "registry_failed": "Gozler could not save \"{0}\" in the Windows registry. {1}"
   }
 }

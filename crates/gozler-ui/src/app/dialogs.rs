@@ -59,7 +59,9 @@ impl DialogProc for About {
             }
             DialogMessage::LinkActivated { .. }
             | DialogMessage::Command { .. }
-            | DialogMessage::Edited
+            | DialogMessage::Edited { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
             | DialogMessage::Other => false,
         }
     }
@@ -162,7 +164,7 @@ impl DialogProc for CustomDate {
 
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
         match message {
-            DialogMessage::Edited => {
+            DialogMessage::Edited { .. } => {
                 if let Some(balloon) = self.balloon.get() {
                     balloon.hide();
                 }
@@ -190,6 +192,8 @@ impl DialogProc for CustomDate {
             }
             DialogMessage::Command { .. }
             | DialogMessage::LinkActivated { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
             | DialogMessage::Other => false,
         }
     }
@@ -297,7 +301,7 @@ impl DialogProc for CustomSize {
 
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
         match message {
-            DialogMessage::Edited => {
+            DialogMessage::Edited { .. } => {
                 if let Some(balloon) = self.balloon.get() {
                     balloon.hide();
                 }
@@ -326,6 +330,8 @@ impl DialogProc for CustomSize {
             }
             DialogMessage::Command { .. }
             | DialogMessage::LinkActivated { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
             | DialogMessage::Other => false,
         }
     }

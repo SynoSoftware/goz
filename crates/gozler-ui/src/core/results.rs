@@ -43,6 +43,9 @@ pub(crate) enum ListMessage {
     /// as `gozler` refuses the same search (spec: S8).
     MissingFolder(String),
     Failure(DaemonFailure),
+    /// The search is empty, and Settings says to show nothing then (spec:
+    /// S6).
+    TypeToSearch,
 }
 
 /// The button a message offers for its fix (spec: Daemon failures).
@@ -79,7 +82,9 @@ impl ListButton {
 impl ListMessage {
     pub(crate) fn fix(&self) -> Option<Fix> {
         match self {
-            ListMessage::Parse(_) | ListMessage::MissingFolder(_) => None,
+            ListMessage::Parse(_) | ListMessage::MissingFolder(_) | ListMessage::TypeToSearch => {
+                None
+            }
             ListMessage::Failure(failure) => match failure {
                 DaemonFailure::NotRunning(why) => {
                     Some(why.repair().map_or(Fix::OpenServices, Fix::Repair))
