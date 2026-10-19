@@ -2,7 +2,7 @@
 
 **Sketch, 2026-10-19.** This file says what the file manager is, and how its
 spec, design and plan get written and built. It is not the finished spec yet.
-The rules here are defaults; the owner corrects them before stage 1.
+The rules here are defaults; the owner corrects them before stage 2.
 
 ## Goal
 
@@ -32,7 +32,7 @@ the person sees and does.
 ## Defaults to confirm
 
 These are this sketch's choices. Each has a reason; the owner changes any of
-them before stage 1.
+them before stage 2.
 
 1. **The two modes share one window.** View > Two panels switches between
    Search and Two panels, and the window opens in the mode it closed in.
@@ -53,7 +53,7 @@ them before stage 1.
    manager without them sends the person to File Explorer for the most
    common acts. View (`F3`) and Edit (`F4`) are not: Open does that.
 6. **Operations wait only for overlapping paths, or for a copy on the same
-   disk,** as the engine's queue decides (engine spec, D14). Deleting folder
+   hard disk,** as the engine's queue decides (engine spec, D14). Deleting folder
    A never waits for a copy of folder B.
 7. **One File operations window shows every operation,** as File Explorer
    groups its copies in one window. It does not move the main window's
@@ -134,7 +134,9 @@ the window shows.
 - **The status bar** has the same four parts as Search's. Part 1 shows the
   active panel's folder and its volume's free space, part 2 the selection as
   in Search, part 3 the running operations, "2 operations · 41 %", which
-  opens the File operations window on a click, and part 4 the index state of
+  opens the File operations window on a click; the percentage counts the
+  operations with a total, and a delete, which has none (engine spec, "The
+  interface"), shows its count of deleted items in its own row, and part 4 the index state of
   the shown volumes.
 
 ## File operations
@@ -161,9 +163,8 @@ row when nothing is selected, as in Norton Commander.
    File operations shows it again. The taskbar button shows the progress of
    all operations together.
 6. **When an operation ends,** both panels already show the change, through
-   their change notifications. A search panel keeps the rows that the
-   operation removed out of its list (see "The person never waits for the
-   disk").
+   their change notifications. A search panel shows the rows that the
+   operation took blank (see "The person never waits for the disk").
 7. **A failure does not stop the operation.** At its end, a dialog lists
    each item that failed or was skipped, with Windows' reason. An operation
    that the engine refuses before it starts (a destination inside a source,
@@ -209,7 +210,7 @@ to skip it, and one forgot.
 
 The engine's queue decides which operation waits (engine spec, D14): for an
 earlier one whose paths overlap, or, for a copy, for an earlier copy on the
-same disk. Nothing else waits. The window only shows the result. A waiting
+same hard disk or network server. Nothing else waits. The window only shows the result. A waiting
 operation shows
 what it waits for: "Waiting for the copy to D:\Backup". The person can
 cancel that copy to let the waiting one start. The person is never asked to
@@ -228,6 +229,11 @@ their mind, but the person must know what happened.
   operation as "Interrupted", with Continue and Dismiss.
 - **Waiting operations are not saved:** they have changed no file, and the
   Exit question says they will not run.
+- **Another window offers no file operations.** When "Allow only one Gozler
+  window at a time" is off, a second window shows Delete, Cut, Paste, Copy
+  to folder… and Move to folder… disabled and accepts no drop, as it shows
+  no tray icon, because the first window's queue owns the saved file
+  (engine spec, "One queue per user session").
 
 ### What a stopped operation leaves
 
@@ -354,7 +360,7 @@ picker as the destination:
 
 ## Vocabulary
 
-These terms go into `CONTEXT.md` before stage 1:
+These terms go into `CONTEXT.md` before stage 2:
 
 - **Panel**: one of the two lists of Two panels; it shows a folder or a
   search.
@@ -365,7 +371,7 @@ These terms go into `CONTEXT.md` before stage 1:
 - **File operation**: a copy, a move, a delete, a rename or a new folder,
   which the engine's queue runs. Every delete is permanent.
 - **Queue**: the file operations that wait, each for an earlier operation
-  whose paths overlap its own or whose copy uses the same disk.
+  whose paths overlap its own or whose copy uses the same hard disk.
 
 ## How the documents get written and built
 
@@ -385,16 +391,18 @@ difference was what the documents asked for around the code (`AGENTS.md`,
 - **Rules with their reasons, no IDs** except for the cases a test names.
   The window's spec gave IDs to every command, state, transition and
   journey, and each ID became something to prove.
-- **One prototype**, an HTML page of the Two panels window and the File
-  operations window, outside the repository. The owner approves it once,
-  before stage 1, because a design change after that costs code. It shows
+- **One prototype**, an HTML page of the Two panels window, the File
+  operations window, Search mode with its new commands, the Delete and
+  conflict questions, and the File operations page of Settings, outside the
+  repository. The owner approves it once,
+  before stage 2, because a design change after that costs code. It shows
   only what this plan builds; a screen for later work is left out or
   labeled "Later" on the screen, because the window's prototype showed
   postponed pages that the owner later took for forgotten work. Its sample
   data looks like the owner's machine, or is labeled as samples: the
   window's prototype showed a drive label "Windows", so a drive without a
   label looked like a defect.
-- **The prototype's text becomes `en.json` before stage 1.** Every hint,
+- **The prototype's text becomes `en.json` before stage 2.** Every hint,
   caption and state text on the approved screens gets its catalogue key.
   Stage 7, when every screen exists, adds a test that fails when a key is
   used by no screen; earlier, the keys of screens not yet built would fail
@@ -437,7 +445,8 @@ difference was what the documents asked for around the code (`AGENTS.md`,
 
 - One implementer keeps its context through every stage and fixes the
   review's findings. The reviewer reads and reports, and rechecks the fixes
-  by reading.
+  by reading. An adversarial review runs only in stage 2, where a wrong
+  drop or paste result makes another program delete the person's files.
 - A rule that `core` decides is proven by a unit test. The engine is proven
   by tests on folders that each test creates; no test touches the owner's
   files.

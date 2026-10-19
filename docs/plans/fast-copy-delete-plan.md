@@ -19,6 +19,10 @@ minutes each.
   review's findings. The reviewer reads the diff against the spec and
   reports; the implementer fixes and builds once; the reviewer rechecks the
   fixes by reading.
+- **An adversarial review only where a defect loses files:** stages A, B
+  and C, where a second reviewer tries to make the stage delete, replace or
+  damage a file it should not. Stage D measures and changes no rule, so it
+  gets the one review.
 - **Proof is a test** on a folder that the test creates under the system's
   temporary folder, which runs in seconds. No test reads or writes any other
   folder, and none needs a running gozlerd.
@@ -32,7 +36,8 @@ minutes each.
 - **A defect is reproduced before it is reported.** Paths are tested from
   PowerShell, because Git Bash rewrites `\\?\` paths, and two of the window's
   alarms were false for that kind of reason.
-- **Nothing waits for the owner,** except stage D's one elevated run. What
+- **Nothing waits for the owner,** except in stage D: its one elevated run,
+  and the owner's approval of the comparison with other tools. What
   needs a second disk, a hard disk, a USB drive or a share goes into "After
   install". A rule that depends on the disks, such as rename against copy
   and delete, is chosen by a function that the tests call with each value,
@@ -46,13 +51,17 @@ Build:
 
 - `gozler-winfs`: open an entry relative to a folder handle; list a folder;
   delete one entry with its fallback (D1); the final path (D12); a volume's
-  class and its disks.
+  class and its disks. `NtOpenFile` needs the `windows-sys` features
+  `Wdk_Foundation` and `Wdk_Storage_FileSystem`, and `RtlGetVersion`, in
+  stage B, needs `Wdk_System_SystemServices`.
 - `gozler-core`: the `FileFullDirectoryInfo` parser (D4).
 - `gozler-fileops`: the crate, its `deny.toml` and CI entries; "What an
   operation receives"; "Delete"; the queue's skeleton from "The interface"
   (prepare, submit, the states, the threads, cancel and the wake function,
   without waits or the saved file), with the delete running in it, so stage
-  B adds to the queue instead of restructuring a delete built without it.
+  B adds to the queue instead of restructuring a delete built without it;
+  the speed settings as one typed value with their ranges, because prepare
+  takes them and the delete reads its worker count from them.
 - Run once: POSIX delete on the Dev Drive. Write the result into the spec.
 
 Done when: the stage A rows of "Tests" pass, the run-once results are in the
@@ -68,8 +77,8 @@ Build:
 - `gozler-fileops`: "Copy" with "The Windows engine", "Move", "Conflicts",
   temporary names (D10), links (D21), and the rest of "The interface": the
   queue's waits (D14) and taken entries, saved operations with Continue and
-  Dismiss (D19), rename, new folder and measure; the speed settings with
-  their ranges and the presets that use only the Windows engine.
+  Dismiss (D19), rename, new folder and measure; the presets that use only
+  the Windows engine.
 - Run once: `CopyFile2` with `COPY_FILE_OPEN_AND_COPY_REPARSE_POINT` on a
   folder junction, a folder symbolic link and a file symbolic link, without
   Developer Mode; `CopyFile2` on a file that another handle holds open for
@@ -119,7 +128,7 @@ and each value is measured once, in the case where it matters.
 | --- | --- | --- |
 | 30,000 files of 1 to 64 KB in 5,000 folders | delete with one worker per processor, and with 8 | `rmdir /s /q`, rmbrr |
 | the same | copy to another folder on the same volume, Windows engine, with and without the `.gozler-partial` rename (D10) | `robocopy /e /mt:16`, FastCopy |
-| one 8 GiB file | copy: Windows engine buffered, unbuffered, and unbuffered with a larger `ioDesiredSize` (D9); ring with 8 MiB × 8 and with 2 MB × 8 | `robocopy /j`, FastCopy |
+| one 8 GiB file | copy: Windows engine buffered, unbuffered, and unbuffered with `ioDesiredSize` of 8 MiB and of 32 MiB (D9); ring with 8 MiB × 8 and with 2 MB × 8 | `robocopy /j`, FastCopy |
 | 20 files each of 32 MiB, 64 MiB and 128 MiB | copy: Windows engine buffered and unbuffered | itself: the large-file limit, AngelCOPY's 32 MiB against BetterCopy's 256 MiB |
 | 20 files of 64 MiB on the Dev Drive | copy within the volume: the ring's clone (D20) and `CopyFile2`'s own | itself |
 
@@ -143,7 +152,9 @@ starts, and stops when the space is short.
 Done when:
 
 - the table is in `docs/BENCHMARKS.md` with the machine, the disk and the
-  date;
+  date; it holds Gozler's columns alone if the owner declines the
+  comparison, and the compared tools' columns are added when the owner
+  approves it;
 - each of D2, D7, D8, D9 and D10 in the spec is confirmed or changed, with
   its numbers, and the Automatic preset holds the fastest measured values
   for each case;
@@ -158,12 +169,14 @@ Each test watches a failure that the compiler and the other tests miss.
 | Stage | Test | Failure it watches |
 | --- | --- | --- |
 | A | Delete a tree that holds a junction to a folder outside it, and a file symbolic link to a file outside it; the symbolic-link case is skipped when the test cannot create one | the delete enters the junction or deletes the link's target, outside the selection |
-| A | Delete a selection whose only entry is a junction, given to the engine as a folder | the engine trusts the caller's mark, enters the junction and deletes its target's files |
-| A | Delete a tree with a read-only file, a path longer than 260 characters and empty nested folders | the tree is left partly deleted |
+| A | Delete a selection whose only entry is a junction to a folder, given to the engine as a path | the engine takes the junction for a folder, enters it and deletes its target's files |
+| A | Delete a tree with a read-only file, a path longer than 260 characters, empty nested folders, and a folder of 1,000 files beside one empty subfolder | the tree is left partly deleted, or a folder is tried before its last file item is done and fails as not empty |
 | A | Delete a read-only file through the classic fallback of D1, called directly on NTFS | a FAT volume's read-only files cannot be deleted |
 | A | Delete 100 files with the POSIX call made to refuse once, and count the POSIX calls (any OS, through the function that chooses the method) | every file on a FAT drive pays a failed call before the classic delete |
 | A | Delete a tree in which one file is held open without `FILE_SHARE_DELETE` | one failure stops the delete, or the failure is lost and the delete reports success |
-| A | Compare a folder with itself by other case, and by its short name; prepare a copy of a folder to a destination that is a junction into that folder; the short-name case is skipped when the volume makes no short names | two operations on one folder do not wait for each other, or a folder is copied or moved into itself |
+| A | Choose the retry for each refusal: sharing violation, lock violation, folder not empty, access denied (any OS) | a permission refusal waits through 200 ms of retries for every file |
+| A | Compare a folder with itself by other case, and by its short name; prepare a copy of a folder to a destination that is a junction into that folder; the short-name case is skipped when the volume makes no short names | two spellings of one folder compare as two folders, so stage B's waits would not hold them apart, or a folder is copied or moved into itself |
+| A | Build speed settings with each value just outside its range, and a block size that is not a power of two (any OS) | a bad value from `ui.json` reaches an operation |
 | A | Nested selection, destination inside a source, the numbers for Keep both, the temporary name of a 250-character name (any OS) | an entry is handled twice, copied into itself, or a long name cannot be copied |
 | B | Copy with each conflict choice onto existing files, and with Replace a file onto a folder of its name | Skip or Keep both replaces a file at the destination, or Replace deletes a folder |
 | B | Create a file at the destination between prepare and run, when prepare found no conflict | the run replaces a file that nobody chose to replace |
@@ -171,9 +184,11 @@ Each test watches a failure that the compiler and the other tests miss.
 | B | Cancel a copy from its first progress report | a partial file stays at the final name and looks complete |
 | B | Continue onto a destination that holds a `.gozler-partial` file, a complete copy, and a Keep both copy `report (2).pdf` | the complete copies are copied again, or the partial file is kept or taken as complete |
 | B | Continue a move with the copy-and-delete method whose destination already holds a complete copy | the source is deleted on a size-and-time guess |
+| B | Continue a move with the rename method after half its entries were renamed; Continue a delete after half its entries were deleted; a first-run move whose source is deleted while it waits, onto a destination that holds a file of that name | entries that already moved or were deleted are reported as failures, or a source deleted by another program is reported as moved |
 | B | Move with the rename method, and compare the file ID before and after; move into a folder of the same name that holds one conflicting file | a move on one volume copies instead of renaming, or a merge replaces a file without a choice |
-| B | The queue's wait decision for: two operations on overlapping paths, two copies on one disk, a delete and a copy on one disk with separate paths, a delete inside a copy's destination folder but outside what it writes (any OS) | an operation changes files that another still uses, or a delete waits behind an unrelated copy |
-| B | Build speed settings with each value just outside its range, and a block size that is not a power of two; reload a saved operation and compare its settings (any OS) | a bad value from `ui.json` reaches a copy, or Continue runs with other settings than the interrupted run |
+| B | The queue's wait decision for: two operations on overlapping paths, two copies on one hard disk, two copies on one SSD, a delete and a copy on one disk with separate paths, a delete inside a copy's destination folder but outside what it writes, an operation after one that ended (any OS) | an operation changes files that another still uses, or waits behind an unrelated or ended one |
+| B | The taken test for a row equal to a taken path, below it, and beside it with a longer name (`C:\a` taken, `C:\ab` not), in other case (any OS) | a deleted file's row stays visible, or a file that is not taken is hidden |
+| B | Reload a saved operation and compare its speed settings (any OS) | Continue runs with other settings than the interrupted run |
 | B | Write the saved file as a crash leaves it and create the queue; separately, drop a queue with a running operation and create it again | an interrupted operation is lost, or a cancelled one is offered as interrupted |
 | C | Copy with the ring, in each profile and disk layout, then compare a hash of each source and destination: a sparse file with holes, a file whose size is not a multiple of the sector size, a file larger than the 256 MB buffer, a file of 0 bytes, a file with a `Zone.Identifier` stream, a read-only file, and 2,000 small files that cross the buffer's end | the ring writes a wrong byte, reuses a buffer still being written, loses a stream, a hole or an attribute, or pads a file |
 | C | Copy with the ring a file that the test holds open for writing | a file another program writes is copied as a mix of bytes |
@@ -189,8 +204,9 @@ waits for them.
 
 - Stage D's copy cases between two disks, on a hard disk with two
   partitions, where the ring's hard-disk profile should help most, and to a
-  USB drive. Their winners replace the Automatic preset's hard-disk and USB
-  values.
+  USB drive, and a small-file copy to a share with 1, 2 and 16 workers,
+  which also times D10's rename there. Their winners replace the Automatic
+  preset's hard-disk, USB and share values.
 - A move across volumes, for example to a USB drive: the sources go, the
   progress shows bytes, and a cancel leaves each file in one place.
 - A copy from a share whose server is switched off during the copy: the
@@ -200,6 +216,9 @@ waits for them.
   D1's classic fallback.
 - One share folder reached through two drive mappings: a copy from one into
   the other is refused as a copy into itself (D12).
+- A move to another drive of a OneDrive folder whose files are only in the
+  cloud: every file arrives with its data, and the source folder goes only
+  after its files ("What an operation receives", the second handle).
 
 ## When the plan is done
 
