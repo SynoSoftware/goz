@@ -7,11 +7,11 @@ use super::{Hwnd, to_rect};
 use crate::core::layout::{Dpi, Px, Rect};
 use windows::Win32::Foundation::{COLORREF, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_3DLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
+    BeginPaint, COLOR_3DLIGHT, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
     DRAW_TEXT_FORMAT, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK, DeleteObject,
     DrawTextW, EndPaint, FW_BOLD, FW_SEMIBOLD, FillRect, GetDC, GetObjectW, GetSysColor,
     GetSysColorBrush, GetTextMetricsW, HDC, HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, ReleaseDC,
-    SelectObject, SetBkColor, SetTextColor, TEXTMETRICW,
+    SYS_COLOR_INDEX, SelectObject, SetBkColor, SetTextColor, TEXTMETRICW,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
@@ -330,10 +330,20 @@ impl StaticColors {
     /// Windows sets none, and the default black can match a high contrast
     /// theme's window colour.
     pub(crate) fn window_background(self) -> LRESULT {
+        self.on_window(COLOR_WINDOWTEXT)
+    }
+
+    /// [`window_background`](Self::window_background) with gray text, for a
+    /// hint beside the content.
+    pub(crate) fn gray_text(self) -> LRESULT {
+        self.on_window(COLOR_GRAYTEXT)
+    }
+
+    fn on_window(self, text: SYS_COLOR_INDEX) -> LRESULT {
         // SAFETY: a stale DC makes the calls fail; system brushes are never
         // freed.
         unsafe {
-            SetTextColor(self.0, COLORREF(GetSysColor(COLOR_WINDOWTEXT)));
+            SetTextColor(self.0, COLORREF(GetSysColor(text)));
             SetBkColor(self.0, COLORREF(GetSysColor(COLOR_WINDOW)));
             LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
         }

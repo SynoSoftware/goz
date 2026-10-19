@@ -7,7 +7,7 @@
 
 **gozler** *(gözler, Turkish for "eyes")* is an instant file-search engine for Windows NTFS and ReFS, written in Rust. A fast, open-source alternative to voidtools Everything.
 
-gozler is a fork of [goz](https://github.com/mustafaahci/goz) *(göz, "eye")*, created by [Mustafa Ahci](https://github.com/mustafaahci). synapse.sr develops gozler at [SynoSoftware/goz](https://github.com/SynoSoftware/goz), building on goz's index, daemon and speed the way vim built on vi.
+[Synapse N.V.](http://synapse.sr) develops gozler at [SynoSoftware/goz](https://github.com/SynoSoftware/goz). gozler started as a fork of [goz](https://github.com/mustafaahci/goz) *(göz, "eye")* 0.2.0 by [Mustafa Ahci](https://github.com/mustafaahci), as vim started from vi.
 
 gozler indexes every filename on your fixed NTFS and ReFS volumes, Dev Drives included, and answers substring queries in single-digit milliseconds, in the Gozler window, from the command line, or from your own tools over a named pipe.
 
@@ -120,7 +120,7 @@ Issues and pull requests welcome.
 
 ## Credits
 
-[Mustafa Ahci](https://github.com/mustafaahci) created goz ([mustafaahci/goz](https://github.com/mustafaahci/goz)). The index, the daemon and the benchmarks above are Mustafa Ahci's work, and gozler would not exist without them. synapse.sr develops the gozler fork.
+[Synapse N.V.](http://synapse.sr) develops gozler. [Mustafa Ahci](https://github.com/mustafaahci) created goz ([mustafaahci/goz](https://github.com/mustafaahci/goz)) and wrote it up to version 0.2.0, the start of gozler: its first MFT index and daemon, and the benchmarks above.
 
 ## License
 

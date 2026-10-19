@@ -18,6 +18,7 @@ AppId=gozler
 AppName=Gozler
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
+AppCopyright=Copyright (C) 2026 Synapse N.V. and Mustafa Ahci
 AppPublisherURL={#AppUrl}
 AppUpdatesURL={#AppUrl}/releases/latest
 VersionInfoVersion={#AppVersion}

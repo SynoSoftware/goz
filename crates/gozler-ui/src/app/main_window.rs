@@ -328,6 +328,8 @@ struct Inspector {
     buttons: [Button; 3],
     /// Each field row's label and value.
     fields: Vec<(Label, Edit)>,
+    /// The gray hint while nothing is selected.
+    note: Label,
 }
 
 /// The controls of each inspector field row's label and value.
@@ -352,6 +354,7 @@ impl Inspector {
                 button(ControlId::InspectorCopyAsPath)?,
             ],
             fields: Vec::new(),
+            note: Label::create_message(parent, ControlId::InspectorNote.id())?,
         };
         for (label, value) in FIELD_CONTROLS {
             inspector.fields.push((
@@ -372,6 +375,7 @@ impl Inspector {
             .iter()
             .map(|b| b.hwnd())
             .chain(fields)
+            .chain([self.note.hwnd()])
             .collect()
     }
 
@@ -802,6 +806,7 @@ impl MainWindow {
             label.hwnd().set_text(label_text);
             value.hwnd().set_text(value_text);
         }
+        inspector.note.hwnd().set_text(&captions.note);
         // The shell call can dispatch messages, so no borrow is held
         // (DESIGN.md: window rule 1).
         let icon = captions
@@ -817,20 +822,24 @@ impl MainWindow {
     }
 
     /// Shows each field row that has a field and room in the pane, and
-    /// hides the others, so Tab skips them.
+    /// hides the others, so Tab skips them; the note likewise.
     fn show_fields(&self) {
-        let rows = {
+        let (rows, note) = {
             let layout = self.created().layout.borrow();
-            let room = layout
-                .as_ref()
-                .and_then(|l| l.inspector.as_ref())
-                .map_or(0, |i| i.fields.len());
-            room.min(self.inspector_shown.borrow().0.fields.len())
+            let placed = layout.as_ref().and_then(|l| l.inspector.as_ref());
+            let room = placed.map_or(0, |i| i.fields.len());
+            let shown = self.inspector_shown.borrow();
+            (
+                room.min(shown.0.fields.len()),
+                placed.is_some_and(|i| i.note.is_some()) && !shown.0.note.is_empty(),
+            )
         };
-        for (index, (label, value)) in self.created().controls.inspector.fields.iter().enumerate() {
+        let inspector = &self.created().controls.inspector;
+        for (index, (label, value)) in inspector.fields.iter().enumerate() {
             label.hwnd().set_visible(index < rows);
             value.hwnd().set_visible(index < rows);
         }
+        inspector.note.hwnd().set_visible(note);
     }
 
     fn show_status(&self, status: &StatusCaptions) {
@@ -852,13 +861,23 @@ impl MainWindow {
             Some((text, buttons)) => (text.as_str(), buttons.as_slice()),
             None => ("", &[][..]),
         };
+        // The same model state the captions came from, read before any
+        // Win32 call (DESIGN.md: window rule 1).
+        let shields: Vec<bool> = self
+            .model
+            .borrow()
+            .list_buttons()
+            .iter()
+            .map(ListButton::needs_administrator)
+            .collect();
         controls.message.hwnd().set_text(text);
         for (index, button) in controls.message_buttons.iter().enumerate() {
             button
                 .hwnd()
                 .set_text(buttons.get(index).map_or("", String::as_str));
+            button.set_shield(shields.get(index).copied().unwrap_or(false));
         }
-        self.place_message(text, buttons);
+        self.place_message(text, buttons, &shields);
         controls.message.hwnd().set_visible(message.is_some());
         for (index, button) in controls.message_buttons.iter().enumerate() {
             button.hwnd().set_visible(index < buttons.len());
@@ -866,8 +885,8 @@ impl MainWindow {
     }
 
     /// Places the message below the list's header, and its buttons below
-    /// it.
-    fn place_message(&self, text: &str, buttons: &[String]) {
+    /// it; `shields` says which buttons show the administrator shield.
+    fn place_message(&self, text: &str, buttons: &[String], shields: &[bool]) {
         let created = self.created();
         let Some(list) = created.layout.borrow().as_ref().map(|l| l.list) else {
             return;
@@ -879,7 +898,11 @@ impl MainWindow {
         let (text, rects) = {
             let fonts = created.fonts.borrow();
             let meter = TextMeter::new(&fonts.ui);
-            let widths: Vec<Px> = buttons.iter().map(|b| meter.width(b)).collect();
+            let widths: Vec<Px> = buttons
+                .iter()
+                .zip(shields.iter().chain(std::iter::repeat(&false)))
+                .map(|(b, &shielded)| layout::button_content(meter.width(b), shielded, metrics.dpi))
+                .collect();
             area.place(
                 meter.wrapped_height(text, area.text_width()),
                 metrics.font_height,
@@ -933,6 +956,9 @@ impl MainWindow {
             {
                 label.hwnd().set_rect(*label_rect);
                 value.hwnd().set_rect(*value_rect);
+            }
+            if let Some(note) = placed.note {
+                inspector.note.hwnd().set_rect(note);
             }
         }
         let shown = layout.inspector.is_some();
@@ -2716,7 +2742,13 @@ impl WindowProc for MainWindow {
                 self.splitter_drag.set(None);
                 None
             }
-            Message::CtlColorStatic(colors) => Some(colors.window_background()),
+            Message::CtlColorStatic { colors, control } => Some(
+                if control == self.created().controls.inspector.note.hwnd() {
+                    colors.gray_text()
+                } else {
+                    colors.window_background()
+                },
+            ),
             Message::Paint => {
                 let created = self.created();
                 let (dividers, icon) = {

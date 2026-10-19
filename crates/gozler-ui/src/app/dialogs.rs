@@ -98,9 +98,11 @@ impl DialogProc for SearchSyntax {
 /// The Custom date dialog: From and To, either of which may be left open
 /// (DESIGN.md: Filter pane, Dialogs).
 pub(super) struct CustomDate {
-    /// The range the dialog opens with; a new range starts today.
+    /// The range the dialog opens with.
     shown: Option<DateRange>,
-    today: jiff::civil::Date,
+    /// Where a new range starts: a week before today, because a range from
+    /// today alone is what the Today choice already gives.
+    week_ago: jiff::civil::Date,
     order: String,
     balloon: OnceCell<Balloon>,
     chosen: Cell<Option<DateRange>>,
@@ -110,7 +112,9 @@ impl CustomDate {
     pub(super) fn new(strings: &Strings, shown: Option<DateRange>) -> CustomDate {
         CustomDate {
             shown,
-            today: jiff::Zoned::now().date(),
+            week_ago: jiff::Zoned::now()
+                .date()
+                .saturating_sub(jiff::Span::new().days(7)),
             order: strings.text("custom_date.order").to_owned(),
             balloon: OnceCell::new(),
             chosen: Cell::new(None),
@@ -146,7 +150,7 @@ impl DialogProc for CustomDate {
     fn init(&self, dialog: Hwnd) -> Opened {
         let (from, to) = match self.shown {
             Some(range) => range.days(),
-            None => (Some(Day(self.today)), None),
+            None => (Some(Day(self.week_ago)), None),
         };
         if let Some((from_picker, to_picker)) = Self::pickers(dialog) {
             from_picker.set_day(from.map(|d| d.0));

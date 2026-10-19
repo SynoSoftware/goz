@@ -123,7 +123,11 @@ pub(crate) enum Message<'a> {
     /// window's.
     CaptureChanged,
     InitMenuPopup,
-    CtlColorStatic(super::gdi::StaticColors),
+    /// A label or check box asks for its colors.
+    CtlColorStatic {
+        colors: super::gdi::StaticColors,
+        control: Hwnd,
+    },
     Paint,
     SettingChange {
         regional_format: bool,
@@ -568,7 +572,10 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_LBUTTONUP => Message::LeftButtonUp,
         WM_CAPTURECHANGED => Message::CaptureChanged,
         WM_INITMENUPOPUP => Message::InitMenuPopup,
-        WM_CTLCOLORSTATIC => Message::CtlColorStatic(super::gdi::StaticColors::from_wparam(wparam)),
+        WM_CTLCOLORSTATIC => Message::CtlColorStatic {
+            colors: super::gdi::StaticColors::from_wparam(wparam),
+            control: Hwnd(HWND(lparam.0 as *mut _)),
+        },
         WM_PAINT => Message::Paint,
         WM_SETTINGCHANGE => Message::SettingChange {
             // SAFETY: WM_SETTINGCHANGE's lparam is null or a NUL-terminated

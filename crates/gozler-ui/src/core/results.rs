@@ -77,6 +77,12 @@ impl ListButton {
             ListButton::ChooseFolder => "filter.choose_folder",
         }
     }
+
+    /// Whether the button runs its fix as administrator, so it shows the
+    /// administrator shield, as Windows' buttons that ask for permission do.
+    pub(crate) fn needs_administrator(&self) -> bool {
+        matches!(self, ListButton::Fix(Fix::Repair(repair)) if repair.commands().is_some())
+    }
 }
 
 impl ListMessage {

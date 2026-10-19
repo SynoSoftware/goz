@@ -52,7 +52,8 @@ try {
     cargo build --release --workspace
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    & $Compiler /Qp "/DAppVersion=$($package.version)" "/DAppPublisher=$($package.authors -join ', ')" `
+    # The first author, the company that develops gozler, is the publisher.
+    & $Compiler /Qp "/DAppVersion=$($package.version)" "/DAppPublisher=$($package.authors[0])" `
         "/DAppUrl=$($package.repository)" installer\Setup.iss
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }

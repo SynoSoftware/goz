@@ -272,6 +272,19 @@ impl CaptionWidths {
 const BUTTON_PADDING: Dip = Dip(24);
 /// The narrowest push button, as Windows' guidelines size OK and Cancel.
 const BUTTON_MIN_WIDTH: Dip = Dip(75);
+/// The administrator shield and its gap, which a button that runs as
+/// administrator draws before its caption.
+const SHIELD_WIDTH: Dip = Dip(20);
+
+/// The room a button needs for a caption `caption` wide, with the
+/// administrator shield before it when `shielded`.
+pub(crate) fn button_content(caption: Px, shielded: bool, dpi: Dpi) -> Px {
+    if shielded {
+        caption + SHIELD_WIDTH.to_px(dpi)
+    } else {
+        caption
+    }
+}
 
 /// The width of a push button for a caption `caption` wide.
 fn button_width(caption: Px, dpi: Dpi) -> Px {
@@ -548,6 +561,9 @@ pub(crate) struct InspectorLayout {
     /// Each field row's label and value, as many as the pane's height
     /// shows.
     pub(crate) fields: Vec<(Rect, Rect)>,
+    /// The hint under the heading, across the first field row, which is
+    /// empty while the hint shows; `None` when the pane has no room for it.
+    pub(crate) note: Option<Rect>,
     /// The pane's height, and the heights the splitter can give it.
     height: Px,
     min_height: Px,
@@ -618,6 +634,10 @@ impl InspectorLayout {
             fields.push((label, value));
             y = label.bottom() + px(LABEL_GAP);
         }
+        let note = fields.first().map(|(label, _)| Rect {
+            width: area.width,
+            ..*label
+        });
         InspectorLayout {
             splitter: Rect {
                 y: area.y - px(GROUP),
@@ -628,6 +648,7 @@ impl InspectorLayout {
             heading,
             buttons,
             fields,
+            note,
             height: area.height,
             min_height: px(INSPECTOR_MIN_HEIGHT),
             max_height: max_height.max(px(INSPECTOR_MIN_HEIGHT)),

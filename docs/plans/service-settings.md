@@ -128,8 +128,9 @@ indexed.
   the person no longer trusts; the service keeps itself current without it.
   While it runs, the drives show "indexing" and searches give incomplete
   results, as status part 4 says.
-- The drive list adds the state "not indexed", for a drive with nothing
-  checked.
+- The drive list adds the state "Left out", for a drive with nothing
+  checked. It is not "Not indexed", because that already names a drive the
+  service failed to index.
 - **Users and groups who see every file** is a list with Add and Remove and
   an "Every user sees every file" check box, as the
   [visibility spec](visibility-spec.md) `V14` describes. It needs the

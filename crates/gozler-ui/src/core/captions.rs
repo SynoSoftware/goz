@@ -151,7 +151,7 @@ impl FilterCaptions {
 
 /// The Location list's items: Everywhere, each volume by its mount prefix
 /// with its state when it is not complete (DESIGN.md: Filter pane), and the
-/// chosen folder.
+/// chosen folders.
 pub(crate) fn location_items(model: &Model) -> Vec<String> {
     let strings = model.strings();
     model
@@ -400,6 +400,10 @@ impl CaptionTable {
                         Control(C::GeneralOpenLocationBrowse),
                         "settings_general.browse",
                     ),
+                    (
+                        Control(C::GeneralCommandHint),
+                        "settings_general.command_hint",
+                    ),
                 ],
             },
             DialogId::SettingsSearch => CaptionTable {
@@ -447,6 +451,10 @@ impl CaptionTable {
                         "settings_keyboard.show_gozler",
                     ),
                     (
+                        Control(C::KeyboardShortcutHint),
+                        "settings_keyboard.shortcut_hint",
+                    ),
+                    (
                         Control(C::KeyboardCommandsGroup),
                         "settings_keyboard.commands",
                     ),
@@ -464,9 +472,14 @@ impl CaptionTable {
                     (Control(C::IndexStatusHint), "settings_index.status_hint"),
                 ],
             },
+            // DialogCaptions::command_shortcut fills in the command and the
+            // title of Edit….
             DialogId::CommandShortcut => CaptionTable {
-                title: "command_shortcut.title",
-                keyed: &[(Control(C::CommandShortcutLabel), "command_shortcut.press")],
+                title: "command_shortcut.add_title",
+                keyed: &[(
+                    Control(C::CommandShortcutLabel),
+                    "command_shortcut.shortcut_for",
+                )],
                 plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
             },
         }
@@ -533,6 +546,7 @@ impl IndexCaptions {
                     None => prefix.to_owned(),
                 };
                 let state = match volume.phase {
+                    VolumePhase::Live if volume.metadata_pending => "settings_index.live_pending",
                     VolumePhase::Live => "settings_index.live",
                     VolumePhase::Snapshot => "settings_index.snapshot",
                     VolumePhase::Bootstrapping | VolumePhase::Rescanning => {
@@ -580,6 +594,24 @@ impl DialogCaptions {
                 .map(|(item, key)| (item.id(), strings.text(key).to_owned()))
                 .collect(),
         }
+    }
+
+    /// The command shortcut dialog's: "Add shortcut" or, to change one of
+    /// `command`'s shortcuts, "Edit shortcut", with `command` in the label.
+    pub(crate) fn command_shortcut(strings: &Strings, command: &str, edit: bool) -> DialogCaptions {
+        let mut captions = DialogCaptions::new(DialogId::CommandShortcut, strings);
+        if edit {
+            strings
+                .text("command_shortcut.edit_title")
+                .clone_into(&mut captions.title);
+        }
+        let label = ControlId::CommandShortcutLabel.id();
+        for (id, text) in &mut captions.items {
+            if *id == label {
+                *text = strings.format("command_shortcut.shortcut_for", &[command]);
+            }
+        }
+        captions
     }
 }
 
@@ -647,6 +679,8 @@ pub(crate) struct InspectorCaptions {
     pub(crate) icon: Option<(String, bool)>,
     /// Each field's label and value, in the pane's order.
     pub(crate) fields: Vec<(String, String)>,
+    /// The gray hint under the heading, or empty.
+    pub(crate) note: String,
 }
 
 impl InspectorCaptions {
@@ -654,22 +688,21 @@ impl InspectorCaptions {
         let strings = model.strings();
         let label = |key: &'static str| strings.text(key).to_owned();
         match model.selection() {
-            // The number of matches.
-            Selection::None => InspectorCaptions {
-                heading: match model.results().shown() {
-                    Shown::Rows(_) => {
-                        strings.count("status.results", model.results().total(), numbers, &[])
-                    }
-                    Shown::Nothing | Shown::Message(_) => String::new(),
+            // The number of matches, and how to see an entry's details.
+            Selection::None => match model.results().shown() {
+                Shown::Rows(_) => InspectorCaptions {
+                    heading: strings.count("status.results", model.results().total(), numbers, &[]),
+                    note: label("inspector.nothing_selected"),
+                    ..InspectorCaptions::default()
                 },
-                ..InspectorCaptions::default()
+                Shown::Nothing | Shown::Message(_) => InspectorCaptions::default(),
             },
             Selection::Reading { .. } => {
                 let reading = label("status.reading");
                 InspectorCaptions {
                     heading: reading.clone(),
-                    icon: None,
                     fields: vec![(label("inspector.total_size"), reading)],
+                    ..InspectorCaptions::default()
                 }
             }
             Selection::Files(files) => match files.as_slice() {
@@ -696,9 +729,11 @@ fn entry(
         strings.text("inspector.folder_type").to_owned()
     } else {
         match gozler_core::query::extension(name.as_bytes(), false) {
+            // The extension in capitals, as File Explorer writes a type,
+            // such as "PDF File".
             Some(extension) => strings.format(
                 "inspector.file_type",
-                &[&String::from_utf8_lossy(extension)],
+                &[&String::from_utf8_lossy(extension).to_uppercase()],
             ),
             None => strings.text("inspector.file").to_owned(),
         }
@@ -761,6 +796,7 @@ fn entry(
             .zip(values)
             .map(|(key, value)| (strings.text(key).to_owned(), value))
             .collect(),
+        note: String::new(),
     }
 }
 
@@ -786,8 +822,8 @@ fn several(strings: &Strings, numbers: &dyn Numbers, sums: Sums) -> InspectorCap
     };
     InspectorCaptions {
         heading,
-        icon: None,
         fields: vec![(strings.text("inspector.total_size").to_owned(), total)],
+        ..InspectorCaptions::default()
     }
 }
 
@@ -845,6 +881,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> [Vec<String>; 3] {
             )
         })
         .collect();
+    selected.push(strings.format("status.selected_only", &[&limit]));
     selected.push(strings.text("status.reading").to_owned());
     [
         vec![
@@ -914,13 +951,16 @@ pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
         Selection::Reading { .. } => strings.text("status.reading").to_owned(),
         Selection::Files(_) | Selection::Folder { .. } => {
             let sums = Sums::of(model.selected_files().unwrap_or_default());
-            strings.format(
-                "status.selected",
-                &[
-                    &numbers.integer(sums.entries()),
-                    &text::bytes(strings, numbers, sums.bytes),
-                ],
-            )
+            let count = numbers.integer(sums.entries());
+            // The size counts files only, so folders alone have none.
+            if sums.files == 0 {
+                strings.format("status.selected_only", &[&count])
+            } else {
+                strings.format(
+                    "status.selected",
+                    &[&count, &text::bytes(strings, numbers, sums.bytes)],
+                )
+            }
         }
     }
 }

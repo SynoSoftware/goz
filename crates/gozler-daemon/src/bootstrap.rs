@@ -95,10 +95,17 @@ pub(crate) fn enumerate_all() -> Result<Vec<VolumeInfo>> {
 }
 
 /// The filesystem gozler indexes `vol` as, or why it does not index it:
-/// gozler indexes fixed NTFS and ReFS volumes.
+/// gozler indexes fixed NTFS and ReFS volumes that have a drive letter or a
+/// mount folder.
 pub(crate) fn indexed_filesystem(vol: &VolumeInfo) -> Result<Filesystem, String> {
     if !vol.is_fixed {
         return Err("not a fixed disk".into());
+    }
+    // A volume without one, such as Windows' hidden recovery partition, has
+    // no path that File Explorer or any program opens, so its files are no
+    // result a person can use.
+    if vol.mounts.is_empty() {
+        return Err("no drive letter or mount folder".into());
     }
     match vol.filesystem.as_deref() {
         Some("NTFS") => Ok(Filesystem::Ntfs),
@@ -589,6 +596,24 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
+
+    /// Windows' hidden recovery partition is a fixed NTFS volume with no
+    /// drive letter; indexed, it showed in the window's Location list and
+    /// in results as `\\?\Volume{…}\` paths that nothing can open.
+    #[test]
+    fn a_volume_without_a_mount_is_not_indexed() {
+        let volume = |mounts: &[&str]| VolumeInfo {
+            guid_path: r"\\?\Volume{d0b34515-aad9-46e5-bb8c-eaeabd515c12}\".into(),
+            mounts: mounts.iter().map(|m| m.to_string()).collect(),
+            is_fixed: true,
+            filesystem: Some("NTFS".into()),
+        };
+        assert!(indexed_filesystem(&volume(&[])).is_err());
+        assert!(matches!(
+            indexed_filesystem(&volume(&[r"C:\mnt\data\"])),
+            Ok(Filesystem::Ntfs)
+        ));
+    }
 
     #[test]
     fn journal_target_scales_with_the_volume_between_the_clamps() {

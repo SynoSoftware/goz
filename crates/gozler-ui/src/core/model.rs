@@ -549,14 +549,12 @@ impl Model {
         })
     }
 
-    /// Location `folder`, which also becomes the Location list's chosen
-    /// folder.
+    /// Location `folder`, which also becomes one of the Location list's
+    /// chosen folders.
     pub(crate) fn choose_folder(&mut self, folder: String) -> Accepted {
-        self.set_filters(Filters {
-            location: Some(folder.clone()),
-            chosen_folder: Some(folder),
-            ..self.filters().clone()
-        })
+        let mut filters = self.filters().clone();
+        filters.choose_folder(folder);
+        self.set_filters(filters)
     }
 
     /// Location the one selected folder, or the folder that holds the one

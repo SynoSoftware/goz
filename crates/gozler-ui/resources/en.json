@@ -101,6 +101,7 @@
     "filtered": "{0} · Filtered",
     "searching": "Searching…",
     "selected": "{0} selected · {1}",
+    "selected_only": "{0} selected",
     "reading": "Reading the selection…",
     "exporting_one": "Exporting… {0} row",
     "exporting_other": "Exporting… {0} rows",
@@ -186,7 +187,7 @@
     "volume": "Volume:",
     "total_size": "Total size:",
     "file": "File",
-    "file_type": "File (.{0})",
+    "file_type": "File ({0})",
     "folder_type": "Folder",
     "size_exact": "{0} ({1})",
     "calculating": "Calculating…",
@@ -203,6 +204,7 @@
     "folders_other": "{0} folders",
     "files_and_folders": "{0} and {1}",
     "no_files": "No files selected",
+    "nothing_selected": "Select a file to see its details here.",
     "unknown_one": "{1}, {0} file unknown",
     "unknown_other": "{1}, {0} files unknown"
   },
@@ -283,7 +285,7 @@
     "title": "About Gozler",
     "version": "Gozler {0}",
     "description": "Instant filename search for Windows NTFS and ReFS volumes.",
-    "copyright": "Copyright © 2026 Mustafa Ahci and synapse.sr. MIT licence."
+    "copyright": "Copyright © 2026 Synapse N.V. Based on goz by Mustafa Ahci. MIT licence."
   },
   "search_syntax": {
     "title": "Search syntax"
@@ -332,6 +334,7 @@
     "browse": "Browse…",
     "cue_explorer": "File Explorer",
     "cue_default_program": "The file's default program",
+    "command_hint": "%1 is the folder or file. An empty box does what File Explorer does.",
     "total_commander": "Use Total &Commander",
     "no_total_commander": "Gozler found no Total Commander (TOTALCMD64.EXE or TOTALCMD.EXE). Choose it with Browse….",
     "browse_title": "Choose a program",
@@ -348,6 +351,7 @@
     "show_gozler": "Show Gozler",
     "shortcut": "S&hortcut to show Gozler from any program:",
     "windows_key": "&Windows key",
+    "shortcut_hint": "Press the keys together. Backspace removes the shortcut.",
     "closed_note": "The shortcut works only while the window is open, because Gozler does not keep running in the notification area (General).",
     "running_note": "The shortcut works from any program, also after you close the window, because Gozler keeps running in the notification area (General).",
     "commands": "Commands",
@@ -374,6 +378,7 @@
     "state_column": "State",
     "entries_column": "Entries",
     "live": "Live",
+    "live_pending": "Live, some sizes and dates unknown",
     "snapshot": "Does not update",
     "indexing": "Indexing",
     "offline": "Offline",
@@ -387,8 +392,9 @@
     "status_hint": "For the full report, run gozler --status."
   },
   "command_shortcut": {
-    "title": "Command shortcut",
-    "press": "&Press the new shortcut:"
+    "add_title": "Add shortcut",
+    "edit_title": "Edit shortcut",
+    "shortcut_for": "&Shortcut for {0}:"
   },
   "tray": {
     "notice": "Gozler is still running. Click its icon in the notification area to show it. Choose Exit from its menu to stop it.",

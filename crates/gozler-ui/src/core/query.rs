@@ -85,6 +85,10 @@ pub(crate) struct Matching {
     pub(crate) path: bool,
 }
 
+/// How many chosen folders the Location list keeps: as many as it shows
+/// rows, so the list stays a short choice of places, not a history.
+const CHOSEN_FOLDERS: usize = 5;
+
 /// The filter pane's choices (DESIGN.md: Filter pane). Each group but Location
 /// stands for query text that the parser reads on its own, so the window
 /// and `gozler` read a filter alike. Its names are `ui.json`'s.
@@ -95,10 +99,11 @@ pub(crate) struct Filters {
     /// The folder the search is limited to, as `-path`; `None` is
     /// Everywhere.
     pub(crate) location: Option<String>,
-    /// The folder that Choose folder… or Search in this folder chose last.
-    /// It stays an item of the Location list while another item is chosen,
-    /// so the list does not change under the person's arrow keys.
-    pub(crate) chosen_folder: Option<String>,
+    /// The folders that Choose folder… and Search in this folder chose,
+    /// oldest first. Each stays an item of the Location list while another
+    /// item is chosen, so the person can go back to it, and the list does not
+    /// change under their arrow keys.
+    pub(crate) chosen_folders: Vec<String>,
     /// Only the entries directly in the Location folder, as `-parent`.
     pub(crate) only_directly: bool,
     pub(crate) date: DateModified,
@@ -113,18 +118,33 @@ impl Filters {
     pub(crate) fn is_set(&self) -> bool {
         *self
             != Filters {
-                chosen_folder: self.chosen_folder.clone(),
+                chosen_folders: self.chosen_folders.clone(),
                 ..Filters::default()
             }
     }
 
-    /// Every group at its first choice; the chosen folder stays a Location
-    /// item.
+    /// Every group at its first choice; the chosen folders stay Location
+    /// items.
     pub(crate) fn cleared(&self) -> Filters {
         Filters {
-            chosen_folder: self.chosen_folder.clone(),
+            chosen_folders: self.chosen_folders.clone(),
             ..Filters::default()
         }
+    }
+
+    /// Location `folder`, which joins the chosen folders unless it is one of
+    /// them already. Past [`CHOSEN_FOLDERS`], the oldest leaves.
+    pub(crate) fn choose_folder(&mut self, folder: String) {
+        if !self
+            .chosen_folders
+            .iter()
+            .any(|chosen| chosen.eq_ignore_ascii_case(&folder))
+        {
+            self.chosen_folders.push(folder.clone());
+            let extra = self.chosen_folders.len().saturating_sub(CHOSEN_FOLDERS);
+            self.chosen_folders.drain(..extra);
+        }
+        self.location = Some(folder);
     }
 
     /// The query text of each set group but Location.
@@ -204,7 +224,7 @@ impl Kind {
 }
 
 /// An item of the Location list: Everywhere, each indexed volume by its
-/// mount prefix, then the chosen folder (DESIGN.md: Filter pane).
+/// mount prefix, then the chosen folders (DESIGN.md: Filter pane).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum LocationItem<'a> {
     Everywhere,
@@ -233,10 +253,7 @@ pub(crate) fn location_items<'a>(
 ) -> Vec<LocationItem<'a>> {
     let mut items = vec![LocationItem::Everywhere];
     items.extend(volumes.iter().map(LocationItem::Volume));
-    for folder in [&filters.chosen_folder, &filters.location]
-        .into_iter()
-        .flatten()
-    {
+    for folder in filters.chosen_folders.iter().chain(&filters.location) {
         if !items.iter().any(|item| {
             item.folder()
                 .is_some_and(|f| f.eq_ignore_ascii_case(folder))
@@ -787,6 +804,25 @@ mod tests {
             matches!(extensions.as_slice(), [Test::Extension(rs), Test::Extension(documents)]
                 if rs == &["rs"] && documents.len() == 14),
             "{extensions:?}"
+        );
+    }
+
+    /// A chosen folder that replaced the one before would make the person
+    /// pick an earlier folder again in the folder picker.
+    #[test]
+    fn choosing_a_folder_keeps_the_earlier_choices() {
+        let mut filters = Filters::default();
+        for folder in [r"C:\one", r"C:\two", r"c:\ONE"] {
+            filters.choose_folder(folder.into());
+        }
+        assert_eq!(filters.chosen_folders, [r"C:\one", r"C:\two"]);
+        assert_eq!(filters.location.as_deref(), Some(r"c:\ONE"));
+        for folder in [r"C:\c", r"C:\d", r"C:\e", r"C:\six"] {
+            filters.choose_folder(folder.into());
+        }
+        assert_eq!(
+            filters.chosen_folders,
+            [r"C:\two", r"C:\c", r"C:\d", r"C:\e", r"C:\six"]
         );
     }
 

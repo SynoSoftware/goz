@@ -3,8 +3,8 @@
 //! generated from the vocabulary tables: [`SWITCHES`], [`SORT_KEYS`],
 //! [`SEARCH_FUNCTIONS`], the attribute [`LETTERS`] and [`ExitCode::ALL`], and
 //! from this module's examples, search terms and notes, so a row added to a
-//! table is a line of the full reference. [`search_syntax`] renders the
-//! full reference's search sections alone, for the window.
+//! table is a line of the full reference. [`search_syntax`] renders what of
+//! it holds for the window's search box.
 
 use super::ExitCode;
 use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling};
@@ -53,13 +53,7 @@ pub fn help(screen: HelpScreen, color: bool) -> String {
             for section in full_sections() {
                 render_section(&mut out, &section, color);
             }
-            out.push('\n');
-            paint(&mut out, ColorToken::Strong, "Notes:", color);
-            out.push('\n');
-            for note in NOTES {
-                out.push_str("  - ");
-                wrap(&mut out, 4, note, 4, color);
-            }
+            render_notes(&mut out, Reader::CommandLine, color);
             render_section(&mut out, &exit_codes(&ExitCode::ALL), color);
         }
     }
@@ -96,6 +90,9 @@ struct Example {
     text: &'static str,
     /// Whether the quick help lists it.
     quick: bool,
+    /// The same search as typed in the window's search box, for an example
+    /// that uses no option; [`search_syntax`] lists it.
+    search_box: Option<&'static str>,
 }
 
 const fn quick(usage: &'static str, text: &'static str) -> Example {
@@ -103,6 +100,7 @@ const fn quick(usage: &'static str, text: &'static str) -> Example {
         usage,
         text,
         quick: true,
+        search_box: None,
     }
 }
 
@@ -111,34 +109,50 @@ const fn full_only(usage: &'static str, text: &'static str) -> Example {
         usage,
         text,
         quick: false,
+        search_box: None,
+    }
+}
+
+impl Example {
+    /// The example, which the window also lists as `query`.
+    const fn typed(self, query: &'static str) -> Example {
+        Example {
+            search_box: Some(query),
+            ..self
+        }
     }
 }
 
 /// Complete command lines that work as typed in cmd and in PowerShell.
 const EXAMPLES: &[Example] = &[
-    quick("gozler report", "Find names that contain report"),
+    quick("gozler report", "Find names that contain report").typed("report"),
     quick(
         "gozler readme*.txt",
         "Find .txt files that start with readme",
-    ),
+    )
+    .typed("readme*.txt"),
     quick(
         "gozler report !draft",
         "Find names with report but not draft",
-    ),
-    quick(r#"gozler "ext:cs;txt""#, "Find .cs and .txt files"),
+    )
+    .typed("report !draft"),
+    quick(r#"gozler "ext:cs;txt""#, "Find .cs and .txt files").typed("ext:cs;txt"),
     quick(
         r"gozler C:\repo\ *.cs",
         r"Find .cs files anywhere in C:\repo",
-    ),
+    )
+    .typed(r"C:\repo\ *.cs"),
     quick(
         "gozler *.log dm:7days",
         "Find .log files changed in the last 7 days",
-    ),
+    )
+    .typed("*.log dm:7days"),
     quick(
         r#"gozler "size:>1gb""#,
         "Find files and folders larger than 1 GB",
-    ),
-    quick(r#"gozler "*.jpg|*.png""#, "Find .jpg and .png files"),
+    )
+    .typed("size:>1gb"),
+    quick(r#"gozler "*.jpg|*.png""#, "Find .jpg and .png files").typed("*.jpg|*.png"),
     quick(
         "gozler *.iso -sort size -n 10",
         "Show the 10 largest .iso files",
@@ -240,43 +254,101 @@ const QUOTING: &[(&str, &str)] = &[
     ),
 ];
 
-const NOTES: &[&str] = &[
-    "Options start with `-` or `/`, and dashes inside an option name are \
-     optional. A token that starts with / and names an option is that \
-     option, as `/p` is `-p`, so write a relative path without a leading `/`: \
-     `docs/agents`.",
-    "gozler joins its arguments with spaces and splits them into terms again, \
-     so the single argument `\"ext:cs report\"` is two terms.",
-    "Without `-n`, gozler shows 20 results. When the limit hides matches, gozler \
-     writes the shown and total counts to stderr and exits 10. `-export-*` writes \
-     every match unless `-n` is given, and `-get-result-count` and the size totals \
-     count every match.",
-    "When a volume in scope is not ready (indexing, rescanning, offline or \
-     failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, only the \
-     volume of that folder is in scope. `--status` exits 2 when any volume is not \
-     ready or its sizes and dates could not be read.",
-    "When several exit codes apply, the most serious wins: a failure, then 2, \
-     then 9 or 10, then 0. So no matches while a volume in scope is indexing \
-     exits 2, because the matches may still appear.",
-    "Files whose size or date Windows did not report never match `size:` or `dm:`, \
-     even negated, and add nothing to the size totals. When reading sizes and \
-     dates failed on a volume in scope, a search that uses them warns and exits \
-     2. When the read succeeded, a file it could not read is rare and is left \
-     out without a warning.",
-    "A folder's size is the total of the known sizes of the files below it, \
-     each name of a hard-linked file counted; `size:`, `-size` and `-sort size` \
-     use it. `-get-total-size` and `-get-folder-size` add only files, so no file \
-     is counted twice.",
-    "`dm:today`, `dm:yesterday` and `dm:YYYY-MM-DD` are calendar days in the local \
-     time zone. `7days` is the 7 times 24 hours before the search starts, and `dm:<30days` finds files older than 30 \
-     days.",
-    r"`regex:` and `-r` use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with `-p`, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator. `|` and `!` inside a pattern belong to the expression.",
-    "Dates print as ISO 8601 in local time, whatever the locale. Plain output \
-     groups the digits of a size with commas; CSV and TSV print plain bytes. \
-     Attributes print as letters, such as HA, and in CSV and TSV as their \
-     FILE_ATTRIBUTE_* number, such as 34.",
-    "An unknown search function, such as `dc:`, and an unquoted `<` or `>` outside a \
-     function value are invalid input and exit 4.",
+/// Which help a note is for. A note whose text holds for both is written
+/// once, so the two helps cannot drift apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    /// The full reference.
+    CommandLine,
+    /// The window's [`search_syntax`].
+    SearchBox,
+    Both,
+}
+
+const NOTES: &[(Reader, &str)] = &[
+    (
+        Reader::CommandLine,
+        "Options start with `-` or `/`, and dashes inside an option name are \
+         optional. A token that starts with / and names an option is that \
+         option, as `/p` is `-p`, so write a relative path without a leading `/`: \
+         `docs/agents`.",
+    ),
+    (
+        Reader::CommandLine,
+        "gozler joins its arguments with spaces and splits them into terms again, \
+         so the single argument `\"ext:cs report\"` is two terms.",
+    ),
+    (
+        Reader::CommandLine,
+        "Without `-n`, gozler shows 20 results. When the limit hides matches, gozler \
+         writes the shown and total counts to stderr and exits 10. `-export-*` writes \
+         every match unless `-n` is given, and `-get-result-count` and the size totals \
+         count every match.",
+    ),
+    (
+        Reader::CommandLine,
+        "When a volume in scope is not ready (indexing, rescanning, offline or \
+         failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, only the \
+         volume of that folder is in scope. `--status` exits 2 when any volume is not \
+         ready or its sizes and dates could not be read.",
+    ),
+    (
+        Reader::CommandLine,
+        "When several exit codes apply, the most serious wins: a failure, then 2, \
+         then 9 or 10, then 0. So no matches while a volume in scope is indexing \
+         exits 2, because the matches may still appear.",
+    ),
+    (
+        Reader::SearchBox,
+        "The Match list decides how a plain name term matches. The descriptions \
+         here say \"contains\", as Anywhere matches; the default, Start of words, \
+         matches only where a word of the name starts.",
+    ),
+    (
+        Reader::Both,
+        "Files whose size or date Windows did not report never match `size:` or \
+         `dm:`, even negated.",
+    ),
+    (
+        Reader::CommandLine,
+        "Files whose size or date Windows did not report add nothing to the size \
+         totals. When reading sizes and dates failed on a volume in scope, a search \
+         that uses them warns and exits 2. When the read succeeded, a file it could \
+         not read is rare and is left out without a warning.",
+    ),
+    (
+        Reader::CommandLine,
+        "A folder's size is the total of the known sizes of the files below it, \
+         each name of a hard-linked file counted; `size:`, `-size` and `-sort size` \
+         use it. `-get-total-size` and `-get-folder-size` add only files, so no file \
+         is counted twice.",
+    ),
+    (
+        Reader::Both,
+        "`dm:today`, `dm:yesterday` and `dm:YYYY-MM-DD` are calendar days in the local \
+         time zone. `7days` is the 7 times 24 hours before the search starts, and `dm:<30days` finds files older than 30 \
+         days.",
+    ),
+    (
+        Reader::CommandLine,
+        r"`regex:` and `-r` use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with `-p`, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator. `|` and `!` inside a pattern belong to the expression.",
+    ),
+    (
+        Reader::SearchBox,
+        r"With Regular expression in the Match list, the whole search box is one pattern. `regex:` and that pattern use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with Match path, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator.",
+    ),
+    (
+        Reader::CommandLine,
+        "Dates print as ISO 8601 in local time, whatever the locale. Plain output \
+         groups the digits of a size with commas; CSV and TSV print plain bytes. \
+         Attributes print as letters, such as HA, and in CSV and TSV as their \
+         FILE_ATTRIBUTE_* number, such as 34.",
+    ),
+    (
+        Reader::CommandLine,
+        "An unknown search function, such as `dc:`, and an unquoted `<` or `>` outside a \
+         function value are invalid input and exit 4.",
+    ),
 ];
 
 /// The full reference's option sections, in the order it lists them.
@@ -304,18 +376,30 @@ struct Entry {
     token: ColorToken,
 }
 
-/// The search terms, the search functions and the attribute letters, without
-/// color: what a search box accepts, with nothing about options, shell
-/// quoting or exit codes. Its rows are the full reference's.
+/// The examples that use no option, the search terms, the search functions,
+/// the attribute letters and the notes for a search box, without color: what
+/// a search box accepts, with nothing about options, shell quoting or exit
+/// codes. Its rows are the full reference's, except the notes about the
+/// window's own match controls.
 pub fn search_syntax() -> String {
+    let examples = EXAMPLES
+        .iter()
+        .filter_map(|example| {
+            example
+                .search_box
+                .map(|query| entry(query.to_string(), example.text))
+        })
+        .collect();
     let mut out = String::new();
     for section in [
+        section("Examples:", examples),
         search_terms("Search terms:"),
         search_functions(),
         attribute_letters("Attribute letters:"),
     ] {
         render_section(&mut out, &section, false);
     }
+    render_notes(&mut out, Reader::SearchBox, false);
     // Each section starts with a blank line, which the first one does not
     // need.
     out.remove(0);
@@ -464,6 +548,20 @@ fn render_section(out: &mut String, section: &Section, color: bool) {
     paint(out, ColorToken::Strong, section.title, color);
     out.push('\n');
     render(out, &section.entries, section.usage_column, color);
+}
+
+/// Writes the notes for `reader` and for both helps, after a blank line.
+fn render_notes(out: &mut String, reader: Reader, color: bool) {
+    out.push('\n');
+    paint(out, ColorToken::Strong, "Notes:", color);
+    out.push('\n');
+    for &(_, note) in NOTES
+        .iter()
+        .filter(|(note_reader, _)| [reader, Reader::Both].contains(note_reader))
+    {
+        out.push_str("  - ");
+        wrap(out, 4, note, 4, color);
+    }
 }
 
 /// Writes `entries` as two columns: the usage, in its token's color when
@@ -695,14 +793,20 @@ mod tests {
             );
         }
 
-        for example in entries("Examples") {
-            let args = command_line_args(&example);
-            assert_eq!(args[0], "gozler", "{example}");
+        // The window's form of an example is the query its command line
+        // gives, so the two cannot drift apart.
+        for example in EXAMPLES {
+            let usage = example.usage;
+            let args = command_line_args(usage);
+            assert_eq!(args[0], "gozler", "{usage}");
             match parse_argv(&args[1..]) {
                 Ok(Command::Run(plan)) => {
-                    parse(&plan.query).unwrap_or_else(|e| panic!("{example}: {e}"));
+                    parse(&plan.query).unwrap_or_else(|e| panic!("{usage}: {e}"));
+                    if let Some(query) = example.search_box {
+                        assert_eq!(plan.query, query, "{usage}");
+                    }
                 }
-                other => panic!("{example}: {other:?}"),
+                other => panic!("{usage}: {other:?}"),
             }
         }
     }

@@ -564,7 +564,11 @@ impl<'a> SettingsDialog<'a> {
         };
         let shortcuts = self.draft.borrow().edited.choices.shortcuts.clone();
         let state = CommandShortcut::new(&self.strings, command, replaced, shortcuts);
-        let captions = DialogCaptions::new(DialogId::CommandShortcut, &self.strings);
+        let captions = DialogCaptions::command_shortcut(
+            &self.strings,
+            &command_place(&self.strings, command),
+            edit,
+        );
         let ended = dialog::run_modal(dialog, DialogId::CommandShortcut, &captions, &state);
         let Some(keystroke) = state
             .chosen()
@@ -736,9 +740,9 @@ impl DialogProc for SettingsDialog<'_> {
             .and_then(|page| ReportList::of_dialog(page, ControlId::IndexDrives.id()))
         {
             list.set_columns(&[
-                (text("settings_index.drive_column"), 46, false),
-                (text("settings_index.state_column"), 30, false),
-                (text("settings_index.entries_column"), 24, true),
+                (text("settings_index.drive_column"), 38, false),
+                (text("settings_index.state_column"), 42, false),
+                (text("settings_index.entries_column"), 20, true),
             ]);
         }
         if let Ok(balloon) = Balloon::create(dialog) {
@@ -854,9 +858,6 @@ impl<'a> CommandShortcut<'a> {
 
 impl DialogProc for CommandShortcut<'_> {
     fn init(&self, dialog: Hwnd) -> Opened {
-        if let Some(label) = dialog::item(dialog, ControlId::CommandShortcutCommand.id()) {
-            label.set_text(&command_place(self.strings, self.command));
-        }
         if let Some(hotkey) = Self::hotkey(dialog) {
             // Any key: the command shortcut rules refuse a key for typing
             // with their message, which the control's own rules would not
