@@ -16,6 +16,12 @@ owner's machine, because the live checks search through it.
 - A stage is a milestone of one or more commits, each of which passes the
   full CI set from `AGENTS.md`. Each new rule in the core has the test that
   "Tests" below names for it, under `AGENTS.md`'s test rules.
+- **Proof.** A **Done when** item that a rule in the core decides is proven
+  by its core test, which runs in seconds. The probe proves only the wiring:
+  a command reaches its control, a reply reaches the screen, a control acts
+  as Windows' own does. A probe check reads the state at the moment it tests
+  it and never waits a fixed time, because this machine's speed changes with
+  the owner's work.
 - **Traceability.** Each item of a stage's **Done when** and **After
   install** ends with the spec IDs it proves ("Covers: C4, T9"). Every ID in
   the spec appears in at least one item. A stage that builds a behavior whose
@@ -27,10 +33,14 @@ owner's machine, because the live checks search through it.
   answer of the `gozler.exe` of the same build. Stage 1 is the only stage
   that changes the daemon and the protocol, for word start, name start and
   folder sizes; the owner installs its build before stage 2 starts, so from
-  then on the installed `gozlerd` serves both.
+  then on the installed `gozlerd` serves both. During a stage, the probe runs
+  only the groups whose code the stage changes; every group runs in
+  [the final probe run](#the-final-probe-run).
 - **Screenshots.** The probe takes a screenshot of every state that the stage
   makes reachable, in English and in the pseudo-language, at the machine's
-  DPI. Each passes [the screenshot standard](#the-screenshot-standard).
+  DPI. Each passes [the screenshot standard](#the-screenshot-standard). They
+  are saved for the owner to review when the owner chooses; the work does not
+  wait for that review.
 - **Memory.** Each stage measures the steady-state
   [memory budget](ui-spec.md#memory-budget) with the probe and reports the
   figure; stages 4 and 6 also measure the two allowances.
@@ -72,13 +82,18 @@ fails and the control; "looks off" is not a finding.
 
 ### The stage review
 
-At the end of each stage, an independent reviewer (Opus) reads the stage's
-diff, the probe's output and the screenshots against the spec, the design
+One implementer builds the stages and keeps its context from one stage to the
+next, because an agent that knows the code fixes it fastest.
+
+At the end of each stage, a reviewer (Opus) that did not write the stage reads
+its diff, the probe's output and the screenshots against the spec, the design
 and the owner's review standard: every option and grouping makes sense to the
 user, every label is short, fluent and standard, the buttons are standard,
 nothing is placed by accident, every feature of the stage works, each journey
 the stage reaches makes sense, and each failure helps the user fix it. The
-stage is done when:
+reviewer reports its findings and changes nothing. The implementer fixes them
+and builds once, and the reviewer checks the fixes by reading their diff. The
+stage is done, and commits, when:
 
 1. no correctness defect is open;
 2. nothing breaks an approved standard of the spec, the design or this plan;
@@ -554,15 +569,34 @@ ones the owner accepted.
   counts, what the index holds, and the service's state and memory. The
   Include page, Dates created and Rebuild index wait for that plan, which
   is not written yet.
-- First, before the dialog depends on it, the keyboard hook items in
-  [design: Not verified](ui-design.md#not-verified): the owner sets `Win+S`
-  in a first build and presses it. Windows Search and Start stay closed,
-  Gozler comes to the front, and no restart or sign-out is needed. If
-  Windows needs one, the dialog gets the spec's message for it before the
-  stage goes on. Then check the child-dialog DPI item by reading the
-  documentation; the owner checks it on a second monitor after install.
+- The change that adds the Date created column also gives each column one
+  row, as `CommandId::row` does for a command. Three of `Column`'s facts in
+  `core/model.rs` (`shown_by_default`, `can_hide`, `right_aligned`) are
+  `matches!` or `==`, so a new column silently gets "shown by default, can be
+  hidden, left-aligned". Date created must choose its default on purpose,
+  because it costs service memory and its index setting is off by default.
+  `Column::row(self) -> ColumnRow` is one exhaustive match, and `ColumnRow {
+  header, menu_label, width: Dip, shown_by_default: bool, can_hide: bool,
+  right_aligned: bool, sort_key: Option<SortKey>, export_column:
+  Option<EsColumn> }` replaces the eight per-column functions. `text::cell`
+  stays apart, because it formats data. The names that `ui.json` saves do
+  not change, so saved settings still load. No new test: the compiler
+  forces each row.
+- The keyboard hook items in
+  [design: Not verified](ui-design.md#not-verified) are the owner's, after
+  install: `Win+S` set and pressed keeps Windows Search and Start closed and
+  brings Gozler to the front, with no restart or sign-out. If Windows needs
+  one, the spec's message for it is added then. The stage does not wait for
+  this check. Check the child-dialog DPI item by reading the documentation;
+  the owner checks it on a second monitor after install.
 
 **Done when:**
+- Core tests prove the dialog's rules: Apply's state, the Command, Shortcut
+  and command-shortcut input rules with their messages, Restore defaults,
+  the quoted command that Browse… writes, the newest `TOTALCMD*.EXE` that
+  Use Total Commander chooses, and the defaults for a damaged `ui.json`. The
+  probe items below check only that each rule reaches the dialog, with one
+  case each.
 - Apply is disabled until a value changes. Turning off search as you type,
   pressing Apply, then Cancel, closes the dialog with the setting applied:
   typing then starts no search until `Enter`. The setting is the same after a
@@ -670,8 +704,16 @@ ones the owner accepted.
   the window opens in the pseudo-language after a restart. Covers: T12, J10.
 - `dm:yesterdy` shows its message in the pseudo-language, with the English
   detail where the spec allows it. Covers: S7, J7.
-- The screenshots of every screen in the pseudo-language pass the screenshot
-  standard.
+- The screenshots of every screen in the pseudo-language, from the final
+  probe run, pass the screenshot standard.
+
+## The final probe run
+
+After stage 8, the full probe runs with every group, the pseudo-language and
+screenshots. Every failure it reports is fixed, the code builds once for all
+the fixes, and the full probe runs again, until a run fails nothing but a
+known daemon defect that the report names. This run, not the stages' own
+runs, catches a regression in code that a later stage did not touch.
 
 ## Stage 9: install and release
 
@@ -775,12 +817,20 @@ supports:
   window, because `SendInput` goes to whichever window is in front. When the
   window is not in front, the probe reports those checks as not run, and the
   stage is not done until a run with the window in front has passed them.
+- It never moves the mouse, because the owner uses it. A drag, such as the
+  splitter's, is the mouse messages posted to the window; a check that needs
+  the real mouse, such as the marquee, reports not run and is the owner's.
 - It waits until status part 1 no longer says "Searching…".
 - It prints, as JSON, the status bar's parts, the visible rows' cells, the
   inspector's fields, the menus' items with their state, and the process's
   private bytes, peak private bytes and working set. For a responsiveness
-  check, it polls `SendMessageTimeout` with `WM_NULL` every 50 ms and reports
-  the longest wait.
+  check, a thread of its own sends `WM_NULL` with `SendMessageTimeout`
+  again and again while the action runs and reports the longest wait, so a
+  wait between two samples is not missed.
+- `-Groups` runs only the named groups of checks: `window`, `lifetime`,
+  `language`, `search`, `selection`, `export`, `filters` and `inspector`.
+  Without it, every group runs. Building the fixture and starting the
+  window always run.
 - It closes the window it started and nothing else. It stops with a message
   when another `gozler-ui` is running, because that window is the owner's and
   the single-instance rule would bring it forward instead.
@@ -1158,7 +1208,58 @@ impl Requests {
 The spec's [acceptance criteria](ui-spec.md#acceptance-criteria) hold, and
 the full CI set from `AGENTS.md` passes. The Include page, Dates created
 and Rebuild index wait for the service settings plan, so when this plan is
-deleted, their rules move into that plan instead of `DESIGN.md`. `AGENTS.md` names the `win` module in
+deleted, their rules and the column row that stage 7 describes move into
+that plan instead of `DESIGN.md`. `AGENTS.md` names the `win` module in
 its `unsafe` rule, and `DESIGN.md` lists `gozler-ui` and `gozler-client` among
 the crates. The rules of the spec and the design move into `docs/DESIGN.md`,
-and the spec, the design and this plan are deleted.
+and the spec, the design and this plan are deleted. The section below moves
+into `AGENTS.md`, because it is about how to write any plan, not about the
+window.
+
+## Lessons for plan designers
+
+Stages 3 to 5 of this plan took about 2 hours each: stage 3 about 4 hours,
+stage 4 2 h 17 min, stage 5 about 2 hours. The es superset plan built a
+feature about every 25 minutes, and the ReFS plan landed 1,456 lines 1.5
+hours after it was written. The code was not the difference; what the plan
+asked for around the code was. A plan does not ask for these:
+
+1. **A new set of agents for every stage.** This plan had an implementer, a
+   reviewer that fixed its own findings and ran the build and the probe two
+   or three times, and a third agent that checked those fixes. Each one first
+   read the spec, the design, the plan and the growing code, and one stage
+   used about 11 builds. Write instead: one implementer keeps its context
+   through the stages and fixes the review's findings; the reviewer reads and
+   reports.
+2. **A slow end-to-end check as the proof of every item.** This plan wrote
+   most **Done when** items as probe checks, which drive the window through
+   UI Automation and take minutes per run, and each stage re-ran every
+   earlier stage's checks. Write instead: a rule that the core decides is
+   proven by a unit test, which runs in seconds; the end-to-end check proves
+   only the wiring, runs during a stage only for the code that stage
+   changes, and runs in full once at the end, again until it is clean.
+3. **Checks that depend on the machine's speed or on the foreground.** A
+   fixed 3.5-second delay assumed that an export takes under 4 seconds; it
+   took 8.7. A check read the status text after the reply had replaced it.
+   Checks needed the window in front while the owner used the machine. Each
+   cost a fix round for a defect in the check, not in the product. Write
+   instead: a check reads the state at the moment it tests it, and never
+   waits a fixed time.
+4. **Restructuring inside feature stages.** Stages 3, 4, 5 and 7 each began
+   with restructuring items before their features, which made each stage and
+   its review larger. Write instead: restructuring before the plan, or as its
+   own stage with its own proof.
+5. **A stage that waits for the owner.** The work stopped for about 8 hours
+   at stage 3 for a screenshot approval, and stage 7 began with a key press
+   by the owner. Write instead: what only the owner can check goes into
+   **After install**, and screenshots are saved for the owner to review
+   later, so no stage waits.
+6. **A screenshot of every state in every stage.** The screenshots were
+   repeated for states no change had touched, and a stage spent rounds on
+   them. Write instead: each stage saves the screenshots of the states it
+   adds, and the final run takes the full set.
+
+The build script had one defect of the same kind: `check.ps1` stopped at its
+first failing step, so one formatting error hid every test result, and stage
+5 needed 6 full runs to find errors that one run could show. It now runs
+every step and lists each failure.
