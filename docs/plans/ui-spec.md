@@ -1,6 +1,6 @@
 # Spec: gozler-ui
 
-A Windows desktop window for gozler: the crate `gozler-ui`, which builds
+A Windows desktop window for Gozler: the crate `gozler-ui`, which builds
 `gozler-ui.exe`.
 
 This spec says what the window does and why. It changes only when a
@@ -147,7 +147,7 @@ Windows message font. It opens at its saved placement; a saved placement that
 no monitor shows any more opens on the nearest monitor. Its minimum size is
 the smallest one at which every control still fits, except the filter pane,
 which scrolls ("Filter pane"). Its title is the typed search and the program's
-name, "report – gozler", as Windows titles a document window, or "gozler"
+name, "report – Gozler", as Windows titles a document window, or "Gozler"
 alone while the search is empty.
 
 ### Search box
@@ -313,26 +313,26 @@ Part 4:
 - A second start and the shortcut from Settings > Keyboard both bring the
   window forward with the search box focused and its text selected, so the
   person types the next search at once. A second start with
-  `--location <folder>`, from File Explorer's "Search with gozler", also sets
+  `--location <folder>`, from File Explorer's "Search with Gozler", also sets
   Location to that folder.
-- **"Keep gozler running in the notification area when I close its window"**
+- **"Keep Gozler running in the notification area when I close its window"**
   (Settings > General) is Everything's "Run in background":
 
   | | Off | On (the default) |
   | --- | --- | --- |
-  | Close (`Alt+F4`, the title bar's X) | exits | hides the window; gozler keeps running in the notification area |
-  | Tray icon | none | shown while gozler runs |
+  | Close (`Alt+F4`, the title bar's X) | exits | hides the window; Gozler keeps running in the notification area |
+  | Tray icon | none | shown while Gozler runs |
   | The shortcut from any program | works while the window is open | always works |
-  | At sign-in, with "Start gozler when I sign in" on | the window starts minimized | gozler starts in the notification area, with no window |
+  | At sign-in, with "Start Gozler when I sign in" on | the window starts minimized | Gozler starts in the notification area, with no window |
   | Exit (File > Exit, the tray menu) | exits | exits |
 
 - **The tray icon:** a click, or `Enter` on it, shows the window; its menu
   holds **Show window** (bold, the default) and **Exit**, the words of
-  TinyTorrent2's tray. Its tooltip is "gozler". Windows Explorer restarts
-  drop every tray icon, so gozler adds its icon again when the taskbar
+  TinyTorrent2's tray. Its tooltip is "Gozler". Windows Explorer restarts
+  drop every tray icon, so Gozler adds its icon again when the taskbar
   comes back (`TaskbarCreated`).
 - **The first time** the window hides to the notification area, a Windows
-  notification says: "gozler is still running. Press {shortcut} or click its
+  notification says: "Gozler is still running. Press {shortcut} or click its
   icon in the notification area to show it. Choose Exit from its menu to stop
   it." It shows once, because the person knows it after that.
 - Hiding the window changes nothing else: a running export goes on, and
@@ -355,7 +355,7 @@ and the menus show the shortcuts in use.
 | C4 | &Export results… | File | — | the list shows results and no export runs | every match of the shown search, not only the rows the list reaches | stage 4 |
 | C5 | &Cancel export | File, in place of C4 | — | an export runs | the running export; its partial file is deleted | stage 4 |
 | C6 | &Settings… | File | `Ctrl+,` | always | — | stage 7 |
-| C7 | E&xit | File; tray menu | — (`Alt+F4` closes the window, see "Window lifetime") | always | ends gozler | stage 2; stage 7 for the tray menu |
+| C7 | E&xit | File; tray menu | — (`Alt+F4` closes the window, see "Window lifetime") | always | ends Gozler | stage 2; stage 7 for the tray menu |
 | C8 | &Copy | Edit; context menu | `Ctrl+C` | list focused: rows selected and the selection is read; search box focused: text selected | list: the files, as `CF_HDROP`, as File Explorer copies them; search box: the selected text | core test; after install |
 | C9 | Copy as &path | Edit; context menu; inspector button | `Ctrl+Shift+C` | rows selected and the selection is read | each full path in double quotes on its own line, as File Explorer's Copy as path | core test; after install |
 | C10 | Copy &name | Edit; context menu | — | rows selected and the selection is read | each name on its own line | core test; after install |
@@ -371,8 +371,8 @@ and the menus show the shortcuts in use.
 | C20 | Sort &by ▸ Name, Path, Size, Date modified, Extension; Ascending, Descending | View (radio marks); header click | — | always | the sort; runs the search again | stage 3 |
 | C21 | C&lear filters | filter pane button; a button in a zero-results message | — | a filter is set | sets every filter group to its first choice | stage 5 |
 | C22 | &Search syntax | Help | `F1` | always | a dialog with the search syntax: the search terms, the search functions and the attribute letters, from the tables that `gozler --help` lists; no command-line options, shell quoting or exit codes, because none of them applies in the search box | stage 3 |
-| C23 | &About gozler | Help | — | always | a dialog with the version | stage 2 |
-| C24 | &Show window | tray menu (default, bold); a click or `Enter` on the tray icon | the shortcut from Settings > Keyboard | gozler runs in the notification area | shows the window and focuses the search box with its text selected | stage 7 |
+| C23 | &About Gozler | Help | — | always | a dialog with the version | stage 2 |
+| C24 | &Show window | tray menu (default, bold); a click or `Enter` on the tray icon | the shortcut from Settings > Keyboard | Gozler runs in the notification area | shows the window and focuses the search box with its text selected | stage 7 |
 
 "The selection is read" means it holds its files ("The selection"). Open and
 Open file location stop at 15 entries, because File Explorer asks before it
@@ -387,7 +387,7 @@ Groups are separated by a separator, in this order:
   export | Settings… | Exit
 - **Edit:** Copy, Copy as path, Copy name | Select all | Find
 - **View:** Filters, Inspector, Columns | Sort by | Refresh
-- **Help:** Search syntax | About gozler
+- **Help:** Search syntax | About Gozler
 - **Language,** aligned right on the menu bar (`MFT_RIGHTJUSTIFY`): Windows
   default | each shipped language by its own name
 - **Context menu on a row:** Open, Open file location | Copy, Copy as path,
@@ -450,7 +450,7 @@ row's last column names its check; the design's model tests use the same IDs.
 | T11 | New results arrive while the context menu is open | the menu stays open | a command chosen from it acts on the selection when it is chosen; if the selection was cleared meanwhile, it does nothing | none | core test |
 | T12 | The language changes | every caption changes; nothing else does | unchanged | none; no search runs | stage 8 |
 | T13 | The window moves to a monitor with another DPI | the layout and fonts scale; nothing else changes | unchanged | none | after install |
-| T14 | gozler exits while work runs: Exit, or Close with "Keep gozler running in the notification area" off | the window closes at once | — | every request is cancelled; a partial export is deleted; the settings are saved | stage 3, stage 4 |
+| T14 | Gozler exits while work runs: Exit, or Close with "Keep Gozler running in the notification area" off | the window closes at once | — | every request is cancelled; a partial export is deleted; the settings are saved | stage 3, stage 4 |
 
 ## Journeys
 
@@ -486,12 +486,12 @@ Each kind of message has one place, so the user always knows where to look:
 
 | Event | Message |
 | --- | --- |
-| An export cannot write its file | "gozler could not write D:\results.csv. {Windows' reason} Choose another folder or free some space, then export again." |
+| An export cannot write its file | "Gozler could not write D:\results.csv. {Windows' reason} Choose another folder or free some space, then export again." |
 | The clipboard stays in use by another program | "The clipboard is in use by another program. Try again in a moment." |
 | A file to open or show no longer exists | "D:\report.docx no longer exists. Press F5 to search again." |
-| An open command from Settings > General cannot start | "gozler could not start {command}. {Windows' reason} Check the command in File > Settings > General." |
-| The settings cannot be saved | "gozler could not save its settings to {file}. {Windows' reason} Your changes apply until gozler exits." Shown once per session. |
-| At start, another program holds the shortcut | "Another program uses Ctrl+Alt+G, so it no longer shows gozler. Choose another shortcut in File > Settings > Keyboard." Shown the first time the window shows in that session, because at sign-in gozler starts without a window. The tray icon still shows the window. |
+| An open command from Settings > General cannot start | "Gozler could not start {command}. {Windows' reason} Check the command in File > Settings > General." |
+| The settings cannot be saved | "Gozler could not save its settings to {file}. {Windows' reason} Your changes apply until Gozler exits." Shown once per session. |
+| At start, another program holds the shortcut | "Another program uses Ctrl+Alt+G, so it no longer shows Gozler. Choose another shortcut in File > Settings > Keyboard." Shown the first time the window shows in that session, because at sign-in Gozler starts without a window. The tray icon still shows the window. |
 
 ### Daemon failures
 
@@ -504,16 +504,16 @@ fail the same way.
 
 | Failure | Message | Button |
 | --- | --- | --- |
-| The service is stopped | The gozler service is stopped, so gozler cannot search. Start it, and gozler searches again by itself. | Start the service: runs `net start gozler` as administrator, after Windows asks for permission |
-| The service is disabled | The gozler service is turned off, so gozler cannot search. Turn it on, and gozler searches again by itself. | Turn on the service: sets it to start automatically and starts it, as administrator |
-| The service is not installed, and `gozlerd.exe` is beside the window | The gozler service is not installed, so gozler cannot search. Install it, and gozler searches again by itself. | Install the service: runs `gozlerd.exe install` as administrator |
-| The service is not installed, and `gozlerd.exe` is missing | gozler is not fully installed: the gozler service is missing. Download gozler and run its setup. | Download gozler: opens the releases page |
-| The service runs but does not answer yet | The gozler service is starting. Your search runs when it is ready. | — (the window polls) |
-| The service state cannot be read | The gozler service is not running, and gozler could not find out why: {detail} Check the gozler service in Services. | Open Services |
-| Owner check fails | The search service is not the gozler service, so gozler did not connect. Restart Windows, so that the gozler service starts first, then search again. | — (a security check; the fix is not the window's) |
-| Daemon older than the window | The installed gozler service is older than this window. Download gozler and run its setup to update the service. | Download gozler |
-| The daemon refuses the request | "The gozler service refused this search. Change the search, then try again." then the daemon's English detail, such as a scope on no indexed volume or a regular expression that does not compile | — |
-| Connection lost, or the pipe cannot be opened or read | The connection to the gozler service was lost. gozler reconnects when the service answers. | — (the window polls) |
+| The service is stopped | The Gozler service is stopped, so Gozler cannot search. Start it, and Gozler searches again by itself. | Start the service: runs `net start gozler` as administrator, after Windows asks for permission |
+| The service is disabled | The Gozler service is turned off, so Gozler cannot search. Turn it on, and Gozler searches again by itself. | Turn on the service: sets it to start automatically and starts it, as administrator |
+| The service is not installed, and `gozlerd.exe` is beside the window | The Gozler service is not installed, so Gozler cannot search. Install it, and Gozler searches again by itself. | Install the service: runs `gozlerd.exe install` as administrator |
+| The service is not installed, and `gozlerd.exe` is missing | Gozler is not fully installed: the Gozler service is missing. Download Gozler and run its setup. | Download Gozler: opens the releases page |
+| The service runs but does not answer yet | The Gozler service is starting. Your search runs when it is ready. | — (the window polls) |
+| The service state cannot be read | The Gozler service is not running, and Gozler could not find out why: {detail} Check the Gozler service in Services. | Open Services |
+| Owner check fails | The search service is not the Gozler service, so Gozler did not connect. Restart Windows, so that the Gozler service starts first, then search again. | — (a security check; the fix is not the window's) |
+| Daemon older than the window | The installed Gozler service is older than this window. Download Gozler and run its setup to update the service. | Download Gozler |
+| The daemon refuses the request | "The Gozler service refused this search. Change the search, then try again." then the daemon's English detail, such as a scope on no indexed volume or a regular expression that does not compile | — |
+| Connection lost, or the pipe cannot be opened or read | The connection to the Gozler service was lost. Gozler reconnects when the service answers. | — (the window polls) |
 
 The service states are the ones `gozler` already tells apart for its fix-it
 messages, and the buttons run the same commands that `gozler` prints.
@@ -643,17 +643,17 @@ them. OK, Cancel and Apply follow "Dialogs".
 Each group box holds more than one control, as Windows' guidelines ask,
 so a page reads as a few groups instead of a column of boxes.
 
-The settings change what gozler does, never how it looks: the look follows
+The settings change what Gozler does, never how it looks: the look follows
 File Explorer and Windows ("Look"), because the owner does not want
 appearance settings.
 
 | Page | Group | Setting | Control | Default |
 | --- | --- | --- | --- | --- |
 | General | — | Language: Windows default, then each shipped language by its own name | drop-down list at the top of the page | Windows default |
-| | Starting and closing | Start gozler when I sign in to Windows | check box | off |
-| | | Check for updates when gozler starts | check box | off |
-| | | Keep gozler running in the notification area when I close its window | check box | on, as in Everything |
-| | File Explorer | Show "Search with gozler" on folders | check box | off |
+| | Starting and closing | Start Gozler when I sign in to Windows | check box | off |
+| | | Check for updates when Gozler starts | check box | off |
+| | | Keep Gozler running in the notification area when I close its window | check box | on, as in Everything |
+| | File Explorer | Show "Search with Gozler" on folders | check box | off |
 | | | Open folders | edit box with the cue "File Explorer", and Browse… | empty |
 | | | Open files | edit box with the cue "The file's default program", and Browse… | empty |
 | | | Open file location | edit box with the cue "File Explorer", and Browse… | empty |
@@ -661,8 +661,8 @@ appearance settings.
 | Search | Search box | Search as you type | check box | on; off: `Enter` runs the search |
 | | | Show every file and folder when the search is empty | check box | on, as in Everything; off: an empty search shows nothing (`S6`) |
 | | | Select the search text when I click the search box | check box | on |
-| | | Select the search text when gozler is activated | check box | off; on: switching to gozler puts the focus in the search box with its text selected |
-| Keyboard | Show gozler | Shortcut to show gozler from any program | hotkey control and a "Windows key" check box | none |
+| | | Select the search text when Gozler is activated | check box | off; on: switching to Gozler puts the focus in the search box with its text selected |
+| Keyboard | Show Gozler | Shortcut to show Gozler from any program | hotkey control and a "Windows key" check box | none |
 | | Commands | Show commands containing | edit box that filters the list | empty |
 | | | every command of "Commands" that is one item of the menu bar or the context menu, as "Menu > Command" | list | — |
 | | | Shortcuts for the selected command | list, Add…, Edit…, Remove | the "Key" column of "Commands" |
@@ -672,7 +672,7 @@ appearance settings.
 | | Service | the service's state and memory, and `gozler --status` for the full report | text | — |
 | | | Rebuild index (service settings plan) | button with the administrator shield | — |
 | Include | — | the preview line: entries indexed now and after OK | text at the top of the page | — |
-| | Folders | Folders gozler indexes: each indexed folder and the folders left out inside it | list view, read-only | every drive, nothing left out |
+| | Folders | Folders Gozler indexes: each indexed folder and the folders left out inside it | list view, read-only | every drive, nothing left out |
 | | | Modify… | button: opens Indexed folders, the folder tree with check boxes | — |
 | | | Include new fixed drives automatically | check box | on |
 | | Names | Names that are not indexed | edit box: name patterns separated by `;`, such as `*.tmp;node_modules;.git` | empty |
@@ -724,7 +724,7 @@ is indexed.
   service settings plan specifies. A folder that is left out today has no
   entries in the index, so checking it again adds "and the folders you
   checked again, counted once they are indexed".
-- **Folders gozler indexes** is Windows' "Index these locations" list: one
+- **Folders Gozler indexes** is Windows' "Index these locations" list: one
   row for each indexed folder, a checked drive or a checked folder below an
   unchecked one, with the folders left out inside it, such as `C:\` with
   `C:\Windows; C:\ProgramData`. It shows the include and exclude choices in
@@ -767,7 +767,7 @@ is indexed.
 The page has two parts, as Everything's Keyboard page has: the one shortcut
 that works from any program, and the shortcuts of the window's commands.
 
-**Shortcut to show gozler**
+**Shortcut to show Gozler**
 
 - **A shortcut needs the Windows key, or two of `Ctrl`, `Alt` and `Shift`.**
   A shortcut with one of them, such as `Ctrl+F` or `Shift+A`, would take that
@@ -779,13 +779,13 @@ that works from any program, and the shortcuts of the window's commands.
 - **The Windows key** is a check box beside the hotkey control, because the
   Windows hotkey control cannot enter it. With it on, the key alone is
   enough: `Win+S`.
-- **gozler replaces Windows' own use of a Windows-key shortcut,** such as
-  `Win+S` for Windows Search, while gozler runs with that shortcut. It
+- **Gozler replaces Windows' own use of a Windows-key shortcut,** such as
+  `Win+S` for Windows Search, while Gozler runs with that shortcut. It
   changes no Windows setting to do so: it catches the keys before Windows
-  does. When the person chooses another shortcut or none, or gozler exits,
+  does. When the person chooses another shortcut or none, or Gozler exits,
   Windows' own `Win+S` works again at once, so there is nothing to restore.
   It also takes effect at once, with no restart and no sign-out, because
-  gozler changes nothing that Windows reads only at start. If a shortcut
+  Gozler changes nothing that Windows reads only at start. If a shortcut
   ever needs a restart, a sign-out or an Explorer restart to take effect,
   the dialog says so when the person applies it, before they rely on it:
   "Windows uses Win+S until you sign out and sign in again." Stage 7 of the
@@ -793,11 +793,11 @@ that works from any program, and the shortcuts of the window's commands.
   Windows keeps two exceptions: `Win+L` always locks the computer, so the
   dialog refuses it; and while a program that runs as administrator is in
   front, the keys reach Windows, because Windows does not pass that
-  program's keys to gozler.
+  program's keys to Gozler.
 - **A shortcut with `Ctrl`, `Alt` and `Shift` only** is registered with
-  Windows. When another program holds it, the dialog says so; gozler never
+  Windows. When another program holds it, the dialog says so; Gozler never
   takes such a shortcut from another program.
-- **After the window closes,** the shortcut works only while gozler keeps
+- **After the window closes,** the shortcut works only while Gozler keeps
   running in the notification area (Settings > General, on by default). With
   that off, the page says so under the shortcut, so the person knows before
   they close the window.
@@ -808,7 +808,7 @@ that works from any program, and the shortcuts of the window's commands.
   bar or the context menu, as its menu and its name, such as "Edit > Find",
   with its shortcuts after it. A submenu of choices, such as Columns, Sort
   by or Language, the match controls, Clear filters and the tray's Show
-  window take no command shortcut; the shortcut to show gozler is above. Typing in "Show commands
+  window take no command shortcut; the shortcut to show Gozler is above. Typing in "Show commands
   containing" keeps only the commands whose name or shortcut contains the
   text, so `ctrl+e` finds the command that has it.
 - **Add…** and **Edit…** open a small dialog with one hotkey control. A
@@ -834,32 +834,32 @@ that works from any program, and the shortcuts of the window's commands.
 
 ### The General page
 
-- **Keep gozler running in the notification area** is Everything's "Run in
+- **Keep Gozler running in the notification area** is Everything's "Run in
   background": closing the window hides it, the tray icon shows it again,
   and the Keyboard page's shortcut works from any program ("Window
-  lifetime"). With it off, closing the window ends gozler, and the shortcut
+  lifetime"). With it off, closing the window ends Gozler, and the shortcut
   works only while the window is open.
-- **Check for updates** asks GitHub for gozler's latest release, at most once
-  a day, when gozler starts. When a newer one exists, the status bar's last
-  part says "gozler 0.4.0 is available" with a link that opens the release
-  page; gozler never downloads or installs anything itself. Off, gozler
+- **Check for updates** asks GitHub for Gozler's latest release, at most once
+  a day, when Gozler starts. When a newer one exists, the status bar's last
+  part says "Gozler 0.4.0 is available" with a link that opens the release
+  page; Gozler never downloads or installs anything itself. Off, Gozler
   makes no network request at all.
-- **"Search with gozler" on folders** adds that item to File Explorer's menu
-  for folders and for a folder's background. It opens gozler with Location
+- **"Search with Gozler" on folders** adds that item to File Explorer's menu
+  for folders and for a folder's background. It opens Gozler with Location
   set to that folder, through `gozler-ui.exe --location <folder>`; a running
-  gozler takes the folder over (second start, "Window lifetime"). Off, the
-  item is removed. Uninstalling gozler removes it too.
+  Gozler takes the folder over (second start, "Window lifetime"). Off, the
+  item is removed. Uninstalling Gozler removes it too.
 - **Start at sign-in** shows on only when the `Run` value exists and Windows
   has not turned it off. Task Manager's Startup apps page and Windows
   Settings can turn the entry off without removing it; turning the check box
   on removes that mark, so the check box and Task Manager never disagree.
   The `Run` value names the `gozler-ui.exe` that wrote it, and uninstalling
-  gozler removes it.
+  Gozler removes it.
 
 - **The File Explorer group has three open commands, as Everything's
   Context Menu page has:** Open folders runs for Open (`C1`) on a folder, Open files for Open
   on a file, and Open file location for `C2`. A person who browses with
-  another file manager, such as Total Commander, sets them so gozler opens
+  another file manager, such as Total Commander, sets them so Gozler opens
   everything there.
 - **An empty command does what File Explorer does:** a folder opens in File
   Explorer, a file starts its default program, and Open file location opens
@@ -879,12 +879,12 @@ that works from any program, and the shortcuts of the window's commands.
   `"<path>" /O /A /P=L /L="%1"`, the owner's Total Commander command from
   Everything, because nobody remembers Total Commander's options. Open
   file location stays as it is, as in the owner's Everything.
-  - **gozler finds Total Commander in its own index:** `TOTALCMD64.EXE`, or
+  - **Gozler finds Total Commander in its own index:** `TOTALCMD64.EXE`, or
     `TOTALCMD.EXE` when there is no 64-bit one. When it finds several, it
     takes the one with the newest date modified, because an older copy is
     usually a backup. The box shows the path, so the person sees which one
     it took and can change it with Browse….
-  - **It finds none:** a balloon on the button says "gozler found no Total
+  - **It finds none:** a balloon on the button says "Gozler found no Total
     Commander (TOTALCMD64.EXE or TOTALCMD.EXE). Choose it with Browse…." and
     the boxes keep their text. While the service cannot search, the balloon
     gives the service's message instead ("Daemon failures").
@@ -916,29 +916,29 @@ that works from any program, and the shortcuts of the window's commands.
 ### Everything's options, one by one
 
 Every option of Everything's Options dialog, as the owner's screenshots show
-it, with what gozler does instead. An option comes in only when it changes
-what gozler finds or does, and gozler does not already decide it.
+it, with what Gozler does instead. An option comes in only when it changes
+what Gozler finds or does, and Gozler does not already decide it.
 
-| Everything page | Option | gozler |
+| Everything page | Option | Gozler |
 | --- | --- | --- |
-| General | Language, Download languages | General: Language, and the Language menu (owner decision 6); languages ship with gozler |
+| General | Language, Download languages | General: Language, and the Language menu (owner decision 6); languages ship with Gozler |
 | General | Store settings in `%APPDATA%` | no: the window's settings are per user in `%LOCALAPPDATA%`, the service's are per machine |
-| General | Check for updates on startup | General: Check for updates when gozler starts |
-| General | Start on system startup | General: Start gozler when I sign in |
+| General | Check for updates on startup | General: Check for updates when Gozler starts |
+| General | Start on system startup | General: Start Gozler when I sign in |
 | General | Run as administrator | no: the window needs no administrator rights; service pages ask when applied |
 | General | Everything Service | the setup installs the service; Index shows its state |
-| General | Show Search Everything folder context menu item | General: Show "Search with gozler" on folders |
-| General | Start menu, desktop and Quick Launch shortcuts, URL protocol, EFU association | no: the setup adds the Start menu shortcut; gozler has no file lists or URLs |
-| UI | Run in background, show tray icon | General: Keep gozler running in the notification area when I close its window; the tray icon shows while it runs there |
+| General | Show Search Everything folder context menu item | General: Show "Search with Gozler" on folders |
+| General | Start menu, desktop and Quick Launch shortcuts, URL protocol, EFU association | no: the setup adds the Start menu shortcut; Gozler has no file lists or URLs |
+| UI | Run in background, show tray icon | General: Keep Gozler running in the notification area when I close its window; the tray icon shows while it runs there |
 | UI | Single click tray | always: a click on the tray icon shows the window |
 | UI | New window from the tray, new window when running | no: one window |
 | UI | Search as you type | Search |
 | UI | Select search on mouse click | Search: Select the search text when I click the search box |
-| UI | Focus search on activate | Search: Select the search text when gozler is activated |
+| UI | Focus search on activate | Search: Select the search text when Gozler is activated |
 | UI | Full row select, single click open, underline icon titles | no: appearance, as File Explorer does it |
-| Home | Start value of match case, whole word, path, regex, filter, sort and view | no: gozler starts with the last ones, as the owner's Everything does |
+| Home | Start value of match case, whole word, path, regex, filter, sort and view | no: Gozler starts with the last ones, as the owner's Everything does |
 | Home | Match diacritics | see "Search box": accents count today |
-| Home | Start search, index source, file list, ETP server, link type | no: gozler starts with an empty search on its own index |
+| Home | Start search, index source, file list, ETP server, link type | no: Gozler starts with an empty search on its own index |
 | Search | Fast ASCII search | no: always fast |
 | Search | Match path when a term has a separator, whole name with wildcards | always, as the shared query syntax says |
 | Search | Literal operators, bracket grouping, environment variables, forward slashes, operator precedence | no: the query syntax is one rule shared with `gozler` (DESIGN.md: "Search") |
@@ -946,7 +946,7 @@ what gozler finds or does, and gozler does not already decide it.
 | Results | Clear selection on search, sort date and size descending first | always ("The selection", "Results list") |
 | Results | Close window on execute, open path with a double click in the Path column, automatic scrolling, result list focus | no: the window stays open; Open file location (`C2`) opens the folder |
 | Results | Double quote copy as path | no: Copy as path quotes, as File Explorer's does (`C9`) |
-| Results | Do not select extension when renaming | no: gozler does not rename |
+| Results | Do not select extension when renaming | no: Gozler does not rename |
 | Results | Icon, thumbnail and extended information priorities | no: icons come from the shell's image list as rows are shown; no thumbnails |
 | View | Double buffer, alternate row colour, row mouseover, update after scrolling, selection rectangle | no: appearance, as File Explorer does it |
 | View | Show highlighted search terms | always: the matched part of each name and path is bold ("Results list") |
@@ -956,7 +956,7 @@ what gozler finds or does, and gozler does not already decide it.
 | Context Menu | Open (Folders), Open (Files), Open Path commands | General: Open folders, Open files and Open file location, with `%1` |
 | Context Menu | Other menu items and their visibility | no: the context menu has fixed items |
 | Fonts and Colors | Font, size, colours per item state | no: Windows' font and colours, and high contrast |
-| Keyboard | Show window hotkey | Keyboard: Shortcut to show gozler |
+| Keyboard | Show window hotkey | Keyboard: Shortcut to show Gozler |
 | Keyboard | Commands, show commands containing, shortcuts with Add, Edit and Remove | Keyboard |
 | Keyboard | New window hotkey, toggle window hotkey | no: one window, which the shortcut shows |
 | History | Search history and suggestions, run history | no: the owner's Everything has search history off; run history waits for a concrete need |
@@ -967,7 +967,7 @@ what gozler finds or does, and gozler does not already decide it.
 | Indexes | Index folder size | always: a folder's size is the sum of its files ("Results list") |
 | Indexes | Index date created | Index: Dates created |
 | Indexes | Index date accessed | no: Windows can turn its updates off (`NtfsDisableLastAccessUpdate`), so it can mislead |
-| Indexes | Fast size, date, attribute, path and extension sorts | no: gozler sorts each search's results by any column |
+| Indexes | Fast size, date, attribute, path and extension sorts | no: Gozler sorts each search's results by any column |
 | NTFS | Volume list, include in database | Include: the drives at the top of the tree; Index: their state |
 | NTFS | Include new fixed volumes | Include: Include new fixed drives automatically |
 | NTFS | Include new removable volumes | no: removable drives are not indexed (DESIGN.md) |
@@ -1026,7 +1026,7 @@ The window does what a Windows user expects without being told:
 
 ## Where settings are saved
 
-`%LOCALAPPDATA%\gozler\ui.json`, found through the Windows known-folder API,
+`%LOCALAPPDATA%\Gozler\ui.json`, found through the Windows known-folder API,
 written by the window alone: to a temporary file, then renamed over the old
 one. A value that is missing or damaged falls back to its default. A failed
 save shows its message ("Feedback"). `gozler-ui --data-dir <folder>` keeps
@@ -1091,12 +1091,12 @@ window runs (owner decisions 5 and 6).
 
 | Feature | Why not |
 | --- | --- |
-| Removable and network volumes | gozler indexes fixed NTFS and ReFS volumes |
+| Removable and network volumes | Gozler indexes fixed NTFS and ReFS volumes |
 | Database location, compression | the index lives in the daemon's memory |
 | Date accessed | Windows can turn its updates off, so it can mislead; Date created is an Index setting |
-| Find duplicate files, content search, plugins | gozler searches names, paths, sizes, dates and attributes |
+| Find duplicate files, content search, plugins | Gozler searches names, paths, sizes, dates and attributes |
 | File lists, ETP/FTP and HTTP servers | not planned in DESIGN.md |
-| Search and run history | not a gozler feature; it waits for a concrete need |
+| Search and run history | not a Gozler feature; it waits for a concrete need |
 | Editable context menu items, fonts and colors, size and date format options, and every other appearance setting | the owner wants no appearance settings; Windows and File Explorer decide the look |
 | Acrylic or Mica background, and a custom title bar | the common controls paint opaque backgrounds; see "Look" |
 | Custom-drawn buttons, two surface colours, taller list rows | polish that needs a paint routine for every state (priority 4); a search list shows more results at Windows' compact height |

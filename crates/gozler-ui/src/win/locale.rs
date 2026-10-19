@@ -4,10 +4,12 @@
 
 use super::wide;
 use crate::core::text::Numbers;
+use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Globalization::{
-    GetLocaleInfoEx, GetNumberFormatEx, GetUserPreferredUILanguages, LOCALE_ILZERO,
-    LOCALE_INEGNUMBER, LOCALE_RETURN_NUMBER, LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND,
-    MUI_LANGUAGE_NAME, NUMBERFMTW,
+    DATE_SHORTDATE, GetDateFormatEx, GetLocaleInfoEx, GetNumberFormatEx, GetTimeFormatEx,
+    GetUserPreferredUILanguages, LOCALE_ILZERO, LOCALE_INEGNUMBER, LOCALE_RETURN_NUMBER,
+    LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND, MUI_LANGUAGE_NAME, NUMBERFMTW,
+    TIME_NOSECONDS,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -72,6 +74,54 @@ impl Numbers for WindowsNumbers {
 
     fn decimal(&self, n: f64, digits: u8) -> String {
         self.format(&format!("{n:.*}", usize::from(digits)), digits)
+    }
+
+    /// Empty for a time that `jiff` cannot hold.
+    fn date_time(&self, filetime: i64) -> String {
+        let Ok(at) =
+            jiff::Timestamp::from_millisecond(gozler_core::output::filetime_to_unix_ms(filetime))
+        else {
+            return String::new();
+        };
+        let local = at.to_zoned(jiff::tz::TimeZone::system()).datetime();
+        let time = SYSTEMTIME {
+            wYear: u16::try_from(local.year()).unwrap_or(0),
+            wMonth: local.month() as u16,
+            wDayOfWeek: local.weekday().to_sunday_zero_offset() as u16,
+            wDay: local.day() as u16,
+            wHour: local.hour() as u16,
+            wMinute: local.minute() as u16,
+            wSecond: local.second() as u16,
+            wMilliseconds: 0,
+        };
+        let mut date = [0u16; 64];
+        let mut clock = [0u16; 64];
+        // SAFETY: `time` is a complete SYSTEMTIME; each call writes at most
+        // its buffer's length.
+        let (date_len, clock_len) = unsafe {
+            (
+                GetDateFormatEx(
+                    PCWSTR::null(),
+                    DATE_SHORTDATE,
+                    Some(&time),
+                    PCWSTR::null(),
+                    Some(&mut date),
+                    PCWSTR::null(),
+                ),
+                GetTimeFormatEx(
+                    PCWSTR::null(),
+                    TIME_NOSECONDS,
+                    Some(&time),
+                    PCWSTR::null(),
+                    Some(&mut clock),
+                ),
+            )
+        };
+        let text = |buffer: &[u16], written: i32| match usize::try_from(written) {
+            Ok(n) if n > 0 => String::from_utf16_lossy(&buffer[..n - 1]),
+            _ => String::new(),
+        };
+        format!("{} {}", text(&date, date_len), text(&clock, clock_len))
     }
 }
 

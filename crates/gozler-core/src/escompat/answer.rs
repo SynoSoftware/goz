@@ -5,6 +5,7 @@ use super::{Count, EsPlan, ExitCode};
 use crate::output::table::grouped;
 use crate::proto::{QueryResults, QueryTotals};
 use crate::query::ParsedQuery;
+use crate::scope::leaves_matches_out;
 use std::fmt;
 
 /// What the pages of one result set say beyond their rows.
@@ -58,9 +59,7 @@ impl Answer {
         if self.volumes_incomplete {
             warnings.push(Warning::Incomplete);
         }
-        // A size or date test never matches a file whose value is unknown,
-        // and a total adds nothing for it, so the answer may be short.
-        if self.metadata_pending && self.reads_size_or_date {
+        if leaves_matches_out(self.metadata_pending, self.reads_size_or_date) {
             warnings.push(Warning::SizesOrDatesUnknown);
         }
         // The daemon counts in `total` only matches a page can carry, so more

@@ -17,13 +17,14 @@ use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON, IDC_ARROW, IMAGE_ICON,
-    IsDialogMessageW, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG, PostQuitMessage,
-    RegisterClassExW, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SetWindowLongPtrW,
-    SetWindowPlacement, TranslateAcceleratorW, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT,
-    WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DPICHANGED, WM_ENDSESSION, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_EX_LEFT,
-    WS_OVERLAPPEDWINDOW,
+    IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
+    PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
+    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateAcceleratorW,
+    TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CLOSE,
+    WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_ENDSESSION, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_CLIPCHILDREN,
+    WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -43,7 +44,26 @@ pub(crate) enum Message<'a> {
     /// A menu item, an accelerator or a control's notification.
     Command {
         id: u16,
+        /// The control's notification code, such as `EN_CHANGE`.
+        notification: u16,
         from_control: bool,
+    },
+    Notify(super::notify::Notify<'a>),
+    Timer(usize),
+    /// A request thread has put a reply on the channel
+    /// ([`super::wake::Waker`]).
+    Wake,
+    /// A right-click, or the Menu key or `Shift+F10`, which give no point.
+    ContextMenu {
+        /// In screen coordinates.
+        point: Option<(i32, i32)>,
+    },
+    /// A key that [`run_message_loop`] offers the window before
+    /// `IsDialogMessageW`, sent to the focused control `target`. A handler
+    /// that takes it answers 1, and no `WM_CHAR` follows (design rule 8).
+    KeyDown {
+        target: Hwnd,
+        key: u16,
     },
     InitMenuPopup,
     CtlColorStatic(super::gdi::StaticColors),
@@ -148,7 +168,9 @@ pub(crate) fn create_window<W: WindowProc>(
             WS_EX_LEFT,
             &HSTRING::from(class),
             PCWSTR::null(),
-            WS_OVERLAPPEDWINDOW,
+            // The window's background and dividers never paint over its
+            // controls.
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x,
             y,
             width,
@@ -249,15 +271,31 @@ pub(crate) fn window_size(hwnd: Hwnd, client: Size, dpi: Dpi) -> Size {
     }
 }
 
+/// The private message that offers a key to the main window
+/// ([`Message::KeyDown`]).
+const KEY_DOWN: u32 = super::wake::WAKE + 1;
+
 /// Runs the thread's message loop until `WM_QUIT`. The accelerators come
-/// first, then `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc`
-/// among the main window's controls (design rule 8).
+/// first, then the keys the main window takes for its focused control, then
+/// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
+/// main window's controls (design rule 8).
 pub(crate) fn run_message_loop(main: Hwnd, accelerators: &super::menu::Accelerators) {
     let mut msg = MSG::default();
     // SAFETY: `msg` is a local that each call fills in or reads.
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             if TranslateAcceleratorW(main.0, accelerators.handle(), &msg) != 0 {
+                continue;
+            }
+            if msg.message == WM_KEYDOWN
+                && SendMessageW(
+                    main.0,
+                    KEY_DOWN,
+                    Some(msg.wParam),
+                    Some(LPARAM(msg.hwnd.0 as isize)),
+                )
+                .0 != 0
+            {
                 continue;
             }
             if IsDialogMessageW(main.0, &msg).as_bool() {
@@ -354,7 +392,26 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         }
         WM_COMMAND => Message::Command {
             id: low(wparam.0),
+            notification: high(wparam.0),
             from_control: lparam.0 != 0,
+        },
+        // SAFETY: WM_NOTIFY's lparam is the NMHDR of the notification, valid
+        // for the length of the message.
+        WM_NOTIFY => Message::Notify(unsafe { super::notify::decode(lparam) }),
+        WM_TIMER => Message::Timer(wparam.0),
+        super::wake::WAKE => Message::Wake,
+        WM_CONTEXTMENU => Message::ContextMenu {
+            // -1, -1 is the keyboard's; the coordinates are signed words.
+            point: (lparam.0 != -1).then(|| {
+                (
+                    i32::from(low(lparam.0 as usize) as i16),
+                    i32::from(high(lparam.0 as usize) as i16),
+                )
+            }),
+        },
+        KEY_DOWN => Message::KeyDown {
+            target: Hwnd(HWND(lparam.0 as *mut _)),
+            key: low(wparam.0),
         },
         WM_INITMENUPOPUP => Message::InitMenuPopup,
         WM_CTLCOLORSTATIC => Message::CtlColorStatic(super::gdi::StaticColors::from_wparam(wparam)),
@@ -381,5 +438,17 @@ impl Hwnd {
         // SAFETY: a stale handle gives 0, which falls back to 96.
         let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.0) };
         Dpi::new(dpi).unwrap_or(Dpi::new(96).expect("96 is not zero"))
+    }
+
+    /// Starts or restarts the timer `id`, which sends `WM_TIMER` every
+    /// `milliseconds`.
+    pub(crate) fn set_timer(self, id: usize, milliseconds: u32) {
+        // SAFETY: plain values; no timer procedure.
+        unsafe { SetTimer(Some(self.0), id, milliseconds, None) };
+    }
+
+    pub(crate) fn kill_timer(self, id: usize) {
+        // SAFETY: plain values; a timer that does not run is no error here.
+        let _ = unsafe { KillTimer(Some(self.0), id) };
     }
 }

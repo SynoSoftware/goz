@@ -175,8 +175,9 @@ them.
 6. **Pixels mixed with device-independent pixels.** Per-monitor DPI touches
    every size: layout, fonts, column widths and icons. Added later, it means
    finding every number. **Rule:** sizes are designed in `Dip` and converted
-   to `Px` only in `Layout::compute` and in the font and icon code. They are
-   distinct types, so the compiler rejects a mix.
+   to `Px` only in `core::layout`, which holds `Layout::compute`, the column
+   widths and the inset of a cell's text, and in the font and icon code.
+   They are distinct types, so the compiler rejects a mix.
 7. **Layout spread over handlers, or decided by hand.** **Rule:** one pure
    function computes every control's rectangle from the client size, the DPI,
    which panes are shown, the inspector's height, the font height and the
@@ -370,10 +371,12 @@ The UI thread never waits for the pipe. Each request runs on its own thread
 - A refused request, a failed owner check and a daemon older than the window
   start no polling, because the same request would fail the same way.
 - A failure means something different for each purpose. A `Results` failure
-  shows its message in the list. A `Status` failure only updates whether the
-  daemon answers. A `Selection` failure leaves the selection unread, with its
-  commands disabled, and shows the failure in the list when the results also
-  failed. An `Export` failure is the spec's export message box and leaves the
+  shows its message in the list. A `Status` failure updates whether the
+  daemon answers, and replaces a failure that the list shows for another
+  reason, so the list never offers the fix for a state the service has left;
+  while a search is in flight, its own reply shows instead. A `Selection`
+  failure leaves the selection unread, with its commands disabled, and shows
+  the failure in the list when the results also failed. An `Export` failure is the spec's export message box and leaves the
   list alone.
 
 ### Rows on demand
@@ -480,11 +483,13 @@ partial file. The save dialog is `IFileSaveDialog`.
 ### Feedback and fixes
 
 The spec's buttons for daemon failures run the commands that `gozler`
-already prints for them. `win::shell` runs them with `ShellExecuteExW` and
-the `runas` verb, so Windows asks for administrator permission; the window
-never stores or passes credentials. After the command, the status poll that
+already prints for them. `run_fix` joins them with `&&` into one `cmd /c`,
+which `win::shell::run_as_administrator` runs through `ShellExecuteW` and the
+`runas` verb, so Windows asks for
+administrator permission once, and a failed command stops the ones after
+it; the window never stores or passes credentials. After the command, the status poll that
 the failure already started notices the service and runs the search again.
-Download gozler and Open Services open the releases page and `services.msc`
+Download Gozler and Open Services open the releases page and `services.msc`
 the same way, without elevation.
 
 ### Transitions
@@ -573,6 +578,7 @@ gozler-ui/src
 │  ├─ selection.rs   Selection and its files; SelectionSums; ClipboardData
 │  ├─ fetch.rs       Purpose, Generation, Fetch, Fetched, Outcome, DaemonFailure
 │  ├─ commands.rs    the command table: IDs, keys, menus, enabled and checked
+│  ├─ ids.rs         IconId, DialogId and ControlId, generated from resources/ids.h
 │  ├─ layout.rs      Dip, Px, Dpi, Rect, the spacing constants, Layout::compute
 │  ├─ settings.rs    Settings: load and save ui.json
 │  └─ text.rs        Strings, the language table, Numbers, every caption function
@@ -594,7 +600,8 @@ gozler-ui/src
    └─ requests.rs    Requests: one thread per Fetch, the cancel tokens, the reply channel
 ```
 
-Beside `src`, `resources/` holds the catalogues, `gozler-ui.rc` and the icon.
+Beside `src`, `resources/` holds the catalogues, `gozler-ui.rc`, `ids.h` and
+the icon.
 
 `gozler-ui` depends on `gozler-core`, `gozler-client`, `windows` (only the
 features it uses), `serde` with `derive` for `Settings`, `serde_json`, and
@@ -623,6 +630,13 @@ text, because English has one source, `en.json` (rule 12). It holds:
   supported OS list;
 - the icon and the version information.
 
+`resources/ids.h` is the one source of the resource and control IDs, the
+main window's controls included. The script includes it, `build.rs` turns it
+into `core::ids`, and the probe reads it. `build.rs` refuses two controls
+with one ID, a control with ID 1 or 2, which a dialog sends as `IDOK` and
+`IDCANCEL`, and a dialog that the script does not define, which rc.exe and
+rustc would accept.
+
 The main window is created in code, because its layout follows the window size
 and the panes (rule 7). So are the menu bar, the context menu and the
 accelerator table, from the command table and the person's shortcuts
@@ -636,7 +650,7 @@ The modifier names come from the catalogue, because German Windows writes
 **Start.** `main` installs the panic hook and calls `CoInitializeEx` with an
 apartment-threaded model, because the folder picker and `SHGetFileInfoW` need
 COM. It finds the settings folder (`--data-dir`, or the known folder
-`FOLDERID_LocalAppData` and `gozler`), loads `Settings`, loads the `Strings`
+`FOLDERID_LocalAppData` and `Gozler`), loads `Settings`, loads the `Strings`
 of the saved language (or of Windows default, from
 `GetUserPreferredUILanguages`), builds the menu bar and the accelerator table
 from the command table, and creates the window with an `Rc<MainWindow>`. The
@@ -647,7 +661,7 @@ and calls `apply_text` (rule 12). Every other handler starts by reading
 notifications can arrive while `WM_CREATE` runs. The first `WM_SIZE` applies
 `Layout::compute`. After `create_window` returns, `main` starts the first
 search and the first status request. `--sign-in`, which the `Run` value
-passes, starts gozler as "Window lifetime" in the spec says: in the
+passes, starts Gozler as "Window lifetime" in the spec says: in the
 notification area when it keeps running there, otherwise minimized.
 
 **One window per session.** Before it creates the window, `main` creates the
@@ -680,17 +694,17 @@ the window". Two ways reach the same handler:
   own use of the key returns at once and nothing needs restoring.
 
 **The tray.** `win::tray` adds the icon with `Shell_NotifyIconW` and
-`NOTIFYICON_VERSION_4` while gozler keeps running in the notification area
+`NOTIFYICON_VERSION_4` while Gozler keeps running in the notification area
 (Settings > General), and removes it when that is turned off and at exit. `NIN_SELECT` and `NIN_KEYSELECT` call
 `show_window`; `WM_CONTEXTMENU` calls `SetForegroundWindow` on the main
 window and then `TrackPopupMenuEx`, as the `Shell_NotifyIconW` documentation
 requires so that the menu closes on a click elsewhere. The registered
 `TaskbarCreated` message adds the icon again after Explorer restarts. The
 first hide shows the spec's notification through `NIF_INFO` and records it
-in `ui.json`. `WM_CLOSE` hides the window while gozler keeps running in the
+in `ui.json`. `WM_CLOSE` hides the window while Gozler keeps running in the
 notification area and exits otherwise; File > Exit and the tray's Exit always exit.
 
-**Search with gozler.** The setting writes or deletes the `gozler` verb
+**Search with Gozler.** The setting writes or deletes the `gozler` verb
 under `HKCU\Software\Classes\Directory\shell` and
 `...\Directory\Background\shell`, with the command
 `"<this gozler-ui.exe>" --location "%V"`. A second start passes the folder

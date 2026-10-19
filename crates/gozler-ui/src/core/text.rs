@@ -10,9 +10,17 @@
 //! a whole message with all its forms; a translation whose placeholders
 //! differ from English is ignored, so English shows.
 
+use super::fetch::DaemonFailure;
+use super::model::{Column, Model};
+use super::results::{LIST_LIMIT, ListMessage, Shown};
+use gozler_client::NotRunning;
+use gozler_core::proto::ResultItem;
+use gozler_core::query::{Malformed, QueryError};
+use gozler_core::types::VolumePhase;
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::ops::Range;
 
 /// A shipped language: its tag, its own name with the access key it has in
 /// the Language menu, and its embedded catalogue.
@@ -86,11 +94,15 @@ fn find_shipped(tag: &str, shipped: &'static [Language]) -> Option<&'static Lang
     }
 }
 
-/// Regional number formatting; `win::locale` implements it with
-/// `GetNumberFormatEx`, the tests with English formatting.
+/// Regional number, date and time formatting; `win::locale` implements it
+/// with `GetNumberFormatEx`, `GetDateFormatEx` and `GetTimeFormatEx`, the
+/// tests with English formatting.
 pub(crate) trait Numbers {
     fn integer(&self, n: u64) -> String;
     fn decimal(&self, n: f64, digits: u8) -> String;
+    /// A FILETIME as local date and time in the short date and time
+    /// formats, as File Explorer's Date modified column shows it.
+    fn date_time(&self, filetime: i64) -> String;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -349,6 +361,184 @@ pub(crate) fn bytes(strings: &Strings, numbers: &dyn Numbers, n: u64) -> String 
     strings.format(UNITS[unit], &[&numbers.decimal(value, digits)])
 }
 
+/// The window's title: the typed search and the product's name, as Windows
+/// titles a document window, or the name alone while the search is empty.
+pub(crate) fn title(strings: &Strings, text: &str) -> String {
+    if text.trim().is_empty() {
+        strings.text("window.title").to_owned()
+    } else {
+        strings.format("window.title_search", &[text.trim()])
+    }
+}
+
+/// Status part 1: how many results, or that a search runs.
+pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
+    let strings = &model.strings;
+    if model.results.searching() {
+        return strings.text("status.searching").to_owned();
+    }
+    match model.results.shown() {
+        Shown::Rows(_) => {
+            let total = model.results.total();
+            if total > LIST_LIMIT {
+                strings.format(
+                    "status.showing",
+                    &[&numbers.integer(LIST_LIMIT), &numbers.integer(total)],
+                )
+            } else {
+                strings.count("status.results", total, numbers, &[])
+            }
+        }
+        Shown::Nothing | Shown::Message(_) => String::new(),
+    }
+}
+
+/// Status part 4: the index state, only when it affects the answer (spec:
+/// Status bar).
+pub(crate) fn index_status(model: &Model) -> String {
+    let strings = &model.strings;
+    let coverage = model.coverage();
+    if let Some(volume) = coverage.incomplete() {
+        let key = match volume.phase {
+            VolumePhase::Live | VolumePhase::Snapshot => {
+                unreachable!("an incomplete volume is neither live nor a snapshot")
+            }
+            VolumePhase::Bootstrapping | VolumePhase::Rescanning => "status.volume_indexing",
+            VolumePhase::Offline => "status.volume_offline",
+            VolumePhase::Failed { .. } => "status.volume_failed",
+        };
+        return strings.format(key, &[volume.mounted().display_prefix()]);
+    }
+    coverage
+        .sizes_or_dates_unknown()
+        .map(|volume| strings.format("status.metadata", &[volume.mounted().display_prefix()]))
+        .unwrap_or_default()
+}
+
+/// What the list's empty area says instead of rows, if anything: the
+/// message, and the label of its fix's button.
+pub(crate) fn list_message(model: &Model) -> Option<(String, Option<String>)> {
+    let strings = &model.strings;
+    let message = match model.results.shown() {
+        Shown::Rows(_) if model.results.total() == 0 => {
+            return Some((strings.text("list.no_results").to_owned(), None));
+        }
+        Shown::Nothing | Shown::Rows(_) => return None,
+        Shown::Message(message) => message,
+    };
+    let text = match message {
+        ListMessage::Parse(error) => query_error(strings, error),
+        ListMessage::Failure(failure) => match failure {
+            DaemonFailure::NotRunning(why) => match why {
+                NotRunning::Stopped => strings.text("failure.stopped").to_owned(),
+                NotRunning::Disabled => strings.text("failure.disabled").to_owned(),
+                NotRunning::NotInstalled {
+                    gozlerd_beside: true,
+                    ..
+                } => strings.text("failure.not_installed").to_owned(),
+                NotRunning::NotInstalled {
+                    gozlerd_beside: false,
+                    ..
+                } => strings.text("failure.missing").to_owned(),
+                NotRunning::Unknown(detail) => strings.format("failure.unknown", &[detail]),
+            },
+            DaemonFailure::NotReady => strings.text("failure.not_ready").to_owned(),
+            DaemonFailure::NotGozler => strings.text("failure.not_gozler").to_owned(),
+            DaemonFailure::TooOld => strings.text("failure.too_old").to_owned(),
+            DaemonFailure::Refused { detail } => strings.format("failure.refused", &[detail]),
+            DaemonFailure::Lost => strings.text("failure.lost").to_owned(),
+        },
+    };
+    let button = message
+        .fix()
+        .map(|fix| strings.text(fix.label()).to_owned());
+    Some((text, button))
+}
+
+/// What is wrong with a search that does not parse, and how to fix it, in
+/// the person's language; text from a library stays English after it.
+fn query_error(strings: &Strings, error: &QueryError) -> String {
+    let as_typed = |function: &str, value: &str| format!("{function}{value}");
+    match error {
+        QueryError::UnsupportedOperator(c) => {
+            strings.format("query.unsupported_operator", &[&c.to_string()])
+        }
+        QueryError::UnknownFunction(name) => {
+            strings.format("query.unknown_function", &[&format!("{name}:")])
+        }
+        QueryError::RelativePath(path) => strings.format("query.relative_path", &[path]),
+        QueryError::NoQueryStart => strings.text("query.no_query_start").to_owned(),
+        QueryError::TooManyTerms(n) => strings.format("query.too_many_terms", &[&n.to_string()]),
+        QueryError::TooManyRegexes(n) => {
+            strings.format("query.too_many_regexes", &[&n.to_string()])
+        }
+        QueryError::Malformed(reason) => match reason {
+            Malformed::MisplacedNot => strings.text("query.misplaced_not").to_owned(),
+            Malformed::NotWithoutTerm => strings.text("query.not_without_term").to_owned(),
+            Malformed::OrWithoutTerms => strings.text("query.or_without_terms").to_owned(),
+            Malformed::OperatorOnNothing(term) => {
+                strings.format("query.operator_on_nothing", &[term])
+            }
+            Malformed::Size(value) => strings.format("query.size", &[&as_typed("size:", value)]),
+            Malformed::ReversedDates(value) => {
+                strings.format("query.reversed_dates", &[&as_typed("dm:", value)])
+            }
+            Malformed::DateOutOfRange(value) => {
+                strings.format("query.date_out_of_range", &[&as_typed("dm:", value)])
+            }
+            Malformed::Days(value) => strings.format("query.days", &[&as_typed("dm:", value)]),
+            Malformed::Date(value) => strings.format("query.date", &[&as_typed("dm:", value)]),
+            Malformed::NoParentFolder => strings.text("query.no_parent_folder").to_owned(),
+            Malformed::AttributeLetter(c) => {
+                strings.format("query.attribute_letter", &[&c.to_string()])
+            }
+            Malformed::Regex(detail) => strings.format("query.regex", &[detail]),
+        },
+    }
+}
+
+/// The bytes of a full path that the Name or Path cell shows, `None` for
+/// another column. Name and Path split the path at its last `\`, as
+/// `gozler`'s Name and Path columns do.
+pub(crate) fn path_part(column: Column, path: &str) -> Option<Range<usize>> {
+    let name_start = path.rfind('\\').map_or(0, |i| i + 1);
+    match column {
+        Column::Name => Some(name_start..path.len()),
+        Column::Path => Some(0..name_start.saturating_sub(1)),
+        Column::Size | Column::DateModified | Column::Extension | Column::Attributes => None,
+    }
+}
+
+/// One cell of the results list, as File Explorer shows its columns (spec:
+/// Results list).
+pub(crate) fn cell(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    column: Column,
+    row: &ResultItem,
+) -> String {
+    let part = |column| {
+        &row.path[path_part(column, &row.path).expect("Name and Path are parts of the path")]
+    };
+    let name = part(Column::Name);
+    match column {
+        Column::Name | Column::Path => part(column).to_owned(),
+        Column::Size => match row.size {
+            // In KB, rounded up, so sizes line up for comparison.
+            Some(size) => strings.format("size.kb", &[&numbers.integer(size.div_ceil(1024))]),
+            None => strings.text("cell.unknown").to_owned(),
+        },
+        Column::DateModified => row
+            .mtime_ft
+            .map(|ft| numbers.date_time(ft))
+            .unwrap_or_default(),
+        Column::Extension => gozler_core::query::extension(name.as_bytes(), row.is_dir)
+            .map(|ext| String::from_utf8_lossy(ext).into_owned())
+            .unwrap_or_default(),
+        Column::Attributes => row.attributes.map(|a| a.letters()).unwrap_or_default(),
+    }
+}
+
 /// The menu text of `label` with its first shortcut after a tab, as Windows
 /// menus show it.
 pub(crate) fn menu_label(label: &str, shortcut: Option<String>) -> String {
@@ -397,6 +587,10 @@ pub(crate) mod tests {
 
         fn decimal(&self, n: f64, digits: u8) -> String {
             format!("{n:.*}", usize::from(digits))
+        }
+
+        fn date_time(&self, filetime: i64) -> String {
+            gozler_core::output::format_date_local(filetime, &jiff::tz::TimeZone::UTC)
         }
     }
 

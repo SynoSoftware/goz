@@ -84,7 +84,7 @@ public interface IUIAutomationExpandCollapsePattern { void Expand(); void Collap
 public interface IUIAutomationTogglePattern { void Toggle(); int CurrentToggleState { get; } }
 
 [ComImport, Guid("a94cd8b1-0844-4cd6-9d2d-640537ab39e9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-public interface IUIAutomationValuePattern { void SetValue(); [return: MarshalAs(UnmanagedType.BStr)] string get_CurrentValue(); }
+public interface IUIAutomationValuePattern { void SetValue([MarshalAs(UnmanagedType.BStr)] string value); [return: MarshalAs(UnmanagedType.BStr)] string get_CurrentValue(); }
 
 /// One element as the probe reads it.
 public class Element {
@@ -104,8 +104,8 @@ public static class Ui {
 
     public const int Button = 50000, CheckBox = 50002, ComboBox = 50003, Edit = 50004,
         Hyperlink = 50005, ListItem = 50007, List = 50008, Menu = 50009, MenuBar = 50010,
-        MenuItem = 50011, StatusBar = 50017, Text = 50020, Window = 50032, Header = 50034,
-        HeaderItem = 50035, Separator = 50038;
+        MenuItem = 50011, StatusBar = 50017, Text = 50020, DataItem = 50029, Window = 50032,
+        Header = 50034, HeaderItem = 50035, Separator = 50038;
 
     static Element Wrap(IUIAutomationElement raw) {
         if (raw == null) return null;
@@ -135,6 +135,47 @@ public static class Ui {
         return list;
     }
 
+    /// The cells of the list's first `count` rows, one array a row. The walk
+    /// asks for one row at a time, because a virtual list holds as many items
+    /// as the results and reading them all takes minutes.
+    public static List<string[]> Rows(Element list, int count) {
+        var walker = automation.RawViewWalker;
+        var rows = new List<string[]>();
+        for (var c = walker.GetFirstChildElement(list.Raw); c != null && rows.Count < count; c = walker.GetNextSiblingElement(c)) {
+            var row = Wrap(c);
+            if (row.ControlType == ListItem || row.ControlType == DataItem) rows.Add(Cells(row));
+        }
+        return rows;
+    }
+
+    /// The list's header, which comes before its rows.
+    public static Element HeaderOf(Element list) {
+        var walker = automation.RawViewWalker;
+        for (var c = walker.GetFirstChildElement(list.Raw); c != null; c = walker.GetNextSiblingElement(c)) {
+            var child = Wrap(c);
+            if (child.ControlType == Header) return child;
+            if (child.ControlType == ListItem || child.ControlType == DataItem) return null;
+        }
+        return null;
+    }
+
+    /// The cells of the list's last row.
+    public static string[] LastRow(Element list) {
+        var row = Wrap(automation.RawViewWalker.GetLastChildElement(list.Raw));
+        return row != null && (row.ControlType == ListItem || row.ControlType == DataItem) ? Cells(row) : null;
+    }
+
+    static string[] Cells(Element row) {
+        var cells = new List<string>();
+        foreach (var cell in Children(row)) cells.Add(cell.Name);
+        return cells.Count > 0 ? cells.ToArray() : new[] { row.Name };
+    }
+
+    public static void Focus(Element e) { e.Raw.SetFocus(); }
+    public static void SetValue(Element e, string value) { ((IUIAutomationValuePattern)e.Raw.GetCurrentPattern(10002)).SetValue(value); }
+    public static void Toggle(Element e) { ((IUIAutomationTogglePattern)e.Raw.GetCurrentPattern(10015)).Toggle(); }
+    public static void Invoke(Element e) { ((IUIAutomationInvokePattern)e.Raw.GetCurrentPattern(10000)).Invoke(); }
+
     public static void Expand(Element e) { ((IUIAutomationExpandCollapsePattern)e.Raw.GetCurrentPattern(10005)).Expand(); }
     public static void Collapse(Element e) { ((IUIAutomationExpandCollapsePattern)e.Raw.GetCurrentPattern(10005)).Collapse(); }
     public static string Value(Element e) { return ((IUIAutomationValuePattern)e.Raw.GetCurrentPattern(10002)).get_CurrentValue(); }
@@ -152,7 +193,6 @@ public static class Win {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
@@ -187,6 +227,19 @@ public static class Win {
     public static string Text(IntPtr h) { var s = new StringBuilder(1024); GetWindowTextW(h, s, 1024); return s.ToString(); }
 
     public static RECT Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return r; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct GUITHREADINFO { public uint cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret; }
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+
+    /// The control that has the keyboard focus in the thread of `window`,
+    /// which Windows tracks whether or not the window is in front.
+    public static IntPtr Focus(IntPtr window) {
+        uint pid;
+        var info = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf<GUITHREADINFO>() };
+        GetGUIThreadInfo(GetWindowThreadProcessId(window, out pid), ref info);
+        return info.hwndFocus;
+    }
 
     /// The rectangle the window shows on screen, without its invisible
     /// resize borders.
@@ -263,6 +316,15 @@ public static class Win {
             });
         }
         return items;
+    }
+
+    /// A control's text, which Windows copies across processes for
+    /// WM_GETTEXT; GetWindowText reads only a caption in another process.
+    public static string ControlText(IntPtr control) {
+        int length = (int)SendMessageW(control, 0x000E, IntPtr.Zero, IntPtr.Zero);
+        var text = new StringBuilder(length + 1);
+        SendMessageW(control, 0x000D, (IntPtr)(length + 1), text);
+        return text.ToString();
     }
 
     /// A combo box's items, which Windows copies across processes for
@@ -401,8 +463,9 @@ function Save-ScreenArea($hwnd, $popups, [string] $name) {
 
 # The menu bar in the spec's order and groups (spec: Menus). Each line is a
 # catalogue key, or = and a literal text; two more spaces of indent put it in
-# the submenu above it; after | come its shortcut, whether it is enabled in
-# stage 2 with the search box focused and empty, and whether it is marked.
+# the submenu above it; after | come its shortcut, whether it is enabled
+# after the first search with the search box empty, and whether it is
+# marked. "focus" is enabled while the search box has the focus.
 $menuSpec = @'
 menu.file
   command.open||off|
@@ -419,33 +482,33 @@ menu.edit
   command.copy_as_path|Ctrl+Shift+C|off|
   command.copy_name||off|
   -
-  command.select_all|Ctrl+A|on|
+  command.select_all|Ctrl+A|focus|
   -
-  command.find|Ctrl+F|off|
+  command.find|Ctrl+F|on|
 menu.view
   command.filters||off|marked
   command.inspector||off|marked
   command.columns||on|
     column.name||off|marked
-    column.path||off|marked
-    column.size||off|marked
-    column.date_modified||off|marked
-    column.extension||off|
-    column.attributes||off|
+    column.path||on|marked
+    column.size||on|marked
+    column.date_modified||on|marked
+    column.extension||on|
+    column.attributes||on|
   -
   command.sort_by||on|
-    sort.name||off|marked
-    sort.path||off|
-    sort.size||off|
-    sort.date_modified||off|
-    sort.extension||off|
+    sort.name||on|marked
+    sort.path||on|
+    sort.size||on|
+    sort.date_modified||on|
+    sort.extension||on|
     -
-    sort.ascending||off|marked
-    sort.descending||off|
+    sort.ascending||on|marked
+    sort.descending||on|
   -
-  command.refresh|F5|off|
+  command.refresh|F5|on|
 menu.help
-  command.search_syntax|F1|off|
+  command.search_syntax|F1|on|
   -
   command.about||on|
 menu.language|||right
@@ -457,7 +520,7 @@ if ($Pseudo) { $menuSpec += "`n  =&qps-ploc||off|" }
 
 # The expected menus as lines: indent, name, shortcut, access key, enabled,
 # mark. A top-level menu is always enabled.
-function Expected-MenuLines {
+function Expected-MenuLines([bool] $searchFocused) {
     foreach ($line in $menuSpec -split "`r?`n") {
         if (-not $line.Trim()) { continue }
         $indent = $line.Length - $line.TrimStart().Length
@@ -465,6 +528,7 @@ function Expected-MenuLines {
         if ($key -eq '-') { (' ' * $indent) + '-'; continue }
         $text = $key.StartsWith('=') ? $key.Substring(1) : (Caption $key)
         if ($indent -eq 0) { $enabled = 'on' }
+        if ($enabled -eq 'focus') { $enabled = $searchFocused ? 'on' : 'off' }
         (' ' * $indent) + "$(Plain $text) | $shortcut | key $(AccessKeyOf $text) | $enabled | $marked"
     }
 }
@@ -513,20 +577,19 @@ function Menu-Bar($process) {
         Where-Object { ([GozlerProbe.Ui]::Children($_)).Count -gt 1 } | Select-Object -First 1
 }
 
+# Whether the window is in front. The probe never brings it there, because
+# the person at the machine would then type into it.
 function Is-InFront($process) {
-    $front = [GozlerProbe.Win]::GetForegroundWindow()
-    if ($front -eq $process.MainWindowHandle) { return $true }
-    [void][GozlerProbe.Win]::SetForegroundWindow($process.MainWindowHandle)
-    Start-Sleep -Milliseconds 200
     return [GozlerProbe.Win]::GetForegroundWindow() -eq $process.MainWindowHandle
 }
 
-# The element of `hwnd`. A menu window exists before UI Automation can read
-# it, so a failed read is tried again.
-function Element-Of($hwnd) {
+# The children of the window `hwnd`. A menu window exists before UI
+# Automation can read it, and a read can time out while the window is busy,
+# so a failed read is tried again.
+function Children-Of($hwnd) {
     for ($i = 0; ; $i++) {
-        try { return [GozlerProbe.Ui]::FromHandle($hwnd) }
-        catch { if ($i -ge 20) { return $null } }
+        try { return @([GozlerProbe.Ui]::Children([GozlerProbe.Ui]::FromHandle($hwnd))) }
+        catch { if ($i -ge 20) { return @() } }
         Start-Sleep -Milliseconds 250
     }
 }
@@ -537,24 +600,25 @@ function Element-Of($hwnd) {
 # last menu it opened. Runs only while the window is in front.
 function Show-Menu($process, [int] $top, [int] $sub, [string] $name) {
     $item = @([GozlerProbe.Ui]::Children((Menu-Bar $process)))[$top]
-    [GozlerProbe.Ui]::Expand($item)
     try {
+        # UI Automation refuses to open a menu of a window that has left the
+        # front; the caller then reports the check as not run.
+        try { [GozlerProbe.Ui]::Expand($item) } catch { return [ordered]@{ opened = $false } }
         $menu = Wait-Popup $process @()
         if (-not $menu) { return [ordered]@{ opened = $false } }
         $popups = @($menu)
         if ($sub -ge 0) {
-            $subItem = @([GozlerProbe.Ui]::Children((Element-Of $menu)))[$sub]
-            [GozlerProbe.Ui]::Expand($subItem)
+            $subItem = @(Children-Of $menu)[$sub]
+            try { [GozlerProbe.Ui]::Expand($subItem) } catch { return [ordered]@{ opened = $false } }
             $menu = Wait-Popup $process $popups
             if (-not $menu) { return [ordered]@{ opened = $false } }
             $popups += $menu
         }
-        $element = Element-Of $menu
         Save-ScreenArea $process.MainWindowHandle $popups $name
-        $items = if ($element) { @([GozlerProbe.Ui]::Children($element) | ForEach-Object Name) } else { @() }
+        $items = @(Children-Of $menu | ForEach-Object Name)
         return [ordered]@{ opened = $true; items = $items }
     }
-    finally { [GozlerProbe.Ui]::Collapse($item) }
+    finally { try { [GozlerProbe.Ui]::Collapse($item) } catch { } }
 }
 
 # A menu window of the process that is not in `known`, once it opens.
@@ -582,12 +646,18 @@ function Show-Menus($process, [string] $language) {
     return $shown
 }
 
-# Opens Help > About gozler, reads it, takes its screenshot, and closes it
+# Opens Help > About Gozler, reads it, takes its screenshot, and closes it
 # with its Close button.
 function Open-About($process, [string] $screenshot) {
-    # About gozler is the last item of Help, the fourth menu.
+    # About Gozler is the last item of Help, the fourth menu.
     $about = [GozlerProbe.Win]::MenuItems((Find-Submenu $process 3))[-1]
-    [void][GozlerProbe.Win]::PostMessageW($process.MainWindowHandle, 0x0111, [IntPtr]$about.Id, 0)
+    return Open-Dialog $process $about.Id $screenshot
+}
+
+# Runs the menu item with ID `id`, which opens a dialog, then reads the
+# dialog, takes its screenshot, and closes it with its Close button.
+function Open-Dialog($process, [int] $id, [string] $screenshot) {
+    [void][GozlerProbe.Win]::PostMessageW($process.MainWindowHandle, 0x0111, [IntPtr]$id, 0)
     $dialog = $null
     for ($i = 0; $i -lt 50 -and -not $dialog; $i++) {
         Start-Sleep -Milliseconds 100
@@ -595,15 +665,20 @@ function Open-About($process, [string] $screenshot) {
     }
     if (-not $dialog) { return [ordered]@{ opened = $false } }
     Start-Sleep -Milliseconds 300
-    $controls = [GozlerProbe.Ui]::Children((Element-Of $dialog))
+    $controls = Children-Of $dialog
     Save-Screenshot $dialog $screenshot
     $title = [GozlerProbe.Win]::Text($dialog)
+    # UI Automation calls a multiline edit control a document, so the text
+    # is found by its ID.
+    $edit = $controls | Where-Object AutomationId -EQ $ids.IDC_SEARCH_SYNTAX_TEXT | Select-Object -First 1
+    $editText = $edit ? [GozlerProbe.Win]::ControlText([IntPtr]$edit.Hwnd) : $null
     $close = $controls | Where-Object AutomationId -EQ '2' | Select-Object -First 1
     [GozlerProbe.Ui]::InvokeLater($close)
     for ($i = 0; $i -lt 50 -and [GozlerProbe.Win]::IsWindow($dialog); $i++) { Start-Sleep -Milliseconds 100 }
     return [ordered]@{
         title  = $title
         texts  = @($controls | ForEach-Object Name)
+        edit   = $editText
         closed = -not [GozlerProbe.Win]::IsWindow($dialog)
     }
 }
@@ -611,6 +686,180 @@ function Open-About($process, [string] $screenshot) {
 # The submenu of the menu bar's item at `position`.
 function Find-Submenu($process, [int] $position) {
     ([GozlerProbe.Win]::MenuItems([GozlerProbe.Win]::GetMenu($process.MainWindowHandle)))[$position].SubMenu
+}
+
+# --- Searching ---------------------------------------------------------------
+
+# The main window's control IDs, from resources/ids.h, as UI Automation
+# gives them.
+$ids = @{}
+foreach ($line in Get-Content (Join-Path $PSScriptRoot 'resources\ids.h')) {
+    if ($line -match '^#define (ID\w+) (\d+)') { $ids[$Matches[1]] = $Matches[2] }
+}
+$SearchBoxId = $ids.IDC_SEARCH; $MatchLabelId = $ids.IDC_MATCH_LABEL; $MatchModeId = $ids.IDC_MATCH_MODE
+$MatchCaseId = $ids.IDC_MATCH_CASE; $MatchPathId = $ids.IDC_MATCH_PATH; $ListId = $ids.IDC_LIST
+$StatusBarId = $ids.IDC_STATUS; $MessageId = $ids.IDC_MESSAGE
+
+function Control-Hwnd($process, [string] $id) { [IntPtr](Child-ById (Window-Element $process) $id).Hwnd }
+
+# The status bar's part at `index`, from 0. UI Automation sees a new window's
+# controls a moment after the window, so a read is tried again.
+function Status-Part($process, [int] $index) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $children = @([GozlerProbe.Ui]::Children((Window-Element $process)))
+        $bar = $children | Where-Object AutomationId -EQ $StatusBarId | Select-Object -First 1
+        if ($bar) { return @([GozlerProbe.Ui]::Children($bar))[$index].Name }
+        Start-Sleep -Milliseconds 10
+    } until ([DateTime]::UtcNow -gt $deadline)
+    throw "UI Automation does not see the status bar among: $($children -join '; ')"
+}
+
+# The message that replaces the rows, or $null while it is hidden, which UI
+# Automation leaves out.
+function Message-Text($process) { (Child-ById (Window-Element $process) $MessageId).Name }
+
+# "Searching…" is the one text of status part 1 with an ellipsis, in every
+# language.
+function Is-Searching([string] $text) { $text -like '*…*' }
+
+# Waits until status part 1 shows an answer: a count, or nothing when a
+# message replaces the rows.
+function Wait-Answer($process, [int] $seconds = 30) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+    while ($true) {
+        $text = Status-Part $process 0
+        if (-not (Is-Searching $text) -or [DateTime]::UtcNow -gt $deadline) { return $text }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+# Types `text` into the search box through UI Automation and returns status
+# part 1 once the search has answered. The window searches 150 ms after the
+# last change.
+function Search-For($process, [string] $text) {
+    [GozlerProbe.Ui]::SetValue((Child-ById (Window-Element $process) $SearchBoxId), $text)
+    Start-Sleep -Milliseconds 300
+    return Wait-Answer $process
+}
+
+# The count in "3 results", or $null for any other text.
+function Count-Of([string] $text) {
+    if ($text -match '^\[?([\d.,\s]+)\s\D') { return [long]($Matches[1] -replace '\D', '') }
+    return $null
+}
+
+function Row-Count($process) {
+    # LVM_GETITEMCOUNT
+    [long][GozlerProbe.Win]::SendMessageW((Control-Hwnd $process $ListId), 0x1004, 0, 0)
+}
+
+# The full paths of the list's first `count` rows, from their Name and Path
+# cells, as `gozler` prints them.
+function Visible-Paths($process, [int] $count) {
+    $list = Child-ById (Window-Element $process) $ListId
+    @([GozlerProbe.Ui]::Rows($list, $count) | ForEach-Object { Join-Path $_[1] $_[0] })
+}
+
+# Chooses the match mode at `index` as a person's choice in the list does:
+# the list changes, and the window receives CBN_SELCHANGE.
+function Set-MatchMode($process, [int] $index) {
+    $combo = Control-Hwnd $process $MatchModeId
+    # CB_SETCURSEL
+    [void][GozlerProbe.Win]::SendMessageW($combo, 0x014E, [IntPtr]$index, 0)
+    $command = [IntPtr]((1 -shl 16) -bor [int]$MatchModeId)
+    [void][GozlerProbe.Win]::SendMessageW($process.MainWindowHandle, 0x0111, $command, $combo)
+}
+
+# Sets the check box `id` to `on` through UI Automation's Toggle, a click.
+function Set-CheckBox($process, [string] $id, [bool] $on) {
+    $box = Child-ById (Window-Element $process) $id
+    if (([GozlerProbe.Ui]::ToggleState($box) -eq 1) -ne $on) { [GozlerProbe.Ui]::Toggle($box) }
+}
+
+function Header-Names($process) {
+    $listView = Child-ById (Window-Element $process) $ListId
+    $header = [GozlerProbe.Ui]::HeaderOf($listView)
+    @([GozlerProbe.Ui]::Children($header) | ForEach-Object Name)
+}
+
+# Clicks the header of the column at `index` through UI Automation.
+function Click-Header($process, [int] $index) {
+    $listView = Child-ById (Window-Element $process) $ListId
+    $header = [GozlerProbe.Ui]::HeaderOf($listView)
+    [GozlerProbe.Ui]::Invoke(@([GozlerProbe.Ui]::Children($header) | Where-Object ControlType -EQ ([GozlerProbe.Ui]::HeaderItem))[$index])
+}
+
+# The marked items of the submenu `key` of View, as Read-Menus prints them.
+function Marked-Items($process, [string] $key) {
+    $lines = @(Read-Menus $process)
+    $start = [array]::IndexOf(($lines | ForEach-Object { $_.Trim().Split(' | ')[0] }), (Plain (Caption $key)))
+    $marked = for ($i = $start + 1; $i -lt $lines.Count -and $lines[$i].StartsWith('    '); $i++) {
+        if ($lines[$i].EndsWith('| marked')) { $lines[$i].Trim().Split(' | ')[0] }
+    }
+    @($marked)
+}
+
+# The process's memory, as the spec's budget counts it.
+function Memory-Of($process) {
+    $process.Refresh()
+    [ordered]@{
+        private_bytes      = $process.PrivateMemorySize64
+        peak_private_bytes = $process.PeakPagedMemorySize64
+        working_set        = $process.WorkingSet64
+    }
+}
+
+# Starts a window and takes its screenshot before the first search answers
+# (S1). Returns the window and whether part 1 still said "Searching…" after
+# the screenshot.
+function Start-Searching([string] $language) {
+    $process = Start-Process -PassThru -FilePath $Exe -ArgumentList '--data-dir', "`"$dataDir`""
+    $started.Add($process)
+    for ($i = 0; $i -lt 1000 -and $process.MainWindowHandle -eq 0 -and -not $process.HasExited; $i++) {
+        Start-Sleep -Milliseconds 10
+        $process.Refresh()
+    }
+    if ($process.MainWindowHandle -eq 0) { throw "gozler-ui did not open its window" }
+    Save-Screenshot $process.MainWindowHandle "searching-first-$language"
+    $part = Status-Part $process 0
+    return $process, $part
+}
+
+# Takes a screenshot of each state that stage 3 reaches in a fixture
+# search, in `language`. `menuIds` holds the IDs of View > Columns >
+# Extension and Help > Search syntax, which are the same in every language.
+function Show-States($process, [string] $language, $menuIds) {
+    $states = [ordered]@{
+        results    = "$files\ ext:cs"
+        bold       = "$files\ para 50"
+        no_results = "$files\ zzzz"
+        query      = 'dz:x'
+        refused    = 'regex:('
+        date       = "$files\ dm:yesterdy"
+    }
+    # The window paints a reply's rows and status a moment after it shows
+    # them to UI Automation, so each screenshot waits for that paint.
+    foreach ($state in $states.GetEnumerator()) {
+        [void](Search-For $process $state.Value)
+        Start-Sleep -Milliseconds 500
+        Save-Screenshot $process.MainWindowHandle "$($state.Key)-$language"
+    }
+    [void](Search-For $process "$files\ ext:cs")
+    # Size is the third column, and Name the first.
+    Click-Header $process 2
+    Start-Sleep -Milliseconds 300
+    [void](Wait-Answer $process)
+    Start-Sleep -Milliseconds 500
+    Save-Screenshot $process.MainWindowHandle "sorted-size-$language"
+    Click-Header $process 0
+    Start-Sleep -Milliseconds 300
+    [void](Wait-Answer $process)
+    [void][GozlerProbe.Win]::PostMessageW($process.MainWindowHandle, 0x0111, [IntPtr]$menuIds.extension, 0)
+    Start-Sleep -Milliseconds 300
+    Save-Screenshot $process.MainWindowHandle "column-extension-$language"
+    [void][GozlerProbe.Win]::PostMessageW($process.MainWindowHandle, 0x0111, [IntPtr]$menuIds.extension, 0)
+    return Open-Dialog $process $menuIds.syntax "search-syntax-$language"
 }
 
 # --- The fixture folder ------------------------------------------------------
@@ -714,19 +963,19 @@ try {
         working_set        = $window.WorkingSet64
     }
     $element = Window-Element $window
-    $search = Child-ById $element '10'
+    $search = Child-ById $element $SearchBoxId
     Check 'search box' ($search.ControlType -eq [GozlerProbe.Ui]::Edit) "$search"
 
-    $match = Child-ById $element '12'
+    $match = Child-ById $element $MatchModeId
     $modes = 'start_of_words', 'start_of_name', 'anywhere', 'whole_words', 'regular_expression' | ForEach-Object { Caption "match.$_" }
     $chosen = [GozlerProbe.Ui]::Value($match)
-    # A closed drop-down list shows UI Automation no items, and this one is
-    # disabled until stage 3, so its items are read with CB_GETLBTEXT.
+    # A closed drop-down list shows UI Automation no items, so its items are
+    # read with CB_GETLBTEXT.
     $items = [GozlerProbe.Win]::ComboItems([IntPtr]$match.Hwnd)
     Check 'match list' ($match.ControlType -eq [GozlerProbe.Ui]::ComboBox -and $chosen -eq $modes[0] -and
         (($items -join '|') -eq ($modes -join '|'))) "label '$($match.Name)', chosen '$chosen', items: $($items -join ', ')"
 
-    $boxes = foreach ($id in '13', '14') {
+    $boxes = foreach ($id in $MatchCaseId, $MatchPathId) {
         $box = Child-ById $element $id
         [ordered]@{ name = $box.Name; type = $box.ControlType; toggle = [GozlerProbe.Ui]::ToggleState($box) }
     }
@@ -734,22 +983,23 @@ try {
         $boxes[1].name -eq (Plain (Caption 'match.path')) -and
         @($boxes | Where-Object { $_.type -eq [GozlerProbe.Ui]::CheckBox -and $_.toggle -eq 0 }).Count -eq 2) $boxes
 
-    $results['match controls enabled'] = @('11', '12', '13', '14' | ForEach-Object { (Child-ById $element $_).Enabled })
+    $results['match controls enabled'] = @($MatchLabelId, $MatchModeId, $MatchCaseId, $MatchPathId | ForEach-Object { (Child-ById $element $_).Enabled })
 
-    $listView = Child-ById $element '15'
-    $header = [GozlerProbe.Ui]::Children($listView) | Where-Object ControlType -EQ ([GozlerProbe.Ui]::Header) | Select-Object -First 1
+    $listView = Child-ById $element $ListId
+    $header = [GozlerProbe.Ui]::HeaderOf($listView)
     $headers = if ($header) { [GozlerProbe.Ui]::Children($header) | ForEach-Object Name } else { @() }
     $expectedHeaders = 'name', 'path', 'size', 'date_modified' | ForEach-Object { Caption "header.$_" }
     Check 'list columns' (($headers -join '|') -eq ($expectedHeaders -join '|')) ($headers -join ', ')
 
-    $status = Child-ById $element '16'
+    $status = Child-ById $element $StatusBarId
     $parts = @([GozlerProbe.Ui]::Children($status))
     $englishPartWidths = @($parts | ForEach-Object { [int]$_.Rect[2] })
     Check 'status bar parts' ($parts.Count -eq 4) ([ordered]@{ count = $parts.Count; widths = $englishPartWidths; texts = @($parts | ForEach-Object Name) })
 
     Save-Screenshot $hwnd 'main-en'
 
-    $expected = @(Expected-MenuLines)
+    $searchFocused = [GozlerProbe.Win]::Focus($hwnd) -eq [IntPtr]$search.Hwnd
+    $expected = @(Expected-MenuLines $searchFocused)
     $actual = @(Read-Menus $window)
     $diff = Compare-Object $expected $actual -SyncWindow 0 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }
     Check 'menus' (-not $diff) ([ordered]@{ menus = $actual; differences = @($diff) })
@@ -781,7 +1031,7 @@ try {
             Start-Sleep -Milliseconds 100
             $popup = [GozlerProbe.Win]::Windows($window.Id, '#32768') | Select-Object -First 1
         }
-        $first = if ($popup) { ([GozlerProbe.Ui]::Children((Element-Of $popup)) | Select-Object -First 1).Name }
+        $first = if ($popup) { (Children-Of $popup | Select-Object -First 1).Name }
         if ($popup) {
             # VK_ESCAPE closes the menu, and a second leaves the menu bar.
             [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x1B)
@@ -793,11 +1043,11 @@ try {
         else { Report 'Alt and an access key open a menu' 'not run' 'the window was not in front' }
     }
     else {
-        Report 'open menu through UI Automation' 'not run' 'the window could not come to the front, so no menu was opened'
-        Report 'Alt and an access key open a menu' 'not run' 'the window could not come to the front, so no key was pressed'
+        Report 'open menu through UI Automation' 'not run' 'the window was not in front, so no menu was opened'
+        Report 'Alt and an access key open a menu' 'not run' 'the window was not in front, so no key was pressed'
     }
 
-    # Help > About gozler shows the version, and Close closes it (C23).
+    # Help > About Gozler shows the version, and Close closes it (C23).
     $expectedVersion = (Caption 'about.version') -replace '\{0\}', (& $gozler -v | Select-Object -First 1)
     $about = Open-About $window 'about-en'
     Check 'about' ($about.title -eq (Caption 'about.title') -and $about.texts -contains $expectedVersion -and
@@ -812,7 +1062,7 @@ try {
     # Windows lets the second process bring the first window forward only
     # when the process that started it may set the foreground window, as
     # File Explorer may when a person starts gozler. Whether the probe may
-    # is tried first.
+    # is read from whether the first window came to the front when it started.
     foreach ($state in @{ name = 'normal'; show = 1 }, @{ name = 'minimized'; show = 6 }, @{ name = 'maximized'; show = 3 }) {
         Write-Settings $null
         $first = Start-Window
@@ -869,13 +1119,14 @@ try {
     function Read-Captions($process) {
         $element = Window-Element $process
         $bar = Menu-Bar $process
-        $listView = Child-ById $element '15'
-        $header = [GozlerProbe.Ui]::Children($listView) | Where-Object ControlType -EQ ([GozlerProbe.Ui]::Header) | Select-Object -First 1
+        $listView = Child-ById $element $ListId
+        $header = [GozlerProbe.Ui]::HeaderOf($listView)
         [ordered]@{
             menus       = @([GozlerProbe.Ui]::Children($bar) | ForEach-Object Name)
-            match       = @('11', '13', '14' | ForEach-Object { (Child-ById $element $_).Name })
+            match       = @($MatchLabelId, $MatchCaseId, $MatchPathId | ForEach-Object { (Child-ById $element $_).Name })
             headers     = @([GozlerProbe.Ui]::Children($header) | ForEach-Object Name)
-            status_bars = @([GozlerProbe.Ui]::Children((Child-ById $element '16')) | ForEach-Object { [int]$_.Rect[2] })
+            status_bars = @([GozlerProbe.Ui]::Children((Child-ById $element $StatusBarId)) | ForEach-Object { [int]$_.Rect[2] })
+            results     = @([GozlerProbe.Ui]::Children((Child-ById $element $StatusBarId)))[0].Name
         }
     }
     $englishMenus = 'menu.file', 'menu.edit', 'menu.view', 'menu.help', 'menu.language' | ForEach-Object { Plain (Caption $_) }
@@ -884,9 +1135,8 @@ try {
         Write-Settings '{ "settings": { "language": "qps-ploc" } }'
         $window = Start-Window
         $captions = Read-Captions $window
-        $pseudoText = @($captions.menus + $captions.match + $captions.headers | Where-Object { $_ -notmatch '^\[.*\]$' })
-        # The status bar is empty until stage 3, so its parts show the
-        # language by their widths, which the longest pseudo text sets.
+        $pseudoText = @($captions.menus + $captions.match + $captions.headers + $captions.results | Where-Object { $_ -notmatch '^\[.*\]$' })
+        # The longest text a part can show sets its width.
         $wider = $captions.status_bars.Count -eq 4 -and $captions.status_bars[0] -gt $englishPartWidths[0]
         Check 'pseudo-language' ($pseudoText.Count -eq 0 -and $wider) ([ordered]@{ captions = $captions; not_pseudo = $pseudoText; english_status_widths = $englishPartWidths })
         # As before the English screenshot, so the window has painted.
@@ -911,21 +1161,26 @@ try {
 
     # --- gozler lists the fixture -------------------------------------------
     # The daemon reads a new file's size and date after its name, and a
-    # folder's size after those, so the wait ends when every row matches.
+    # folder's size after those, so the wait ends when every row matches,
+    # or when the file rows match and no row changed in the last poll.
     # The file rows are also compared alone, which tells a folder size from
     # a file that is missing.
     $fileRows = { param($all) @($all | Where-Object { -not ([int]$_.Split(',')[2] -band 16) }) }
     $expectedRows = @(Expected-Rows $files)
     $expectedFiles = & $fileRows $expectedRows
     $deadline = [DateTime]::UtcNow.AddMinutes(3)
+    $previous = $null
     do {
         $output = @(& $gozler -path "$files\" -n all -size -dm -attributes -csv -no-header 2>&1)
         $code = $LASTEXITCODE
         if ($code -ne 0 -and $code -ne 2) { break }
         $rows = @($output | Where-Object { $_ -is [string] } | Sort-Object -CaseSensitive)
         $listed = ($rows -join "`n") -ceq ($expectedRows -join "`n")
-        if (-not $listed) { Start-Sleep -Seconds 2 }
-    } until ($listed -or [DateTime]::UtcNow -gt $deadline)
+        $filesListed = ((& $fileRows $rows) -join "`n") -ceq ($expectedFiles -join "`n")
+        $settled = $filesListed -and ($rows -join "`n") -ceq $previous
+        $previous = $rows -join "`n"
+        if (-not $listed -and -not $settled) { Start-Sleep -Seconds 2 }
+    } until ($listed -or $settled -or [DateTime]::UtcNow -gt $deadline)
     if ($code -ne 0 -and $code -ne 2) {
         Report 'gozler lists the fixture' 'not run' "gozler exited $code`: $($output -join ' ')"
     }
@@ -937,11 +1192,343 @@ try {
         Check 'gozler lists the fixture' $listed ([ordered]@{
                 expected          = $expectedRows.Count
                 listed            = $rows.Count
-                file_rows_match   = ((& $fileRows $rows) -join "`n") -ceq ($expectedFiles -join "`n")
+                file_rows_match   = $filesListed
                 differences       = $differences.Count
-                first_differences = @($differences | Select-Object -First 6)
+                first_differences = @($differences | Where-Object { $_ -like 'expected *' } | Select-Object -First 3) +
+                    @($differences | Where-Object { $_ -like 'listed *' } | Select-Object -First 3)
             })
     }
+
+    # --- Search and results -------------------------------------------------
+    Write-Settings $null
+    $window, $firstPart = Start-Searching 'en'
+    Check 'first screenshot before the first reply' (Is-Searching $firstPart) "status part 1 after the screenshot: '$firstPart'"
+    $menuIds = @{
+        extension = Menu-Id $window (Caption 'column.extension')
+        syntax    = Menu-Id $window (Caption 'command.search_syntax')
+    }
+
+    # The empty search lists every entry, up to the limit (S4).
+    $answer = Wait-Answer $window
+    Save-Screenshot $window.MainWindowHandle 'limit-en'
+    $showing = '^' + ([regex]::Escape((Caption 'status.showing')) -replace '\\\{[01]}', '([\d.,\s]+)') + '$'
+    $numbers = @(if ($answer -match $showing) { $Matches[1], $Matches[2] | ForEach-Object { [long]($_ -replace '\D', '') } })
+    Check 'empty search shows the limit' ($numbers.Count -eq 2 -and $numbers[0] -eq 100000 -and $numbers[1] -gt 100000 -and
+        (Row-Count $window) -eq 100000) ([ordered]@{
+            status = $answer; rows = Row-Count $window
+        })
+
+    $list = Child-ById (Window-Element $window) $ListId
+    $firstRows = @([GozlerProbe.Ui]::Rows($list, 5))
+    Check 'UI Automation reads the visible rows' ($firstRows.Count -eq 5 -and -not ($firstRows | Where-Object { -not $_[0] -or -not $_[1] })) @($firstRows | ForEach-Object { $_ -join ' | ' })
+
+    # The last row's cells, once the list has fetched them.
+    function Wait-LastRow($process) {
+        for ($i = 0; $i -lt 50; $i++) {
+            $last = [GozlerProbe.Ui]::LastRow((Child-ById (Window-Element $process) $ListId))
+            if ($last -and $last[0]) { return , $last }
+            Start-Sleep -Milliseconds 100
+        }
+        return $null
+    }
+    function Press-End($process) {
+        [GozlerProbe.Ui]::Focus((Child-ById (Window-Element $process) $ListId))
+        # VK_END
+        return [GozlerProbe.Win]::PressKeys($process.MainWindowHandle, 0x23)
+    }
+    if ((Is-InFront $window) -and (Press-End $window)) {
+        $last = Wait-LastRow $window
+        Check 'End in the empty search shows a row' ([bool]$last) ($last -join ' | ')
+    }
+    else { Report 'End in the empty search shows a row' 'not run' 'the window was not in front' }
+    $memory = Memory-Of $window
+    Check 'memory budget' ($memory.private_bytes -lt 16MB) $memory
+
+    # The searches below read names, file sizes and file dates, so they need
+    # the file rows only.
+    if (-not $filesListed) {
+        Report 'fixture searches' 'not run' 'gozler did not list the fixture'
+    }
+    else {
+        $F = "$files\"
+        $csCount = @(Get-ChildItem -LiteralPath $files -Recurse -Filter '*.cs').Count
+        $answer = Search-For $window "$F ext:cs"
+        $cli = @(& $gozler $F ext:cs -n 20)
+        $cliCount = [long](& $gozler -get-result-count $F ext:cs)
+        $paths = @(Visible-Paths $window 20)
+        Check 'ext:cs count and rows' ((Count-Of $answer) -eq $csCount -and $cliCount -eq $csCount -and
+            ($paths -join '|') -eq ($cli -join '|')) ([ordered]@{
+                status = $answer; fixture = $csCount; gozler = $cliCount; rows = $paths; gozler_rows = $cli
+            })
+
+        # Down in the search box moves to the first row (J1).
+        if (Is-InFront $window) {
+            [GozlerProbe.Ui]::Focus((Child-ById (Window-Element $window) $SearchBoxId))
+            # VK_DOWN
+            [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x28)
+            Start-Sleep -Milliseconds 300
+            $listHwnd = Control-Hwnd $window $ListId
+            # LVM_GETNEXTITEM from the start with LVNI_SELECTED
+            $selected = [long][GozlerProbe.Win]::SendMessageW($listHwnd, 0x100C, [IntPtr](-1), [IntPtr]2)
+            $focused = [GozlerProbe.Win]::Focus($window.MainWindowHandle) -eq $listHwnd
+            Check 'Down selects the first row' ($focused -and $selected -eq 0) ([ordered]@{ list_focused = $focused; selected = $selected })
+        }
+        else { Report 'Down selects the first row' 'not run' 'the window was not in front' }
+
+        # A click on Size sorts by size, largest first (C20).
+        Click-Header $window 2
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+        $paths = @(Visible-Paths $window 20)
+        $cli = @(& $gozler $F ext:cs -n 20 -sort size-descending)
+        $marks = @(Marked-Items $window 'command.sort_by')
+        $expectedMarks = @('sort.size', 'sort.descending' | ForEach-Object { Plain (Caption $_) })
+        Check 'Size header sorts' (($paths -join '|') -eq ($cli -join '|') -and ($marks -join '|') -eq ($expectedMarks -join '|')) ([ordered]@{
+                rows = $paths; gozler_rows = $cli; sort_by_marks = $marks
+            })
+        Click-Header $window 0
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+
+        $answer = Search-For $window $F
+        if ((Is-InFront $window) -and (Press-End $window)) {
+            $last = Wait-LastRow $window
+            $cliLast = @(& $gozler $F -n all)[-1]
+            $lastPath = $last ? (Join-Path $last[1] $last[0]) : $null
+            Check 'End shows the last row' ($lastPath -eq $cliLast) ([ordered]@{ status = $answer; last_row = $lastPath; gozler_last = $cliLast })
+        }
+        else { Report 'End shows the last row' 'not run' 'the window was not in front' }
+
+        # Each match mode and check box against the same search of gozler
+        # (C19), with the fixture's own count.
+        $regex = [regex]::Escape($F) + '.*\.cs$'
+        $cases = @(
+            @{ name = 'Start of words'; mode = 0; text = "$F para"; cli = @($F, 'wordstart:para'); fixture = 1 }
+            @{ name = 'Start of name'; mode = 1; text = "$F rep"; cli = @($F, 'startwith:rep'); fixture = 2 }
+            @{ name = 'Anywhere'; mode = 2; text = "$F para"; cli = @($F, 'para'); fixture = 3 }
+            # parent: limits the search to the fixture, because -ww also
+            # applies to a path term such as F\.
+            @{ name = 'Whole words'; mode = 3; text = "parent:$($F)docs report"; cli = @('-ww', "parent:$($F)docs", 'report'); fixture = 1 }
+            @{ name = 'Match case'; mode = 2; case = $true; text = "$F README"; cli = @('-case', $F, 'README'); fixture = 1 }
+            @{ name = 'Match path'; mode = 2; path = $true; text = "$F upper"; cli = @('-p', $F, 'upper'); fixture = 2 }
+            @{ name = 'Regular expression'; mode = 4; text = $regex; cli = @('-r', $regex); fixture = $csCount }
+        )
+        $matched = foreach ($case in $cases) {
+            Set-MatchMode $window $case.mode
+            Set-CheckBox $window $MatchCaseId ([bool]$case.case)
+            Set-CheckBox $window $MatchPathId ([bool]$case.path)
+            $answer = Search-For $window $case.text
+            $cliArgs = $case.cli
+            [ordered]@{
+                case    = $case.name
+                window  = Count-Of $answer
+                gozler  = [long](& $gozler -get-result-count @cliArgs)
+                fixture = $case.fixture
+            }
+        }
+        Set-MatchMode $window 0
+        Set-CheckBox $window $MatchCaseId $false
+        Set-CheckBox $window $MatchPathId $false
+        Check 'match modes and check boxes' (-not ($matched | Where-Object { $_.window -ne $_.gozler -or $_.gozler -ne $_.fixture })) $matched
+
+        # Alt and each access key reach the match controls; a check box's
+        # key also toggles it, and a second press puts it back.
+        if (Is-InFront $window) {
+            $reached = foreach ($control in @{ id = $MatchModeId; key = 'match.label' }, @{ id = $MatchCaseId; key = 'match.case' }, @{ id = $MatchPathId; key = 'match.path' }) {
+                $box = Child-ById (Window-Element $window) $control.id
+                $isBox = $control.id -ne $MatchModeId
+                $before = $isBox ? [GozlerProbe.Ui]::ToggleState($box) : 0
+                $letter = [uint16][char](AccessKeyOf (Caption $control.key)).ToUpperInvariant()
+                # VK_MENU (Alt), then the letter.
+                [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x12, $letter)
+                Start-Sleep -Milliseconds 300
+                $after = $isBox ? [GozlerProbe.Ui]::ToggleState($box) : 0
+                $focused = [GozlerProbe.Win]::Focus($window.MainWindowHandle) -eq [IntPtr]$box.Hwnd
+                if ($after -ne $before) {
+                    [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x12, $letter)
+                    Start-Sleep -Milliseconds 300
+                }
+                [ordered]@{ key = "Alt+$([char]$letter)"; focused = $focused; toggled = $after -ne $before; wanted_toggle = $isBox }
+            }
+            [void](Wait-Answer $window)
+            Check 'Alt and an access key reach the match controls' (-not ($reached | Where-Object { -not $_.focused -or $_.toggled -ne $_.wanted_toggle })) $reached
+        }
+        else { Report 'Alt and an access key reach the match controls' 'not run' 'the window was not in front' }
+
+        # Ten changes within one second: the rows stay while part 1 says
+        # Searching…, and the last text's results end it (S2, T1, T2). The
+        # search starts 150 ms after the last change and the fixture answers
+        # within tens of milliseconds, so part 1 and the rows are read with
+        # one message each to their window handles, which takes far less time
+        # than a read through UI Automation. WM_GETTEXT gives a status bar's
+        # first part.
+        [void](Search-For $window "$F ext:cs")
+        $statusHwnd = Control-Hwnd $window $StatusBarId
+        $listHwnd = Control-Hwnd $window $ListId
+        # LVM_GETITEMCOUNT
+        $rowCount = { [long][GozlerProbe.Win]::SendMessageW($listHwnd, 0x1004, 0, 0) }
+        $rowsBefore = & $rowCount
+        $box = Child-ById (Window-Element $window) $SearchBoxId
+        $word = 'paracetamol'
+        $samples = [System.Collections.Generic.List[object]]::new()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        for ($i = 1; $i -le 10; $i++) {
+            [GozlerProbe.Ui]::SetValue($box, "$F $($word.Substring(0, $i))")
+            $samples.Add([ordered]@{ ms = $clock.ElapsedMilliseconds; rows = & $rowCount })
+            while ($clock.ElapsedMilliseconds -lt $i * 90) { Start-Sleep -Milliseconds 5 }
+        }
+        $typed = $clock.ElapsedMilliseconds
+        $previous = $null
+        do {
+            $sample = [ordered]@{ ms = $clock.ElapsedMilliseconds; part = [GozlerProbe.Win]::ControlText($statusHwnd); rows = & $rowCount }
+            # Only the samples where part 1 or the rows change, so the
+            # detail stays short.
+            $key = "$($sample.part)|$($sample.rows)"
+            if ($key -ne $previous) { $samples.Add($sample) }
+            $previous = $key
+        } until (($sample.ms -gt $typed + 200 -and -not (Is-Searching $sample.part)) -or $sample.ms -gt $typed + 30000)
+        $last = "$F $($word.Substring(0, 10))"
+        $cliCount = [long](& $gozler -get-result-count $F "wordstart:$($word.Substring(0, 10))")
+        $paths = @(Visible-Paths $window 20)
+        $cli = @(& $gozler $F "wordstart:$($word.Substring(0, 10))" -n 20)
+        $kept = @($samples | Where-Object { (Is-Searching $_.part) -and $_.rows -eq $rowsBefore })
+        Check 'ten changes in one second' ($typed -lt 1000 -and $kept.Count -gt 0 -and (Count-Of $sample.part) -eq $cliCount -and
+            ($paths -join '|') -eq ($cli -join '|')) ([ordered]@{
+                last_text = $last; typed_ms = $typed; rows_before = $rowsBefore; samples = $samples; gozler = $cliCount; rows = $paths
+            })
+
+        # The bold parts show in the screenshot of Show-States; this checks
+        # the row they are drawn on.
+        $answer = Search-For $window "$F para 50"
+        $paths = @(Visible-Paths $window 20)
+        Check 'para 50 finds the Paracetamol file' (($paths -join '|') -eq (Join-Path $files 'docs\Paracetamol 500mg.pdf')) ([ordered]@{ status = $answer; rows = $paths })
+
+        $answer = Search-For $window "$F zzzz"
+        $message = Message-Text $window
+        $none = (Caption 'status.results_other') -replace '\{0\}', '0'
+        Check 'no results' ($answer -eq $none -and $message -eq (Caption 'list.no_results')) ([ordered]@{ status = $answer; message = $message })
+
+        # View > Columns > Extension, and the header's menu (C15).
+        [void](Search-For $window "$F ext:cs")
+        Run-MenuItem $window (Caption 'column.extension')
+        Start-Sleep -Milliseconds 300
+        $shown = @(Header-Names $window)
+        $columnMarks = @(Marked-Items $window 'command.columns')
+        $headerMarks = $null
+        $inFront = Is-InFront $window
+        if ($inFront) {
+            $listView = Child-ById (Window-Element $window) $ListId
+            $header = [GozlerProbe.Ui]::HeaderOf($listView)
+            $x = [int]($header.Rect[0] + 20); $y = [int]($header.Rect[1] + $header.Rect[3] / 2)
+            # WM_CONTEXTMENU, as a right-click on the header sends it.
+            [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, 0x007B, [IntPtr]$listView.Hwnd, [IntPtr]((($y -band 0xFFFF) -shl 16) -bor ($x -band 0xFFFF)))
+            $popup = Wait-Popup $window @()
+            if ($popup) {
+                # MN_GETHMENU
+                $menu = [GozlerProbe.Win]::SendMessageW($popup, 0x01E1, 0, 0)
+                $headerMarks = @([GozlerProbe.Win]::MenuItems($menu) | Where-Object Checked | ForEach-Object { Plain $_.Text })
+                Save-ScreenArea $window.MainWindowHandle @($popup) 'header-menu-en'
+                # VK_ESCAPE
+                [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x1B)
+                Start-Sleep -Milliseconds 300
+            }
+        }
+        Run-MenuItem $window (Caption 'column.extension')
+        Start-Sleep -Milliseconds 300
+        $hidden = @(Header-Names $window)
+        $expectedMarks = @('name', 'path', 'size', 'date_modified', 'extension' | ForEach-Object { Plain (Caption "column.$_") })
+        $detail = [ordered]@{ shown = $shown; hidden = $hidden; columns_marks = $columnMarks; header_menu_marks = $headerMarks }
+        $columnsPassed = $shown[-1] -eq (Caption 'header.extension') -and $hidden.Count -eq 4 -and
+            ($columnMarks -join '|') -eq ($expectedMarks -join '|')
+        if (-not $inFront) {
+            Report 'View > Columns and the header menu' ($columnsPassed ? 'not run' : 'failed') ([ordered]@{ note = 'the header menu was not opened, because the window was not in front'; detail = $detail })
+        }
+        else { Check 'View > Columns and the header menu' ($columnsPassed -and $null -ne $headerMarks -and ($headerMarks -join '|') -eq ($expectedMarks -join '|')) $detail }
+
+        # Find focuses the search box and selects its text (C17).
+        if (Is-InFront $window) {
+            [GozlerProbe.Ui]::Focus((Child-ById (Window-Element $window) $ListId))
+            Run-MenuItem $window (Caption 'command.find')
+            Start-Sleep -Milliseconds 300
+            $searchHwnd = Control-Hwnd $window $SearchBoxId
+            # EM_GETSEL
+            $selection = [long][GozlerProbe.Win]::SendMessageW($searchHwnd, 0x00B0, 0, 0)
+            $length = [GozlerProbe.Ui]::Value((Child-ById (Window-Element $window) $SearchBoxId)).Length
+            $detail = [ordered]@{
+                focused = [GozlerProbe.Win]::Focus($window.MainWindowHandle) -eq $searchHwnd
+                start   = $selection -band 0xFFFF
+                end     = ($selection -shr 16) -band 0xFFFF
+                length  = $length
+            }
+            Check 'Find' ($detail.focused -and $detail.start -eq 0 -and $detail.end -eq $length) $detail
+        }
+        else { Report 'Find' 'not run' 'the window was not in front' }
+
+        # Refresh shows a file that was added after the search (C18).
+        $added = Join-Path $files 'src\Added.cs'
+        [System.IO.File]::WriteAllBytes($added, [byte[]]::new(1))
+        $deadline = [DateTime]::UtcNow.AddMinutes(1)
+        while ([long](& $gozler -get-result-count $F ext:cs) -ne $csCount + 1 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 500 }
+        $stale = Status-Part $window 0
+        Run-MenuItem $window (Caption 'command.refresh')
+        Start-Sleep -Milliseconds 300
+        $answer = Wait-Answer $window
+        Check 'Refresh' ((Count-Of $stale) -eq $csCount -and (Count-Of $answer) -eq $csCount + 1) ([ordered]@{ before = $stale; after = $answer })
+        Remove-Item -LiteralPath $added
+        $deadline = [DateTime]::UtcNow.AddMinutes(1)
+        while ([long](& $gozler -get-result-count $F ext:cs) -ne $csCount -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 500 }
+
+        # Help > Search syntax opens and Close closes it (C22).
+        $syntax = Show-States $window 'en' $menuIds
+        Check 'Search syntax' ($syntax.title -eq (Caption 'search_syntax.title') -and $syntax.edit -like '*ext:*' -and $syntax.closed) ([ordered]@{
+                title = $syntax.title; text_length = "$($syntax.edit)".Length; closed = $syntax.closed
+            })
+    }
+
+    # The parser's message (S7), and the daemon's refusal (S9).
+    $answer = Search-For $window 'dz:x'
+    $message = Message-Text $window
+    Check 'dz:x shows the parser message' ($message -eq ((Caption 'query.unknown_function') -replace '\{0\}', 'dz:') -and (Row-Count $window) -eq 0) ([ordered]@{
+            status = $answer; message = $message; note = 'that no status poll starts is pinned by a core test; the probe cannot see the poll'
+        })
+    $answer = Search-For $window 'regex:('
+    $message = Message-Text $window
+    $refused = ((Caption 'failure.refused') -split "`n`n")[0]
+    Check 'regex:( shows the refusal' ("$message".StartsWith($refused) -and (Row-Count $window) -eq 0) ([ordered]@{ status = $answer; message = $message })
+
+    # A typing mistake in a date, then its correction (J7).
+    $answer = Search-For $window 'dm:yesterdy'
+    $wrong = Message-Text $window
+    $answer = Search-For $window 'dm:yesterday'
+    $corrected = Message-Text $window
+    Check 'dm:yesterdy, then dm:yesterday' ("$wrong" -like '*yesterdy*' -and $null -eq $corrected -and $null -ne (Count-Of $answer)) ([ordered]@{
+            wrong = $wrong; corrected_status = $answer; corrected_message = $corrected
+        })
+
+    # Closing while the empty search runs (T14).
+    [GozlerProbe.Ui]::SetValue((Child-ById (Window-Element $window) $SearchBoxId), '')
+    Start-Sleep -Milliseconds 200
+    $part = Status-Part $window 0
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, $WM_CLOSE, 0, 0)
+    $ended = $window.WaitForExit(10000)
+    Check 'closing during a search' ($ended -and $clock.ElapsedMilliseconds -lt 1000) ([ordered]@{
+            status_when_closed = $part; ended = $ended; milliseconds = $clock.ElapsedMilliseconds
+        })
+
+    if ($Pseudo) {
+        Write-Settings '{ "settings": { "language": "qps-ploc" } }'
+        $window, $firstPart = Start-Searching 'pseudo'
+        [void](Wait-Answer $window)
+        Save-Screenshot $window.MainWindowHandle 'limit-pseudo'
+        if ($filesListed) { [void](Show-States $window 'pseudo' $menuIds) }
+        [void](Close-Window $window)
+    }
+}
+catch {
+    # The error alone names only the line that threw, not the check.
+    $results['probe stopped'] = "$_`n$($_.ScriptStackTrace)"
+    throw
 }
 finally {
     foreach ($process in $started) {

@@ -12,8 +12,9 @@ pub(crate) mod gdi;
 pub(crate) mod instance;
 pub(crate) mod locale;
 pub(crate) mod menu;
-pub(crate) mod resources;
+pub(crate) mod notify;
 pub(crate) mod shell;
+pub(crate) mod wake;
 pub(crate) mod window;
 
 use crate::core::layout::{Px, Rect, Size};
@@ -23,9 +24,10 @@ use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DrawMenuBar, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW,
-    GetWindowPlacement, IsIconic, PostMessageW, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWNORMAL,
-    SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetMenu, SetWindowPos, SetWindowTextW,
-    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
+    GetWindowPlacement, GetWindowRect, IsIconic, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SW_SHOWDEFAULT, SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
+    SetMenu, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
 };
 use windows::core::HSTRING;
 
@@ -88,6 +90,20 @@ impl Hwnd {
                 SWP_NOZORDER | SWP_NOACTIVATE,
             )
         };
+    }
+
+    /// Shows or hides a control without activating it.
+    pub(crate) fn set_visible(self, visible: bool) {
+        // SAFETY: plain values.
+        let _ = unsafe { ShowWindow(self.0, if visible { SW_SHOWNA } else { SW_HIDE }) };
+    }
+
+    /// The window's rectangle in screen coordinates.
+    pub(crate) fn screen_rect(self) -> Rect {
+        let mut rect = RECT::default();
+        // SAFETY: `rect` is a local the call fills in.
+        let _ = unsafe { GetWindowRect(self.0, &mut rect) };
+        from_rect(rect)
     }
 
     pub(crate) fn show_normal(self) {

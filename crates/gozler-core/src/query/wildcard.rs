@@ -49,7 +49,43 @@ impl Wildcard {
     pub(super) fn matches_into(&self, name: &[u8], buf: &mut CodePointBuf) -> bool {
         buf.clear();
         buf.extend(crate::wtf8::CodePoints::new(name));
-        glob_match(&self.tokens, buf.as_slice())
+        glob_match(&self.tokens, buf.as_slice(), |_, _| {})
+    }
+
+    /// Appends to `parts` the byte ranges of `text` that the pattern's
+    /// literal characters matched, when the pattern matches the whole of
+    /// `text`; one range per character, which the caller merges.
+    pub(super) fn literal_parts(
+        &self,
+        text: &[u8],
+        buf: &mut CodePointBuf,
+        parts: &mut Vec<std::ops::Range<usize>>,
+    ) {
+        buf.clear();
+        buf.extend(crate::wtf8::CodePoints::new(text));
+        let mut matched_at = vec![0; self.tokens.len()];
+        if !glob_match(&self.tokens, buf.as_slice(), |token, at| {
+            matched_at[token] = at;
+        }) {
+            return;
+        }
+        let mut offsets = Vec::with_capacity(buf.len() + 1);
+        let mut offset = 0;
+        for &cp in buf.iter() {
+            offsets.push(offset);
+            offset += match cp {
+                0..0x80 => 1,
+                0x80..0x800 => 2,
+                0x800..0x1_0000 => 3,
+                _ => 4,
+            };
+        }
+        offsets.push(offset);
+        for (token, &at) in self.tokens.iter().zip(&matched_at) {
+            if let GlobTok::Lit(_) = token {
+                parts.push(offsets[at]..offsets[at + 1]);
+            }
+        }
     }
 
     /// The longest run of literal characters in the pattern, as WTF-8 bytes
@@ -78,17 +114,21 @@ impl Wildcard {
 }
 
 /// Iterative glob match with backtracking on `*` (linear-ish; patterns and
-/// names are short).
-fn glob_match(pat: &[GlobTok], text: &[u32]) -> bool {
+/// names are short). `matched(token, at)` hears each pattern token that
+/// consumes the code point at `at`; a backtrack hears the tokens after its
+/// `*` again, so on success the last call for each token is where it matched.
+fn glob_match(pat: &[GlobTok], text: &[u32], mut matched: impl FnMut(usize, usize)) -> bool {
     let (mut ti, mut pi) = (0usize, 0usize);
     let mut star: Option<(usize, usize)> = None; // (pattern idx after '*', text idx)
     while ti < text.len() {
         match pat.get(pi) {
             Some(GlobTok::Lit(c)) if *c == text[ti] => {
+                matched(pi, ti);
                 pi += 1;
                 ti += 1;
             }
             Some(GlobTok::AnyOne) => {
+                matched(pi, ti);
                 pi += 1;
                 ti += 1;
             }

@@ -1,6 +1,7 @@
 {
   "window": {
-    "title": "gozler"
+    "title": "Gozler",
+    "title_search": "{0} – Gozler"
   },
   "menu": {
     "file": "&File",
@@ -30,7 +31,7 @@
     "sort_by": "Sort &by",
     "clear_filters": "C&lear filters",
     "search_syntax": "&Search syntax",
-    "about": "&About gozler",
+    "about": "&About Gozler",
     "show_window": "&Show window",
     "windows_default": "&Windows default"
   },
@@ -79,6 +80,8 @@
     "enter": "Enter"
   },
   "status": {
+    "results_one": "{0} result",
+    "results_other": "{0} results",
     "showing": "Showing the first {0} of {1} results",
     "filtered": "{0} · Filtered",
     "searching": "Searching…",
@@ -87,7 +90,56 @@
     "exporting_one": "Exporting… {0} row",
     "exporting_other": "Exporting… {0} rows",
     "exported_one": "Exported {0} row to {1}",
-    "exported_other": "Exported {0} rows to {1}"
+    "exported_other": "Exported {0} rows to {1}",
+    "volume_indexing": "{0} is indexing — results may be incomplete.",
+    "volume_offline": "{0} is offline — results may be incomplete.",
+    "volume_failed": "{0} could not be indexed — results may be incomplete.",
+    "metadata": "Some sizes and dates on {0} are unknown."
+  },
+  "list": {
+    "no_results": "No files match."
+  },
+  "failure": {
+    "stopped": "The Gozler service is stopped, so Gozler cannot search. Start it, and Gozler searches again by itself.",
+    "disabled": "The Gozler service is turned off, so Gozler cannot search. Turn it on, and Gozler searches again by itself.",
+    "not_installed": "The Gozler service is not installed, so Gozler cannot search. Install it, and Gozler searches again by itself.",
+    "missing": "Gozler is not fully installed: the Gozler service is missing. Download Gozler and run its setup.",
+    "unknown": "The Gozler service is not running, and Gozler could not find out why: {0} Check the Gozler service in Services.",
+    "not_ready": "The Gozler service is starting. Your search runs when it is ready.",
+    "not_gozler": "The search service is not the Gozler service, so Gozler did not connect. Restart Windows, so that the Gozler service starts first, then search again.",
+    "too_old": "The installed Gozler service is older than this window. Download Gozler and run its setup to update the service.",
+    "refused": "The Gozler service refused this search. Change the search, then try again.\n\n{0}",
+    "lost": "The connection to the Gozler service was lost. Gozler reconnects when the service answers."
+  },
+  "fix": {
+    "start_service": "Sta&rt the service",
+    "turn_on_service": "T&urn on the service",
+    "install_service": "Install the se&rvice",
+    "download": "Download &Gozler",
+    "open_services": "Open Se&rvices"
+  },
+  "query": {
+    "unsupported_operator": "Gozler does not group search terms with {0}. Put the text in quotation marks to search for it.",
+    "unknown_function": "{0} is not a search function. Press F1 for the search functions, or put the text in quotation marks to search for it.",
+    "relative_path": "{0} is a relative path. Type the full path, such as C:\\Users\\Public.",
+    "no_query_start": "Gozler could not read the date in this search. Search again.",
+    "too_many_terms": "The search has {0} terms, more than Gozler can search at once. Remove some terms.",
+    "too_many_regexes": "The search has {0} regular expressions, more than Gozler can search at once. Remove some of them.",
+    "misplaced_not": "! must start a term. Put a space before it, or put it in quotation marks to search for it.",
+    "not_without_term": "! needs a term after it, such as !draft.",
+    "or_without_terms": "| needs a term on each side, such as pdf|docx.",
+    "operator_on_nothing": "{0} tests nothing, so ! and | cannot apply to it. Remove the ! or the |.",
+    "size": "{0} is not a size. Use a size such as size:large or size:1mb..10mb.",
+    "reversed_dates": "{0} runs backwards. Write the earlier date first, such as dm:2026-01-01..2026-03-31.",
+    "date_out_of_range": "{0} is outside the dates Gozler can search. Use a date such as dm:2026-01-31.",
+    "days": "{0} needs a number of days above 0, such as dm:7days.",
+    "date": "{0} is not a date. Use a date such as dm:today, dm:yesterday or dm:2026-01-31.",
+    "no_parent_folder": "parent: needs a folder, such as parent:C:\\Users\\Public.",
+    "attribute_letter": "{0} is not an attribute letter. Use letters such as attrib:h for hidden items, or press F1 for every letter.",
+    "regex": "The regular expression is not valid. Change it, then search again.\n\n{0}"
+  },
+  "cell": {
+    "unknown": "Unknown"
   },
   "size": {
     "bytes_one": "{0} byte",
@@ -98,16 +150,19 @@
     "tb": "{0} TB"
   },
   "about": {
-    "title": "About gozler",
-    "version": "gozler {0}",
+    "title": "About Gozler",
+    "version": "Gozler {0}",
     "description": "Instant filename search for Windows NTFS and ReFS volumes.",
     "copyright": "Copyright © 2026 Mustafa Ahci and synapse.sr. MIT licence."
+  },
+  "search_syntax": {
+    "title": "Search syntax"
   },
   "button": {
     "close": "Close"
   },
   "message": {
-    "internal_error": "gozler stopped because of an internal error. The details are in {0}.",
-    "settings_not_saved": "gozler could not save its settings to {0}. {1} Your changes apply until gozler exits."
+    "internal_error": "Gozler stopped because of an internal error. The details are in {0}.",
+    "settings_not_saved": "Gozler could not save its settings to {0}. {1} Your changes apply until Gozler exits."
   }
 }

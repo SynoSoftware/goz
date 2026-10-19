@@ -4,9 +4,12 @@
 #![forbid(unsafe_code)]
 
 mod dialogs;
+mod icons;
 mod main_window;
+mod requests;
 
 use crate::core::commands;
+use crate::core::ids::IconId;
 use crate::core::model::Model;
 use crate::core::settings::Settings;
 use crate::core::text::{LANGUAGES, Language, Strings};
@@ -29,7 +32,7 @@ pub(crate) fn run() {
     let data_dir = data_dir_argument.clone().unwrap_or_else(|| {
         win::shell::local_app_data()
             .expect("Windows names the local application data folder")
-            .join("gozler")
+            .join("Gozler")
     });
     set_panic_report(|report| report.folder = Some(data_dir.clone()));
     let suffix = data_dir_argument
@@ -56,7 +59,7 @@ pub(crate) fn run() {
     set_panic_report(|report| report.language = Some(language));
     let model = Model::new(Strings::load(language), settings);
 
-    win::window::register_class::<MainWindow>(&window_class, win::resources::ICON)
+    win::window::register_class::<MainWindow>(&window_class, IconId::Gozler.id())
         .expect("the window class registers");
     let window = MainWindow::open(&window_class, model, settings_file, show_message);
     let shortcuts: Vec<_> = commands::accelerators()
@@ -69,7 +72,7 @@ pub(crate) fn run() {
 }
 
 /// The folder of `ui.json` and `ui-error.log` that `--data-dir <folder>`
-/// gives; without it, `run` uses `%LOCALAPPDATA%\gozler`.
+/// gives; without it, `run` uses `%LOCALAPPDATA%\Gozler`.
 fn data_dir_argument() -> Option<PathBuf> {
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {

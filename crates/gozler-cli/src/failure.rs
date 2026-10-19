@@ -1,6 +1,6 @@
 //! Every way a gozler run fails, each with its one exit code and its message.
 
-use gozler_client::{ClientError, NotRunning};
+use gozler_client::{ClientError, NotRunning, RELEASES, Repair};
 use gozler_core::escompat::{EsFatal, ExitCode};
 use gozler_core::proto::{ProtoError, SERVICE_NAME};
 use gozler_core::query::QueryError;
@@ -109,10 +109,11 @@ impl Failure {
             Failure::Client(error) => match error {
                 ClientError::NotRunning(why) => {
                     let mut text = line(&problem(why));
-                    if let Some(repair) = repair(why) {
-                        text.push_str(repair.how);
+                    if let Some(repair) = why.repair() {
+                        let (how, lines) = repair_lines(&repair);
+                        text.push_str(how);
                         text.push('\n');
-                        for command in &repair.lines {
+                        for command in &lines {
                             text.push_str(&format!("  {command}\n"));
                         }
                     }
@@ -140,16 +141,6 @@ impl Failure {
     }
 }
 
-/// Where the gozler setup is published.
-const RELEASES: &str = "https://github.com/SynoSoftware/goz/releases";
-
-/// How to start a service that is not running: what the lines below do, then
-/// each command or link alone on its line, so that it can be copied.
-pub(crate) struct Repair {
-    pub(crate) how: &'static str,
-    pub(crate) lines: Vec<String>,
-}
-
 /// The state in a word or two, as the card for bare `gozler` shows it.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn state(why: &NotRunning) -> &'static str {
@@ -175,45 +166,19 @@ pub(crate) fn problem(why: &NotRunning) -> String {
     }
 }
 
-/// What starts the service, or `None` when gozler does not know why it is
-/// not running.
-pub(crate) fn repair(why: &NotRunning) -> Option<Repair> {
-    let repair = match why {
-        NotRunning::Stopped => Repair {
-            how: "To start it, open a terminal as administrator and run:",
-            lines: vec![format!("net start {SERVICE_NAME}")],
-        },
-        // `sc.exe`, because PowerShell reads `sc` as Set-Content, and two
-        // lines, because Windows PowerShell 5.1 has no `&&`.
-        NotRunning::Disabled => Repair {
-            how: "To turn it on, open a terminal as administrator and run:",
-            lines: vec![
-                format!("sc.exe config {SERVICE_NAME} start= auto"),
-                format!("net start {SERVICE_NAME}"),
-            ],
-        },
-        // An administrator terminal opens in System32, and the folder is
-        // not always on PATH. pushd also changes the drive in cmd.
-        NotRunning::NotInstalled {
-            folder,
-            gozlerd_beside: true,
-        } => Repair {
-            how: "To install it, open a terminal as administrator and run:",
-            lines: vec![
-                format!("pushd \"{}\"", folder.display()),
-                r".\gozlerd.exe install".to_string(),
-            ],
-        },
-        NotRunning::NotInstalled {
-            gozlerd_beside: false,
-            ..
-        } => Repair {
-            how: "To install it, run the gozler setup from:",
-            lines: vec![RELEASES.to_string()],
-        },
-        NotRunning::Unknown(_) => return None,
+/// How to make `repair`: what the lines below do, then each command or link
+/// alone on its line, so that it can be copied.
+pub(crate) fn repair_lines(repair: &Repair) -> (&'static str, Vec<String>) {
+    let how = match repair {
+        Repair::StartService => "To start it, open a terminal as administrator and run:",
+        Repair::TurnOnService => "To turn it on, open a terminal as administrator and run:",
+        Repair::InstallService { .. } => "To install it, open a terminal as administrator and run:",
+        Repair::Download => "To install it, run the gozler setup from:",
     };
-    Some(repair)
+    let lines = repair
+        .commands()
+        .unwrap_or_else(|| vec![RELEASES.to_string()]);
+    (how, lines)
 }
 
 /// Maps the result of writing output to the run's result. A reader that

@@ -8,12 +8,14 @@
 //! not exist, the error carries the state of the gozler service as Windows
 //! reports it. Each request waits for its reply by polling the pipe, so a
 //! [`CancelToken`] that another thread sets ends the wait at the next poll.
-//! [`folder_is_missing`] is the rule that refuses a scope folder that does not
-//! exist, which both callers check before they send a scoped search.
+//! [`NotRunning::repair`] says what gets the service running again, which
+//! `gozler` prints and the window runs. [`folder_is_missing`] is the rule that
+//! refuses a scope folder that does not exist, which both callers check before
+//! they send a scoped search.
 //!
-//! The error types and the folder check build on every OS, so each caller's
-//! handling of every failure is tested on Ubuntu too; the pipe is Windows
-//! only.
+//! The error types, the repairs and the folder check build on every OS, so
+//! each caller's handling of every failure is tested on Ubuntu too; the pipe
+//! is Windows only.
 
 #[cfg(windows)]
 mod client;
@@ -21,7 +23,7 @@ mod client;
 #[cfg(windows)]
 pub use client::Client;
 
-use gozler_core::proto::ProtoError;
+use gozler_core::proto::{ProtoError, SERVICE_NAME};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,7 +56,7 @@ pub enum ClientError {
 }
 
 /// Why the gozler service is not running, as Windows reports it.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotRunning {
     Stopped,
     Disabled,
@@ -67,6 +69,71 @@ pub enum NotRunning {
     /// The service state or the folder of the running program could not be
     /// read; carries the error, in English.
     Unknown(String),
+}
+
+/// Where the gozler setup is published.
+pub const RELEASES: &str = "https://github.com/SynoSoftware/goz/releases";
+
+/// What gets the gozler service running again. `gozler` prints it and the
+/// window runs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Repair {
+    StartService,
+    /// Sets the disabled service to start automatically, and starts it.
+    TurnOnService,
+    /// Installs the service from the gozlerd.exe in `folder`.
+    InstallService {
+        folder: PathBuf,
+    },
+    /// Run the gozler setup from [`RELEASES`].
+    Download,
+}
+
+impl NotRunning {
+    /// The repair for this state, or `None` when Windows did not say why
+    /// the service is not running.
+    pub fn repair(&self) -> Option<Repair> {
+        Some(match self {
+            NotRunning::Stopped => Repair::StartService,
+            NotRunning::Disabled => Repair::TurnOnService,
+            NotRunning::NotInstalled {
+                folder,
+                gozlerd_beside: true,
+            } => Repair::InstallService {
+                folder: folder.clone(),
+            },
+            NotRunning::NotInstalled {
+                gozlerd_beside: false,
+                ..
+            } => Repair::Download,
+            NotRunning::Unknown(_) => return None,
+        })
+    }
+}
+
+impl Repair {
+    /// The commands that make the repair, in order, each run as
+    /// administrator; `None` for [`Repair::Download`]. Each is alone on its
+    /// line so that it can be copied into cmd, Windows PowerShell or
+    /// PowerShell 7, and the lines joined with `&&` also run in `cmd /c`.
+    pub fn commands(&self) -> Option<Vec<String>> {
+        Some(match self {
+            Repair::StartService => vec![format!("net start {SERVICE_NAME}")],
+            // `sc.exe`, because PowerShell reads `sc` as Set-Content, and two
+            // lines, because Windows PowerShell 5.1 has no `&&`.
+            Repair::TurnOnService => vec![
+                format!("sc.exe config {SERVICE_NAME} start= auto"),
+                format!("net start {SERVICE_NAME}"),
+            ],
+            // An administrator terminal opens in System32, and the folder is
+            // not always on PATH. pushd also changes the drive in cmd.
+            Repair::InstallService { folder } => vec![
+                format!("pushd \"{}\"", folder.display()),
+                r".\gozlerd.exe install".to_string(),
+            ],
+            Repair::Download => return None,
+        })
+    }
 }
 
 /// Stops a request from another thread: a clone of the token that a
@@ -94,4 +161,49 @@ impl CancelToken {
 /// because gozlerd answers from its index and not from the folder.
 pub fn folder_is_missing(folder: &str) -> bool {
     std::fs::metadata(folder).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A person pastes these lines into cmd, Windows PowerShell or
+    /// PowerShell 7, and the window runs them in `cmd /c`, so a line that
+    /// works in only one of them, such as `sc` for Set-Content in
+    /// PowerShell, fails a repair that no other test runs.
+    #[test]
+    fn each_state_has_its_repair_and_commands() {
+        let folder = PathBuf::from(r"C:\Program Files\Gozler");
+        let commands = |why: NotRunning| why.repair().and_then(|repair| repair.commands());
+        assert_eq!(
+            commands(NotRunning::Stopped),
+            Some(vec!["net start gozler".to_string()])
+        );
+        assert_eq!(
+            commands(NotRunning::Disabled),
+            Some(vec![
+                "sc.exe config gozler start= auto".to_string(),
+                "net start gozler".to_string()
+            ])
+        );
+        assert_eq!(
+            commands(NotRunning::NotInstalled {
+                folder: folder.clone(),
+                gozlerd_beside: true
+            }),
+            Some(vec![
+                r#"pushd "C:\Program Files\Gozler""#.to_string(),
+                r".\gozlerd.exe install".to_string()
+            ])
+        );
+        let missing = NotRunning::NotInstalled {
+            folder,
+            gozlerd_beside: false,
+        };
+        assert_eq!(missing.repair(), Some(Repair::Download));
+        assert_eq!(
+            NotRunning::Unknown("access is denied".into()).repair(),
+            None
+        );
+    }
 }

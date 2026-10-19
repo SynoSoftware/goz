@@ -1,7 +1,7 @@
 //! The menu bar and the accelerator table, built from what
 //! `core::commands` says (design rule 9).
 
-use super::wide;
+use super::{Hwnd, wide};
 use crate::core::commands::{Key, Mark, MenuNode, Shortcut};
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_F1, VK_OEM_COMMA, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -9,7 +9,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyAcceleratorTable, DestroyMenu, EnableMenuItem, FALT, FCONTROL, FSHIFT, FVIRTKEY, HACCEL,
     HMENU, InsertMenuItemW, MENU_ITEM_TYPE, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED,
     MF_GRAYED, MF_UNCHECKED, MFT_RADIOCHECK, MFT_RIGHTJUSTIFY, MFT_SEPARATOR, MFT_STRING,
-    MIIM_FTYPE, MIIM_ID, MIIM_STRING, MIIM_SUBMENU,
+    MIIM_FTYPE, MIIM_ID, MIIM_STRING, MIIM_SUBMENU, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenuEx,
 };
 use windows::core::PWSTR;
 
@@ -93,6 +94,42 @@ impl Menu {
                 (MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED }).0,
             );
         }
+    }
+
+    /// Shows `items` as a context menu at `point`, in screen coordinates,
+    /// and returns the ID of the item chosen. The menu runs its own message
+    /// loop, so the caller holds no borrow across this call (design rule 1)
+    /// and acts on the choice after it returns (design rule 9).
+    pub(crate) fn track_popup(
+        owner: Hwnd,
+        items: &[MenuNode],
+        point: (i32, i32),
+        states: &[(u16, bool, bool)],
+    ) -> Option<u16> {
+        // SAFETY: no parameters.
+        let menu = Menu(unsafe { CreatePopupMenu() }.ok()?);
+        let chosen = menu.append(items).ok().map(|()| {
+            for &(id, enabled, checked) in states {
+                menu.set_state(id, enabled, checked);
+            }
+            // SAFETY: the menu is this function's own; with TPM_RETURNCMD
+            // the call returns the chosen ID instead of sending WM_COMMAND.
+            unsafe {
+                TrackPopupMenuEx(
+                    menu.0,
+                    (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+                    point.0,
+                    point.1,
+                    owner.0,
+                    None,
+                )
+            }
+            .0
+        });
+        menu.destroy();
+        chosen
+            .and_then(|id| u16::try_from(id).ok())
+            .filter(|id| *id != 0)
     }
 
     /// Destroys a menu bar that no window shows any more.

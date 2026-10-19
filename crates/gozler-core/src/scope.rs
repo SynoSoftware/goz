@@ -1,9 +1,12 @@
 //! Which volumes a query searches, and the mount prefix each volume's full
 //! paths print with.
 //!
-//! The daemon routes a query's `-path` scope with [`Scope::of`], and the client
-//! uses the same rule to know which volumes `-timeout` waits for, so the two
-//! cannot disagree about the volume a folder is on.
+//! The daemon routes a query's `-path` scope with [`Scope::of`], and the
+//! clients use the same rule, through [`Coverage`], to know which volumes
+//! `-timeout` waits for and which volume the window names in its status bar,
+//! so they cannot disagree about the volume a folder is on.
+
+use crate::proto::VolumeStatus;
 
 /// Where one volume is mounted: its mount points, such as `C:\` or
 /// `C:\mnt\data\`, and its GUID path.
@@ -76,6 +79,56 @@ impl<'p> Scope<'p> {
     }
 }
 
+/// What the index state of the volumes a search reaches means for its
+/// answer. `gozler` and the window both read a status reply through it.
+#[derive(Clone, Debug)]
+pub struct Coverage<'s> {
+    volumes: Vec<&'s VolumeStatus>,
+    reads_size_or_date: bool,
+}
+
+impl<'s> Coverage<'s> {
+    /// The volumes of a status reply that a search scoped to `scope`
+    /// reaches, routed by [`Scope::of`]. `reads_size_or_date` says whether the
+    /// search tests sizes or dates, or totals sizes.
+    pub fn of(volumes: &'s [VolumeStatus], scope: Option<&str>, reads_size_or_date: bool) -> Self {
+        let volumes = match Scope::of(scope, volumes.iter().map(VolumeStatus::mounted)) {
+            Scope::Everywhere => volumes.iter().collect(),
+            Scope::Folder { volume, .. } => vec![&volumes[volume]],
+            Scope::Nowhere => Vec::new(),
+        };
+        Coverage {
+            volumes,
+            reads_size_or_date,
+        }
+    }
+
+    /// The volumes the search reaches.
+    pub fn volumes(&self) -> impl Iterator<Item = &'s VolumeStatus> + '_ {
+        self.volumes.iter().copied()
+    }
+
+    /// The first volume the search reaches that is not complete, so matches
+    /// on it may be missing.
+    pub fn incomplete(&self) -> Option<&'s VolumeStatus> {
+        self.volumes().find(|v| !v.phase.is_complete())
+    }
+
+    /// The first volume the search reaches whose unknown sizes or dates may
+    /// leave matches out of the answer.
+    pub fn sizes_or_dates_unknown(&self) -> Option<&'s VolumeStatus> {
+        self.volumes()
+            .find(|v| leaves_matches_out(v.metadata_pending, self.reads_size_or_date))
+    }
+}
+
+/// Whether unknown sizes or dates leave matches out of an answer: they do
+/// when the search reads them, because a size or date test never matches a
+/// file whose value is unknown, and a size total adds nothing for it.
+pub fn leaves_matches_out(metadata_pending: bool, reads_size_or_date: bool) -> bool {
+    metadata_pending && reads_size_or_date
+}
+
 /// The length of `prefix`, without its trailing separators, when it starts
 /// `path` and ends there or at a separator of `path`.
 fn mount_len(path: &str, prefix: &str) -> Option<usize> {
@@ -89,6 +142,7 @@ fn mount_len(path: &str, prefix: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::VolumePhase;
 
     fn mounts(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
@@ -132,5 +186,42 @@ mod tests {
             );
         }
         assert_eq!(Scope::of(Some(r"E:\x"), volumes), Scope::Nowhere);
+    }
+
+    fn volume(mount: &str, phase: VolumePhase, metadata_pending: bool) -> VolumeStatus {
+        VolumeStatus {
+            guid: String::new(),
+            mounts: mounts(&[mount]),
+            phase,
+            entries: 0,
+            generation: 0,
+            metadata_pending,
+            journal_max_bytes: None,
+            placeholders_created: 0,
+            delete_of_unknown: 0,
+            stale_slots: 0,
+            link_reconciles_dropped: 0,
+            memory: None,
+        }
+    }
+
+    /// A search scoped to D:\ that counted C:\'s indexing would wait for it
+    /// with `-timeout` and tell the window's reader that its results may be
+    /// incomplete; unknown sizes matter only to a search that reads them.
+    #[test]
+    fn coverage_reads_only_the_volumes_the_search_reaches() {
+        let volumes = [
+            volume(r"C:\", VolumePhase::Rescanning, false),
+            volume(r"D:\", VolumePhase::Live, true),
+        ];
+        let mount = |v: Option<&VolumeStatus>| v.map(|v| v.mounts[0].clone());
+        let on_d = Coverage::of(&volumes, Some(r"D:\work"), true);
+        assert_eq!(mount(on_d.incomplete()), None);
+        assert_eq!(mount(on_d.sizes_or_dates_unknown()), Some(r"D:\".into()));
+        let everywhere = Coverage::of(&volumes, None, false);
+        assert_eq!(mount(everywhere.incomplete()), Some(r"C:\".into()));
+        assert_eq!(mount(everywhere.sizes_or_dates_unknown()), None);
+        let nowhere = Coverage::of(&volumes, Some(r"E:\x"), true);
+        assert_eq!(nowhere.volumes().count(), 0);
     }
 }

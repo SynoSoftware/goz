@@ -288,7 +288,7 @@ then folder sizes. The owner installs the build after both, once.
   top-level menu. Each menu holds the spec's items in the spec's groups and
   order, each item has its access key, and only this stage's commands are
   enabled.
-- Help > About gozler shows the version and Close closes it; File > Exit ends
+- Help > About Gozler shows the version and Close closes it; File > Exit ends
   the process. Covers: C7, C23.
 - The probe creates the fixture folder, waits until `gozler` lists all of it
   with the sizes, dates and attributes it built, and removes it after the
@@ -335,8 +335,8 @@ then folder sizes. The owner installs the build after both, once.
 
 **Done when:**
 - The `Model::accept`, `Model::polls_status` and `Results` tests from "Tests"
-  pass on Ubuntu, with one test for each of the transition rows T1 to T5 and
-  T11. Covers: T1, T2, T3, T4, T5, T11, S9, S13.
+  pass on Ubuntu, with one test for each of the transition rows T1 to T5.
+  Covers: T1, T2, T3, T4, T5, S9, S13.
 - The probe reads the cells of the list's visible rows.
 
 In the fixture folder, written `F\` below:
@@ -392,11 +392,11 @@ after that answer, so the layout and wording that later stages copy are the
 ones the owner accepted.
 
 **After install:**
-- With the service stopped by the owner, the list shows "The gozler service
+- With the service stopped by the owner, the list shows "The Gozler service
   is stopped." and Start the service; after Windows' permission prompt the
   service starts and the search runs by itself. Covers: S9, T4, J8.
 - The owner restarts the service while the window shows results and
-  scrolls: the list shows "The connection to the gozler service was lost…",
+  scrolls: the list shows "The connection to the Gozler service was lost…",
   then searches again by itself. Covers: S9, T4.
 - After a restart of Windows, while C:\ indexes, part 4 says so, and the
   results complete by themselves. Covers: S13, J9.
@@ -438,6 +438,10 @@ ones the owner accepted.
   part 3 shows the export's result while part 1 says Searching…, and the
   export went on through the search's start. Covers: T1, T8.
 - The `Model::accept` tests for T8 and T9 pass. Covers: T8, T9.
+- The core test for T11 passes: a command chosen from the context menu after
+  a new search's first rows cleared the selection does nothing. It is here
+  and not in stage 3, because the row's context menu and the selection
+  arrive in this stage. Covers: T11.
 - An export into the fixture folder whose ACL denies the current user file
   creation shows the spec's message box and leaves no file. Covers: T9.
 - Closing the window 0.5 s after an export of the empty search starts ends
@@ -547,7 +551,7 @@ ones the owner accepted.
 - First, before the dialog depends on it, the keyboard hook items in
   [design: Not verified](ui-design.md#not-verified): the owner sets `Win+S`
   in a first build and presses it. Windows Search and Start stay closed,
-  gozler comes to the front, and no restart or sign-out is needed. If
+  Gozler comes to the front, and no restart or sign-out is needed. If
   Windows needs one, the dialog gets the spec's message for it before the
   stage goes on. Then check the child-dialog DPI item by reading the
   documentation; the owner checks it on a second monitor after install.
@@ -559,7 +563,7 @@ ones the owner accepted.
   restart. Covers: C6.
 - `Esc` closes the dialog and changes nothing that Apply did not apply.
 - With `Ctrl+Alt+Shift+F12` chosen as the shortcut, pressing it while
-  another of the probe's windows is in front brings gozler forward with the
+  another of the probe's windows is in front brings Gozler forward with the
   search text selected. Covers: C6.
 - A shortcut that another program holds shows the spec's message and keeps
   the dialog open. The probe holds the combination itself with
@@ -569,9 +573,9 @@ ones the owner accepted.
   in the list; `Alt+F`, `Ctrl+V` and `K` alone are refused with the spec's
   messages; `Ctrl+E` on another command names Edit > Find; Restore defaults
   gives every command its default again. Covers: C6, C18.
-- With "Keep gozler running in the notification area" off, closing the
+- With "Keep Gozler running in the notification area" off, closing the
   window ends the process even with a shortcut set. Covers: C7.
-- With "Select the search text when gozler is activated" on, switching to
+- With "Select the search text when Gozler is activated" on, switching to
   the window from another of the probe's windows selects the search text;
   off, the focus stays on the list row it was on. Covers: C6.
 - In the hotkey control, `Ctrl+F` becomes `Ctrl+Alt+F`; with Windows key on,
@@ -584,7 +588,7 @@ ones the owner accepted.
   path in the spec's command and leaves Open file location alone; with no
   `TOTALCMD*.EXE` in the index, and with the service stopped, it shows the
   spec's balloons and changes no box. Covers: C6.
-- With "Keep gozler running in the notification area" on, the default,
+- With "Keep Gozler running in the notification area" on, the default,
   closing the window hides it and the process keeps running, with or
   without a shortcut; Show window brings it back with the search text
   selected; File > Exit ends the process. The probe checks the window's
@@ -606,15 +610,15 @@ ones the owner accepted.
 - Each open command runs for its own case, emptying a box brings
   back File Explorer's way, and the dialog scales when it moves to a monitor
   with another DPI.
-- After a restart of Windows with "Start gozler when I sign in" on: with no
-  shortcut, the window is running, minimized; with `Win+S` set, gozler is in
+- After a restart of Windows with "Start Gozler when I sign in" on: with no
+  shortcut, the window is running, minimized; with `Win+S` set, Gozler is in
   the notification area with no window, and `Win+S` shows it. Turned off,
   the `gozler` value under the current user's `Run` key is gone. Turned off
   in Task Manager's Startup apps, the check box shows off; turned on again,
   Task Manager shows the entry on. The owner checks this, because the `Run`
   key is the owner's, and a probe that wrote it could replace the owner's
   own value.
-- With `Win+S` set, Windows Search does not open and gozler comes forward;
+- With `Win+S` set, Windows Search does not open and Gozler comes forward;
   after choosing another shortcut, and after Exit, `Win+S` opens Windows
   Search again at once, with no restart. With an administrator window in
   front, `Win+S` opens Windows Search, as the spec says.
@@ -626,13 +630,13 @@ ones the owner accepted.
   Open folders and Open files. Then Open on a folder and on a file opens it
   in Total Commander, and Open file location, left empty, opens File
   Explorer with the entry selected.
-- With "Search with gozler" on, File Explorer's menu on a folder and on a
-  folder's background shows it, and it opens gozler with Location set to that
-  folder, also when gozler already runs; off, the item is gone. The owner
+- With "Search with Gozler" on, File Explorer's menu on a folder and on a
+  folder's background shows it, and it opens Gozler with Location set to that
+  folder, also when Gozler already runs; off, the item is gone. The owner
   checks this, because the verb is in the owner's registry.
 - With "Check for updates" on and an older version installed, the status
   bar names the newer release and its link opens the release page; off,
-  gozler makes no request (Resource Monitor's Network page shows none).
+  Gozler makes no request (Resource Monitor's Network page shows none).
 - With the dialog open, the owner stops the service: the dialog stays usable,
   its Index page shows the failure, and the main window shows it behind
   the dialog. Covers: T10.
@@ -666,7 +670,7 @@ ones the owner accepted.
 ## Stage 9: install and release
 
 - `Setup.iss` installs `gozler-ui.exe` and adds a Start menu shortcut named
-  "gozler"; the release workflow packages `gozler-ui.exe` with the other two
+  "Gozler"; the release workflow packages `gozler-ui.exe` with the other two
   executables.
 
 - Uninstalling removes the `gozler` values under the current user's `Run`

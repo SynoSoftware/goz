@@ -2,9 +2,8 @@
 
 use super::{EsPlan, ScopeFolder};
 use crate::proto::{Returns, Rows, SearchRequest};
-use crate::query::{
-    Clause, ParseOptions, QueryError, QueryStart, TermMatch, Test, parse_query_with, regex_test,
-};
+use crate::query::{QueryError, QueryStart, TermMatch};
+use crate::search::{Search, SearchInput, TextMatch};
 use crate::types::EsColumn;
 use crate::winpath::{absolute, parent_of};
 
@@ -19,9 +18,6 @@ use crate::winpath::{absolute, parent_of};
 /// `D:x` depends on the current folder of each drive, which only Windows
 /// knows, so the caller resolves it first (see
 /// [`is_drive_relative`](crate::winpath::is_drive_relative)).
-///
-/// Each `-r PATTERN` adds the test `regex:PATTERN` would, with the whole
-/// argument as the pattern, and `-parent DIR` adds what [`add_parent`] adds.
 pub fn build_search(
     plan: &EsPlan,
     working_dir: &str,
@@ -40,57 +36,34 @@ pub fn build_search(
             want_attributes: plan.columns.contains(&EsColumn::Attributes),
         }),
     };
-    let mut query = parse_query_with(
-        &plan.query,
-        ParseOptions {
-            match_case: plan.match_case,
-            match_path: plan.match_path,
-            term_match: if plan.whole_word {
-                TermMatch::WholeWords
-            } else {
-                TermMatch::Anywhere
-            },
-            working_dir: Some(working_dir),
-            query_start: Some(query_start),
-        },
-    )?;
-    let regexes = plan
-        .regexes
-        .iter()
-        .filter_map(|pattern| regex_test(pattern, plan.match_path));
-    query.clauses.extend(regexes.map(Clause::single));
     let scope = plan.scope.as_ref().map(|scope| match scope {
         ScopeFolder::Dir(dir) => absolute(dir, working_dir),
         ScopeFolder::ParentOf(path) => parent_of(&absolute(path, working_dir)),
     });
-    let mut request = SearchRequest {
-        query,
-        scope,
-        returns,
-    };
-    if let Some(dir) = &plan.parent {
-        add_parent(&mut request, absolute(dir, working_dir));
-    }
-    Ok(request)
-}
-
-/// Limits `request` to the entries directly in `folder`, an absolute path,
-/// as `-parent` does: it adds a `parent:` test for `folder`, and when the
-/// request has no scope, `folder` becomes its scope, so the daemon walks
-/// the folder instead of every volume and refuses a folder on no indexed
-/// volume.
-pub fn add_parent(request: &mut SearchRequest, folder: String) {
-    request
-        .query
-        .clauses
-        .push(Clause::single(Test::Parent(folder.clone())));
-    request.scope.get_or_insert(folder);
+    let parent = plan.parent.as_ref().map(|dir| absolute(dir, working_dir));
+    let search = Search::new(&SearchInput {
+        text: &plan.query,
+        text_match: TextMatch::Terms(if plan.whole_word {
+            TermMatch::WholeWords
+        } else {
+            TermMatch::Anywhere
+        }),
+        match_case: plan.match_case,
+        match_path: plan.match_path,
+        regexes: &plan.regexes,
+        scope: scope.as_deref(),
+        parent: parent.as_deref(),
+        working_dir: Some(working_dir),
+        query_start,
+    })?;
+    Ok(search.request(returns))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::escompat::{Command, parse_argv};
+    use crate::query::{Clause, Test};
     use crate::winpath::is_drive_relative;
 
     /// The request for `plan` in `working_dir`, at an arbitrary query start.

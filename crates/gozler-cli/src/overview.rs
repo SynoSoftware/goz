@@ -7,7 +7,7 @@ use gozler_core::escompat::version;
 use gozler_core::output::style::{ColorToken, paint};
 use gozler_core::output::table::grouped;
 
-use crate::failure::{problem, repair, state};
+use crate::failure::{problem, repair_lines, state};
 use crate::win::bytes;
 use gozler_client::NotRunning;
 
@@ -78,12 +78,13 @@ pub(crate) fn render(service: &Service, color: bool) -> String {
         Service::NotRunning(why) => {
             out.paint(ColorToken::Danger, state(why));
             out.text.push('\n');
-            match repair(why) {
+            match why.repair() {
                 Some(repair) => {
+                    let (how, lines) = repair_lines(&repair);
                     out.label("Fix");
-                    out.text.push_str(repair.how);
+                    out.text.push_str(how);
                     out.text.push('\n');
-                    for line in &repair.lines {
+                    for line in &lines {
                         out.command(line);
                     }
                 }

@@ -484,7 +484,9 @@ name = "gozler-ui"
 version = "0.3.0"
 dependencies = [
  "embed-resource",
+ "gozler-client",
  "gozler-core",
+ "jiff",
  "serde",
  "serde_json",
  "windows",

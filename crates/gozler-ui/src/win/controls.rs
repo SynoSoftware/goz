@@ -2,22 +2,32 @@
 //! theme change has one place to hook in (docs/plans/ui-design.md: How
 //! normal changes land).
 
+use super::gdi::ImageList;
 use super::{Hwnd, wide};
 use crate::core::layout::Px;
+use std::ops::Range;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Controls::{
-    EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL, ICC_BAR_CLASSES, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
-    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_FMT, LVCF_TEXT,
-    LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVM_GETCOLUMNWIDTH, LVM_INSERTCOLUMNW,
-    LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_DOUBLEBUFFER,
-    LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS,
-    SB_SETPARTS, SBARS_SIZEGRIP, STATUSCLASSNAMEW, SetWindowTheme, WC_LISTVIEWW,
+    BST_CHECKED, EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL, HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT,
+    HDITEMW, HDM_GETITEMW, HDM_SETITEMW, ICC_BAR_CLASSES, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
+    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
+    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIS_FOCUSED,
+    LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY,
+    LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETTOPINDEX,
+    LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
+    LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
+    LVM_SETITEMSTATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP,
+    LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVSICF_NOSCROLL, LVSIL_SMALL, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW,
+    SetWindowTheme, WC_LISTVIEWW,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_SETCHECK, BS_AUTOCHECKBOX, CB_ADDSTRING, CB_RESETCONTENT, CB_SETCURSEL, CBS_DROPDOWNLIST,
-    CreateWindowExW, ES_AUTOHSCROLL, GetWindowRect, HMENU, SendMessageW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_COPY, WM_SIZE, WS_CHILD, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
+    CB_RESETCONTENT, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, ES_AUTOHSCROLL,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, SendMessageW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_COPY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -68,11 +78,13 @@ fn send(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize {
     unsafe { SendMessageW(hwnd.0, message, Some(WPARAM(wparam)), Some(LPARAM(lparam))) }.0
 }
 
-/// Sends a message whose `lparam` points to data the control reads.
+/// Sends a message whose `lparam` points to data the control reads or fills
+/// in.
 ///
 /// # Safety
 /// `lparam` points to a valid value of the type `message` expects, which
-/// lives until this synchronous call returns.
+/// lives until this synchronous call returns, and is writable when the
+/// message fills it in.
 unsafe fn send_pointer<T>(hwnd: Hwnd, message: u32, wparam: usize, lparam: *const T) -> isize {
     // SAFETY: the caller keeps `lparam` valid for the call.
     unsafe {
@@ -87,9 +99,16 @@ unsafe fn send_pointer<T>(hwnd: Hwnd, message: u32, wparam: usize, lparam: *cons
 }
 
 impl Hwnd {
+    /// Enables or disables the control. A control already in that state is
+    /// left alone, because the window sets every control's state after
+    /// every reply.
     pub(crate) fn set_enabled(self, enabled: bool) {
         // SAFETY: plain values.
-        let _ = unsafe { EnableWindow(self.0, enabled) };
+        unsafe {
+            if IsWindowEnabled(self.0).as_bool() != enabled {
+                let _ = EnableWindow(self.0, enabled);
+            }
+        }
     }
 }
 
@@ -129,6 +148,15 @@ impl Edit {
     pub(crate) fn copy(self) {
         send(self.0, WM_COPY, 0, 0);
     }
+
+    pub(crate) fn text(self) -> String {
+        // SAFETY: plain values.
+        let length = unsafe { GetWindowTextLengthW(self.0.0) };
+        let mut buffer = vec![0u16; usize::try_from(length).unwrap_or(0) + 1];
+        // SAFETY: the call writes at most the buffer's length.
+        let copied = unsafe { GetWindowTextW(self.0.0, &mut buffer) };
+        String::from_utf16_lossy(&buffer[..usize::try_from(copied).unwrap_or(0)])
+    }
 }
 
 /// A static text, such as a label before its control.
@@ -138,6 +166,32 @@ pub(crate) struct Label(pub(crate) Hwnd);
 impl Label {
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
         child(parent, w!("STATIC"), 0, WINDOW_EX_STYLE(0), id).map(Label)
+    }
+
+    /// A text that wraps at word ends and shows `&` as itself, such as a
+    /// message that can quote the typed search.
+    pub(crate) fn create_message(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        // SS_NOPREFIX, which the windows crate has only in a feature for
+        // system services.
+        const SS_NOPREFIX: u32 = 0x80;
+        child(parent, w!("STATIC"), SS_NOPREFIX, WINDOW_EX_STYLE(0), id).map(Label)
+    }
+}
+
+/// A push button.
+#[derive(Clone, Copy)]
+pub(crate) struct Button(pub(crate) Hwnd);
+
+impl Button {
+    pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
+        child(
+            parent,
+            w!("BUTTON"),
+            WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Button)
     }
 }
 
@@ -169,6 +223,10 @@ impl DropDownList {
         }
         send(self.0, CB_SETCURSEL, selected, 0);
     }
+
+    pub(crate) fn selected(self) -> Option<usize> {
+        usize::try_from(send(self.0, CB_GETCURSEL, 0, 0)).ok()
+    }
 }
 
 /// A check box.
@@ -190,6 +248,10 @@ impl CheckBox {
     pub(crate) fn set_checked(self, checked: bool) {
         send(self.0, BM_SETCHECK, usize::from(checked), 0);
     }
+
+    pub(crate) fn is_checked(self) -> bool {
+        send(self.0, BM_GETCHECK, 0, 0) == BST_CHECKED.0 as isize
+    }
 }
 
 /// The results list: a list view in report and virtual mode, drawn as File
@@ -205,15 +267,25 @@ pub(crate) struct ListColumn<'a> {
 }
 
 impl ListView {
+    /// The list clips the controls created before it, which lie above it,
+    /// such as the message in its empty area. It shares the system image
+    /// list, which it must not destroy.
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<ListView> {
         let list = child(
             parent,
             WC_LISTVIEWW,
-            WS_TABSTOP.0 | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS,
+            WS_TABSTOP.0
+                | WS_CLIPSIBLINGS.0
+                | LVS_REPORT
+                | LVS_OWNERDATA
+                | LVS_SHOWSELALWAYS
+                | LVS_SHAREIMAGELISTS,
             WINDOW_EX_STYLE(0),
             id,
         )?;
-        let extended = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP;
+        // LVS_EX_LABELTIP shows a cut-off cell's whole text in a tooltip.
+        let extended =
+            LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP | LVS_EX_LABELTIP;
         send(
             list,
             LVM_SETEXTENDEDLISTVIEWSTYLE,
@@ -262,6 +334,125 @@ impl ListView {
     pub(crate) fn set_column_width(self, index: usize, width: Px) {
         send(self.0, LVM_SETCOLUMNWIDTH, index, width.0 as isize);
     }
+
+    pub(crate) fn delete_column(self, index: usize) {
+        send(self.0, LVM_DELETECOLUMN, index, 0);
+    }
+
+    /// The column indexes in the order the header shows them, of `count`
+    /// columns.
+    pub(crate) fn column_order(self, count: usize) -> Vec<usize> {
+        let mut order = vec![0i32; count];
+        // SAFETY: `order` holds the `count` integers the message writes.
+        unsafe { send_pointer(self.0, LVM_GETCOLUMNORDERARRAY, count, order.as_mut_ptr()) };
+        order
+            .into_iter()
+            .map(|i| usize::try_from(i).unwrap_or(0))
+            .collect()
+    }
+
+    pub(crate) fn set_column_order(self, order: &[usize]) {
+        let order: Vec<i32> = order.iter().map(|&i| i as i32).collect();
+        // SAFETY: `order` holds the `order.len()` integers the message reads.
+        unsafe { send_pointer(self.0, LVM_SETCOLUMNORDERARRAY, order.len(), order.as_ptr()) };
+    }
+
+    /// The header control above the rows.
+    pub(crate) fn header(self) -> Hwnd {
+        Hwnd(windows::Win32::Foundation::HWND(
+            send(self.0, LVM_GETHEADER, 0, 0) as *mut _,
+        ))
+    }
+
+    /// Shows the sort arrow on the column `sorted` of `count` columns,
+    /// pointing up when `ascending`, and on no other.
+    pub(crate) fn show_sort(self, count: usize, sorted: Option<(usize, bool)>) {
+        let header = self.header();
+        for index in 0..count {
+            let mut item = HDITEMW {
+                mask: HDI_FORMAT,
+                ..Default::default()
+            };
+            // SAFETY: `item` is a local that the header fills in, then reads.
+            unsafe { send_pointer(header, HDM_GETITEMW, index, &raw mut item) };
+            item.fmt.0 &= !(HDF_SORTUP.0 | HDF_SORTDOWN.0);
+            match sorted {
+                Some((column, true)) if column == index => item.fmt.0 |= HDF_SORTUP.0,
+                Some((column, false)) if column == index => item.fmt.0 |= HDF_SORTDOWN.0,
+                _ => {}
+            }
+            // SAFETY: as above.
+            unsafe { send_pointer(header, HDM_SETITEMW, index, &raw const item) };
+        }
+    }
+
+    pub(crate) fn set_small_images(self, images: &ImageList) {
+        send(
+            self.0,
+            LVM_SETIMAGELIST,
+            LVSIL_SMALL as usize,
+            images.handle(),
+        );
+    }
+
+    /// Sets the number of rows and redraws them, keeping the scroll
+    /// position.
+    pub(crate) fn set_count(self, count: u64) {
+        send(
+            self.0,
+            LVM_SETITEMCOUNT,
+            usize::try_from(count).unwrap_or(usize::MAX),
+            LVSICF_NOSCROLL as isize,
+        );
+    }
+
+    pub(crate) fn count(self) -> u64 {
+        send(self.0, LVM_GETITEMCOUNT, 0, 0).max(0) as u64
+    }
+
+    pub(crate) fn ensure_visible(self, row: u64) {
+        send(self.0, LVM_ENSUREVISIBLE, row as usize, 0);
+    }
+
+    /// Selects and focuses `row` alone, or clears the selection and the
+    /// focus for `None`.
+    pub(crate) fn select_only(self, row: Option<u64>) {
+        let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+        let set = |index: usize, state| {
+            let item = LVITEMW {
+                stateMask: both,
+                state,
+                ..Default::default()
+            };
+            // SAFETY: `item` outlives the call, which reads it.
+            unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
+        };
+        // Index -1 is every row.
+        set(usize::MAX, LIST_VIEW_ITEM_STATE_FLAGS(0));
+        if let Some(row) = row {
+            set(row as usize, both);
+        }
+    }
+
+    /// Redraws `rows`, whose cells have changed.
+    pub(crate) fn redraw_rows(self, rows: Range<u64>) {
+        if rows.is_empty() {
+            return;
+        }
+        send(
+            self.0,
+            LVM_REDRAWITEMS,
+            rows.start as usize,
+            (rows.end - 1) as isize,
+        );
+    }
+
+    /// The rows the list shows now, a partly shown last row included.
+    pub(crate) fn visible_rows(self) -> Range<u64> {
+        let top = send(self.0, LVM_GETTOPINDEX, 0, 0).max(0) as u64;
+        let page = send(self.0, LVM_GETCOUNTPERPAGE, 0, 0).max(0) as u64;
+        top..top + page + 1
+    }
 }
 
 /// The status bar, which sizes itself to its font at the window's bottom.
@@ -303,5 +494,12 @@ impl StatusBar {
         // SAFETY: `edges` holds the `edges.len()` integers the message reads,
         // and outlives the call.
         unsafe { send_pointer(self.0, SB_SETPARTS, edges.len(), edges.as_ptr()) };
+    }
+
+    pub(crate) fn set_text(self, part: usize, text: &str) {
+        let text = wide(text);
+        // SAFETY: `text` is NUL-terminated and outlives the call, which
+        // copies it.
+        unsafe { send_pointer(self.0, SB_SETTEXTW, part, text.as_ptr()) };
     }
 }

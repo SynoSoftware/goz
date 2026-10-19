@@ -21,6 +21,8 @@ pseudo-language = ["dep:serde_json"]
 
 [dependencies]
 gozler-core = { path = "../gozler-core" }
+gozler-client = { path = "../gozler-client" }
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

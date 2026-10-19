@@ -124,12 +124,12 @@ impl CommandId {
                     never,
                     Some(|s| s.model.panes.inspector),
                 ),
-                C::Columns => ("command.columns", &[], never, None),
+                C::Columns => ("command.columns", &[], always, None),
                 C::Language => ("menu.language", &[], never, None),
                 C::Refresh => (
                     "command.refresh",
                     const { &[Shortcut::plain(Key::Function(5))] },
-                    never,
+                    searched,
                     None,
                 ),
                 C::Find => (
@@ -140,16 +140,16 @@ impl CommandId {
                             Shortcut::ctrl(Key::Letter(b'E')),
                         ]
                     },
-                    never,
+                    always,
                     None,
                 ),
-                C::Match => ("match.label", &[], never, None),
-                C::SortBy => ("command.sort_by", &[], never, None),
+                C::Match => ("match.label", &[], always, None),
+                C::SortBy => ("command.sort_by", &[], always, None),
                 C::ClearFilters => ("command.clear_filters", &[], never, None),
                 C::SearchSyntax => (
                     "command.search_syntax",
                     const { &[Shortcut::plain(Key::Function(1))] },
-                    never,
+                    always,
                     None,
                 ),
                 C::About => ("command.about", &[], always, None),
@@ -200,6 +200,11 @@ fn always(_: &State) -> bool {
 /// disabled, so the menus never change shape (spec: Menus).
 fn never(_: &State) -> bool {
     false
+}
+
+/// Refresh runs the shown search again (spec: C17).
+fn searched(state: &State) -> bool {
+    state.model.results.has_searched()
 }
 
 /// Copy and Select all act on the focused control (spec: C8, C11).
@@ -513,16 +518,31 @@ pub(crate) enum MenuNode {
     },
 }
 
-/// The menu bar `menus` in the language of `strings`.
-pub(crate) fn render(menus: &[Menu], strings: &Strings) -> Vec<MenuNode> {
-    let item = |item: &MenuItem| MenuNode::Item {
+/// The header's context menu: View > Columns' items (spec: C15). A context
+/// menu shows no shortcuts, and these have none.
+pub(crate) fn header_menu() -> Vec<MenuItem> {
+    Column::ALL.into_iter().map(MenuItem::Column).collect()
+}
+
+/// `items` as a popup menu in the language of `strings`.
+pub(crate) fn render_popup(items: &[MenuItem], strings: &Strings) -> Vec<MenuNode> {
+    items.iter().map(|item| node(item, strings)).collect()
+}
+
+fn node(item: &MenuItem, strings: &Strings) -> MenuNode {
+    MenuNode::Item {
         id: item.id(),
         text: menu_label(
             item.label(strings),
             item.shortcut().map(|s| s.text(strings)),
         ),
         mark: item.mark(),
-    };
+    }
+}
+
+/// The menu bar `menus` in the language of `strings`.
+pub(crate) fn render(menus: &[Menu], strings: &Strings) -> Vec<MenuNode> {
+    let item = |item: &MenuItem| node(item, strings);
     menus
         .iter()
         .map(|menu| MenuNode::Submenu {
@@ -574,7 +594,9 @@ pub(crate) fn accelerators() -> Vec<(Shortcut, MenuItem)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::results::Fix;
     use crate::core::text::{Strings, access_key};
+    use gozler_client::Repair;
     use std::collections::HashSet;
 
     /// `WM_COMMAND` carries only the ID, so two items with one ID, or an ID
@@ -652,6 +674,20 @@ mod tests {
             }
             let window = ["match.label", "match.case", "match.path"].map(|key| strings.text(key));
             assert_unique(language.tag, window, &mut bar_keys);
+            // The list shows one message, with at most one of these buttons.
+            let fixes = [
+                Fix::Repair(Repair::StartService),
+                Fix::Repair(Repair::TurnOnService),
+                Fix::Repair(Repair::InstallService {
+                    folder: Default::default(),
+                }),
+                Fix::Repair(Repair::Download),
+                Fix::OpenServices,
+            ];
+            for fix in fixes {
+                let button = [strings.text(fix.label())];
+                assert_unique(language.tag, button, &mut bar_keys.clone());
+            }
         }
     }
 }

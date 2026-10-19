@@ -1,14 +1,14 @@
 // The window's resources. Every caption is empty here: WM_INITDIALOG sets
 // them from en.json or the chosen language, so English has one source.
-// The resource and control IDs match the constants in src/win/resources.rs.
 
 #include <windows.h>
 #include <commctrl.h>
+#include "ids.h"
 #include "version.rh"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "gozler-ui.manifest"
 
-1 ICON "gozler-ui.ico"
+IDI_GOZLER ICON "gozler-ui.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION GOZLER_VERSION_NUMBERS
@@ -20,11 +20,11 @@ BEGIN
     BEGIN
         BLOCK "000004b0"
         BEGIN
-            VALUE "FileDescription", "gozler"
+            VALUE "FileDescription", "Gozler"
             VALUE "FileVersion", GOZLER_VERSION
             VALUE "InternalName", "gozler-ui"
             VALUE "OriginalFilename", "gozler-ui.exe"
-            VALUE "ProductName", "gozler"
+            VALUE "ProductName", "Gozler"
             VALUE "ProductVersion", GOZLER_VERSION
         END
     END
@@ -34,16 +34,27 @@ BEGIN
     END
 END
 
-// About gozler: the icon, the version, what gozler is, the copyright and the
+// About Gozler: the icon, the version, what Gozler is, the copyright and the
 // repository link. The two-line texts leave room for longer translations.
-100 DIALOGEX 0, 0, 240, 95
+IDD_ABOUT DIALOGEX 0, 0, 240, 95
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    ICON            1, 1001, 7, 7, 21, 20
-    LTEXT           "", 1002, 36, 7, 197, 8, SS_NOPREFIX
-    LTEXT           "", 1003, 36, 15, 197, 16, SS_NOPREFIX
-    LTEXT           "", 1004, 36, 35, 197, 16, SS_NOPREFIX
-    CONTROL         "", 1005, "SysLink", WS_TABSTOP, 36, 55, 197, 8
+    ICON            IDI_GOZLER, IDC_ABOUT_ICON, 7, 7, 21, 20
+    LTEXT           "", IDC_ABOUT_VERSION, 36, 7, 197, 8, SS_NOPREFIX
+    LTEXT           "", IDC_ABOUT_DESCRIPTION, 36, 15, 197, 16, SS_NOPREFIX
+    LTEXT           "", IDC_ABOUT_COPYRIGHT, 36, 35, 197, 16, SS_NOPREFIX
+    CONTROL         "", IDC_ABOUT_LINK, "SysLink", WS_TABSTOP, 36, 55, 197, 8
     DEFPUSHBUTTON   "", IDCANCEL, 183, 74, 50, 14
+END
+
+// Search syntax: the search terms, the search functions and the attribute
+// letters, in a monospace font, so their columns line up as in a console of
+// 80 columns. The text is English in every language, as the syntax is.
+IDD_SEARCH_SYNTAX DIALOGEX 0, 0, 380, 270
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    EDITTEXT        IDC_SEARCH_SYNTAX_TEXT, 7, 7, 366, 234, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "", IDCANCEL, 323, 249, 50, 14
 END

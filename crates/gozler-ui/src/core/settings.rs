@@ -3,7 +3,11 @@
 //! format, so renaming one needs a migration. A value that is missing or
 //! damaged falls back to its default, and every other value still loads.
 
+use super::layout::Dip;
+use super::model::Column;
+use super::query::Matching;
 use super::text::LanguageChoice;
+use gozler_core::types::SortSpec;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io;
@@ -39,6 +43,26 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) placement: Option<Placement>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) matching: Matching,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) sort: SortSpec,
+    /// The shown columns in the order the list shows them; empty for the
+    /// default columns.
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) columns: Vec<SavedColumn>,
+}
+
+/// A shown column and its width in device-independent pixels, so the width
+/// is the same on a monitor with another DPI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SavedColumn {
+    pub(crate) column: Column,
+    pub(crate) width: Dip,
 }
 
 /// The window's restored rectangle, in the workspace coordinates that
@@ -173,6 +197,22 @@ mod tests {
                     bottom: 600,
                     maximized: false,
                 }),
+                matching: Matching {
+                    mode: crate::core::query::MatchMode::WholeWords,
+                    case: true,
+                    path: false,
+                },
+                sort: SortSpec::default_for(gozler_core::types::SortKey::Size),
+                columns: vec![
+                    SavedColumn {
+                        column: Column::Size,
+                        width: Dip(90),
+                    },
+                    SavedColumn {
+                        column: Column::Name,
+                        width: Dip(300),
+                    },
+                ],
             },
         };
         Settings::default()

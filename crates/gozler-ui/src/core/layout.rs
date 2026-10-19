@@ -4,13 +4,17 @@
 //! guidelines at 96 DPI: 11 px margins and gaps between groups, 7 px between
 //! related controls, 23 px tall text boxes and lists, 17 px check boxes.
 
-use super::model::LIST_LIMIT;
+use super::model::Column;
+use super::results::LIST_LIMIT;
 use super::text::{self, Numbers, Strings};
+use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 use std::ops::{Add, Sub};
 
 /// Device-independent pixels, as the layout is designed; 96 DPI pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// `ui.json` saves one as its number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct Dip(pub(crate) i32);
 
 /// Physical pixels on the window's monitor.
@@ -33,7 +37,7 @@ impl Dpi {
 
 impl Dip {
     /// Rounded to the nearest pixel, as `MulDiv` rounds.
-    pub(crate) fn to_px(self, dpi: Dpi) -> Px {
+    fn to_px(self, dpi: Dpi) -> Px {
         let scaled = (i64::from(self.0) * i64::from(dpi.get()) + 48).div_euclid(96);
         Px(i32::try_from(scaled).expect("a layout size fits in i32 at any DPI"))
     }
@@ -47,6 +51,26 @@ impl Px {
             .div_euclid(i64::from(from.get()));
         Px(i32::try_from(scaled).expect("a scaled size fits in i32"))
     }
+}
+
+/// The width of `column` on a monitor of `dpi`: its `saved` width, or else
+/// its default width.
+pub(crate) fn column_width(column: Column, saved: Option<Dip>, dpi: Dpi) -> Px {
+    saved.unwrap_or(column.default_width()).to_px(dpi)
+}
+
+/// A column `width` wide on a monitor of `dpi`, as it is saved: in DIP, so
+/// the column keeps its size on a monitor with another DPI.
+pub(crate) fn saved_width(width: Px, dpi: Dpi) -> Dip {
+    Dip(width.rescale(dpi, Dpi::new(96).expect("96 is not zero")).0)
+}
+
+/// Where the list draws a cell's text after the left edge of the cell's
+/// label, which a cell the window draws itself keeps, so the two line up.
+/// Measured against the list's own drawing at 96 DPI.
+pub(crate) fn cell_text_inset(first_column: bool, dpi: Dpi) -> Px {
+    let inset = if first_column { Dip(2) } else { Dip(6) };
+    inset.to_px(dpi)
 }
 
 impl Add for Px {
@@ -200,6 +224,62 @@ impl Captions {
                 ]),
             ],
         }
+    }
+}
+
+/// A push button is this much wider than its caption.
+const BUTTON_PADDING: Dip = Dip(24);
+/// The narrowest push button, as Windows' guidelines size OK and Cancel.
+const BUTTON_MIN_WIDTH: Dip = Dip(75);
+
+/// Where the list's message and its button go, inside the list below its
+/// header, so the message reads where the rows would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MessageArea {
+    text: Rect,
+    dpi: Dpi,
+}
+
+impl MessageArea {
+    /// `header` is the height of the list's header.
+    pub(crate) fn new(list: Rect, header: Px, dpi: Dpi) -> MessageArea {
+        let margin = MARGIN.to_px(dpi);
+        MessageArea {
+            text: Rect {
+                x: list.x + margin,
+                y: list.y + header + margin,
+                width: (list.width - margin - margin).max(Px(0)),
+                height: (list.height - header - margin - margin).max(Px(0)),
+            },
+            dpi,
+        }
+    }
+
+    /// The width the message wraps at.
+    pub(crate) fn text_width(&self) -> Px {
+        self.text.width
+    }
+
+    /// The message's rectangle for a text `text_height` tall, and its
+    /// button's below it, for a caption `button` wide, when it has one.
+    pub(crate) fn place(
+        &self,
+        text_height: Px,
+        font_height: Px,
+        button: Option<Px>,
+    ) -> (Rect, Option<Rect>) {
+        let px = |dip: Dip| dip.to_px(self.dpi);
+        let text = Rect {
+            height: text_height.min(self.text.height),
+            ..self.text
+        };
+        let button = button.map(|caption| Rect {
+            x: text.x,
+            y: text.bottom() + px(GROUP),
+            width: (caption + px(BUTTON_PADDING)).max(px(BUTTON_MIN_WIDTH)),
+            height: font_height + px(CONTROL_PADDING),
+        });
+        (text, button)
     }
 }
 

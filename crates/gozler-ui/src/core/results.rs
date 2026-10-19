@@ -1,0 +1,435 @@
+//! What the results list shows, and the chunk of rows asked for
+//! (docs/plans/ui-design.md: Rows on demand). The list keeps the shown rows
+//! until the new search's first chunk arrives, so it does not empty on every
+//! keystroke, and every chunk is asked for with the shown search, so it
+//! names the rows the person sees even while the typed text has already
+//! changed.
+
+use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation};
+use gozler_client::Repair;
+use gozler_core::proto::ResultItem;
+use gozler_core::query::{MatchedParts, QueryError};
+use gozler_core::search::Search;
+use gozler_core::types::SortSpec;
+use std::ops::Range;
+
+/// The list reaches the first 100,000 rows of a search (spec: Searching).
+pub(crate) const LIST_LIMIT: u64 = 100_000;
+
+/// The rows of one request. Every request scans every match before it
+/// sorts, so a larger chunk costs the daemon little more and halves the
+/// waits on a long scroll.
+pub(crate) const CHUNK_ROWS: u64 = 16_384;
+
+/// The most rows the cache keeps, in whole chunks, so memory stays the same
+/// for any number of matches (spec: Memory budget).
+const CACHE_ROWS: u64 = 32_768;
+
+/// What the list area shows. Rows and a message never show together.
+pub(crate) enum Shown {
+    /// Before the first reply.
+    Nothing,
+    /// The rows of a search; none when nothing matches.
+    Rows(ShownRows),
+    Message(ListMessage),
+}
+
+/// Why the list shows a message instead of rows; each has its own text and
+/// buttons (spec: States).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ListMessage {
+    Parse(QueryError),
+    Failure(DaemonFailure),
+}
+
+/// The button a message offers for its fix (spec: Daemon failures).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Fix {
+    Repair(Repair),
+    /// Opens Services, where the person sees why the service is not
+    /// running when Windows did not tell gozler.
+    OpenServices,
+}
+
+impl ListMessage {
+    pub(crate) fn fix(&self) -> Option<Fix> {
+        match self {
+            ListMessage::Parse(_) => None,
+            ListMessage::Failure(failure) => match failure {
+                DaemonFailure::NotRunning(why) => {
+                    Some(why.repair().map_or(Fix::OpenServices, Fix::Repair))
+                }
+                DaemonFailure::TooOld => Some(Fix::Repair(Repair::Download)),
+                // The owner check is a security check, whose fix is not the
+                // window's; the others end by themselves or by a new search.
+                DaemonFailure::NotReady
+                | DaemonFailure::NotGozler
+                | DaemonFailure::Refused { .. }
+                | DaemonFailure::Lost => None,
+            },
+        }
+    }
+}
+
+impl Fix {
+    /// The button's catalogue key.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Fix::Repair(repair) => match repair {
+                Repair::StartService => "fix.start_service",
+                Repair::TurnOnService => "fix.turn_on_service",
+                Repair::InstallService { .. } => "fix.install_service",
+                Repair::Download => "fix.download",
+            },
+            Fix::OpenServices => "fix.open_services",
+        }
+    }
+}
+
+pub(crate) struct ShownRows {
+    /// The ask of the first chunk; a later chunk changes its start.
+    ask: ChunkAsk,
+    total: u64,
+    chunks: Vec<CachedChunk>,
+    /// `None` when the query's terms do not compile, which the daemon
+    /// refuses before any row is shown.
+    matched: Option<MatchedParts>,
+    /// The order of use, for dropping the chunk used least recently.
+    clock: u64,
+}
+
+struct CachedChunk {
+    start: u64,
+    rows: Vec<ResultItem>,
+    used: u64,
+}
+
+/// The request whose reply the results wait for; a reply of another
+/// generation is stale.
+enum InFlight {
+    /// A new search, whose first chunk's ask its rows will be shown with.
+    Search(Generation, ChunkAsk),
+    Chunk(Generation),
+}
+
+/// What accepting a chunk changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RowsChange {
+    Stale,
+    /// A new search's first rows replace the old ones; `count` is the
+    /// list's new row count.
+    NewSearch {
+        count: u64,
+    },
+    /// Rows of the shown search arrived; the count changed when the total
+    /// did.
+    Rows {
+        rows: Range<u64>,
+        count: u64,
+    },
+}
+
+pub(crate) struct Results {
+    shown: Shown,
+    in_flight: Option<InFlight>,
+}
+
+impl Results {
+    pub(crate) fn new() -> Results {
+        Results {
+            shown: Shown::Nothing,
+            in_flight: None,
+        }
+    }
+
+    pub(crate) fn shown(&self) -> &Shown {
+        &self.shown
+    }
+
+    /// Whether a search has started, so Refresh has one to run again.
+    pub(crate) fn has_searched(&self) -> bool {
+        !matches!(self.shown, Shown::Nothing) || self.in_flight.is_some()
+    }
+
+    /// Whether a new search waits for its first rows.
+    pub(crate) fn searching(&self) -> bool {
+        matches!(self.in_flight, Some(InFlight::Search(..)))
+    }
+
+    /// Every match of the shown search.
+    pub(crate) fn total(&self) -> u64 {
+        match &self.shown {
+            Shown::Rows(rows) => rows.total,
+            Shown::Nothing | Shown::Message(_) => 0,
+        }
+    }
+
+    /// The rows the list has: every match up to [`LIST_LIMIT`].
+    pub(crate) fn count(&self) -> u64 {
+        self.total().min(LIST_LIMIT)
+    }
+
+    /// The row at `index`, or `None` while its chunk has not arrived.
+    pub(crate) fn row(&self, index: u64) -> Option<&ResultItem> {
+        let Shown::Rows(shown) = &self.shown else {
+            return None;
+        };
+        let chunk = shown
+            .chunks
+            .iter()
+            .find(|c| (c.start..c.start + c.rows.len() as u64).contains(&index))?;
+        chunk.rows.get(usize::try_from(index - chunk.start).ok()?)
+    }
+
+    /// The byte ranges of the row's full path that the shown search's text
+    /// terms matched.
+    pub(crate) fn matched_parts(&self, row: &ResultItem) -> Vec<Range<usize>> {
+        match &self.shown {
+            Shown::Rows(ShownRows {
+                matched: Some(matched),
+                ..
+            }) => matched.ranges(&row.path),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The shown search, for the index state its scope decides.
+    pub(crate) fn shown_search(&self) -> Option<&Search> {
+        match &self.shown {
+            Shown::Rows(rows) => Some(&rows.ask.search),
+            Shown::Nothing | Shown::Message(_) => None,
+        }
+    }
+
+    /// A new search in the order `sort`, whose first chunk `generation`
+    /// asks for with the returned ask; the shown rows stay until it arrives.
+    pub(crate) fn start_search(
+        &mut self,
+        generation: Generation,
+        search: Search,
+        sort: SortSpec,
+    ) -> ChunkAsk {
+        let ask = ChunkAsk {
+            search,
+            sort,
+            start: 0,
+            len: CHUNK_ROWS,
+        };
+        self.in_flight = Some(InFlight::Search(generation, ask.clone()));
+        ask
+    }
+
+    /// Replaces whatever the list shows with `message`, and drops the
+    /// request in flight, whose reply would show rows again.
+    pub(crate) fn show_message(&mut self, message: ListMessage) {
+        self.shown = Shown::Message(message);
+        self.in_flight = None;
+    }
+
+    /// Whether `generation` is the request the results wait for.
+    pub(crate) fn awaits(&self, generation: Generation) -> bool {
+        matches!(&self.in_flight, Some(InFlight::Search(g, _) | InFlight::Chunk(g)) if *g == generation)
+    }
+
+    /// The ask for the first chunk that the rows `visible` need and the
+    /// cache lacks, which `generation` then asks for, and marks the cached
+    /// chunks they show as used. `None` while a search or a chunk is in
+    /// flight, so fast scrolling never queues a request for every chunk it
+    /// passes.
+    pub(crate) fn next_chunk(
+        &mut self,
+        visible: Range<u64>,
+        generation: Generation,
+    ) -> Option<ChunkAsk> {
+        let count = self.count();
+        let Shown::Rows(shown) = &mut self.shown else {
+            return None;
+        };
+        let visible = visible.start..visible.end.min(count);
+        shown.clock += 1;
+        let mut missing = None;
+        let mut start = visible.start - visible.start % CHUNK_ROWS;
+        while start < visible.end {
+            match shown.chunks.iter_mut().find(|c| c.start == start) {
+                Some(chunk) => chunk.used = shown.clock,
+                None => {
+                    missing.get_or_insert(start);
+                }
+            }
+            start += CHUNK_ROWS;
+        }
+        if self.in_flight.is_some() {
+            return None;
+        }
+        let start = missing?;
+        self.in_flight = Some(InFlight::Chunk(generation));
+        Some(ChunkAsk {
+            start,
+            len: CHUNK_ROWS.min(LIST_LIMIT - start),
+            ..shown.ask.clone()
+        })
+    }
+
+    /// Accepts the rows of the request `generation` asked for.
+    pub(crate) fn accept(&mut self, generation: Generation, chunk: Chunk) -> RowsChange {
+        if !self.awaits(generation) {
+            return RowsChange::Stale;
+        }
+        match self.in_flight.take() {
+            Some(InFlight::Search(_, ask)) => {
+                let matched = MatchedParts::new(&ask.search.query).ok();
+                let mut shown = ShownRows {
+                    ask,
+                    total: chunk.total,
+                    chunks: Vec::new(),
+                    matched,
+                    clock: 0,
+                };
+                shown.insert(chunk.start, chunk.rows);
+                self.shown = Shown::Rows(shown);
+                RowsChange::NewSearch {
+                    count: self.count(),
+                }
+            }
+            Some(InFlight::Chunk(_)) => {
+                let Shown::Rows(shown) = &mut self.shown else {
+                    return RowsChange::Stale;
+                };
+                let rows = chunk.start..chunk.start + chunk.rows.len() as u64;
+                shown.total = chunk.total;
+                shown.insert(chunk.start, chunk.rows);
+                RowsChange::Rows {
+                    rows,
+                    count: self.count(),
+                }
+            }
+            None => RowsChange::Stale,
+        }
+    }
+}
+
+impl ShownRows {
+    /// Caches a chunk, and drops the chunk used least recently when the
+    /// cache holds more than [`CACHE_ROWS`].
+    fn insert(&mut self, start: u64, rows: Vec<ResultItem>) {
+        self.clock += 1;
+        self.chunks.retain(|c| c.start != start);
+        if rows.is_empty() {
+            return;
+        }
+        self.chunks.push(CachedChunk {
+            start,
+            rows,
+            used: self.clock,
+        });
+        while self.chunks.len() as u64 * CHUNK_ROWS > CACHE_ROWS {
+            let oldest = self
+                .chunks
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, c)| c.used)
+                .map(|(i, _)| i)
+                .expect("the cache holds the chunk just inserted");
+            self.chunks.swap_remove(oldest);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use gozler_core::query::parse_query;
+
+    fn search() -> Search {
+        Search {
+            query: parse_query("").expect("the empty query parses"),
+            scope: None,
+        }
+    }
+
+    /// A chunk of `len` rows from `start`, of a search with `total` matches.
+    pub(crate) fn chunk(start: u64, len: u64, total: u64) -> Chunk {
+        Chunk {
+            start,
+            rows: (start..start + len)
+                .map(|i| ResultItem {
+                    path: format!(r"C:\row{i}"),
+                    path_u16: None,
+                    size: None,
+                    mtime_ft: None,
+                    is_dir: false,
+                    attributes: None,
+                })
+                .collect(),
+            total,
+            volumes_incomplete: false,
+            metadata_pending: false,
+        }
+    }
+
+    /// Results that show the first chunk of a search with `total` matches.
+    fn showing(total: u64) -> Results {
+        let mut results = Results::new();
+        results.start_search(Generation(1), search(), SortSpec::default());
+        let first = chunk(0, CHUNK_ROWS.min(total), total);
+        results.accept(Generation(1), first);
+        results
+    }
+
+    /// Fast scrolling would queue a request for every chunk it passes, and a
+    /// chunk asked for during a new search would name the old search's rows.
+    #[test]
+    fn at_most_one_chunk_is_in_flight_and_none_while_a_search_is() {
+        let mut results = showing(50_000);
+        let far = 2 * CHUNK_ROWS + 5;
+        let asked = results.next_chunk(far..far + 40, Generation(2));
+        assert_eq!(asked.map(|a| a.start), Some(2 * CHUNK_ROWS));
+        let near = CHUNK_ROWS..CHUNK_ROWS + 40;
+        assert_eq!(results.next_chunk(near, Generation(3)), None);
+
+        let mut results = showing(50_000);
+        results.start_search(Generation(2), search(), SortSpec::default());
+        assert_eq!(results.next_chunk(far..far + 40, Generation(3)), None);
+    }
+
+    /// The daemon's index changes between two chunks, so a later reply's
+    /// total is the list's new count, which stops at the list's limit.
+    #[test]
+    fn a_changed_total_changes_the_count_which_stops_at_the_limit() {
+        let mut results = showing(3 * CHUNK_ROWS);
+        let asked = results.next_chunk(CHUNK_ROWS..CHUNK_ROWS + 40, Generation(2));
+        let start = asked.expect("the rows are not cached").start;
+        let accepted = results.accept(Generation(2), chunk(start, 1_000, 200_000));
+        assert_eq!(
+            accepted,
+            RowsChange::Rows {
+                rows: start..start + 1_000,
+                count: LIST_LIMIT
+            }
+        );
+        assert_eq!(showing(LIST_LIMIT + 1).count(), LIST_LIMIT);
+    }
+
+    /// Without the eviction the cache grows with every chunk scrolled to,
+    /// and memory with it; dropping the chunk in view would empty the rows
+    /// the person looks at.
+    #[test]
+    fn the_cache_drops_the_chunk_used_least_recently() {
+        let mut results = showing(LIST_LIMIT);
+        let cached = CACHE_ROWS / CHUNK_ROWS;
+        for n in 1..=cached {
+            let start = n * CHUNK_ROWS;
+            // The first chunk stays in view while the others arrive.
+            results.next_chunk(0..10, Generation(0));
+            let asked = results.next_chunk(start..start + 10, Generation(n + 1));
+            assert_eq!(asked.map(|a| a.start), Some(start));
+            results.accept(Generation(n + 1), chunk(start, CHUNK_ROWS, LIST_LIMIT));
+        }
+        assert!(results.row(0).is_some(), "the chunk in view stays");
+        assert!(
+            results.row(CHUNK_ROWS).is_none(),
+            "the chunk used least recently is dropped"
+        );
+        assert!(results.row(cached * CHUNK_ROWS).is_some());
+    }
+}

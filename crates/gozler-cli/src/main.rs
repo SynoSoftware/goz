@@ -102,9 +102,9 @@ mod win {
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
     use gozler_core::output::TableWriter;
     use gozler_core::output::table::grouped;
-    use gozler_core::proto::{DaemonStatus, PIPE_NAME, QueryResults, VolumeStatus};
+    use gozler_core::proto::{DaemonStatus, PIPE_NAME, QueryResults};
     use gozler_core::query::QueryStart;
-    use gozler_core::scope::Scope;
+    use gozler_core::scope::Coverage;
     use gozler_core::winpath::is_drive_relative;
     use std::io::Write;
     use std::time::{Duration, Instant};
@@ -273,11 +273,7 @@ mod win {
         let deadline = Instant::now() + timeout;
         loop {
             let volumes = connection.status()?.volumes;
-            let complete = match Scope::of(scope, volumes.iter().map(VolumeStatus::mounted)) {
-                Scope::Everywhere => volumes.iter().all(|v| v.phase.is_complete()),
-                Scope::Folder { volume, .. } => volumes[volume].phase.is_complete(),
-                Scope::Nowhere => true,
-            };
+            let complete = Coverage::of(&volumes, scope, false).incomplete().is_none();
             let left = deadline.saturating_duration_since(Instant::now());
             if complete || left.is_zero() {
                 return Ok(());
@@ -378,11 +374,14 @@ mod win {
     /// The ways a volume of `status` is not complete, each as the warning
     /// `--status` writes for it.
     fn status_warnings(status: &DaemonStatus) -> Vec<&'static str> {
+        // Every volume, and unknown sizes and dates whatever a search reads,
+        // because the report is about the index, not one search.
+        let every_volume = Coverage::of(&status.volumes, None, true);
         let mut warnings = Vec::new();
-        if status.volumes.iter().any(|v| !v.phase.is_complete()) {
+        if every_volume.incomplete().is_some() {
             warnings.push("some volumes are not ready; the phase above shows why");
         }
-        if status.volumes.iter().any(|v| v.metadata_pending) {
+        if every_volume.sizes_or_dates_unknown().is_some() {
             warnings.push("gozler could not read the sizes and dates on some volumes");
         }
         warnings

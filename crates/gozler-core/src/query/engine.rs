@@ -23,6 +23,7 @@ use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::ops::Range;
 
 /// One matched entry. The daemon formats `mtime` for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +171,7 @@ enum Check {
 
 /// The text a [`Check::Text`] reads, in the form the query compares: folded
 /// unless it matches case.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
     Name,
     Path,
@@ -449,19 +451,48 @@ impl Check {
     }
 }
 
+impl Matcher {
+    /// Appends to `parts` each part of `text` that this matcher matches, as
+    /// a byte range, with the occurrence rules of [`Check::test`], so the
+    /// part a window shows bold is always one that made the entry match.
+    /// A wildcard gives the parts its literal characters matched, and a
+    /// regular expression each of its matches.
+    fn parts(&self, text: &[u8], code_points: &mut CodePointBuf, parts: &mut Vec<Range<usize>>) {
+        let found = |finder: &memmem::Finder, accept: fn(&Occurrence) -> bool| {
+            let len = finder.needle().len();
+            occurrences(finder, text)
+                .filter(accept)
+                .map(move |o| o.start..o.start + len)
+                .collect::<Vec<_>>()
+        };
+        match self {
+            Matcher::Contains(finder) => parts.extend(found(finder, |_| true)),
+            Matcher::WholeWord(finder) => parts.extend(found(finder, Occurrence::is_whole_word)),
+            Matcher::WordStart(finder) => parts.extend(found(finder, Occurrence::is_word_start)),
+            Matcher::Start(start) => {
+                if text.starts_with(start) {
+                    parts.push(0..start.len());
+                }
+            }
+            Matcher::Wildcard(wildcard) => wildcard.literal_parts(text, code_points, parts),
+            Matcher::Regex(regex) => parts.extend(regex.find_iter(text).map(|m| m.range())),
+        }
+    }
+}
+
 /// Whether `text` contains the finder's needle with no letter or digit right
 /// before or after it. As in Everything, every other character, `_`
 /// included, ends a word; letters and digits outside ASCII are word
 /// characters too.
 fn contains_whole_word(finder: &memmem::Finder, text: &[u8]) -> bool {
-    occurrences(finder, text).any(|(before, after)| !is_word(before) && !is_word(after))
+    occurrences(finder, text).any(|o| o.is_whole_word())
 }
 
 /// Whether `text` contains the finder's needle where a word starts: at the
 /// start of `text`, or after a character that is not a letter or digit, as
 /// [`contains_whole_word`] reads a word.
 fn contains_at_word_start(finder: &memmem::Finder, text: &[u8]) -> bool {
-    occurrences(finder, text).any(|(before, _)| !is_word(before))
+    occurrences(finder, text).any(|o| o.is_word_start())
 }
 
 /// Whether a code point is a letter or a digit; `None`, the edge of the
@@ -471,12 +502,30 @@ fn is_word(cp: Option<u32>) -> bool {
         .is_some_and(char::is_alphanumeric)
 }
 
+/// Where a needle occurs in a text, and the code points right before and
+/// after it; `None` at an edge of the text.
+struct Occurrence {
+    start: usize,
+    before: Option<u32>,
+    after: Option<u32>,
+}
+
+impl Occurrence {
+    fn is_whole_word(&self) -> bool {
+        !is_word(self.before) && !is_word(self.after)
+    }
+
+    fn is_word_start(&self) -> bool {
+        !is_word(self.before)
+    }
+}
+
 /// Each occurrence of the finder's needle in `text`, overlapping ones
-/// included, as the code points right before and after it.
+/// included.
 fn occurrences<'a>(
     finder: &'a memmem::Finder,
     text: &'a [u8],
-) -> impl Iterator<Item = (Option<u32>, Option<u32>)> + 'a {
+) -> impl Iterator<Item = Occurrence> + 'a {
     use crate::wtf8::CodePoints;
     // A code point is at most 4 bytes, and only its first is not 0b10xxxxxx.
     let last = |bytes: &[u8]| {
@@ -490,8 +539,143 @@ fn occurrences<'a>(
         let end = start + finder.needle().len();
         // The next occurrence may overlap this one: `a-a` in `xa-a-a`.
         from = start + 1;
-        Some((last(&text[..start]), CodePoints::new(&text[end..]).next()))
+        Some(Occurrence {
+            start,
+            before: last(&text[..start]),
+            after: CodePoints::new(&text[end..]).next(),
+        })
     })
+}
+
+/// The parts of an entry's full path that a query's text terms match, which
+/// the window shows bold, so a person sees why a row matched.
+///
+/// It compiles each positive text term as [`CompiledQuery`] does and finds
+/// its parts with the matcher that decides whether the entry matches, so the
+/// bold parts and the matches cannot disagree. A negated term matched by
+/// being absent, and a test of the size, the date, the kind, the extension,
+/// the attributes or the parent folder matches no text, so neither gives a
+/// part. Build it once per search: it compiles every term.
+pub struct MatchedParts {
+    match_case: bool,
+    terms: Vec<(Target, Matcher)>,
+}
+
+impl MatchedParts {
+    /// The text terms of `query`, compiled.
+    ///
+    /// # Errors
+    ///
+    /// A regular expression that [`CompiledQuery::new`] refuses, as
+    /// [`QueryError::Malformed`].
+    pub fn new(query: &ParsedQuery) -> Result<Self, QueryError> {
+        let mut terms = Vec::new();
+        for term in query.clauses.iter().flat_map(|c| &c.terms) {
+            if term.negated {
+                continue;
+            }
+            if let Check::Text(target, matcher) = Check::new(&term.test, query.match_case)? {
+                terms.push((target, matcher));
+            }
+        }
+        Ok(Self {
+            match_case: query.match_case,
+            terms,
+        })
+    }
+
+    /// The byte ranges of `full_path` that the terms match, in order and
+    /// without overlaps. A name term's parts lie in the name, after the last
+    /// `\`; a path term's anywhere in the full path.
+    pub fn ranges(&self, full_path: &str) -> Vec<Range<usize>> {
+        let name_at = full_path.rfind('\\').map_or(0, |i| i + 1);
+        let mut ranges = Vec::new();
+        let mut code_points = CodePointBuf::new();
+        let mut found = Vec::new();
+        for (target, raw, offset) in [
+            (Target::Name, &full_path[name_at..], name_at),
+            (Target::Path, full_path, 0),
+        ] {
+            let matchers = self.terms.iter().filter(|(t, _)| *t == target);
+            if matchers.clone().next().is_none() {
+                continue;
+            }
+            let compared = Compared::new(raw, self.match_case);
+            found.clear();
+            for (_, matcher) in matchers {
+                matcher.parts(&compared.text, &mut code_points, &mut found);
+            }
+            ranges.extend(found.iter().filter(|r| !r.is_empty()).map(|r| {
+                let r = compared.raw_range(r.clone());
+                r.start + offset..r.end + offset
+            }));
+        }
+        ranges.sort_by_key(|r| r.start);
+        let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            match merged.last_mut() {
+                Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+                _ => merged.push(range),
+            }
+        }
+        merged
+    }
+}
+
+/// A text in the form a query compares it, folded unless the query matches
+/// case, with the way back from a range of that form to the text as stored.
+struct Compared<'a> {
+    raw: &'a str,
+    text: std::borrow::Cow<'a, [u8]>,
+    /// Each character boundary of the raw text, with the length of the
+    /// compared text before it; `None` when every byte keeps its place: a
+    /// query that matches case, or ASCII text, which folds byte for byte.
+    boundaries: Option<Vec<(usize, usize)>>,
+}
+
+impl<'a> Compared<'a> {
+    fn new(raw: &'a str, match_case: bool) -> Self {
+        if match_case {
+            return Self {
+                raw,
+                text: raw.as_bytes().into(),
+                boundaries: None,
+            };
+        }
+        // Folding can change a character's length, and composes a
+        // decomposed letter with its accent, so a boundary is mapped through
+        // the folded length of the whole text before it.
+        let boundaries = (!raw.is_ascii()).then(|| {
+            raw.char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(raw.len()))
+                .map(|i| (i, fold(&raw.as_bytes()[..i]).len()))
+                .collect()
+        });
+        Self {
+            raw,
+            text: fold(raw.as_bytes()).into(),
+            boundaries,
+        }
+    }
+
+    /// The range of the raw text that `range` of the compared text came
+    /// from, widened to whole characters.
+    fn raw_range(&self, range: Range<usize>) -> Range<usize> {
+        let Some(boundaries) = &self.boundaries else {
+            return range;
+        };
+        let start = boundaries
+            .iter()
+            .rev()
+            .find(|&&(_, at)| at <= range.start)
+            .map_or(0, |&(raw_at, _)| raw_at);
+        let end = boundaries
+            .iter()
+            .find(|&&(_, at)| at >= range.end)
+            .map_or(self.raw.len(), |&(raw_at, _)| raw_at);
+        start..end.max(start)
+    }
 }
 
 /// A matched entry before its path is built (deferred to the final page).
@@ -1084,7 +1268,9 @@ mod tests {
     use super::*;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::query::order::{VolumeRun, order_hits};
-    use crate::query::parse::{Clause, ParseOptions, Term, parse_query, parse_query_with};
+    use crate::query::parse::{
+        Clause, ParseOptions, Term, TermMatch, parse_query, parse_query_with,
+    };
     use crate::types::{Frn, SortDir};
     use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 
@@ -1691,6 +1877,41 @@ mod tests {
             ]
         );
         assert!(found("wordstart:ocs", false, true).is_empty());
+    }
+
+    /// The window shows these parts bold as the reason a row matched, so a
+    /// part must be where a term matched: a lost word-start check would
+    /// bold `para` in `comparator.txt`, and a range of the folded text used
+    /// as it is would cut the stored name where folding changed a length.
+    #[test]
+    fn matched_parts_are_where_the_terms_matched() {
+        let parts = |query: &str, term_match, path: &'static str| -> Vec<&'static str> {
+            let options = ParseOptions {
+                term_match,
+                ..ParseOptions::default()
+            };
+            let query = parse_query_with(query, options).unwrap();
+            let ranges = MatchedParts::new(&query).unwrap().ranges(path);
+            ranges.into_iter().map(|r| &path[r]).collect()
+        };
+        let pills = r"C:\docs\Paracetamol 500mg.pdf";
+        assert_eq!(
+            parts("para 50", TermMatch::WordStart, pills),
+            ["Para", "50"]
+        );
+        assert!(parts("para", TermMatch::WordStart, r"C:\docs\comparator.txt").is_empty());
+        // İ folds to the one byte of i.
+        assert_eq!(
+            parts("report", TermMatch::Anywhere, r"C:\İİ report.txt"),
+            ["report"]
+        );
+        // A path term reaches into the folder, a wildcard gives its
+        // literal characters, and the other tests give nothing.
+        assert_eq!(
+            parts(r"docs\para size:>1 !x", TermMatch::Anywhere, pills),
+            [r"docs\Para"]
+        );
+        assert_eq!(parts("*.pdf", TermMatch::Anywhere, pills), [".pdf"]);
     }
 
     /// A regular expression matches anywhere in the name unless it anchors,

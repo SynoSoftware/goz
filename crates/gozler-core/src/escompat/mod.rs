@@ -29,4 +29,4 @@ pub use argv::{
 };
 pub use exit::ExitCode;
 pub use help::{help, search_syntax, version};
-pub use request::{add_parent, build_search};
+pub use request::build_search;

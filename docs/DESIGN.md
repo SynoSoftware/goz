@@ -132,7 +132,7 @@ Each of these waits for a concrete need:
 - Content search: `rg` does that.
 - `< >` grouping of terms.
 - Paging: es's `-viewport-offset` and `-viewport-count` are unknown options (exit 6). The pipe protocol keeps its `offset` field for other applications.
-- EFU file lists, playlists, bookmarks, macros, highlighting, and the size and date format menus.
+- EFU file lists, playlists, bookmarks, macros, and the size and date format menus.
 
 These do not fit gozler:
 

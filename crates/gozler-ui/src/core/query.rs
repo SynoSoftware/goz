@@ -1,11 +1,43 @@
-//! What the person asks for besides the typed text: the match controls and
-//! the sort.
+//! What the person asks for besides the typed text: the match controls, the
+//! sort, and the search that the text and the match controls make.
 
-use gozler_core::types::{SortDir, SortKey, SortSpec};
+use gozler_core::query::{QueryError, QueryStart, TermMatch};
+use gozler_core::search::{Search, SearchInput, TextMatch};
+use gozler_core::types::{SortDir, SortKey};
+use serde::{Deserialize, Serialize};
+
+/// The search that `text` and the match controls ask for. The window parses
+/// with no working folder, so a relative path is the parser's
+/// [`QueryError::RelativePath`], which asks for the full path.
+pub(crate) fn search(
+    text: &str,
+    matching: Matching,
+    query_start: &QueryStart,
+) -> Result<Search, QueryError> {
+    let text_match = match matching.mode {
+        MatchMode::StartOfWords => TextMatch::Terms(TermMatch::WordStart),
+        MatchMode::StartOfName => TextMatch::Terms(TermMatch::NameStart),
+        MatchMode::Anywhere => TextMatch::Terms(TermMatch::Anywhere),
+        MatchMode::WholeWords => TextMatch::Terms(TermMatch::WholeWords),
+        MatchMode::RegularExpression => TextMatch::Regex,
+    };
+    Search::new(&SearchInput {
+        text,
+        text_match,
+        match_case: matching.case,
+        match_path: matching.path,
+        regexes: &[],
+        scope: None,
+        parent: None,
+        working_dir: None,
+        query_start,
+    })
+}
 
 /// How the typed name terms match; one choice, because the modes exclude
-/// each other (spec: Search box).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// each other (spec: Search box). Its names are `ui.json`'s.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MatchMode {
     #[default]
     StartOfWords,
@@ -37,7 +69,7 @@ impl MatchMode {
 }
 
 /// The match controls beside the search box.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Matching {
     pub(crate) mode: MatchMode,
     pub(crate) case: bool,
@@ -54,11 +86,6 @@ pub(crate) const SORT_KEYS: [SortKey; 5] = [
 ];
 
 pub(crate) const SORT_DIRECTIONS: [SortDir; 2] = [SortDir::Asc, SortDir::Desc];
-
-/// The sort a first start shows: by name, ascending.
-pub(crate) fn default_sort() -> SortSpec {
-    SortSpec::default_for(SortKey::Name)
-}
 
 pub(crate) fn sort_key_label(key: SortKey) -> &'static str {
     match key {
