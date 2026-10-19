@@ -7,22 +7,21 @@
 //! `gozler-core` interprets them, and neither knows about the other. The daemon
 //! (here) owns the buffers and the loop.
 
-use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use gozler_core::index::VolumeIndex;
+use gozler_core::index::settle::{self, FileLink, FileStat, VolumeReads};
 use gozler_core::layout::{
     LayoutFile, RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer, walk_listing_buffer,
 };
 use gozler_core::types::Frn;
-use gozler_core::usn::record::FILE_ATTRIBUTE_DIRECTORY;
 use gozler_core::usn::walk_enum_buffer;
 use gozler_winfs::{
     ERROR_ACCESS_DENIED, JournalInfo, JournalQuery, JournalRecords, VolumeHandle, VolumeInfo,
-    WinError, create_usn_journal, enum_usn_data, enumerate_volumes, open_folder, query_file_layout,
-    query_usn_journal, root_folder_id, volume_total_bytes,
+    WinError, create_usn_journal, enum_usn_data, enumerate_volumes, file_links, open_folder,
+    query_file_layout, query_usn_journal, root_folder_id, stat_file, volume_total_bytes,
 };
 
 /// Floor for the USN journal: large enough that routine churn does not wrap it
@@ -39,9 +38,6 @@ const IO_BUFFER_BYTES: usize = 1024 * 1024;
 /// 64 KiB listing buffer, as `u64`s because the entries are 8-byte aligned.
 /// It holds several hundred names, so one read lists most folders.
 const LISTING_BUFFER_WORDS: usize = 8 * 1024;
-/// `FILE_ATTRIBUTE_REPARSE_POINT`: a folder with it, such as a junction, is
-/// indexed but not entered, so the walk cannot loop or leave the volume.
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// The filesystems gozler indexes. They build the index differently and ask
 /// the journal for different records; the index, the journal tail and the
@@ -219,7 +215,7 @@ pub(crate) struct BuiltIndex {
     pub enum_secs: Option<f64>,
     /// The FILE_LAYOUT pass stopped, so some files' sizes and dates are
     /// unknown. The volume stores it as
-    /// [`VolumeState::metadata_pending`](crate::volume_state::VolumeState::metadata_pending).
+    /// [`Indexed::metadata_pending`](crate::volume_state::Indexed::metadata_pending).
     pub metadata_pending: bool,
 }
 
@@ -244,7 +240,8 @@ enum LayoutPass {
 /// every file after it from the index.
 ///
 /// ReFS answers neither request, so its build walks every folder from the
-/// root with [`walk_folders`], which gives names, sizes and dates in one pass.
+/// root with [`settle::walk_folders`], which gives names, sizes and dates in
+/// one pass.
 pub(crate) fn build_index(
     handle: &VolumeHandle,
     guid_path: &str,
@@ -259,11 +256,16 @@ pub(crate) fn build_index(
 
     let read_start = Instant::now();
     if filesystem == Filesystem::Refs {
-        let walked = walk_folders(handle, &[root], cancelled, |files| {
-            for f in files {
-                index.insert_listed(f);
-            }
-        })?;
+        let walked = settle::walk_folders(
+            &mut Disk::new(handle, guid_path),
+            &[root],
+            cancelled,
+            |files| {
+                for f in files {
+                    index.insert_listed(f);
+                }
+            },
+        )?;
         if !walked {
             return Ok(None);
         }
@@ -330,59 +332,87 @@ pub(crate) fn build_index(
     }))
 }
 
-/// Lists every folder in `tops` and every folder under them, and hands each
-/// page of listed names to `insert`. Returns `false` when `cancelled`, asked
-/// before each folder, stopped the walk.
-///
-/// A folder that is gone when the walk opens it is skipped: the journal's
-/// delete record removes it. Any other failure fails the walk, because the
-/// index cannot tell which names it missed. A folder reparse point, such as a
-/// junction, is listed but not entered.
-///
-/// Each folder is listed once. A folder that moved during the walk can be met
-/// again, and the journal records every change after its first listing; a
-/// listing that names a folder inside itself, which only corrupt data can
-/// do, would otherwise make the walk endless.
-pub(crate) fn walk_folders(
-    handle: &VolumeHandle,
-    tops: &[Frn],
-    mut cancelled: impl FnMut() -> bool,
-    mut insert: impl FnMut(&[LayoutFile]),
-) -> Result<bool> {
-    let mut buf = vec![0u64; LISTING_BUFFER_WORDS];
-    let mut folders: VecDeque<Frn> = tops.iter().copied().collect();
-    let mut listed: HashSet<Frn> = HashSet::new();
-    while let Some(folder) = folders.pop_front() {
-        if !listed.insert(folder) {
-            continue;
-        }
-        if cancelled() {
-            return Ok(false);
-        }
-        let Some(listing) =
-            open_folder(handle, folder.0).with_context(|| format!("opening folder {folder:?}"))?
-        else {
-            continue;
-        };
-        while let Some(page) = listing
-            .read_listing(&mut buf)
-            .with_context(|| format!("listing folder {folder:?}"))?
-        {
-            let files = walk_listing_buffer(folder, page)
-                .with_context(|| format!("parsing the listing of folder {folder:?}"))?;
-            folders.extend(
-                files
-                    .iter()
-                    .filter(|f| {
-                        f.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-                            && f.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                    })
-                    .map(|f| f.frn),
-            );
-            insert(&files);
+/// A volume's reads for [`settle`], on the handle the caller owns. Each error
+/// is logged at debug level where it happens, with the volume and file ID.
+pub(crate) struct Disk<'a> {
+    handle: &'a VolumeHandle,
+    /// The volume as log lines name it.
+    volume: &'a str,
+    buf: Vec<u64>,
+}
+
+impl<'a> Disk<'a> {
+    pub(crate) fn new(handle: &'a VolumeHandle, volume: &'a str) -> Self {
+        Self {
+            handle,
+            volume,
+            buf: vec![0; LISTING_BUFFER_WORDS],
         }
     }
-    Ok(true)
+
+    fn list(&mut self, folder: Frn, page: &mut dyn FnMut(&[LayoutFile])) -> Result<bool> {
+        let Some(listing) =
+            open_folder(self.handle, folder.0).map_err(|e| anyhow!("opening it: {e}"))?
+        else {
+            return Ok(false);
+        };
+        while let Some(bytes) = listing
+            .read_listing(&mut self.buf)
+            .map_err(|e| anyhow!("reading its listing: {e}"))?
+        {
+            let files = walk_listing_buffer(folder, bytes)
+                .map_err(|e| anyhow!("parsing its listing: {e}"))?;
+            page(&files);
+        }
+        Ok(true)
+    }
+}
+
+impl VolumeReads for Disk<'_> {
+    type Error = anyhow::Error;
+
+    fn list_folder(&mut self, folder: Frn, page: &mut dyn FnMut(&[LayoutFile])) -> Result<bool> {
+        let listed = self.list(folder, page);
+        if let Err(e) = &listed {
+            tracing::debug!(volume = %self.volume, ?folder, error = %e, "folder listing failed");
+        }
+        listed
+    }
+
+    fn stat(&mut self, frn: Frn) -> Result<Option<FileStat>> {
+        match stat_file(self.handle, frn.0) {
+            Ok(stat) => Ok(stat.map(|s| FileStat {
+                size: s.size,
+                mtime: s.mtime_ft,
+            })),
+            Err(e) => {
+                tracing::debug!(volume = %self.volume, ?frn, error = %e, "live stat failed");
+                Err(e.into())
+            }
+        }
+    }
+
+    fn links(&mut self, frn: Frn) -> Result<Option<Vec<FileLink>>> {
+        match file_links(self.handle, frn.0) {
+            Ok(links) => Ok(links.map(|links| {
+                links
+                    .into_iter()
+                    .map(|link| {
+                        let mut name = Vec::new();
+                        gozler_core::wtf8::from_utf16(&link.name, &mut name);
+                        FileLink {
+                            folder: Frn(link.folder),
+                            name,
+                        }
+                    })
+                    .collect()
+            })),
+            Err(e) => {
+                tracing::debug!(volume = %self.volume, ?frn, error = %e, "link walk failed");
+                Err(e.into())
+            }
+        }
+    }
 }
 
 /// The FILE_LAYOUT pass: hands each file of each page that `read_page` writes
@@ -443,6 +473,7 @@ fn journal_target_bytes(volume_bytes: Option<u64>) -> u64 {
 }
 
 /// What [`ensure_journal`] got for a volume.
+#[derive(Debug)]
 pub(crate) enum JournalSetup {
     /// A usable journal, with the cursor to tail it from.
     Active(JournalInfo),

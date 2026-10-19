@@ -10,6 +10,7 @@ use crate::usn::record::{
     FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_BASIC_INFO_CHANGE,
     USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME,
 };
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 // -- record/index construction helpers -----------------------------------
@@ -912,33 +913,67 @@ fn listed(f: Frn, folder: Frn, name: &str, is_dir: bool) -> LayoutFile {
     }
 }
 
-/// Lists `tops` and every folder under them, one folder at a time, as the
-/// daemon's walk does. `states[t]` is the model after `t` changes, and
-/// `listing_time` says when each folder is listed; a folder that is gone by
-/// then is skipped.
-fn walk_model(
-    idx: &mut VolumeIndex,
+/// The volume a walk race reads: `states[t]` is the model after `t` changes,
+/// and `now` is the state each read sees. While `listing_changes` is
+/// `Some`, the model changes before each listing by the next count, cycled,
+/// as a volume does while a walk builds its index.
+///
+/// Each read checks that `index` is not locked, because a volume read made
+/// under the index lock would stall every search on the volume.
+struct ModelReads<'a> {
+    index: &'a RefCell<VolumeIndex>,
     ids: Ids,
-    states: &[Model],
-    tops: &[u64],
-    mut listing_time: impl FnMut() -> usize,
-) {
-    let mut folders: std::collections::VecDeque<u64> = tops.iter().copied().collect();
-    let mut listed = HashSet::new();
-    while let Some(folder) = folders.pop_front() {
-        if !listed.insert(folder) {
-            continue;
+    states: &'a [Model],
+    now: usize,
+    listing_changes: Option<std::iter::Cycle<std::slice::Iter<'a, usize>>>,
+}
+
+impl ModelReads<'_> {
+    fn assert_unlocked(&self) {
+        assert!(
+            self.index.try_borrow_mut().is_ok(),
+            "a volume read under the index lock"
+        );
+    }
+}
+
+impl settle::VolumeReads for ModelReads<'_> {
+    type Error = std::convert::Infallible;
+
+    fn list_folder(
+        &mut self,
+        folder: Frn,
+        page: &mut dyn FnMut(&[LayoutFile]),
+    ) -> Result<bool, Self::Error> {
+        self.assert_unlocked();
+        if let Some(changes) = &mut self.listing_changes {
+            let last = self.states.len() - 1;
+            self.now = (self.now + changes.next().expect("cycled")).min(last);
         }
-        let model = &states[listing_time()];
+        let model = &self.states[self.now];
+        let folder = self.ids.model(folder);
         if !model.exists(folder) {
-            continue;
+            return Ok(false);
         }
-        for file in model.listing(ids, folder) {
-            if file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                folders.push_back(ids.model(file.frn));
-            }
-            idx.insert_listed(&file);
-        }
+        page(&model.listing(self.ids, folder));
+        Ok(true)
+    }
+
+    fn stat(&mut self, _: Frn) -> Result<Option<settle::FileStat>, Self::Error> {
+        self.assert_unlocked();
+        Ok(Some(settle::FileStat { size: 0, mtime: 0 }))
+    }
+
+    /// The model gives each file one name.
+    fn links(&mut self, frn: Frn) -> Result<Option<Vec<settle::FileLink>>, Self::Error> {
+        self.assert_unlocked();
+        let entry = self.states[self.now].entries.get(&self.ids.model(frn));
+        Ok(entry.map(|(parent, name, _)| {
+            vec![settle::FileLink {
+                folder: self.ids.id(*parent),
+                name: name.clone().into_bytes(),
+            }]
+        }))
     }
 }
 
@@ -1168,9 +1203,10 @@ proptest! {
 
     /// Walk race: a folder walk is not a snapshot, so the model keeps changing
     /// between the folders it lists. The journal then replays from the cursor
-    /// taken before the walk, in batches, and after each batch the folders the
-    /// index missed are listed, at that moment or later, as the tail does. The
-    /// result must equal the final model. Without the missed-folder rule a
+    /// taken before the walk, in batches, and `settle::settle_batch` settles
+    /// each batch, reading the volume at that moment or later, as the tail
+    /// does. The result must equal the final model. Without the missed-folder
+    /// rule a
     /// folder renamed into an already listed part loses its contents, and a
     /// folder listed twice must not duplicate them.
     #[test]
@@ -1202,18 +1238,24 @@ proptest! {
         let last = states.len() - 1;
         let start = (last as f64 * cursor) as usize;
 
-        let mut idx = VolumeIndex::new(ids.root());
-        let mut now = start;
-        let mut listings = changes_per_listing.iter().cycle();
-        walk_model(&mut idx, ids, &states, &[MODEL_ROOT], || {
-            now = (now + listings.next().expect("cycled")).min(last);
-            now
+        let index = RefCell::new(VolumeIndex::new(ids.root()));
+        let mut reads = ModelReads {
+            index: &index,
+            ids,
+            states: &states,
+            now: start,
+            listing_changes: Some(changes_per_listing.iter().cycle()),
+        };
+        let walked = settle::walk_folders(&mut reads, &[ids.root()], || false, |files| {
+            files.iter().for_each(|f| index.borrow_mut().insert_listed(f));
         });
+        prop_assert!(matches!(walked, Ok(true)));
+        reads.listing_changes = None;
 
         let mut delays = walk_delays.iter().cycle();
         let mut ends = batch_ends.iter().cycle();
         let mut batch = Vec::new();
-        let mut walked_at = now;
+        let mut walked_at = reads.now;
         let journal = records.iter().filter(|(t, _)| *t > start);
         let count = journal.clone().count();
         for (i, (t, rec)) in journal.enumerate() {
@@ -1221,24 +1263,19 @@ proptest! {
             if !*ends.next().expect("cycled") && i + 1 < count {
                 continue;
             }
-            let outcome = idx.apply_batch(&batch);
-            batch.clear();
             walked_at = (walked_at.max(*t) + delays.next().expect("cycled")).min(last);
-            let missed: Vec<u64> = outcome.needs_walk.iter().map(|&f| ids.model(f)).collect();
-            walk_model(&mut idx, ids, &states, &missed, || walked_at);
-            // The hard-link reconcile: a file the walk met in two folders
-            // has two names until the filesystem's one name replaces them.
-            for &f in &outcome.needs_link_reconcile {
-                let Some((parent, name, _)) = states[walked_at].entries.get(&ids.model(f)) else {
-                    continue; // gone: its delete record removes it
-                };
-                if let Some(parent) = idx.head_of(ids.id(*parent)) {
-                    let name = name.clone().into_bytes();
-                    idx.reconcile_links(f, &[LinkTarget { parent, name }]);
-                }
-            }
+            reads.now = walked_at;
+            let settled = settle::settle_batch(
+                &index,
+                &mut reads,
+                settle::Batch { records: &batch, replaying_walk: true },
+                || false,
+            );
+            prop_assert!(settled.is_ok());
+            batch.clear();
         }
 
+        let idx = index.borrow();
         prop_assert_eq!(path_set(&idx), model.path_set());
         prop_assert!(idx.dir_index_matches_rebuild(), "dir index drifted after walk race");
         prop_assert!(idx.name_chains_match_rebuild(), "name chains drifted after walk race");

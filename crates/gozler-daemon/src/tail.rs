@@ -4,25 +4,16 @@
 //!
 //! It polls with a non-blocking drain and a short sleep when caught up, which
 //! gives sub-100 ms freshness and a clean, `CancelSynchronousIo`-free shutdown,
-//! unlike a blocking read with `BytesToWaitFor=1`. It applies structural
-//! changes (create / rename / delete) immediately and collects the
-//! `ApplyOutcome::needs_stat` side effects for the enricher, which refreshes
-//! the size/date a USN record does not carry.
-//!
-//! Hard links are reconciled out of band, from a Win32 link walk (see
-//! [`reconcile_links`]).
-//!
-//! A rename can also bring in a folder the index lacks, because a folder walk
-//! is not a snapshot (see `ApplyOutcome::needs_walk`). The tail lists such a
-//! folder and everything under it; a listing that fails starts a rescan.
+//! unlike a blocking read with `BytesToWaitFor=1`. Each batch goes through
+//! [`settle_batch`], which applies it and reads from the volume what its
+//! records leave out; a missed folder that cannot be listed starts a rescan.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use gozler_core::index::LinkTarget;
-use gozler_core::types::{Frn, VolumePhase};
+use gozler_core::index::settle::{Batch, settle_batch};
 use gozler_core::usn::record::{
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_CLOSE, USN_REASON_DATA_EXTEND,
     USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
@@ -32,10 +23,10 @@ use gozler_core::usn::record::{
 use gozler_core::usn::walk_journal_buffer;
 use gozler_winfs::{
     ERROR_JOURNAL_DELETE_IN_PROGRESS, ERROR_JOURNAL_ENTRY_DELETED, ERROR_JOURNAL_NOT_ACTIVE,
-    JournalInfo, VolumeHandle, read_usn_journal, stat_file,
+    JournalInfo, VolumeHandle, read_usn_journal,
 };
 
-use crate::bootstrap::{self, Filesystem, JournalSetup};
+use crate::bootstrap::{self, Disk, Filesystem, JournalSetup};
 use crate::pulse::TailPulse;
 use crate::volume_state::VolumeState;
 
@@ -114,8 +105,7 @@ pub(crate) struct TailHandle {
     /// Volume this tail serves, for supervisor log lines.
     pub(crate) mount: String,
     /// The tail's self-reported liveness: beating, busy in a rebuild, or
-    /// retired. The supervisor's stall decisions read only this, never
-    /// `state.phase`, which reports the volume's state to users.
+    /// retired. Stall verdicts read only this, never the volume's phase.
     pub(crate) pulse: Arc<TailPulse>,
     /// Real handle to the tail thread, target of `cancel_synchronous_io`.
     pub(crate) io_handle: gozler_winfs::ThreadIoHandle,
@@ -222,8 +212,7 @@ impl ReadPosition {
 struct ReadFailures {
     since: Instant,
     backoff: Duration,
-    /// This run moved the volume to Offline, so only its end moves it back and
-    /// the tail never stomps a phase someone else owns (Rescanning, Failed).
+    /// This run moved the volume to Offline, so only its end moves it back.
     degraded: bool,
 }
 
@@ -256,6 +245,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
         return;
     };
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
+    let mut disk = Disk::new(handle, state.mount_prefix());
 
     'tail: while !stop.load(Ordering::Relaxed) {
         // Liveness stamp for the supervisor: as long as this loop is turning,
@@ -279,7 +269,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                             volume = %state.mount_prefix(),
                             "journal reads recovered; volume is tracking again"
                         );
-                        *state.phase.write() = VolumePhase::Live;
+                        state.reads_recovered();
                     }
                     let walk = match walk_journal_buffer(&buf[..bytes]) {
                         Ok(w) => w,
@@ -296,56 +286,38 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         std::thread::sleep(IDLE_POLL);
                         continue 'tail;
                     }
-                    // Hold the write lock only for the mutation; the owned
-                    // `ApplyOutcome` needs no lock. Arena compaction, the one
-                    // long step, is not part of it: `apply_batch` reports it
-                    // and `compact_index` does the copying off the exclusive
-                    // lock.
-                    let mut outcome = {
-                        let mut index = state.index.write();
-                        index.apply_batch(&walk.records)
+                    let batch = Batch {
+                        records: &walk.records,
+                        replaying_walk: pos.replaying_walk,
                     };
-                    for anomaly in &outcome.anomalies {
+                    // The settle asks before each folder and file it reads.
+                    // Teardown must not wait behind a long batch: each read is
+                    // a blocking open, and dozens on a slow disk outlast the
+                    // teardown deadline. And that progress is liveness: without
+                    // the stamp, a long batch on a slow disk reads as a stale
+                    // beat, which delays the supervisor's budget refund and
+                    // inches toward a spurious stall verdict.
+                    let cancelled = || {
+                        pulse.beat();
+                        stop.load(Ordering::Relaxed)
+                    };
+                    let settled = match settle_batch(state, &mut disk, batch, cancelled) {
+                        Ok(settled) => settled,
+                        Err(e) => break 'rescan (RescanReason::WalkFailed, e.to_string()),
+                    };
+                    for anomaly in &settled.anomalies {
                         tracing::debug!(volume = %state.mount_prefix(), ?anomaly, "index anomaly");
                     }
-                    if pos.replaying_walk {
-                        // A walk lists one folder at a time, so a hard link
-                        // renamed during it from a folder not yet listed into one
-                        // already listed was never listed, and its rename record
-                        // replaced the file's other name. The link reconcile
-                        // restores the file's real names.
-                        outcome.needs_link_reconcile.extend(
-                            walk.records
-                                .iter()
-                                .filter(|r| {
-                                    r.reason & USN_REASON_RENAME_NEW_NAME != 0 && !r.is_dir()
-                                })
-                                .map(|r| r.frn),
+                    if settled.missed_folders > 0 {
+                        tracing::debug!(
+                            volume = %state.mount_prefix(),
+                            folders = settled.missed_folders,
+                            entries = settled.missed_entries,
+                            "listed folders the index missed"
                         );
-                        outcome.needs_link_reconcile.sort_unstable();
-                        outcome.needs_link_reconcile.dedup();
                     }
-
-                    // Before the link reconcile, which finds each link's folder by
-                    // its path: that folder may be one this walk adds.
-                    if let Err(e) = walk_missed(state, handle, &outcome.needs_walk, stop, pulse) {
-                        break 'rescan (RescanReason::WalkFailed, format!("{e:#}"));
-                    }
-                    // USN records carry no size or date, so these FRNs are stat'd.
-                    // Link-dirty FRNs are stat'd too; that does not refresh
-                    // their names.
-                    let mut dirty: Vec<Frn> = outcome
-                        .needs_stat
-                        .iter()
-                        .chain(&outcome.needs_link_reconcile)
-                        .copied()
-                        .collect();
-                    dirty.sort_unstable();
-                    dirty.dedup();
-                    enrich_stats(state, handle, &dirty, stop, pulse);
-                    reconcile_links(state, handle, &outcome.needs_link_reconcile, stop, pulse);
-                    if outcome.wants_compact {
-                        compact_index(state);
+                    if settled.wants_compact {
+                        state.compact_index();
                     }
                     pos.start_usn = walk.next_usn;
                     rescans = 0;
@@ -402,7 +374,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                             failing_for_secs = since.elapsed().as_secs(),
                             "journal reads keep failing; marking volume Offline (its index is no longer current)"
                         );
-                        *state.phase.write() = VolumePhase::Offline;
+                        state.reads_keep_failing();
                         failures.degraded = true;
                     } else {
                         tracing::warn!(volume = %state.mount_prefix(), error = %e, "journal read failed; retrying");
@@ -419,203 +391,6 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
         };
         pos = fresh;
     }
-}
-
-/// Compacts the name arenas, blocking queries only for the install.
-///
-/// The expensive half copies every live name into fresh arenas (hundreds of MB
-/// on a large volume), so it runs while queries keep reading.
-///
-/// The plan is only valid while the index does not change, which is safe here
-/// for a specific reason: a volume has exactly one writer, this tail thread. An
-/// upgradable read lets queries keep reading throughout while excluding any
-/// other writer, and the upgrade to exclusive covers only the column writes.
-fn compact_index(state: &VolumeState) {
-    let started = Instant::now();
-    let guard = state.index.upgradable_read();
-    let Some(plan) = guard.plan_compaction() else {
-        return; // raced with another compaction, or no longer worth it
-    };
-    let planned = started.elapsed();
-
-    let install_started = Instant::now();
-    let mut index = parking_lot::RwLockUpgradableReadGuard::upgrade(guard);
-    index.apply_compaction(plan);
-    drop(index);
-
-    // `blocked_ms` is the only part that stops queries; `planned_ms` runs
-    // alongside them.
-    tracing::debug!(
-        volume = %state.mount_prefix(),
-        planned_ms = planned.as_millis() as u64,
-        blocked_ms = install_started.elapsed().as_millis() as u64,
-        "compacted name arenas"
-    );
-}
-
-/// Reconciles the hard-link set of each FRN in `frns` to what the filesystem
-/// actually reports.
-///
-/// A `HARD_LINK_CHANGE` record names one link and may name a dead one, so the
-/// index cannot learn the real set from the journal. The set comes from a Win32
-/// link walk (`gozler_winfs::file_links`) fed to `VolumeIndex::reconcile_links`.
-///
-/// Mirrors [`enrich_stats`]'s lock discipline: only the apply takes the lock.
-///
-/// An FRN whose walk fails is SKIPPED, never reconciled to an empty set:
-/// `VolumeIndex::reconcile_links` treats empty as a delete, so a transient lock
-/// would otherwise erase a live file from the index.
-fn reconcile_links(
-    state: &VolumeState,
-    handle: &VolumeHandle,
-    frns: &[Frn],
-    stop: &AtomicBool,
-    pulse: &TailPulse,
-) {
-    if frns.is_empty() {
-        return;
-    }
-    let mut resolved: Vec<(Frn, Vec<LinkTarget>)> = Vec::new();
-    let mut dropped = 0u64;
-
-    for &frn in frns {
-        // Teardown must not wait behind a long walk batch: each iteration is
-        // a blocking open, and dozens on a slow disk outlast the teardown
-        // deadline. The daemon is exiting; the results would never be served.
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-        // Per-file progress IS liveness: without the stamp, a long batch on
-        // a slow disk reads as a stale beat, which delays the supervisor's
-        // budget refund and inches toward a spurious stall verdict.
-        pulse.beat();
-        let links = match gozler_winfs::file_links(handle, frn.0) {
-            Ok(Some(l)) if !l.is_empty() => l,
-            // Gone: leave the entry alone. The journal's delete record
-            // removes it.
-            Ok(_) => continue,
-            Err(e) => {
-                tracing::debug!(volume = %state.mount_prefix(), ?frn, error = %e, "link walk failed");
-                dropped += 1;
-                continue;
-            }
-        };
-
-        // Find each link's folder by its file ID, under one short read lock.
-        // Its name would do only if the index were current, and during the
-        // replay of a build it is not: a path can name a folder that a later
-        // record renames or swaps.
-        let index = state.index.read();
-        let targets: Option<Vec<LinkTarget>> = links
-            .iter()
-            .map(|link| {
-                let parent = index.head_of(Frn(link.folder))?;
-                let mut name = Vec::new();
-                gozler_core::wtf8::from_utf16(&link.name, &mut name);
-                Some(LinkTarget { parent, name })
-            })
-            .collect();
-        drop(index);
-
-        // A folder we have not indexed yet: reconciling to a partial set
-        // would delete the links we could not resolve.
-        let Some(targets) = targets else {
-            dropped += 1;
-            continue;
-        };
-        resolved.push((frn, targets));
-    }
-
-    if dropped > 0 {
-        // Not silent: a reconcile we could not perform means names on this
-        // volume may be stale until the next rescan, and `--status` says so.
-        state.index.write().note_link_reconciles_dropped(dropped);
-    }
-    if resolved.is_empty() {
-        return;
-    }
-    let mut index = state.index.write();
-    for (frn, targets) in &resolved {
-        index.reconcile_links(*frn, targets);
-    }
-}
-
-/// Refreshes size/mtime for `frns` (a file created or modified after bootstrap
-/// has no size/date in the USN record; without this it stays "unknown", which
-/// the CSV output renders as a directory). Stats every file with the write lock
-/// RELEASED, since `OpenFileById` must never run under it, then applies the whole
-/// batch under one short lock.
-fn enrich_stats(
-    state: &VolumeState,
-    handle: &VolumeHandle,
-    frns: &[Frn],
-    stop: &AtomicBool,
-    pulse: &TailPulse,
-) {
-    if frns.is_empty() {
-        return;
-    }
-    let mut stats: Vec<(Frn, u64, i64)> = Vec::with_capacity(frns.len());
-    for &frn in frns {
-        // Same teardown escape and per-file stamp as `reconcile_links`.
-        if stop.load(Ordering::Relaxed) {
-            break; // apply what was already gathered
-        }
-        pulse.beat();
-        match stat_file(handle, frn.0) {
-            Ok(Some(s)) => stats.push((frn, s.size, s.mtime_ft)),
-            Ok(None) => {} // gone or locked: nothing to refresh
-            Err(e) => {
-                tracing::debug!(volume = %state.mount_prefix(), ?frn, error = %e, "live stat failed")
-            }
-        }
-    }
-    if stats.is_empty() {
-        return;
-    }
-    let mut index = state.index.write();
-    for (frn, size, mtime) in stats {
-        index.set_stat(frn, size, mtime);
-    }
-}
-
-/// Lists each folder in `folders`, which the index lacked until a rename
-/// brought it in, and everything under it, and inserts what it lists.
-///
-/// Mirrors [`reconcile_links`]'s lock discipline and per-folder pulse. The whole
-/// listing is applied under one short lock. A stop ends the walk and applies
-/// nothing, because the daemon is exiting.
-fn walk_missed(
-    state: &VolumeState,
-    handle: &VolumeHandle,
-    folders: &[Frn],
-    stop: &AtomicBool,
-    pulse: &TailPulse,
-) -> anyhow::Result<()> {
-    if folders.is_empty() {
-        return Ok(());
-    }
-    let mut listed = Vec::new();
-    let cancelled = || {
-        pulse.beat();
-        stop.load(Ordering::Relaxed)
-    };
-    if !bootstrap::walk_folders(handle, folders, cancelled, |files| {
-        listed.extend_from_slice(files);
-    })? {
-        return Ok(());
-    }
-    tracing::debug!(
-        volume = %state.mount_prefix(),
-        folders = folders.len(),
-        entries = listed.len(),
-        "listed folders the index missed"
-    );
-    let mut index = state.index.write();
-    for file in &listed {
-        index.insert_listed(file);
-    }
-    Ok(())
 }
 
 /// Rescan with a storm guard: rebuilds the index, capping consecutive attempts
@@ -660,13 +435,11 @@ fn rescan(
     // The rebuild stamps no pulse; `Busy` tells the supervisor that silence
     // is legitimate.
     let _busy = pulse.busy_scope();
-    // A volume's first build keeps the phase `Bootstrapping`, so `--status`
-    // tells a volume that was never indexed from one being rebuilt.
-    if *state.phase.read() == VolumePhase::Bootstrapping {
+    let building = state.begin_build();
+    if building.is_first() {
         tracing::info!(volume = %state.mount_prefix(), "indexing volume");
     } else {
         tracing::warn!(volume = %state.mount_prefix(), ?reason, detail, "rebuilding index");
-        *state.phase.write() = VolumePhase::Rescanning;
     }
 
     // Capture the cursor BEFORE reading the volume. A change landing after its
@@ -691,33 +464,21 @@ fn rescan(
         }
     };
 
-    {
-        let mut index = state.index.write();
-        *index = built.index;
-        // Set before the phase returns to Live, so a query that reads Live
-        // also reads the new index's flag rather than the old one's.
-        *state.metadata_pending.write() = built.metadata_pending;
-        *state.journal_max_bytes.write() = match &journal {
-            JournalSetup::Active(c) => Some(c.maximum_size),
-            JournalSetup::Refused | JournalSetup::Unavailable => None,
-        };
-    }
+    let entries = built.index.len();
+    building.finish(built, &journal);
 
     match journal {
         JournalSetup::Active(c) => {
-            *state.phase.write() = VolumePhase::Live;
             tracing::info!(
                 volume = %state.mount_prefix(),
-                entries = state.index.read().len(),
+                entries,
                 "index built; tailing the journal"
             );
             Some(ReadPosition::at(c, state.filesystem))
         }
         JournalSetup::Refused => {
-            // Snapshot, not Offline: nothing is wrong and nothing will change,
-            // so the volume must not flag every result incomplete. The tail
-            // stops, and the supervisor sees the phase and does not revive it.
-            *state.phase.write() = VolumePhase::Snapshot;
+            // The tail stops, and the supervisor sees the Snapshot phase and
+            // does not revive it.
             tracing::info!(
                 volume = %state.mount_prefix(),
                 "no USN journal; volume is indexed but its index is a snapshot and cannot track changes"
@@ -725,10 +486,7 @@ fn rescan(
             None
         }
         JournalSetup::Unavailable => {
-            // Rebuilt, but nothing to tail right now. Offline makes status and
-            // query responses flag the volume incomplete instead of falsely
-            // Live; the tail stops and the supervisor revives it.
-            *state.phase.write() = VolumePhase::Offline;
+            // The tail stops and the supervisor revives it.
             tracing::warn!(volume = %state.mount_prefix(), "index built but no journal is available; live updates paused");
             None
         }
@@ -757,9 +515,7 @@ fn mark_failed(state: &VolumeState, reason: RescanReason, detail: &str) {
         detail,
         "volume failed; its tail is stopping and live updates have ended"
     );
-    *state.phase.write() = VolumePhase::Failed {
-        reason: format!("{reason:?}: {detail}"),
-    };
+    state.fail(format!("{reason:?}: {detail}"));
 }
 
 #[cfg(test)]
@@ -809,8 +565,7 @@ mod tests {
     /// from reporting `Live`.
     ///
     /// The loop itself needs a real `VolumeHandle` and cannot be unit-tested, so
-    /// this pins the constants that bound it. The behaviour they drive is
-    /// asserted by the gated Windows test that stops a volume mid-tail.
+    /// this pins the constants that bound it.
     #[test]
     fn retry_policy_is_bounded_and_degrades() {
         // Must tolerate a transient failure: a drive spinning up answers

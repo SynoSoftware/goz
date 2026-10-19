@@ -147,22 +147,25 @@ impl IndexMemory {
 /// Side effects a batch produced that the daemon must service out of band.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApplyOutcome {
-    /// FRNs whose size/mtime changed and need an external stat.
+    /// FRNs whose size/mtime changed and need an external stat, which
+    /// [`settle_batch`](crate::index::settle::settle_batch) reads.
     pub needs_stat: Vec<Frn>,
     /// FRNs whose hard links changed and need an external link-set walk, each
     /// once.
     ///
-    /// The daemon resolves each FRN's real link set with a Win32 link walk and
-    /// applies it through [`VolumeIndex::reconcile_links`]. A walk that cannot
-    /// complete is counted in `IndexStats::link_reconciles_dropped`.
+    /// [`settle_batch`](crate::index::settle::settle_batch) reads each FRN's
+    /// real link set from the volume and applies it through
+    /// [`VolumeIndex::reconcile_links`]. A walk that cannot complete is
+    /// counted in `IndexStats::link_reconciles_dropped`.
     pub needs_link_reconcile: Vec<Frn>,
     /// Folders the index did not hold until a rename brought them in, so
     /// their contents are missing, each once.
     ///
     /// A folder walk lists one folder at a time, so a folder moved during the
     /// walk from a part not yet listed into one already listed is never
-    /// listed, and the journal records no change to its contents. The daemon
-    /// walks each of these folders and inserts what it lists with
+    /// listed, and the journal records no change to its contents.
+    /// [`settle_batch`](crate::index::settle::settle_batch) walks each of
+    /// these folders and inserts what it lists with
     /// [`VolumeIndex::insert_listed`].
     pub needs_walk: Vec<Frn>,
     /// Irregularities worth logging.
@@ -1245,10 +1248,9 @@ impl VolumeIndex {
     /// lock, where queries keep reading, then [`Self::apply_compaction`] the
     /// result.
     ///
-    /// The plan is only valid while the index has not changed. That is not a
-    /// hazard in practice because a volume has exactly one writer (its tail
-    /// thread), which is also the only caller: hold an upgradable read across
-    /// both calls and no write can interleave.
+    /// The plan is only valid while the index has not changed, so hold an
+    /// upgradable read across both calls: it keeps every writer out until it
+    /// upgrades, so the plan cannot go stale whoever else writes.
     pub fn plan_compaction(&self) -> Option<CompactPlan> {
         if !self.names.should_compact() {
             return None;

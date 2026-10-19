@@ -138,9 +138,9 @@ fn assess(pulse: Pulse, now: u64, revive_attempts: u32, proven_healthy: bool) ->
 /// nothing (the read-retry path beats once per backoff turn forever), and a
 /// stale beat is a loop that has stopped turning; counting either would
 /// refund the budget of a volume delivering zero service and make give-up
-/// unreachable, the exact churn the budget exists to stop. This is the one
-/// place the supervisor reads the phase, and it reads it for what the phase
-/// means (is the volume served?), never to decide stall handling.
+/// unreachable, the exact churn the budget exists to stop. The supervisor
+/// reads the phase for what it means (is the volume served?), never to decide
+/// stall handling.
 fn accrue_health(
     prev: Option<Instant>,
     pulse: Pulse,
@@ -370,11 +370,11 @@ impl Fleet {
         let volumes = self.volumes.current();
         if volumes
             .iter()
-            .any(|v| *v.phase.read() == VolumePhase::Bootstrapping)
+            .any(|v| v.phase() == VolumePhase::Bootstrapping)
         {
             return;
         }
-        let entries: usize = volumes.iter().map(|v| v.index.read().len()).sum();
+        let entries: usize = volumes.iter().map(|v| v.index().len()).sum();
         tracing::info!(
             entries,
             volumes = volumes.len(),
@@ -643,7 +643,8 @@ impl Supervised {
             .tail
             .as_ref()
             .map_or(Pulse::Retired, |t| t.pulse.load());
-        if pulse == Pulse::Retired && *self.state.phase.read() == VolumePhase::Snapshot {
+        let phase = self.state.phase();
+        if pulse == Pulse::Retired && phase == VolumePhase::Snapshot {
             // The tail built the index and found that the volume has no
             // journal and never will: the index is complete and there is
             // nothing to tail, so reviving it would only rebuild it again.
@@ -651,9 +652,9 @@ impl Supervised {
         }
         // Sampled at scan granularity, which can only under-count health,
         // never fake it. The anchor is only consulted for a refund, so a
-        // never-revived original skips the bookkeeping and the phase read.
+        // never-revived original skips the bookkeeping.
         if self.revive_attempts > 0 {
-            let live = matches!(*self.state.phase.read(), VolumePhase::Live);
+            let live = matches!(phase, VolumePhase::Live);
             self.beating_since =
                 accrue_health(self.beating_since, pulse, live, now, Instant::now());
         }
@@ -697,16 +698,7 @@ impl Supervised {
     fn launch_revival(&mut self) {
         self.revive_attempts += 1;
         self.beating_since = None;
-        // Every deliberate exit sets Failed or Offline itself, so a phase
-        // still claiming to track here is the panic signature. Correct it
-        // before the revival window opens: a revival blocked on sick
-        // hardware must not extend a false Live indefinitely.
-        {
-            let mut phase = self.state.phase.write();
-            if matches!(*phase, VolumePhase::Live | VolumePhase::Rescanning) {
-                *phase = VolumePhase::Offline;
-            }
-        }
+        self.state.tail_retired();
         tracing::warn!(
             volume = %self.state.mount_prefix(),
             attempt = self.revive_attempts,
@@ -831,35 +823,15 @@ impl Supervised {
         }
     }
 
-    /// The budget is spent: say so once, loudly, and stop supervising. A
-    /// tail's own exit already set an honest phase with its own reason
-    /// (`Failed` or `Offline`, both logged), and `launch_revival` corrects
-    /// the panic signature before each attempt. A volume still
-    /// `Bootstrapping` was never indexed, because its tail never started or
-    /// never finished the first build; it becomes `Failed` here, or it would
-    /// claim to be indexing forever. The `Live` correction is
-    /// belt-and-braces for any future path that retires a Live tail without
-    /// a revival ever launching.
+    /// The budget is spent: say so once, loudly, and stop supervising.
     fn give_up(&self) {
         tracing::error!(
             volume = %self.state.mount_prefix(),
             attempts = self.revive_attempts,
             "the volume's tail keeps failing; giving up until the daemon restarts"
         );
-        let mut phase = self.state.phase.write();
-        let reason = match *phase {
-            VolumePhase::Bootstrapping => format!(
-                "never indexed: {}",
-                self.last_failure
-                    .as_deref()
-                    .unwrap_or("its tail kept stopping")
-            ),
-            VolumePhase::Live | VolumePhase::Rescanning => {
-                "tail thread kept dying; live updates stopped".into()
-            }
-            _ => return,
-        };
-        *phase = VolumePhase::Failed { reason };
+        self.state
+            .give_up(self.last_failure.as_deref(), self.revive_attempts);
     }
 }
 

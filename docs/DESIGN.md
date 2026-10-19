@@ -4,7 +4,7 @@
 
 gozler is six crates:
 
-- **`gozler-core`**: pure, OS-agnostic. USN, MFT and folder-listing parsing, the index, the query engine, the wire protocol, CSV output, and `es`-compatible argv parsing. Tests run on any OS.
+- **`gozler-core`**: pure, OS-agnostic. USN, MFT and folder-listing parsing, the index and the steps that bring it up to date after each journal batch, the folder walk, the query engine, the wire protocol, CSV output, and `es`-compatible argv parsing. Tests run on any OS.
 - **`gozler-winfs`**: the thin `unsafe` Win32 layer (`windows-sys` only). Buffers, typed structs, and opaque handles; it never parses an ioctl record payload. It depends on nothing else in the workspace, enforced by cargo-deny.
 - **`gozler-daemon`** (`gozlerd`): bootstrap, USN journal tail, the tokio named-pipe server, and Windows service integration.
 - **`gozler-client`**: the blocking named-pipe client, with the state of the gozler service and the scope-folder check, which `gozler` and the window share. Its error types build on every OS; the pipe is Windows only.
@@ -33,7 +33,7 @@ The index is a cache of the filesystem, and a cache that cannot prove it is cohe
 
 There is never a silent fourth state.
 
-Some irregularities do not lose sync and are not rescanned. A delete for a file ID the index does not hold has nothing to remove. A record number that NTFS has given to a new file has its stale entries removed in place. Both are normal while the journal replays changes made during the build, so a rescan would rebuild the same index; they are counted, and `--status` shows the counts. An entry whose walk to the root is longer than the hop limit has no full path and is left out of results. That happens briefly when the replay applies an old move on top of the newer scan, which can close a loop in the parent links until the later moves arrive, and permanently for a real folder tree that deep, which a rescan would rebuild the same way. Neither case starts a rescan. `--status`, the daemon handshake, and every result page decide a volume's state with a single shared rule, so a client can always tell whether the results it just got are complete.
+Some irregularities do not lose sync and are not rescanned. A delete for a file ID the index does not hold has nothing to remove. A record number that NTFS has given to a new file has its stale entries removed in place. Both are normal while the journal replays changes made during the build, so a rescan would rebuild the same index; they are counted, and `--status` shows the counts. An entry whose walk to the root is longer than the hop limit has no full path and is left out of results. That happens briefly when the replay applies an old move on top of the newer scan, which can close a loop in the parent links until the later moves arrive, and permanently for a real folder tree that deep, which a rescan would rebuild the same way. Neither case starts a rescan. `--status`, the daemon handshake, and every result page decide a volume's state with a single shared rule, so a client can always tell whether the results it just got are complete. A request reads each volume's phase while it holds that volume's index, so the state a page reports is the state of the index that answered it.
 
 ## Hard links
 

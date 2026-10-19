@@ -13,7 +13,7 @@
 //! result set.
 
 use super::{decode_frames, dir_record, reply_bytes, set, volume};
-use crate::volume_state::VolumeSet;
+use crate::volume_state::{Indexed, VolumeSet, VolumeState};
 use gozler_core::escompat::{Answer, Command, Count, EsPlan, build_search, parse_argv};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::layout::{LayoutFile, LayoutName};
@@ -21,6 +21,7 @@ use gozler_core::proto::{ProtoError, QueryRequest, Request, Response, SearchRequ
 use gozler_core::query::{QueryError, QueryStart};
 use gozler_core::types::{Frn, VolumePhase};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// One entry of the fixture, by full path.
 enum Entry {
@@ -1060,8 +1061,20 @@ fn a_total_too_large_for_64_bits_is_refused() {
 /// size or date, a count included, is unaffected.
 #[test]
 fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
-    let volumes = fixture();
-    *volumes[0].metadata_pending.write() = true;
+    let unknown_sizes = Indexed {
+        index: index(r"C:\", C_DRIVE),
+        metadata_pending: true,
+        journal_max_bytes: None,
+        built: true,
+    };
+    let volumes = set(&[
+        Arc::new(VolumeState::in_state(
+            r"C:\",
+            unknown_sizes,
+            VolumePhase::Live,
+        )),
+        volume(r"D:\", index(r"D:\", D_DRIVE), VolumePhase::Live),
+    ]);
     let warning = "results may be incomplete: gozler could not read the sizes and dates on a \
                    volume in scope, so size and date tests and size totals leave those files \
                    out";

@@ -37,8 +37,9 @@ Each stage is one or more commits, each of which passes `check.ps1`
   `usn/record.rs`). This plan does not use it, so NTFS and ReFS follow one
   rule (see "Reading descriptors").
 - **ReFS gives none.** `FileIdExtdDirectoryInfo` has no security field. The
-  ReFS build and the tail's `walk_missed` both list folders through
-  `bootstrap::walk_folders`, which opens each folder with `open_folder`
+  ReFS build and the tail's `settle_batch` both list folders through
+  `walk_folders` (`gozler-core/src/index/settle.rs`), whose reads,
+  `bootstrap::Disk`, open each folder with `open_folder`
   (`gozler-winfs/src/file_id.rs`): `OpenFileById` with backup semantics and
   `FILE_LIST_DIRECTORY`.
 - **The tail never hears of a security change.** `REASON_MASK` in
@@ -49,8 +50,8 @@ Each stage is one or more commits, each of which passes `check.ps1`
   `unrelated_bits_do_not_mask_matches` test it. `ops_for` returns
   `SmallVec<[UsnOp; 3]>`.
 - **A new folder is already stat'd.** A record with `FILE_CREATE` yields
-  `UsnOp::StatDirty` for files and folders alike, and the tail's
-  `enrich_stats` opens each one with the index lock released.
+  `UsnOp::StatDirty` for files and folders alike, and `settle_batch` reads
+  each one with the index lock released.
 - **Every query result passes one function.** `scan` in `query/engine.rs`
   calls `Scan::visit`, then `Scan::evaluate`, for every candidate, on all
   three paths: the scope subtree walk, the folded arena and the full scan.
@@ -71,8 +72,9 @@ Each stage is one or more commits, each of which passes `check.ps1`
 - **The daemon reads each request on the async side.** `handle_connection`
   in `server.rs` reads a frame, then runs `serve(volumes, frame, emit)` with
   `spawn_blocking`. The server tests and `server::tests::corpus` call `serve`
-  directly. `run_on_volumes` takes each target volume's `parking_lot` read
-  lock. The daemon runs as LocalSystem and refuses remote clients.
+  directly. `run_on_volumes` reads each target volume through
+  `VolumeState::read`, which holds the volume's `parking_lot` read lock on
+  its index. The daemon runs as LocalSystem and refuses remote clients.
 - **`gozlerd` has subcommands** (`Command` in `gozler-daemon/src/main.rs`,
   with clap): `scan`, `run`, `install`, `uninstall`, `status`.
 - **No crate reads the registry yet**, and the workspace's `windows-sys`
@@ -102,10 +104,11 @@ From Microsoft's documentation:
 | The filter | `Scan::evaluate` in `query/engine.rs` | which candidates a request sees |
 | Reading descriptors | `gozler-winfs/src/file_id.rs` | `read_folder_security`, `Folder::descriptor`, `descriptor_sddl` |
 | A record's USN | `gozler-core/src/usn/record.rs` | `record_usn` |
+| The NTFS build | `gozler-daemon/src/bootstrap.rs` | `NtfsReads`, `build_ntfs`, `read_build_descriptors` |
 | The caller | `gozler-winfs/src/caller.rs` (new) | `Sid`, `ClientToken`, `pipe_client_token`, the access check |
 | The stored list | `gozler-winfs/src/parameters.rs` (new) | reading and writing "Users and groups who see every file", account names |
 | Who sees what | `gozler-daemon/src/views.rs` (new) | `ViewRegistry`, `Access`, `sees_everything` |
-| The journal | `usn/ops.rs`, `tail.rs` | `UsnOp::SecurityDirty`, reading changed descriptors |
+| The journal | `usn/ops.rs`, `index/settle.rs`, `tail.rs` | `UsnOp::SecurityDirty`, reading changed descriptors |
 | The commands | `gozler-daemon/src/main.rs`, `service.rs` | `gozlerd see-every-file`, `gozlerd signed-in-user`, `gozlerd install --see-every-file` |
 | The setup's choice | `installer/Setup.iss` | the page that offers the signed-in user |
 
@@ -199,20 +202,49 @@ checks that no other folder refuses.
 available length is at least 56, through `zerocopy` like the rest, so a short
 entry gives `None`, never a panic. `walk_listing_buffer` sets both to `None`.
 
-**The NTFS build.** Only `layout_pass` sees each `LayoutFile`, so it gains a
-parameter `security: &mut FxHashMap<u32, Vec<(Frn, i64)>>` and adds to it, for
-each `LayoutFile` that is a folder and has both `security_id` and `usn`, the
-`(Frn, Usn)` under its `SecurityId`. `build_index` owns the map, which lives
-only for the build; the existing `layout_pass` test passes an empty one.
-After the layout pass, `build_index` calls `read_build_descriptors(index:
-&mut VolumeIndex, folders: FxHashMap<u32, Vec<(Frn, i64)>>, read: impl
-FnMut(Frn) -> anyhow::Result<Option<FolderSecurity>>)` (new, `bootstrap.rs`),
-where `FolderSecurity { descriptor: Vec<u8>, usn: i64 }` is a `bootstrap.rs`
-struct. As `layout_pass` takes its `read_page`, it takes the reader as a
-closure; the build's closure calls `read_folder_security` and `record_usn`,
-and returns `Ok(None)` when the folder is gone. It first drops every folder
-for which `is_metadata_folder` is true from its lists, then handles each
-`SecurityId`:
+**The NTFS build.** Stage 1 rewrites the NTFS half of `build_index`, so the
+same change puts it behind a volume-reading seam. Today its rules run only
+against a real volume: a stopped layout pass falls back to the MFT
+enumeration, sets `metadata_pending`, and skips `compute_folder_sizes`, and
+no test watches them. `build_index` keeps reading the root folder and the
+ReFS branch, and calls a new `build_ntfs` for the rest:
+
+```rust
+// bootstrap.rs, daemon-private
+trait NtfsReads: VolumeReads {
+    fn layout_page(&mut self, restart: bool, buf: &mut [u8]) -> Result<Option<usize>, WinError>;
+    fn enum_page(&mut self, start: u64, buf: &mut [u8]) -> Result<Option<usize>, Self::Error>;
+}
+fn build_ntfs(index: &mut VolumeIndex, reads: &mut impl NtfsReads, cancelled: impl Fn() -> bool)
+    -> anyhow::Result<Option<NtfsBuild>>; // NtfsBuild { read_secs, enum_secs, metadata_pending }
+```
+
+`Disk` implements `NtfsReads` with the FILE_LAYOUT and ENUM reads. A trait
+replaces `layout_pass`'s `read_page` closure because the build makes three
+different reads (layout pages, ENUM pages and folder descriptors), and a test
+fake answers all three. It is a supertrait of `VolumeReads` because every
+NTFS build also reads descriptors through `VolumeReads::folder_security`, so
+the build needs one bound and one error type. `layout_page` keeps `WinError`,
+because a failed layout read stops the pass instead of failing the build.
+The inline enumeration loop becomes an `enum_page` loop with the same
+stuck-cursor guard. The build stays in the daemon, not in core, because core
+has no logging and the build has one real adapter.
+
+Only `layout_pass` sees each `LayoutFile`, so it gains a parameter
+`security: &mut FxHashMap<u32, Vec<(Frn, i64)>>` and adds to it, for each
+`LayoutFile` that is a folder and has both `security_id` and `usn`, the
+`(Frn, Usn)` under its `SecurityId`. `build_ntfs` owns the map, which lives
+only for the build. After the layout pass, `build_ntfs` calls
+`read_build_descriptors(index: &mut VolumeIndex, folders: FxHashMap<u32,
+Vec<(Frn, i64)>>, reads: &mut impl VolumeReads)` (new, `bootstrap.rs`). It
+reads each folder through `VolumeReads::folder_security(&mut self, frn: Frn)
+-> Result<Option<FolderSecurity>, Self::Error>`, where `FolderSecurity {
+descriptor: Vec<u8>, usn: i64 }` is a struct in
+`gozler-core/src/index/settle.rs`, beside `FileStat`. `Disk` answers it with
+`read_folder_security` and `record_usn`, and with `Ok(None)` when the folder
+is gone. The settle step calls the same method and ignores `usn`, so one read
+serves both. `read_build_descriptors` first drops every folder for which
+`is_metadata_folder` is true from its lists, then handles each `SecurityId`:
 
 1. `SecurityId` 0 means the folder keeps its own descriptor, as files from
    before NTFS 3.0 can, so 0 is no group: each folder with it is read on its
@@ -233,19 +265,21 @@ folder whose permissions changed during the build would give its new
 permissions to every folder that shared its old `SecurityId`.
 
 After a stopped layout pass, the MFT enumeration gives no `SecurityId`, so
-`build_index` reads, on its own, every folder that still has `None` and is
+`build_ntfs` reads, on its own, every folder that still has `None` and is
 not a metadata folder. This path is rare and slow.
 
-**The ReFS build** and **`walk_missed`**: `walk_folders` reads each folder's
-descriptor from the handle it opens. Its callback becomes `insert(listed:
-Listed<'_>)`, with a `bootstrap.rs` enum:
+**The ReFS build** and **the missed-folder walk**: `walk_folders` and
+`Listed` live in `gozler-core/src/index/settle.rs`. The callbacks of
+`VolumeReads::list_folder` and of `walk_folders` both take a
+`Listed<'_, E>`, where `E` is the reads' error type, and `Disk` in
+`bootstrap.rs` reads each folder's descriptor from the handle it opens:
 
 ```rust
-enum Listed<'a> {
+enum Listed<'a, E> {
     /// Once per folder the walk opens, before its first page. The folder
     /// comes from the walk, not from a listing, because an empty folder lists
     /// no page.
-    Folder { frn: Frn, descriptor: Result<Vec<u8>, WinError> },
+    Folder { frn: Frn, descriptor: Result<Vec<u8>, E> },
     /// Each page of that folder's listing.
     Page(&'a [LayoutFile]),
 }
@@ -254,7 +288,7 @@ enum Listed<'a> {
 For `Folder`, the callback calls `set_folder_descriptor` with `Ok` bytes, and
 for `Err` it adds 1 to a failure count and leaves the folder `None`. For
 `Page` it calls `insert_listed`, as today. The ReFS build applies each event
-at once; `walk_missed` collects the events in one `Vec`, in walk order, and
+at once; `settle_batch` collects the events in one `Vec`, in walk order, and
 applies them in that order under one lock, as today, with the count through
 `note_descriptor_reads_failed`. The order matters: a subfolder's entry comes
 from its parent's `Page`, which the walk gives before the subfolder's
@@ -286,18 +320,19 @@ does not fail the walk.
   descriptor is read (spec `V9`). Without this, after `icacls` denies `ben`
   a folder and 5,000 files are copied into it in the same batch, `ben` sees
   their names until the read, which comes after the batch's other work.
-- `tail.rs` gains `read_descriptors(state, handle, frns, stop, pulse)`, shaped
-  like `enrich_stats`: with the lock released and the pulse beating, it calls
-  `read_folder_security` for each folder, then applies the batch with
-  `set_folder_descriptor` under one write lock. A failed read adds 1 to
+- `settle_batch` gains a descriptor step, shaped like its stat step: with
+  the lock released and `cancelled` asked before each folder, it reads each
+  folder's descriptor through a new `VolumeReads::folder_security`, which
+  `Disk` answers with `read_folder_security`, then applies the batch with
+  `set_folder_descriptor` under one write. A failed read adds 1 to
   `descriptor_reads_failed` through
   `VolumeIndex::note_descriptor_reads_failed`; a folder that is gone is not
-  counted, because its delete is in the journal. It runs first, right after
-  `apply_batch` and before `walk_missed`, `enrich_stats` and
-  `reconcile_links`, which can take seconds (one open per file), so a folder
-  stays hidden only for the reads themselves (spec `V9`). It needs nothing
-  those steps produce: `walk_missed` reads the descriptors of the folders it
-  lists itself.
+  counted, because its delete is in the journal. It runs between the apply
+  and the missed-folder walk, so before the walk, the stat step and the link
+  step, which can take seconds (one open per file), and a folder stays hidden
+  only for the reads themselves (spec `V9`). It needs nothing those
+  steps produce: the walk reads the descriptors of the folders it lists
+  itself.
 - An inherited permission change gives each changed folder its own record
   (stage 0, item 3, checks this), so the tail reads each one. If stage 0 shows
   otherwise, `SecurityDirty` on a folder also reads every folder below it,
@@ -588,12 +623,14 @@ When `set_folder_descriptor` adds a new ID, the index calls each view's
 `MayList` for it at once, under the same write lock, so no view meets a
 descriptor without an answer, and no other lock is involved.
 
-`run_on_volumes` in `server.rs` gains the request's `&Visibility`. For each
-volume it takes the read lock as today. When `seen_by` returns `None`, it
-drops the read lock, takes the write lock, checks again, calls `add_view` if
-the view is still missing, then turns the guard into a read guard with
-`RwLockWriteGuard::downgrade` and runs the query under it, so no rescan and no
-sweep can remove the view in between. A new volume or a rescanned index so
+`run_on_volumes` in `server.rs` gains the request's `&Visibility` and reads
+each volume through a new `VolumeState::request(&Visibility)` instead of
+`VolumeState::read`. `request` takes the read lock as `read` does. When
+`seen_by` returns `None`, it drops the read lock, takes the write lock,
+checks again, calls `add_view` if the view is still missing, then turns the
+guard into a read guard with `RwLockWriteGuard::downgrade` and returns it,
+so the query runs under it and no rescan and no sweep can remove the view in
+between. A new volume or a rescanned index so
 gets the view on its first request. After `add_view` it logs, at info level,
 `view added` with the volume, the `ViewId`, the view's memory and the time
 it took. It never uses `upgradable_read`:
@@ -711,12 +748,6 @@ total.
   adds none, so the window cannot tell this rule from a size pass still
   running; "Unknown" would read as data still loading. The volume's state
   already says when a pass is running. A file's "Unknown" stays as it is.
-- `compact_index` in `tail.rs` and `VolumeIndex::plan_compaction` say the
-  compaction plan is safe because the tail is a volume's only writer. After
-  stage 2, `add_view` and `retain_views` also write. The plan stays valid for
-  another reason, which the comments then give: the upgradable read excludes
-  every writer until it is upgraded, and no view call touches the name
-  store.
 - `docs/SECURITY.md`: the trust model says which names each user sees, who
   sees every name, who may change the list, and why the client connects at the
   identification level. `README.md`'s security paragraph says the same in one
@@ -824,7 +855,7 @@ memory". No answer changes: nothing reads the column yet.
 
 **Done when:**
 
-1. `check.ps1` passes, with tests T1 to T4 and T10.
+1. `check.ps1` passes, with tests T1 to T4 and T10 to T12.
 2. `gozler --status` shows `C:` and `V:` live, with the new `permissions`
    memory part. Index memory is up by 4 bytes per entry plus the table, and
    the table is within 20 % of stage 0's descriptor count times its average
@@ -835,8 +866,8 @@ memory". No answer changes: nothing reads the column yet.
 4. In a scratch folder on `C:` and on `V:`, a new folder and a folder whose
    permissions `icacls` changed each get the folder's current descriptor
    within a second. The proof is a `debug`-level log line from
-   `read_descriptors` that prints the folder and its descriptor in SDDL, from
-   `descriptor_sddl`, compared with `(Get-Acl <folder>).Sddl`. A temporary
+   `Disk::folder_security` that prints the folder and its descriptor in
+   SDDL, from `descriptor_sddl`, compared with `(Get-Acl <folder>).Sddl`. A temporary
    folder that is deleted at once adds no failed read. (Spec `V8`, `V9`,
    `V15`.)
 
@@ -952,8 +983,8 @@ Each test names the failure it watches.
   `SecurityId` 0 are each read on their own. Without it, one
   folder whose permissions changed during the build gives its new permissions
   to every folder that shared its old `SecurityId`, with no error.
-  `read_build_descriptors` takes the reader as a closure, as `layout_pass`
-  takes `read_page`, so the test needs no volume.
+  `read_build_descriptors` takes `&mut impl VolumeReads`, so the test's fake
+  needs no volume; it answers only `folder_security`.
 - **T4. A folder that needs its descriptor is reported.** An `apply_batch`
   test: a new folder, a folder with `SECURITY_CHANGE`, and a file that becomes
   a folder each appear once in `needs_descriptor`; a file with
@@ -1008,6 +1039,23 @@ Each test names the failure it watches.
   odd record from `FSCTL_READ_FILE_USN_DATA` could panic the daemon during a
   build, or a wrong offset would make every USN differ, which silently turns
   the build's sharing off and makes every boot read each folder.
+- **T11. A settle reads descriptors first.** A `settle.rs` test with a fake
+  `VolumeReads` that records the order of its calls: over a batch that has a
+  folder with `SECURITY_CHANGE`, a missed folder, a changed file and a file
+  whose links changed, every `folder_security` call comes before any
+  `list_folder`, `stat` or `links` call. Without it, a change that moves the
+  descriptor step after the walk or the link step keeps a folder's names
+  visible, for seconds, to a user who just lost permission to list it.
+- **T12. A stopped build pass leaves its gaps visible.** A `bootstrap.rs`
+  test of `build_ntfs` with a fake `NtfsReads` that records its calls and
+  needs no layout or ENUM bytes. When `layout_page` fails at once,
+  `metadata_pending` is true, `enum_page` is called, and the root's folder
+  size stays unknown. When `layout_page` gives `Ok(None)` at once,
+  `metadata_pending` is false, `enum_page` is not called, and the root's
+  folder size is known. Without it, a change that sums folder sizes after a
+  stopped pass reports short sums as exact. It does not watch that ENUM
+  records reach the index, which core's parser tests cover. The existing
+  `layout_pass_reports_a_failed_read_as_stopped` moves to the same fake.
 
 Not tested in code: `pipe_client_token`, `enabled_sids`, `rights_key`, `may_list` and `parameters.rs`. They only call
 Windows, and a test would need a second account or a registry write. Stage 0

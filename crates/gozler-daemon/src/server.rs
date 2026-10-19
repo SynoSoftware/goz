@@ -321,18 +321,18 @@ fn run_on_volumes<'t, T>(
     let mut coverage = Coverage::default();
     let mut results = Vec::new();
     for (vol, scope) in targets {
-        coverage.volumes_incomplete |= !vol.phase.read().is_complete();
-        coverage.metadata_pending |= *vol.metadata_pending.read();
         // Resolve and run under ONE read guard; see `VolScope`.
-        let index = vol.index.read();
+        let read = vol.read();
+        coverage.volumes_incomplete |= !read.phase().is_complete();
+        coverage.metadata_pending |= read.metadata_pending();
         let scope_entry = match scope {
             VolScope::All => None,
-            VolScope::Rel(rel) => match resolve_scope(&index, rel, match_case) {
+            VolScope::Rel(rel) => match resolve_scope(read.index(), rel, match_case) {
                 Some(e) => Some(e),
                 None => continue, // scope folder absent on this volume: no hits
             },
         };
-        results.push(run(vol, &index, scope_entry));
+        results.push(run(vol, read.index(), scope_entry));
     }
     (results, coverage)
 }
@@ -489,7 +489,7 @@ fn hello(volumes: &VolumeSet, proto_min: u16, proto_max: u16) -> Response {
 /// [`DaemonStatus::volumes_incomplete`] applies, so `Hello.ready` and a `Status`
 /// reply can never disagree about whether the index is whole.
 fn all_volumes_live(volumes: &VolumeSet) -> bool {
-    volumes.iter().all(|v| v.phase.read().is_complete())
+    volumes.iter().all(|v| v.phase().is_complete())
 }
 
 fn build_status(volumes: &VolumeSet) -> DaemonStatus {
@@ -497,11 +497,11 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
     let vols = volumes
         .iter()
         .map(|v| {
-            let phase = v.phase.read().clone();
-            if !phase.is_complete() {
+            let read = v.read();
+            if !read.phase().is_complete() {
                 incomplete = true;
             }
-            let index = v.index.read();
+            let index = read.index();
             let stats = index.stats();
             let mem = index.memory();
             let pair = |c: gozler_core::index::ComponentBytes| MemPair {
@@ -511,11 +511,11 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
             VolumeStatus {
                 guid: v.guid.clone(),
                 mounts: v.mounts.clone(),
-                phase,
+                phase: read.phase().clone(),
                 entries: index.len() as u64,
                 generation: index.generation(),
-                metadata_pending: *v.metadata_pending.read(),
-                journal_max_bytes: *v.journal_max_bytes.read(),
+                metadata_pending: read.metadata_pending(),
+                journal_max_bytes: read.journal_max_bytes(),
                 placeholders_created: stats.placeholders_created,
                 delete_of_unknown: stats.delete_of_unknown,
                 stale_slots: stats.stale_slots,
@@ -568,7 +568,7 @@ fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Option<Vec<(Arc<VolumeSt
 #[cfg(test)]
 mod tests {
     use super::{build_status, serve};
-    use crate::volume_state::{VolumeSet, VolumeState};
+    use crate::volume_state::{Indexed, VolumeSet, VolumeState};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
         FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, QueryRequest,
@@ -578,7 +578,6 @@ mod tests {
     use gozler_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
     };
-    use parking_lot::RwLock;
     use std::sync::Arc;
 
     mod corpus;
@@ -602,15 +601,13 @@ mod tests {
     }
 
     fn volume(mount: &str, index: VolumeIndex, phase: VolumePhase) -> Arc<VolumeState> {
-        Arc::new(VolumeState {
-            guid: r"\\?\Volume{00000000-0000-0000-0000-000000000000}\".to_string(),
-            mounts: vec![mount.to_string()],
-            filesystem: crate::bootstrap::Filesystem::Ntfs,
-            index: RwLock::new(index),
-            phase: RwLock::new(phase),
-            metadata_pending: RwLock::new(false),
-            journal_max_bytes: RwLock::new(None),
-        })
+        let indexed = Indexed {
+            index,
+            metadata_pending: false,
+            journal_max_bytes: None,
+            built: true,
+        };
+        Arc::new(VolumeState::in_state(mount, indexed, phase))
     }
 
     fn live_volume(mount: &str) -> Arc<VolumeState> {
