@@ -3,6 +3,16 @@
 gozler finds files and folders on NTFS and ReFS volumes by name, path, size and
 date, from an index of each volume that a daemon keeps current.
 
+**Gozler**:
+**Owner ruling.** The product's name wherever a person sees it outside the
+command line: the window, the setup, Windows' lists such as Services, and the
+folders Gozler creates, such as `C:\Program Files\Gozler`. The command line
+writes `gozler`: the command, its help and its messages, and every name a
+person types there, such as `gozler.exe`, `gozlerd install` and
+`net start gozler`. A person types the command line in lower case, so its text
+matches what they type; elsewhere Gozler follows Windows, where a product name
+is a proper noun.
+
 ## Index
 
 **Indexed volume**:
@@ -132,7 +142,8 @@ owner's programs read alike.
 _Avoid_: UI, GUI, app (in text the person reads)
 
 **Service**:
-`gozlerd` as Windows and the window name it: "the gozler service".
+`gozlerd` as the window names it, "the Gozler service", and the command line,
+"the gozler service".
 _Avoid_: daemon (in text the person reads)
 
 **Settings**:

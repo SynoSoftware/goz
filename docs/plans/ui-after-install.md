@@ -9,6 +9,9 @@ owner has run it, and file an issue for each item that fails.
 
 - The Start menu shortcut "Gozler" starts the window, and the window searches
   through the installed `gozlerd`.
+- The setup's last page offers "Launch Gozler". The window it starts runs
+  without administrator rights: Task Manager's Details page shows it with
+  Elevated "No".
 - Against the installed `gozlerd`, `gozler ext:cs -n 3`,
   `gozler -get-result-count ext:cs`, `gozler --status` and
   `gozler -path X:\no-such-folder x` exit with the codes they gave before, and

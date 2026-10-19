@@ -8,16 +8,23 @@
 ; The service name, gozler_core::proto::SERVICE_NAME. It stays "gozler" across
 ; versions, and it is not "goz", the upstream service installed beside it.
 #define ServiceName "gozler"
+; The install folder and the folder of the service log that
+; init_service_tracing in service.rs writes.
+#define AppFolder "{autopf}\Gozler"
+#define LogFolder "{win}\Logs\Gozler"
 
 [Setup]
 AppId=gozler
-AppName=gozler
+AppName=Gozler
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppUrl}
 AppUpdatesURL={#AppUrl}/releases/latest
 VersionInfoVersion={#AppVersion}
-DefaultDirName={autopf}\gozler
+DefaultDirName={#AppFolder}
+; Every install goes to the default folder, so an upgrade from a setup that
+; wrote the folder's name in lower case gets its new name.
+UsePreviousAppDir=no
 ; Installing the service and the machine PATH entry needs administrator rights.
 PrivilegesRequired=admin
 ; The window's single-instance mutex, INSTANCE_MUTEX in gozler-ui's app
@@ -48,15 +55,15 @@ SetupAppRunningError=Gozler is running. To close it, choose File > Exit in its w
 UninstallAppRunningError=Gozler is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
 
 [CustomMessages]
-StartService=Starting the gozler service...
-ServiceFailed=The gozler service could not be installed (exit code %1). Search does not work until it runs. Run "gozlerd install" in an elevated terminal to retry.
-CleanupCaption=Clean up
-CleanupDescription=Setup found programs that gozler replaces.
-CleanupText=Choose what Setup removes after gozler is running: the program, its service and its PATH entry. Other files in its folder stay, and anything you leave stays beside gozler.
-CleanGoz=goz in %1
-CleanOldGozler=An earlier gozler in %1
-CleaningUp=Cleaning up...
-GozFailed=goz could not be removed (exit code %1), so it stays installed beside gozler. To remove it, run "%2" uninstall in an elevated terminal.
+StartService=Starting the Gozler service...
+ServiceFailed=The Gozler service could not be installed (exit code %1). Search does not work until it runs. Run "gozlerd install" in an elevated terminal to retry.
+CleanupCaption=Keep or remove other programs
+CleanupDescription=Gozler works with or without these programs.
+CleanupText=For each program you select, Setup deletes its files and removes its folder from PATH. Other files in that folder stay.
+CleanGoz=Remove goz from %1
+CleanOldGozler=Remove the other copy of Gozler from %1
+CleaningUp=Finishing installation...
+GozFailed=Setup couldn't remove goz (error code %1).%n%nTo remove goz's service, open a terminal as administrator and run:%n  pushd "%2"%n  .\gozd.exe uninstall%n%nIf the command succeeds, delete goz.exe and gozd.exe from that folder.
 
 [Files]
 Source: "..\target\release\gozlerd.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -68,12 +75,17 @@ Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{autoprograms}\Gozler"; Filename: "{app}\gozler-ui.exe"
 
+[Run]
+; The window runs as the person who started the setup, not as administrator,
+; so its settings, its sign-in entry and its File Explorer command are that
+; person's.
+Filename: "{app}\gozler-ui.exe"; Description: "{cm:LaunchProgram,Gozler}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+
 [UninstallRun]
 Filename: "{app}\gozlerd.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
 
 [UninstallDelete]
-; The service log that init_service_tracing in service.rs writes.
-Type: filesandordirs; Name: "{win}\Logs\gozler"
+Type: filesandordirs; Name: "{#LogFolder}"
 
 [Code]
 const
@@ -92,8 +104,7 @@ type
   end;
 
 var
-  // gozler's folder: the directory page is off, so gozler goes where the
-  // last setup put it, or to the default folder.
+  // Gozler's folder, the default one, because the directory page is off.
   InstallFolder: String;
   Found: array of TFound;
   // Created only when something is found.
@@ -252,9 +263,7 @@ var
   Daemon: String;
   I: Integer;
 begin
-  InstallFolder := WizardForm.PrevAppDir;
-  if InstallFolder = '' then
-    InstallFolder := ExpandConstant('{autopf}\gozler');
+  InstallFolder := ExpandConstant('{#AppFolder}');
   // Services first, so a folder that both a service and a PATH name keeps its
   // service.
   Daemon := ServiceProgram('goz');
@@ -274,11 +283,9 @@ begin
     begin
       Found[I].Item := CleanupPage.Add(
         FmtMessage(CustomMessage('CleanGoz'), [Found[I].Folder]));
-      // goz stays unless the person ticks it, because gozler runs beside it
-      // and people keep goz until gozler works for them. An upgrade
-      // preselects what the last install chose; a first install, which has
-      // no recorded choice, keeps goz.
-      CleanupPage.Values[Found[I].Item] := GetPreviousData('Goz', '1') = '0';
+      // Every setup starts with goz kept, because gozler runs beside it and
+      // removing goz is a choice, never a step gozler needs.
+      CleanupPage.Values[Found[I].Item] := False;
     end
     else
     begin
@@ -295,28 +302,6 @@ begin
   Result := False;
   if WizardSilent then exit;
   Result := CleanupPage.Values[Found[I].Item];
-end;
-
-// Records whether goz was kept, for the next upgrade's default.
-procedure RegisterPreviousData(PreviousDataKey: Integer);
-var
-  I: Integer;
-  Seen, Kept: Boolean;
-begin
-  Seen := False;
-  Kept := False;
-  for I := 0 to GetArrayLength(Found) - 1 do
-    if Found[I].IsGoz then
-    begin
-      Seen := True;
-      if not CleanUp(I) then
-        Kept := True;
-    end;
-  if not Seen then exit;
-  if Kept then
-    SetPreviousData(PreviousDataKey, 'Goz', '1')
-  else
-    SetPreviousData(PreviousDataKey, 'Goz', '0');
 end;
 
 // Removes a hand install from Folder: its folder from both PATHs, because a
@@ -345,12 +330,29 @@ begin
       or (Code <> 0) then
     begin
       SuppressibleMsgBox(FmtMessage(CustomMessage('GozFailed'), [IntToStr(Code),
-        Found[I].Daemon]), mbError, MB_OK, IDOK);
+        Found[I].Folder]), mbError, MB_OK, IDOK);
       exit;
     end;
     DelTree(ExpandConstant('{commonappdata}\goz'), True, True, True);
   end;
   RemoveHandInstall(Found[I].Folder, 'goz.exe', 'gozd.exe');
+end;
+
+// Gives an existing Folder the case of its name in Folder, such as Gozler for
+// the gozler folder an earlier setup made. Windows keeps a folder's name when
+// files are written into it, so only a rename changes it. A folder in use
+// keeps its old name, which works the same.
+procedure MatchFolderCase(const Folder: String);
+var
+  FindRec: TFindRec;
+  Actual: String;
+begin
+  if not FindFirst(Folder, FindRec) then exit;
+  Actual := FindRec.Name;
+  FindClose(FindRec);
+  if (Actual <> ExtractFileName(Folder)) and
+    not RenameFile(ExtractFilePath(Folder) + Actual, Folder) then
+    Log(Format('Could not rename %s%s to %s', [ExtractFilePath(Folder), Actual, Folder]));
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -363,6 +365,9 @@ begin
   Exec(ExpandConstant('{sys}\net.exe'), 'stop {#ServiceName}', '', SW_HIDE,
     ewWaitUntilTerminated, Code);
   Log(Format('net stop {#ServiceName}: code=%d', [Code]));
+  // The stopped service no longer holds its log open.
+  MatchFolderCase(ExpandConstant('{app}'));
+  MatchFolderCase(ExpandConstant('{#LogFolder}'));
   Result := '';
 end;
 

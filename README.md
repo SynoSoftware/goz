@@ -9,7 +9,7 @@
 
 gozler is a fork of [goz](https://github.com/mustafaahci/goz) *(göz, "eye")*, created by [Mustafa Ahci](https://github.com/mustafaahci). synapse.sr develops gozler at [SynoSoftware/goz](https://github.com/SynoSoftware/goz), building on goz's index, daemon and speed the way vim built on vi.
 
-gozler indexes every filename on your fixed NTFS and ReFS volumes, Dev Drives included, and answers substring queries in single-digit milliseconds, from the command line or from your own tools over a named pipe.
+gozler indexes every filename on your fixed NTFS and ReFS volumes, Dev Drives included, and answers substring queries in single-digit milliseconds, in the Gozler window, from the command line, or from your own tools over a named pipe.
 
 ## Highlights
 
@@ -26,18 +26,19 @@ gozler indexes every filename on your fixed NTFS and ReFS volumes, Dev Drives in
 
 ## Install
 
-Run `gozler-<version>-x64-Setup.exe` from the [gozler releases](https://github.com/SynoSoftware/goz/releases). It installs both binaries to `C:\Program Files\gozler`, adds that folder to the machine `PATH`, and installs and starts the service. It upgrades an earlier gozler in place. When it finds goz, or a gozler installed by hand in another folder, it offers to remove them once gozler runs: their service, files and `PATH` entries, and goz's logs. A silent install removes nothing. Or download `gozler.exe` and `gozlerd.exe` in the release's zip, or build from source:
+Run `gozler-<version>-x64-Setup.exe` from the [gozler releases](https://github.com/SynoSoftware/goz/releases). It installs the three programs to `C:\Program Files\Gozler`, adds a Gozler shortcut to the Start menu, adds that folder to the machine `PATH`, and installs and starts the service. It upgrades an earlier gozler in place. When it finds goz, or a gozler installed by hand in another folder, it offers to remove them once gozler runs: their service, files and `PATH` entries, and goz's logs. A silent install removes nothing. Or download `gozler.exe`, `gozlerd.exe` and `gozler-ui.exe` in the release's zip, or build from source:
 
 ```
 cargo build --release
 ```
 
-Either way you get two binaries (in `target\release` when built locally):
+Either way you get three binaries (in `target\release` when built locally):
 
-| Binary        | Role                                                                              |
-| ------------- | --------------------------------------------------------------------------------- |
-| `gozlerd.exe` | The indexing daemon. Runs elevated; owns the index and serves queries.            |
-| `gozler.exe`  | The command-line client. Runs unelevated; talks to the daemon.                    |
+| Binary          | Role                                                                            |
+| --------------- | ------------------------------------------------------------------------------- |
+| `gozlerd.exe`   | The indexing daemon. Runs elevated; owns the index and serves queries.          |
+| `gozler.exe`    | The command-line client. Runs unelevated; talks to the daemon.                  |
+| `gozler-ui.exe` | The Gozler window, a native Windows search window. Runs unelevated; talks to the daemon. |
 
 Run the daemon in an elevated terminal:
 
@@ -53,11 +54,13 @@ Or install it as an auto-start Windows service (elevated):
 .\target\release\gozlerd.exe uninstall   # stop and remove
 ```
 
-To build an installer instead, double-click `Release.cmd`, or run `pwsh ./installer/Build.ps1`, with Inno Setup 7.1 or later installed. It writes `target\installer\gozler-<version>-x64-Setup.exe`, the installer the release publishes. Each local run first raises the patch version in `Cargo.toml`, such as 0.2.0 to 0.2.1, so each setup upgrades the one before; the release builds the version its tag names. Uninstalling removes the binaries, the `PATH` entry and the service.
+To build an installer instead, double-click `Release.cmd`, or run `pwsh ./installer/Build.ps1`, with Inno Setup 7.1 or later installed. It writes `target\installer\gozler-<version>-x64-Setup.exe`, the installer the release publishes. Each local run first raises the patch version in `Cargo.toml`, such as 0.2.0 to 0.2.1, so each setup upgrades the one before; the release builds the version its tag names. Uninstalling removes the binaries, the Start menu shortcut, the `PATH` entry and the service, and, for the person who uninstalls, the window's sign-in entry and its "Search with Gozler" command in File Explorer.
 
 ## Usage
 
-Query the running daemon from any terminal:
+Open Gozler from the Start menu, type, and open what it finds. Help > Search syntax lists the search terms.
+
+Or query the running daemon from any terminal:
 
 ```
 # search everywhere
@@ -105,7 +108,7 @@ goz wins the resident-RAM rows that matter for a background daemon and edges out
 
 ## How it works
 
-gozler is a small workspace of four crates: a pure, OS-agnostic core (parsing, index, query engine), a thin `unsafe` Win32 layer, an indexing daemon, and a CLI client. The design notes, including how the index stays coherent and how hard-link reconciliation works, are in [docs/DESIGN.md](docs/DESIGN.md).
+gozler is a small workspace of six crates: a pure, OS-agnostic core (parsing, index, query engine), a thin `unsafe` Win32 layer, an indexing daemon, a named-pipe client library, a CLI client, and the window. The design notes, including how the index stays coherent and how hard-link reconciliation works, are in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Security
 

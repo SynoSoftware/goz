@@ -30,7 +30,7 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 use crate::{run, server};
 
-const DISPLAY_NAME: &str = "gozler file index";
+const DISPLAY_NAME: &str = "Gozler file index";
 const DESCRIPTION: &str = "Indexes NTFS and ReFS volumes for instant file search with gozler.";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
@@ -422,7 +422,7 @@ fn stopped_report(exit_code: ServiceExitCode) -> ServiceStatus {
 }
 
 /// Best-effort file logging for service mode (no console). Writes to
-/// `%SystemRoot%\Logs\gozler\gozlerd.log`; any failure skips logging.
+/// `%SystemRoot%\Logs\Gozler\gozlerd.log`; any failure skips logging.
 ///
 /// The log must live where only SYSTEM and Administrators can create entries.
 /// Standard users may create folders anywhere under `%ProgramData%`, so a user
@@ -434,7 +434,7 @@ fn init_service_tracing() {
     };
     let dir = std::path::Path::new(&system_root)
         .join("Logs")
-        .join("gozler");
+        .join("Gozler");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
