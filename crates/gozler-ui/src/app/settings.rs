@@ -811,11 +811,10 @@ impl DialogProc for SettingsDialog<'_> {
 
         let text = |key: &'static str| self.strings.text(key);
         if let Some(list) = self.language_list() {
-            // As the Language menu lists them, each language by its own
-            // name (DESIGN.md: Language).
+            // As the Language menu lists them (DESIGN.md: Language).
             let names = LANGUAGES
                 .iter()
-                .map(|language| without_access_key(language.name));
+                .map(|language| without_access_key(&language.label(&self.strings)));
             let items: Vec<String> =
                 std::iter::once(text("settings_general.windows_default").to_owned())
                     .chain(names)

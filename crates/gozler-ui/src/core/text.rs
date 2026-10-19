@@ -6,9 +6,9 @@
 //! A catalogue is JSON with one level of objects, such as
 //! `{"menu": {"file": "&File"}}`, read as the dotted key `menu.file`. A
 //! counted message has the forms `_one` and `_other`. A message comes from
-//! the language, then from its parent language, then from English, always as
-//! a whole message with all its forms; a translation whose placeholders
-//! differ from English is ignored, so English shows.
+//! the language, then from its parent language, always as a whole message
+//! with all its forms. A message that neither has, or whose placeholders
+//! differ from English, shows its dotted key, so the gap is visible.
 
 use super::model::Column;
 use gozler_core::proto::ResultItem;
@@ -17,31 +17,79 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
-/// A shipped language: its tag, its own name with the access key it has in
-/// the Language menu, and its embedded catalogue.
+/// A shipped language: its tag, its names and its embedded catalogue.
 pub(crate) struct Language {
     pub(crate) tag: &'static str,
-    pub(crate) name: &'static str,
+    /// Its name as its speakers write it.
+    own_name: &'static str,
+    /// The catalogue key of its name in the current language, with the
+    /// access key it has in the Language menu; `None` for the
+    /// pseudo-language, which has no name to translate.
+    name_key: Option<&'static str>,
     pub(crate) catalogue: &'static str,
+}
+
+impl Language {
+    /// Its item in the Language menu and the Language list: its name in the
+    /// current language, then its own name in brackets when the two differ,
+    /// such as "&Dutch (Nederlands)", so a person who picked a language they
+    /// cannot read still finds their own (DESIGN.md: Language).
+    pub(crate) fn label(&self, strings: &Strings) -> String {
+        let Some(key) = self.name_key else {
+            return format!("&{}", self.own_name);
+        };
+        let name = strings.text(key);
+        if without_access_key(name) == self.own_name {
+            name.to_owned()
+        } else {
+            format!("{name} ({})", self.own_name)
+        }
+    }
 }
 
 const ENGLISH: Language = Language {
     tag: "en",
-    name: "&English",
+    own_name: "English",
+    name_key: Some("language.english"),
     catalogue: include_str!("../../resources/en.json"),
+};
+
+const SPANISH: Language = Language {
+    tag: "es",
+    own_name: "Español",
+    name_key: Some("language.spanish"),
+    catalogue: include_str!("../../resources/es.json"),
+};
+
+const DUTCH: Language = Language {
+    tag: "nl",
+    own_name: "Nederlands",
+    name_key: Some("language.dutch"),
+    catalogue: include_str!("../../resources/nl.json"),
+};
+
+const TURKISH: Language = Language {
+    tag: "tr",
+    own_name: "Türkçe",
+    name_key: Some("language.turkish"),
+    catalogue: include_str!("../../resources/tr.json"),
 };
 
 /// Every shipped language, English first; the Language menu and the
 /// Language list read this table, so listing them loads no catalogue.
 #[cfg(not(feature = "pseudo-language"))]
-pub(crate) static LANGUAGES: &[Language] = &[ENGLISH];
+pub(crate) static LANGUAGES: &[Language] = &[ENGLISH, SPANISH, DUTCH, TURKISH];
 
 #[cfg(feature = "pseudo-language")]
 pub(crate) static LANGUAGES: &[Language] = &[
     ENGLISH,
+    SPANISH,
+    DUTCH,
+    TURKISH,
     Language {
         tag: "qps-ploc",
-        name: "&qps-ploc",
+        own_name: "qps-ploc",
+        name_key: None,
         catalogue: include_str!(concat!(env!("OUT_DIR"), "/qps-ploc.json")),
     },
 ];
@@ -146,9 +194,8 @@ impl Message {
     }
 }
 
-/// One loaded language, with its fallback to the parent language and to
-/// English already applied. It does not change; a language switch loads a
-/// new one.
+/// One loaded language, with its fallback to the parent language already
+/// applied. It does not change; a language switch loads a new one.
 #[derive(Clone)]
 pub(crate) struct Strings {
     messages: HashMap<String, Message>,
@@ -172,16 +219,13 @@ impl Strings {
             tag = parent;
         }
         chain.push(tag);
-        let mut merged = english.clone();
+        let mut merged = HashMap::new();
         for tag in chain.iter().rev() {
             let Some(found) = shipped.iter().find(|l| l.tag.eq_ignore_ascii_case(tag)) else {
                 continue;
             };
-            if std::ptr::eq(found.catalogue, shipped[0].catalogue) {
-                continue;
-            }
             // A catalogue that does not parse is a build defect that the
-            // catalogue test catches; here its messages show in English.
+            // catalogue test catches; here its messages show their keys.
             let Ok(entries) = parse_catalogue(found.catalogue) else {
                 continue;
             };
@@ -194,8 +238,8 @@ impl Strings {
         Strings { messages: merged }
     }
 
-    /// The message, or the dotted key when English lacks it, so a person
-    /// sees the gap and nothing panics.
+    /// The message, or the dotted key when the language lacks it, so a
+    /// person sees the gap and nothing panics.
     pub(crate) fn text<'a>(&'a self, key: &'a str) -> &'a str {
         match self.messages.get(key) {
             Some(Message::One(text)) => text,
@@ -523,34 +567,37 @@ pub(crate) mod tests {
     static TEST_LANGUAGES: &[Language] = &[
         Language {
             tag: "en",
-            name: "English",
+            own_name: "English",
+            name_key: None,
             catalogue: r#"{"a": {"plain": "Plain", "only_en": "English only",
                 "files_one": "{0} file", "files_other": "{0} files", "moved": "{0} to {1}"}}"#,
         },
         Language {
             tag: "pt",
-            name: "Português",
+            own_name: "Português",
+            name_key: None,
             catalogue: r#"{"a": {"plain": "Simples", "files_one": "{0} arquivo",
                 "files_other": "{0} arquivos"}}"#,
         },
         Language {
             tag: "pt-BR",
-            name: "Português (Brasil)",
-            // `files` lacks its `_other` form and `moved` drops `{1}`, so
-            // both show the message of a more general language whole.
+            own_name: "Português (Brasil)",
+            name_key: None,
+            // `files` lacks its `_other` form, so `pt`'s message shows
+            // whole; `moved` drops `{1}` and `pt` lacks it, so its key shows.
             catalogue: r#"{"a": {"plain": "Simples (BR)", "files_one": "{0} ficheiro",
                 "moved": "{0} para"}}"#,
         },
     ];
 
     #[test]
-    fn a_message_falls_back_whole_to_the_parent_language_then_to_english() {
+    fn a_message_falls_back_whole_to_the_parent_language_else_shows_its_key() {
         let strings = Strings::load_in(&TEST_LANGUAGES[2], TEST_LANGUAGES);
         assert_eq!(strings.text("a.plain"), "Simples (BR)");
         assert_eq!(strings.count("a.files", 1, &English, &[]), "1 arquivo");
         assert_eq!(strings.count("a.files", 2, &English, &[]), "2 arquivos");
-        assert_eq!(strings.text("a.only_en"), "English only");
-        assert_eq!(strings.format("a.moved", &["x", "y"]), "x to y");
+        assert_eq!(strings.text("a.only_en"), "a.only_en");
+        assert_eq!(strings.format("a.moved", &["x", "y"]), "a.moved");
         assert_eq!(strings.text("a.missing"), "a.missing");
     }
 
@@ -570,8 +617,8 @@ pub(crate) mod tests {
     }
 
     /// The shipped catalogues are data that no compiler checks, and a broken
-    /// one shows English or dotted keys only at run time, in the language
-    /// that has the defect.
+    /// one shows dotted keys only at run time, in the language that has the
+    /// defect.
     #[test]
     fn every_shipped_catalogue_matches_english() {
         let english_entries = parse_catalogue(ENGLISH.catalogue).expect("en.json parses");
@@ -599,6 +646,13 @@ pub(crate) mod tests {
                         language.tag
                     );
                 }
+            }
+            for key in &english_keys {
+                assert!(
+                    keys.contains(key),
+                    "{}.json lacks {key}, which then shows as its key",
+                    language.tag
+                );
             }
             for (key, message) in messages(&entries) {
                 assert!(

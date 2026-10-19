@@ -10,6 +10,12 @@
     "help": "&Help",
     "language": "La&nguage"
   },
+  "language": {
+    "english": "&English",
+    "spanish": "&Spanish",
+    "dutch": "&Dutch",
+    "turkish": "&Turkish"
+  },
   "command": {
     "open": "&Open",
     "open_file_location": "Open file &location",

@@ -650,7 +650,10 @@ menu.help
 menu.language|||right
   command.windows_default||on|marked
   -
-  =&English||on|
+  language.english||on|
+  =&Spanish (Español)||on|
+  =&Dutch (Nederlands)||on|
+  =&Turkish (Türkçe)||on|
 '@
 if ($Pseudo) { $menuSpec += "`n  =&qps-ploc||on|" }
 
@@ -2700,8 +2703,9 @@ try {
     # the typed text, the selected row, the focus and the top row (T12);
     # a parser message then shows in it (S7); the window opens in it
     # after a restart; the Language menu and Settings' Language list hold the
-    # same choices, and a choice in one shows in the other (C16). Only the
-    # build with the pseudo-language ships a second language.
+    # same choices, and a choice in one shows in the other (C16). The checks
+    # tell a switched caption by the pseudo-language's brackets, so they run
+    # only on a build with it.
     if (Runs 'language') {
         $switchChecks = 'Language switches at once and keeps the place', 'a parser message in the pseudo-language',
         'the chosen language after a restart', 'the Language menu and list show one choice'
@@ -2710,8 +2714,8 @@ try {
             foreach ($name in $switchChecks) { Report $name 'not run' $why }
         }
         else {
-            # The menu item ID of LANGUAGES' second entry, the pseudo-language.
-            $pseudoId = 0x502
+            # The menu item ID of LANGUAGES' last entry, the pseudo-language.
+            $pseudoId = 0x505
             Write-Settings $null
             $window = Start-Window
             [void](Wait-Answer $window)
@@ -2794,8 +2798,8 @@ try {
             $choices = [ordered]@{
                 list = $items; list_selected = $listSelected; marked_before = $markedBefore; applied = $applied; marked_after = $markedAfter
             }
-            Check 'the Language menu and list show one choice' ($items.Count -eq 3 -and ($items[1..2] -join '|') -eq 'English|qps-ploc' -and
-                $listSelected -eq 2 -and $markedBefore -contains 'qps-ploc' -and $applied -and
+            Check 'the Language menu and list show one choice' ($items.Count -eq 6 -and $items[5] -eq 'qps-ploc' -and
+                $listSelected -eq 5 -and $markedBefore -contains 'qps-ploc' -and $applied -and
                 $markedAfter -contains (Plain (Caption 'command.windows_default'))) $choices
         }
     }

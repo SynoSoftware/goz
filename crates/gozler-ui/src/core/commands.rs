@@ -584,15 +584,16 @@ impl MenuItem {
     }
 
     /// Its label, with its access key.
-    pub(crate) fn label(self, strings: &Strings) -> &str {
-        match self {
-            MenuItem::Run(command) => strings.text(command.row().label),
-            MenuItem::Column(column) => strings.text(column.menu_label()),
-            MenuItem::SortKey(key) => strings.text(sort_key_label(key)),
-            MenuItem::SortDirection(dir) => strings.text(sort_direction_label(dir)),
-            MenuItem::Language(None) => strings.text("command.windows_default"),
-            MenuItem::Language(Some(language)) => LANGUAGES[language].name,
-        }
+    pub(crate) fn label(self, strings: &Strings) -> String {
+        let key = match self {
+            MenuItem::Run(command) => command.row().label,
+            MenuItem::Column(column) => column.menu_label(),
+            MenuItem::SortKey(key) => sort_key_label(key),
+            MenuItem::SortDirection(dir) => sort_direction_label(dir),
+            MenuItem::Language(None) => "command.windows_default",
+            MenuItem::Language(Some(language)) => return LANGUAGES[language].label(strings),
+        };
+        strings.text(key).to_owned()
     }
 
     /// The shortcut the menu shows after the label: the first of the
@@ -806,7 +807,7 @@ pub(crate) fn export_slot(model: &Model) -> MenuItem {
 pub(crate) fn render_popup(groups: &[Vec<MenuItem>], strings: &Strings) -> Vec<MenuNode> {
     separated(groups, |item| MenuNode::Item {
         id: item.id(),
-        text: item.label(strings).to_owned(),
+        text: item.label(strings),
         mark: item.mark(),
     })
 }
@@ -816,7 +817,7 @@ pub(crate) fn node(item: &MenuItem, strings: &Strings, shortcuts: &CommandShortc
     MenuNode::Item {
         id: item.id(),
         text: menu_label(
-            item.label(strings),
+            &item.label(strings),
             item.shortcut(shortcuts).map(|s| s.text(strings)),
         ),
         mark: item.mark(),
@@ -935,12 +936,13 @@ mod tests {
     /// (DESIGN.md: Words). Every shipped language chooses its own letters.
     #[test]
     fn access_keys_are_unique_in_every_menu_and_language() {
-        fn assert_unique<'a>(
+        fn assert_unique(
             tag: &str,
-            labels: impl IntoIterator<Item = &'a str>,
+            labels: impl IntoIterator<Item = impl AsRef<str>>,
             keys: &mut HashSet<char>,
         ) {
             for label in labels {
+                let label = label.as_ref();
                 assert!(
                     access_key(label).is_some_and(|k| keys.insert(k)),
                     "{tag}: {label} has no access key, or one its menu already uses"
@@ -962,7 +964,7 @@ mod tests {
                 // results…' place.
                 let labels = menu.groups.iter().flatten().map(|entry| match entry {
                     Entry::Item(item) => item.label(&strings),
-                    Entry::Submenu { label, .. } => strings.text(label),
+                    Entry::Submenu { label, .. } => strings.text(label).to_owned(),
                 });
                 let cancel = (menu.label == "menu.file")
                     .then(|| MenuItem::Run(CommandId::CancelExport).label(&strings));
