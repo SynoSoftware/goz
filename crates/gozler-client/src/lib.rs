@@ -8,7 +8,7 @@
 //! not exist, the error carries the state of the gozler service as Windows
 //! reports it. Each request waits for its reply by polling the pipe, so a
 //! [`CancelToken`] that another thread sets ends the wait at the next poll.
-//! [`NotRunning::repair`] says what gets the service running again, which
+//! [`ClientError::repair`] says what makes a failed request work again, which
 //! `gozler` prints and the window runs. [`folder_is_missing`] is the rule that
 //! refuses a scope folder that does not exist, which both callers check before
 //! they send a scoped search.
@@ -74,8 +74,8 @@ pub enum NotRunning {
 /// Where the gozler setup is published.
 pub const RELEASES: &str = "https://github.com/SynoSoftware/goz/releases";
 
-/// What gets the gozler service running again. `gozler` prints it and the
-/// window runs it.
+/// What makes a failed request work again. `gozler` prints it and the window
+/// runs it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Repair {
     StartService,
@@ -87,6 +87,23 @@ pub enum Repair {
     },
     /// Run the gozler setup from [`RELEASES`].
     Download,
+}
+
+impl ClientError {
+    /// The repair for this failure, or `None` when no repair fixes it.
+    pub fn repair(&self) -> Option<Repair> {
+        match self {
+            ClientError::NotRunning(why) => why.repair(),
+            // The setup installs gozlerd and gozler together.
+            ClientError::TooOld => Some(Repair::Download),
+            ClientError::NotReady
+            | ClientError::Communication(_)
+            | ClientError::Untrusted
+            | ClientError::Refused { .. }
+            | ClientError::Lost
+            | ClientError::Cancelled => None,
+        }
+    }
 }
 
 impl NotRunning {
@@ -205,5 +222,7 @@ mod tests {
             NotRunning::Unknown("access is denied".into()).repair(),
             None
         );
+        // Both programs offer the setup for a daemon older than the client.
+        assert_eq!(ClientError::TooOld.repair(), Some(Repair::Download));
     }
 }

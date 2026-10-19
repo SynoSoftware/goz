@@ -106,36 +106,37 @@ impl Failure {
             Failure::NotWindows => {
                 line("gozler runs only on Windows, because it searches NTFS and ReFS volumes")
             }
-            Failure::Client(error) => match error {
-                ClientError::NotRunning(why) => {
-                    let mut text = line(&problem(why));
-                    if let Some(repair) = why.repair() {
-                        let (how, lines) = repair_lines(&repair);
-                        text.push_str(how);
-                        text.push('\n');
-                        for command in &lines {
-                            text.push_str(&format!("  {command}\n"));
-                        }
+            Failure::Client(error) => {
+                let mut text = match error {
+                    ClientError::NotRunning(why) => line(&problem(why)),
+                    ClientError::NotReady => line(&format!(
+                        "the {SERVICE_NAME} service is not ready; try again shortly"
+                    )),
+                    ClientError::Untrusted => line(
+                        "the pipe server is not the trusted gozlerd daemon (owner is not \
+                         SYSTEM/Administrators), so gozler did not send the query. If this is \
+                         expected, pass --insecure-no-server-check.",
+                    ),
+                    ClientError::TooOld => line(
+                        "the running gozlerd is older than this client; install the matching \
+                         gozlerd",
+                    ),
+                    ClientError::Lost => line("daemon closed the connection"),
+                    ClientError::Cancelled => line("the request was cancelled"),
+                    ClientError::Communication(message) | ClientError::Refused { message, .. } => {
+                        line(message)
                     }
-                    text
+                };
+                if let Some(repair) = error.repair() {
+                    let (how, lines) = repair_lines(&repair);
+                    text.push_str(how);
+                    text.push('\n');
+                    for command in &lines {
+                        text.push_str(&format!("  {command}\n"));
+                    }
                 }
-                ClientError::NotReady => line(&format!(
-                    "the {SERVICE_NAME} service is not ready; try again shortly"
-                )),
-                ClientError::Untrusted => line(
-                    "the pipe server is not the trusted gozlerd daemon (owner is not \
-                     SYSTEM/Administrators), so gozler did not send the query. If this is \
-                     expected, pass --insecure-no-server-check.",
-                ),
-                ClientError::TooOld => line(
-                    "the running gozlerd is older than this client; install the matching gozlerd",
-                ),
-                ClientError::Lost => line("daemon closed the connection"),
-                ClientError::Cancelled => line("the request was cancelled"),
-                ClientError::Communication(message) | ClientError::Refused { message, .. } => {
-                    line(message)
-                }
-            },
+                text
+            }
             Failure::Internal(message) => line(message),
         }
     }
