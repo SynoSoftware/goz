@@ -35,7 +35,7 @@ use crate::core::results::{Fix, ListButton};
 use crate::core::selection::wide_path;
 use crate::core::settings::{SavedColumn, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
-use crate::core::text::{Numbers, without_access_key};
+use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
 use crate::win::clipboard::ClipboardBlock;
 use crate::win::controls::{
@@ -626,15 +626,31 @@ impl MainWindow {
         WindowCaptions::new(&self.model.borrow(), &*self.numbers.borrow())
     }
 
-    /// Sets every caption, then measures them and lays out again. Runs
-    /// after a change to the regional format.
+    /// Sets every caption, then measures them and lays out again, and draws
+    /// the window once at the end. Runs after a change to the language or
+    /// to the regional format.
     fn refresh_text(&self, hwnd: Hwnd) {
-        let captions = self.captions();
-        self.apply_text(hwnd, &captions);
-        let created = self.created();
-        let metrics = Metrics::measure(&created.fonts.borrow(), &captions, hwnd.dpi());
-        created.metrics.set(metrics);
-        self.layout(hwnd);
+        hwnd.draw_once_after(|| {
+            let captions = self.captions();
+            self.apply_text(hwnd, &captions);
+            let created = self.created();
+            let metrics = Metrics::measure(&created.fonts.borrow(), &captions, hwnd.dpi());
+            created.metrics.set(metrics);
+            self.layout(hwnd);
+        });
+    }
+
+    /// Loads the language of `choice`, gives it to the model and sets every
+    /// caption in it (design: "Switching the language"). The Language menu
+    /// and Settings' OK and Apply call it; the typed text, the results, the
+    /// selection and the focus stay as they are.
+    fn set_language(&self, hwnd: Hwnd, choice: LanguageChoice) {
+        let language = choice.resolve(&win::locale::display_languages());
+        self.model
+            .borrow_mut()
+            .set_language(choice, Strings::load(language));
+        super::set_panic_report(|report| report.language = Some(language));
+        self.refresh_text(hwnd);
     }
 
     fn apply_text(&self, hwnd: Hwnd, captions: &WindowCaptions) {
@@ -1174,7 +1190,11 @@ impl MainWindow {
                 let key = model.sort().key;
                 model.sort_by(SortSpec { key, dir })
             }
-            MenuItem::Language(_) => return,
+            MenuItem::Language(place) => {
+                self.set_language(hwnd, LanguageChoice::at(place));
+                self.save_settings(hwnd, true);
+                return;
+            }
         };
         self.apply(hwnd, accepted);
     }
@@ -2278,6 +2298,9 @@ impl MainWindow {
         };
         let accepted = self.model.borrow_mut().set_choices(values.choices.clone());
         self.apply(hwnd, accepted);
+        if edited.choices.language != last.choices.language {
+            self.set_language(hwnd, edited.choices.language.clone());
+        }
         self.save_settings(hwnd, true);
         Ok(Applied { values, failures })
     }

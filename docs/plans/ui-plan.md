@@ -692,7 +692,7 @@ ones the owner accepted.
   since stage 2; this stage adds only the switch.
 
 **Done when:**
-- The `Model::set_strings` test from "Tests" passes on Ubuntu.
+- The `Model::set_language` test from "Tests" passes on Ubuntu.
 - The Language menu is the last menu bar item, aligned right. With English
   alone, it and the Language list in Settings hold Windows default and
   English; in the build with the pseudo-language, they hold that language
@@ -795,7 +795,7 @@ boundary, under `AGENTS.md`'s test rules:
   other placeholders than English shows the English; a key that English
   lacks shows its dotted name; Windows default takes the first language of
   the Windows list that ships, then its parent language, then English;
-- `Model::set_strings`: it returns no `Fetch` and keeps the results, the
+- `Model::set_language`: it returns no `Fetch` and keeps the results, the
   selection and the typed text.
 
 ## The probe
@@ -1062,9 +1062,9 @@ impl Model {
     pub(crate) fn polls_status(&self) -> bool;
     /// Applies a reply; a reply of an older generation changes nothing.
     pub(crate) fn accept(&mut self, fetched: Fetched) -> Accepted;
-    /// Replaces the language. It starts no request, because the results do
-    /// not depend on the language.
-    pub(crate) fn set_strings(&mut self, strings: Strings);
+    /// Replaces the language and records the choice. It starts no request,
+    /// because the results do not depend on the language.
+    pub(crate) fn set_language(&mut self, choice: LanguageChoice, strings: Strings);
 }
 
 /// Regional number formatting; `win::locale` implements it with

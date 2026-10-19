@@ -16,7 +16,7 @@ use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{ListButton, ListMessage, Results, RowsChange, Shown};
 use super::selection::{FolderContents, Selection};
 use super::settings::{Choices, Placement, SavedColumn, Settings};
-use super::text::{self, Strings};
+use super::text::{self, LanguageChoice, Strings};
 use super::update;
 use gozler_core::escompat::EsPlan;
 use gozler_core::output::Format;
@@ -298,6 +298,14 @@ impl Model {
             change: Change::Settings,
             then: search_again.then_some(Then::SearchAgain),
         }
+    }
+
+    /// Replaces the language with `strings` and records `choice`, which the
+    /// settings file saves. It starts no request, because the results do
+    /// not depend on the language (spec: Language, `T12`).
+    pub(crate) fn set_language(&mut self, choice: LanguageChoice, strings: Strings) {
+        self.settings.choices.language = choice;
+        self.strings = strings;
     }
 
     /// Settings shows or hides its Index page; while it shows, the window
@@ -1784,6 +1792,21 @@ pub(crate) mod tests {
             Change::NewSearch { count: 3 },
             "a search in flight shows its own reply"
         );
+    }
+
+    /// T12: a language switch that searched again or reset the results
+    /// would lose the person's place, and one that forgot the choice would
+    /// open in the old language after a restart.
+    #[test]
+    fn t12_a_language_switch_keeps_the_results_the_selection_and_the_text() {
+        let mut model = showing(50_000);
+        model.set_selection(vec![3..5]);
+        model.set_typed_search(r"F:\ ext:cs".into());
+        model.set_language(LanguageChoice::Tag("en".into()), english());
+        assert_eq!(model.results().count(), 50_000);
+        assert_eq!(paths(&model), [r"C:\row3", r"C:\row4"]);
+        assert_eq!(model.text, r"F:\ ext:cs");
+        assert_eq!(model.choices().language, LanguageChoice::Tag("en".into()));
     }
 
     /// T2: the rows of a new search are other files.

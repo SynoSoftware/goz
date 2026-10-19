@@ -14,7 +14,7 @@ use crate::core::settings::{SettingsDraft, SettingsPage, SettingsValues};
 use crate::core::shortcuts::{
     CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows, show_refusal_message,
 };
-use crate::core::text::Strings;
+use crate::core::text::{LANGUAGES, LanguageChoice, Strings, without_access_key};
 use crate::win::controls::{
     Balloon, CheckBox, DropDownList, Edit, HotkeyControl, HotkeyValue, ListBox, ReportList,
 };
@@ -177,6 +177,13 @@ impl<'a> SettingsDialog<'a> {
         )
     }
 
+    fn language_list(&self) -> Option<DropDownList> {
+        DropDownList::of_dialog(
+            self.page(SettingsPage::General)?,
+            ControlId::GeneralLanguage.id(),
+        )
+    }
+
     fn command_list(&self) -> Option<ReportList> {
         ReportList::of_dialog(
             self.page(SettingsPage::Keyboard)?,
@@ -211,6 +218,12 @@ impl<'a> SettingsDialog<'a> {
                     }
                 }
                 if page == SettingsPage::General {
+                    if let Some(list) = self.language_list() {
+                        // A saved tag that no longer ships shows as Windows
+                        // default; it stays saved unless the person chooses.
+                        let place = values.choices.language.shipped();
+                        list.select(place.map_or(0, |index| index + 1));
+                    }
                     for (control, _, _, command) in OPEN_COMMANDS {
                         if let Some(edit) = self.control(page, control) {
                             edit.set_text(command(&mut values));
@@ -613,6 +626,12 @@ impl<'a> SettingsDialog<'a> {
                 .map(Hwnd::text)
                 .unwrap_or_default();
             *command(&mut self.draft.borrow_mut().edited) = text;
+        } else if is(id, ControlId::GeneralLanguage) {
+            // Windows default first, then the shipped languages.
+            if let Some(index) = self.language_list().and_then(DropDownList::selected) {
+                self.draft.borrow_mut().edited.choices.language =
+                    LanguageChoice::at(index.checked_sub(1));
+            }
         } else if is(id, ControlId::KeyboardShortcut) {
             self.shortcut_changed();
         } else if is(id, ControlId::KeyboardFilter) {
@@ -687,13 +706,19 @@ impl DialogProc for SettingsDialog<'_> {
         self.pages.replace(pages);
 
         let text = |key: &'static str| self.strings.text(key);
-        // Languages arrive with stage 8 of the plan; until then the list
-        // shows the one choice there is.
+        if let Some(list) = self.language_list() {
+            // As the Language menu lists them, each language by its own
+            // name (spec: Language).
+            let names = LANGUAGES
+                .iter()
+                .map(|language| without_access_key(language.name));
+            let items: Vec<String> =
+                std::iter::once(text("settings_general.windows_default").to_owned())
+                    .chain(names)
+                    .collect();
+            list.set_items(&items, 0);
+        }
         if let Some(page) = self.page(SettingsPage::General) {
-            if let Some(list) = DropDownList::of_dialog(page, ControlId::GeneralLanguage.id()) {
-                list.set_items(&[text("settings_general.windows_default")], 0);
-                list.hwnd().set_enabled(false);
-            }
             for (control, _, cue, _) in OPEN_COMMANDS {
                 if let Some(edit) = Edit::of_dialog(page, control.id()) {
                     edit.set_cue(text(cue));

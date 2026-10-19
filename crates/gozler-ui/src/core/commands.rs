@@ -135,7 +135,7 @@ impl CommandId {
                     Some(|s| s.model.panes().inspector),
                 ),
                 C::Columns => ("command.columns", &[], always, None),
-                C::Language => ("menu.language", &[], never, None),
+                C::Language => ("menu.language", &[], always, None),
                 C::Refresh => (
                     "command.refresh",
                     const { &[Keystroke::plain(Key::Function(5))] },
@@ -225,12 +225,6 @@ pub(crate) enum Focus {
 
 fn always(_: &State) -> bool {
     true
-}
-
-/// A command the window cannot carry out yet. It stays in its menu,
-/// disabled, so the menus never change shape (spec: Menus).
-fn never(_: &State) -> bool {
-    false
 }
 
 /// Refresh runs the shown search again (spec: C17).
@@ -650,10 +644,9 @@ impl MenuItem {
             MenuItem::SortKey(key) => model.sort().key == key,
             MenuItem::SortDirection(dir) => model.sort().dir == dir,
             MenuItem::Language(None) => model.settings.choices.language == LanguageChoice::Windows,
-            MenuItem::Language(Some(language)) => matches!(
-                &model.settings.choices.language,
-                LanguageChoice::Tag(tag) if tag.eq_ignore_ascii_case(LANGUAGES[language].tag)
-            ),
+            MenuItem::Language(Some(language)) => {
+                model.settings.choices.language.shipped() == Some(language)
+            }
         }
     }
 }

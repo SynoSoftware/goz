@@ -867,9 +867,10 @@ call a `MainWindow` method that gives the copy to the model and saves it.
 `WM_COMMAND`, and the handler calls `MainWindow::set_language(choice)`. OK
 or Apply in Settings, with Deutsch chosen in General > Language, calls the
 same method after it gives the other settings to the model.
-`Strings::load` builds the new strings, `model.borrow_mut().set_strings(…)`
-replaces the old ones in a statement of its own, and the handler measures the
-captions again and calls `apply_text`, which sets every caption:
+`Strings::load` builds the new strings, `model.borrow_mut().set_language(…)`
+records the choice and replaces the old strings in a statement of its own,
+and the handler measures the captions again and calls `apply_text`, which
+sets every caption:
 
 - the menu bar's items (`SetMenuItemInfoW`, then `DrawMenuBar`), with the
   radio mark on the new choice (`CheckMenuRadioItem`);

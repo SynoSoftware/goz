@@ -56,6 +56,26 @@ pub(crate) enum LanguageChoice {
 }
 
 impl LanguageChoice {
+    /// The choice at `place` in the Language menu and the Language list:
+    /// `None` for Windows default, or an index of [`LANGUAGES`].
+    pub(crate) fn at(place: Option<usize>) -> LanguageChoice {
+        match place {
+            Some(index) => LanguageChoice::Tag(LANGUAGES[index].tag.to_owned()),
+            None => LanguageChoice::Windows,
+        }
+    }
+
+    /// The index in [`LANGUAGES`] of a chosen language that ships; `None`
+    /// for Windows default and for a saved tag that no longer ships.
+    pub(crate) fn shipped(&self) -> Option<usize> {
+        match self {
+            LanguageChoice::Windows => None,
+            LanguageChoice::Tag(tag) => LANGUAGES
+                .iter()
+                .position(|language| language.tag.eq_ignore_ascii_case(tag)),
+        }
+    }
+
     /// The shipped language to load: the chosen tag, or the first of
     /// `windows_languages` that ships, each with its parent languages
     /// (`pt` for `pt-BR`), and English when none ships.

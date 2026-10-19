@@ -656,11 +656,11 @@ menu.help
   -
   command.about||on|
 menu.language|||right
-  command.windows_default||off|marked
+  command.windows_default||on|marked
   -
-  =&English||off|
+  =&English||on|
 '@
-if ($Pseudo) { $menuSpec += "`n  =&qps-ploc||off|" }
+if ($Pseudo) { $menuSpec += "`n  =&qps-ploc||on|" }
 
 # The expected menus as lines: indent, name, shortcut, access key, enabled,
 # mark. A top-level menu is always enabled.
@@ -2977,6 +2977,107 @@ try {
             }
         }
         [void](Close-Window $window)
+    }
+
+    # --- Switching the language (stage 8) -----------------------------------
+    # Language > the pseudo-language changes every caption at once and keeps
+    # the typed text, the selected row, the focus and the top row (T12, J10);
+    # a parser message then shows in it (S7, J7); the window opens in it
+    # after a restart; the Language menu and Settings' Language list hold the
+    # same choices, and a choice in one shows in the other (C16). Only the
+    # build with the pseudo-language ships a second language.
+    if (Runs 'language') {
+        $switchChecks = 'Language switches at once and keeps the place', 'a parser message in the pseudo-language',
+        'the chosen language after a restart', 'the Language menu and list show one choice'
+        if (-not $Pseudo -or -not $filesListed) {
+            $why = $Pseudo ? 'gozler did not list the fixture' : 'run with -Pseudo on a check.ps1 -Release -Pseudo build'
+            foreach ($name in $switchChecks) { Report $name 'not run' $why }
+        }
+        else {
+            # The menu item IDs of Windows default and of LANGUAGES' entries.
+            $windowsDefaultId = 0x500
+            $pseudoId = 0x502
+            Write-Settings $null
+            $window = Start-Window
+            [void](Wait-Answer $window)
+            [void](Search-For $window "$files\ ext:cs")
+            $hwnd = $windowOf[$window.Id]
+            $listHwnd = Control-Hwnd $window $ListId
+            # WM_KEYDOWN with VK_DOWN in the search box focuses the list and
+            # selects its first row.
+            [void][GozlerProbe.Win]::PostMessageW((Search-Hwnd $window), 0x0100, [IntPtr]0x28, 0)
+            [void](Wait-Until { [GozlerProbe.Win]::Focus($hwnd) -eq $listHwnd })
+            $place = {
+                [ordered]@{
+                    text          = [GozlerProbe.Win]::ControlText((Search-Hwnd $window))
+                    # LVM_GETNEXTITEM with LVNI_SELECTED, and LVM_GETTOPINDEX.
+                    selected      = [long][GozlerProbe.Win]::SendMessageW($listHwnd, 0x100C, [IntPtr](-1), [IntPtr]2)
+                    top           = [long][GozlerProbe.Win]::SendMessageW($listHwnd, 0x1027, 0, 0)
+                    focus_in_list = [GozlerProbe.Win]::Focus($hwnd) -eq $listHwnd
+                    results       = Count-Of ([GozlerProbe.Win]::ControlText((Control-Hwnd $window $StatusBarId)))
+                }
+            }
+            $before = & $place
+            # The menu item's WM_COMMAND, sent, so it returns once the window
+            # has switched; a person notices a pause from about 100 ms. A
+            # click on the menu is the window's own message, so the time of
+            # an empty message from the probe, WM_NULL, is taken off.
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            [void][GozlerProbe.Win]::SendMessageW($hwnd, 0, 0, 0)
+            $roundTrip = $clock.ElapsedMilliseconds
+            $clock.Restart()
+            [void][GozlerProbe.Win]::SendMessageW($hwnd, $WM_COMMAND, [IntPtr]$pseudoId, 0)
+            $ms = $clock.ElapsedMilliseconds - $roundTrip
+            $after = & $place
+            $captions = Read-Captions $window
+            $inspector = Inspector-State $window
+            $notPseudo = @($captions.menus + $captions.match + $captions.filters + $captions.headers + $captions.results + @($inspector.fields.Keys) |
+                    Where-Object { $_ -notmatch '^\[.*\]$' })
+            Start-Sleep -Milliseconds 300
+            Save-Screenshot $hwnd 'switched-pseudo'
+            Check 'Language switches at once and keeps the place' ($notPseudo.Count -eq 0 -and $ms -lt 100 -and
+                ($before | ConvertTo-Json -Compress) -eq ($after | ConvertTo-Json -Compress)) ([ordered]@{
+                    ms = $ms; round_trip_ms = $roundTrip; before = $before; after = $after; not_pseudo = $notPseudo; inspector_labels = @($inspector.fields.Keys)
+                })
+
+            # The detail after the translated sentence is the parser's
+            # English, which names the mistyped word.
+            [void](Search-For $window 'dm:yesterdy')
+            $message = Message-Text $window
+            Check 'a parser message in the pseudo-language' ($message -match '^\[.*\]' -and $message -like '*yesterdy*') ([ordered]@{ message = $message })
+            [void](Close-Window $window)
+
+            $window = Start-Window
+            $captions = Read-Captions $window
+            $notPseudo = @($captions.menus + $captions.headers | Where-Object { $_ -notmatch '^\[.*\]$' })
+            Check 'the chosen language after a restart' ($notPseudo.Count -eq 0) ([ordered]@{ menus = $captions.menus; not_pseudo = $notPseudo })
+
+            # The menu marks the pseudo-language and the list selects it;
+            # Windows default chosen in the list with OK then marks Windows
+            # default in the menu.
+            $marked = { @(Read-Menus $window) | Where-Object { $_.Trim().EndsWith('| marked') } | ForEach-Object { ($_.Trim() -split ' \| ')[0] } }
+            $markedBefore = @(& $marked)
+            $dialog = Open-Settings $window
+            $combo = Dialog-Control $dialog 'IDC_GENERAL_LANGUAGE' 'ComboBox'
+            $items = @([GozlerProbe.Win]::ComboItems($combo))
+            # CB_GETCURSEL
+            $listSelected = [long][GozlerProbe.Win]::SendMessageW($combo, 0x0147, 0, 0)
+            Start-Sleep -Milliseconds 300
+            Save-Screenshot $dialog 'settings-language-pseudo'
+            # CB_SETCURSEL, then CBN_SELCHANGE, as a choice in the list.
+            [void][GozlerProbe.Win]::SendMessageW($combo, 0x014E, 0, 0)
+            [void][GozlerProbe.Win]::SendMessageW($dialog, $WM_COMMAND, [IntPtr]((1 -shl 16) -bor [int]$ids.IDC_GENERAL_LANGUAGE), $combo)
+            Click-Button $dialog 1
+            $applied = Wait-Until { -not [GozlerProbe.Win]::IsWindow($dialog) }
+            $markedAfter = @(& $marked)
+            [void](Close-Window $window)
+            $choices = [ordered]@{
+                list = $items; list_selected = $listSelected; marked_before = $markedBefore; applied = $applied; marked_after = $markedAfter
+            }
+            Check 'the Language menu and list show one choice' ($items.Count -eq 3 -and ($items[1..2] -join '|') -eq 'English|qps-ploc' -and
+                $listSelected -eq 2 -and $markedBefore -contains 'qps-ploc' -and $applied -and
+                $markedAfter -contains (Plain (Caption 'command.windows_default'))) $choices
+        }
     }
 
     # --- The Settings dialog (stage 7) --------------------------------------

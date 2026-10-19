@@ -26,14 +26,18 @@ pub(crate) mod window;
 use crate::core::layout::{Px, Rect, Size};
 use crate::core::settings::Placement;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{InvalidateRect, MapWindowPoints};
+use windows::Win32::Graphics::Gdi::{
+    InvalidateRect, MapWindowPoints, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
+    RedrawWindow,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW, GetWindowPlacement,
     GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, IsWindowVisible,
     PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE, SW_SHOWNA,
-    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, SetWindowTextW,
-    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
+    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowPos,
+    SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_SETREDRAW,
+    WPF_RESTORETOMAXIMIZED,
 };
 use windows::core::HSTRING;
 
@@ -219,6 +223,26 @@ impl Hwnd {
     pub(crate) fn invalidate(self) {
         // SAFETY: plain values.
         let _ = unsafe { InvalidateRect(Some(self.0), None, true) };
+    }
+
+    /// Runs `change`, which changes many of the window's controls, with the
+    /// window's drawing stopped (`WM_SETREDRAW`), then draws the window, its
+    /// menu bar and every control once, instead of each control drawing
+    /// itself as it changes.
+    pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
+        // SAFETY: plain values.
+        unsafe { SendMessageW(self.0, WM_SETREDRAW, Some(WPARAM(0)), None) };
+        change();
+        // SAFETY: plain values.
+        unsafe {
+            SendMessageW(self.0, WM_SETREDRAW, Some(WPARAM(1)), None);
+            let _ = RedrawWindow(
+                Some(self.0),
+                None,
+                None,
+                RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN,
+            );
+        }
     }
 
     pub(crate) fn focus(self) {
