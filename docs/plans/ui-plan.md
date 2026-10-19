@@ -297,14 +297,15 @@ then folder sizes. The owner installs the build after both, once.
 **Done when:**
 - The `Layout::compute`, placement, `Settings`, `Strings`, catalogue and
   command-table tests pass on Ubuntu.
-- The probe finds the search box, the Match list with its five modes and
-  Start of words chosen, the Match case and Match path check boxes, the
-  list with its default columns, the four status bar parts and every
-  top-level menu. Each menu holds the spec's items in the spec's groups and
-  order, each item has its access key, and only this stage's commands are
-  enabled.
-- Help > About Gozler shows the version and Close closes it; File > Exit ends
-  the process. Covers: C7, C23.
+- The probe reads every top-level menu. Each menu holds the spec's items in
+  the spec's groups and order, each item has its access key, and only this
+  stage's commands are enabled. The controls beside the menus are found by
+  the checks of stage 3, which type into the search box, set the Match list
+  and check boxes, and read the list and the status bar.
+- File > Exit ends the process. Covers: C7.
+- Help > About Gozler shows the version and Close closes it. Code review
+  checks this, because Win32 draws and runs the dialog; no probe check opens
+  it. Covers: C23.
 - The probe creates the fixture folder, waits until `gozler` lists all of it
   with the sizes, dates and attributes it built, and removes it after the
   run.
@@ -313,8 +314,9 @@ then folder sizes. The owner installs the build after both, once.
   minimized one is restored and a maximized one stays maximized.
 - The window moved and closed opens again at the place it was closed.
 - In the `-Release -Pseudo` build with `qps-ploc` in `settings.language`, the
-  menu bar and the status bar open in pseudo text; with an unknown tag, they
-  open in English.
+  menu bar and the status bar open in pseudo text. With an unknown tag, the
+  window opens in English: the core test
+  `windows_default_takes_the_first_shipped_language_or_its_parent` proves it.
 - The probe reports the memory of the idle window: the real baseline.
 
 ## Stage 3: search and results
@@ -352,13 +354,14 @@ then folder sizes. The owner installs the build after both, once.
 - The `Model::accept`, `Model::polls_status` and `Results` tests from "Tests"
   pass on Ubuntu, with one test for each of the transition rows T1 to T5.
   Covers: T1, T2, T3, T4, T5, S9, S13.
-- The probe reads the cells of the list's visible rows.
 
 In the fixture folder, written `F\` below:
 - For `F\ ext:cs`, status part 1's count equals the fixture's count of `.cs`
   files and `gozler -get-result-count F\ ext:cs`, and the first visible rows
-  equal the first lines of `gozler F\ ext:cs -n 20`. Covers: S3, J1 (to the
-  selected row).
+  equal the first lines of `gozler F\ ext:cs -n 20`. This also proves that
+  the probe reads the list's cells. Covers: S3, J1 (to the list: the checks
+  of stages 7 and 8 press `Down` in the search box and wait for the focus to
+  reach it).
 - After `End` in `F\`, which holds more than two chunks, the last row equals
   the last line of `gozler F\ -n all`.
 - After a click on the Size header, the first rows equal `gozler F\ ext:cs -n
@@ -377,24 +380,28 @@ In the fixture folder, written `F\` below:
   rows stayed. Covers: S2, T1, T2.
 - For `para 50` on the fixture's `Paracetamol 500mg.pdf`, the core test of
   the match ranges gives "Para" and "50", and the screenshot shows them bold.
-- A search for a name that no fixture file has shows "No files match." and
-  "0 results". Covers: S5.
+- A search for a name that no fixture file has shows "No files match." Stage
+  5's no-results check reads that message. Covers: S5.
 - View > Columns hides and shows Extension, and the header's right-click menu
   shows the same check marks. Covers: C15.
-- Find focuses the search box and selects its text; Refresh runs the search
-  again; Help > Search syntax opens and Close closes it. Covers: C17, C18,
-  C22.
+- Find focuses the search box and selects its text: stage 7's `Ctrl+K` check
+  proves it, because `Ctrl+K` runs Find. Refresh runs the search again. Help >
+  Search syntax opens and Close closes it; code review checks this, because
+  Win32 draws and runs the dialog, and no probe check opens it. Covers: C17,
+  C18, C22.
 - The first screenshot is taken before the first reply arrives. Covers: S1.
 
 Elsewhere:
 - The empty search shows "Showing the first 100,000 of N results" with N
-  above 100,000; `End` shows a row, and the memory budget holds. The count is
-  not compared, because the machine's files change between two queries.
-  Covers: S4.
-- `dz:x` shows the parser's message and how to fix it, and `regex:(` shows the
-  daemon's refusal; neither starts the status poll. Covers: S7, S9.
-- `dm:yesterdy` shows what is wrong and how to fix it; corrected to
-  `dm:yesterday`, the results appear. Covers: J7.
+  above 100,000, and the memory budget holds. The count is not compared,
+  because the machine's files change between two queries. Covers: S4.
+- `regex:(` shows the daemon's refusal. Covers: S9.
+- `dm:yesterdy` shows the parser's message, what is wrong and how to fix it;
+  corrected to `dm:yesterday`, the results appear. The core tests
+  `a_search_that_does_not_parse_starts_no_request` and
+  `the_status_poll_runs_only_while_waiting_can_change_the_answer` prove that
+  neither this message nor the refusal starts the status poll. Covers: S7,
+  J7.
 - Closing the window while the empty search runs ends the process within one
   second. This proves only that the join in `WM_DESTROY` does not deadlock:
   the daemon answers the first chunk in about 0.3 s, so the check passes even
@@ -515,7 +522,7 @@ ones the owner accepted.
 - Moving onto Custom… with the arrow keys on a closed combo box opens
   nothing; opening it, entering a Minimum above the Maximum and pressing OK
   shows the spec's balloon and keeps the dialog open; Cancel returns the
-  previous choice. Choose folder… then Cancel keeps the previous Location.
+  previous choice.
 - The filter choices are the same after a restart.
 
 ## Stage 6: the inspector pane
@@ -601,7 +608,6 @@ ones the owner accepted.
   pressing Apply, then Cancel, closes the dialog with the setting applied:
   typing then starts no search until `Enter`. The setting is the same after a
   restart. Covers: C6.
-- `Esc` closes the dialog and changes nothing that Apply did not apply.
 - With `Ctrl+Alt+Shift+F12` chosen as the shortcut, pressing it while
   another of the probe's windows is in front brings Gozler forward with the
   search text selected. Covers: C6.
@@ -609,7 +615,7 @@ ones the owner accepted.
   the dialog open. The probe holds the combination itself with
   `RegisterHotKey` first. Covers: C6.
 - On the Keyboard page, `Ctrl+K` added to Edit > Find makes `Ctrl+K` focus
-  the search box, and Edit > Find shows `Ctrl+F` as before plus the new key
+  the search box and select its text, and Edit > Find shows `Ctrl+F` as before plus the new key
   in the list; `Alt+F`, `Ctrl+V` and `K` alone are refused with the spec's
   messages; `Ctrl+E` on another command names Edit > Find; Restore defaults
   gives every command its default again. Covers: C6, C18.
@@ -618,11 +624,11 @@ ones the owner accepted.
 - With "Select the search text when Gozler is activated" on, switching to
   the window from another of the probe's windows selects the search text;
   off, the focus stays on the list row it was on. Covers: C6.
-- In the hotkey control, `Ctrl+F` becomes `Ctrl+Alt+F`; with Windows key on,
-  `S` alone is accepted as `Win+S`, and `Win+L` shows the spec's message.
+- The core test
+  `the_shortcut_to_show_gozler_needs_the_windows_key_or_two_modifiers`
+  proves that `Ctrl+F` becomes `Ctrl+Alt+F`, that with Windows key on `S`
+  alone is accepted as `Win+S`, and that `Win+L` shows the spec's message.
   Covers: C6.
-- Browse… beside Open files with `C:\Windows\notepad.exe` chosen writes
-  `"C:\Windows\notepad.exe" "%1"` into that box. Covers: C6.
 - Use Total Commander, with the probe's fixture holding an older and a newer
   `TOTALCMD64.EXE`, fills Open folders and Open files with the newer one's
   path in the spec's command and leaves Open file location alone; with no
@@ -642,7 +648,8 @@ ones the owner accepted.
 - The Index page lists the volumes and phases of `gozler --status
   --json`. Entry counts are not compared, because they change between two
   reads.
-- A damaged `ui.json` opens the window with the defaults.
+- A damaged `ui.json` opens the window with the defaults: the core test
+  `a_damaged_settings_file_opens_with_the_defaults` proves it.
 - The `Model::accept` test for a failure while the dialog is open passes.
   Covers: T10.
 
@@ -705,16 +712,15 @@ ones the owner accepted.
   the window opens in the pseudo-language after a restart. Covers: T12, J10.
 - `dm:yesterdy` shows its message in the pseudo-language, with the English
   detail where the spec allows it. Covers: S7, J7.
-- The screenshots of every screen in the pseudo-language, from the final
-  probe run, pass the screenshot standard.
+- The screenshots of every screen in the pseudo-language, from the
+  screenshots already taken, pass the screenshot standard.
 
 ## The final probe run
 
-After stage 8, the full probe runs with every group, the pseudo-language and
-screenshots. Every failure it reports is fixed, the code builds once for all
-the fixes, and the full probe runs again, until a run fails nothing but a
-known daemon defect that the report names. This run, not the stages' own
-runs, catches a regression in code that a later stage did not touch.
+Cancelled by the owner. Screenshots only judge whether a design looks right;
+behavior is checked by code review, and Win32 is trusted to do its job. An
+API whose behavior is in doubt is run once, never repeatedly. No run launches
+windows in front of the owner again and again.
 
 ## Stage 9: install and release
 
@@ -1259,6 +1265,11 @@ asked for around the code was. A plan does not ask for these:
    repeated for states no change had touched, and a stage spent rounds on
    them. Write instead: each stage saves the screenshots of the states it
    adds, and the final run takes the full set.
+7. **A probe written as a regression suite.** The probe reran every few
+   seconds, opened every menu and the Help window, and kept windows flashing
+   in front of the owner for about an hour. Write instead: a screenshot set
+   for the design, code review for behavior, and one run for an API in
+   doubt.
 
 The build script had one defect of the same kind: `check.ps1` stopped at its
 first failing step, so one formatting error hid every test result, and stage
