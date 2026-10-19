@@ -589,7 +589,7 @@ The release `gozler-ui.exe` stays under 16 MB of private bytes in steady state: 
 | A new language | its `<tag>.json` in `resources/` and a row in the language table |
 | A right-to-left language | the main window and the dialogs created with `WS_EX_LAYOUTRTL`, which mirrors their coordinates, so `Layout::compute` does not change; whether a switch between directions must create the controls again is not verified |
 | A second top-level window | another window procedure with the same trampoline |
-| A daemon result snapshot | a new request for rows of a snapshot; the cache, the list and the selection's rule do not change, and a selected row the person never saw becomes exact |
+| A daemon result snapshot | a new request for rows of a result snapshot, and a selected row the person never saw becomes exact; the list reaches every match, a row whose file is gone and an expired result snapshot get states of their own, and the selection gets its own limit of 100,000 rows (`docs/plans/result-snapshot.md`) |
 | Results that update when files change | a new outcome, after the protocol gets change notification |
 
 ## Not planned

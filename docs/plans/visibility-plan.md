@@ -740,11 +740,12 @@ total.
   filtering by permissions is removed.
 - `gozler-client/src/lib.rs`: the doc comment of `folder_is_missing` says the
   same as "Paths".
-- `docs/DESIGN.md`: "Results list" and "Inspector pane" say that a user who does not see every file gets no
-  folder sizes (spec `V6`), and that the window leaves a folder's size empty,
-  in the column and in the pane, whenever it is unknown. A result carries no reason for an unknown size, and spec `V12`
-  adds none, so the window cannot tell this rule from a size pass still
-  running; "Unknown" would read as data still loading. The volume's state
+- `docs/DESIGN.md`: "Results list" and "Inspector pane" say that a user who
+  does not see every file gets no folder sizes (spec `V6`), and that the
+  window leaves a folder's size empty, in the column and in the pane,
+  whenever it is unknown. A result carries no reason for an unknown size, and
+  spec `V12` adds none, so the window cannot tell this rule from a size pass
+  still running; "Unknown" would read as data still loading. The volume's state
   already says when a pass is running. A file's "Unknown" stays as it is.
 - `docs/SECURITY.md`: the trust model says which names each user sees, who
   sees every name, who may change the list, and why the client connects at the

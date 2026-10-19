@@ -266,8 +266,8 @@ Checked by: plan, stage 2 check 8.
 it.** The Include page leaves folders out of the index for every user. This
 spec decides which indexed entries each user sees. An excluded folder is in
 no user's results. An included one shows to the users `V1`, `V3` and `V16`
-allow. Two things follow for the service settings plan, which is not written
-yet:
+allow. Two things follow for the
+[service settings plan](service-settings.md), which is not written yet:
 
 - The Include page's preview line counts the whole index, not the caller's
   view, because only an administrator changes that page and its change

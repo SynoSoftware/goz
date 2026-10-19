@@ -67,7 +67,9 @@ indexed.
   checking it again adds "and the folders you checked again, counted once
   they are indexed". The window asks for the count 300 ms after the last
   change, through its worker, and a newer change cancels the older request
-  (window rule 4 in `docs/DESIGN.md`).
+  (window rule 4 in `docs/DESIGN.md`). It counts the whole index, not the
+  entries the administrator may see, because the change reaches every user
+  ([visibility spec](visibility-spec.md) `V14`).
 - **Folders Gozler indexes** is Windows' "Index these locations" list: one row
   for each indexed folder, a checked drive or a checked folder below an
   unchecked one, with the folders left out inside it, such as `C:\` with
@@ -128,6 +130,10 @@ indexed.
   results, as status part 4 says.
 - The drive list adds the state "not indexed", for a drive with nothing
   checked.
+- **Users and groups who see every file** is a list with Add and Remove and
+  an "Every user sees every file" check box, as the
+  [visibility spec](visibility-spec.md) `V14` describes. It needs the
+  visibility plan's stored list, so it comes after that plan.
 
 ## Everything's options
 
