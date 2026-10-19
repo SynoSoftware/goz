@@ -41,6 +41,13 @@ pub(crate) struct ControlEvent {
     pub(super) from: Hwnd,
 }
 
+impl ControlEvent {
+    /// The control that sent it.
+    pub(crate) fn sender(self) -> Hwnd {
+        self.from
+    }
+}
+
 pub(super) fn command(wparam: WPARAM, lparam: LPARAM) -> Command {
     let id = (wparam.0 & 0xffff) as u16;
     if lparam.0 == 0 {

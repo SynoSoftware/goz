@@ -99,7 +99,69 @@
     "metadata": "Some sizes and dates on {0} are unknown."
   },
   "list": {
-    "no_results": "No files match."
+    "no_results": "No files match.",
+    "missing_folder": "The folder {0} does not exist.",
+    "search_everywhere": "Search every&where"
+  },
+  "filter": {
+    "kind": "&Kind",
+    "all": "All",
+    "folders": "Folders",
+    "files": "Files",
+    "audio": "Audio",
+    "archives": "Archives",
+    "documents": "Documents",
+    "executables": "Executables",
+    "pictures": "Pictures",
+    "videos": "Videos",
+    "location": "L&ocation",
+    "everywhere": "Everywhere",
+    "location_indexing": "{0} (indexing)",
+    "location_offline": "{0} (offline)",
+    "location_failed": "{0} (not indexed)",
+    "choose_folder": "Choose fol&der…",
+    "only_directly": "Only directl&y in this folder",
+    "date": "Date &modified",
+    "any_time": "Any time",
+    "today": "Today",
+    "yesterday": "Yesterday",
+    "last_7_days": "Last 7 days",
+    "last_30_days": "Last 30 days",
+    "last_365_days": "Last 365 days",
+    "custom": "Custom…",
+    "date_from": "From {0}",
+    "date_until": "Until {0}",
+    "date_between": "{0} to {1}",
+    "size": "Si&ze",
+    "any_size": "Any size",
+    "empty": "Empty",
+    "tiny": "Tiny ({0})",
+    "small": "Small ({0})",
+    "medium": "Medium ({0})",
+    "large": "Large ({0})",
+    "huge": "Huge ({0})",
+    "gigantic": "Gigantic ({0})",
+    "range_up_to": "up to {0}",
+    "range_over": "over {0}",
+    "range_between": "{0} to {1}",
+    "size_at_least": "At least {0}",
+    "size_up_to": "Up to {0}",
+    "size_between": "{0} to {1}",
+    "attributes": "A&ttributes",
+    "hidden": "Hidden",
+    "system": "System",
+    "read_only": "Read-only",
+    "link": "Link",
+    "compressed": "Compressed",
+    "encrypted": "Encrypted",
+    "attribute_any": "Any",
+    "attribute_only": "Only",
+    "attribute_exclude": "Exclude"
+  },
+  "unit": {
+    "kb": "KB",
+    "mb": "MB",
+    "gb": "GB"
   },
   "failure": {
     "stopped": "The Gozler service is stopped, so Gozler cannot search. Start it, and Gozler searches again by itself.",
@@ -161,7 +223,23 @@
     "title": "Search syntax"
   },
   "button": {
-    "close": "Close"
+    "close": "Close",
+    "ok": "OK",
+    "cancel": "Cancel"
+  },
+  "custom_date": {
+    "title": "Custom date",
+    "from": "&From:",
+    "to": "&To:",
+    "order": "From must be on or before To."
+  },
+  "custom_size": {
+    "title": "Custom size",
+    "minimum": "&Minimum:",
+    "maximum": "Ma&ximum:",
+    "unit": "&Unit:",
+    "not_a_number": "Enter a number, such as {0}.",
+    "order": "Minimum must not be larger than Maximum."
   },
   "export": {
     "title": "Export results",

@@ -420,6 +420,20 @@ public static class Win {
         return true;
     }
 
+    /// A list box's items, which Windows copies across processes for
+    /// LB_GETTEXT.
+    public static List<string> ListItems(IntPtr list) {
+        var items = new List<string>();
+        int count = (int)SendMessageW(list, 0x018B, IntPtr.Zero, IntPtr.Zero);
+        for (int i = 0; i < count; i++) {
+            int length = (int)SendMessageW(list, 0x018A, (IntPtr)i, IntPtr.Zero);
+            var text = new StringBuilder(length + 1);
+            SendMessageW(list, 0x0189, (IntPtr)i, text);
+            items.Add(text.ToString());
+        }
+        return items;
+    }
+
     /// A combo box's items, which Windows copies across processes for
     /// CB_GETLBTEXT.
     public static List<string> ComboItems(IntPtr combo) {
@@ -579,7 +593,7 @@ menu.edit
   -
   command.find|Ctrl+F|on|
 menu.view
-  command.filters||off|marked
+  command.filters||on|marked
   command.inspector||off|marked
   command.columns||on|
     column.name||off|marked
@@ -747,7 +761,9 @@ function Open-About($process, [string] $screenshot) {
 }
 
 # Runs the menu item with ID `id`, which opens a dialog, then reads the
-# dialog, takes its screenshot, and closes it with its Close button.
+# dialog, which control has the focus, and takes its screenshot. Esc closes
+# it, posted to the focused control as the keyboard queues a key, so the
+# dialog need not be in front; when it does not, its Close button does.
 function Open-Dialog($process, [int] $id, [string] $screenshot) {
     [void][GozlerProbe.Win]::PostMessageW($process.MainWindowHandle, 0x0111, [IntPtr]$id, 0)
     $dialog = $null
@@ -765,13 +781,23 @@ function Open-Dialog($process, [int] $id, [string] $screenshot) {
     $edit = $controls | Where-Object AutomationId -EQ $ids.IDC_SEARCH_SYNTAX_TEXT | Select-Object -First 1
     $editText = $edit ? [GozlerProbe.Win]::ControlText([IntPtr]$edit.Hwnd) : $null
     $close = $controls | Where-Object AutomationId -EQ '2' | Select-Object -First 1
-    [GozlerProbe.Ui]::InvokeLater($close)
-    for ($i = 0; $i -lt 50 -and [GozlerProbe.Win]::IsWindow($dialog); $i++) { Start-Sleep -Milliseconds 100 }
+    $focus = [GozlerProbe.Win]::Focus($dialog)
+    $focusOnClose = $close -and $focus -eq [IntPtr]$close.Hwnd
+    # WM_KEYDOWN with VK_ESCAPE.
+    [void][GozlerProbe.Win]::PostMessageW(($focus -ne 0 ? $focus : $dialog), 0x0100, [IntPtr]0x1B, 0)
+    for ($i = 0; $i -lt 30 -and [GozlerProbe.Win]::IsWindow($dialog); $i++) { Start-Sleep -Milliseconds 100 }
+    $escClosed = -not [GozlerProbe.Win]::IsWindow($dialog)
+    if (-not $escClosed) {
+        [GozlerProbe.Ui]::InvokeLater($close)
+        for ($i = 0; $i -lt 50 -and [GozlerProbe.Win]::IsWindow($dialog); $i++) { Start-Sleep -Milliseconds 100 }
+    }
     return [ordered]@{
-        title  = $title
-        texts  = @($controls | ForEach-Object Name)
-        edit   = $editText
-        closed = -not [GozlerProbe.Win]::IsWindow($dialog)
+        title          = $title
+        texts          = @($controls | ForEach-Object Name)
+        edit           = $editText
+        focus_on_close = $focusOnClose
+        esc_closed     = $escClosed
+        closed         = -not [GozlerProbe.Win]::IsWindow($dialog)
     }
 }
 
@@ -792,7 +818,102 @@ $SearchBoxId = $ids.IDC_SEARCH; $MatchLabelId = $ids.IDC_MATCH_LABEL; $MatchMode
 $MatchCaseId = $ids.IDC_MATCH_CASE; $MatchPathId = $ids.IDC_MATCH_PATH; $ListId = $ids.IDC_LIST
 $StatusBarId = $ids.IDC_STATUS; $MessageId = $ids.IDC_MESSAGE
 
+# The menu item ID of `command`, a CommandId variant, as MenuItem::id gives
+# it: the base of the commands, then the command's place in CommandId::ALL.
+# It reaches a command that only a context menu shows.
+function Command-Id([string] $command) {
+    $table = Get-Content -Raw (Join-Path $PSScriptRoot 'src\core\commands.rs')
+    if ($table -notmatch '(?s)const ALL: \[CommandId; \d+\] = \[(.*?)\];') { throw 'commands.rs has no CommandId::ALL' }
+    $order = @([regex]::Matches($Matches[1], 'CommandId::(\w+)') | ForEach-Object { $_.Groups[1].Value })
+    if ($table -notmatch 'MenuItem::Run\(command\) => \{\s*(0x[0-9a-f]+) \+ index\(CommandId::ALL') { throw 'commands.rs numbers its commands otherwise' }
+    $index = [array]::IndexOf($order, $command)
+    if ($index -lt 0) { throw "CommandId::ALL has no $command" }
+    [Convert]::ToInt32($Matches[1], 16) + $index
+}
+
 function Control-Hwnd($process, [string] $id) { [IntPtr](Child-ById (Window-Element $process) $id).Hwnd }
+
+# The filter pane's control `id`. The pane is a window of its own, so its
+# controls are its children, not the main window's.
+function Pane-Child($process, [string] $id) {
+    Child-ById (Child-ById (Window-Element $process) $ids.IDC_FILTER_PANE) $id
+}
+function Pane-Hwnd($process, [string] $id) { [IntPtr](Pane-Child $process $id).Hwnd }
+
+# Selects the item at `index` of the pane's list `id`, a drop-down list when
+# `dropDown`, as a click or an arrow key does: the list changes, and the
+# window receives LBN_SELCHANGE or CBN_SELCHANGE, which are both 1.
+function Select-PaneItem($process, [string] $id, [int] $index, [bool] $dropDown) {
+    $control = Pane-Hwnd $process $id
+    # CB_SETCURSEL or LB_SETCURSEL
+    [void][GozlerProbe.Win]::SendMessageW($control, ($dropDown ? 0x014E : 0x0186), [IntPtr]$index, 0)
+    $command = [IntPtr]((1 -shl 16) -bor [int]$id)
+    [void][GozlerProbe.Win]::SendMessageW($process.MainWindowHandle, 0x0111, $command, $control)
+}
+
+# The selected position of the pane's list `id`, a drop-down list when
+# `dropDown`.
+function Pane-Selected($process, [string] $id, [bool] $dropDown) {
+    # CB_GETCURSEL or LB_GETCURSEL
+    [long][GozlerProbe.Win]::SendMessageW((Pane-Hwnd $process $id), ($dropDown ? 0x0147 : 0x0188), 0, 0)
+}
+
+# The Location list's selected item.
+function Selected-Location($process) {
+    $items = [GozlerProbe.Win]::ListItems((Pane-Hwnd $process $ids.IDC_LOCATION))
+    $items[(Pane-Selected $process $ids.IDC_LOCATION $false)]
+}
+
+# Selects `folder` in the Location list, an item since Search in this
+# folder chose it.
+function Set-Location($process, [string] $folder) {
+    $items = @([GozlerProbe.Win]::ListItems((Pane-Hwnd $process $ids.IDC_LOCATION)))
+    Select-PaneItem $process $ids.IDC_LOCATION ([array]::IndexOf($items, $folder)) $false
+}
+
+# The captions of the list message's buttons that show.
+function Message-Buttons($process) {
+    $element = Window-Element $process
+    @($ids.IDC_MESSAGE_BUTTON_1, $ids.IDC_MESSAGE_BUTTON_2 | ForEach-Object { Child-ById $element $_ } | Where-Object { $_ } | ForEach-Object Name)
+}
+
+# The window's first dialog once it opens, or $null.
+function Wait-Dialog($process) {
+    for ($i = 0; $i -lt 100; $i++) {
+        Start-Sleep -Milliseconds 100
+        $dialog = [GozlerProbe.Win]::Windows($process.Id, '#32770') | Select-Object -First 1
+        if ($dialog) { return $dialog }
+    }
+    return $null
+}
+
+# Clicks the dialog's button `id` through UI Automation and waits until the
+# dialog closes; returns whether it closed.
+function Close-Dialog($dialog, [int] $id) {
+    $button = [GozlerProbe.Win]::ChildById($dialog, $id, 'Button')
+    if ($button -ne 0) { [GozlerProbe.Ui]::InvokeLater([GozlerProbe.Ui]::FromHandle($button)) }
+    for ($i = 0; $i -lt 50 -and [GozlerProbe.Win]::IsWindow($dialog); $i++) { Start-Sleep -Milliseconds 100 }
+    $closed = -not [GozlerProbe.Win]::IsWindow($dialog)
+    # A dialog left open would block the window's close at the end.
+    if (-not $closed) { [void][GozlerProbe.Win]::PostMessageW($dialog, $WM_CLOSE, 0, 0) }
+    return $closed
+}
+
+# Opens the custom range dialog of the pane's drop-down list `id`: Custom…
+# is selected as an arrow key selects it, which opens nothing, then Enter
+# is posted to the closed list as the keyboard queues it, so the window
+# need not be in front. Returns whether a dialog opened after the arrow
+# key, and the dialog that Enter opened.
+function Open-Custom($process, [string] $id) {
+    $list = Pane-Hwnd $process $id
+    $custom = [GozlerProbe.Win]::ComboItems($list).Count - 1
+    Select-PaneItem $process $id $custom $true
+    Start-Sleep -Milliseconds 500
+    $openedByArrow = [bool]([GozlerProbe.Win]::Windows($process.Id, '#32770') | Select-Object -First 1)
+    # WM_KEYDOWN with VK_RETURN.
+    [void][GozlerProbe.Win]::PostMessageW($list, 0x0100, [IntPtr]0x0D, 0)
+    return $openedByArrow, (Wait-Dialog $process)
+}
 
 # The status bar's part at `index`, from 0. UI Automation sees a new window's
 # controls a moment after the window, so a read is tried again.
@@ -998,8 +1119,9 @@ function Same-Bytes([string] $a, [string] $b) {
 }
 
 # Starts a window and takes its screenshot before the first search answers
-# (S1). Returns the window and whether part 1 still said "Searching…" after
-# the screenshot.
+# (S1). Returns the window and status part 1 just after the screenshot,
+# read with one message, so it shows what the screenshot shows whatever the
+# machine's speed; UI Automation would read it too late.
 function Start-Searching([string] $language) {
     $process = Start-Process -PassThru -FilePath $Exe -ArgumentList '--data-dir', "`"$dataDir`""
     $started.Add($process)
@@ -1008,9 +1130,9 @@ function Start-Searching([string] $language) {
         $process.Refresh()
     }
     if ($process.MainWindowHandle -eq 0) { throw "gozler-ui did not open its window" }
+    $status = [GozlerProbe.Win]::ChildById($process.MainWindowHandle, [int]$StatusBarId, 'msctls_statusbar32')
     Save-Screenshot $process.MainWindowHandle "searching-first-$language"
-    $part = Status-Part $process 0
-    return $process, $part
+    return $process, [GozlerProbe.Win]::ControlText($status)
 }
 
 # Takes a screenshot of each state that stage 3 reaches in a fixture
@@ -1081,6 +1203,10 @@ function New-Fixture([string] $files) {
         'attributes\read-only.txt'   = 2
         'to-delete\gone.txt'         = 3
         'denied\kept.txt'            = 4
+        # Directly in the fixture folder, for Search in this folder and the
+        # filters; Large is above 1 MB.
+        'large.bin'                  = 2MB
+        'old.txt'                    = 5
     }
     foreach ($entry in $named.GetEnumerator()) {
         $path = Join-Path $files $entry.Key
@@ -1089,6 +1215,8 @@ function New-Fixture([string] $files) {
     }
     [System.IO.File]::SetLastWriteTime((Join-Path $files 'docs\Paracetamol 500mg.pdf'), [datetime]'2024-02-29 13:14:15')
     [System.IO.File]::SetLastWriteTime((Join-Path $files 'docs\comparator.txt'), [datetime]'2020-01-01 00:00:00')
+    # Outside Last 7 days and Last 30 days.
+    [System.IO.File]::SetLastWriteTime((Join-Path $files 'old.txt'), (Get-Date).AddDays(-40))
     [System.IO.File]::SetAttributes((Join-Path $files 'attributes\hidden.txt'), 'Hidden, Archive')
     [System.IO.File]::SetAttributes((Join-Path $files 'attributes\read-only.txt'), 'ReadOnly, Archive')
     # NTFS ignores the read-only attribute on a folder, so the failed export
@@ -1241,7 +1369,7 @@ try {
     $expectedVersion = (Caption 'about.version') -replace '\{0\}', (& $gozler -v | Select-Object -First 1)
     $about = Open-About $window 'about-en'
     Check 'about' ($about.title -eq (Caption 'about.title') -and $about.texts -contains $expectedVersion -and
-        $about.closed) ([ordered]@{ about = $about; expected_version = $expectedVersion })
+        $about.focus_on_close -and $about.esc_closed -and $about.closed) ([ordered]@{ about = $about; expected_version = $expectedVersion })
 
     # File > Exit ends the process (C7).
     Run-MenuItem $window (Caption 'command.exit')
@@ -1314,6 +1442,7 @@ try {
         [ordered]@{
             menus       = @([GozlerProbe.Ui]::Children($bar) | ForEach-Object Name)
             match       = @($MatchLabelId, $MatchCaseId, $MatchPathId | ForEach-Object { (Child-ById $element $_).Name })
+            filters     = @($ids.IDC_KIND_LABEL, $ids.IDC_LOCATION_LABEL, $ids.IDC_DATE_LABEL, $ids.IDC_SIZE_LABEL, $ids.IDC_ATTRIBUTES_LABEL | ForEach-Object { (Pane-Child $process $_).Name })
             headers     = @([GozlerProbe.Ui]::Children($header) | ForEach-Object Name)
             status_bars = @([GozlerProbe.Ui]::Children((Child-ById $element $StatusBarId)) | ForEach-Object { [int]$_.Rect[2] })
             results     = @([GozlerProbe.Ui]::Children((Child-ById $element $StatusBarId)))[0].Name
@@ -1325,7 +1454,7 @@ try {
         Write-Settings '{ "settings": { "language": "qps-ploc" } }'
         $window = Start-Window
         $captions = Read-Captions $window
-        $pseudoText = @($captions.menus + $captions.match + $captions.headers + $captions.results | Where-Object { $_ -notmatch '^\[.*\]$' })
+        $pseudoText = @($captions.menus + $captions.match + $captions.filters + $captions.headers + $captions.results | Where-Object { $_ -notmatch '^\[.*\]$' })
         # The longest text a part can show sets its width.
         $wider = $captions.status_bars.Count -eq 4 -and $captions.status_bars[0] -gt $englishPartWidths[0]
         Check 'pseudo-language' ($pseudoText.Count -eq 0 -and $wider) ([ordered]@{ captions = $captions; not_pseudo = $pseudoText; english_status_widths = $englishPartWidths })
@@ -1392,7 +1521,14 @@ try {
     # --- Search and results -------------------------------------------------
     Write-Settings $null
     $window, $firstPart = Start-Searching 'en'
-    Check 'first screenshot before the first reply' (Is-Searching $firstPart) "status part 1 after the screenshot: '$firstPart'"
+    $firstDetail = "status part 1 after the screenshot: '$firstPart'"
+    # The first search is the empty one, which shows the limit (S4). That
+    # answer after the screenshot means the reply came first, which says
+    # nothing about the window.
+    if ($firstPart -match (Caption-Pattern 'status.showing')) {
+        Report 'first screenshot before the first reply' 'not run' "the first reply arrived before the screenshot was taken; $firstDetail"
+    }
+    else { Check 'first screenshot before the first reply' (Is-Searching $firstPart) $firstDetail }
     $menuIds = @{
         extension = Menu-Id $window (Caption 'column.extension')
         syntax    = Menu-Id $window (Caption 'command.search_syntax')
@@ -1671,8 +1807,10 @@ try {
 
         # Help > Search syntax opens and Close closes it (C22).
         $syntax = Show-States $window 'en' $menuIds
-        Check 'Search syntax' ($syntax.title -eq (Caption 'search_syntax.title') -and $syntax.edit -like '*ext:*' -and $syntax.closed) ([ordered]@{
-                title = $syntax.title; text_length = "$($syntax.edit)".Length; closed = $syntax.closed
+        Check 'Search syntax' ($syntax.title -eq (Caption 'search_syntax.title') -and $syntax.edit -like '*ext:*' -and
+            $syntax.focus_on_close -and $syntax.esc_closed -and $syntax.closed) ([ordered]@{
+                title = $syntax.title; text_length = "$($syntax.edit)".Length; focus_on_close = $syntax.focus_on_close
+                esc_closed = $syntax.esc_closed; closed = $syntax.closed
             })
 
         # --- The selection and the actions ----------------------------------
@@ -1792,7 +1930,7 @@ try {
             $expectedItems = @(
                 "$($label.open) | on | default", "$($label.open_file_location) | on", '-',
                 "$(Plain (Caption 'command.copy')) | on", "$($label.copy_as_path) | on", "$($label.copy_name) | on", '-',
-                "$(Plain (Caption 'command.search_in_this_folder')) | off", '-', "$($label.properties) | on"
+                "$(Plain (Caption 'command.search_in_this_folder')) | on", '-', "$($label.properties) | on"
             )
             if ($pressed) { Check 'Shift+F10 opens the row menu' (($items -join '|') -eq ($expectedItems -join '|')) ([ordered]@{ items = $items; expected = $expectedItems }) }
             else { Report 'Shift+F10 opens the row menu' 'not run' 'the window left the front before the keys were pressed' }
@@ -1951,6 +2089,238 @@ try {
         Check 'export into a denied folder' ($closed -and ($texts | Where-Object { "$_".StartsWith($prefix) }) -and -not (Test-Path -LiteralPath $denied)) ([ordered]@{
                 dialog_closed = $closed; message = $texts; expected_start = $prefix; file_exists = Test-Path -LiteralPath $denied
             })
+
+        # --- The filter pane ------------------------------------------------
+        # Search in this folder on a file directly in the fixture folder
+        # sets Location to it (C12).
+        $searchHere = Command-Id 'SearchInThisFolder'
+        [void](Search-For $window "$F large")
+        Select-Rows $window @(0)
+        Start-Sleep -Milliseconds 500
+        [void][GozlerProbe.Win]::SendMessageW($window.MainWindowHandle, 0x0111, [IntPtr]$searchHere, 0)
+        [void](Wait-Answer $window)
+        $location = Selected-Location $window
+        Save-Screenshot $window.MainWindowHandle 'search-here-en'
+        Check 'Search in this folder' ($location -eq $files) ([ordered]@{ location = $location; expected = $files })
+
+        # Each filter gives the fixture's own count and the count of the
+        # gozler query it stands for (J3, J4).
+        $entries = @(Expected-Rows $files | ForEach-Object {
+                $size, $date, $attributes, $path = $_.Split(',', 4)
+                [pscustomobject]@{ size = [long]$size; date = [datetime]$date; attributes = [int]$attributes; path = $path.Trim('"') }
+            })
+        # The spec's Documents list.
+        $documents = 'pdf;doc;docx;xls;xlsx;ppt;pptx;odt;ods;odp;rtf;txt;md;csv'
+        $documentList = $documents.Split(';')
+        $weekAgo = (Get-Date).AddDays(-7)
+        $isFile = { -not ($_.attributes -band 16) }
+        $filterCases = @(
+            @{ name = 'no filter'; set = {}; reset = {}; cli = @('-path', $files); fixture = $entries.Count }
+            @{
+                name = 'Kind Documents'; set = { Select-PaneItem $window $ids.IDC_KIND 5 $false }; reset = { Select-PaneItem $window $ids.IDC_KIND 0 $false }
+                cli = @('-path', $files, "ext:$documents")
+                fixture = @($entries | Where-Object $isFile | Where-Object { [System.IO.Path]::GetExtension($_.path).TrimStart('.').ToLowerInvariant() -in $documentList }).Count
+            }
+            @{
+                name = 'Only directly in this folder'; set = { [GozlerProbe.Ui]::Toggle((Pane-Child $window $ids.IDC_ONLY_DIRECTLY)) }
+                reset = { [GozlerProbe.Ui]::Toggle((Pane-Child $window $ids.IDC_ONLY_DIRECTLY)) }
+                cli = @('-parent', $files); fixture = @($entries | Where-Object { (Split-Path $_.path) -eq $files }).Count
+            }
+            @{
+                name = 'Last 7 days'; set = { Select-PaneItem $window $ids.IDC_DATE 3 $true }; reset = { Select-PaneItem $window $ids.IDC_DATE 0 $true }
+                cli = @('-path', $files, 'dm:7days'); fixture = @($entries | Where-Object { $_.date -gt $weekAgo }).Count
+            }
+            @{
+                name = 'Large'; set = { Select-PaneItem $window $ids.IDC_SIZE 5 $true }; reset = { Select-PaneItem $window $ids.IDC_SIZE 0 $true }
+                cli = @('-path', $files, 'size:large'); fixture = @($entries | Where-Object { $_.size -gt 1MB -and $_.size -le 16MB }).Count
+            }
+            @{
+                name = 'Hidden Exclude'; set = { Select-PaneItem $window $ids.IDC_HIDDEN 2 $true }; reset = { Select-PaneItem $window $ids.IDC_HIDDEN 0 $true }
+                cli = @('-path', $files, '!attrib:h'); fixture = @($entries | Where-Object { -not ($_.attributes -band 2) }).Count
+            }
+        )
+        [void](Search-For $window '')
+        $filtered = foreach ($case in $filterCases) {
+            & $case.set
+            $answer = Wait-Answer $window
+            $cliArgs = $case.cli
+            [ordered]@{ case = $case.name; window = Count-Of $answer; gozler = [long](& $gozler -get-result-count @cliArgs); fixture = $case.fixture }
+            & $case.reset
+            [void](Wait-Answer $window)
+        }
+        Check 'each filter against gozler and the fixture' (-not ($filtered | Where-Object { $_.window -ne $_.gozler -or $_.gozler -ne $_.fixture })) $filtered
+
+        # With a filter set and no match, the message offers Clear filters
+        # and Search everywhere, and each does what it says; so does the
+        # pane's Clear filters (C21, S5).
+        $clearCaption = Plain (Caption 'command.clear_filters')
+        $everywhereCaption = Plain (Caption 'list.search_everywhere')
+        Select-PaneItem $window $ids.IDC_KIND 5 $false
+        [void](Search-For $window "$F zzzz")
+        Save-Screenshot $window.MainWindowHandle 'no-results-filtered-en'
+        $offered = @(Message-Buttons $window)
+        [GozlerProbe.Ui]::Invoke((Child-ById (Window-Element $window) $ids.IDC_MESSAGE_BUTTON_1))
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+        $cleared = [ordered]@{ kind = Pane-Selected $window $ids.IDC_KIND $false; location = Selected-Location $window; buttons = @(Message-Buttons $window) }
+        Set-Location $window $files
+        [void](Wait-Answer $window)
+        $locationOffered = @(Message-Buttons $window)
+        [GozlerProbe.Ui]::Invoke((Child-ById (Window-Element $window) $ids.IDC_MESSAGE_BUTTON_2))
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+        $everywhere = [ordered]@{ location = Selected-Location $window; buttons = @(Message-Buttons $window) }
+        Select-PaneItem $window $ids.IDC_KIND 5 $false
+        [void](Wait-Answer $window)
+        [GozlerProbe.Ui]::Invoke((Pane-Child $window $ids.IDC_CLEAR_FILTERS))
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+        $paneCleared = [ordered]@{ kind = Pane-Selected $window $ids.IDC_KIND $false; clear_enabled = (Pane-Child $window $ids.IDC_CLEAR_FILTERS).Enabled }
+        $everywhereItem = Caption 'filter.everywhere'
+        Check 'no-results buttons and Clear filters' (($offered -join '|') -eq "$clearCaption|$everywhereCaption" -and
+            $cleared.kind -eq 0 -and $cleared.location -eq $everywhereItem -and $cleared.buttons.Count -eq 0 -and
+            ($locationOffered -join '|') -eq "$clearCaption|$everywhereCaption" -and
+            $everywhere.location -eq $everywhereItem -and $everywhere.buttons.Count -eq 0 -and
+            $paneCleared.kind -eq 0 -and -not $paneCleared.clear_enabled) ([ordered]@{
+                offered = $offered; after_clear = $cleared; with_location = $locationOffered; after_search_everywhere = $everywhere; after_pane_clear = $paneCleared
+            })
+
+        # View > Filters hides the pane, and with a filter set part 1 adds
+        # "· Filtered" (C13, S10).
+        $paneHwnd = Control-Hwnd $window $ids.IDC_FILTER_PANE
+        Select-PaneItem $window $ids.IDC_KIND 5 $false
+        [void](Search-For $window "$F ext:pdf")
+        Run-MenuItem $window (Caption 'command.filters')
+        Start-Sleep -Milliseconds 300
+        $hidden = [ordered]@{ pane_visible = [GozlerProbe.Win]::IsWindowVisible($paneHwnd); status = Status-Part $window 0 }
+        Save-Screenshot $window.MainWindowHandle 'filters-hidden-en'
+        Run-MenuItem $window (Caption 'command.filters')
+        Start-Sleep -Milliseconds 300
+        $shown = [ordered]@{ pane_visible = [GozlerProbe.Win]::IsWindowVisible($paneHwnd); status = Status-Part $window 0 }
+        Select-PaneItem $window $ids.IDC_KIND 0 $false
+        [void](Wait-Answer $window)
+        $filteredPattern = Caption-Pattern 'status.filtered'
+        Check 'View > Filters and Filtered' (-not $hidden.pane_visible -and $hidden.status -match $filteredPattern -and
+            $shown.pane_visible -and $shown.status -notmatch $filteredPattern) ([ordered]@{ hidden = $hidden; shown = $shown })
+
+        # Custom… reached with the arrow keys opens nothing and keeps the
+        # previous filter; Enter opens the dialog, a Minimum above the
+        # Maximum shows the spec's balloon and keeps the dialog open, and
+        # Cancel shows the previous choice again.
+        [void](Search-For $window '')
+        Select-PaneItem $window $ids.IDC_SIZE 5 $true
+        $large = Wait-Answer $window
+        $openedByArrow, $dialog = Open-Custom $window $ids.IDC_SIZE
+        $afterArrow = Status-Part $window 0
+        $balloon = $null
+        $stayedOpen = $false
+        $closed = $false
+        if ($dialog) {
+            Start-Sleep -Milliseconds 300
+            [GozlerProbe.Win]::SetControlText([GozlerProbe.Win]::ChildById($dialog, [int]$ids.IDC_CUSTOM_SIZE_MINIMUM, 'Edit'), '2')
+            [GozlerProbe.Win]::SetControlText([GozlerProbe.Win]::ChildById($dialog, [int]$ids.IDC_CUSTOM_SIZE_MAXIMUM, 'Edit'), '1')
+            [GozlerProbe.Ui]::InvokeLater([GozlerProbe.Ui]::FromHandle([GozlerProbe.Win]::ChildById($dialog, 1, 'Button')))
+            $tip = $null
+            for ($i = 0; $i -lt 30 -and -not $tip; $i++) {
+                Start-Sleep -Milliseconds 100
+                $tip = [GozlerProbe.Win]::Windows($window.Id, 'tooltips_class32') | Select-Object -First 1
+            }
+            if ($tip) {
+                $balloon = [GozlerProbe.Ui]::FromHandle($tip).Name
+                Save-ScreenArea $dialog @($tip) 'custom-size-balloon-en'
+            }
+            $stayedOpen = [GozlerProbe.Win]::IsWindow($dialog)
+            $closed = Close-Dialog $dialog 2
+        }
+        Start-Sleep -Milliseconds 300
+        $afterCancel = Pane-Selected $window $ids.IDC_SIZE $true
+        Select-PaneItem $window $ids.IDC_SIZE 0 $true
+        [void](Wait-Answer $window)
+        # Custom date opens the same way; its screenshot shows it.
+        $null, $dateDialog = Open-Custom $window $ids.IDC_DATE
+        $dateTitle = $null
+        if ($dateDialog) {
+            Start-Sleep -Milliseconds 300
+            $dateTitle = [GozlerProbe.Win]::Text($dateDialog)
+            Save-Screenshot $dateDialog 'custom-date-en'
+            [void](Close-Dialog $dateDialog 2)
+        }
+        $dateAfter = Pane-Selected $window $ids.IDC_DATE $true
+        Check 'Custom… and its dialogs' (-not $openedByArrow -and (Count-Of $afterArrow) -eq (Count-Of $large) -and $dialog -and
+            $balloon -eq (Caption 'custom_size.order') -and $stayedOpen -and $closed -and $afterCancel -eq 5 -and
+            $dateTitle -eq (Caption 'custom_date.title') -and $dateAfter -eq 0) ([ordered]@{
+                large = $large; opened_by_arrow = $openedByArrow; after_arrow = $afterArrow; dialog_opened = [bool]$dialog; balloon = $balloon
+                stayed_open = $stayedOpen; cancelled = $closed; size_after_cancel = $afterCancel; date_dialog = $dateTitle; date_after_cancel = $dateAfter
+            })
+
+        # Choose folder… then Cancel keeps the previous Location.
+        Set-Location $window $files
+        [void](Wait-Answer $window)
+        [GozlerProbe.Ui]::InvokeLater((Pane-Child $window $ids.IDC_CHOOSE_FOLDER))
+        $picker = Wait-Dialog $window
+        $pickerClosed = $picker ? (Close-Dialog $picker 2) : $false
+        Start-Sleep -Milliseconds 300
+        $kept = Selected-Location $window
+        Check 'Choose folder then Cancel' ($picker -and $pickerClosed -and $kept -eq $files) ([ordered]@{ picker_opened = [bool]$picker; picker_closed = $pickerClosed; location = $kept })
+
+        # The filter choices are the same after a restart; the window saves
+        # them in the probe's data folder.
+        Select-PaneItem $window $ids.IDC_KIND 5 $false
+        [GozlerProbe.Ui]::Toggle((Pane-Child $window $ids.IDC_ONLY_DIRECTLY))
+        Select-PaneItem $window $ids.IDC_SIZE 5 $true
+        Select-PaneItem $window $ids.IDC_HIDDEN 2 $true
+        [void](Wait-Answer $window)
+        $readChoices = {
+            [ordered]@{
+                kind = Pane-Selected $window $ids.IDC_KIND $false; location = Selected-Location $window
+                only_directly = [GozlerProbe.Ui]::ToggleState((Pane-Child $window $ids.IDC_ONLY_DIRECTLY))
+                date = Pane-Selected $window $ids.IDC_DATE $true; size = Pane-Selected $window $ids.IDC_SIZE $true
+                hidden = Pane-Selected $window $ids.IDC_HIDDEN $true
+            }
+        }
+        $before = & $readChoices
+        [void](Close-Window $window)
+        $window = Start-Window
+        [void](Wait-Answer $window)
+        $after = & $readChoices
+        Check 'filter choices after a restart' (($before | ConvertTo-Json -Compress) -eq ($after | ConvertTo-Json -Compress) -and
+            $before.kind -eq 5 -and $before.location -eq $files) ([ordered]@{ before = $before; after = $after })
+        [GozlerProbe.Ui]::Invoke((Pane-Child $window $ids.IDC_CLEAR_FILTERS))
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+
+        # A Location folder deleted after it was chosen: F5 shows the
+        # message with Choose folder… and Search everywhere, and part 1 never
+        # says Searching… (S8). Status part 1 is read with one message to its
+        # handle each time, which is fast enough to see a search start.
+        $missing = Join-Path $files 'to-delete'
+        [void](Search-For $window "$F gone")
+        Select-Rows $window @(0)
+        Start-Sleep -Milliseconds 500
+        [void][GozlerProbe.Win]::SendMessageW($window.MainWindowHandle, 0x0111, [IntPtr]$searchHere, 0)
+        [void](Wait-Answer $window)
+        $chosen = Selected-Location $window
+        Remove-Item -LiteralPath $missing -Recurse -Force
+        $statusHwnd = Control-Hwnd $window $StatusBarId
+        Run-MenuItem $window (Caption 'command.refresh')
+        $parts = [System.Collections.Generic.List[string]]::new()
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        while ($clock.ElapsedMilliseconds -lt 1000) {
+            $part = [GozlerProbe.Win]::ControlText($statusHwnd)
+            if ($parts.Count -eq 0 -or $parts[-1] -ne $part) { $parts.Add($part) }
+        }
+        $message = Message-Text $window
+        $offered = @(Message-Buttons $window)
+        Save-Screenshot $window.MainWindowHandle 'missing-folder-en'
+        $expectedMessage = (Caption 'list.missing_folder').Replace('{0}', $missing)
+        Check 'a missing Location folder' ($chosen -eq $missing -and $message -eq $expectedMessage -and
+            ($offered -join '|') -eq "$(Plain (Caption 'filter.choose_folder'))|$everywhereCaption" -and
+            -not ($parts | Where-Object { Is-Searching $_ })) ([ordered]@{
+                location = $chosen; message = $message; buttons = $offered; part_1 = $parts
+            })
+        [GozlerProbe.Ui]::Invoke((Child-ById (Window-Element $window) $ids.IDC_MESSAGE_BUTTON_2))
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
     }
 
     # The parser's message (S7), and the daemon's refusal (S9).

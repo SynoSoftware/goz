@@ -5,24 +5,36 @@
 //! calls Win32 after the borrow ends, because many calls send messages back
 //! to this window before they return.
 
-use super::dialogs;
+use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
 use super::icons::Icons;
 use super::requests::Requests;
-use crate::core::captions::{self, StatusCaptions, WindowCaptions};
+use crate::core::captions::{
+    self, DialogCaptions, FilterCaptions, ListCaption, StatusCaptions, WindowCaptions,
+};
 use crate::core::clipboard::{ClipboardData, ClipboardFormat};
 use crate::core::commands::{self, CommandId, Focus, KeyAction, Keystroke, Menu, MenuItem, State};
 use crate::core::fetch::{Fetch, WriteFailure};
-use crate::core::ids::ControlId;
-use crate::core::layout::{self, CaptionWidths, Dpi, Layout, MessageArea, Px, Rect, Size};
-use crate::core::model::{Accepted, Change, Column, ExportError, ExportFormat, Model, Then};
-use crate::core::query::{MatchMode, Matching};
-use crate::core::results::{Fix, Shown};
+use crate::core::ids::{ControlId, DialogId};
+use crate::core::layout::{
+    self, CaptionWidths, Dpi, FilterLayout, Layout, MessageArea, Px, Rect, ScrollRequest, Size,
+};
+use crate::core::model::{
+    Accepted, Change, Column, ExportError, ExportFormat, Model, ScopeCheck, Then,
+};
+use crate::core::query::{
+    AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
+    date_items, size_items,
+};
+use crate::core::results::{Fix, ListButton};
 use crate::core::selection::wide_path;
 use crate::core::settings::SavedColumn;
+use crate::core::text::Numbers;
 use crate::win::clipboard::ClipboardBlock;
 use crate::win::controls::{
-    Button, CheckBox, DropDownList, Edit, Label, ListColumn, ListView, StatusBar,
+    Button, CheckBox, DropDownList, Edit, Label, ListBox, ListClosing, ListColumn, ListView,
+    StatusBar,
 };
+use crate::win::dialog::{DialogEnd, DialogProc};
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::notify::{
@@ -63,11 +75,13 @@ struct Controls {
     match_mode: DropDownList,
     match_case: CheckBox,
     match_path: CheckBox,
-    /// The list's message and its button, in the list's empty area. They
+    filters: FilterPane,
+    /// The list's message and its buttons, in the list's empty area. They
     /// are created before the list, so they lie above it and come before it
     /// in the Tab order.
     message: Label,
-    fix: Button,
+    /// In [`Model::list_buttons`]' order.
+    message_buttons: [Button; 2],
     list: ListView,
     status: StatusBar,
 }
@@ -82,32 +96,187 @@ impl Controls {
             match_mode: DropDownList::create(parent, ControlId::MatchMode.id())?,
             match_case: CheckBox::create(parent, ControlId::MatchCase.id())?,
             match_path: CheckBox::create(parent, ControlId::MatchPath.id())?,
+            filters: FilterPane::create(parent)?,
             message: Label::create_message(parent, ControlId::Message.id())?,
-            fix: Button::create(parent, ControlId::Fix.id())?,
+            message_buttons: [
+                Button::create(parent, ControlId::MessageButton1.id())?,
+                Button::create(parent, ControlId::MessageButton2.id())?,
+            ],
             list: ListView::create(parent, ControlId::List.id())?,
             status: StatusBar::create(parent, ControlId::Status.id())?,
         };
         controls.message.hwnd().set_visible(false);
-        controls.fix.hwnd().set_visible(false);
+        for button in controls.message_buttons {
+            button.hwnd().set_visible(false);
+        }
         Ok(controls)
     }
 
     /// Gives every control the window's font, at creation and on a monitor
     /// with another DPI.
     fn apply_fonts(&self, fonts: &Fonts) {
-        for control in [
+        let controls = [
             self.search.hwnd(),
             self.match_label.hwnd(),
             self.match_mode.hwnd(),
             self.match_case.hwnd(),
             self.match_path.hwnd(),
             self.message.hwnd(),
-            self.fix.hwnd(),
+            self.message_buttons[0].hwnd(),
+            self.message_buttons[1].hwnd(),
             self.list.hwnd(),
             self.status.hwnd(),
-        ] {
+        ];
+        let pane = self.filters.controls();
+        for control in controls.into_iter().chain(pane) {
             control.set_font(&fonts.ui);
         }
+        // Rows as tall as the Kind list's, which Windows draws.
+        let height = TextMeter::new(&fonts.ui).height();
+        self.filters.location.set_item_height(height);
+    }
+}
+
+/// The filter pane's window and its controls, in Tab order. Each label
+/// comes right before its control, so its access key focuses the control
+/// (spec: Filter pane).
+struct FilterPane {
+    pane: Hwnd,
+    clear: Button,
+    kind_label: Label,
+    kind: ListBox,
+    location_label: Label,
+    location: ListBox,
+    choose_folder: Button,
+    only_directly: CheckBox,
+    date_label: Label,
+    date: DropDownList,
+    size_label: Label,
+    size: DropDownList,
+    attributes_label: Label,
+    /// Each attribute's label and list, in the order of
+    /// [`crate::core::query::ATTRIBUTES`].
+    attributes: Vec<(Label, DropDownList)>,
+}
+
+/// The controls of each attribute's label and list.
+const ATTRIBUTE_CONTROLS: [(ControlId, ControlId); 6] = [
+    (ControlId::HiddenLabel, ControlId::Hidden),
+    (ControlId::SystemLabel, ControlId::System),
+    (ControlId::ReadOnlyLabel, ControlId::ReadOnly),
+    (ControlId::LinkLabel, ControlId::Link),
+    (ControlId::CompressedLabel, ControlId::Compressed),
+    (ControlId::EncryptedLabel, ControlId::Encrypted),
+];
+
+/// The Date modified and Size lists, whose Custom… opens a dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RangeFilter {
+    Date,
+    Size,
+}
+
+impl FilterPane {
+    fn create(parent: Hwnd) -> windows::core::Result<FilterPane> {
+        let pane = win::pane::create(parent, ControlId::FilterPane.id())?;
+        let label = |id: ControlId| Label::create(pane, id.id());
+        let drop_down = |id: ControlId| DropDownList::create(pane, id.id());
+        let mut filters = FilterPane {
+            pane,
+            clear: Button::create(pane, ControlId::ClearFilters.id())?,
+            kind_label: label(ControlId::KindLabel)?,
+            kind: ListBox::create(pane, ControlId::Kind.id())?,
+            location_label: label(ControlId::LocationLabel)?,
+            location: ListBox::create_paths(pane, ControlId::Location.id())?,
+            choose_folder: Button::create(pane, ControlId::ChooseFolder.id())?,
+            only_directly: CheckBox::create(pane, ControlId::OnlyDirectly.id())?,
+            date_label: label(ControlId::DateLabel)?,
+            date: drop_down(ControlId::Date)?,
+            size_label: label(ControlId::SizeLabel)?,
+            size: drop_down(ControlId::Size)?,
+            attributes_label: label(ControlId::AttributesLabel)?,
+            attributes: Vec::new(),
+        };
+        for (name, choice) in ATTRIBUTE_CONTROLS {
+            filters.attributes.push((label(name)?, drop_down(choice)?));
+        }
+        Ok(filters)
+    }
+
+    /// Every control in the pane.
+    fn controls(&self) -> Vec<Hwnd> {
+        self.placed_with(None)
+            .into_iter()
+            .map(|(control, ..)| control)
+            .collect()
+    }
+
+    /// Each control, its rectangle in `layout` before the pane scrolls, and
+    /// whether it is a drop-down list, whose rectangle also holds its open
+    /// list.
+    fn placed(&self, layout: &FilterLayout) -> Vec<(Hwnd, Rect, bool)> {
+        self.placed_with(Some(layout))
+            .into_iter()
+            .map(|(control, rect, drop_down)| (control, rect.unwrap_or_default(), drop_down))
+            .collect()
+    }
+
+    fn placed_with(&self, layout: Option<&FilterLayout>) -> Vec<(Hwnd, Option<Rect>, bool)> {
+        let at = |rect: fn(&FilterLayout) -> Rect| layout.map(rect);
+        let mut placed = vec![
+            (self.clear.hwnd(), at(|l| l.clear), false),
+            (self.kind_label.hwnd(), at(|l| l.kind_label), false),
+            (self.kind.hwnd(), at(|l| l.kind), false),
+            (self.location_label.hwnd(), at(|l| l.location_label), false),
+            (self.location.hwnd(), at(|l| l.location), false),
+            (self.choose_folder.hwnd(), at(|l| l.choose_folder), false),
+            (self.only_directly.hwnd(), at(|l| l.only_directly), false),
+            (self.date_label.hwnd(), at(|l| l.date_label), false),
+            (self.date.hwnd(), at(|l| l.date), true),
+            (self.size_label.hwnd(), at(|l| l.size_label), false),
+            (self.size.hwnd(), at(|l| l.size), true),
+            (
+                self.attributes_label.hwnd(),
+                at(|l| l.attributes_label),
+                false,
+            ),
+        ];
+        for (index, (name, choice)) in self.attributes.iter().enumerate() {
+            let rects = layout.map(|l| l.attributes[index]);
+            placed.push((name.hwnd(), rects.map(|r| r.0), false));
+            placed.push((choice.hwnd(), rects.map(|r| r.1), true));
+        }
+        placed
+    }
+
+    /// Sets the labels and the buttons' captions.
+    fn set_captions(&self, captions: &FilterCaptions) {
+        self.clear.hwnd().set_text(&captions.clear);
+        self.kind_label.hwnd().set_text(&captions.kind);
+        self.location_label.hwnd().set_text(&captions.location);
+        self.choose_folder.hwnd().set_text(&captions.choose_folder);
+        self.only_directly.hwnd().set_text(&captions.only_directly);
+        self.date_label.hwnd().set_text(&captions.date);
+        self.size_label.hwnd().set_text(&captions.size);
+        self.attributes_label.hwnd().set_text(&captions.attributes);
+        for ((name, _), text) in self.attributes.iter().zip(&captions.attribute_names) {
+            name.hwnd().set_text(text);
+        }
+    }
+
+    /// The list `range` stands for.
+    fn range(&self, range: RangeFilter) -> DropDownList {
+        match range {
+            RangeFilter::Date => self.date,
+            RangeFilter::Size => self.size,
+        }
+    }
+
+    /// The range list that `control` is, if it is one.
+    fn range_of(&self, control: Hwnd) -> Option<RangeFilter> {
+        [RangeFilter::Date, RangeFilter::Size]
+            .into_iter()
+            .find(|range| self.range(*range).hwnd() == control)
     }
 }
 
@@ -174,6 +343,15 @@ pub(crate) struct MainWindow {
     /// Whether a [`Message::Deferred`] is posted to read the list's
     /// selection, so one user action reads it once (design: The selection).
     selection_pending: Cell<bool>,
+    /// The filter pane's scroll position.
+    filter_scroll: Cell<Px>,
+    /// How the open Date modified or Size list is closing, between its
+    /// `CBN_SELENDOK` or `CBN_SELENDCANCEL` and its `CBN_CLOSEUP`.
+    range_closing: Cell<Option<(RangeFilter, ListClosing)>>,
+    /// The range list that closed on a choice, whose Custom… opens its
+    /// dialog in [`Message::Deferred`], after the list has said which item
+    /// it closed on, in whichever order it sends that.
+    range_closed: Cell<Option<RangeFilter>>,
 }
 
 impl MainWindow {
@@ -198,6 +376,9 @@ impl MainWindow {
             icons: Icons::default(),
             polling: Cell::new(false),
             selection_pending: Cell::new(false),
+            filter_scroll: Cell::new(Px(0)),
+            range_closing: Cell::new(None),
+            range_closed: Cell::new(None),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -290,12 +471,64 @@ impl MainWindow {
         controls.match_mode.set_items(&modes, mode);
         controls.match_case.hwnd().set_text(&captions.match_case);
         controls.match_path.hwnd().set_text(&captions.match_path);
+        controls.filters.set_captions(&captions.filters);
+        self.show_filters(&captions.filters);
         for (index, header) in captions.headers.iter().enumerate() {
             controls.list.set_header(index, header);
         }
         self.show_status(&captions.status);
         self.show_message(captions.message.as_ref());
         self.update_bound_controls();
+    }
+
+    /// Gives the filter pane's lists their items and selects the model's
+    /// choices.
+    fn show_filters(&self, captions: &FilterCaptions) {
+        let pane = &self.created().controls.filters;
+        let (positions, located, only_directly) = {
+            let model = self.model.borrow();
+            let filters = model.filters();
+            (
+                filters.positions(&model.location_items()),
+                filters.location.is_some(),
+                filters.only_directly,
+            )
+        };
+        pane.kind.set_items(&captions.kinds, positions.kind);
+        pane.location
+            .set_items(&captions.locations, positions.location);
+        // Only directly in a folder needs a folder.
+        pane.only_directly.hwnd().set_enabled(located);
+        pane.only_directly.set_checked(only_directly);
+        pane.date.set_items(&captions.dates, positions.date);
+        pane.size.set_items(&captions.sizes, positions.size);
+        for ((_, list), position) in pane.attributes.iter().zip(positions.attributes) {
+            list.set_items(&captions.attribute_choices, position);
+        }
+    }
+
+    fn update_filters(&self) {
+        let captions = FilterCaptions::new(&self.model.borrow(), &*self.numbers.borrow());
+        self.show_filters(&captions);
+    }
+
+    /// The Location list after a status reply, which can name other
+    /// volumes; the other lists keep what the person moved to, such as
+    /// Custom… with the arrow keys.
+    fn update_locations(&self) {
+        let (locations, position) = {
+            let model = self.model.borrow();
+            let items = model.location_items();
+            (
+                captions::location_items(&model),
+                model.filters().positions(&items).location,
+            )
+        };
+        self.created()
+            .controls
+            .filters
+            .location
+            .set_items(&locations, position);
     }
 
     fn match_mode_index(&self) -> usize {
@@ -307,18 +540,23 @@ impl MainWindow {
     }
 
     /// Gives the controls bound to a command the command's state and
-    /// choice, after every change (design rule 9): the match controls and
-    /// the header's sort arrow.
+    /// choice, after every change (design rule 9): the match controls, the
+    /// pane's Clear filters and the header's sort arrow.
     fn update_bound_controls(&self) {
         let controls = &self.created().controls;
-        let (enabled, matching) = {
+        let (enabled, can_clear, matching) = {
             let model = self.model.borrow();
             let state = State {
                 model: &model,
                 focus: Focus::Other,
             };
-            ((CommandId::Match.row().enabled)(&state), model.matching())
+            (
+                (CommandId::Match.row().enabled)(&state),
+                (CommandId::ClearFilters.row().enabled)(&state),
+                model.matching(),
+            )
         };
+        controls.filters.clear.hwnd().set_enabled(can_clear);
         for control in [
             controls.match_label.hwnd(),
             controls.match_mode.hwnd(),
@@ -350,22 +588,29 @@ impl MainWindow {
         self.show_message(message.as_ref());
     }
 
-    /// Shows the list's message and its button, or hides them.
-    fn show_message(&self, message: Option<&(String, Option<String>)>) {
+    /// Shows the list's message and its buttons, or hides them.
+    fn show_message(&self, message: Option<&ListCaption>) {
         let controls = &self.created().controls;
-        let (text, button) = match message {
-            Some((text, button)) => (text.as_str(), button.as_deref()),
-            None => ("", None),
+        let (text, buttons) = match message {
+            Some((text, buttons)) => (text.as_str(), buttons.as_slice()),
+            None => ("", &[][..]),
         };
         controls.message.hwnd().set_text(text);
-        controls.fix.hwnd().set_text(button.unwrap_or_default());
-        self.place_message(text, button);
+        for (index, button) in controls.message_buttons.iter().enumerate() {
+            button
+                .hwnd()
+                .set_text(buttons.get(index).map_or("", String::as_str));
+        }
+        self.place_message(text, buttons);
         controls.message.hwnd().set_visible(message.is_some());
-        controls.fix.hwnd().set_visible(button.is_some());
+        for (index, button) in controls.message_buttons.iter().enumerate() {
+            button.hwnd().set_visible(index < buttons.len());
+        }
     }
 
-    /// Places the message below the list's header, and its button below it.
-    fn place_message(&self, text: &str, button: Option<&str>) {
+    /// Places the message below the list's header, and its buttons below
+    /// it.
+    fn place_message(&self, text: &str, buttons: &[String]) {
         let created = self.created();
         let Some(list) = created.layout.borrow().as_ref().map(|l| l.list) else {
             return;
@@ -374,18 +619,19 @@ impl MainWindow {
         let metrics = created.metrics.get();
         let header = controls.list.header().screen_rect().height;
         let area = MessageArea::new(list, header, metrics.dpi);
-        let (text, button) = {
+        let (text, rects) = {
             let fonts = created.fonts.borrow();
             let meter = TextMeter::new(&fonts.ui);
+            let widths: Vec<Px> = buttons.iter().map(|b| meter.width(b)).collect();
             area.place(
                 meter.wrapped_height(text, area.text_width()),
                 metrics.font_height,
-                button.map(|b| meter.width(b)),
+                &widths,
             )
         };
         controls.message.hwnd().set_rect(text);
-        if let Some(button) = button {
-            controls.fix.hwnd().set_rect(button);
+        for (button, rect) in controls.message_buttons.iter().zip(rects) {
+            button.hwnd().set_rect(rect);
         }
     }
 
@@ -413,11 +659,70 @@ impl MainWindow {
         });
         controls.match_case.hwnd().set_rect(layout.match_case);
         controls.match_path.hwnd().set_rect(layout.match_path);
+        if let Some(filters) = &layout.filters {
+            self.place_filters(filters, self.filter_scroll.get());
+        }
+        controls.filters.pane.set_visible(layout.filters.is_some());
         controls.list.hwnd().set_rect(layout.list);
         controls.status.set_parts(&layout.status_parts);
         created.layout.replace(Some(layout));
         self.update_message();
         hwnd.invalidate();
+    }
+
+    /// Places the pane and its controls for the scroll position nearest
+    /// `position` that `filters` allows.
+    fn place_filters(&self, filters: &FilterLayout, position: Px) {
+        let pane = &self.created().controls.filters;
+        let position = filters.scrolled(position, ScrollRequest::To(position));
+        self.filter_scroll.set(position);
+        pane.pane.set_rect(filters.pane);
+        for (control, rect, drop_down) in pane.placed(filters) {
+            // A drop-down list's height includes its open list.
+            let height = if drop_down {
+                Px(rect.height.0 * 12)
+            } else {
+                rect.height
+            };
+            control.set_rect(Rect {
+                y: rect.y - position,
+                height,
+                ..rect
+            });
+        }
+        pane.pane
+            .set_vertical_scroll(filters.content_height, filters.pane.height, position);
+    }
+
+    /// Scrolls the pane to the position `to` gives for its layout and its
+    /// current position.
+    fn scroll_filters(&self, to: impl FnOnce(&FilterLayout, Px) -> Px) {
+        let filters = self
+            .created()
+            .layout
+            .borrow()
+            .as_ref()
+            .and_then(|l| l.filters.clone());
+        let Some(filters) = filters else { return };
+        let position = to(&filters, self.filter_scroll.get());
+        if position != self.filter_scroll.get() {
+            self.place_filters(&filters, position);
+        }
+    }
+
+    /// Scrolls the pane so that `control`, which a key focused, shows.
+    fn reveal(&self, control: Hwnd) {
+        let filters = self
+            .created()
+            .layout
+            .borrow()
+            .as_ref()
+            .and_then(|l| l.filters.clone());
+        let Some(filters) = filters else { return };
+        let placed = self.created().controls.filters.placed(&filters);
+        if let Some((_, rect, _)) = placed.into_iter().find(|(c, ..)| *c == control) {
+            self.scroll_filters(|filters, position| filters.revealing(position, rect));
+        }
     }
 
     fn on_dpi_changed(&self, hwnd: Hwnd, dpi: Dpi, suggested: Rect) {
@@ -453,6 +758,15 @@ impl MainWindow {
                 text_selected: controls.search.has_selected_text(),
             },
             Some(control) if control == controls.list.hwnd() => Focus::List,
+            // An open list takes Enter itself, to close.
+            Some(control)
+                if controls
+                    .filters
+                    .range_of(control)
+                    .is_some_and(|range| !controls.filters.range(range).is_open()) =>
+            {
+                Focus::RangeFilter
+            }
             _ => Focus::Other,
         }
     }
@@ -523,7 +837,11 @@ impl MainWindow {
         let accepted = match item {
             MenuItem::Run(command) => match command {
                 CommandId::Exit => return self.exit(hwnd),
-                CommandId::About => return dialogs::about(hwnd, &self.model),
+                CommandId::About => {
+                    let about = About::new(self.model.borrow().strings());
+                    self.open_dialog(hwnd, DialogId::About, &about);
+                    return;
+                }
                 CommandId::Open => return self.open_selected(hwnd),
                 CommandId::OpenFileLocation => return self.show_selected(hwnd),
                 CommandId::Properties => return self.show_properties(hwnd),
@@ -531,29 +849,36 @@ impl MainWindow {
                 CommandId::CancelExport => self.model.borrow_mut().cancel_export(),
                 CommandId::Copy => match focus {
                     Focus::SearchBox { .. } => return controls.search.copy(),
-                    Focus::List | Focus::Other => return self.copy(hwnd, ClipboardFormat::Files),
+                    Focus::List | Focus::RangeFilter | Focus::Other => {
+                        return self.copy(hwnd, ClipboardFormat::Files);
+                    }
                 },
                 CommandId::CopyAsPath => return self.copy(hwnd, ClipboardFormat::Paths),
                 CommandId::CopyName => return self.copy(hwnd, ClipboardFormat::Names),
                 CommandId::SelectAll => match focus {
                     Focus::SearchBox { .. } => return controls.search.select_all(),
-                    Focus::List | Focus::Other => return controls.list.select_all(),
+                    Focus::List | Focus::RangeFilter | Focus::Other => {
+                        return controls.list.select_all();
+                    }
                 },
                 CommandId::Find => {
                     controls.search.hwnd().focus();
                     return controls.search.select_all();
                 }
                 CommandId::Refresh => return self.search(hwnd),
-                CommandId::SearchSyntax => return dialogs::search_syntax(hwnd, &self.model),
+                CommandId::SearchSyntax => {
+                    self.open_dialog(hwnd, DialogId::SearchSyntax, &SearchSyntax);
+                    return;
+                }
+                CommandId::SearchInThisFolder => self.model.borrow_mut().search_in_this_folder(),
+                CommandId::Filters => self.model.borrow_mut().toggle_filter_pane(),
+                CommandId::ClearFilters => self.model.borrow_mut().clear_filters(),
                 CommandId::Settings
-                | CommandId::SearchInThisFolder
-                | CommandId::Filters
                 | CommandId::Inspector
                 | CommandId::Columns
                 | CommandId::Language
                 | CommandId::Match
                 | CommandId::SortBy
-                | CommandId::ClearFilters
                 | CommandId::ShowWindow => return,
             },
             MenuItem::Column(column) => self.model.borrow_mut().toggle_column(column),
@@ -579,8 +904,107 @@ impl MainWindow {
             now: jiff::Timestamp::now(),
             time_zone: jiff::tz::TimeZone::system(),
         };
-        let accepted = self.model.borrow_mut().start_search(&start);
+        let location = self.model.borrow().location().map(str::to_owned);
+        let scope = match location {
+            Some(folder) if gozler_client::folder_is_missing(&folder) => ScopeCheck::Missing,
+            Some(_) | None => ScopeCheck::Exists,
+        };
+        let accepted = self.model.borrow_mut().start_search(&start, scope);
         self.apply(hwnd, accepted);
+    }
+
+    /// Runs the dialog `dialog` with `state`. A dialog that Windows cannot
+    /// open leaves a line in `ui-error.log` and the window as it was.
+    fn open_dialog<D: DialogProc>(
+        &self,
+        hwnd: Hwnd,
+        dialog: DialogId,
+        state: &D,
+    ) -> Option<DialogEnd> {
+        let captions = DialogCaptions::new(dialog, self.model.borrow().strings());
+        match win::dialog::run_modal(hwnd, dialog, &captions, state) {
+            Ok(end) => Some(end),
+            Err(error) => {
+                super::write_log(
+                    &self.settings_file.with_file_name("ui-error.log"),
+                    &format!("The {dialog:?} dialog did not open: {error}"),
+                );
+                None
+            }
+        }
+    }
+
+    /// Changes the filters to what `change` makes of them.
+    fn change_filters(&self, hwnd: Hwnd, change: impl FnOnce(&mut Filters)) {
+        let mut filters = self.model.borrow().filters().clone();
+        change(&mut filters);
+        let accepted = self.model.borrow_mut().set_filters(filters);
+        self.apply(hwnd, accepted);
+    }
+
+    /// Asks for a folder with the Windows folder picker and sets Location
+    /// to it; Cancel keeps the Location (spec: Filter pane).
+    fn choose_folder(&self, hwnd: Hwnd) {
+        let start = self.model.borrow().location().map(str::to_owned);
+        let Some(folder) = win::shell::pick_folder(hwnd, start.as_deref()) else {
+            return;
+        };
+        let accepted = self.model.borrow_mut().choose_folder(folder);
+        self.apply(hwnd, accepted);
+    }
+
+    /// Opens the custom range dialog of `range` when its list shows
+    /// Custom…; OK sets the range, and Cancel shows the previous choice
+    /// again (spec: Filter pane).
+    fn choose_custom(&self, hwnd: Hwnd, range: RangeFilter) {
+        let custom = {
+            let model = self.model.borrow();
+            let filters = model.filters();
+            match range {
+                RangeFilter::Date => date_items(filters.date).len(),
+                RangeFilter::Size => size_items(filters.size).len(),
+            }
+        };
+        let list = self.created().controls.filters.range(range);
+        if list.selected() != Some(custom - 1) {
+            return;
+        }
+        match range {
+            RangeFilter::Date => {
+                let dialog = {
+                    let model = self.model.borrow();
+                    let shown = match model.filters().date {
+                        DateModified::Custom(range) => Some(range),
+                        _ => None,
+                    };
+                    CustomDate::new(model.strings(), shown)
+                };
+                if self.open_dialog(hwnd, DialogId::CustomDate, &dialog) == Some(DialogEnd::Ok)
+                    && let Some(chosen) = dialog.chosen()
+                {
+                    self.change_filters(hwnd, |f| f.date = DateModified::Custom(chosen));
+                }
+            }
+            RangeFilter::Size => {
+                let dialog = {
+                    let model = self.model.borrow();
+                    let shown = match model.filters().size {
+                        SizeFilter::Custom(range) => Some(range),
+                        _ => None,
+                    };
+                    let numbers = self.numbers.borrow();
+                    CustomSize::new(model.strings(), numbers.decimal_separator(), shown)
+                };
+                if self.open_dialog(hwnd, DialogId::CustomSize, &dialog) == Some(DialogEnd::Ok)
+                    && let Some(chosen) = dialog.chosen()
+                {
+                    self.change_filters(hwnd, |f| f.size = SizeFilter::Custom(chosen));
+                }
+            }
+        }
+        // After Cancel, the list shows Custom… and the filter is the one
+        // before it.
+        self.update_filters();
     }
 
     fn ask_status(&self) {
@@ -621,6 +1045,17 @@ impl MainWindow {
         let mut failed_export = None;
         match accepted.change {
             Change::Nothing | Change::Choice => {}
+            Change::Filters => self.update_filters(),
+            Change::Panes => {
+                let shown = self.model.borrow().panes().filters;
+                let pane = controls.filters.pane;
+                // A hidden control keeps the focus but takes no key.
+                if !shown && Hwnd::focused().is_some_and(|f| pane.is_parent_of(f)) {
+                    controls.search.hwnd().focus();
+                }
+                self.layout(hwnd);
+                self.update_status();
+            }
             Change::Typed => hwnd.set_text(&captions::title(&self.model.borrow())),
             Change::ColumnShown { index } => {
                 let (column, header) = {
@@ -638,7 +1073,11 @@ impl MainWindow {
                 );
             }
             Change::ColumnHidden { index } => controls.list.delete_column(index),
-            Change::Searching | Change::Status | Change::Selection | Change::Export => {
+            Change::Status => {
+                self.update_status();
+                self.update_locations();
+            }
+            Change::Searching | Change::Selection | Change::Export => {
                 self.update_status();
             }
             Change::NewSearch { count } => {
@@ -736,19 +1175,100 @@ impl MainWindow {
                 ..matching()
             };
             self.model.borrow_mut().set_matching(choice)
-        } else if controls.fix.clicked(event) {
-            let fix = match self.model.borrow().results().shown() {
-                Shown::Message(message) => message.fix(),
-                Shown::Nothing | Shown::Rows(_) => None,
-            };
-            if let Some(fix) = fix {
-                run_fix(hwnd, &fix);
+        } else if let Some(index) = controls
+            .message_buttons
+            .iter()
+            .position(|button| button.clicked(event))
+        {
+            let button = self.model.borrow().list_buttons().get(index).cloned();
+            match button {
+                Some(ListButton::Fix(fix)) => run_fix(hwnd, &fix),
+                Some(ListButton::ClearFilters) => {
+                    self.run(hwnd, MenuItem::Run(CommandId::ClearFilters));
+                }
+                Some(ListButton::SearchEverywhere) => {
+                    let accepted = self.model.borrow_mut().search_everywhere();
+                    self.apply(hwnd, accepted);
+                }
+                Some(ListButton::ChooseFolder) => self.choose_folder(hwnd),
+                None => {}
             }
             return;
         } else {
-            return;
+            return self.on_filter(hwnd, event);
         };
         self.apply(hwnd, accepted);
+    }
+
+    /// A notification of a control in the filter pane.
+    fn on_filter(&self, hwnd: Hwnd, event: ControlEvent) {
+        let pane = &self.created().controls.filters;
+        if pane.clear.clicked(event) {
+            self.run(hwnd, MenuItem::Run(CommandId::ClearFilters));
+        } else if pane.kind.selection_changed(event) {
+            if let Some(kind) = pane.kind.selected().and_then(|i| Kind::ALL.get(i)) {
+                self.change_filters(hwnd, |f| f.kind = *kind);
+            }
+        } else if pane.location.selection_changed(event) {
+            let location = {
+                let model = self.model.borrow();
+                let items = model.location_items();
+                pane.location
+                    .selected()
+                    .and_then(|i| items.get(i))
+                    .map(|item| item.folder().map(str::to_owned))
+            };
+            if let Some(location) = location {
+                self.change_filters(hwnd, |f| f.location = location);
+            }
+        } else if pane.choose_folder.clicked(event) {
+            self.choose_folder(hwnd);
+        } else if pane.only_directly.clicked(event) {
+            let checked = pane.only_directly.is_checked();
+            self.change_filters(hwnd, |f| f.only_directly = checked);
+        } else if pane.date.selection_changed(event) {
+            let date = self.model.borrow().filters().date;
+            // Custom… opens its dialog only when the list closes on it, so
+            // the arrow keys pass it by and keep the previous filter.
+            if let Some(RangeItem::Choice(date)) = pane
+                .date
+                .selected()
+                .and_then(|i| date_items(date).get(i).copied())
+            {
+                self.change_filters(hwnd, |f| f.date = date);
+            }
+        } else if pane.size.selection_changed(event) {
+            let size = self.model.borrow().filters().size;
+            if let Some(RangeItem::Choice(size)) = pane
+                .size
+                .selected()
+                .and_then(|i| size_items(size).get(i).copied())
+            {
+                self.change_filters(hwnd, |f| f.size = size);
+            }
+        } else if let Some(range) = pane.range_of(event.sender()) {
+            let list = pane.range(range);
+            if let Some(closing) = list.closing(event) {
+                self.range_closing.set(Some((range, closing)));
+            } else if list.closed(event)
+                && self.range_closing.take() == Some((range, ListClosing::Chosen))
+            {
+                self.range_closed.set(Some(range));
+                hwnd.post(DEFERRED);
+            }
+        } else if let Some(index) = pane
+            .attributes
+            .iter()
+            .position(|(_, list)| list.selection_changed(event))
+        {
+            let choice = pane.attributes[index]
+                .1
+                .selected()
+                .and_then(|i| AttributeChoice::ALL.get(i).copied());
+            if let Some(choice) = choice {
+                self.change_filters(hwnd, |f| f.attributes[index] = choice);
+            }
+        }
     }
 
     /// The arrow on the sorted column's header (spec: Results list).
@@ -948,15 +1468,23 @@ impl MainWindow {
             }
             KeyAction::SearchNow => self.search(hwnd),
             KeyAction::ClearSearch => controls.search.hwnd().set_text(""),
+            KeyAction::ChooseCustom => {
+                if let Some(range) = controls.filters.range_of(target) {
+                    self.choose_custom(hwnd, range);
+                }
+            }
         }
         true
     }
 
     /// Whether `point`, in screen coordinates, is on the list's header.
     fn on_header(&self, point: (i32, i32)) -> bool {
-        let header = self.created().controls.list.header().screen_rect();
-        (header.x.0..header.right().0).contains(&point.0)
-            && (header.y.0..header.bottom().0).contains(&point.1)
+        self.created()
+            .controls
+            .list
+            .header()
+            .screen_rect()
+            .contains(point)
     }
 
     /// The selected entries' paths as Windows names them.
@@ -1308,6 +1836,36 @@ impl WindowProc for MainWindow {
             }
             Message::Deferred => {
                 self.read_list_selection(hwnd);
+                if let Some(range) = self.range_closed.take() {
+                    self.choose_custom(hwnd, range);
+                }
+                Some(LRESULT(0))
+            }
+            Message::VerticalScroll { from, request }
+                if from == self.created().controls.filters.pane =>
+            {
+                self.scroll_filters(|filters, position| filters.scrolled(position, request));
+                Some(LRESULT(0))
+            }
+            Message::VerticalScroll { .. } => None,
+            Message::MouseWheel { delta, point }
+                if self.model.borrow().panes().filters
+                    && self
+                        .created()
+                        .controls
+                        .filters
+                        .pane
+                        .screen_rect()
+                        .contains(point) =>
+            {
+                self.scroll_filters(|filters, position| {
+                    filters.scrolled(position, ScrollRequest::Wheel(delta))
+                });
+                Some(LRESULT(0))
+            }
+            Message::MouseWheel { .. } => None,
+            Message::FocusMoved { to } => {
+                self.reveal(to);
                 Some(LRESULT(0))
             }
             Message::ContextMenu {

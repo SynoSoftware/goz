@@ -61,6 +61,7 @@ pub(crate) fn run() {
 
     win::window::register_class::<MainWindow>(&window_class, IconId::Gozler.id())
         .expect("the window class registers");
+    win::pane::register().expect("the filter pane's window class registers");
     let window = MainWindow::open(&window_class, model, settings_file, show_message);
     let shortcuts: Vec<_> = commands::accelerators()
         .into_iter()

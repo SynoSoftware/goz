@@ -108,6 +108,17 @@ mod ids {
                 let _ = writeln!(code, "    {variant} = {value},");
             }
             let _ = write!(code, "}}\n\nimpl {kind} {{\n");
+            // Tests check every dialog; no test needs the other kinds' lists.
+            let _ = writeln!(
+                code,
+                "    #[cfg(test)]\n    #[allow(dead_code)]\n    pub(crate) const ALL: [{kind}; {}] = [{}];\n",
+                variants.len(),
+                variants
+                    .iter()
+                    .map(|v| format!("{kind}::{v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             let _ = write!(
                 code,
                 "    pub(crate) fn id(self) -> u16 {{\n        self as u16\n    }}\n}}\n"

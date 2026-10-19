@@ -6,6 +6,7 @@
 
 use super::captions::WindowCaptions;
 use super::model::Column;
+use super::query::Kind;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 use std::ops::{Add, Sub};
@@ -72,6 +73,13 @@ pub(crate) fn cell_text_inset(first_column: bool, dpi: Dpi) -> Px {
     inset.to_px(dpi)
 }
 
+/// Where a list box draws an item's text after the item's left edge,
+/// which a list box the window draws itself keeps, so the filter pane's
+/// lists line up. Measured against a list box's own drawing at 96 DPI.
+pub(crate) fn list_box_text_inset(dpi: Dpi) -> Px {
+    Dip(2).to_px(dpi)
+}
+
 impl Add for Px {
     type Output = Px;
     fn add(self, other: Px) -> Px {
@@ -108,6 +116,11 @@ impl Rect {
     pub(crate) fn bottom(self) -> Px {
         self.y + self.height
     }
+
+    /// Whether `point`, in the rectangle's coordinates, is inside it.
+    pub(crate) fn contains(self, (x, y): (i32, i32)) -> bool {
+        (self.x.0..self.right().0).contains(&x) && (self.y.0..self.bottom().0).contains(&y)
+    }
 }
 
 /// The window's edges and the gaps between groups.
@@ -127,7 +140,20 @@ const CHECK_BOX_CHROME: Dip = Dip(20);
 const DROP_DOWN_CHROME: Dip = Dip(30);
 /// The search box keeps room for a few words when the window is narrow.
 const SEARCH_MIN_WIDTH: Dip = Dip(120);
+/// The filter pane's narrowest width; longer captions widen it.
 const FILTER_PANE_WIDTH: Dip = Dip(180);
+/// Between a label and the control below it.
+const LABEL_GAP: Dip = Dip(4);
+/// A list box's borders and the inset of its text.
+const LIST_BOX_CHROME: Dip = Dip(6);
+/// The rows the Location list shows; more scroll in the list.
+const LOCATION_ROWS: usize = 5;
+/// A vertical scroll bar, as Windows draws it at 100 %.
+const SCROLL_BAR: Dip = Dip(17);
+/// The lines one notch of the mouse wheel scrolls, as Windows' default.
+const WHEEL_LINES: i32 = 3;
+/// One notch of the mouse wheel, `WHEEL_DELTA`.
+const WHEEL_DELTA: i32 = 120;
 const LIST_MIN_WIDTH: Dip = Dip(300);
 /// A list row is this much taller than its font, as File Explorer's.
 const ROW_PADDING: Dip = Dip(7);
@@ -171,8 +197,25 @@ pub(crate) struct CaptionWidths {
     match_modes: Px,
     match_case: Px,
     match_path: Px,
+    filters: FilterWidths,
     /// The widest text of each fixed status bar part.
     status: [Px; 3],
+}
+
+/// The measured widths of the filter pane's captions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FilterWidths {
+    clear: Px,
+    choose_folder: Px,
+    only_directly: Px,
+    /// The widest group label.
+    labels: Px,
+    /// The widest Kind item.
+    kinds: Px,
+    /// The widest Date modified or Size item.
+    ranges: Px,
+    attribute_names: Px,
+    attribute_choices: Px,
 }
 
 impl CaptionWidths {
@@ -183,11 +226,28 @@ impl CaptionWidths {
         measure: &dyn Fn(&str) -> Px,
     ) -> CaptionWidths {
         let widest = |texts: &[String]| texts.iter().map(|t| measure(t)).max().unwrap_or_default();
+        let filters = &captions.filters;
         CaptionWidths {
             match_label: measure(&captions.match_label),
             match_modes: widest(&captions.match_modes),
             match_case: measure(&captions.match_case),
             match_path: measure(&captions.match_path),
+            filters: FilterWidths {
+                clear: measure(&filters.clear),
+                choose_folder: measure(&filters.choose_folder),
+                only_directly: measure(&filters.only_directly),
+                labels: widest(&[
+                    filters.kind.clone(),
+                    filters.location.clone(),
+                    filters.date.clone(),
+                    filters.size.clone(),
+                    filters.attributes.clone(),
+                ]),
+                kinds: widest(&filters.kinds),
+                ranges: widest(&filters.ranges_widest),
+                attribute_names: widest(&filters.attribute_names),
+                attribute_choices: widest(&filters.attribute_choices),
+            },
             status: captions.status_widest.each_ref().map(|texts| widest(texts)),
         }
     }
@@ -198,7 +258,12 @@ const BUTTON_PADDING: Dip = Dip(24);
 /// The narrowest push button, as Windows' guidelines size OK and Cancel.
 const BUTTON_MIN_WIDTH: Dip = Dip(75);
 
-/// Where the list's message and its button go, inside the list below its
+/// The width of a push button for a caption `caption` wide.
+fn button_width(caption: Px, dpi: Dpi) -> Px {
+    (caption + BUTTON_PADDING.to_px(dpi)).max(BUTTON_MIN_WIDTH.to_px(dpi))
+}
+
+/// Where the list's message and its buttons go, inside the list below its
 /// header, so the message reads where the rows would.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MessageArea {
@@ -227,25 +292,230 @@ impl MessageArea {
     }
 
     /// The message's rectangle for a text `text_height` tall, and its
-    /// button's below it, for a caption `button` wide, when it has one.
+    /// buttons' in a row below it, for captions `buttons` wide.
     pub(crate) fn place(
         &self,
         text_height: Px,
         font_height: Px,
-        button: Option<Px>,
-    ) -> (Rect, Option<Rect>) {
+        buttons: &[Px],
+    ) -> (Rect, Vec<Rect>) {
         let px = |dip: Dip| dip.to_px(self.dpi);
         let text = Rect {
             height: text_height.min(self.text.height),
             ..self.text
         };
-        let button = button.map(|caption| Rect {
-            x: text.x,
-            y: text.bottom() + px(GROUP),
-            width: (caption + px(BUTTON_PADDING)).max(px(BUTTON_MIN_WIDTH)),
-            height: font_height + px(CONTROL_PADDING),
+        let mut x = text.x;
+        let buttons = buttons
+            .iter()
+            .map(|caption| {
+                let button = Rect {
+                    x,
+                    y: text.bottom() + px(GROUP),
+                    width: button_width(*caption, self.dpi),
+                    height: font_height + px(CONTROL_PADDING),
+                };
+                x = button.right() + px(RELATED);
+                button
+            })
+            .collect();
+        (text, buttons)
+    }
+}
+
+/// How the person scrolls the filter pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollRequest {
+    LineUp,
+    LineDown,
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+    /// The scroll box dragged to this position.
+    To(Px),
+    /// The mouse wheel turned by this `WM_MOUSEWHEEL` delta, positive away
+    /// from the person.
+    Wheel(i32),
+}
+
+/// The filter pane's window, and its controls in the pane's coordinates
+/// before it scrolls. When the pane is shorter than its controls, it shows
+/// a scroll bar and the part of them from its scroll position down (spec:
+/// Filter pane).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FilterLayout {
+    /// The pane's window in the client area.
+    pub(crate) pane: Rect,
+    /// The height of the pane's controls, its scroll range.
+    pub(crate) content_height: Px,
+    pub(crate) clear: Rect,
+    pub(crate) kind_label: Rect,
+    pub(crate) kind: Rect,
+    pub(crate) location_label: Rect,
+    pub(crate) location: Rect,
+    pub(crate) choose_folder: Rect,
+    pub(crate) only_directly: Rect,
+    pub(crate) date_label: Rect,
+    pub(crate) date: Rect,
+    pub(crate) size_label: Rect,
+    pub(crate) size: Rect,
+    pub(crate) attributes_label: Rect,
+    /// Each attribute's label and list, in the order of
+    /// [`super::query::ATTRIBUTES`].
+    pub(crate) attributes: [(Rect, Rect); 6],
+    /// What one line of scrolling moves.
+    line: Px,
+}
+
+impl FilterLayout {
+    /// The pane's controls, in a pane window `pane`; when they are taller
+    /// than the pane, its scroll bar takes room from their width.
+    fn compute(pane: Rect, dpi: Dpi, font_height: Px, widths: &FilterWidths) -> FilterLayout {
+        let full = FilterLayout::place(pane, pane.width, dpi, font_height, widths);
+        if full.content_height > pane.height {
+            let width = pane.width - SCROLL_BAR.to_px(dpi);
+            FilterLayout::place(pane, width, dpi, font_height, widths)
+        } else {
+            full
+        }
+    }
+
+    /// The controls `width` wide, from the top down.
+    fn place(
+        pane: Rect,
+        width: Px,
+        dpi: Dpi,
+        font_height: Px,
+        widths: &FilterWidths,
+    ) -> FilterLayout {
+        let px = |dip: Dip| dip.to_px(dpi);
+        let control_height = font_height + px(CONTROL_PADDING);
+        let check_height = font_height + px(CHECK_BOX_PADDING);
+        let list_height = |rows: usize| Px(font_height.0 * rows as i32) + px(LIST_BOX_CHROME);
+        let mut y = Px(0);
+        let mut next = |height: Px, gap: Dip| {
+            let rect = Rect {
+                x: Px(0),
+                y,
+                width,
+                height,
+            };
+            y = rect.bottom() + px(gap);
+            rect
+        };
+        let clear = Rect {
+            width: button_width(widths.clear, dpi),
+            ..next(control_height, GROUP)
+        };
+        let label = |rect: Rect| Rect {
+            width: widths.labels.min(width),
+            ..rect
+        };
+        let kind_label = label(next(font_height, LABEL_GAP));
+        let kind = next(list_height(Kind::ALL.len()), GROUP);
+        let location_label = label(next(font_height, LABEL_GAP));
+        let location = next(list_height(LOCATION_ROWS), RELATED);
+        let choose_folder = Rect {
+            width: button_width(widths.choose_folder, dpi),
+            ..next(control_height, RELATED)
+        };
+        let only_directly = next(check_height, GROUP);
+        let date_label = label(next(font_height, LABEL_GAP));
+        let date = next(control_height, GROUP);
+        let size_label = label(next(font_height, LABEL_GAP));
+        let size = next(control_height, GROUP);
+        let attributes_label = label(next(font_height, LABEL_GAP));
+        let attributes = [(); 6].map(|()| {
+            let row = next(control_height, RELATED);
+            let names = widths.attribute_names;
+            let name = Rect {
+                y: row.y + Px((control_height.0 - font_height.0) / 2),
+                width: names,
+                height: font_height,
+                ..row
+            };
+            let choice_x = names + px(RELATED);
+            let choice = Rect {
+                x: choice_x,
+                width: width - choice_x,
+                ..row
+            };
+            (name, choice)
         });
-        (text, button)
+        FilterLayout {
+            pane,
+            content_height: attributes[5].1.bottom(),
+            clear,
+            kind_label,
+            kind,
+            location_label,
+            location,
+            choose_folder,
+            only_directly,
+            date_label,
+            date,
+            size_label,
+            size,
+            attributes_label,
+            attributes,
+            line: font_height,
+        }
+    }
+
+    /// The narrowest pane that shows every caption whole, with room for
+    /// its scroll bar.
+    fn min_width(dpi: Dpi, widths: &FilterWidths) -> Px {
+        let px = |dip: Dip| dip.to_px(dpi);
+        let content = [
+            button_width(widths.clear, dpi),
+            button_width(widths.choose_folder, dpi),
+            widths.only_directly + px(CHECK_BOX_CHROME),
+            widths.labels,
+            widths.kinds + px(LIST_BOX_CHROME),
+            widths.ranges + px(DROP_DOWN_CHROME),
+            widths.attribute_names + px(RELATED) + widths.attribute_choices + px(DROP_DOWN_CHROME),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or_default();
+        (content + px(SCROLL_BAR)).max(px(FILTER_PANE_WIDTH))
+    }
+
+    /// The largest scroll position, at which the last control shows.
+    pub(crate) fn max_position(&self) -> Px {
+        (self.content_height - self.pane.height).max(Px(0))
+    }
+
+    /// The scroll position after `request` from `position`.
+    pub(crate) fn scrolled(&self, position: Px, request: ScrollRequest) -> Px {
+        let page = self.pane.height.max(self.line);
+        let to = match request {
+            ScrollRequest::LineUp => position - self.line,
+            ScrollRequest::LineDown => position + self.line,
+            ScrollRequest::PageUp => position - page,
+            ScrollRequest::PageDown => position + page,
+            ScrollRequest::Top => Px(0),
+            ScrollRequest::Bottom => self.max_position(),
+            ScrollRequest::To(to) => to,
+            ScrollRequest::Wheel(delta) => {
+                position - Px(self.line.0 * WHEEL_LINES * delta / WHEEL_DELTA)
+            }
+        };
+        to.clamp(Px(0), self.max_position())
+    }
+
+    /// The scroll position nearest `position` that shows `control`, a
+    /// rectangle in the pane's coordinates, such as the control the focus
+    /// moved to.
+    pub(crate) fn revealing(&self, position: Px, control: Rect) -> Px {
+        let to = if control.y < position {
+            control.y
+        } else if control.bottom() > position + self.pane.height {
+            control.bottom() - self.pane.height
+        } else {
+            position
+        };
+        to.clamp(Px(0), self.max_position())
     }
 }
 
@@ -258,6 +528,8 @@ pub(crate) struct Layout {
     pub(crate) match_mode: Rect,
     pub(crate) match_case: Rect,
     pub(crate) match_path: Rect,
+    /// `None` while the pane is hidden.
+    pub(crate) filters: Option<FilterLayout>,
     pub(crate) list: Rect,
     /// The one-pixel lines between the panes.
     pub(crate) dividers: Vec<Rect>,
@@ -333,15 +605,21 @@ impl Layout {
         let bottom = client.height - status_height - margin;
         let mut dividers = Vec::new();
         let mut left = margin;
-        if panes.filters {
-            left = left + px(FILTER_PANE_WIDTH) + group;
-            dividers.push(Rect {
-                x: left - group + Px((group.0 - 1) / 2),
+        let filters = panes.filters.then(|| {
+            let pane = Rect {
+                x: margin,
                 y: top,
-                width: Px(1),
+                width: FilterLayout::min_width(dpi, &captions.filters),
                 height: (bottom - top).max(Px(0)),
+            };
+            left = pane.right() + group;
+            dividers.push(Rect {
+                x: pane.right() + Px((group.0 - 1) / 2),
+                width: Px(1),
+                ..pane
             });
-        }
+            FilterLayout::compute(pane, dpi, font_height, &captions.filters)
+        });
         let list_min_height = Px((font_height + px(ROW_PADDING)).0 * LIST_MIN_ROWS);
         let mut list_bottom = bottom;
         if panes.inspector {
@@ -390,6 +668,7 @@ impl Layout {
             match_mode,
             match_case,
             match_path,
+            filters,
             list,
             dividers,
             status_parts,
@@ -403,6 +682,28 @@ mod tests {
     use super::*;
     use crate::core::model::tests::model;
     use crate::core::text::tests::English;
+
+    /// The filter pane's controls, in the pane's coordinates.
+    fn pane_controls(filters: &FilterLayout) -> Vec<Rect> {
+        let mut controls = vec![
+            filters.clear,
+            filters.kind_label,
+            filters.kind,
+            filters.location_label,
+            filters.location,
+            filters.choose_folder,
+            filters.only_directly,
+            filters.date_label,
+            filters.date,
+            filters.size_label,
+            filters.size,
+            filters.attributes_label,
+        ];
+        for (name, choice) in filters.attributes {
+            controls.extend([name, choice]);
+        }
+        controls
+    }
 
     /// Caption widths as a font of `char_width` pixels per character would
     /// give them; `stretch` stands for a longer language.
@@ -470,6 +771,35 @@ mod tests {
                             layout.list,
                         ];
                         controls.extend(&layout.dividers);
+                        if let Some(filters) = &layout.filters {
+                            controls.push(filters.pane);
+                            // The pane scrolls instead of setting the
+                            // window's minimum height.
+                            assert!(client != min || filters.max_position() > Px(0));
+                            let bar = if filters.max_position() > Px(0) {
+                                Dip(17).to_px(dpi)
+                            } else {
+                                Px(0)
+                            };
+                            let inside = pane_controls(filters);
+                            for (i, a) in inside.iter().enumerate() {
+                                assert!(
+                                    a.x >= Px(0)
+                                        && a.y >= Px(0)
+                                        && a.right() <= filters.pane.width - bar
+                                        && a.bottom() <= filters.content_height,
+                                    "{a:?} leaves the pane {filters:?} at {dpi:?}, \
+                                     stretch {stretch}"
+                                );
+                                for b in &inside[i + 1..] {
+                                    assert!(
+                                        !overlaps(*a, *b),
+                                        "{a:?} overlaps {b:?} in the pane at {dpi:?}, \
+                                         stretch {stretch}"
+                                    );
+                                }
+                            }
+                        }
                         for (i, a) in controls.iter().enumerate() {
                             assert!(
                                 a.x >= Px(0)

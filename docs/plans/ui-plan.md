@@ -1069,9 +1069,10 @@ pub(crate) trait WindowProc: 'static {
 /// `WM_NCCREATE`, such as `WM_GETMINMAXINFO`, go to `DefWindowProcW`.
 pub(crate) fn create_window<W: WindowProc>(class: &WindowClass, state: Rc<W>, params: CreateParams) -> windows::core::Result<Hwnd>;
 
-/// Runs a modal dialog from a .rc template. `state` is borrowed for the
-/// dialog's whole life, because the call returns only after it closes.
-pub(crate) fn run_modal<D: DialogProc>(owner: Hwnd, template: DialogId, state: &D) -> isize;
+/// Runs a modal dialog from a .rc template with its captions. `state` is
+/// borrowed for the dialog's whole life, because the call returns only after
+/// it closes. Fails when Windows cannot create the dialog.
+pub(crate) fn run_modal<D: DialogProc>(owner: Hwnd, dialog: DialogId, captions: &DialogCaptions, state: &D) -> windows::core::Result<DialogEnd>;
 
 /// An owned GDI font, deleted on drop.
 pub(crate) struct Font(HFONT);

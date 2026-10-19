@@ -5,7 +5,7 @@
 
 use super::layout::Dip;
 use super::model::Column;
-use super::query::Matching;
+use super::query::{Filters, Matching};
 use super::text::LanguageChoice;
 use gozler_core::types::SortSpec;
 use serde::de::DeserializeOwned;
@@ -35,7 +35,7 @@ pub(crate) struct Choices {
     pub(crate) language: LanguageChoice,
 }
 
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WindowState {
     #[serde(
         default,
@@ -55,6 +55,24 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub(crate) columns: Vec<SavedColumn>,
+    /// Whether the filter pane shows (spec: C13).
+    #[serde(default = "shown", deserialize_with = "shown_or_default")]
+    pub(crate) filter_pane: bool,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) filters: Filters,
+}
+
+impl Default for WindowState {
+    fn default() -> WindowState {
+        WindowState {
+            placement: None,
+            matching: Matching::default(),
+            sort: SortSpec::default(),
+            columns: Vec::new(),
+            filter_pane: shown(),
+            filters: Filters::default(),
+        }
+    }
 }
 
 /// A shown column and its width in device-independent pixels, so the width
@@ -107,6 +125,15 @@ fn or_default<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(
     Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
+/// A pane shows until the person hides it.
+fn shown() -> bool {
+    true
+}
+
+fn shown_or_default<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(or_default::<D, Option<bool>>(deserializer)?.unwrap_or_else(shown))
+}
+
 /// A placement whose width or height is not a positive `i32` is damaged,
 /// because the window computes its size from it; `GetWindowPlacement`
 /// never gives one.
@@ -143,6 +170,7 @@ fn is_windows_default(choice: &LanguageChoice) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::query::{DateModified, DateRange, Day, Kind, SizeFilter, SizeWord};
 
     /// A file another version or a person edited must not lose every
     /// setting for one bad value: each damaged value falls back alone.
@@ -213,6 +241,16 @@ mod tests {
                         width: Dip(300),
                     },
                 ],
+                filter_pane: false,
+                filters: Filters {
+                    kind: Kind::Documents,
+                    location: Some(r"D:\work".into()),
+                    date: DateModified::Custom(DateRange::Until(Day("2026-10-11"
+                        .parse()
+                        .expect("a date")))),
+                    size: SizeFilter::Word(SizeWord::Large),
+                    ..Filters::default()
+                },
             },
         };
         Settings::default()

@@ -77,7 +77,7 @@ pub fn absolute(path: &str, working_dir: &str) -> String {
 
 /// The folder that holds `path`, an absolute path as [`absolute`] writes it.
 /// A root holds itself.
-pub(crate) fn parent_of(path: &str) -> String {
+pub fn parent_of(path: &str) -> String {
     let (root, rest) = root(path).unwrap_or((path, ""));
     match rest.trim_end_matches('\\').rsplit_once('\\') {
         Some((folder, _)) if !folder.is_empty() => format!("{root}{folder}"),

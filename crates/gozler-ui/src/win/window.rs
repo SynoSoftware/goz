@@ -7,7 +7,7 @@
 use super::notify::{Command, Notification};
 use super::{Hwnd, from_rect, to_rect, wide};
 use crate::core::commands::{Key, Keystroke};
-use crate::core::layout::{Dpi, Px, Rect, Size};
+use crate::core::layout::{Dpi, Px, Rect, ScrollRequest, Size};
 use crate::core::settings::Placement;
 use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -17,20 +17,22 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_F12, VK_MENU, VK_OEM_COMMA,
-    VK_RETURN, VK_SHIFT,
+    GetFocus, GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_F12, VK_MENU,
+    VK_OEM_COMMA, VK_RETURN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON, IDC_ARROW, IMAGE_ICON,
+    GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW, HICON, IDC_ARROW, IMAGE_ICON,
     IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
-    PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWNORMAL,
-    SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateAcceleratorW,
-    TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CLOSE,
-    WM_COMMAND, WM_CONTEXTMENU, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_ENDSESSION, WM_GETMINMAXINFO, WM_INITMENUPOPUP, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_CLIPCHILDREN,
-    WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
+    PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
+    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_TRACKPOS, SM_CXICON,
+    SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SendMessageW, SetTimer, SetWindowLongPtrW,
+    SetWindowPlacement, TranslateAcceleratorW, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT,
+    WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_CREATE,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ENDSESSION, WM_GETMINMAXINFO,
+    WM_INITMENUPOPUP, WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
+    WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -70,6 +72,24 @@ pub(crate) enum Message<'a> {
     KeyDown {
         target: Hwnd,
         keystroke: Keystroke,
+    },
+    /// A key that `IsDialogMessageW` handled moved the focus to `to`, such
+    /// as `Tab` or an access key.
+    FocusMoved {
+        to: Hwnd,
+    },
+    /// A scroll bar's request; `from` is the window whose vertical scroll
+    /// bar it is, such as the filter pane.
+    VerticalScroll {
+        from: Hwnd,
+        request: ScrollRequest,
+    },
+    /// The mouse wheel turned over the window, or over a child that left
+    /// it alone.
+    MouseWheel {
+        delta: i32,
+        /// In screen coordinates.
+        point: (i32, i32),
     },
     InitMenuPopup,
     CtlColorStatic(super::gdi::StaticColors),
@@ -284,10 +304,16 @@ const KEY_DOWN: u32 = super::wake::WAKE + 1;
 /// The private message a window posts itself ([`Message::Deferred`]).
 pub(crate) const DEFERRED: u32 = super::wake::WAKE + 2;
 
+/// The private message that tells the main window where a key moved the
+/// focus ([`Message::FocusMoved`]).
+const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
+
 /// Runs the thread's message loop until `WM_QUIT`. The accelerators come
 /// first, then the keys the main window takes for its focused control, then
 /// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
-/// main window's controls (design rule 8).
+/// main window's controls (design rule 8). A key that `IsDialogMessageW`
+/// moves the focus with is reported to the main window, which no control
+/// notifies of it.
 pub(crate) fn run_message_loop(main: Hwnd, accelerators: &super::menu::Accelerators) {
     let mut msg = MSG::default();
     // SAFETY: `msg` is a local that each call fills in or reads.
@@ -307,7 +333,16 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &super::menu::Accelerat
             {
                 continue;
             }
+            let key = matches!(
+                msg.message,
+                WM_KEYDOWN | WM_SYSKEYDOWN | WM_CHAR | WM_SYSCHAR
+            );
+            let focused = GetFocus();
             if IsDialogMessageW(main.0, &msg).as_bool() {
+                let now = GetFocus();
+                if key && now != focused && !now.is_invalid() {
+                    SendMessageW(main.0, FOCUS_MOVED, None, Some(LPARAM(now.0 as isize)));
+                }
                 continue;
             }
             let _ = TranslateMessage(&msg);
@@ -423,6 +458,23 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             },
             None => Message::Other(msg),
         },
+        FOCUS_MOVED => Message::FocusMoved {
+            to: Hwnd(HWND(lparam.0 as *mut _)),
+        },
+        WM_VSCROLL => {
+            let from = Hwnd(HWND(lparam.0 as *mut _));
+            match scroll_request(from, low(wparam.0)) {
+                Some(request) => Message::VerticalScroll { from, request },
+                None => Message::Other(msg),
+            }
+        }
+        WM_MOUSEWHEEL => Message::MouseWheel {
+            delta: i32::from(high(wparam.0) as i16),
+            point: (
+                i32::from(low(lparam.0 as usize) as i16),
+                i32::from(high(lparam.0 as usize) as i16),
+            ),
+        },
         WM_INITMENUPOPUP => Message::InitMenuPopup,
         WM_CTLCOLORSTATIC => Message::CtlColorStatic(super::gdi::StaticColors::from_wparam(wparam)),
         WM_PAINT => Message::Paint,
@@ -440,6 +492,32 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_DESTROY => Message::Destroy,
         _ => Message::Other(msg),
     }
+}
+
+/// What the `WM_VSCROLL` code `code` asks of `from`'s vertical scroll bar;
+/// `None` for the end of a drag, which asks nothing.
+fn scroll_request(from: Hwnd, code: u16) -> Option<ScrollRequest> {
+    Some(match i32::from(code) {
+        code if code == SB_LINEUP.0 => ScrollRequest::LineUp,
+        code if code == SB_LINEDOWN.0 => ScrollRequest::LineDown,
+        code if code == SB_PAGEUP.0 => ScrollRequest::PageUp,
+        code if code == SB_PAGEDOWN.0 => ScrollRequest::PageDown,
+        code if code == SB_TOP.0 => ScrollRequest::Top,
+        code if code == SB_BOTTOM.0 => ScrollRequest::Bottom,
+        code if code == SB_THUMBTRACK.0 || code == SB_THUMBPOSITION.0 => {
+            // The message's own position has 16 bits; the tracked one has 32.
+            let mut info = SCROLLINFO {
+                cbSize: size_of::<SCROLLINFO>() as u32,
+                fMask: SIF_TRACKPOS,
+                ..Default::default()
+            };
+            // SAFETY: `info` is a local with its size set, which the call
+            // fills in.
+            unsafe { GetScrollInfo(from.0, SB_VERT, &mut info) }.ok()?;
+            ScrollRequest::To(Px(info.nTrackPos))
+        }
+        _ => return None,
+    })
 }
 
 /// The key `key` with the modifiers held while its message was read, if a

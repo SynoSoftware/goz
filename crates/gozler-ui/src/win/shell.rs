@@ -1,18 +1,20 @@
-//! COM, the known folders, the save dialog and the shell's verbs: open,
-//! show in File Explorer, Properties and run as administrator.
+//! COM, the known folders, the save dialog, the folder picker and the
+//! shell's verbs: open, show in File Explorer, Properties and run as
+//! administrator.
 
 use super::Hwnd;
 use std::path::PathBuf;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-    CoInitializeEx, CoTaskMemFree,
+    CoInitializeEx, CoTaskMemFree, IBindCtx,
 };
 use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOS_FORCEFILESYSTEM, FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT,
-    FileSaveDialog, IFileSaveDialog, ILCreateFromPathW, ILFindLastID, ILFree, KF_FLAG_DEFAULT,
-    SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties, SHOpenFolderAndSelectItems,
-    SIGDN_FILESYSPATH, ShellExecuteW,
+    FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog,
+    ILCreateFromPathW, ILFindLastID, ILFree, IShellItem, KF_FLAG_DEFAULT,
+    SHCreateItemFromParsingName, SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties,
+    SHOpenFolderAndSelectItems, SIGDN_FILESYSPATH, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 use windows::core::{HSTRING, PCWSTR, w};
@@ -172,6 +174,41 @@ pub(crate) fn save_dialog(
         CoTaskMemFree(Some(path.0.cast_const().cast()));
         let index = usize::try_from(index).ok()?.checked_sub(1)?;
         Some((PathBuf::from(text.ok()?), index))
+    }
+}
+
+/// Shows the Windows folder picker, open at `start` when that folder
+/// exists, and returns the chosen folder, or `None` when the person
+/// cancels. It runs its own message loop, so the caller holds no borrow
+/// across it (design rule 1).
+pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
+    // SAFETY: every string outlives the call that reads it; the chosen
+    // path is copied, then freed as the call requires.
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        // Only a folder on disk can be searched.
+        dialog
+            .SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+            .ok()?;
+        if let Some(start) = start
+            && let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+                &HSTRING::from(start),
+                None::<&IBindCtx>,
+            )
+        {
+            let _ = dialog.SetFolder(&folder);
+        }
+        dialog.Show(Some(owner.0)).ok()?;
+        let path = dialog
+            .GetResult()
+            .ok()?
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .ok()?;
+        let text = path.to_string();
+        CoTaskMemFree(Some(path.0.cast_const().cast()));
+        text.ok()
     }
 }
 

@@ -4,14 +4,21 @@
 //! change to the regional format, and `layout::CaptionWidths` measures the
 //! same value. A handler that updates one caption calls the same function.
 //!
+//! A dialog's fixed captions come from its [`CaptionTable`], which
+//! [`DialogCaptions::new`] reads in the language of the moment.
+//!
 //! A catalogue key is written whole, as a literal, so the test below finds
 //! every key the code uses in `en.json`.
 
 use super::commands::{self, MenuNode};
 use super::fetch::DaemonFailure;
+use super::ids::{ControlId, DialogId};
 use super::layout::WIDEST_TOTAL;
 use super::model::{Column, Export, Model};
-use super::query::MatchMode;
+use super::query::{
+    ATTRIBUTES, AttributeChoice, DateModified, DateRange, Day, Kind, LocationItem, MatchMode,
+    RangeItem, SizeFilter, SizeRange, SizeUnit, SizeWord, date_items, size_items,
+};
 use super::results::{LIST_LIMIT, ListMessage, Shown};
 use super::selection::{Selection, sums};
 use super::text::{self, Numbers, Strings};
@@ -30,6 +37,7 @@ pub(crate) struct WindowCaptions {
     pub(crate) match_modes: [String; 5],
     pub(crate) match_case: String,
     pub(crate) match_path: String,
+    pub(crate) filters: FilterCaptions,
     /// In [`Model::columns`]' order.
     pub(crate) headers: Vec<String>,
     pub(crate) status: StatusCaptions,
@@ -49,8 +57,306 @@ pub(crate) struct StatusCaptions {
 }
 
 /// What the list's empty area says instead of rows: the message, and the
-/// label of its fix's button.
-pub(crate) type ListCaption = (String, Option<String>);
+/// labels of its buttons, in [`Model::list_buttons`]' order.
+pub(crate) type ListCaption = (String, Vec<String>);
+
+/// The filter pane's captions and the items of its lists, in the lists'
+/// orders.
+pub(crate) struct FilterCaptions {
+    pub(crate) clear: String,
+    pub(crate) kind: String,
+    /// In [`Kind::ALL`]'s order.
+    pub(crate) kinds: [String; 9],
+    pub(crate) location: String,
+    /// In [`Model::location_items`]' order.
+    pub(crate) locations: Vec<String>,
+    pub(crate) choose_folder: String,
+    pub(crate) only_directly: String,
+    pub(crate) date: String,
+    /// In [`date_items`]' order.
+    pub(crate) dates: Vec<String>,
+    pub(crate) size: String,
+    /// In [`size_items`]' order.
+    pub(crate) sizes: Vec<String>,
+    pub(crate) attributes: String,
+    /// In [`ATTRIBUTES`]' order.
+    pub(crate) attribute_names: [String; 6],
+    /// In [`AttributeChoice::ALL`]'s order.
+    pub(crate) attribute_choices: [String; 3],
+    /// The Date modified and Size items the pane is sized for: each choice
+    /// but a custom range, and a custom range of each as wide as a usual
+    /// one, so the pane keeps its width when one is set.
+    pub(crate) ranges_widest: Vec<String>,
+}
+
+impl FilterCaptions {
+    pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> FilterCaptions {
+        let strings = model.strings();
+        let filters = model.filters();
+        let text = |key: &'static str| strings.text(key).to_owned();
+        let dates = |chosen: DateModified| -> Vec<String> {
+            date_items(chosen)
+                .into_iter()
+                .map(|item| match item {
+                    RangeItem::Choice(choice) => date_text(strings, numbers, choice),
+                    RangeItem::Custom => text("filter.custom"),
+                })
+                .collect()
+        };
+        let sizes = |chosen: SizeFilter| -> Vec<String> {
+            size_items(chosen)
+                .into_iter()
+                .map(|item| match item {
+                    RangeItem::Choice(choice) => size_text(strings, numbers, choice),
+                    RangeItem::Custom => text("filter.custom"),
+                })
+                .collect()
+        };
+        let day = Day(jiff::civil::date(2026, 12, 30));
+        let samples = [
+            dates(DateModified::Custom(DateRange::Between(day, day))),
+            sizes(SizeFilter::Custom(SizeRange {
+                min: Some(150 * 1024),
+                max: Some(1536 * 1024),
+                unit: SizeUnit::Mb,
+            })),
+        ];
+        FilterCaptions {
+            clear: text("command.clear_filters"),
+            kind: text("filter.kind"),
+            kinds: Kind::ALL.map(|kind| text(kind.label())),
+            location: text("filter.location"),
+            locations: location_items(model),
+            choose_folder: text("filter.choose_folder"),
+            only_directly: text("filter.only_directly"),
+            date: text("filter.date"),
+            dates: dates(filters.date),
+            size: text("filter.size"),
+            sizes: sizes(filters.size),
+            attributes: text("filter.attributes"),
+            attribute_names: ATTRIBUTES.map(|(_, label)| text(label)),
+            attribute_choices: AttributeChoice::ALL.map(|choice| text(choice.label())),
+            ranges_widest: samples.into_iter().flatten().collect(),
+        }
+    }
+}
+
+/// The Location list's items: Everywhere, each volume by its mount prefix
+/// with its state when it is not complete (spec: Filter pane), and the
+/// chosen folder.
+pub(crate) fn location_items(model: &Model) -> Vec<String> {
+    let strings = model.strings();
+    model
+        .location_items()
+        .iter()
+        .map(|item| match item {
+            LocationItem::Everywhere => strings.text("filter.everywhere").to_owned(),
+            LocationItem::Volume(volume) => {
+                let prefix = volume.mounted().display_prefix();
+                match volume.phase {
+                    VolumePhase::Live | VolumePhase::Snapshot => prefix.to_owned(),
+                    VolumePhase::Bootstrapping | VolumePhase::Rescanning => {
+                        strings.format("filter.location_indexing", &[prefix])
+                    }
+                    VolumePhase::Offline => strings.format("filter.location_offline", &[prefix]),
+                    VolumePhase::Failed { .. } => {
+                        strings.format("filter.location_failed", &[prefix])
+                    }
+                }
+            }
+            LocationItem::Folder(folder) => (*folder).to_owned(),
+        })
+        .collect()
+}
+
+/// A Date modified choice as its list shows it.
+fn date_text(strings: &Strings, numbers: &dyn Numbers, date: DateModified) -> String {
+    let day = |day: Day| numbers.date(day.0);
+    match date {
+        DateModified::Any => strings.text("filter.any_time").to_owned(),
+        DateModified::Today => strings.text("filter.today").to_owned(),
+        DateModified::Yesterday => strings.text("filter.yesterday").to_owned(),
+        DateModified::Last7Days => strings.text("filter.last_7_days").to_owned(),
+        DateModified::Last30Days => strings.text("filter.last_30_days").to_owned(),
+        DateModified::Last365Days => strings.text("filter.last_365_days").to_owned(),
+        DateModified::Custom(DateRange::From(from)) => {
+            strings.format("filter.date_from", &[&day(from)])
+        }
+        DateModified::Custom(DateRange::Until(to)) => {
+            strings.format("filter.date_until", &[&day(to)])
+        }
+        DateModified::Custom(DateRange::Between(from, to)) => {
+            strings.format("filter.date_between", &[&day(from), &day(to)])
+        }
+    }
+}
+
+/// A Size choice as its list shows it: a size word with its range, such as
+/// "Tiny (up to 10 KB)", or a custom range in its unit.
+fn size_text(strings: &Strings, numbers: &dyn Numbers, size: SizeFilter) -> String {
+    match size {
+        SizeFilter::Any => strings.text("filter.any_size").to_owned(),
+        SizeFilter::Word(word) => {
+            let range = word.word().range;
+            let size = |bytes: u64| round_size(strings, numbers, bytes);
+            let text = if range.min <= 1 {
+                strings.format("filter.range_up_to", &[&size(range.max)])
+            } else if range.max == u64::MAX {
+                strings.format("filter.range_over", &[&size(range.min - 1)])
+            } else {
+                strings.format(
+                    "filter.range_between",
+                    &[&size(range.min - 1), &size(range.max)],
+                )
+            };
+            // Empty has no range to show.
+            match word {
+                SizeWord::Empty => strings.text(word.label()).to_owned(),
+                _ => strings.format(word.label(), &[&text]),
+            }
+        }
+        SizeFilter::Custom(range) => {
+            let size = |bytes: u64| unit_size(strings, numbers, bytes, range.unit);
+            match (range.min, range.max) {
+                (Some(min), Some(max)) => {
+                    strings.format("filter.size_between", &[&size(min), &size(max)])
+                }
+                (Some(min), None) => strings.format("filter.size_at_least", &[&size(min)]),
+                (None, Some(max)) => strings.format("filter.size_up_to", &[&size(max)]),
+                (None, None) => strings.text("filter.any_size").to_owned(),
+            }
+        }
+    }
+}
+
+const SIZE_UNITS: [(u64, &str); 3] = [
+    (1 << 30, "size.gb"),
+    (1 << 20, "size.mb"),
+    (1 << 10, "size.kb"),
+];
+
+/// A size word's boundary, a whole number of a unit, such as "10 KB".
+fn round_size(strings: &Strings, numbers: &dyn Numbers, bytes: u64) -> String {
+    SIZE_UNITS
+        .iter()
+        .find(|(unit, _)| bytes >= *unit && bytes.is_multiple_of(*unit))
+        .map_or_else(
+            || text::bytes(strings, numbers, bytes),
+            |(unit, key)| strings.format(key, &[&numbers.integer(bytes / unit)]),
+        )
+}
+
+/// `bytes` in `unit`, with the decimals the person can have typed, such as
+/// "1.5 MB".
+fn unit_size(strings: &Strings, numbers: &dyn Numbers, bytes: u64, unit: SizeUnit) -> String {
+    let value = bytes as f64 / unit.bytes() as f64;
+    let digits = (0u8..2)
+        .find(|&digits| {
+            let scaled = value * 10f64.powi(i32::from(digits));
+            (scaled - scaled.round()).abs() < 1e-6
+        })
+        .unwrap_or(2);
+    let key = match unit {
+        SizeUnit::Kb => "size.kb",
+        SizeUnit::Mb => "size.mb",
+        SizeUnit::Gb => "size.gb",
+    };
+    strings.format(key, &[&numbers.decimal(value, digits)])
+}
+
+/// A control of a dialog that a caption goes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DialogItem {
+    Ok,
+    Cancel,
+    Control(ControlId),
+}
+
+impl DialogItem {
+    /// Its control ID. OK and Cancel are `IDOK` and `IDCANCEL`, which a
+    /// dialog sends for `Enter` and `Esc`.
+    pub(crate) fn id(self) -> u16 {
+        match self {
+            DialogItem::Ok => 1,
+            DialogItem::Cancel => 2,
+            DialogItem::Control(control) => control.id(),
+        }
+    }
+}
+
+/// The catalogue keys of a dialog's title and fixed captions. A text that
+/// depends on a fact, such as About's version, is the dialog's own.
+pub(crate) struct CaptionTable {
+    title: &'static str,
+    /// Captions with an access key, which is unique in the dialog.
+    keyed: &'static [(DialogItem, &'static str)],
+    /// Captions without one: the buttons that `Enter` and `Esc` press, and
+    /// texts that label no control.
+    plain: &'static [(DialogItem, &'static str)],
+}
+
+impl CaptionTable {
+    pub(crate) fn of(dialog: DialogId) -> CaptionTable {
+        use ControlId as C;
+        use DialogItem::{Cancel, Control, Ok};
+        match dialog {
+            DialogId::About => CaptionTable {
+                title: "about.title",
+                keyed: &[],
+                plain: &[
+                    (Control(C::AboutDescription), "about.description"),
+                    (Control(C::AboutCopyright), "about.copyright"),
+                    (Cancel, "button.close"),
+                ],
+            },
+            DialogId::SearchSyntax => CaptionTable {
+                title: "search_syntax.title",
+                keyed: &[],
+                plain: &[(Cancel, "button.close")],
+            },
+            DialogId::CustomDate => CaptionTable {
+                title: "custom_date.title",
+                keyed: &[
+                    (Control(C::CustomDateFromLabel), "custom_date.from"),
+                    (Control(C::CustomDateToLabel), "custom_date.to"),
+                ],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
+            DialogId::CustomSize => CaptionTable {
+                title: "custom_size.title",
+                keyed: &[
+                    (Control(C::CustomSizeMinimumLabel), "custom_size.minimum"),
+                    (Control(C::CustomSizeMaximumLabel), "custom_size.maximum"),
+                    (Control(C::CustomSizeUnitLabel), "custom_size.unit"),
+                ],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
+        }
+    }
+}
+
+/// A dialog's title and fixed captions in the language of the moment,
+/// which the dialog module sets when the dialog opens.
+pub(crate) struct DialogCaptions {
+    pub(crate) title: String,
+    /// Each control's ID and caption.
+    pub(crate) items: Vec<(u16, String)>,
+}
+
+impl DialogCaptions {
+    pub(crate) fn new(dialog: DialogId, strings: &Strings) -> DialogCaptions {
+        let table = CaptionTable::of(dialog);
+        DialogCaptions {
+            title: strings.text(table.title).to_owned(),
+            items: table
+                .keyed
+                .iter()
+                .chain(table.plain)
+                .map(|(item, key)| (item.id(), strings.text(key).to_owned()))
+                .collect(),
+        }
+    }
+}
 
 impl WindowCaptions {
     pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> WindowCaptions {
@@ -63,6 +369,7 @@ impl WindowCaptions {
             match_modes: MatchMode::ALL.map(|m| strings.text(m.label()).to_owned()),
             match_case: strings.text("match.case").to_owned(),
             match_path: strings.text("match.path").to_owned(),
+            filters: FilterCaptions::new(model, numbers),
             headers: model
                 .columns()
                 .iter()
@@ -139,7 +446,8 @@ pub(crate) fn header(strings: &Strings, column: Column) -> String {
     strings.text(column.header()).to_owned()
 }
 
-/// Status part 1: how many results, or that a search runs.
+/// Status part 1: how many results, or that a search runs. A filter that
+/// the hidden pane cannot show adds "· Filtered" (spec: S10).
 pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     let results = model.results();
@@ -149,13 +457,18 @@ pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     match results.shown() {
         Shown::Rows(_) => {
             let total = results.total();
-            if total > LIST_LIMIT {
+            let count = if total > LIST_LIMIT {
                 strings.format(
                     "status.showing",
                     &[&numbers.integer(LIST_LIMIT), &numbers.integer(total)],
                 )
             } else {
                 strings.count("status.results", total, numbers, &[])
+            };
+            if model.filters().is_set() && !model.panes().filters {
+                strings.format("status.filtered", &[&count])
+            } else {
+                count
             }
         }
         Shown::Nothing | Shown::Message(_) => String::new(),
@@ -223,21 +536,23 @@ pub(crate) fn index_status(model: &Model) -> String {
 /// What the list's empty area says instead of rows, if anything.
 pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
     let strings = model.strings();
-    let message = match model.results().shown() {
+    let text = match model.results().shown() {
         Shown::Rows(_) if model.results().total() == 0 => {
-            return Some((strings.text("list.no_results").to_owned(), None));
+            strings.text("list.no_results").to_owned()
         }
         Shown::Nothing | Shown::Rows(_) => return None,
-        Shown::Message(message) => message,
+        Shown::Message(ListMessage::Parse(error)) => query_error(strings, error),
+        Shown::Message(ListMessage::MissingFolder(folder)) => {
+            strings.format("list.missing_folder", &[folder])
+        }
+        Shown::Message(ListMessage::Failure(failure)) => failure_text(strings, failure),
     };
-    let text = match message {
-        ListMessage::Parse(error) => query_error(strings, error),
-        ListMessage::Failure(failure) => failure_text(strings, failure),
-    };
-    let button = message
-        .fix()
-        .map(|fix| strings.text(fix.label()).to_owned());
-    Some((text, button))
+    let buttons = model
+        .list_buttons()
+        .iter()
+        .map(|button| strings.text(button.label()).to_owned())
+        .collect();
+    Some((text, buttons))
 }
 
 /// What a failure of the service means for the person (spec: Daemon
@@ -309,9 +624,33 @@ fn query_error(strings: &Strings, error: &QueryError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::text::{LANGUAGES, parse_catalogue};
+    use super::super::text::{LANGUAGES, Strings, access_key, parse_catalogue};
+    use super::*;
     use std::collections::HashSet;
     use std::path::Path;
+
+    /// An access key that two controls of a dialog share focuses the first
+    /// only, and a label without one leaves its control out of reach of the
+    /// keyboard (spec: Words). Every shipped language chooses its own
+    /// letters.
+    #[test]
+    fn every_dialog_label_has_its_own_access_key() {
+        for language in LANGUAGES {
+            let strings = Strings::load(language);
+            for dialog in DialogId::ALL {
+                let mut keys = HashSet::new();
+                for (_, key) in CaptionTable::of(dialog).keyed {
+                    let caption = strings.text(key);
+                    assert!(
+                        access_key(caption).is_some_and(|k| keys.insert(k)),
+                        "{}: {caption} in {dialog:?} has no access key, or one the dialog \
+                         already uses",
+                        language.tag
+                    );
+                }
+            }
+        }
+    }
 
     /// A key that `en.json` lacks shows its dotted name on screen, and only
     /// the code that builds that caption shows it, so a typo in a rare

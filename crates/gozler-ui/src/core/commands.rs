@@ -117,18 +117,18 @@ impl CommandId {
                     always,
                     None,
                 ),
-                C::SearchInThisFolder => ("command.search_in_this_folder", &[], never, None),
+                C::SearchInThisFolder => ("command.search_in_this_folder", &[], one_file, None),
                 C::Filters => (
                     "command.filters",
                     &[],
-                    never,
-                    Some(|s| s.model.panes.filters),
+                    always,
+                    Some(|s| s.model.panes().filters),
                 ),
                 C::Inspector => (
                     "command.inspector",
                     &[],
                     never,
-                    Some(|s| s.model.panes.inspector),
+                    Some(|s| s.model.panes().inspector),
                 ),
                 C::Columns => ("command.columns", &[], always, None),
                 C::Language => ("menu.language", &[], never, None),
@@ -151,7 +151,12 @@ impl CommandId {
                 ),
                 C::Match => ("match.label", &[], always, None),
                 C::SortBy => ("command.sort_by", &[], always, None),
-                C::ClearFilters => ("command.clear_filters", &[], never, None),
+                C::ClearFilters => (
+                    "command.clear_filters",
+                    &[],
+                    |s| s.model.filters().is_set(),
+                    None,
+                ),
                 C::SearchSyntax => (
                     "command.search_syntax",
                     const { &[Keystroke::plain(Key::Function(1))] },
@@ -194,8 +199,13 @@ pub(crate) struct State<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
-    SearchBox { text_selected: bool },
+    SearchBox {
+        text_selected: bool,
+    },
     List,
+    /// The Date modified or Size list, closed, whose `Enter` opens the
+    /// custom range's dialog when Custom… is selected (spec: Filter pane).
+    RangeFilter,
     Other,
 }
 
@@ -227,7 +237,8 @@ fn open(state: &State) -> bool {
         .is_some_and(|files| files.len() <= OPEN_LIMIT)
 }
 
-/// Properties shows one entry (spec: C3).
+/// Properties shows one entry, and Search in this folder searches its
+/// folder (spec: C3, C12).
 fn one_file(state: &State) -> bool {
     state
         .model
@@ -240,7 +251,7 @@ fn copy(state: &State) -> bool {
     match state.focus {
         Focus::SearchBox { text_selected } => text_selected,
         Focus::List => files(state),
-        Focus::Other => false,
+        Focus::RangeFilter | Focus::Other => false,
     }
 }
 
@@ -333,6 +344,8 @@ pub(crate) enum KeyAction {
     SearchNow,
     /// `Esc` in the search box: the box is emptied.
     ClearSearch,
+    /// `Enter` in a closed Date modified or Size list.
+    ChooseCustom,
 }
 
 /// The meaning `key` has in the focused control, which the window takes
@@ -358,6 +371,7 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
                 )]
             }
         }
+        Focus::RangeFilter => const { &[(Keystroke::plain(Key::Enter), KeyAction::ChooseCustom)] },
         Focus::Other => &[],
     };
     table
@@ -704,7 +718,7 @@ mod tests {
     use super::*;
     use crate::core::model::ExportFormat;
     use crate::core::model::tests::{rows, search, showing};
-    use crate::core::results::Fix;
+    use crate::core::results::{Fix, ListButton};
     use crate::core::text::{Strings, access_key};
     use gozler_client::Repair;
     use std::collections::HashSet;
@@ -789,8 +803,28 @@ mod tests {
             let row = row_menu().into_iter().flatten();
             let labels = row.map(|item| item.label(&strings));
             assert_unique(language.tag, labels, &mut HashSet::new());
-            let window = ["match.label", "match.case", "match.path"].map(|key| strings.text(key));
+            let window = [
+                "match.label",
+                "match.case",
+                "match.path",
+                "command.clear_filters",
+                "filter.kind",
+                "filter.location",
+                "filter.choose_folder",
+                "filter.only_directly",
+                "filter.date",
+                "filter.size",
+                "filter.attributes",
+            ]
+            .map(|key| strings.text(key));
             assert_unique(language.tag, window, &mut bar_keys);
+            // The list's message offers Clear filters and Choose folder…
+            // with the pane's captions, which do what the pane's buttons do.
+            assert_unique(
+                language.tag,
+                [strings.text(ListButton::SearchEverywhere.label())],
+                &mut bar_keys,
+            );
             // The list shows one message, with at most one of these buttons.
             let fixes = [
                 Fix::Repair(Repair::StartService),

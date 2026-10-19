@@ -39,6 +39,9 @@ pub(crate) enum Shown {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ListMessage {
     Parse(QueryError),
+    /// The Location folder does not exist, so the window does not search,
+    /// as `gozler` refuses the same search (spec: S8).
+    MissingFolder(String),
     Failure(DaemonFailure),
 }
 
@@ -51,10 +54,32 @@ pub(crate) enum Fix {
     OpenServices,
 }
 
+/// A button below the list's message (spec: S5, S8, S9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ListButton {
+    Fix(Fix),
+    ClearFilters,
+    SearchEverywhere,
+    ChooseFolder,
+}
+
+impl ListButton {
+    /// The button's catalogue key; Clear filters and Choose folder… are
+    /// the filter pane's buttons, with their captions.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            ListButton::Fix(fix) => fix.label(),
+            ListButton::ClearFilters => "command.clear_filters",
+            ListButton::SearchEverywhere => "list.search_everywhere",
+            ListButton::ChooseFolder => "filter.choose_folder",
+        }
+    }
+}
+
 impl ListMessage {
     pub(crate) fn fix(&self) -> Option<Fix> {
         match self {
-            ListMessage::Parse(_) => None,
+            ListMessage::Parse(_) | ListMessage::MissingFolder(_) => None,
             ListMessage::Failure(failure) => match failure {
                 DaemonFailure::NotRunning(why) => {
                     Some(why.repair().map_or(Fix::OpenServices, Fix::Repair))

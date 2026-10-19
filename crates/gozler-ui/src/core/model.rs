@@ -10,17 +10,18 @@ use super::fetch::{
     Ask, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose, WriteFailure,
 };
 use super::layout::{Dip, Panes};
-use super::query::{self, Matching};
-use super::results::{ListMessage, Results, RowsChange, Shown};
+use super::query::{self, Filters, LocationItem, Matching};
+use super::results::{ListButton, ListMessage, Results, RowsChange, Shown};
 use super::selection::Selection;
 use super::settings::{Placement, SavedColumn, Settings};
 use super::text::Strings;
 use gozler_core::escompat::EsPlan;
 use gozler_core::output::Format;
-use gozler_core::proto::{DaemonStatus, ResultItem};
+use gozler_core::proto::{DaemonStatus, ResultItem, VolumeStatus};
 use gozler_core::query::QueryStart;
 use gozler_core::scope::{Coverage, leaves_matches_out};
 use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
+use gozler_core::winpath::parent_of;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::ops::Range;
@@ -28,12 +29,12 @@ use std::path::{Path, PathBuf};
 
 pub(crate) struct Model {
     pub(super) strings: Strings,
-    /// Also the one copy of the match controls and the sort.
+    /// Also the one copy of the match controls, the filters, the sort and
+    /// whether the filter pane shows.
     pub(super) settings: Settings,
     /// The columns the list shows, in the list's column order: Name first,
     /// because only the first column carries the icon.
     pub(super) columns: Vec<Column>,
-    pub(super) panes: Panes,
     /// The typed search text.
     pub(super) text: String,
     pub(super) results: Results,
@@ -79,6 +80,10 @@ pub(crate) enum Change {
     Typed,
     /// A match control or the sort, which their controls show.
     Choice,
+    /// A filter, which the filter pane shows.
+    Filters,
+    /// The filter pane was shown or hidden.
+    Panes,
     /// The column at `index` of [`Model::columns`] was added.
     ColumnShown {
         index: usize,
@@ -198,6 +203,14 @@ impl Accepted {
     }
 }
 
+/// Whether the Location folder exists, which `app` asks before a search,
+/// because the core makes no filesystem call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScopeCheck {
+    Exists,
+    Missing,
+}
+
 impl Model {
     pub(crate) fn new(strings: Strings, settings: Settings) -> Model {
         let window = &settings.window;
@@ -219,7 +232,6 @@ impl Model {
         Model {
             strings,
             columns,
-            panes: Panes::default(),
             settings,
             text: String::new(),
             results: Results::new(),
@@ -241,7 +253,53 @@ impl Model {
     }
 
     pub(crate) fn panes(&self) -> Panes {
-        self.panes
+        Panes {
+            filters: self.settings.window.filter_pane,
+            ..Panes::default()
+        }
+    }
+
+    pub(crate) fn filters(&self) -> &Filters {
+        &self.settings.window.filters
+    }
+
+    /// The folder the filters limit the search to.
+    pub(crate) fn location(&self) -> Option<&str> {
+        self.filters().location.as_deref()
+    }
+
+    /// The volumes of the latest status reply.
+    fn volumes(&self) -> &[VolumeStatus] {
+        self.status.as_ref().map_or(&[], |s| &s.volumes)
+    }
+
+    /// The Location list's items.
+    pub(crate) fn location_items(&self) -> Vec<LocationItem<'_>> {
+        query::location_items(self.filters(), self.volumes())
+    }
+
+    /// The buttons below the list's message: the failure's fix, or the ways
+    /// out of a search that the filters leave without results (spec: S5,
+    /// S8).
+    pub(crate) fn list_buttons(&self) -> Vec<ListButton> {
+        let filters = self.filters();
+        match self.results.shown() {
+            Shown::Rows(_) if self.results.total() == 0 => [
+                filters.is_set().then_some(ListButton::ClearFilters),
+                filters
+                    .location
+                    .is_some()
+                    .then_some(ListButton::SearchEverywhere),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            Shown::Message(ListMessage::MissingFolder(_)) => {
+                vec![ListButton::ChooseFolder, ListButton::SearchEverywhere]
+            }
+            Shown::Message(message) => message.fix().map(ListButton::Fix).into_iter().collect(),
+            Shown::Nothing | Shown::Rows(_) => Vec::new(),
+        }
     }
 
     pub(crate) fn results(&self) -> &Results {
@@ -310,6 +368,63 @@ impl Model {
         }
     }
 
+    /// The person changed the filters; the search runs again. Only directly
+    /// in this folder needs a folder, so Everywhere clears it.
+    pub(crate) fn set_filters(&mut self, mut filters: Filters) -> Accepted {
+        if filters.location.is_none() {
+            filters.only_directly = false;
+        }
+        if filters == self.settings.window.filters {
+            return Accepted::only(Change::Nothing);
+        }
+        self.settings.window.filters = filters;
+        Accepted {
+            change: Change::Filters,
+            then: Some(Then::SearchAgain),
+        }
+    }
+
+    /// Every filter group at its first choice (spec: C21).
+    pub(crate) fn clear_filters(&mut self) -> Accepted {
+        self.set_filters(self.filters().cleared())
+    }
+
+    /// Location Everywhere, from a button below the list's message.
+    pub(crate) fn search_everywhere(&mut self) -> Accepted {
+        self.set_filters(Filters {
+            location: None,
+            ..self.filters().clone()
+        })
+    }
+
+    /// Location `folder`, which also becomes the Location list's chosen
+    /// folder.
+    pub(crate) fn choose_folder(&mut self, folder: String) -> Accepted {
+        self.set_filters(Filters {
+            location: Some(folder.clone()),
+            chosen_folder: Some(folder),
+            ..self.filters().clone()
+        })
+    }
+
+    /// Location the one selected folder, or the folder that holds the one
+    /// selected file (spec: C12).
+    pub(crate) fn search_in_this_folder(&mut self) -> Accepted {
+        let folder = match self.selected_files() {
+            Some([entry]) if entry.is_dir => entry.path.clone(),
+            Some([entry]) => parent_of(&entry.path),
+            _ => return Accepted::only(Change::Nothing),
+        };
+        self.choose_folder(folder)
+    }
+
+    /// Shows or hides the filter pane (spec: C13).
+    pub(crate) fn toggle_filter_pane(&mut self) -> Accepted {
+        let window = &mut self.settings.window;
+        window.filter_pane = !window.filter_pane;
+        Accepted::only(Change::Panes)
+    }
+
     /// Shows or hides `column` (spec: C15). A shown column joins at the
     /// end; Name cannot be hidden.
     pub(crate) fn toggle_column(&mut self, column: Column) -> Accepted {
@@ -331,28 +446,34 @@ impl Model {
     }
 
     /// The search that the typed text and the controls ask for, or the
-    /// parser's message when the text does not parse, which starts no
-    /// request. The shown rows and the selection stay until the new
-    /// search's first rows arrive.
-    pub(crate) fn start_search(&mut self, query_start: &QueryStart) -> Accepted {
-        match query::search(&self.text, self.matching(), query_start) {
-            Err(error) => {
-                self.results.show_message(ListMessage::Parse(error));
-                self.selection = Selection::None;
-                Accepted::only(Change::Message)
-            }
-            Ok(search) => {
+    /// message that says why it cannot run, which starts no request: the
+    /// text does not parse, or `scope` says the Location folder is missing.
+    /// The shown rows and the selection stay until the new search's first
+    /// rows arrive.
+    pub(crate) fn start_search(&mut self, query_start: &QueryStart, scope: ScopeCheck) -> Accepted {
+        let search = query::search(&self.text, self.matching(), self.filters(), query_start);
+        let missing = self
+            .location()
+            .filter(|_| scope == ScopeCheck::Missing)
+            .map(str::to_owned);
+        let message = match (search, missing) {
+            (Err(error), _) => ListMessage::Parse(error),
+            (Ok(_), Some(folder)) => ListMessage::MissingFolder(folder),
+            (Ok(search), None) => {
                 let generation = self.generation();
                 let ask = self.results.start_search(generation, search, self.sort());
-                Accepted {
+                return Accepted {
                     change: Change::Searching,
                     then: Some(Then::Fetch(Fetch {
                         generation,
                         ask: Ask::Rows(ask),
                     })),
-                }
+                };
             }
-        }
+        };
+        self.results.show_message(message);
+        self.selection = Selection::None;
+        Accepted::only(Change::Message)
     }
 
     /// The chunk that the visible rows still lack, if no request for rows
@@ -513,7 +634,7 @@ impl Model {
     /// What the latest status says about the volumes the shown search
     /// reaches.
     pub(crate) fn coverage(&self) -> Coverage<'_> {
-        let volumes = self.status.as_ref().map_or(&[][..], |s| &s.volumes);
+        let volumes = self.volumes();
         let scope = self
             .results
             .shown_search()
@@ -893,7 +1014,7 @@ pub(crate) mod tests {
             now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
             time_zone: jiff::tz::TimeZone::UTC,
         };
-        match model.start_search(&start) {
+        match model.start_search(&start, ScopeCheck::Exists) {
             Accepted {
                 change: Change::Searching,
                 then: Some(Then::Fetch(fetch)),
@@ -1002,7 +1123,7 @@ pub(crate) mod tests {
         let strings = english();
         assert_eq!(
             list_message(&model),
-            Some((strings.text("failure.lost").to_owned(), None))
+            Some((strings.text("failure.lost").to_owned(), vec![]))
         );
     }
 
@@ -1137,7 +1258,7 @@ pub(crate) mod tests {
             list_message(&model),
             Some((
                 strings.text("failure.disabled").to_owned(),
-                Some(strings.text("fix.turn_on_service").to_owned())
+                vec![strings.text("fix.turn_on_service").to_owned()]
             ))
         );
     }
@@ -1151,11 +1272,42 @@ pub(crate) mod tests {
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
-        assert_eq!(model.start_search(&start), Accepted::only(Change::Message));
+        assert_eq!(
+            model.start_search(&start, ScopeCheck::Exists),
+            Accepted::only(Change::Message)
+        );
         let strings = english();
         assert_eq!(
             list_message(&model),
-            Some((strings.format("query.unknown_function", &["dz:"]), None))
+            Some((strings.format("query.unknown_function", &["dz:"]), vec![]))
+        );
+        assert!(!model.polls_status());
+    }
+
+    /// S8: searching a folder that does not exist would say "No results"
+    /// instead of naming the folder, and `gozler` refuses the same search.
+    #[test]
+    fn a_missing_location_folder_starts_no_request() {
+        let mut model = showing(10);
+        model.choose_folder(r"D:\Old".into());
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        assert_eq!(
+            model.start_search(&start, ScopeCheck::Missing),
+            Accepted::only(Change::Message)
+        );
+        let strings = english();
+        assert_eq!(
+            list_message(&model),
+            Some((
+                strings.format("list.missing_folder", &[r"D:\Old"]),
+                vec![
+                    strings.text("filter.choose_folder").to_owned(),
+                    strings.text("list.search_everywhere").to_owned(),
+                ]
+            ))
         );
         assert!(!model.polls_status());
     }
@@ -1302,7 +1454,7 @@ pub(crate) mod tests {
         let strings = english();
         assert_eq!(
             list_message(&model),
-            Some((strings.text("failure.lost").to_owned(), None))
+            Some((strings.text("failure.lost").to_owned(), vec![]))
         );
         assert!(model.polls_status());
 

@@ -27,6 +27,11 @@ pub struct SearchInput<'a> {
     /// Name terms and regular expressions test the full path instead of
     /// the name.
     pub match_path: bool,
+    /// More query texts, such as the window's filters, each parsed on its
+    /// own and every clause added to the text's, so neither can change what
+    /// the other means: an unclosed `"` or a trailing `|` in the text stays
+    /// in the text.
+    pub filters: &'a [String],
     /// More patterns, each tested as `regex:PATTERN` is, as `-r` adds them.
     pub regexes: &'a [String],
     /// The absolute folder the search is limited to (`-path`).
@@ -67,6 +72,17 @@ impl Search {
                 query_start: Some(input.query_start),
             },
         )?;
+        for filter in input.filters {
+            let parsed = parse_query_with(
+                filter,
+                ParseOptions {
+                    working_dir: input.working_dir,
+                    query_start: Some(input.query_start),
+                    ..ParseOptions::default()
+                },
+            )?;
+            query.clauses.extend(parsed.clauses);
+        }
         let patterns = pattern
             .into_iter()
             .chain(input.regexes.iter().map(String::as_str));
@@ -99,6 +115,34 @@ impl Search {
 mod tests {
     use super::*;
 
+    /// Joined to the typed text, a filter would end inside its unclosed
+    /// `"` and search for `ext:pdf` as text, so the window's Kind filter
+    /// would find nothing.
+    #[test]
+    fn a_filter_keeps_its_clause_whatever_the_text_holds() {
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        let search = Search::new(&SearchInput {
+            text: r#"report "draft"#,
+            text_match: TextMatch::Terms(TermMatch::Anywhere),
+            match_case: false,
+            match_path: false,
+            filters: &["ext:pdf".to_owned()],
+            regexes: &[],
+            scope: None,
+            parent: None,
+            working_dir: None,
+            query_start: &start,
+        })
+        .expect("an unclosed quote ends at the end of the text");
+        assert_eq!(
+            search.query.clauses.last(),
+            Some(&Clause::single(Test::Extension(vec!["pdf".into()])))
+        );
+    }
+
     /// Read as terms, the pattern would split at its spaces and lose its
     /// `\\`, which is what makes it test the full path.
     #[test]
@@ -113,6 +157,7 @@ mod tests {
                 text_match: TextMatch::Regex,
                 match_case: true,
                 match_path: false,
+                filters: &[],
                 regexes: &[],
                 scope: None,
                 parent: None,

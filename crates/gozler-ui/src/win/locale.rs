@@ -20,16 +20,19 @@ pub(crate) struct WindowsNumbers {
     grouping: u32,
     negative_order: u32,
     decimal: Vec<u16>,
+    decimal_text: String,
     thousand: Vec<u16>,
 }
 
 impl WindowsNumbers {
     pub(crate) fn new() -> WindowsNumbers {
+        let decimal = locale_text(LOCALE_SDECIMAL).unwrap_or_else(|| ".".to_owned());
         WindowsNumbers {
             leading_zero: locale_number(LOCALE_ILZERO).unwrap_or(1),
             grouping: grouping(&locale_text(LOCALE_SGROUPING).unwrap_or_else(|| "3;0".to_owned())),
             negative_order: locale_number(LOCALE_INEGNUMBER).unwrap_or(1),
-            decimal: wide(&locale_text(LOCALE_SDECIMAL).unwrap_or_else(|| ".".to_owned())),
+            decimal: wide(&decimal),
+            decimal_text: decimal,
             thousand: wide(&locale_text(LOCALE_STHOUSAND).unwrap_or_else(|| ",".to_owned())),
         }
     }
@@ -84,44 +87,70 @@ impl Numbers for WindowsNumbers {
             return String::new();
         };
         let local = at.to_zoned(jiff::tz::TimeZone::system()).datetime();
-        let time = SYSTEMTIME {
-            wYear: u16::try_from(local.year()).unwrap_or(0),
-            wMonth: local.month() as u16,
-            wDayOfWeek: local.weekday().to_sunday_zero_offset() as u16,
-            wDay: local.day() as u16,
-            wHour: local.hour() as u16,
-            wMinute: local.minute() as u16,
-            wSecond: local.second() as u16,
-            wMilliseconds: 0,
-        };
-        let mut date = [0u16; 64];
+        let time = system_time(local);
         let mut clock = [0u16; 64];
-        // SAFETY: `time` is a complete SYSTEMTIME; each call writes at most
+        // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most
         // its buffer's length.
-        let (date_len, clock_len) = unsafe {
-            (
-                GetDateFormatEx(
-                    PCWSTR::null(),
-                    DATE_SHORTDATE,
-                    Some(&time),
-                    PCWSTR::null(),
-                    Some(&mut date),
-                    PCWSTR::null(),
-                ),
-                GetTimeFormatEx(
-                    PCWSTR::null(),
-                    TIME_NOSECONDS,
-                    Some(&time),
-                    PCWSTR::null(),
-                    Some(&mut clock),
-                ),
+        let clock_len = unsafe {
+            GetTimeFormatEx(
+                PCWSTR::null(),
+                TIME_NOSECONDS,
+                Some(&time),
+                PCWSTR::null(),
+                Some(&mut clock),
             )
         };
-        let text = |buffer: &[u16], written: i32| match usize::try_from(written) {
-            Ok(n) if n > 0 => String::from_utf16_lossy(&buffer[..n - 1]),
-            _ => String::new(),
-        };
-        format!("{} {}", text(&date, date_len), text(&clock, clock_len))
+        format!("{} {}", short_date(&time), text(&clock, clock_len))
+    }
+
+    fn date(&self, date: jiff::civil::Date) -> String {
+        short_date(&system_time(
+            date.to_datetime(jiff::civil::Time::midnight()),
+        ))
+    }
+
+    fn decimal_separator(&self) -> &str {
+        &self.decimal_text
+    }
+}
+
+fn system_time(local: jiff::civil::DateTime) -> SYSTEMTIME {
+    SYSTEMTIME {
+        wYear: u16::try_from(local.year()).unwrap_or(0),
+        wMonth: local.month() as u16,
+        wDayOfWeek: local.weekday().to_sunday_zero_offset() as u16,
+        wDay: local.day() as u16,
+        wHour: local.hour() as u16,
+        wMinute: local.minute() as u16,
+        wSecond: local.second() as u16,
+        wMilliseconds: 0,
+    }
+}
+
+/// `time`'s day in the user's short date format.
+fn short_date(time: &SYSTEMTIME) -> String {
+    let mut date = [0u16; 64];
+    // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most the
+    // buffer's length.
+    let written = unsafe {
+        GetDateFormatEx(
+            PCWSTR::null(),
+            DATE_SHORTDATE,
+            Some(time),
+            PCWSTR::null(),
+            Some(&mut date),
+            PCWSTR::null(),
+        )
+    };
+    text(&date, written)
+}
+
+/// The text a formatting call wrote into `buffer`: `written` units with the
+/// NUL, or nothing when it failed.
+fn text(buffer: &[u16], written: i32) -> String {
+    match usize::try_from(written) {
+        Ok(n) if n > 0 => String::from_utf16_lossy(&buffer[..n - 1]),
+        _ => String::new(),
     }
 }
 

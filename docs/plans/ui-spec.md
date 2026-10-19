@@ -557,7 +557,9 @@ request's scope, as `-path` does, or with the check box its parent folder, as
   button, not a list item, so moving through the list with the arrow keys
   never opens a dialog. It opens the Windows folder picker (`IFileOpenDialog`
   with `FOS_PICKFOLDERS`); the chosen folder becomes a list item and is
-  selected. Cancel keeps the previous choice.
+  selected. Cancel keeps the previous choice. A path wider than the list
+  loses its middle, as Windows shortens a path (`C:\Users\user\Ap…\files`),
+  so its drive and last folder stay visible, and its tooltip shows it whole.
 - **Custom…** in Date modified and Size opens its dialog when the drop-down
   list closes on it, or when `Enter` is pressed on it. Moving onto it with
   the arrow keys while the list is closed opens nothing and keeps the

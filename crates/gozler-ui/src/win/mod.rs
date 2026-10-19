@@ -14,6 +14,7 @@ pub(crate) mod instance;
 pub(crate) mod locale;
 pub(crate) mod menu;
 pub(crate) mod notify;
+pub(crate) mod pane;
 pub(crate) mod shell;
 pub(crate) mod wake;
 pub(crate) mod window;
@@ -25,9 +26,10 @@ use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW, GetWindowPlacement,
-    GetWindowRect, IsIconic, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWNA,
-    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, SetWindowTextW,
-    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, PostMessageW, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
 };
 use windows::core::HSTRING;
 
@@ -62,6 +64,15 @@ impl Hwnd {
     pub(crate) fn set_text(self, text: &str) {
         // SAFETY: the text is a NUL-terminated copy that outlives the call.
         let _ = unsafe { SetWindowTextW(self.0, &HSTRING::from(text)) };
+    }
+
+    pub(crate) fn text(self) -> String {
+        // SAFETY: plain values.
+        let length = unsafe { GetWindowTextLengthW(self.0) };
+        let mut buffer = vec![0u16; usize::try_from(length).unwrap_or(0) + 1];
+        // SAFETY: the call writes at most the buffer's length.
+        let copied = unsafe { GetWindowTextW(self.0, &mut buffer) };
+        String::from_utf16_lossy(&buffer[..usize::try_from(copied).unwrap_or(0)])
     }
 
     pub(crate) fn client_size(self) -> Size {
@@ -147,6 +158,12 @@ impl Hwnd {
     pub(crate) fn focus(self) {
         // SAFETY: plain values.
         let _ = unsafe { SetFocus(Some(self.0)) };
+    }
+
+    /// Whether `window` is a child of this window, or a child of one.
+    pub(crate) fn is_parent_of(self, window: Hwnd) -> bool {
+        // SAFETY: plain values.
+        unsafe { IsChild(self.0, window.0) }.as_bool()
     }
 
     /// The control that has the keyboard focus on this thread, if any.

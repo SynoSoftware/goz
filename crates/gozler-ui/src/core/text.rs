@@ -98,6 +98,10 @@ pub(crate) trait Numbers {
     /// A FILETIME as local date and time in the short date and time
     /// formats, as File Explorer's Date modified column shows it.
     fn date_time(&self, filetime: i64) -> String;
+    /// A day in the short date format.
+    fn date(&self, date: jiff::civil::Date) -> String;
+    /// The separator of a number's decimals, such as `.` or `,`.
+    fn decimal_separator(&self) -> &str;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -450,6 +454,14 @@ pub(crate) mod tests {
 
         fn date_time(&self, filetime: i64) -> String {
             gozler_core::output::format_date_local(filetime, &jiff::tz::TimeZone::UTC)
+        }
+
+        fn date(&self, date: jiff::civil::Date) -> String {
+            date.to_string()
+        }
+
+        fn decimal_separator(&self) -> &str {
+            "."
         }
     }
 

@@ -1,17 +1,25 @@
-//! The main window's common controls. Each is created here, so a later
-//! theme change has one place to hook in (docs/plans/ui-design.md: How
-//! normal changes land).
+//! The common controls of the main window, which are created here, and the
+//! wrappers of the dialogs' controls, which their templates create.
 
-use super::gdi::ImageList;
+use super::gdi::{ImageList, draw_text};
 use super::notify::ControlEvent;
 use super::{Hwnd, wide};
-use crate::core::layout::Px;
+use crate::core::layout::{Px, list_box_text_inset};
+use std::cell::RefCell;
 use std::ops::Range;
-use windows::Win32::Foundation::{LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
+use windows::Win32::Foundation::{
+    COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
+};
+use windows::Win32::Graphics::Gdi::{
+    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen,
+    DT_CALCRECT, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawFocusRect, FillRect,
+    GetDC, GetSysColor, GetSysColorBrush, HGDIOBJ, ReleaseDC, ScreenToClient, SelectObject,
+    SetBkMode, SetTextColor, TRANSPARENT,
+};
 use windows::Win32::UI::Controls::{
-    BST_CHECKED, EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL, HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT,
-    HDITEMW, HDM_GETITEMW, HDM_SETITEMW, ICC_BAR_CLASSES, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
+    BST_CHECKED, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETSEL, EM_SETCUEBANNER,
+    EM_SETSEL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT, HDITEMW, HDM_GETITEMW,
+    HDM_SETITEMW, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
     ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
     LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO,
     LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
@@ -21,16 +29,24 @@ use windows::Win32::UI::Controls::{
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
     LVM_SETITEMSTATE, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
     LVS_EX_HEADERDRAGDROP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP,
-    STATUSCLASSNAMEW, SetWindowTheme, WC_LISTVIEWW,
+    LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, ODS_FLAGS, ODS_FOCUS, ODS_NOFOCUSRECT,
+    ODS_SELECTED, ODT_LISTBOX, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW,
+    SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW,
+    TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW,
+    TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CreateWindowExW,
-    EN_CHANGE, ES_AUTOHSCROLL, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
+    CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
+    CreateWindowExW, EN_CHANGE, ES_AUTOHSCROLL, GetWindowRect, HMENU, LB_ADDSTRING, LB_GETCOUNT,
+    LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT, LB_GETTEXTLEN, LB_ITEMFROMPOINT, LB_RESETCONTENT,
+    LB_SETCURSEL, LB_SETITEMHEIGHT, LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
+    LBS_NOTIFY, LBS_OWNERDRAWFIXED, SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY,
+    WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE,
+    WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -38,7 +54,11 @@ use windows::core::{PCWSTR, PWSTR, w};
 pub(crate) fn initialize() {
     let classes = INITCOMMONCONTROLSEX {
         dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-        dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_LINK_CLASS,
+        dwICC: ICC_STANDARD_CLASSES
+            | ICC_LISTVIEW_CLASSES
+            | ICC_BAR_CLASSES
+            | ICC_LINK_CLASS
+            | ICC_DATE_CLASSES,
     };
     // SAFETY: `classes` is complete.
     let _ = unsafe { InitCommonControlsEx(&classes) };
@@ -122,6 +142,25 @@ impl ControlEvent {
     }
 }
 
+/// The texts of a list's items, read with the list's count, length and
+/// text messages, such as `CB_GETCOUNT`, `CB_GETLBTEXTLEN` and
+/// `CB_GETLBTEXT`.
+fn item_texts(list: Hwnd, count: u32, length: u32, text: u32) -> Vec<String> {
+    (0..send(list, count, 0, 0).max(0) as usize)
+        .map(|index| item_text(list, length, text, index))
+        .collect()
+}
+
+/// The text of the item at `index`, read with the list's length and text
+/// messages.
+fn item_text(list: Hwnd, length: u32, text: u32, index: usize) -> String {
+    let length = send(list, length, index, 0).max(0) as usize;
+    let mut buffer = vec![0u16; length + 1];
+    // SAFETY: the buffer holds the item's text and its NUL.
+    let copied = unsafe { send_pointer(list, text, index, buffer.as_mut_ptr()) };
+    String::from_utf16_lossy(&buffer[..copied.clamp(0, length as isize) as usize])
+}
+
 /// The search box.
 #[derive(Clone, Copy)]
 pub(crate) struct Edit(Hwnd);
@@ -169,12 +208,7 @@ impl Edit {
     }
 
     pub(crate) fn text(self) -> String {
-        // SAFETY: plain values.
-        let length = unsafe { GetWindowTextLengthW(self.0.0) };
-        let mut buffer = vec![0u16; usize::try_from(length).unwrap_or(0) + 1];
-        // SAFETY: the call writes at most the buffer's length.
-        let copied = unsafe { GetWindowTextW(self.0.0, &mut buffer) };
-        String::from_utf16_lossy(&buffer[..usize::try_from(copied).unwrap_or(0)])
+        self.0.text()
     }
 }
 
@@ -230,14 +264,50 @@ impl Button {
 #[derive(Clone, Copy)]
 pub(crate) struct DropDownList(Hwnd);
 
+/// How a drop-down list's open list closed: on an item, or without a
+/// choice, such as with `Esc`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ListClosing {
+    Chosen,
+    Cancelled,
+}
+
 impl DropDownList {
     pub(crate) fn hwnd(self) -> Hwnd {
         self.0
     }
 
-    /// Whether `event` says that the person chose another item.
+    /// The drop-down list `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<DropDownList> {
+        super::dialog::item(dialog, id).map(DropDownList)
+    }
+
+    /// Whether `event` says that another item is selected, by the person's
+    /// choice or by an arrow key on the closed list.
     pub(crate) fn selection_changed(self, event: ControlEvent) -> bool {
         event.is(self.0, CBN_SELCHANGE)
+    }
+
+    /// How the open list is closing, when `event` says that it is; its
+    /// `CBN_CLOSEUP` follows.
+    pub(crate) fn closing(self, event: ControlEvent) -> Option<ListClosing> {
+        if event.is(self.0, CBN_SELENDOK) {
+            Some(ListClosing::Chosen)
+        } else if event.is(self.0, CBN_SELENDCANCEL) {
+            Some(ListClosing::Cancelled)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `event` says that the open list closed.
+    pub(crate) fn closed(self, event: ControlEvent) -> bool {
+        event.is(self.0, CBN_CLOSEUP)
+    }
+
+    /// Whether the list is open.
+    pub(crate) fn is_open(self) -> bool {
+        send(self.0, CB_GETDROPPEDSTATE, 0, 0) != 0
     }
 
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<DropDownList> {
@@ -251,17 +321,25 @@ impl DropDownList {
         .map(DropDownList)
     }
 
-    /// Replaces the items and selects `selected`. A selection set by a
-    /// message sends no `CBN_SELCHANGE`, so nothing reacts to it.
-    pub(crate) fn set_items(self, items: &[&str], selected: usize) {
-        send(self.0, CB_RESETCONTENT, 0, 0);
-        for item in items {
-            let item = wide(item);
-            // SAFETY: `item` is a NUL-terminated string that outlives the
-            // call; the list keeps its own copy.
-            unsafe { send_pointer(self.0, CB_ADDSTRING, 0, item.as_ptr()) };
+    /// Gives the list `items`, unless it has them, and selects `selected`.
+    /// A selection set by a message sends no `CBN_SELCHANGE`, so nothing
+    /// reacts to it; unchanged items keep an open list open.
+    pub(crate) fn set_items<S: AsRef<str>>(self, items: &[S], selected: usize) {
+        let shown = item_texts(self.0, CB_GETCOUNT, CB_GETLBTEXTLEN, CB_GETLBTEXT);
+        if !shown
+            .iter()
+            .map(String::as_str)
+            .eq(items.iter().map(AsRef::as_ref))
+        {
+            send(self.0, CB_RESETCONTENT, 0, 0);
+            for item in items {
+                let item = wide(item.as_ref());
+                // SAFETY: `item` is a NUL-terminated string that outlives
+                // the call; the list keeps its own copy.
+                unsafe { send_pointer(self.0, CB_ADDSTRING, 0, item.as_ptr()) };
+            }
         }
-        send(self.0, CB_SETCURSEL, selected, 0);
+        self.select(selected);
     }
 
     pub(crate) fn selected(self) -> Option<usize> {
@@ -273,6 +351,430 @@ impl DropDownList {
         if self.selected() != Some(index) {
             send(self.0, CB_SETCURSEL, index, 0);
         }
+    }
+}
+
+/// A list box that shows every item, such as the filter pane's Kind list.
+#[derive(Clone, Copy)]
+pub(crate) struct ListBox(Hwnd);
+
+impl ListBox {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    /// Its height is the layout's, not a whole number of rows.
+    pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<ListBox> {
+        ListBox::create_styled(parent, id, 0)
+    }
+
+    /// A list of paths, such as the Location list. A path wider than its
+    /// row loses its middle (`DT_PATH_ELLIPSIS`), so the drive and the last
+    /// folder stay visible, and a tooltip shows it whole. Its parent draws
+    /// its items with [`draw_path_item`], and gives it its row height with
+    /// [`ListBox::set_item_height`].
+    pub(crate) fn create_paths(parent: Hwnd, id: u16) -> windows::core::Result<ListBox> {
+        let style = (LBS_OWNERDRAWFIXED | LBS_HASSTRINGS) as u32;
+        let list = ListBox::create_styled(parent, id, style)?;
+        PathTip::attach(list.0)?;
+        Ok(list)
+    }
+
+    fn create_styled(parent: Hwnd, id: u16, style: u32) -> windows::core::Result<ListBox> {
+        child(
+            parent,
+            w!("LISTBOX"),
+            WS_TABSTOP.0 | WS_VSCROLL.0 | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32 | style,
+            WS_EX_CLIENTEDGE,
+            id,
+        )
+        .map(ListBox)
+    }
+
+    /// Sets the row height of a list whose parent draws its items, which
+    /// a font does not change; a list Windows draws takes it from its font.
+    pub(crate) fn set_item_height(self, height: Px) {
+        send(self.0, LB_SETITEMHEIGHT, 0, height.0 as isize);
+    }
+
+    /// Whether `event` says that the person selected another item.
+    pub(crate) fn selection_changed(self, event: ControlEvent) -> bool {
+        event.is(self.0, LBN_SELCHANGE)
+    }
+
+    /// Gives the list `items`, unless it has them, and selects `selected`,
+    /// so a list that does not change keeps its scroll position.
+    pub(crate) fn set_items<S: AsRef<str>>(self, items: &[S], selected: usize) {
+        let shown = item_texts(self.0, LB_GETCOUNT, LB_GETTEXTLEN, LB_GETTEXT);
+        if !shown
+            .iter()
+            .map(String::as_str)
+            .eq(items.iter().map(AsRef::as_ref))
+        {
+            send(self.0, LB_RESETCONTENT, 0, 0);
+            for item in items {
+                let item = wide(item.as_ref());
+                // SAFETY: `item` is a NUL-terminated string that outlives
+                // the call; the list keeps its own copy.
+                unsafe { send_pointer(self.0, LB_ADDSTRING, 0, item.as_ptr()) };
+            }
+        }
+        if self.selected() != Some(selected) {
+            send(self.0, LB_SETCURSEL, selected, 0);
+        }
+    }
+
+    pub(crate) fn selected(self) -> Option<usize> {
+        usize::try_from(send(self.0, LB_GETCURSEL, 0, 0)).ok()
+    }
+}
+
+/// Draws the item of `WM_DRAWITEM`'s `lparam` when it belongs to a list
+/// from [`ListBox::create_paths`], in the system colours, and returns
+/// whether it did.
+///
+/// # Safety
+/// `lparam` is the `lparam` of a `WM_DRAWITEM` that is being handled.
+pub(crate) unsafe fn draw_path_item(lparam: LPARAM) -> bool {
+    // SAFETY: the caller passes WM_DRAWITEM's lparam, which points to a
+    // DRAWITEMSTRUCT that lives while the message is handled.
+    let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+    if item.CtlType != ODT_LISTBOX {
+        return false;
+    }
+    let list = Hwnd(item.hwndItem);
+    let state = |flag: ODS_FLAGS| item.itemState.0 & flag.0 != 0;
+    let (background, foreground) = if state(ODS_SELECTED) {
+        (COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT)
+    } else {
+        (COLOR_WINDOW, COLOR_WINDOWTEXT)
+    };
+    // SAFETY: the DC and the rectangle are the ones Windows passed for this
+    // item.
+    unsafe {
+        FillRect(item.hDC, &item.rcItem, GetSysColorBrush(background));
+        // An empty list draws only its focus rectangle.
+        if item.itemID != u32::MAX {
+            let text = item_text(list, LB_GETTEXTLEN, LB_GETTEXT, item.itemID as usize);
+            let mut rect = path_text_rect(list, item.rcItem);
+            SetTextColor(item.hDC, COLORREF(GetSysColor(foreground)));
+            SetBkMode(item.hDC, TRANSPARENT);
+            draw_text(
+                item.hDC,
+                &text,
+                &mut rect,
+                DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_PATH_ELLIPSIS,
+            );
+        }
+        if state(ODS_FOCUS) && !state(ODS_NOFOCUSRECT) {
+            let _ = DrawFocusRect(item.hDC, &item.rcItem);
+        }
+    }
+    true
+}
+
+/// Where a path list's row `row` shows its text, which lines up with the
+/// text of a list that Windows draws.
+fn path_text_rect(list: Hwnd, row: RECT) -> RECT {
+    let inset = list_box_text_inset(list.dpi()).0;
+    RECT {
+        left: row.left + inset,
+        right: row.right - inset,
+        ..row
+    }
+}
+
+/// The tooltip of a list from [`ListBox::create_paths`]. Its one tool
+/// covers the row under the mouse and holds that row's whole path when
+/// the row shortens it, so moving onto another row leaves the tool, and
+/// the tip shows the new row's path once the mouse rests.
+struct PathTip {
+    tip: Hwnd,
+    /// The row the tool covers, in the list's client coordinates, and the
+    /// path in that row, because after the list scrolls another path has
+    /// the same rectangle.
+    covered: RefCell<(RECT, String)>,
+}
+
+impl PathTip {
+    /// Gives `list` its tooltip.
+    fn attach(list: Hwnd) -> windows::core::Result<()> {
+        // SAFETY: a tooltip window, as Windows documents it. The list is a
+        // child window, so Windows makes the list's top-level window the
+        // tip's owner, which destroys it.
+        let tip = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST,
+                TOOLTIPS_CLASSW,
+                PCWSTR::null(),
+                WINDOW_STYLE(WS_POPUP.0 | TTS_NOPREFIX),
+                0,
+                0,
+                0,
+                0,
+                Some(list.0),
+                None,
+                None,
+                None,
+            )
+        }?;
+        let data = Box::into_raw(Box::new(PathTip {
+            tip: Hwnd(tip),
+            covered: RefCell::new((RECT::default(), String::new())),
+        }));
+        // The list's procedure is subclassed before the tooltip subclasses
+        // it for its tool, so the tooltip sees each mouse move first: a
+        // move onto another row leaves the old tool before it covers the
+        // new row.
+        // SAFETY: `data` lives until the procedure frees it on
+        // WM_NCDESTROY, the list's last message.
+        if !unsafe { SetWindowSubclass(list.0, Some(path_list_procedure), 0, data as usize) }
+            .as_bool()
+        {
+            // SAFETY: the subclass did not take `data`.
+            drop(unsafe { Box::from_raw(data) });
+            return Err(windows::core::Error::from_thread());
+        }
+        let mut empty = wide("");
+        let tool = PathTip::tool(list, RECT::default(), &mut empty);
+        // SAFETY: `tool` and its text outlive the call, which copies them.
+        unsafe { send_pointer(Hwnd(tip), TTM_ADDTOOLW, 0, &raw const tool) };
+        Ok(())
+    }
+
+    /// The list's one tool, which covers `rect` and shows `text`.
+    fn tool(list: Hwnd, rect: RECT, text: &mut [u16]) -> TTTOOLINFOW {
+        TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_SUBCLASS,
+            hwnd: list.0,
+            uId: 0,
+            rect,
+            lpszText: PWSTR(text.as_mut_ptr()),
+            ..TTTOOLINFOW::default()
+        }
+    }
+
+    /// Covers the row at `point`, `WM_MOUSEMOVE`'s `lparam`, with the
+    /// tool, unless the tool covers it already.
+    fn cover(&self, list: Hwnd, point: LPARAM) {
+        // The low word is the row, the high word 1 below the last row.
+        let hit = send(list, LB_ITEMFROMPOINT, 0, point.0);
+        let row = ((hit >> 16) & 0xffff == 0).then_some((hit & 0xffff) as usize);
+        let mut rect = RECT::default();
+        if let Some(row) = row {
+            // SAFETY: `rect` is a local the call fills in.
+            unsafe { send_pointer(list, LB_GETITEMRECT, row, &raw mut rect) };
+        }
+        let path = row
+            .map(|row| item_text(list, LB_GETTEXTLEN, LB_GETTEXT, row))
+            .unwrap_or_default();
+        {
+            let (covered_rect, covered_path) = &*self.covered.borrow();
+            if *covered_rect == rect && *covered_path == path {
+                return;
+            }
+        }
+        // An empty text shows no tip.
+        let shown = if shortened(list, &path, rect) {
+            path.as_str()
+        } else {
+            ""
+        };
+        let mut text = wide(shown);
+        *self.covered.borrow_mut() = (rect, path);
+        let tool = PathTip::tool(list, rect, &mut text);
+        // SAFETY: `tool` and its text outlive each call, which copies them.
+        unsafe {
+            send_pointer(self.tip, TTM_NEWTOOLRECTW, 0, &raw const tool);
+            send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool);
+        }
+    }
+}
+
+/// Whether the row `row` of a path list shortens `path`.
+fn shortened(list: Hwnd, path: &str, row: RECT) -> bool {
+    let shown = path_text_rect(list, row);
+    let mut measured = RECT::default();
+    // SAFETY: the list's DC is released, with its font restored, before
+    // the block ends.
+    unsafe {
+        let dc = GetDC(Some(list.0));
+        let font = HGDIOBJ(send(list, WM_GETFONT, 0, 0) as *mut _);
+        let previous = SelectObject(dc, font);
+        draw_text(
+            dc,
+            path,
+            &mut measured,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        SelectObject(dc, previous);
+        ReleaseDC(Some(list.0), dc);
+    }
+    measured.right > shown.right - shown.left
+}
+
+/// The procedure of a list from [`ListBox::create_paths`], before the
+/// list's own: it moves the tooltip's tool to the row under the mouse.
+unsafe extern "system" fn path_list_procedure(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    data: usize,
+) -> LRESULT {
+    let list = Hwnd(hwnd);
+    match msg {
+        WM_MOUSEMOVE => {
+            // SAFETY: `data` is the PathTip that `attach` gave this
+            // subclass, which lives until WM_NCDESTROY.
+            unsafe { &*(data as *const PathTip) }.cover(list, lparam);
+        }
+        WM_NCDESTROY => {
+            // SAFETY: the list gets no message after this one, so nothing
+            // reads `data` again.
+            unsafe {
+                let _ = RemoveWindowSubclass(hwnd, Some(path_list_procedure), 0);
+                drop(Box::from_raw(data as *mut PathTip));
+            }
+        }
+        _ => {}
+    }
+    // SAFETY: the parameters are the ones Windows passed.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// A date picker with a check box, which a dialog's template declares.
+#[derive(Clone, Copy)]
+pub(crate) struct DatePicker(Hwnd);
+
+impl DatePicker {
+    /// The date picker `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<DatePicker> {
+        super::dialog::item(dialog, id).map(DatePicker)
+    }
+
+    /// The day it shows, or `None` while its check box is cleared.
+    pub(crate) fn day(self) -> Option<jiff::civil::Date> {
+        let mut time = SYSTEMTIME::default();
+        // SAFETY: `time` is a local the picker fills in.
+        let result = unsafe { send_pointer(self.0, DTM_GETSYSTEMTIME, 0, &raw mut time) };
+        if result != GDT_VALID.0 as isize {
+            return None;
+        }
+        jiff::civil::Date::new(
+            i16::try_from(time.wYear).ok()?,
+            i8::try_from(time.wMonth).ok()?,
+            i8::try_from(time.wDay).ok()?,
+        )
+        .ok()
+    }
+
+    /// Shows `day` with its check box set, or clears the check box.
+    pub(crate) fn set_day(self, day: Option<jiff::civil::Date>) {
+        match day {
+            Some(day) => {
+                let time = SYSTEMTIME {
+                    wYear: day.year() as u16,
+                    wMonth: day.month() as u16,
+                    wDay: day.day() as u16,
+                    ..SYSTEMTIME::default()
+                };
+                // SAFETY: `time` outlives the call, which reads it.
+                unsafe {
+                    send_pointer(
+                        self.0,
+                        DTM_SETSYSTEMTIME,
+                        GDT_VALID.0 as usize,
+                        &raw const time,
+                    )
+                };
+            }
+            None => {
+                send(self.0, DTM_SETSYSTEMTIME, GDT_NONE.0 as usize, 0);
+            }
+        }
+    }
+}
+
+/// A balloon tip that points at a control and says what to enter there
+/// (spec: Dialogs). Windows destroys it with its owner.
+pub(crate) struct Balloon {
+    tip: Hwnd,
+    owner: Hwnd,
+}
+
+impl Balloon {
+    /// A hidden balloon owned by the dialog `owner`.
+    pub(crate) fn create(owner: Hwnd) -> windows::core::Result<Balloon> {
+        // SAFETY: a tooltip window, as Windows documents it.
+        let tip = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST,
+                TOOLTIPS_CLASSW,
+                PCWSTR::null(),
+                WINDOW_STYLE(WS_POPUP.0 | TTS_NOPREFIX | TTS_BALLOON),
+                0,
+                0,
+                0,
+                0,
+                Some(owner.0),
+                None,
+                None,
+                None,
+            )
+        }?;
+        let balloon = Balloon {
+            tip: Hwnd(tip),
+            owner,
+        };
+        let mut empty = wide("");
+        let tool = balloon.tool(&mut empty);
+        // SAFETY: `tool` and its text outlive the call, which copies them.
+        unsafe { send_pointer(balloon.tip, TTM_ADDTOOLW, 0, &raw const tool) };
+        // A width makes the tip wrap its text instead of running across
+        // the screen.
+        let width = owner.screen_rect().width;
+        send(balloon.tip, TTM_SETMAXTIPWIDTH, 0, width.0 as isize);
+        Ok(balloon)
+    }
+
+    /// The balloon's one tool, which it shows where it is told.
+    fn tool(&self, text: &mut [u16]) -> TTTOOLINFOW {
+        TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_TRACK | TTF_ABSOLUTE,
+            hwnd: self.owner.0,
+            uId: 1,
+            lpszText: windows::core::PWSTR(text.as_mut_ptr()),
+            ..TTTOOLINFOW::default()
+        }
+    }
+
+    /// Shows `text` pointing at the bottom of `control`, until
+    /// [`Balloon::hide`].
+    pub(crate) fn show(&self, control: Hwnd, text: &str) {
+        let mut text = wide(text);
+        let tool = self.tool(&mut text);
+        let rect = control.screen_rect();
+        let x = rect.x.0 + rect.width.0 / 2;
+        let y = rect.bottom().0;
+        // The screen coordinates are signed words.
+        let point = (x as u16 as u32 | (y as u16 as u32) << 16) as isize;
+        // SAFETY: `tool` and its text outlive each call, which copies them.
+        unsafe {
+            send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool);
+            send(self.tip, TTM_TRACKPOSITION, 0, point);
+            send_pointer(self.tip, TTM_TRACKACTIVATE, 1, &raw const tool);
+        }
+    }
+
+    pub(crate) fn hide(&self) {
+        let mut empty = wide("");
+        let tool = self.tool(&mut empty);
+        // SAFETY: `tool` outlives the call, which reads it.
+        unsafe { send_pointer(self.tip, TTM_TRACKACTIVATE, 0, &raw const tool) };
     }
 }
 

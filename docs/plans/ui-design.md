@@ -597,6 +597,7 @@ gozler-ui/src
 │  ├─ dialog.rs      modal dialogs from .rc templates
 │  ├─ controls.rs    Edit, Button, ComboBox, ListBox, ListView, StatusBar, Tooltip
 │  ├─ notify.rs      WM_NOTIFY and WM_COMMAND decoded into enums
+│  ├─ pane.rs        the filter pane's window, which scrolls its controls
 │  ├─ gdi.rs         Font, Fonts, text measurement, the system image list
 │  ├─ shell.rs       open, open file location, properties, clipboard block, folder picker, save and program dialogs, run as administrator, the `Run` value
 │  ├─ shortcut.rs    RegisterHotKey, and the keyboard hook thread for Windows-key shortcuts
@@ -896,7 +897,7 @@ waits for it, and aborts (rule 11). No handler runs with half-changed state.
 | A new column | a `Column` entry in the core, and its arm in the `GetDispInfo` handler |
 | A new filter | `Filters` and its clause text, one control in `Controls`, its rectangle in `Layout::compute` |
 | A new Settings category | one child-dialog template and its `DialogProc` |
-| Dark mode | a `win::dark` module; every control is created in `win::controls`, so theming has one place to hook in |
+| Dark mode | a `win::dark` module, which `win::controls` calls for each main-window control it creates, and `win::dialog`'s procedure for each dialog, whose template creates its controls; the procedure then answers `WM_CTLCOLOR*`, which it leaves alone until then |
 | A new text | a key in `en.json`, and the function that formats it (rule 12) |
 | A new language | its `<tag>.json` in `resources/` and a row in the language table |
 | A right-to-left language | the main window and the dialogs created with `WS_EX_LAYOUTRTL`, which mirrors their coordinates, so `Layout::compute` does not change; whether a switch between directions must create the controls again is not verified |
