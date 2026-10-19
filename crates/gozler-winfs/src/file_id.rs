@@ -8,14 +8,14 @@ use core::mem::{size_of, zeroed};
 use core::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, HANDLE,
-    INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
+    ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_128, FILE_ID_DESCRIPTOR,
-    FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileIdExtdDirectoryInfo, FileIdInfo, GetFileInformationByHandleEx,
-    OPEN_EXISTING, OpenFileById,
+    CreateFileW, ExtendedFileIdType, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_128, FILE_ID_DESCRIPTOR, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdExtdDirectoryInfo, FileIdInfo,
+    GetFileInformationByHandleEx, OPEN_EXISTING, OpenFileById,
 };
 
 use crate::error::{WinError, last_error};
@@ -40,7 +40,10 @@ impl Drop for FileHandle {
 }
 
 /// Opens the file or folder `id` on `volume` with `access`, whatever its
-/// permissions allow, because the daemon holds `SeBackupPrivilege`.
+/// permissions allow, because the daemon holds `SeBackupPrivilege`. A
+/// symbolic link or a junction opens as itself, which is what the index
+/// holds. Without `FILE_FLAG_OPEN_REPARSE_POINT` its open by ID fails with
+/// `ERROR_INVALID_PARAMETER`, which [`is_gone`] reads as gone.
 pub(crate) fn open_by_id(
     volume: &VolumeHandle,
     id: u128,
@@ -61,7 +64,8 @@ pub(crate) fn open_by_id(
             access,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             ptr::null(),
-            FILE_FLAG_BACKUP_SEMANTICS, // also opens folders
+            // Backup semantics also open folders.
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         )
     };
     if handle == INVALID_HANDLE_VALUE {
@@ -85,11 +89,17 @@ pub fn root_folder_id(guid_path: &str) -> Result<u128, WinError> {
     } else {
         to_wide_nul(&format!("{guid_path}\\"))
     };
-    // SAFETY: `root` is a NUL-terminated path; no security attributes and no
+    path_file_id(&root)
+}
+
+/// The file ID of the file or folder at `path`, a NUL-terminated UTF-16 path.
+pub(crate) fn path_file_id(path: &[u16]) -> Result<u128, WinError> {
+    assert_eq!(path.last(), Some(&0), "path is NUL-terminated");
+    // SAFETY: `path` is a NUL-terminated path; no security attributes and no
     // template handle are supplied.
     let handle = unsafe {
         CreateFileW(
-            root.as_ptr(),
+            path.as_ptr(),
             FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             ptr::null(),
@@ -99,14 +109,14 @@ pub fn root_folder_id(guid_path: &str) -> Result<u128, WinError> {
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(last_error("CreateFileW (root_folder_id)"));
+        return Err(last_error("CreateFileW (path_file_id)"));
     }
-    let root = FileHandle(handle);
+    let file = FileHandle(handle);
     // SAFETY: `info` is a plain struct the call fills, and its size is passed.
     let info = unsafe {
         let mut info: FILE_ID_INFO = zeroed();
         let ok = GetFileInformationByHandleEx(
-            root.as_handle(),
+            file.as_handle(),
             FileIdInfo,
             ptr::from_mut(&mut info).cast(),
             size_of::<FILE_ID_INFO>() as u32,
@@ -123,13 +133,24 @@ pub fn root_folder_id(guid_path: &str) -> Result<u128, WinError> {
 pub struct Folder(FileHandle);
 
 /// Opens folder `id` on `volume` for listing. `Ok(None)` means the folder is
-/// gone, so there is nothing to list.
+/// gone or being deleted, so there is nothing to list.
 pub fn open_folder(volume: &VolumeHandle, id: u128) -> Result<Option<Folder>, WinError> {
     match open_by_id(volume, id, FILE_LIST_DIRECTORY) {
         Ok(handle) => Ok(Some(Folder(handle))),
-        Err(error) if is_gone(&error) => Ok(None),
+        Err(error) if is_gone(&error) || is_being_deleted(volume, id, &error) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Whether a folder that refused to open has a delete pending: it was deleted
+/// while another process still has it open. Windows deletes only an empty
+/// folder and creates nothing in one with a delete pending, so it holds
+/// nothing to list. It refuses every open with `ERROR_ACCESS_DENIED`, even one
+/// that asks for no access, which a folder whose access list refuses listing
+/// still allows.
+fn is_being_deleted(volume: &VolumeHandle, id: u128, error: &WinError) -> bool {
+    error.code == ERROR_ACCESS_DENIED
+        && matches!(open_by_id(volume, id, 0), Err(e) if e.code == ERROR_ACCESS_DENIED || is_gone(&e))
 }
 
 impl Folder {

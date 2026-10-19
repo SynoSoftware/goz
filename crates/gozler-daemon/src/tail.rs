@@ -11,7 +11,7 @@
 //!
 //! Hard links are reconciled out of band: a `HARD_LINK_CHANGE` record names one
 //! link and may name a dead one, so the real set comes from a Win32 link walk
-//! (`gozler_winfs::link_paths`) fed to `VolumeIndex::reconcile_links`. A walk that
+//! (`gozler_winfs::file_links`) fed to `VolumeIndex::reconcile_links`. A walk that
 //! cannot be resolved is skipped, never applied as an empty set (which would
 //! delete a live file), and counted as `IndexStats::link_reconciles_dropped` so
 //! `--status` shows it rather than hiding it.
@@ -26,7 +26,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use gozler_core::index::LinkTarget;
-use gozler_core::query::resolve_scope;
 use gozler_core::types::{Frn, VolumePhase};
 use gozler_core::usn::record::{
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_CLOSE, USN_REASON_DATA_EXTEND,
@@ -257,7 +256,14 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
     // counter only resets on a non-empty batch, so on a quiet volume the
     // charge would never clear). Revival storms are bounded by the
     // supervisor's own budget instead.
-    let Some(mut pos) = rescan(state, handle, pulse, RescanReason::NoCursor, stop) else {
+    let Some(mut pos) = rescan(
+        state,
+        handle,
+        pulse,
+        RescanReason::NoCursor,
+        "the tail started without a journal cursor",
+        stop,
+    ) else {
         return;
     };
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
@@ -520,7 +526,7 @@ fn reconcile_links(
         // a slow disk reads as a stale beat, which delays the supervisor's
         // budget refund and inches toward a spurious stall verdict.
         pulse.beat();
-        let links = match gozler_winfs::link_paths(handle, frn.0) {
+        let links = match gozler_winfs::file_links(handle, frn.0) {
             Ok(Some(l)) if !l.is_empty() => l,
             // Gone: leave the entry alone. The journal's delete record
             // removes it.
@@ -532,33 +538,28 @@ fn reconcile_links(
             }
         };
 
-        // Resolve each link's parent directory under one short read lock.
+        // Find each link's folder by its file ID, under one short read lock.
+        // Its name would do only if the index were current, and during the
+        // replay of a build it is not: a path can name a folder that a later
+        // record renames or swaps.
         let index = state.index.read();
-        let mut targets = Vec::with_capacity(links.len());
-        let mut unresolved = false;
-        for wide in &links {
-            let mut bytes = Vec::new();
-            gozler_core::wtf8::from_utf16(wide, &mut bytes);
-            let (dir, name) = split_parent(&bytes);
-            match resolve_scope(&index, dir, false) {
-                Some(parent) => targets.push(LinkTarget {
-                    parent,
-                    name: name.to_vec(),
-                }),
-                // A parent we have not indexed yet: reconciling to a partial set
-                // would delete the links we could not resolve.
-                None => {
-                    unresolved = true;
-                    break;
-                }
-            }
-        }
+        let targets: Option<Vec<LinkTarget>> = links
+            .iter()
+            .map(|link| {
+                let parent = index.head_of(Frn(link.folder))?;
+                let mut name = Vec::new();
+                gozler_core::wtf8::from_utf16(&link.name, &mut name);
+                Some(LinkTarget { parent, name })
+            })
+            .collect();
         drop(index);
 
-        if unresolved || targets.is_empty() {
+        // A folder we have not indexed yet: reconciling to a partial set
+        // would delete the links we could not resolve.
+        let Some(targets) = targets else {
             dropped += 1;
             continue;
-        }
+        };
         resolved.push((frn, targets));
     }
 
@@ -573,17 +574,6 @@ fn reconcile_links(
     let mut index = state.index.write();
     for (frn, targets) in &resolved {
         index.reconcile_links(*frn, targets);
-    }
-}
-
-/// Splits a volume-relative path into (parent dir, file name) at the last
-/// separator, so a link path becomes something `resolve_scope` can look up. A
-/// name at the volume root yields an empty dir, which resolves to the root
-/// entry.
-fn split_parent(path: &[u8]) -> (&[u8], &[u8]) {
-    match path.iter().rposition(|&b| b == b'\\' || b == b'/') {
-        Some(i) => (&path[..i], &path[i + 1..]),
-        None => (&[], path),
     }
 }
 
@@ -691,11 +681,11 @@ fn bounded_rescan(
         );
         return None;
     }
-    rescan(state, handle, pulse, reason, stop)
+    rescan(state, handle, pulse, reason, detail, stop)
 }
 
-/// Builds this volume's index in place: its first build, or a rebuild after a
-/// journal loss (wrap, deletion, or parse anomaly). Reads the volume on the
+/// Builds this volume's index in place: its first build, or a rebuild for
+/// `reason`, which the log gives with `detail`. Reads the volume on the
 /// handle the tail already owns, swaps the fresh index in under the write lock,
 /// and returns where to read the journal from, or `None` to stop the tail.
 /// Queries keep serving (flagged incomplete) during the build.
@@ -704,6 +694,7 @@ fn rescan(
     handle: &VolumeHandle,
     pulse: &TailPulse,
     reason: RescanReason,
+    detail: &str,
     stop: &AtomicBool,
 ) -> Option<ReadPosition> {
     // The rebuild rereads the whole volume without stamping the pulse.
@@ -715,7 +706,7 @@ fn rescan(
     if *state.phase.read() == VolumePhase::Bootstrapping {
         tracing::info!(volume = %state.mount_prefix(), "indexing volume");
     } else {
-        tracing::warn!(volume = %state.mount_prefix(), ?reason, "journal lost; rebuilding index");
+        tracing::warn!(volume = %state.mount_prefix(), ?reason, detail, "rebuilding index");
         *state.phase.write() = VolumePhase::Rescanning;
     }
 

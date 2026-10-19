@@ -31,7 +31,7 @@ pub enum UsnOp {
     ///
     /// Reconciling the file's actual link set needs an external link-set walk
     /// fed to [`crate::index::VolumeIndex::reconcile_links`]. The daemon does
-    /// that walk (`gozler_winfs::link_paths`) and applies the result, so names
+    /// that walk (`gozler_winfs::file_links`) and applies the result, so names
     /// added or removed by a hard-link change are reconciled live. A walk that
     /// cannot complete is skipped and counted rather than applied.
     LinkDirty,

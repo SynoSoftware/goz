@@ -81,7 +81,7 @@ pub use file_id::{Folder, open_folder, root_folder_id};
 pub use file_layout::query_file_layout;
 
 #[cfg(windows)]
-pub use links::link_paths;
+pub use links::{Link, file_links};
 
 #[cfg(windows)]
 pub use file_stat::{FileStat, stat_file};

@@ -361,11 +361,17 @@ pub(crate) fn walk_folders(
         if cancelled() {
             return Ok(false);
         }
-        let Some(listing) = open_folder(handle, folder.0).context("opening a folder by ID")? else {
+        let Some(listing) =
+            open_folder(handle, folder.0).with_context(|| format!("opening folder {folder:?}"))?
+        else {
             continue;
         };
-        while let Some(page) = listing.read_listing(&mut buf).context("listing a folder")? {
-            let files = walk_listing_buffer(folder, page).context("parsing a folder listing")?;
+        while let Some(page) = listing
+            .read_listing(&mut buf)
+            .with_context(|| format!("listing folder {folder:?}"))?
+        {
+            let files = walk_listing_buffer(folder, page)
+                .with_context(|| format!("parsing the listing of folder {folder:?}"))?;
             folders.extend(
                 files
                     .iter()
