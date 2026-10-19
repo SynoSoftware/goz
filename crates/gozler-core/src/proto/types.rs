@@ -176,6 +176,21 @@ pub struct QueryResults {
     pub generation: u64,
 }
 
+impl QueryResults {
+    /// Folds `page`, the next page of the same result set, into this one, so
+    /// every reader of a paged answer agrees on what the pages say together:
+    /// the rows join, `total` and `generation` are the latest page's, and a
+    /// flag holds when any page sets it.
+    pub fn add_page(&mut self, page: QueryResults) {
+        self.total = page.total;
+        self.items.extend(page.items);
+        self.more = page.more;
+        self.volumes_incomplete |= page.volumes_incomplete;
+        self.metadata_pending |= page.metadata_pending;
+        self.generation = page.generation;
+    }
+}
+
 /// The totals of every match of a [`Returns::Totals`] search.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueryTotals {

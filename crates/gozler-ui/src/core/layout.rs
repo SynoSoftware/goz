@@ -4,9 +4,8 @@
 //! guidelines at 96 DPI: 11 px margins and gaps between groups, 7 px between
 //! related controls, 23 px tall text boxes and lists, 17 px check boxes.
 
+use super::captions::WindowCaptions;
 use super::model::Column;
-use super::results::LIST_LIMIT;
-use super::text::{self, Numbers, Strings};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 use std::ops::{Add, Sub};
@@ -142,7 +141,7 @@ const STATUS_REST_MIN_WIDTH: Dip = Dip(100);
 
 /// The largest result count the status bar is sized for; a larger one ends
 /// in an ellipsis instead of moving the parts (spec: Look).
-const WIDEST_TOTAL: u64 = 9_999_999;
+pub(crate) const WIDEST_TOTAL: u64 = 9_999_999;
 
 /// Which panes the window shows, and the inspector's height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,62 +166,29 @@ impl Default for Panes {
 /// The measured width of each caption that the window places in code, in
 /// the current language, font and DPI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Captions {
+pub(crate) struct CaptionWidths {
     match_label: Px,
     match_modes: Px,
     match_case: Px,
     match_path: Px,
-    /// The longest message of each fixed status bar part.
+    /// The widest text of each fixed status bar part.
     status: [Px; 3],
 }
 
-impl Captions {
-    /// Measures every caption with `measure`, which gives the width of a
-    /// text as its control draws it, an access-key `&` included.
+impl CaptionWidths {
+    /// Measures `captions` with `measure`, which gives the width of a text
+    /// as its control draws it, an access-key `&` included.
     pub(crate) fn measure(
-        strings: &Strings,
-        numbers: &dyn Numbers,
+        captions: &WindowCaptions,
         measure: &dyn Fn(&str) -> Px,
-    ) -> Captions {
+    ) -> CaptionWidths {
         let widest = |texts: &[String]| texts.iter().map(|t| measure(t)).max().unwrap_or_default();
-        let modes: Vec<String> = super::query::MatchMode::ALL
-            .iter()
-            .map(|m| strings.text(m.label()).to_owned())
-            .collect();
-        let limit = numbers.integer(LIST_LIMIT);
-        let showing = strings.format("status.showing", &[&limit, &numbers.integer(WIDEST_TOTAL)]);
-        // Which size is widest depends on the font and the language, so
-        // every unit's widest forms are measured: 1,023 bytes, then 9.99,
-        // 99.9 and 999 of each unit.
-        let sizes =
-            std::iter::once(1023).chain((1..=4).flat_map(|unit| {
-                [9.99, 99.9, 999.0].map(|value| (value * 1024f64.powi(unit)) as u64)
-            }));
-        let mut selected: Vec<String> = sizes
-            .map(|n| {
-                strings.format(
-                    "status.selected",
-                    &[&limit, &text::bytes(strings, numbers, n)],
-                )
-            })
-            .collect();
-        selected.push(strings.text("status.reading").to_owned());
-        Captions {
-            match_label: measure(strings.text("match.label")),
-            match_modes: widest(&modes),
-            match_case: measure(strings.text("match.case")),
-            match_path: measure(strings.text("match.path")),
-            status: [
-                widest(&[
-                    strings.format("status.filtered", &[&showing]),
-                    strings.text("status.searching").to_owned(),
-                ]),
-                widest(&selected),
-                widest(&[
-                    strings.count("status.exporting", WIDEST_TOTAL, numbers, &[]),
-                    strings.count("status.exported", WIDEST_TOTAL, numbers, &["results.csv"]),
-                ]),
-            ],
+        CaptionWidths {
+            match_label: measure(&captions.match_label),
+            match_modes: widest(&captions.match_modes),
+            match_case: measure(&captions.match_case),
+            match_path: measure(&captions.match_path),
+            status: captions.status_widest.each_ref().map(|texts| widest(texts)),
         }
     }
 }
@@ -309,7 +275,7 @@ impl Layout {
         dpi: Dpi,
         font_height: Px,
         status_height: Px,
-        captions: &Captions,
+        captions: &CaptionWidths,
         panes: &Panes,
     ) -> Layout {
         let px = |dip: Dip| dip.to_px(dpi);
@@ -435,14 +401,15 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::text::tests::{English, english};
+    use crate::core::model::tests::model;
+    use crate::core::text::tests::English;
 
     /// Caption widths as a font of `char_width` pixels per character would
     /// give them; `stretch` stands for a longer language.
-    fn captions(dpi: Dpi, stretch: f64) -> Captions {
-        let strings = english();
+    fn captions(dpi: Dpi, stretch: f64) -> CaptionWidths {
         let char_width = f64::from(Dip(7).to_px(dpi).0);
-        Captions::measure(&strings, &English, &|text: &str| {
+        let captions = WindowCaptions::new(&model(), &English);
+        CaptionWidths::measure(&captions, &|text: &str| {
             Px((text.chars().count() as f64 * char_width * stretch).ceil() as i32)
         })
     }

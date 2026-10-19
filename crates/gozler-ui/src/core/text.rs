@@ -1,7 +1,7 @@
 //! The window's text: the shipped languages, the loaded [`Strings`] of one of
-//! them, and the functions that build each caption from facts (design rule
-//! 12). Numbers come through [`Numbers`], so the regional format has one
-//! owner, Windows.
+//! them, and the formatting of sizes, cells and menu labels that
+//! `core::captions` builds the captions with. Numbers come through
+//! [`Numbers`], so the regional format has one owner, Windows.
 //!
 //! A catalogue is JSON with one level of objects, such as
 //! `{"menu": {"file": "&File"}}`, read as the dotted key `menu.file`. A
@@ -10,13 +10,8 @@
 //! a whole message with all its forms; a translation whose placeholders
 //! differ from English is ignored, so English shows.
 
-use super::fetch::DaemonFailure;
-use super::model::{Column, Model};
-use super::results::{LIST_LIMIT, ListMessage, Shown};
-use gozler_client::NotRunning;
+use super::model::Column;
 use gozler_core::proto::ResultItem;
-use gozler_core::query::{Malformed, QueryError};
-use gozler_core::types::VolumePhase;
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -359,142 +354,6 @@ pub(crate) fn bytes(strings: &Strings, numbers: &dyn Numbers, n: u64) -> String 
         })
         .unwrap_or(0);
     strings.format(UNITS[unit], &[&numbers.decimal(value, digits)])
-}
-
-/// The window's title: the typed search and the product's name, as Windows
-/// titles a document window, or the name alone while the search is empty.
-pub(crate) fn title(strings: &Strings, text: &str) -> String {
-    if text.trim().is_empty() {
-        strings.text("window.title").to_owned()
-    } else {
-        strings.format("window.title_search", &[text.trim()])
-    }
-}
-
-/// Status part 1: how many results, or that a search runs.
-pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
-    let strings = &model.strings;
-    if model.results.searching() {
-        return strings.text("status.searching").to_owned();
-    }
-    match model.results.shown() {
-        Shown::Rows(_) => {
-            let total = model.results.total();
-            if total > LIST_LIMIT {
-                strings.format(
-                    "status.showing",
-                    &[&numbers.integer(LIST_LIMIT), &numbers.integer(total)],
-                )
-            } else {
-                strings.count("status.results", total, numbers, &[])
-            }
-        }
-        Shown::Nothing | Shown::Message(_) => String::new(),
-    }
-}
-
-/// Status part 4: the index state, only when it affects the answer (spec:
-/// Status bar).
-pub(crate) fn index_status(model: &Model) -> String {
-    let strings = &model.strings;
-    let coverage = model.coverage();
-    if let Some(volume) = coverage.incomplete() {
-        let key = match volume.phase {
-            VolumePhase::Live | VolumePhase::Snapshot => {
-                unreachable!("an incomplete volume is neither live nor a snapshot")
-            }
-            VolumePhase::Bootstrapping | VolumePhase::Rescanning => "status.volume_indexing",
-            VolumePhase::Offline => "status.volume_offline",
-            VolumePhase::Failed { .. } => "status.volume_failed",
-        };
-        return strings.format(key, &[volume.mounted().display_prefix()]);
-    }
-    coverage
-        .sizes_or_dates_unknown()
-        .map(|volume| strings.format("status.metadata", &[volume.mounted().display_prefix()]))
-        .unwrap_or_default()
-}
-
-/// What the list's empty area says instead of rows, if anything: the
-/// message, and the label of its fix's button.
-pub(crate) fn list_message(model: &Model) -> Option<(String, Option<String>)> {
-    let strings = &model.strings;
-    let message = match model.results.shown() {
-        Shown::Rows(_) if model.results.total() == 0 => {
-            return Some((strings.text("list.no_results").to_owned(), None));
-        }
-        Shown::Nothing | Shown::Rows(_) => return None,
-        Shown::Message(message) => message,
-    };
-    let text = match message {
-        ListMessage::Parse(error) => query_error(strings, error),
-        ListMessage::Failure(failure) => match failure {
-            DaemonFailure::NotRunning(why) => match why {
-                NotRunning::Stopped => strings.text("failure.stopped").to_owned(),
-                NotRunning::Disabled => strings.text("failure.disabled").to_owned(),
-                NotRunning::NotInstalled {
-                    gozlerd_beside: true,
-                    ..
-                } => strings.text("failure.not_installed").to_owned(),
-                NotRunning::NotInstalled {
-                    gozlerd_beside: false,
-                    ..
-                } => strings.text("failure.missing").to_owned(),
-                NotRunning::Unknown(detail) => strings.format("failure.unknown", &[detail]),
-            },
-            DaemonFailure::NotReady => strings.text("failure.not_ready").to_owned(),
-            DaemonFailure::NotGozler => strings.text("failure.not_gozler").to_owned(),
-            DaemonFailure::TooOld => strings.text("failure.too_old").to_owned(),
-            DaemonFailure::Refused { detail } => strings.format("failure.refused", &[detail]),
-            DaemonFailure::Lost => strings.text("failure.lost").to_owned(),
-        },
-    };
-    let button = message
-        .fix()
-        .map(|fix| strings.text(fix.label()).to_owned());
-    Some((text, button))
-}
-
-/// What is wrong with a search that does not parse, and how to fix it, in
-/// the person's language; text from a library stays English after it.
-fn query_error(strings: &Strings, error: &QueryError) -> String {
-    let as_typed = |function: &str, value: &str| format!("{function}{value}");
-    match error {
-        QueryError::UnsupportedOperator(c) => {
-            strings.format("query.unsupported_operator", &[&c.to_string()])
-        }
-        QueryError::UnknownFunction(name) => {
-            strings.format("query.unknown_function", &[&format!("{name}:")])
-        }
-        QueryError::RelativePath(path) => strings.format("query.relative_path", &[path]),
-        QueryError::NoQueryStart => strings.text("query.no_query_start").to_owned(),
-        QueryError::TooManyTerms(n) => strings.format("query.too_many_terms", &[&n.to_string()]),
-        QueryError::TooManyRegexes(n) => {
-            strings.format("query.too_many_regexes", &[&n.to_string()])
-        }
-        QueryError::Malformed(reason) => match reason {
-            Malformed::MisplacedNot => strings.text("query.misplaced_not").to_owned(),
-            Malformed::NotWithoutTerm => strings.text("query.not_without_term").to_owned(),
-            Malformed::OrWithoutTerms => strings.text("query.or_without_terms").to_owned(),
-            Malformed::OperatorOnNothing(term) => {
-                strings.format("query.operator_on_nothing", &[term])
-            }
-            Malformed::Size(value) => strings.format("query.size", &[&as_typed("size:", value)]),
-            Malformed::ReversedDates(value) => {
-                strings.format("query.reversed_dates", &[&as_typed("dm:", value)])
-            }
-            Malformed::DateOutOfRange(value) => {
-                strings.format("query.date_out_of_range", &[&as_typed("dm:", value)])
-            }
-            Malformed::Days(value) => strings.format("query.days", &[&as_typed("dm:", value)]),
-            Malformed::Date(value) => strings.format("query.date", &[&as_typed("dm:", value)]),
-            Malformed::NoParentFolder => strings.text("query.no_parent_folder").to_owned(),
-            Malformed::AttributeLetter(c) => {
-                strings.format("query.attribute_letter", &[&c.to_string()])
-            }
-            Malformed::Regex(detail) => strings.format("query.regex", &[detail]),
-        },
-    }
 }
 
 /// The bytes of a full path that the Name or Path cell shows, `None` for

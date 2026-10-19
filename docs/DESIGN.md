@@ -144,7 +144,7 @@ These do not fit gozler:
 
 ## Golden corpus
 
-The golden corpus records what gozler prints for a set of command lines over fixed data, so a change that alters behavior fails a row. The daemon's corpus (`gozler-daemon`, `server::tests::corpus`) runs each command line through `parse_argv` and `build_search` into the daemon's request path over a fixture index, and one row as protocol 1's text query. The output corpus (`gozler-cli`, `win::corpus`) prints a fixed result set through `ResultWriter` in each output format. Dates render in UTC, so every row passes in any time zone.
+The golden corpus records what gozler prints for a set of command lines over fixed data, so a change that alters behavior fails a row. The daemon's corpus (`gozler-daemon`, `server::tests::corpus`) runs each command line through `parse_argv` and `build_search` into the daemon's request path over a fixture index, and one row as protocol 1's text query. The output corpus (`gozler-core`, `output::results::corpus`) prints a fixed result set through `ResultWriter`, which `gozler` and the window's Export both write through, in each output format. Dates render in UTC, so every row passes in any time zone.
 
 goz v0.2.0 returned a wrong answer that looked valid, or hid a limit, for each command line below. A corpus row or test marked `Bug N` keeps bug N fixed.
 

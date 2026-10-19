@@ -5,7 +5,7 @@
 //! names the rows the person sees even while the typed text has already
 //! changed.
 
-use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation};
+use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation, SelectionAsk};
 use gozler_client::Repair;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{MatchedParts, QueryError};
@@ -195,10 +195,85 @@ impl Results {
 
     /// The shown search, for the index state its scope decides.
     pub(crate) fn shown_search(&self) -> Option<&Search> {
+        self.shown_ask().map(|ask| &ask.search)
+    }
+
+    /// The shown search and its sort, which every request about the shown
+    /// rows starts from.
+    pub(crate) fn shown_ask(&self) -> Option<&ChunkAsk> {
         match &self.shown {
-            Shown::Rows(rows) => Some(&rows.ask.search),
+            Shown::Rows(rows) => Some(&rows.ask),
             Shown::Nothing | Shown::Message(_) => None,
         }
+    }
+
+    /// The rows at `positions`, if the cache holds every one of them.
+    pub(crate) fn cached_rows(&self, positions: &[Range<u64>]) -> Option<Vec<ResultItem>> {
+        positions
+            .iter()
+            .flat_map(Range::clone)
+            .map(|position| self.row(position).cloned())
+            .collect()
+    }
+
+    /// The request for the rows at `positions`, from the first to the last,
+    /// widened to the cached chunks that it overlaps, so the reply replaces
+    /// them whole (design: The selection). `None` while no rows are shown.
+    pub(crate) fn selection_ask(&self, positions: Vec<Range<u64>>) -> Option<SelectionAsk> {
+        let Shown::Rows(shown) = &self.shown else {
+            return None;
+        };
+        let mut start = positions.first()?.start;
+        let mut end = positions.last()?.end;
+        let overlapped: Vec<Range<u64>> = shown
+            .chunks
+            .iter()
+            .map(|c| c.start..c.start + c.rows.len() as u64)
+            .filter(|chunk| chunk.start < end && start < chunk.end)
+            .collect();
+        for chunk in &overlapped {
+            start = start.min(chunk.start);
+            end = end.max(chunk.end);
+        }
+        let mut cached = overlapped;
+        cached.sort_by_key(|chunk| chunk.start);
+        Some(SelectionAsk {
+            span: ChunkAsk {
+                start,
+                len: end - start,
+                ..shown.ask.clone()
+            },
+            positions,
+            cached,
+        })
+    }
+
+    /// Gives each chunk of `cached` that the cache still holds the rows of
+    /// `rows` inside it, which a selection reply read at one moment, and
+    /// returns the positions it replaced.
+    pub(crate) fn replace_cached(
+        &mut self,
+        cached: &[Range<u64>],
+        rows: &[(u64, ResultItem)],
+    ) -> Range<u64> {
+        let Shown::Rows(shown) = &mut self.shown else {
+            return 0..0;
+        };
+        let mut replaced: Option<Range<u64>> = None;
+        for range in cached {
+            let Some(chunk) = shown.chunks.iter_mut().find(|c| c.start == range.start) else {
+                continue;
+            };
+            let first = rows.partition_point(|(position, _)| *position < range.start);
+            let last = rows.partition_point(|(position, _)| *position < range.end);
+            chunk.rows = rows[first..last]
+                .iter()
+                .map(|(_, row)| row.clone())
+                .collect();
+            let all = replaced.get_or_insert(range.clone());
+            *all = all.start.min(range.start)..all.end.max(range.end);
+        }
+        replaced.unwrap_or(0..0)
     }
 
     /// A new search in the order `sort`, whose first chunk `generation`

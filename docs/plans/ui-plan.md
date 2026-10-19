@@ -420,6 +420,10 @@ ones the owner accepted.
   "Reading the selection…" and the selection commands are disabled in the
   menus; then part 2 shows the two files and the commands are enabled.
   Covers: S12.
+- Every row of the empty search selected, as Select all selects them: part
+  2 shows 100,000 selected, no `WM_NULL` waits more than 100 ms meanwhile,
+  and the probe reports the private bytes while the selection is held (spec:
+  Memory budget).
 - With one fixture row selected, Open, Open file location and Properties are
   enabled; with two, Properties is disabled; with 16, Open and Open file
   location are disabled. The probe reads this from the menus and does not run
@@ -433,10 +437,11 @@ ones the owner accepted.
 - During an export of the empty search, part 3 shows its progress and File
   shows Cancel export; Cancel export ends it and its partial file is gone.
   Covers: C5, S11.
-- A search of the empty search with another sort, started about 3.5 s into
-  an export of the empty search, is still running when the export ends:
-  part 3 shows the export's result while part 1 says Searching…, and the
-  export went on through the search's start. Covers: T1, T8.
+- During an export of the empty search, the sort changes three times as often
+  as the probe measured one search of the empty search to take on the same
+  machine, so a search runs when the export ends however fast the machine
+  is: part 3 shows the export's result while part 1 says Searching…, and the
+  export went on through every search's start. Covers: T1, T8.
 - The `Model::accept` tests for T8 and T9 pass. Covers: T8, T9.
 - The core test for T11 passes: a command chosen from the context menu after
   a new search's first rows cleared the selection does nothing. It is here
@@ -445,9 +450,10 @@ ones the owner accepted.
 - An export into the fixture folder whose ACL denies the current user file
   creation shows the spec's message box and leaves no file. Covers: T9.
 - Closing the window 0.5 s after an export of the empty search starts ends
-  the process within two seconds, and the partial file is gone. That export
-  takes 3.6 to 3.9 seconds, so an export that ignores the token fails the
-  check. Covers: T14.
+  the process within two seconds, and the partial file is gone. An export
+  that ignores the token either holds the process until it has written
+  every row, which takes several seconds, or ends and leaves its file, so it
+  fails the check on any machine. Covers: T14.
 
 **After install:**
 - Open, Open file location and Properties act on the selected entries; Open
@@ -722,11 +728,12 @@ boundary, under `AGENTS.md`'s test rules:
 - the command table: Open and Open file location are enabled for 1 and 15
   read rows and disabled for 16 and while the selection is read; Properties
   only for one row; Export results… is disabled while an export runs;
-- `ClipboardData`: the size it reports equals the bytes it writes, for 3 rows
-  and for 100,000 rows; Copy as path gives each path in double quotes on its
-  own line; Copy name gives the names; Copy gives the whole `CF_HDROP` block,
-  the `DROPFILES` header with its `pFiles` offset and `fWide` set, then the
-  double-NUL path list;
+- `ClipboardData`: the size it reports equals the bytes it writes, which
+  `write_into` asserts on every copy, so the exact-bytes cases below pin it;
+  Copy as path gives each path in double quotes on its own line; Copy name
+  gives the names; Copy gives the whole `CF_HDROP` block, the `DROPFILES`
+  header with its `pFiles` offset and `fWide` set, then the double-NUL path
+  list;
 - `Layout::compute` at 96, 144 and 192 DPI, with English and pseudo-language
   caption widths: no control overlaps another or leaves the client area; the
   list keeps a minimum size; the status bar parts' widths do not depend on the

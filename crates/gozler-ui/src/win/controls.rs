@@ -3,31 +3,34 @@
 //! normal changes land).
 
 use super::gdi::ImageList;
+use super::notify::ControlEvent;
 use super::{Hwnd, wide};
 use crate::core::layout::Px;
 use std::ops::Range;
-use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::Foundation::{LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows::Win32::UI::Controls::{
     BST_CHECKED, EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL, HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT,
     HDITEMW, HDM_GETITEMW, HDM_SETITEMW, ICC_BAR_CLASSES, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
     ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
-    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIS_FOCUSED,
-    LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY,
-    LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETTOPINDEX,
-    LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
+    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO,
+    LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
+    LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETHEADER,
+    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX,
+    LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
-    LVM_SETITEMSTATE, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP,
-    LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
-    LVSICF_NOSCROLL, LVSIL_SMALL, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW,
-    SetWindowTheme, WC_LISTVIEWW,
+    LVM_SETITEMSTATE, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    LVS_EX_HEADERDRAGDROP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP,
+    STATUSCLASSNAMEW, SetWindowTheme, WC_LISTVIEWW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
-    CB_RESETCONTENT, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, ES_AUTOHSCROLL,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, SendMessageW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_COPY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
+    CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CBN_SELCHANGE, CBS_DROPDOWNLIST, CreateWindowExW,
+    EN_CHANGE, ES_AUTOHSCROLL, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU,
+    SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -112,9 +115,16 @@ impl Hwnd {
     }
 }
 
+impl ControlEvent {
+    /// Whether `control` sent this with the notification code `code`.
+    fn is(self, control: Hwnd, code: u32) -> bool {
+        self.from == control && self.code == code
+    }
+}
+
 /// The search box.
 #[derive(Clone, Copy)]
-pub(crate) struct Edit(pub(crate) Hwnd);
+pub(crate) struct Edit(Hwnd);
 
 impl Edit {
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Edit> {
@@ -133,6 +143,15 @@ impl Edit {
         let text = wide(text);
         // SAFETY: `text` is a NUL-terminated string that outlives the call.
         unsafe { send_pointer(self.0, EM_SETCUEBANNER, 1, text.as_ptr()) };
+    }
+
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    /// Whether `event` says that the text changed.
+    pub(crate) fn changed(self, event: ControlEvent) -> bool {
+        event.is(self.0, EN_CHANGE)
     }
 
     pub(crate) fn has_selected_text(self) -> bool {
@@ -161,9 +180,13 @@ impl Edit {
 
 /// A static text, such as a label before its control.
 #[derive(Clone, Copy)]
-pub(crate) struct Label(pub(crate) Hwnd);
+pub(crate) struct Label(Hwnd);
 
 impl Label {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
         child(parent, w!("STATIC"), 0, WINDOW_EX_STYLE(0), id).map(Label)
     }
@@ -180,9 +203,17 @@ impl Label {
 
 /// A push button.
 #[derive(Clone, Copy)]
-pub(crate) struct Button(pub(crate) Hwnd);
+pub(crate) struct Button(Hwnd);
 
 impl Button {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    pub(crate) fn clicked(self, event: ControlEvent) -> bool {
+        event.is(self.0, BN_CLICKED)
+    }
+
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
         child(
             parent,
@@ -197,9 +228,18 @@ impl Button {
 
 /// A drop-down list, such as the Match list.
 #[derive(Clone, Copy)]
-pub(crate) struct DropDownList(pub(crate) Hwnd);
+pub(crate) struct DropDownList(Hwnd);
 
 impl DropDownList {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    /// Whether `event` says that the person chose another item.
+    pub(crate) fn selection_changed(self, event: ControlEvent) -> bool {
+        event.is(self.0, CBN_SELCHANGE)
+    }
+
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<DropDownList> {
         child(
             parent,
@@ -227,13 +267,28 @@ impl DropDownList {
     pub(crate) fn selected(self) -> Option<usize> {
         usize::try_from(send(self.0, CB_GETCURSEL, 0, 0)).ok()
     }
+
+    /// Selects `index`, unless it is selected.
+    pub(crate) fn select(self, index: usize) {
+        if self.selected() != Some(index) {
+            send(self.0, CB_SETCURSEL, index, 0);
+        }
+    }
 }
 
 /// A check box.
 #[derive(Clone, Copy)]
-pub(crate) struct CheckBox(pub(crate) Hwnd);
+pub(crate) struct CheckBox(Hwnd);
 
 impl CheckBox {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    pub(crate) fn clicked(self, event: ControlEvent) -> bool {
+        event.is(self.0, BN_CLICKED)
+    }
+
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<CheckBox> {
         child(
             parent,
@@ -245,8 +300,11 @@ impl CheckBox {
         .map(CheckBox)
     }
 
+    /// Checks or clears the box, unless it already shows `checked`.
     pub(crate) fn set_checked(self, checked: bool) {
-        send(self.0, BM_SETCHECK, usize::from(checked), 0);
+        if self.is_checked() != checked {
+            send(self.0, BM_SETCHECK, usize::from(checked), 0);
+        }
     }
 
     pub(crate) fn is_checked(self) -> bool {
@@ -255,9 +313,11 @@ impl CheckBox {
 }
 
 /// The results list: a list view in report and virtual mode, drawn as File
-/// Explorer draws its list (spec: Look).
+/// Explorer draws its list (spec: Look). Only [`ListView::create`] makes
+/// one, so its handle is a list view's, which decoding its notifications
+/// relies on.
 #[derive(Clone, Copy)]
-pub(crate) struct ListView(pub(crate) Hwnd);
+pub(crate) struct ListView(Hwnd);
 
 /// One column as the list shows it.
 pub(crate) struct ListColumn<'a> {
@@ -295,6 +355,10 @@ impl ListView {
         // SAFETY: plain values; a missing theme leaves the classic look.
         let _ = unsafe { SetWindowTheme(list.0, w!("Explorer"), PCWSTR::null()) };
         Ok(ListView(list))
+    }
+
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
     }
 
     pub(crate) fn insert_column(self, index: usize, column: &ListColumn) {
@@ -375,14 +439,19 @@ impl ListView {
             };
             // SAFETY: `item` is a local that the header fills in, then reads.
             unsafe { send_pointer(header, HDM_GETITEMW, index, &raw mut item) };
+            let shown = item.fmt.0;
             item.fmt.0 &= !(HDF_SORTUP.0 | HDF_SORTDOWN.0);
             match sorted {
                 Some((column, true)) if column == index => item.fmt.0 |= HDF_SORTUP.0,
                 Some((column, false)) if column == index => item.fmt.0 |= HDF_SORTDOWN.0,
                 _ => {}
             }
-            // SAFETY: as above.
-            unsafe { send_pointer(header, HDM_SETITEMW, index, &raw const item) };
+            // The window shows the sort after every reply, and a header
+            // given its own format still repaints.
+            if item.fmt.0 != shown {
+                // SAFETY: as above.
+                unsafe { send_pointer(header, HDM_SETITEMW, index, &raw const item) };
+            }
         }
     }
 
@@ -414,24 +483,118 @@ impl ListView {
         send(self.0, LVM_ENSUREVISIBLE, row as usize, 0);
     }
 
+    /// Sets the states `mask` of the row `index`, or of every row for
+    /// `usize::MAX`, which is -1, to `state`.
+    fn set_state(
+        self,
+        index: usize,
+        mask: LIST_VIEW_ITEM_STATE_FLAGS,
+        state: LIST_VIEW_ITEM_STATE_FLAGS,
+    ) {
+        let item = LVITEMW {
+            stateMask: mask,
+            state,
+            ..Default::default()
+        };
+        // SAFETY: `item` outlives the call, which reads it.
+        unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
+    }
+
     /// Selects and focuses `row` alone, or clears the selection and the
     /// focus for `None`.
     pub(crate) fn select_only(self, row: Option<u64>) {
         let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
-        let set = |index: usize, state| {
-            let item = LVITEMW {
-                stateMask: both,
-                state,
-                ..Default::default()
-            };
-            // SAFETY: `item` outlives the call, which reads it.
-            unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
-        };
-        // Index -1 is every row.
-        set(usize::MAX, LIST_VIEW_ITEM_STATE_FLAGS(0));
+        self.set_state(usize::MAX, both, LIST_VIEW_ITEM_STATE_FLAGS(0));
         if let Some(row) = row {
-            set(row as usize, both);
+            self.set_state(row as usize, both, both);
         }
+    }
+
+    /// Selects every row (spec: C11).
+    pub(crate) fn select_all(self) {
+        self.set_state(usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
+    }
+
+    /// The selected rows, as sorted ranges that do not touch. A virtual
+    /// list knows them only row by row, so a selection of every row, which
+    /// Select all makes, is read without asking for each.
+    #[allow(
+        clippy::single_range_in_vec_init,
+        reason = "a selection is a list of row ranges"
+    )]
+    pub(crate) fn selected(self) -> Vec<Range<u64>> {
+        let selected = send(self.0, LVM_GETSELECTEDCOUNT, 0, 0).max(0) as u64;
+        if selected == 0 {
+            return Vec::new();
+        }
+        let count = self.count();
+        if selected == count {
+            return vec![0..count];
+        }
+        let mut ranges: Vec<Range<u64>> = Vec::new();
+        let mut after = -1isize;
+        loop {
+            let next = send(
+                self.0,
+                LVM_GETNEXTITEM,
+                after as usize,
+                LVNI_SELECTED as isize,
+            );
+            let Ok(row) = u64::try_from(next) else { break };
+            match ranges.last_mut() {
+                Some(last) if last.end == row => last.end = row + 1,
+                _ => ranges.push(row..row + 1),
+            }
+            after = next;
+        }
+        ranges
+    }
+
+    /// The row at `point`, in screen coordinates, if one is there.
+    pub(crate) fn row_at(self, point: (i32, i32)) -> Option<u64> {
+        let mut hit = LVHITTESTINFO {
+            pt: POINT {
+                x: point.0,
+                y: point.1,
+            },
+            ..Default::default()
+        };
+        // SAFETY: `hit.pt` is a local the call converts in place.
+        if !unsafe { ScreenToClient(self.0.0, &mut hit.pt) }.as_bool() {
+            return None;
+        }
+        // SAFETY: `hit` is a local that the list reads and fills in.
+        let row = unsafe { send_pointer(self.0, LVM_HITTEST, 0, &raw mut hit) };
+        u64::try_from(row).ok()
+    }
+
+    /// Where a context menu for the focused row opens, in screen
+    /// coordinates: the bottom left of the row, as File Explorer opens it
+    /// for Shift+F10. Select all selects rows without focusing one, so
+    /// without a focused row the first selected one stands for it. The row
+    /// is scrolled into view first.
+    pub(crate) fn focused_row_point(self) -> Option<(i32, i32)> {
+        let row = [LVNI_FOCUSED, LVNI_SELECTED].into_iter().find_map(|flag| {
+            usize::try_from(send(self.0, LVM_GETNEXTITEM, usize::MAX, flag as isize)).ok()
+        })?;
+        self.ensure_visible(row as u64);
+        let mut rect = RECT {
+            left: LVIR_BOUNDS as i32,
+            ..RECT::default()
+        };
+        // SAFETY: `rect` is a local that the list reads the part from and
+        // fills in.
+        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, row, &raw mut rect) } == 0 {
+            return None;
+        }
+        let mut point = POINT {
+            x: rect.left,
+            y: rect.bottom,
+        };
+        // SAFETY: `point` is a local the call converts in place.
+        unsafe { ClientToScreen(self.0.0, &mut point) }
+            .as_bool()
+            .then_some((point.x, point.y))
     }
 
     /// Redraws `rows`, whose cells have changed.
@@ -457,9 +620,13 @@ impl ListView {
 
 /// The status bar, which sizes itself to its font at the window's bottom.
 #[derive(Clone, Copy)]
-pub(crate) struct StatusBar(pub(crate) Hwnd);
+pub(crate) struct StatusBar(Hwnd);
 
 impl StatusBar {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<StatusBar> {
         child(
             parent,

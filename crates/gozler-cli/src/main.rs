@@ -2,8 +2,9 @@
 //!
 //! Parses arguments with the es.exe-compatible rules from
 //! `gozler-core::escompat`, talks to the running daemon over `\\.\pipe\gozler-v1`
-//! through `gozler-client`, and writes results as JSON (`--json`), or through
-//! `gozler_core::output::TableWriter` as plain text (default), CSV, TSV or TXT.
+//! through `gozler-client`, and writes results through
+//! `gozler_core::output::ResultWriter` as JSON (`--json`), plain text
+//! (default), CSV, TSV or TXT.
 //!
 //! The exit codes are [`gozler_core::escompat::ExitCode`]; every failure is a
 //! [`Failure`], which maps to its code in one place.
@@ -100,9 +101,8 @@ mod win {
     use super::overview::{Index, Service, render};
     use gozler_client::{CancelToken, Client, ClientError, folder_is_missing};
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
-    use gozler_core::output::TableWriter;
-    use gozler_core::output::table::grouped;
-    use gozler_core::proto::{DaemonStatus, PIPE_NAME, QueryResults};
+    use gozler_core::output::{ResultWriter, write_status};
+    use gozler_core::proto::{DaemonStatus, PIPE_NAME};
     use gozler_core::query::QueryStart;
     use gozler_core::scope::Coverage;
     use gozler_core::winpath::is_drive_relative;
@@ -221,12 +221,13 @@ mod win {
                 // writes.
                 None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
             };
-            let mut writer = ResultWriter::new(&plan, time_zone, out);
+            let destination = plan.export.as_deref().unwrap_or("stdout");
+            let mut writer = ResultWriter::new(plan.result_format(), time_zone, out);
             connection.query(request, |page| {
                 answer.add_page(&page);
-                writer.page(page)
+                output(writer.page(page), destination)
             })?;
-            writer.finish()?;
+            output(writer.finish(), destination)?;
         }
         for warning in answer.warnings() {
             eprintln!("gozler: warning: {warning}");
@@ -282,71 +283,6 @@ mod win {
         }
     }
 
-    /// Writes one result set to stdout or the export file, in the format the
-    /// plan asks for, as its pages arrive, so a large export never waits for
-    /// or holds the whole set. Dates are local time in `tz`.
-    struct ResultWriter<'p, W: Write> {
-        plan: &'p EsPlan,
-        out: W,
-        rows: Rows,
-    }
-
-    /// How a [`ResultWriter`] writes the rows.
-    enum Rows {
-        Table(TableWriter),
-        /// `--json`, which prints one object at the end: the pages so far.
-        Json(Option<QueryResults>),
-    }
-
-    impl<'p, W: Write> ResultWriter<'p, W> {
-        fn new(plan: &'p EsPlan, tz: jiff::tz::TimeZone, out: W) -> Self {
-            let rows = if plan.json && plan.export.is_none() {
-                Rows::Json(None)
-            } else {
-                Rows::Table(TableWriter::new(plan.table_options(), tz))
-            };
-            Self { plan, out, rows }
-        }
-
-        fn page(&mut self, page: QueryResults) -> Result<(), Failure> {
-            let written = match &mut self.rows {
-                Rows::Table(table) => {
-                    let mut bytes = Vec::new();
-                    table.write_page(&page.items, &mut bytes);
-                    self.out.write_all(&bytes)
-                }
-                Rows::Json(pages) => {
-                    match pages {
-                        None => *pages = Some(page),
-                        Some(all) => {
-                            all.items.extend(page.items);
-                            all.more = page.more;
-                        }
-                    }
-                    Ok(())
-                }
-            };
-            output(written, self.destination())
-        }
-
-        /// Writes what the pages left to write, and flushes.
-        fn finish(mut self) -> Result<(), Failure> {
-            let written = match &self.rows {
-                Rows::Json(Some(all)) => {
-                    let json = serde_json::to_string_pretty(all)
-                        .map_err(|e| Failure::Internal(format!("JSON encoding failed: {e}")))?;
-                    writeln!(self.out, "{json}")
-                }
-                Rows::Json(None) | Rows::Table(_) => Ok(()),
-            };
-            output(written.and_then(|()| self.out.flush()), self.destination())
-        }
-
-        fn destination(&self) -> &'p str {
-            self.plan.export.as_deref().unwrap_or("stdout")
-        }
-    }
-
     /// `--status`: prints the daemon's state, as JSON with `--json`, and exits
     /// 2 with a warning for each way a volume is not complete.
     fn status(connection: &mut Client, json: bool) -> Result<ExitCode, Failure> {
@@ -386,132 +322,6 @@ mod win {
         }
         warnings
     }
-
-    /// Writes the `--status` report: whether every volume is ready first, then
-    /// each volume with its details under labels.
-    fn write_status(s: &DaemonStatus, out: &mut impl Write) -> std::io::Result<()> {
-        let ready = s.volumes.iter().filter(|v| v.phase.is_complete()).count();
-        let entries: u64 = s.volumes.iter().map(|v| v.entries).sum();
-        writeln!(
-            out,
-            "gozlerd: {ready} of {} ready, {}",
-            plural(s.volumes.len() as u64, "volume", "volumes"),
-            plural(entries, "entry", "entries"),
-        )?;
-        if s.process_private_bytes > 0 {
-            writeln!(
-                out,
-                "Memory: {} private, {} working set",
-                bytes(s.process_private_bytes),
-                bytes(s.process_working_set),
-            )?;
-        }
-        for v in &s.volumes {
-            writeln!(
-                out,
-                "\n{}  {}, {}",
-                v.mounted().display_prefix(),
-                v.phase,
-                plural(v.entries, "entry", "entries"),
-            )?;
-            if v.metadata_pending {
-                detail(
-                    out,
-                    "Sizes, dates",
-                    "some unknown: the size and date pass did not finish",
-                )?;
-            }
-            // The journal's size is the replay horizon: everything older
-            // than what it holds costs a full rescan on restart.
-            if let Some(max) = v.journal_max_bytes {
-                detail(out, "Journal", &format!("{} MiB", max / (1024 * 1024)))?;
-            }
-            // `allocated` above `used` is capacity slack.
-            if let Some(m) = &v.memory {
-                let total = m.total();
-                detail(
-                    out,
-                    "Index memory",
-                    &format!("{} of {} allocated", bytes(total.used), bytes(total.alloc)),
-                )?;
-                if total.used > 0 {
-                    let part = |name: &str, p: &gozler_core::proto::MemPair| {
-                        format!("{name} {}", bytes(p.used))
-                    };
-                    detail(
-                        out,
-                        "",
-                        &format!(
-                            "{}, {}, {}",
-                            part("entries", &m.entries),
-                            part("names", &m.arena_raw),
-                            part("folded names", &m.arena_folded)
-                        ),
-                    )?;
-                    detail(
-                        out,
-                        "",
-                        &format!(
-                            "{} ({}), {}, {}",
-                            part("file IDs", &m.frn_map),
-                            m.frn_map_kind,
-                            part("name tables", &m.name_tables),
-                            part("folders", &m.dir_children)
-                        ),
-                    )?;
-                }
-            }
-            // The drift counters are the only outward sign that the index and
-            // the volume have diverged, so each shows whenever it is not zero.
-            if v.link_reconciles_dropped > 0 {
-                detail(
-                    out,
-                    "Hard links",
-                    &format!(
-                        "{} not reconciled; some names may be stale",
-                        plural(v.link_reconciles_dropped, "change", "changes")
-                    ),
-                )?;
-            }
-            let drift: Vec<String> = [
-                (v.stale_slots, "stale slot", "stale slots"),
-                (v.delete_of_unknown, "unknown delete", "unknown deletes"),
-                (v.placeholders_created, "placeholder", "placeholders"),
-            ]
-            .into_iter()
-            .filter(|&(n, _, _)| n > 0)
-            .map(|(n, one, many)| plural(n, one, many))
-            .collect();
-            if !drift.is_empty() {
-                detail(out, "Drift", &drift.join(", "))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// One labelled line under a volume in the `--status` report.
-    fn detail(out: &mut impl Write, label: &str, value: &str) -> std::io::Result<()> {
-        writeln!(out, "  {label:<14}{value}")
-    }
-
-    /// `n` and its noun, with thousands grouped: `1 entry`, `2,004,613 entries`.
-    fn plural(n: u64, one: &str, many: &str) -> String {
-        format!("{} {}", grouped(n), if n == 1 { one } else { many })
-    }
-
-    /// A byte count in the largest decimal unit that keeps it at least 1:
-    /// `950 B`, `4.2 KB`, `192.0 MB`, `1.3 GB`.
-    pub(crate) fn bytes(n: u64) -> String {
-        match n {
-            0..1_000 => format!("{n} B"),
-            1_000..1_000_000 => format!("{:.1} KB", n as f64 / 1e3),
-            1_000_000..1_000_000_000 => format!("{:.1} MB", n as f64 / 1e6),
-            _ => format!("{:.1} GB", n as f64 / 1e9),
-        }
-    }
-
-    #[cfg(test)]
-    mod corpus;
 
     #[cfg(test)]
     mod tests {

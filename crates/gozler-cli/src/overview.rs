@@ -4,11 +4,11 @@
 //! without reading the others.
 
 use gozler_core::escompat::version;
+use gozler_core::output::bytes;
 use gozler_core::output::style::{ColorToken, paint};
 use gozler_core::output::table::grouped;
 
 use crate::failure::{problem, repair_lines, state};
-use crate::win::bytes;
 use gozler_client::NotRunning;
 
 /// What gozlerd reports about the index.

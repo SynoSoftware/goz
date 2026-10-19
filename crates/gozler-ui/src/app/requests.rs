@@ -2,13 +2,24 @@
 //! its own connection and cancel token, and one channel for the replies
 //! (design rules 3 to 5).
 
-use crate::core::fetch::{Ask, Chunk, ChunkAsk, DaemonFailure, Fetch, Fetched, Outcome, Purpose};
+use crate::core::fetch::{
+    Ask, Chunk, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Outcome, Purpose, SelectionAsk,
+    SelectionRows, WriteFailure,
+};
 use crate::win::wake::Waker;
 use gozler_client::{CancelToken, Client, ClientError};
-use gozler_core::proto::PIPE_NAME;
+use gozler_core::output::ResultWriter;
+use gozler_core::proto::{PIPE_NAME, QueryResults};
 use std::cell::RefCell;
+use std::fs::File;
+use std::io::{self, BufWriter};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+/// How often an export reports the rows it has written, which status part
+/// 3 shows (design: Export).
+const EXPORT_PROGRESS: Duration = Duration::from_millis(500);
 
 struct Running {
     cancel: CancelToken,
@@ -47,7 +58,7 @@ impl Requests {
             let (cancel, sender, waker) = (cancel.clone(), self.sender.clone(), self.waker.clone());
             std::thread::spawn(move || {
                 let generation = fetch.generation;
-                if let Some(outcome) = run(fetch.ask, cancel) {
+                let reply = |outcome: Outcome| {
                     // The window drops the receiver only after joining this
                     // thread, so the send cannot fail while it matters.
                     let _ = sender.send(Fetched {
@@ -56,6 +67,9 @@ impl Requests {
                         outcome,
                     });
                     waker.wake();
+                };
+                if let Some(outcome) = run(fetch.ask, &cancel, &reply) {
+                    reply(outcome);
                 }
             })
         };
@@ -65,6 +79,15 @@ impl Requests {
             self.cancelled.borrow_mut().push(old);
         }
         self.join_finished();
+    }
+
+    /// Cancels the live request of `purpose`, whose reply nobody reads.
+    pub(super) fn cancel(&self, purpose: Purpose) {
+        let old = self.live.borrow_mut()[slot(purpose)].take();
+        if let Some(old) = old {
+            old.cancel.cancel();
+            self.cancelled.borrow_mut().push(old);
+        }
     }
 
     /// Every reply that has arrived, without waiting.
@@ -107,37 +130,121 @@ fn slot(purpose: Purpose) -> usize {
         .expect("ALL holds every purpose")
 }
 
-/// Connects, asks and gathers the reply; `None` once cancelled, because a
+/// Connects, asks and gathers the reply, which `reply` takes before the end
+/// when a request answers more than once; `None` once cancelled, because a
 /// cancelled request's reply is never read.
-fn run(ask: Ask, cancel: CancelToken) -> Option<Outcome> {
-    let result = Client::connect(PIPE_NAME, true, cancel).and_then(|mut client| match ask {
-        Ask::Status => client.status().map(Outcome::Status),
-        Ask::Rows(ask) => rows(&mut client, &ask).map(Outcome::Rows),
-    });
+fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcome> {
+    let result =
+        Client::connect(PIPE_NAME, true, cancel.clone()).and_then(|mut client| match ask {
+            Ask::Status => client.status().map(Outcome::Status),
+            Ask::Rows(ask) => rows(&mut client, &ask).map(Outcome::Rows),
+            Ask::Selection(ask) => selection(&mut client, ask).map(Outcome::Selection),
+            Ask::Export(ask) => Ok(export(&mut client, &ask, cancel, reply)),
+        });
     match result {
         Ok(outcome) => Some(outcome),
         Err(ClientError::Cancelled) => None,
         Err(error) => Some(Outcome::Failed(failure(error))),
     }
+    .filter(|_| !cancel.is_cancelled())
 }
 
 /// Every page of one chunk.
 fn rows(client: &mut Client, ask: &ChunkAsk) -> Result<Chunk, ClientError> {
-    let mut chunk = Chunk {
-        start: ask.start,
-        rows: Vec::new(),
-        total: 0,
-        volumes_incomplete: false,
-        metadata_pending: false,
-    };
+    let mut all: Option<QueryResults> = None;
     client.query(ask.request(), |page| {
-        chunk.total = page.total;
-        chunk.volumes_incomplete |= page.volumes_incomplete;
-        chunk.metadata_pending |= page.metadata_pending;
-        chunk.rows.extend(page.items);
+        match &mut all {
+            None => all = Some(page),
+            Some(all) => all.add_page(page),
+        }
         Ok::<(), ClientError>(())
     })?;
-    Ok(chunk)
+    let all = all.ok_or_else(|| ClientError::Communication("the reply had no page".into()))?;
+    Ok(Chunk {
+        start: ask.start,
+        rows: all.items,
+        total: all.total,
+        volumes_incomplete: all.volumes_incomplete,
+        metadata_pending: all.metadata_pending,
+    })
+}
+
+/// The rows of the selection's span that it keeps; it drops every other
+/// row as its page arrives, so it holds at most the selection and the
+/// cache.
+fn selection(client: &mut Client, ask: SelectionAsk) -> Result<SelectionRows, ClientError> {
+    let mut rows = Vec::new();
+    let mut position = ask.span.start;
+    client.query(ask.span.request(), |page| {
+        for item in page.items {
+            if ask.keeps(position) {
+                rows.push((position, item));
+            }
+            position += 1;
+        }
+        Ok::<(), ClientError>(())
+    })?;
+    Ok(SelectionRows {
+        rows,
+        cached: ask.cached,
+    })
+}
+
+/// Why an export stopped before its end.
+enum ExportStop {
+    Client(ClientError),
+    Write(io::Error),
+}
+
+impl From<ClientError> for ExportStop {
+    fn from(error: ClientError) -> ExportStop {
+        ExportStop::Client(error)
+    }
+}
+
+/// Writes every page to the export's file as it arrives, and reports the
+/// rows written about twice a second. The file is created first, as
+/// `gozler -export-csv` creates it, and a cancelled or failed export
+/// deletes it (design: Export).
+fn export(
+    client: &mut Client,
+    ask: &ExportAsk,
+    cancel: &CancelToken,
+    reply: &dyn Fn(Outcome),
+) -> Outcome {
+    let stopped = match File::create(&ask.path) {
+        Err(error) => return Outcome::ExportFailed(WriteFailure::from(&error)),
+        Ok(file) => {
+            let mut writer = ResultWriter::new(
+                ask.format.clone(),
+                jiff::tz::TimeZone::system(),
+                BufWriter::new(file),
+            );
+            let mut written = 0;
+            let mut reported = Instant::now();
+            let pages = client.query(ask.request(), |page| {
+                written += page.items.len() as u64;
+                writer.page(page).map_err(ExportStop::Write)?;
+                if reported.elapsed() >= EXPORT_PROGRESS {
+                    reported = Instant::now();
+                    reply(Outcome::ExportProgress { rows: written });
+                }
+                Ok::<(), ExportStop>(())
+            });
+            match pages.and_then(|()| writer.finish().map_err(ExportStop::Write)) {
+                // Cancel export that comes after the last page still leaves
+                // no file, as the person asked.
+                Ok(()) if !cancel.is_cancelled() => return Outcome::Exported { rows: written },
+                Ok(()) => ExportStop::Client(ClientError::Cancelled),
+                Err(stop) => stop,
+            }
+        }
+    };
+    let _ = std::fs::remove_file(&ask.path);
+    match stopped {
+        ExportStop::Write(error) => Outcome::ExportFailed(WriteFailure::from(&error)),
+        ExportStop::Client(error) => Outcome::Failed(failure(error)),
+    }
 }
 
 /// The failure the window shows for the client's error (design: Shared

@@ -5,6 +5,7 @@
 
 use super::model::{Column, Model};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
+use super::selection::OPEN_LIMIT;
 use super::text::{LANGUAGES, LanguageChoice, Strings, menu_label};
 use gozler_core::types::{SortDir, SortKey};
 
@@ -68,47 +69,52 @@ impl CommandId {
     /// The command's row; a `match`, so every command has one.
     pub(crate) fn row(self) -> Command {
         use CommandId as C;
-        let (label, shortcuts, enabled, checked): (_, &'static [Shortcut], Enabled, Checked) =
+        let (label, shortcuts, enabled, checked): (_, &'static [Keystroke], Enabled, Checked) =
             match self {
-                C::Open => ("command.open", &[], never, None),
+                C::Open => ("command.open", &[], open, None),
                 C::OpenFileLocation => (
                     "command.open_file_location",
-                    const { &[Shortcut::ctrl(Key::Enter)] },
-                    never,
+                    const { &[Keystroke::ctrl(Key::Enter)] },
+                    open,
                     None,
                 ),
                 C::Properties => (
                     "command.properties",
-                    const { &[Shortcut::alt(Key::Enter)] },
-                    never,
+                    const { &[Keystroke::alt(Key::Enter)] },
+                    one_file,
                     None,
                 ),
-                C::ExportResults => ("command.export_results", &[], never, None),
-                C::CancelExport => ("command.cancel_export", &[], never, None),
+                C::ExportResults => (
+                    "command.export_results",
+                    &[],
+                    |s| s.model.can_export(),
+                    None,
+                ),
+                C::CancelExport => ("command.cancel_export", &[], |s| s.model.exporting(), None),
                 C::Settings => (
                     "command.settings",
-                    const { &[Shortcut::ctrl(Key::Comma)] },
+                    const { &[Keystroke::ctrl(Key::Comma)] },
                     never,
                     None,
                 ),
                 C::Exit => ("command.exit", &[], always, None),
                 C::Copy => (
                     "command.copy",
-                    const { &[Shortcut::ctrl(Key::Letter(b'C'))] },
-                    search_text_selected,
+                    const { &[Keystroke::ctrl(Key::Letter(b'C'))] },
+                    copy,
                     None,
                 ),
                 C::CopyAsPath => (
                     "command.copy_as_path",
-                    const { &[Shortcut::ctrl_shift(Key::Letter(b'C'))] },
-                    never,
+                    const { &[Keystroke::ctrl_shift(Key::Letter(b'C'))] },
+                    files,
                     None,
                 ),
-                C::CopyName => ("command.copy_name", &[], never, None),
+                C::CopyName => ("command.copy_name", &[], files, None),
                 C::SelectAll => (
                     "command.select_all",
-                    const { &[Shortcut::ctrl(Key::Letter(b'A'))] },
-                    search_box_focused,
+                    const { &[Keystroke::ctrl(Key::Letter(b'A'))] },
+                    always,
                     None,
                 ),
                 C::SearchInThisFolder => ("command.search_in_this_folder", &[], never, None),
@@ -128,7 +134,7 @@ impl CommandId {
                 C::Language => ("menu.language", &[], never, None),
                 C::Refresh => (
                     "command.refresh",
-                    const { &[Shortcut::plain(Key::Function(5))] },
+                    const { &[Keystroke::plain(Key::Function(5))] },
                     searched,
                     None,
                 ),
@@ -136,8 +142,8 @@ impl CommandId {
                     "command.find",
                     const {
                         &[
-                            Shortcut::ctrl(Key::Letter(b'F')),
-                            Shortcut::ctrl(Key::Letter(b'E')),
+                            Keystroke::ctrl(Key::Letter(b'F')),
+                            Keystroke::ctrl(Key::Letter(b'E')),
                         ]
                     },
                     always,
@@ -148,7 +154,7 @@ impl CommandId {
                 C::ClearFilters => ("command.clear_filters", &[], never, None),
                 C::SearchSyntax => (
                     "command.search_syntax",
-                    const { &[Shortcut::plain(Key::Function(1))] },
+                    const { &[Keystroke::plain(Key::Function(1))] },
                     always,
                     None,
                 ),
@@ -173,7 +179,7 @@ pub(crate) struct Command {
     /// The catalogue key of its menu label, with its access key.
     pub(crate) label: &'static str,
     /// The default shortcuts; the menus show the first.
-    pub(crate) shortcuts: &'static [Shortcut],
+    pub(crate) shortcuts: &'static [Keystroke],
     pub(crate) enabled: Enabled,
     /// `Some` for a command with a check mark.
     pub(crate) checked: Checked,
@@ -189,6 +195,7 @@ pub(crate) struct State<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
     SearchBox { text_selected: bool },
+    List,
     Other,
 }
 
@@ -207,21 +214,40 @@ fn searched(state: &State) -> bool {
     state.model.results.has_searched()
 }
 
-/// Copy and Select all act on the focused control (spec: C8, C11).
-fn search_box_focused(state: &State) -> bool {
-    matches!(state.focus, Focus::SearchBox { .. })
+/// The selected entries, once the selection is read (spec: The selection).
+fn files(state: &State) -> bool {
+    state.model.selected_files().is_some()
 }
 
-fn search_text_selected(state: &State) -> bool {
-    state.focus
-        == Focus::SearchBox {
-            text_selected: true,
-        }
+/// Open and Open file location (spec: C1, C2).
+fn open(state: &State) -> bool {
+    state
+        .model
+        .selected_files()
+        .is_some_and(|files| files.len() <= OPEN_LIMIT)
 }
 
-/// A key combination that runs a command.
+/// Properties shows one entry (spec: C3).
+fn one_file(state: &State) -> bool {
+    state
+        .model
+        .selected_files()
+        .is_some_and(|files| files.len() == 1)
+}
+
+/// Copy acts on the focused control (spec: C8).
+fn copy(state: &State) -> bool {
+    match state.focus {
+        Focus::SearchBox { text_selected } => text_selected,
+        Focus::List => files(state),
+        Focus::Other => false,
+    }
+}
+
+/// A pressed key combination: a command's shortcut, or a key the focused
+/// control gives a meaning (design rule 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Shortcut {
+pub(crate) struct Keystroke {
     pub(crate) ctrl: bool,
     pub(crate) alt: bool,
     pub(crate) shift: bool,
@@ -236,11 +262,13 @@ pub(crate) enum Key {
     Function(u8),
     Enter,
     Comma,
+    Down,
+    Escape,
 }
 
-impl Shortcut {
-    const fn plain(key: Key) -> Shortcut {
-        Shortcut {
+impl Keystroke {
+    pub(crate) const fn plain(key: Key) -> Keystroke {
+        Keystroke {
             ctrl: false,
             alt: false,
             shift: false,
@@ -248,25 +276,25 @@ impl Shortcut {
         }
     }
 
-    const fn ctrl(key: Key) -> Shortcut {
-        Shortcut {
+    const fn ctrl(key: Key) -> Keystroke {
+        Keystroke {
             ctrl: true,
-            ..Shortcut::plain(key)
+            ..Keystroke::plain(key)
         }
     }
 
-    const fn alt(key: Key) -> Shortcut {
-        Shortcut {
+    const fn alt(key: Key) -> Keystroke {
+        Keystroke {
             alt: true,
-            ..Shortcut::plain(key)
+            ..Keystroke::plain(key)
         }
     }
 
-    const fn ctrl_shift(key: Key) -> Shortcut {
-        Shortcut {
+    const fn ctrl_shift(key: Key) -> Keystroke {
+        Keystroke {
             ctrl: true,
             shift: true,
-            ..Shortcut::plain(key)
+            ..Keystroke::plain(key)
         }
     }
 
@@ -288,9 +316,54 @@ impl Shortcut {
             Key::Function(n) => format!("F{n}"),
             Key::Enter => strings.text("key.enter").to_owned(),
             Key::Comma => ",".to_owned(),
+            Key::Down => strings.text("key.down").to_owned(),
+            Key::Escape => strings.text("key.escape").to_owned(),
         });
         parts.join("+")
     }
+}
+
+/// What a key does in the focused control (design rule 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyAction {
+    Run(CommandId),
+    /// `Down` in the search box: the focus moves to the list's first row.
+    FocusList,
+    /// `Enter` in the search box: the search runs at once.
+    SearchNow,
+    /// `Esc` in the search box: the box is emptied.
+    ClearSearch,
+}
+
+/// The meaning `key` has in the focused control, which the window takes
+/// before `IsDialogMessageW` turns `Enter` and `Esc` into `IDOK` and
+/// `IDCANCEL`, and before the control itself sees the key. The message loop
+/// translates a command's shortcut first, so no shortcut reaches this table.
+pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
+    let table: &[(Keystroke, KeyAction)] = match focus {
+        Focus::SearchBox { .. } => {
+            const {
+                &[
+                    (Keystroke::plain(Key::Down), KeyAction::FocusList),
+                    (Keystroke::plain(Key::Enter), KeyAction::SearchNow),
+                    (Keystroke::plain(Key::Escape), KeyAction::ClearSearch),
+                ]
+            }
+        }
+        Focus::List => {
+            const {
+                &[(
+                    Keystroke::plain(Key::Enter),
+                    KeyAction::Run(CommandId::Open),
+                )]
+            }
+        }
+        Focus::Other => &[],
+    };
+    table
+        .iter()
+        .find(|(stroke, _)| *stroke == key)
+        .map(|(_, action)| *action)
 }
 
 /// One clickable menu item: a command, or one choice of a command that has
@@ -363,7 +436,7 @@ impl MenuItem {
     }
 
     /// The shortcut the menu shows after the label.
-    pub(crate) fn shortcut(self) -> Option<Shortcut> {
+    pub(crate) fn shortcut(self) -> Option<Keystroke> {
         match self {
             MenuItem::Run(command) => command.row().shortcuts.first().copied(),
             _ => None,
@@ -381,8 +454,11 @@ impl MenuItem {
     }
 
     pub(crate) fn enabled(self, state: &State) -> bool {
-        // Name cannot be hidden (spec: C15).
-        (self.command().row().enabled)(state) && self != MenuItem::Column(Column::Name)
+        let shown = match self {
+            MenuItem::Column(column) => column.can_hide(),
+            _ => true,
+        };
+        (self.command().row().enabled)(state) && shown
     }
 
     pub(crate) fn mark(self) -> Mark {
@@ -403,8 +479,8 @@ impl MenuItem {
         match self {
             MenuItem::Run(command) => command.row().checked.is_some_and(|checked| checked(state)),
             MenuItem::Column(column) => model.columns.contains(&column),
-            MenuItem::SortKey(key) => model.sort.key == key,
-            MenuItem::SortDirection(dir) => model.sort.dir == dir,
+            MenuItem::SortKey(key) => model.sort().key == key,
+            MenuItem::SortDirection(dir) => model.sort().dir == dir,
             MenuItem::Language(None) => model.settings.choices.language == LanguageChoice::Windows,
             MenuItem::Language(Some(language)) => matches!(
                 &model.settings.choices.language,
@@ -518,18 +594,46 @@ pub(crate) enum MenuNode {
     },
 }
 
-/// The header's context menu: View > Columns' items (spec: C15). A context
-/// menu shows no shortcuts, and these have none.
-pub(crate) fn header_menu() -> Vec<MenuItem> {
-    Column::ALL.into_iter().map(MenuItem::Column).collect()
+/// The header's context menu: View > Columns' items (spec: C15).
+pub(crate) fn header_menu() -> Vec<Vec<MenuItem>> {
+    vec![Column::ALL.into_iter().map(MenuItem::Column).collect()]
 }
 
-/// `items` as a popup menu in the language of `strings`.
-pub(crate) fn render_popup(items: &[MenuItem], strings: &Strings) -> Vec<MenuNode> {
-    items.iter().map(|item| node(item, strings)).collect()
+/// A row's context menu (spec: Menus). Its first item, Open, is the
+/// default, which a double-click and `Enter` also run.
+pub(crate) fn row_menu() -> Vec<Vec<MenuItem>> {
+    use CommandId as C;
+    let run = |commands: &[CommandId]| commands.iter().map(|c| MenuItem::Run(*c)).collect();
+    vec![
+        run(&[C::Open, C::OpenFileLocation]),
+        run(&[C::Copy, C::CopyAsPath, C::CopyName]),
+        run(&[C::SearchInThisFolder]),
+        run(&[C::Properties]),
+    ]
 }
 
-fn node(item: &MenuItem, strings: &Strings) -> MenuNode {
+/// The item that File shows in Export results…' place: Cancel export while
+/// an export runs (spec: Menus).
+pub(crate) fn export_slot(model: &Model) -> MenuItem {
+    MenuItem::Run(if model.exporting() {
+        CommandId::CancelExport
+    } else {
+        CommandId::ExportResults
+    })
+}
+
+/// `groups` as a context menu in the language of `strings`. A context menu
+/// shows no shortcuts, as File Explorer's does (spec: Menus).
+pub(crate) fn render_popup(groups: &[Vec<MenuItem>], strings: &Strings) -> Vec<MenuNode> {
+    separated(groups, |item| MenuNode::Item {
+        id: item.id(),
+        text: item.label(strings).to_owned(),
+        mark: item.mark(),
+    })
+}
+
+/// A menu bar item, with its shortcut after its label.
+pub(crate) fn node(item: &MenuItem, strings: &Strings) -> MenuNode {
     MenuNode::Item {
         id: item.id(),
         text: menu_label(
@@ -584,7 +688,7 @@ pub(crate) fn items(menus: &[Menu]) -> Vec<MenuItem> {
 }
 
 /// Every command shortcut, with the item it runs.
-pub(crate) fn accelerators() -> Vec<(Shortcut, MenuItem)> {
+pub(crate) fn accelerators() -> Vec<(Keystroke, MenuItem)> {
     CommandId::ALL
         .iter()
         .flat_map(|c| c.row().shortcuts.iter().map(|s| (*s, MenuItem::Run(*c))))
@@ -592,8 +696,14 @@ pub(crate) fn accelerators() -> Vec<(Shortcut, MenuItem)> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::single_range_in_vec_init,
+    reason = "a selection is a list of row ranges"
+)]
 mod tests {
     use super::*;
+    use crate::core::model::ExportFormat;
+    use crate::core::model::tests::{rows, search, showing};
     use crate::core::results::Fix;
     use crate::core::text::{Strings, access_key};
     use gozler_client::Repair;
@@ -659,12 +769,16 @@ mod tests {
                 &mut bar_keys,
             );
             for menu in &bar {
-                // A submenu's label shares its menu with the items beside it.
+                // A submenu's label shares its menu with the items beside it,
+                // and Cancel export shares File with them in Export
+                // results…' place.
                 let labels = menu.groups.iter().flatten().map(|entry| match entry {
                     Entry::Item(item) => item.label(&strings),
                     Entry::Submenu { label, .. } => strings.text(label),
                 });
-                assert_unique(language.tag, labels, &mut HashSet::new());
+                let cancel = (menu.label == "menu.file")
+                    .then(|| MenuItem::Run(CommandId::CancelExport).label(&strings));
+                assert_unique(language.tag, labels.chain(cancel), &mut HashSet::new());
                 for entry in menu.groups.iter().flatten() {
                     if let Entry::Submenu { groups, .. } = entry {
                         let labels = groups.iter().flatten().map(|item| item.label(&strings));
@@ -672,6 +786,9 @@ mod tests {
                     }
                 }
             }
+            let row = row_menu().into_iter().flatten();
+            let labels = row.map(|item| item.label(&strings));
+            assert_unique(language.tag, labels, &mut HashSet::new());
             let window = ["match.label", "match.case", "match.path"].map(|key| strings.text(key));
             assert_unique(language.tag, window, &mut bar_keys);
             // The list shows one message, with at most one of these buttons.
@@ -689,5 +806,63 @@ mod tests {
                 assert_unique(language.tag, button, &mut bar_keys.clone());
             }
         }
+    }
+
+    fn enabled(model: &Model, command: CommandId) -> bool {
+        MenuItem::Run(command).enabled(&State {
+            model,
+            focus: Focus::List,
+        })
+    }
+
+    /// File Explorer asks before it opens more than 15 items, and a command
+    /// that acts on rows not read yet would act on files nobody chose
+    /// (spec: C1, C2, C3, S12).
+    #[test]
+    fn the_selection_commands_follow_the_number_of_files_read() {
+        let mut model = showing(50_000);
+        for (selected, opens, shows_properties) in
+            [(1, true, true), (15, true, false), (16, false, false)]
+        {
+            model.set_selection(vec![0..selected]);
+            assert_eq!(enabled(&model, CommandId::Open), opens, "{selected} rows");
+            assert_eq!(enabled(&model, CommandId::OpenFileLocation), opens);
+            assert_eq!(enabled(&model, CommandId::Properties), shows_properties);
+            assert!(enabled(&model, CommandId::CopyAsPath));
+        }
+        model.set_selection(vec![0..1, 40_000..40_001]);
+        for command in [CommandId::Open, CommandId::Copy, CommandId::Properties] {
+            assert!(
+                !enabled(&model, command),
+                "{command:?} while the selection is read"
+            );
+        }
+    }
+
+    /// A second export would write the same file twice at once.
+    #[test]
+    fn export_results_is_disabled_while_an_export_runs() {
+        let mut model = showing(10);
+        assert!(enabled(&model, CommandId::ExportResults));
+        let order = model.column_order();
+        model.start_export(r"D:\results.csv".into(), ExportFormat::Csv, &order);
+        assert!(!enabled(&model, CommandId::ExportResults));
+        assert!(enabled(&model, CommandId::CancelExport));
+        assert_eq!(export_slot(&model), MenuItem::Run(CommandId::CancelExport));
+    }
+
+    /// T11: a context menu stays open while new results arrive, and its
+    /// command must not act on rows of the new search that nobody selected.
+    #[test]
+    fn t11_a_command_chosen_after_new_rows_cleared_the_selection_does_nothing() {
+        let mut model = showing(10);
+        model.set_selection(vec![2..3]);
+        assert!(
+            enabled(&model, CommandId::Open),
+            "the menu opens with it on"
+        );
+        let fetch = search(&mut model, "repo");
+        model.accept(rows(&fetch, 3));
+        assert!(!enabled(&model, CommandId::Open));
     }
 }

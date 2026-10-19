@@ -4,7 +4,9 @@
 //! The trampoline decodes every message whose parameters carry a pointer, so
 //! no handler outside this module dereferences one.
 
+use super::notify::{Command, Notification};
 use super::{Hwnd, from_rect, to_rect, wide};
+use crate::core::commands::{Key, Keystroke};
 use crate::core::layout::{Dpi, Px, Rect, Size};
 use crate::core::settings::Placement;
 use std::rc::Rc;
@@ -14,6 +16,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_F12, VK_MENU, VK_OEM_COMMA,
+    VK_RETURN, VK_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON, IDC_ARROW, IMAGE_ICON,
@@ -41,29 +47,29 @@ pub(crate) enum Message<'a> {
         suggested: Rect,
     },
     GetMinMaxInfo(MinMaxInfo<'a>),
-    /// A menu item, an accelerator or a control's notification.
-    Command {
-        id: u16,
-        /// The control's notification code, such as `EN_CHANGE`.
-        notification: u16,
-        from_control: bool,
-    },
-    Notify(super::notify::Notify<'a>),
+    Command(Command),
+    Notify(Notification<'a>),
     Timer(usize),
     /// A request thread has put a reply on the channel
     /// ([`super::wake::Waker`]).
     Wake,
+    /// What the window posted itself with [`DEFERRED`], to act once after
+    /// the messages of one user action.
+    Deferred,
     /// A right-click, or the Menu key or `Shift+F10`, which give no point.
     ContextMenu {
+        /// The window clicked, or the focused one for a key.
+        from: Hwnd,
         /// In screen coordinates.
         point: Option<(i32, i32)>,
     },
     /// A key that [`run_message_loop`] offers the window before
     /// `IsDialogMessageW`, sent to the focused control `target`. A handler
     /// that takes it answers 1, and no `WM_CHAR` follows (design rule 8).
+    /// A key that no [`Key`] names arrives as [`Message::Other`].
     KeyDown {
         target: Hwnd,
-        key: u16,
+        keystroke: Keystroke,
     },
     InitMenuPopup,
     CtlColorStatic(super::gdi::StaticColors),
@@ -275,6 +281,9 @@ pub(crate) fn window_size(hwnd: Hwnd, client: Size, dpi: Dpi) -> Size {
 /// ([`Message::KeyDown`]).
 const KEY_DOWN: u32 = super::wake::WAKE + 1;
 
+/// The private message a window posts itself ([`Message::Deferred`]).
+pub(crate) const DEFERRED: u32 = super::wake::WAKE + 2;
+
 /// Runs the thread's message loop until `WM_QUIT`. The accelerators come
 /// first, then the keys the main window takes for its focused control, then
 /// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
@@ -390,17 +399,15 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
             Message::GetMinMaxInfo(MinMaxInfo(info))
         }
-        WM_COMMAND => Message::Command {
-            id: low(wparam.0),
-            notification: high(wparam.0),
-            from_control: lparam.0 != 0,
-        },
+        WM_COMMAND => Message::Command(super::notify::command(wparam, lparam)),
         // SAFETY: WM_NOTIFY's lparam is the NMHDR of the notification, valid
         // for the length of the message.
-        WM_NOTIFY => Message::Notify(unsafe { super::notify::decode(lparam) }),
+        WM_NOTIFY => Message::Notify(unsafe { Notification::new(lparam) }),
         WM_TIMER => Message::Timer(wparam.0),
         super::wake::WAKE => Message::Wake,
+        DEFERRED => Message::Deferred,
         WM_CONTEXTMENU => Message::ContextMenu {
+            from: Hwnd(HWND(wparam.0 as *mut _)),
             // -1, -1 is the keyboard's; the coordinates are signed words.
             point: (lparam.0 != -1).then(|| {
                 (
@@ -409,9 +416,12 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                 )
             }),
         },
-        KEY_DOWN => Message::KeyDown {
-            target: Hwnd(HWND(lparam.0 as *mut _)),
-            key: low(wparam.0),
+        KEY_DOWN => match keystroke(VIRTUAL_KEY(low(wparam.0))) {
+            Some(keystroke) => Message::KeyDown {
+                target: Hwnd(HWND(lparam.0 as *mut _)),
+                keystroke,
+            },
+            None => Message::Other(msg),
         },
         WM_INITMENUPOPUP => Message::InitMenuPopup,
         WM_CTLCOLORSTATIC => Message::CtlColorStatic(super::gdi::StaticColors::from_wparam(wparam)),
@@ -430,6 +440,32 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_DESTROY => Message::Destroy,
         _ => Message::Other(msg),
     }
+}
+
+/// The key `key` with the modifiers held while its message was read, if a
+/// shortcut or a control's key can be it.
+fn keystroke(key: VIRTUAL_KEY) -> Option<Keystroke> {
+    let key = match key {
+        // A capital letter's virtual-key code is its ASCII code.
+        VIRTUAL_KEY(code @ 0x41..=0x5A) => Key::Letter(code as u8),
+        VIRTUAL_KEY(code) if (VK_F1.0..=VK_F12.0).contains(&code) => {
+            Key::Function((code - VK_F1.0 + 1) as u8)
+        }
+        VK_RETURN => Key::Enter,
+        VK_OEM_COMMA => Key::Comma,
+        VK_DOWN => Key::Down,
+        VK_ESCAPE => Key::Escape,
+        _ => return None,
+    };
+    // SAFETY: plain values; the high bit of the state is set while the key
+    // is down.
+    let held = |modifier: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(modifier.0)) } < 0;
+    Some(Keystroke {
+        ctrl: held(VK_CONTROL),
+        alt: held(VK_MENU),
+        shift: held(VK_SHIFT),
+        key,
+    })
 }
 
 impl Hwnd {

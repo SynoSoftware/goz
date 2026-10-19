@@ -1,7 +1,8 @@
 //! The golden corpus for output: command lines run through `parse_argv` and
 //! [`ResultWriter`] over one fixed result set, with the exact text gozler
-//! writes to stdout or to the `-export-csv` file. Dates render in UTC, so
-//! every row passes in any time zone.
+//! writes to stdout or to the `-export-csv` file, and the window's Export
+//! writes to its file. Dates render in UTC, so every row passes in any time
+//! zone.
 //!
 //! A row records today's behavior, right or wrong. A row that a fix changed
 //! on purpose carries a comment with its bug number from the "Golden corpus"
@@ -9,11 +10,11 @@
 //! are in the daemon's corpus, in `gozler-daemon`'s `server` tests.
 
 use super::ResultWriter;
-use gozler_core::attributes::Attributes;
-use gozler_core::escompat::{Command, parse_argv};
-use gozler_core::output::unix_ms_to_filetime;
-use gozler_core::proto::{QueryResults, ResultItem};
-use gozler_core::types::EsColumn;
+use crate::attributes::Attributes;
+use crate::escompat::{Command, parse_argv};
+use crate::output::unix_ms_to_filetime;
+use crate::proto::{QueryResults, ResultItem};
+use crate::types::EsColumn;
 
 /// 2026-10-17T12:34:56 UTC.
 const MODIFIED_UNIX_MS: i64 = 1_792_240_496_000;
@@ -319,7 +320,7 @@ fn print(args: &[&str], pages: Vec<QueryResults>) -> String {
         panic!("{args:?}: every output row is a search");
     };
     let mut out = Vec::new();
-    let mut writer = ResultWriter::new(&plan, jiff::tz::TimeZone::UTC, &mut out);
+    let mut writer = ResultWriter::new(plan.result_format(), jiff::tz::TimeZone::UTC, &mut out);
     for mut page in pages {
         if !plan.columns.contains(&EsColumn::Attributes) {
             page.items

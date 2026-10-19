@@ -99,24 +99,15 @@ mod ids {
         } in &kinds
         {
             let variants: Vec<String> = ids.iter().map(|(name, _)| camel_case(name)).collect();
+            // resources/ids.h also names IDs that only the .rc file uses.
             let _ = write!(
                 code,
-                "\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[repr(u16)]\npub(crate) enum {kind} {{\n"
+                "\n#[allow(dead_code)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n#[repr(u16)]\npub(crate) enum {kind} {{\n"
             );
             for (variant, (_, value)) in variants.iter().zip(ids) {
                 let _ = writeln!(code, "    {variant} = {value},");
             }
             let _ = write!(code, "}}\n\nimpl {kind} {{\n");
-            // Only a control's ID arrives in a message and is looked up.
-            if *kind == "ControlId" {
-                let all: Vec<String> = variants.iter().map(|v| format!("{kind}::{v}")).collect();
-                let _ = write!(
-                    code,
-                    "    pub(crate) const ALL: [{kind}; {}] = [{}];\n\n",
-                    all.len(),
-                    all.join(", ")
-                );
-            }
             let _ = write!(
                 code,
                 "    pub(crate) fn id(self) -> u16 {{\n        self as u16\n    }}\n}}\n"

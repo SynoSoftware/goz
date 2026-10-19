@@ -39,7 +39,7 @@
 
 use super::ExitCode;
 use crate::attributes::Attributes;
-use crate::output::{Format, TableOptions};
+use crate::output::{Format, ResultFormat, TableOptions};
 use crate::types::{EsColumn, SortDir, SortKey, SortSpec};
 use std::borrow::Cow;
 use std::time::Duration;
@@ -194,6 +194,16 @@ impl EsPlan {
             bom: self.bom && self.export.is_some(),
             header: self.header,
             double_quote: self.double_quote,
+        }
+    }
+
+    /// How the results are written: `--json` prints JSON, except into an
+    /// export file, which always holds the export's format.
+    pub fn result_format(&self) -> ResultFormat {
+        if self.json && self.export.is_none() {
+            ResultFormat::Json
+        } else {
+            ResultFormat::Table(self.table_options())
         }
     }
 }

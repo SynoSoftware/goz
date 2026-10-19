@@ -1,13 +1,18 @@
-//! COM, the known folders and the shell's open and run-as-administrator
-//! verbs.
+//! COM, the known folders, the save dialog and the shell's verbs: open,
+//! show in File Explorer, Properties and run as administrator.
 
 use super::Hwnd;
 use std::path::PathBuf;
 use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
+    CoInitializeEx, CoTaskMemFree,
 };
+use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
-    FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
+    FOLDERID_LocalAppData, FOS_FORCEFILESYSTEM, FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT,
+    FileSaveDialog, IFileSaveDialog, ILCreateFromPathW, ILFindLastID, ILFree, KF_FLAG_DEFAULT,
+    SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties, SHOpenFolderAndSelectItems,
+    SIGDN_FILESYSPATH, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 use windows::core::{HSTRING, PCWSTR, w};
@@ -46,6 +51,127 @@ pub(crate) fn open(target: &str) {
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
+    }
+}
+
+/// Opens the file or folder `path`, UTF-16 without a NUL, with its default
+/// command, as File Explorer's double-click does.
+pub(crate) fn open_entry(owner: Hwnd, path: &[u16]) {
+    // SAFETY: the path outlives the call; a null verb is the default one.
+    unsafe {
+        ShellExecuteW(
+            Some(owner.0),
+            PCWSTR::null(),
+            &HSTRING::from_wide(path),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Opens the folder `folder` in File Explorer with `entries`, which are in
+/// it, selected. Each path is UTF-16 without a NUL.
+pub(crate) fn show_in_folder(folder: &[u16], entries: &[Vec<u16>]) {
+    let item_list = |path: &[u16]| {
+        // SAFETY: the path outlives the call; null is a path the shell
+        // cannot name.
+        let list = unsafe { ILCreateFromPathW(&HSTRING::from_wide(path)) };
+        (!list.is_null()).then_some(list)
+    };
+    let Some(folder) = item_list(folder) else {
+        return;
+    };
+    let entries: Vec<*mut ITEMIDLIST> = entries.iter().filter_map(|e| item_list(e)).collect();
+    // SAFETY: each list is this function's own until it is freed below, and
+    // the last item of an entry's list names it inside its folder.
+    unsafe {
+        let children: Vec<*const ITEMIDLIST> = entries
+            .iter()
+            .map(|list| ILFindLastID(*list).cast_const())
+            .collect();
+        let _ = SHOpenFolderAndSelectItems(folder, Some(children.as_slice()), 0);
+        for list in entries {
+            ILFree(Some(list));
+        }
+        ILFree(Some(folder));
+    }
+}
+
+/// Shows the shell's Properties dialog of `path`, UTF-16 without a NUL.
+/// The dialog runs in its own window, so the call returns at once.
+pub(crate) fn properties(owner: Hwnd, path: &[u16]) {
+    // SAFETY: the path outlives the call; no page is named.
+    unsafe {
+        let _ = SHObjectProperties(
+            Some(owner.0),
+            SHOP_FILEPATH,
+            &HSTRING::from_wide(path),
+            PCWSTR::null(),
+        );
+    }
+}
+
+/// One file type of the save dialog: its name and its extension.
+pub(crate) struct FileType<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) extension: &'a str,
+}
+
+/// Shows the Windows save dialog, which asks before it replaces a file, and
+/// returns the chosen file and the index of the type it showed, or `None`
+/// when the person cancels. It runs its own message loop, so the caller
+/// holds no borrow across it (design rule 1).
+pub(crate) fn save_dialog(
+    owner: Hwnd,
+    title: &str,
+    file_name: &str,
+    types: &[FileType],
+) -> Option<(PathBuf, usize)> {
+    let names: Vec<HSTRING> = types.iter().map(|t| HSTRING::from(t.name)).collect();
+    let specs: Vec<HSTRING> = types
+        .iter()
+        .map(|t| HSTRING::from(format!("*.{}", t.extension)))
+        .collect();
+    let filters: Vec<COMDLG_FILTERSPEC> = names
+        .iter()
+        .zip(&specs)
+        .map(|(name, spec)| COMDLG_FILTERSPEC {
+            pszName: PCWSTR(name.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
+        })
+        .collect();
+    // SAFETY: every string outlives the dialog, which copies them; the
+    // chosen path is copied, then freed as the call requires.
+    unsafe {
+        let dialog: IFileSaveDialog =
+            CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        // The export creates the file itself, and only a file on disk can
+        // be written.
+        dialog
+            .SetOptions(options | FOS_OVERWRITEPROMPT | FOS_NOTESTFILECREATE | FOS_FORCEFILESYSTEM)
+            .ok()?;
+        dialog.SetFileTypes(&filters).ok()?;
+        dialog.SetFileTypeIndex(1).ok()?;
+        if let Some(first) = types.first() {
+            dialog
+                .SetDefaultExtension(&HSTRING::from(first.extension))
+                .ok()?;
+        }
+        dialog.SetTitle(&HSTRING::from(title)).ok()?;
+        dialog.SetFileName(&HSTRING::from(file_name)).ok()?;
+        dialog.Show(Some(owner.0)).ok()?;
+        let index = dialog.GetFileTypeIndex().ok()?;
+        let path = dialog
+            .GetResult()
+            .ok()?
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .ok()?;
+        let text = path.to_string();
+        CoTaskMemFree(Some(path.0.cast_const().cast()));
+        let index = usize::try_from(index).ok()?.checked_sub(1)?;
+        Some((PathBuf::from(text.ok()?), index))
     }
 }
 

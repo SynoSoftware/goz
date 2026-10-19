@@ -4,9 +4,13 @@
 //! [`Fetch`] on its own thread and answers with a [`Fetched`].
 
 use gozler_client::NotRunning;
+use gozler_core::output::ResultFormat;
 use gozler_core::proto::{DaemonStatus, ResultItem, Returns, Rows, SearchRequest};
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
+use std::io;
+use std::ops::Range;
+use std::path::PathBuf;
 
 /// What a request is for. At most one request of each purpose is live, so
 /// starting one cancels the live one of its purpose and no other (design
@@ -16,11 +20,19 @@ pub(crate) enum Purpose {
     /// The list's rows: a new search's first chunk, or a chunk of the shown
     /// search.
     Results,
+    /// The selected rows that the cache lacks.
+    Selection,
     Status,
+    Export,
 }
 
 impl Purpose {
-    pub(crate) const ALL: [Purpose; 2] = [Purpose::Results, Purpose::Status];
+    pub(crate) const ALL: [Purpose; 4] = [
+        Purpose::Results,
+        Purpose::Selection,
+        Purpose::Status,
+        Purpose::Export,
+    ];
 }
 
 /// Which request a reply answers; a newer request has a larger number, and
@@ -39,6 +51,8 @@ pub(crate) struct Fetch {
 pub(crate) enum Ask {
     /// One chunk of rows, gathered from all its pages.
     Rows(ChunkAsk),
+    Selection(SelectionAsk),
+    Export(ExportAsk),
     Status,
 }
 
@@ -68,16 +82,70 @@ impl ChunkAsk {
     }
 }
 
+/// The selected rows: one request for `span`, from the first selected
+/// position to the last, widened to the cached chunks it overlaps. The
+/// thread keeps only the rows at `positions` and inside `cached`, so a
+/// Ctrl+click on row 0 and on row 99,999 carries two files and at most the
+/// cache, not 100,000 rows (design: The selection).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SelectionAsk {
+    pub(crate) span: ChunkAsk,
+    /// Sorted and apart, as the list gives them.
+    pub(crate) positions: Vec<Range<u64>>,
+    /// The cached chunks inside `span`, sorted.
+    pub(crate) cached: Vec<Range<u64>>,
+}
+
+impl SelectionAsk {
+    /// Whether the row at `position` is one the reply carries.
+    pub(crate) fn keeps(&self, position: u64) -> bool {
+        let inside = |ranges: &[Range<u64>]| {
+            let after = ranges.partition_point(|r| r.end <= position);
+            ranges.get(after).is_some_and(|r| r.contains(&position))
+        };
+        inside(&self.positions) || inside(&self.cached)
+    }
+}
+
+/// Every match of `search` in the order `sort`, written to `path` as
+/// `format` says, page by page as `gozler -export-csv` writes it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ExportAsk {
+    pub(crate) search: Search,
+    pub(crate) sort: SortSpec,
+    pub(crate) path: PathBuf,
+    pub(crate) format: ResultFormat,
+    /// Whether the file has an Attributes column, as `gozler` asks only
+    /// then.
+    pub(crate) want_attributes: bool,
+}
+
+impl ExportAsk {
+    pub(crate) fn request(&self) -> SearchRequest {
+        self.search.clone().request(Returns::Rows(Rows {
+            sort: self.sort,
+            offset: 0,
+            limit: None,
+            want_size: true,
+            want_mtime: true,
+            want_attributes: self.want_attributes,
+        }))
+    }
+}
+
 impl Fetch {
     pub(crate) fn purpose(&self) -> Purpose {
         match self.ask {
             Ask::Rows(_) => Purpose::Results,
+            Ask::Selection(_) => Purpose::Selection,
+            Ask::Export(_) => Purpose::Export,
             Ask::Status => Purpose::Status,
         }
     }
 }
 
-/// A reply to a [`Fetch`].
+/// A reply to a [`Fetch`]. An export sends several: its progress, then its
+/// end.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Fetched {
     pub(crate) purpose: Purpose,
@@ -88,8 +156,45 @@ pub(crate) struct Fetched {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Outcome {
     Rows(Chunk),
+    Selection(SelectionRows),
     Status(DaemonStatus),
+    /// The rows an export has written so far.
+    ExportProgress {
+        rows: u64,
+    },
+    Exported {
+        rows: u64,
+    },
+    /// Creating or writing the export's file failed; the partial file is
+    /// deleted.
+    ExportFailed(WriteFailure),
     Failed(DaemonFailure),
+}
+
+/// The rows a [`SelectionAsk`] keeps, read at one moment.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SelectionRows {
+    /// By position, in position order.
+    pub(crate) rows: Vec<(u64, ResultItem)>,
+    /// The ask's [`SelectionAsk::cached`], whose chunks these rows replace.
+    pub(crate) cached: Vec<Range<u64>>,
+}
+
+/// Why a file could not be written, as Windows said it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WriteFailure {
+    pub(crate) kind: io::ErrorKind,
+    /// The Windows error code, when Windows gave one.
+    pub(crate) os_code: Option<i32>,
+}
+
+impl From<&io::Error> for WriteFailure {
+    fn from(error: &io::Error) -> WriteFailure {
+        WriteFailure {
+            kind: error.kind(),
+            os_code: error.raw_os_error(),
+        }
+    }
 }
 
 /// The rows of one chunk, from the position `start`, and what every page of

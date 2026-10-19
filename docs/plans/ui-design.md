@@ -119,7 +119,9 @@ them.
    that can send or dispatch a message: a call that takes a window handle, a
    COM or shell call, and a modal loop. Formatting a date or copying text into
    a buffer is not one. **Rule:** a handler changes the model in a statement
-   of its own and makes Win32 calls only after that borrow ends. The model
+   of its own and makes Win32 calls only after that borrow ends. The model's
+   fields are private to the core, so `app` changes a fact only through a
+   `Model` method, for a reply and for the person's change alike. The method
    returns what changed, and the handler then updates the controls. In `app`,
    a borrow is bound with `let` only in a block that makes no Win32 call; the
    `LVN_GETDISPINFO` handler is that block, because it formats a row and
@@ -203,16 +205,16 @@ them.
      send it `WM_COPY` and `EM_SETSEL`. The Keyboard page refuses every key
      that a focused control uses (spec: The Keyboard page), so no shortcut
      can take one.
-   - The main window handles `IDOK` and `IDCANCEL` by the focused control:
-     `Enter` in the list opens the selection, `Enter` in the search box runs
-     the search, and `Esc` clears the search box.
-   - The message loop takes a few keys from `WM_KEYDOWN` before
-     `IsDialogMessageW`, by the focused control, so no `WM_CHAR` follows
-     them. In the search box, `Down` moves focus to the list and `Ctrl+A`
-     selects the box's text. In the list, `Ctrl+A` selects every row,
-     `Ctrl+C` copies and `Ctrl+Shift+C` copies as path.
+   - The message loop translates the accelerators first, so a shortcut
+     reaches its command whatever control has the focus. Then it takes the
+     keys that `core::commands::control_key` gives the focused control a
+     meaning from `WM_KEYDOWN`, before `IsDialogMessageW` turns `Enter` and
+     `Esc` into `IDOK` and `IDCANCEL`, so no `WM_CHAR` follows them. In the
+     search box, `Down` moves focus to the list, `Enter` runs the search and
+     `Esc` clears the box; in the list, `Enter` opens the selection.
    - Shift+F10 and the Menu key reach the list as `WM_CONTEXTMENU` with no
-     point, and the handler opens the context menu at the focused row.
+     point, and the handler opens the context menu at the focused row, or at
+     the first selected row when Select all left no row focused.
 9. **Commands that disagree between surfaces.** The menu bar, the context
    menu, the keys, the match controls, the header and the inspector's buttons can
    each grow their own idea of a command. **Rule:** `core::commands` holds one
@@ -249,12 +251,15 @@ them.
     the language it was built in. **Rule:** the model and the controls' state
     hold facts, such as counts, phases, typed failures and parse errors, and
     never display text. Every caption comes from a function of those facts
-    and the current `Strings`. `MainWindow::apply_text` calls every such
-    function: at creation, after a language switch, and after a change to the
-    Windows regional format. A handler that updates one caption after a reply
-    calls the same function, so the two paths cannot show different text. The
-    list's cells are formatted when Windows asks for them, so a redraw
-    updates them.
+    and the current `Strings`. `core::captions::WindowCaptions::new` calls
+    every such function, and `MainWindow::apply_text` sets its result: at
+    creation, after a language switch, and after a change to the Windows
+    regional format. `layout::CaptionWidths` measures the same value, so the
+    layout sizes what is shown. A handler that updates one caption after a
+    reply calls the same function, so the two paths cannot show different
+    text. A catalogue key is written whole, as a literal, so a test finds
+    every key the code uses in `en.json`. The list's cells are formatted when
+    Windows asks for them, so a redraw updates them.
 
 Two smaller rules. Every user-visible string is a key in `en.json` (see "Text
 and languages"), and no English is written in the code or in the `.rc` file.
@@ -375,9 +380,14 @@ The UI thread never waits for the pipe. Each request runs on its own thread
   daemon answers, and replaces a failure that the list shows for another
   reason, so the list never offers the fix for a state the service has left;
   while a search is in flight, its own reply shows instead. A `Selection`
-  failure leaves the selection unread, with its commands disabled, and shows
-  the failure in the list when the results also failed. An `Export` failure is the spec's export message box and leaves the
-  list alone.
+  failure is the service failing while rows are shown, so it shows as a
+  `Results` failure does (spec `T3`): the list shows the failure and clears
+  the selection, and for a failure that ends by itself the status poll runs
+  the search again once the service answers; while a search is in flight,
+  its own reply shows instead. A selection left unread instead would keep
+  its commands disabled until the person selected again, with nothing to
+  say why. An `Export` failure is the spec's export message box and leaves
+  the list alone.
 
 ### Rows on demand
 

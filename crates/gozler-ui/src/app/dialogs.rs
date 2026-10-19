@@ -26,7 +26,7 @@ const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 pub(super) fn about(owner: Hwnd, model: &RefCell<Model>) {
     let dialog = {
         let model = model.borrow();
-        let strings = &model.strings;
+        let strings = model.strings();
         About {
             title: strings.text("about.title").to_owned(),
             version: strings.format("about.version", &[gozler_core::escompat::version()]),
@@ -101,7 +101,7 @@ struct SearchSyntax {
 pub(super) fn search_syntax(owner: Hwnd, model: &RefCell<Model>) {
     let dialog = {
         let model = model.borrow();
-        let strings = &model.strings;
+        let strings = model.strings();
         SearchSyntax {
             title: strings.text("search_syntax.title").to_owned(),
             close: strings.text("button.close").to_owned(),

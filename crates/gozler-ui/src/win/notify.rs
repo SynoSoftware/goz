@@ -1,33 +1,83 @@
-//! The results list's notifications, decoded from `WM_NOTIFY`. Each borrows
-//! the structure that the message carries, so no handler can keep it past
-//! the message.
+//! What controls tell their parent: `WM_COMMAND` as a [`Command`], and
+//! `WM_NOTIFY` as a [`Notification`] that the control which sent it decodes.
+//! Each decoded notification borrows the structure that the message carries,
+//! so no handler can keep it past the message.
 
 use super::Hwnd;
+use super::controls::ListView;
 use super::gdi::{Font, ImageList, draw_text};
 use crate::core::layout::Px;
+use std::marker::PhantomData;
 use std::ops::Range;
-use windows::Win32::Foundation::{COLORREF, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
     GetSysColor, HGDIOBJ, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
-    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, LVIF_IMAGE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL,
-    LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ODCACHEHINT,
-    NM_CUSTOMDRAW, NMHDR, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, WC_LISTVIEWW,
+    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON,
+    LVIR_LABEL, LVIS_SELECTED, LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_COLUMNCLICK,
+    LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED,
+    NM_CUSTOMDRAW, NMHDR, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW,
+    NMLVODSTATECHANGE,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, SendMessageW};
+use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
-/// A notification from a child control.
-pub(crate) struct Notify<'a> {
-    /// The control's ID.
-    pub(crate) from: u16,
-    pub(crate) list: ListNotify<'a>,
+/// A `WM_COMMAND`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Command {
+    /// A menu item or an accelerator, by its ID.
+    Menu(u16),
+    Control(ControlEvent),
 }
 
-/// A list view's notification; [`ListNotify::Other`] for any other
-/// control's.
+/// A control's notification in `WM_COMMAND`, such as `EN_CHANGE`. The
+/// control's wrapper says which it is, by the control's handle, so an ID
+/// that two windows share never confuses them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ControlEvent {
+    pub(super) code: u32,
+    pub(super) from: Hwnd,
+}
+
+pub(super) fn command(wparam: WPARAM, lparam: LPARAM) -> Command {
+    let id = (wparam.0 & 0xffff) as u16;
+    if lparam.0 == 0 {
+        Command::Menu(id)
+    } else {
+        Command::Control(ControlEvent {
+            code: ((wparam.0 >> 16) & 0xffff) as u32,
+            from: Hwnd(HWND(lparam.0 as *mut _)),
+        })
+    }
+}
+
+/// A `WM_NOTIFY`, which only the control that sent it can decode, because
+/// each control class sends its own structures behind the `NMHDR`.
+pub(crate) struct Notification<'a> {
+    header: *mut NMHDR,
+    message: PhantomData<&'a mut NMHDR>,
+}
+
+impl Notification<'_> {
+    /// # Safety
+    /// `lparam` is the `NMHDR` pointer of a `WM_NOTIFY` that Windows sent,
+    /// valid and unaliased for the notification's lifetime.
+    pub(super) unsafe fn new(lparam: LPARAM) -> Self {
+        Notification {
+            header: lparam.0 as *mut NMHDR,
+            message: PhantomData,
+        }
+    }
+
+    fn header(&self) -> &NMHDR {
+        // SAFETY: `new`'s contract.
+        unsafe { &*self.header }
+    }
+}
+
+/// A list view's notification.
 pub(crate) enum ListNotify<'a> {
     /// The list asks for a cell's text or a row's icon.
     GetDispInfo(DispInfo<'a>),
@@ -36,61 +86,76 @@ pub(crate) enum ListNotify<'a> {
     /// A click on the header of the column at this index.
     ColumnClick(usize),
     CustomDraw(CustomDraw<'a>),
+    /// Rows were selected or deselected: `LVN_ITEMCHANGED` with a change of
+    /// `LVIS_SELECTED`, item -1 (every row) included, and
+    /// `LVN_ODSTATECHANGED`, which a virtual list sends for a range such as
+    /// a Shift+click. The handler reads the selection from the list once
+    /// per user action (docs/plans/ui-design.md: The selection).
+    SelectionChanged,
+    /// A double-click on a row.
+    Activated,
     Other,
 }
 
-/// # Safety
-/// `lparam` is the `NMHDR` pointer of a `WM_NOTIFY` that Windows sent, valid
-/// and unaliased for the length of the message.
-pub(super) unsafe fn decode<'a>(lparam: LPARAM) -> Notify<'a> {
-    // SAFETY: the caller's contract.
-    let header = unsafe { &*(lparam.0 as *const NMHDR) };
-    let from = header.idFrom as u16;
-    if !is_list_view(Hwnd(header.hwndFrom)) {
-        return Notify {
-            from,
-            list: ListNotify::Other,
-        };
-    }
-    // SAFETY: the sender is a list view, and each structure is read only for
-    // the code with which a list view sends it, so the memory behind the
-    // NMHDR is that whole structure. Other controls send NM_CUSTOMDRAW with
-    // the smaller NMCUSTOMDRAW, which is why the sender is checked first.
-    let list = unsafe {
-        match header.code {
-            LVN_GETDISPINFOW => {
-                ListNotify::GetDispInfo(DispInfo(&mut *(lparam.0 as *mut NMLVDISPINFOW)))
-            }
-            LVN_ODCACHEHINT => {
-                let hint = &*(lparam.0 as *const NMLVCACHEHINT);
-                let from = u64::try_from(hint.iFrom).unwrap_or(0);
-                let to = u64::try_from(hint.iTo).unwrap_or(0);
-                ListNotify::CacheHint(from..to.max(from) + 1)
-            }
-            LVN_COLUMNCLICK => {
-                let list = &*(lparam.0 as *const NMLISTVIEW);
-                match usize::try_from(list.iSubItem) {
-                    Ok(column) => ListNotify::ColumnClick(column),
-                    Err(_) => ListNotify::Other,
-                }
-            }
-            NM_CUSTOMDRAW => ListNotify::CustomDraw(CustomDraw {
-                draw: &mut *(lparam.0 as *mut NMLVCUSTOMDRAW),
-                list: Hwnd(header.hwndFrom),
-            }),
-            _ => ListNotify::Other,
+impl ListView {
+    /// `notification` decoded, if this list sent it.
+    pub(crate) fn notification<'a>(self, notification: Notification<'a>) -> Option<ListNotify<'a>> {
+        let header = notification.header();
+        if header.hwndFrom != self.hwnd().0 {
+            return None;
         }
-    };
-    Notify { from, list }
-}
-
-fn is_list_view(window: Hwnd) -> bool {
-    let mut class = [0u16; 32];
-    // SAFETY: `class` is a local buffer that the call fills in.
-    let length = unsafe { GetClassNameW(window.0, &mut class) };
-    let length = usize::try_from(length).unwrap_or(0);
-    // SAFETY: WC_LISTVIEWW is a constant NUL-terminated string.
-    class[..length] == *unsafe { WC_LISTVIEWW.as_wide() }
+        let pointer = notification.header;
+        let selection_changed = |new: u32, old: u32| (new ^ old) & LVIS_SELECTED.0 != 0;
+        // SAFETY: the sender is this list view, which `ListView::create`
+        // made with the list view class, and each structure is read only
+        // for the code with which a list view sends it, so the memory behind
+        // the NMHDR is that whole structure for the notification's lifetime.
+        // Other controls send NM_CUSTOMDRAW with the smaller NMCUSTOMDRAW,
+        // which is why the sender is checked first.
+        let list = unsafe {
+            match header.code {
+                LVN_GETDISPINFOW => ListNotify::GetDispInfo(DispInfo(&mut *pointer.cast())),
+                LVN_ODCACHEHINT => {
+                    let hint = &*pointer.cast::<NMLVCACHEHINT>();
+                    let from = u64::try_from(hint.iFrom).unwrap_or(0);
+                    let to = u64::try_from(hint.iTo).unwrap_or(0);
+                    ListNotify::CacheHint(from..to.max(from) + 1)
+                }
+                LVN_COLUMNCLICK => {
+                    let list = &*pointer.cast::<NMLISTVIEW>();
+                    match usize::try_from(list.iSubItem) {
+                        Ok(column) => ListNotify::ColumnClick(column),
+                        Err(_) => ListNotify::Other,
+                    }
+                }
+                LVN_ITEMCHANGED => {
+                    let change = &*pointer.cast::<NMLISTVIEW>();
+                    if change.uChanged.contains(LVIF_STATE)
+                        && selection_changed(change.uNewState, change.uOldState)
+                    {
+                        ListNotify::SelectionChanged
+                    } else {
+                        ListNotify::Other
+                    }
+                }
+                LVN_ODSTATECHANGED => {
+                    let change = &*pointer.cast::<NMLVODSTATECHANGE>();
+                    if selection_changed(change.uNewState.0, change.uOldState.0) {
+                        ListNotify::SelectionChanged
+                    } else {
+                        ListNotify::Other
+                    }
+                }
+                LVN_ITEMACTIVATE => ListNotify::Activated,
+                NM_CUSTOMDRAW => ListNotify::CustomDraw(CustomDraw {
+                    draw: &mut *pointer.cast(),
+                    list: self.hwnd(),
+                }),
+                _ => ListNotify::Other,
+            }
+        };
+        Some(list)
+    }
 }
 
 /// `LVN_GETDISPINFOW`: the list asks for a cell.

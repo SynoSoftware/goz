@@ -77,7 +77,9 @@
     "ctrl": "Ctrl",
     "alt": "Alt",
     "shift": "Shift",
-    "enter": "Enter"
+    "enter": "Enter",
+    "down": "Down",
+    "escape": "Esc"
   },
   "status": {
     "results_one": "{0} result",
@@ -161,8 +163,19 @@
   "button": {
     "close": "Close"
   },
+  "export": {
+    "title": "Export results",
+    "file_name": "results",
+    "csv": "CSV (comma-separated)",
+    "tsv": "TSV (tab-separated)",
+    "txt": "Text, one path per line"
+  },
   "message": {
     "internal_error": "Gozler stopped because of an internal error. The details are in {0}.",
-    "settings_not_saved": "Gozler could not save its settings to {0}. {1} Your changes apply until Gozler exits."
+    "settings_not_saved": "Gozler could not save its settings to {0}. {1} Your changes apply until Gozler exits.",
+    "export_failed": "Gozler could not write {0}. {1} Choose another folder or free some space, then export again.",
+    "export_stopped": "Gozler could not export to {0}. {1}",
+    "clipboard_busy": "The clipboard is in use by another program. Try again in a moment.",
+    "no_longer_exists": "{0} no longer exists. Press F5 to search again."
   }
 }

@@ -10,9 +10,10 @@ owner's ui.json and ui-error.log are never read or written. It closes only
 the windows it started and never uses the clipboard. It reads the window
 through UI Automation and the Win32 menu functions, and runs menu items
 with WM_COMMAND, none of which needs the keyboard focus. It opens a menu
-through UI Automation, or presses a key, only while its own window is in
-front, because keys go to the window in front; otherwise those checks
-report "not run".
+through UI Automation, presses a key or drags the mouse only while its own
+window is in front, because keys and the mouse act on the window in front;
+otherwise those checks report "not run". Its exports go to the fixture
+folder.
 
 Every check reports "passed", "failed" or "not run" with what it saw.
 #>
@@ -268,6 +269,17 @@ public static class Win {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, StringBuilder l);
     [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr result);
+
+    /// How long `window` takes to answer WM_NULL, in milliseconds, which is
+    /// how long its thread was busy; at most `limit`.
+    public static long AnswerMs(IntPtr window, uint limit) {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        IntPtr result;
+        // WM_NULL, SMTO_NORMAL
+        SendMessageTimeoutW(window, 0, IntPtr.Zero, IntPtr.Zero, 0, limit, out result);
+        return clock.ElapsedMilliseconds;
+    }
     [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
     [DllImport("user32.dll")] static extern int GetMenuItemCount(IntPtr m);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMenuItemInfoW(IntPtr m, uint item, bool byPosition, ref MENUITEMINFO info);
@@ -283,7 +295,7 @@ public static class Win {
     public class MenuItem {
         public string Text;
         public int Id;
-        public bool Separator, Enabled, Checked, RightJustify;
+        public bool Separator, Enabled, Checked, Default, RightJustify;
         public IntPtr SubMenu;
     }
 
@@ -312,6 +324,7 @@ public static class Win {
                 RightJustify = (info.fType & 0x4000) != 0,
                 Enabled = (info.fState & 0x3) == 0,
                 Checked = (info.fState & 0x8) != 0,
+                Default = (info.fState & 0x1000) != 0,
                 SubMenu = info.hSubMenu,
             });
         }
@@ -325,6 +338,86 @@ public static class Win {
         var text = new StringBuilder(length + 1);
         SendMessageW(control, 0x000D, (IntPtr)(length + 1), text);
         return text.ToString();
+    }
+
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc f, IntPtr l);
+    [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")] static extern IntPtr SendText(IntPtr h, uint m, IntPtr w, string l);
+
+    /// The descendant of `parent` with class `cls` and control ID `id`.
+    public static IntPtr ChildById(IntPtr parent, int id, string cls) {
+        var found = IntPtr.Zero;
+        EnumChildWindows(parent, (h, l) => {
+            if (GetDlgCtrlID(h) != id || ClassName(h) != cls) return true;
+            found = h;
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    /// Sets a control's text with WM_SETTEXT, which Windows copies across
+    /// processes.
+    public static void SetControlText(IntPtr control, string text) { SendText(control, 0x000C, IntPtr.Zero, text); }
+
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern IntPtr VirtualAllocEx(IntPtr p, IntPtr address, UIntPtr size, uint type, uint protect);
+    [DllImport("kernel32.dll")] static extern bool VirtualFreeEx(IntPtr p, IntPtr address, UIntPtr size, uint type);
+    [DllImport("kernel32.dll")] static extern bool WriteProcessMemory(IntPtr p, IntPtr address, byte[] bytes, UIntPtr size, out UIntPtr written);
+
+    /// Sets the state bits `mask` of the list's row `row`, or of every row
+    /// for -1, to `state`, as a click does. LVM_SETITEMSTATE reads an LVITEMW
+    /// in the list's own process, so the item is written there.
+    public static void SetItemState(IntPtr list, int row, uint state, uint mask) {
+        uint pid;
+        GetWindowThreadProcessId(list, out pid);
+        // PROCESS_VM_OPERATION | PROCESS_VM_WRITE
+        var process = OpenProcess(0x0008 | 0x0020, false, pid);
+        if (process == IntPtr.Zero) throw new InvalidOperationException("OpenProcess failed");
+        try {
+            // Larger than an LVITEMW; state and stateMask follow mask, iItem
+            // and iSubItem.
+            var item = new byte[128];
+            BitConverter.GetBytes(state).CopyTo(item, 12);
+            BitConverter.GetBytes(mask).CopyTo(item, 16);
+            // MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+            var remote = VirtualAllocEx(process, IntPtr.Zero, (UIntPtr)item.Length, 0x3000, 0x04);
+            if (remote == IntPtr.Zero) throw new InvalidOperationException("VirtualAllocEx failed");
+            try {
+                UIntPtr written;
+                if (!WriteProcessMemory(process, remote, item, (UIntPtr)item.Length, out written))
+                    throw new InvalidOperationException("WriteProcessMemory failed");
+                SendMessageW(list, 0x102B, (IntPtr)row, remote);
+            }
+            // MEM_RELEASE
+            finally { VirtualFreeEx(process, remote, UIntPtr.Zero, 0x8000); }
+        }
+        finally { CloseHandle(process); }
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] static extern void mouse_event(uint flags, int dx, int dy, uint data, IntPtr extra);
+
+    /// Drags with the left button from (x1, y1) to (x2, y2), in screen
+    /// pixels, and puts the pointer back, but only while `window` is in
+    /// front, because the mouse acts on the window in front.
+    public static bool Drag(IntPtr window, int x1, int y1, int x2, int y2) {
+        if (GetForegroundWindow() != window) return false;
+        POINT old;
+        GetCursorPos(out old);
+        SetCursorPos(x1, y1);
+        System.Threading.Thread.Sleep(50);
+        // MOUSEEVENTF_LEFTDOWN, then MOUSEEVENTF_LEFTUP
+        mouse_event(0x2, 0, 0, 0, IntPtr.Zero);
+        for (int i = 1; i <= 10; i++) {
+            SetCursorPos(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10);
+            System.Threading.Thread.Sleep(30);
+        }
+        mouse_event(0x4, 0, 0, 0, IntPtr.Zero);
+        SetCursorPos(old.X, old.Y);
+        return true;
     }
 
     /// A combo box's items, which Windows copies across processes for
@@ -464,15 +557,15 @@ function Save-ScreenArea($hwnd, $popups, [string] $name) {
 # The menu bar in the spec's order and groups (spec: Menus). Each line is a
 # catalogue key, or = and a literal text; two more spaces of indent put it in
 # the submenu above it; after | come its shortcut, whether it is enabled
-# after the first search with the search box empty, and whether it is
-# marked. "focus" is enabled while the search box has the focus.
+# after the first search with the search box empty and nothing selected, and
+# whether it is marked.
 $menuSpec = @'
 menu.file
   command.open||off|
   command.open_file_location|Ctrl+Enter|off|
   command.properties|Alt+Enter|off|
   -
-  command.export_results||off|
+  command.export_results||on|
   -
   command.settings|Ctrl+,|off|
   -
@@ -482,7 +575,7 @@ menu.edit
   command.copy_as_path|Ctrl+Shift+C|off|
   command.copy_name||off|
   -
-  command.select_all|Ctrl+A|focus|
+  command.select_all|Ctrl+A|on|
   -
   command.find|Ctrl+F|on|
 menu.view
@@ -520,7 +613,7 @@ if ($Pseudo) { $menuSpec += "`n  =&qps-ploc||off|" }
 
 # The expected menus as lines: indent, name, shortcut, access key, enabled,
 # mark. A top-level menu is always enabled.
-function Expected-MenuLines([bool] $searchFocused) {
+function Expected-MenuLines {
     foreach ($line in $menuSpec -split "`r?`n") {
         if (-not $line.Trim()) { continue }
         $indent = $line.Length - $line.TrimStart().Length
@@ -528,7 +621,6 @@ function Expected-MenuLines([bool] $searchFocused) {
         if ($key -eq '-') { (' ' * $indent) + '-'; continue }
         $text = $key.StartsWith('=') ? $key.Substring(1) : (Caption $key)
         if ($indent -eq 0) { $enabled = 'on' }
-        if ($enabled -eq 'focus') { $enabled = $searchFocused ? 'on' : 'off' }
         (' ' * $indent) + "$(Plain $text) | $shortcut | key $(AccessKeyOf $text) | $enabled | $marked"
     }
 }
@@ -810,6 +902,101 @@ function Memory-Of($process) {
     }
 }
 
+# --- The selection and the actions -----------------------------------------
+
+# Selects the list's rows `rows`, from 0, and no other, as clicks do. Each
+# change notifies the window, which reads the selection once they stop.
+function Select-Rows($process, $rows) {
+    $list = Control-Hwnd $process $ListId
+    # LVIS_SELECTED
+    [GozlerProbe.Win]::SetItemState($list, -1, 0, 2)
+    foreach ($row in $rows) { [GozlerProbe.Win]::SetItemState($list, $row, 2, 2) }
+}
+
+# Whether each item of the menu bar's menu at `position` is enabled, by its
+# label, after WM_INITMENUPOPUP asks the window to set the states.
+function Item-States($process, [int] $position) {
+    $menu = Find-Submenu $process $position
+    [void][GozlerProbe.Win]::SendMessageW($process.MainWindowHandle, 0x0117, $menu, [IntPtr]$position)
+    $states = [ordered]@{}
+    foreach ($item in [GozlerProbe.Win]::MenuItems($menu)) {
+        if (-not $item.Separator) { $states[(Plain $item.Text.Split("`t")[0])] = $item.Enabled }
+    }
+    return $states
+}
+
+# A regular expression for the whole catalogue text `key`, with `first` and
+# `second`, which are regular expressions, in place of {0} and {1}.
+function Caption-Pattern([string] $key, [string] $first = '.+', [string] $second = '.+') {
+    '^' + ([regex]::Escape((Caption $key)) -replace '\\\{0}', $first -replace '\\\{1}', $second) + '$'
+}
+
+# Runs File > Export results… and saves to `path` in the Windows save
+# dialog. The path is typed in quotation marks, so the dialog adds no
+# extension. The item is found by its ID, which is the same in every
+# language. Returns whether the dialog closed.
+function Export-To($process, [string] $path) {
+    [void][GozlerProbe.Win]::PostMessageW($process.MainWindowHandle, 0x0111, [IntPtr]$menuIds.export, 0)
+    $dialog = $null
+    for ($i = 0; $i -lt 100 -and -not $dialog; $i++) {
+        Start-Sleep -Milliseconds 100
+        $dialog = [GozlerProbe.Win]::Windows($process.Id, '#32770') | Select-Object -First 1
+    }
+    if (-not $dialog) { return $false }
+    # The file name box and Save, by the IDs the Windows dialog gives them.
+    $edit = $save = [IntPtr]::Zero
+    for ($i = 0; $i -lt 50 -and ($edit -eq 0 -or $save -eq 0); $i++) {
+        Start-Sleep -Milliseconds 100
+        $edit = [GozlerProbe.Win]::ChildById($dialog, 1001, 'Edit')
+        $save = [GozlerProbe.Win]::ChildById($dialog, 1, 'Button')
+    }
+    if ($edit -ne 0 -and $save -ne 0) {
+        [GozlerProbe.Win]::SetControlText($edit, "`"$path`"")
+        [GozlerProbe.Ui]::InvokeLater([GozlerProbe.Ui]::FromHandle($save))
+        for ($i = 0; $i -lt 100 -and [GozlerProbe.Win]::IsWindow($dialog); $i++) { Start-Sleep -Milliseconds 100 }
+    }
+    $closed = -not [GozlerProbe.Win]::IsWindow($dialog)
+    # A dialog left open would block the window's close at the end.
+    if (-not $closed) { [void][GozlerProbe.Win]::PostMessageW($dialog, $WM_CLOSE, 0, 0) }
+    return $closed
+}
+
+# Status part 3 once an export has started and no longer runs.
+function Wait-Export($process, [int] $seconds = 60) {
+    $running = (Caption 'status.exporting_other').Split('{')[0]
+    $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+    do {
+        $text = Status-Part $process 2
+        if ($text -and -not $text.StartsWith($running)) { return $text }
+        Start-Sleep -Milliseconds 100
+    } until ([DateTime]::UtcNow -gt $deadline)
+    return $text
+}
+
+# The texts of the window's message box once it opens; the probe takes its
+# screenshot and closes it with its button.
+function Close-MessageBox($process, [string] $screenshot) {
+    $box = $null
+    for ($i = 0; $i -lt 100 -and -not $box; $i++) {
+        Start-Sleep -Milliseconds 100
+        $box = [GozlerProbe.Win]::Windows($process.Id, '#32770') | Select-Object -First 1
+    }
+    if (-not $box) { return $null }
+    Start-Sleep -Milliseconds 300
+    $controls = Children-Of $box
+    Save-Screenshot $box $screenshot
+    $button = $controls | Where-Object ControlType -EQ ([GozlerProbe.Ui]::Button) | Select-Object -First 1
+    if ($button) { [GozlerProbe.Ui]::InvokeLater($button) }
+    for ($i = 0; $i -lt 50 -and [GozlerProbe.Win]::IsWindow($box); $i++) { Start-Sleep -Milliseconds 100 }
+    return @($controls | ForEach-Object Name)
+}
+
+# Whether two files hold the same bytes.
+function Same-Bytes([string] $a, [string] $b) {
+    if (-not (Test-Path -LiteralPath $a) -or -not (Test-Path -LiteralPath $b)) { return $false }
+    [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($a)) -ceq [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($b))
+}
+
 # Starts a window and takes its screenshot before the first search answers
 # (S1). Returns the window and whether part 1 still said "Searching…" after
 # the screenshot.
@@ -948,6 +1135,10 @@ try {
     $files = Join-Path $fixture 'files'
     $dataDir = Join-Path $fixture 'data'
     New-Item -ItemType Directory $dataDir | Out-Null
+    # The window's exports go beside the fixture, so no search of it finds
+    # them.
+    $exports = Join-Path $fixture 'exports'
+    New-Item -ItemType Directory $exports | Out-Null
     $built = Measure-Command { New-Fixture $files }
     $results['fixture'] = [ordered]@{ folder = $files; files = $FixtureFiles; seconds = [int]$built.TotalSeconds }
 
@@ -998,8 +1189,7 @@ try {
 
     Save-Screenshot $hwnd 'main-en'
 
-    $searchFocused = [GozlerProbe.Win]::Focus($hwnd) -eq [IntPtr]$search.Hwnd
-    $expected = @(Expected-MenuLines $searchFocused)
+    $expected = @(Expected-MenuLines)
     $actual = @(Read-Menus $window)
     $diff = Compare-Object $expected $actual -SyncWindow 0 | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }
     Check 'menus' (-not $diff) ([ordered]@{ menus = $actual; differences = @($diff) })
@@ -1206,6 +1396,7 @@ try {
     $menuIds = @{
         extension = Menu-Id $window (Caption 'column.extension')
         syntax    = Menu-Id $window (Caption 'command.search_syntax')
+        export    = Menu-Id $window (Caption 'command.export_results')
     }
 
     # The empty search lists every entry, up to the limit (S4).
@@ -1483,6 +1674,283 @@ try {
         Check 'Search syntax' ($syntax.title -eq (Caption 'search_syntax.title') -and $syntax.edit -like '*ext:*' -and $syntax.closed) ([ordered]@{
                 title = $syntax.title; text_length = "$($syntax.edit)".Length; closed = $syntax.closed
             })
+
+        # --- The selection and the actions ----------------------------------
+        $listHwnd = Control-Hwnd $window $ListId
+        $label = @{}
+        foreach ($key in 'open', 'open_file_location', 'properties', 'copy_as_path', 'copy_name', 'export_results', 'cancel_export') {
+            $label[$key] = Plain (Caption "command.$key")
+        }
+        $running = (Caption 'status.exporting_other').Split('{')[0]
+
+        # One, two and 16 selected rows enable Open, Open file location and
+        # Properties as the spec says. The probe reads the menus and runs none
+        # of the commands (C1, C2, C3).
+        [void](Search-For $window $F)
+        $counted = foreach ($n in 1, 2, 16) {
+            Select-Rows $window (0..($n - 1))
+            Start-Sleep -Milliseconds 300
+            $file = Item-States $window 0
+            [ordered]@{
+                selected = $n; status = Status-Part $window 1
+                open = $file[$label.open]; open_file_location = $file[$label.open_file_location]; properties = $file[$label.properties]
+            }
+        }
+        Save-Screenshot $window.MainWindowHandle 'selection-en'
+        $wanted = @{ 1 = 'True True True'; 2 = 'True True False'; 16 = 'False False False' }
+        Check 'commands follow the number selected' (-not ($counted | Where-Object {
+                    "$($_.open) $($_.open_file_location) $($_.properties)" -ne $wanted[$_.selected] -or
+                    $_.status -notmatch (Caption-Pattern 'status.selected' "$($_.selected)") })) $counted
+
+        # A selection with a row that has left the cache is read from the
+        # service: part 2 says so and the selection commands wait (S12). A row
+        # of the second chunk, then the last row, are shown, so the first
+        # chunk is the one used least recently and leaves the cache.
+        Select-Rows $window @(0)
+        Start-Sleep -Milliseconds 300
+        $rows = Row-Count $window
+        foreach ($row in 20000, ($rows - 1)) {
+            # LVM_ENSUREVISIBLE
+            [void][GozlerProbe.Win]::SendMessageW($listHwnd, 0x1013, [IntPtr]$row, 0)
+            Start-Sleep -Milliseconds 1500
+        }
+        [GozlerProbe.Win]::SetItemState($listHwnd, $rows - 1, 2, 2)
+        $reading = Status-Part $window 1
+        $edit = Item-States $window 1
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 100
+            $read = Status-Part $window 1
+        } until ($read -ne (Caption 'status.reading') -or [DateTime]::UtcNow -gt $deadline)
+        $after = Item-States $window 1
+        Save-Screenshot $window.MainWindowHandle 'selection-read-en'
+        Check 'a selection outside the cache is read' ($reading -eq (Caption 'status.reading') -and
+            -not $edit[$label.copy_as_path] -and -not $edit[$label.copy_name] -and
+            $read -match (Caption-Pattern 'status.selected' '2') -and $after[$label.copy_as_path] -and $after[$label.copy_name]) ([ordered]@{
+                rows = $rows; while_reading = $reading; copy_as_path_while_reading = $edit[$label.copy_as_path]
+                copy_name_while_reading = $edit[$label.copy_name]; after = $read; copy_as_path_after = $after[$label.copy_as_path]
+            })
+
+        # Edit > Select all selects the search box's text when it has the
+        # focus, and every row when the list has it (C11).
+        if (Is-InFront $window) {
+            $searchElement = Child-ById (Window-Element $window) $SearchBoxId
+            [GozlerProbe.Ui]::Focus($searchElement)
+            Run-MenuItem $window (Caption 'command.select_all')
+            Start-Sleep -Milliseconds 300
+            # EM_GETSEL
+            $selection = [long][GozlerProbe.Win]::SendMessageW((Control-Hwnd $window $SearchBoxId), 0x00B0, 0, 0)
+            $length = [GozlerProbe.Ui]::Value($searchElement).Length
+            [GozlerProbe.Ui]::Focus((Child-ById (Window-Element $window) $ListId))
+            Run-MenuItem $window (Caption 'command.select_all')
+            Start-Sleep -Milliseconds 300
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                Start-Sleep -Milliseconds 100
+                $read = Status-Part $window 1
+            } until ($read -ne (Caption 'status.reading') -or [DateTime]::UtcNow -gt $deadline)
+            $detail = [ordered]@{
+                text_start = $selection -band 0xFFFF; text_end = ($selection -shr 16) -band 0xFFFF; text_length = $length
+                # LVM_GETSELECTEDCOUNT
+                rows = $rows; selected_rows = [long][GozlerProbe.Win]::SendMessageW($listHwnd, 0x1032, 0, 0); status = $read
+            }
+            $statusRows = ($read -match (Caption-Pattern 'status.selected' '([\d.,\s]+)')) ? [long]($Matches[1] -replace '\D', '') : $null
+            Check 'Select all' ($detail.text_start -eq 0 -and $detail.text_end -eq $length -and $detail.selected_rows -eq $rows -and
+                $statusRows -eq $rows) $detail
+        }
+        else { Report 'Select all' 'not run' 'the window was not in front, so the probe did not move the focus' }
+
+        # Shift+F10 opens the row's context menu, with Open as its default
+        # item (spec: Results list).
+        if (Is-InFront $window) {
+            Select-Rows $window @(0)
+            # LVIS_FOCUSED | LVIS_SELECTED
+            [GozlerProbe.Win]::SetItemState($listHwnd, 0, 3, 3)
+            [GozlerProbe.Ui]::Focus((Child-ById (Window-Element $window) $ListId))
+            # The first row can be out of the cache, so the menu waits until
+            # the selection is read.
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                Start-Sleep -Milliseconds 100
+                $read = Status-Part $window 1
+            } until ($read -match (Caption-Pattern 'status.selected' '1') -or [DateTime]::UtcNow -gt $deadline)
+            # VK_SHIFT, VK_F10
+            $pressed = [GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x10, 0x79)
+            $popup = $pressed ? (Wait-Popup $window @()) : $null
+            $items = $null
+            if ($popup) {
+                # MN_GETHMENU
+                $menu = [GozlerProbe.Win]::SendMessageW($popup, 0x01E1, 0, 0)
+                $items = @([GozlerProbe.Win]::MenuItems($menu) | ForEach-Object {
+                        $_.Separator ? '-' : "$(Plain $_.Text) | $($_.Enabled ? 'on' : 'off')$($_.Default ? ' | default' : '')"
+                    })
+                Save-ScreenArea $window.MainWindowHandle @($popup) 'row-menu-en'
+                # VK_ESCAPE
+                [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x1B)
+                Start-Sleep -Milliseconds 300
+            }
+            $expectedItems = @(
+                "$($label.open) | on | default", "$($label.open_file_location) | on", '-',
+                "$(Plain (Caption 'command.copy')) | on", "$($label.copy_as_path) | on", "$($label.copy_name) | on", '-',
+                "$(Plain (Caption 'command.search_in_this_folder')) | off", '-', "$($label.properties) | on"
+            )
+            if ($pressed) { Check 'Shift+F10 opens the row menu' (($items -join '|') -eq ($expectedItems -join '|')) ([ordered]@{ items = $items; expected = $expectedItems }) }
+            else { Report 'Shift+F10 opens the row menu' 'not run' 'the window left the front before the keys were pressed' }
+        }
+        else { Report 'Shift+F10 opens the row menu' 'not run' 'the window was not in front, so no key was pressed' }
+
+        # The marquee selects rows in the virtual list: a drag from below the
+        # last row to the first (design: Not verified).
+        [void](Search-For $window "$F ext:cs")
+        Select-Rows $window @()
+        if (Is-InFront $window) {
+            $listElement = Child-ById (Window-Element $window) $ListId
+            $rowElements = @([GozlerProbe.Ui]::Children($listElement) | Where-Object { $_.ControlType -in [GozlerProbe.Ui]::ListItem, [GozlerProbe.Ui]::DataItem })
+            $first = $rowElements[0].Rect; $last = $rowElements[-1].Rect
+            $x = [int]($first[0] + 60)
+            $dragged = [GozlerProbe.Win]::Drag($window.MainWindowHandle, $x, [int]($last[1] + $last[3] + 40), $x + 40, [int]($first[1] + $first[3] / 2))
+            Start-Sleep -Milliseconds 500
+            $detail = [ordered]@{ rows = $rowElements.Count; selected_rows = [long][GozlerProbe.Win]::SendMessageW($listHwnd, 0x1032, 0, 0); status = Status-Part $window 1 }
+            if ($dragged) { Check 'the marquee selects rows' ($detail.selected_rows -eq $rowElements.Count -and $detail.status -match (Caption-Pattern 'status.selected' "$($rowElements.Count)")) $detail }
+            else { Report 'the marquee selects rows' 'not run' 'the window left the front before the drag' }
+            Select-Rows $window @()
+        }
+        else { Report 'the marquee selects rows' 'not run' 'the window was not in front, so the mouse was not moved' }
+
+        # Export results… writes the bytes gozler writes with the switches
+        # of the shown columns, and part 3 says how many rows (C4, J6).
+        $extension = Caption 'column.extension'; $attributes = Caption 'column.attributes'
+        $formats = @(
+            @{ file = 'cs.csv'; switch = '-export-csv' }
+            @{ file = 'cs.tsv'; switch = '-export-tsv' }
+            @{ file = 'cs.txt'; switch = '-export-txt' }
+            @{ file = 'cs-columns.csv'; switch = '-export-csv'; columns = $true }
+        )
+        $exported = foreach ($format in $formats) {
+            $columns = @('-size', '-dm')
+            if ($format.columns) {
+                Run-MenuItem $window $extension
+                Run-MenuItem $window $attributes
+                Start-Sleep -Milliseconds 300
+                $columns += '-ext', '-attributes'
+            }
+            $path = Join-Path $exports $format.file
+            $closed = Export-To $window $path
+            $status = $closed ? (Wait-Export $window) : $null
+            $cliPath = Join-Path $exports "gozler-$($format.file)"
+            & $gozler $F ext:cs $format.switch $cliPath @columns
+            [ordered]@{
+                file = $format.file; dialog_closed = $closed; status = $status; same_bytes = Same-Bytes $path $cliPath
+                bytes = (Test-Path -LiteralPath $path) ? (Get-Item -LiteralPath $path).Length : $null
+                gozler_bytes = (Test-Path -LiteralPath $cliPath) ? (Get-Item -LiteralPath $cliPath).Length : $null
+                gozler_switches = "$($format.switch) FILE $($columns -join ' ')"
+            }
+        }
+        Save-Screenshot $window.MainWindowHandle 'exported-en'
+        Run-MenuItem $window $extension
+        Run-MenuItem $window $attributes
+        Check 'Export results writes what gozler writes' (-not ($exported | Where-Object {
+                    -not $_.same_bytes -or $_.status -notmatch (Caption-Pattern 'status.exported_other' "$csCount" ([regex]::Escape($_.file))) })) $exported
+
+        # During an export of the empty search, part 3 shows its progress and
+        # File shows Cancel export in place of Export results…; Cancel export
+        # ends it and deletes its file (C5, S11).
+        [void](Search-For $window '')
+        $all = Join-Path $exports 'all.csv'
+        $closed = Export-To $window $all
+        Start-Sleep -Milliseconds 1000
+        $progress = Status-Part $window 2
+        $file = Item-States $window 0
+        Save-Screenshot $window.MainWindowHandle 'exporting-en'
+        $existed = Test-Path -LiteralPath $all
+        Run-MenuItem $window (Caption 'command.cancel_export')
+        for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath $all); $i++) { Start-Sleep -Milliseconds 100 }
+        $detail = [ordered]@{
+            dialog_closed = $closed; progress = $progress; file_menu = @($file.Keys); cancel_export_enabled = $file[$label.cancel_export]
+            file_while_running = $existed; file_after = Test-Path -LiteralPath $all; status_after = Status-Part $window 2
+        }
+        Check 'Cancel export' ($closed -and $progress -match (Caption-Pattern 'status.exporting_other') -and $file[$label.cancel_export] -and
+            -not $file.Contains($label.export_results) -and $existed -and -not $detail.file_after -and -not $detail.status_after) $detail
+
+        # A search runs when an export of the empty search ends: part 3 shows
+        # the export's result while part 1 says Searching…, and the export
+        # ran on through every search's start (T1, T8). Each change of the
+        # sort direction starts a search of the empty search. The probe times
+        # one, then changes the direction three times as often during the
+        # export, so a search runs at every moment of it on any machine.
+        $directions = @((Menu-Id $window (Caption 'sort.descending')), (Menu-Id $window (Caption 'sort.ascending')))
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, 0x0111, [IntPtr]$directions[0], 0)
+        while (-not (Is-Searching (Status-Part $window 0)) -and $clock.ElapsedMilliseconds -lt 2000) { }
+        [void](Wait-Answer $window)
+        $searchMs = $clock.ElapsedMilliseconds
+        [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, 0x0111, [IntPtr]$directions[1], 0)
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+        $interval = [Math]::Max(10, [int]($searchMs / 3))
+        $all = Join-Path $exports 'all-sorted.csv'
+        $closed = Export-To $window $all
+        $clock.Restart()
+        while (-not "$(Status-Part $window 2)".StartsWith($running) -and $clock.ElapsedMilliseconds -lt 5000) { }
+        $samples = [System.Collections.Generic.List[object]]::new()
+        $previous = $null
+        $changes = 0
+        $nextChange = 0
+        do {
+            if ($clock.ElapsedMilliseconds -ge $nextChange) {
+                [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, 0x0111, [IntPtr]$directions[$changes % 2], 0)
+                $changes++
+                $nextChange = $clock.ElapsedMilliseconds + $interval
+            }
+            $sample = [ordered]@{ ms = $clock.ElapsedMilliseconds; part1 = Status-Part $window 0; part3 = Status-Part $window 2 }
+            $key = "$($sample.part1)|$($sample.part3)"
+            if ($key -ne $previous) { $samples.Add($sample) }
+            $previous = $key
+        } until (-not "$($sample.part3)".StartsWith($running) -or $clock.ElapsedMilliseconds -gt 120000)
+        [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, 0x0111, [IntPtr]$directions[1], 0)
+        Start-Sleep -Milliseconds 300
+        [void](Wait-Answer $window)
+        $exportedPattern = Caption-Pattern 'status.exported_other' '.+' ([regex]::Escape('all-sorted.csv'))
+        $overlap = @($samples | Where-Object { (Is-Searching $_.part1) -and $_.part3 -match $exportedPattern })
+        $detail = [ordered]@{ dialog_closed = $closed; search_ms = $searchMs; interval_ms = $interval; sort_changes = $changes; samples = $samples }
+        Check 'an export ends while a search runs' ($closed -and $changes -gt 1 -and $overlap.Count -gt 0) $detail
+        if (Test-Path -LiteralPath $all) { Remove-Item -LiteralPath $all }
+
+        # A selection of every row of the empty search holds its files while
+        # it lasts, and no message waits more than 100 ms meanwhile (spec:
+        # Memory budget). The probe selects every row as Select all does,
+        # and asks the window for WM_NULL every 50 ms until part 2 shows the
+        # files; it reports the memory, which the spec estimates.
+        $rows = Row-Count $window
+        $before = Memory-Of $window
+        [GozlerProbe.Win]::SetItemState($listHwnd, -1, 2, 2)
+        $longest = 0
+        $selected = $null
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $longest = [Math]::Max($longest, [GozlerProbe.Win]::AnswerMs($window.MainWindowHandle, 5000))
+            Start-Sleep -Milliseconds 50
+            $part = Status-Part $window 1
+            if ($part -match (Caption-Pattern 'status.selected' '([\d.,\s]+)')) { $selected = [long]($Matches[1] -replace '\D', '') }
+        } until ($selected -or [DateTime]::UtcNow -gt $deadline)
+        $held = Memory-Of $window
+        Select-Rows $window @()
+        Start-Sleep -Milliseconds 500
+        $detail = [ordered]@{
+            rows = $rows; status = $part; longest_wait_ms = $longest; before = $before; while_held = $held; after = Memory-Of $window
+        }
+        Check 'a selection of every row' ($rows -eq 100000 -and $selected -eq $rows -and $longest -le 100) $detail
+
+        # An export into the folder whose ACL denies creating files shows the
+        # spec's message box and leaves no file (T9).
+        [void](Search-For $window "$F ext:cs")
+        $denied = Join-Path $files 'denied\export.csv'
+        $closed = Export-To $window $denied
+        $texts = $closed ? (Close-MessageBox $window 'export-failed-en') : $null
+        $prefix = ((Caption 'message.export_failed') -split '\{1\}')[0].Replace('{0}', $denied)
+        Check 'export into a denied folder' ($closed -and ($texts | Where-Object { "$_".StartsWith($prefix) }) -and -not (Test-Path -LiteralPath $denied)) ([ordered]@{
+                dialog_closed = $closed; message = $texts; expected_start = $prefix; file_exists = Test-Path -LiteralPath $denied
+            })
     }
 
     # The parser's message (S7), and the daemon's refusal (S9).
@@ -1516,12 +1984,44 @@ try {
             status_when_closed = $part; ended = $ended; milliseconds = $clock.ElapsedMilliseconds
         })
 
+    # Closing 0.5 s into an export of the empty search ends the process
+    # within two seconds and deletes the partial file (T14). The export takes
+    # several seconds, so one that ignores its cancel token fails the check.
+    Write-Settings $null
+    $window = Start-Window
+    [void](Wait-Answer $window)
+    $closing = Join-Path $exports 'closing.csv'
+    if (Export-To $window $closing) {
+        Start-Sleep -Milliseconds 500
+        $existed = Test-Path -LiteralPath $closing
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        [void][GozlerProbe.Win]::PostMessageW($window.MainWindowHandle, $WM_CLOSE, 0, 0)
+        $ended = $window.WaitForExit(2000)
+        Check 'closing during an export' ($ended -and -not (Test-Path -LiteralPath $closing)) ([ordered]@{
+                ended = $ended; milliseconds = $clock.ElapsedMilliseconds; file_while_running = $existed; file_after = Test-Path -LiteralPath $closing
+            })
+    }
+    else { Check 'closing during an export' $false 'the save dialog did not close' }
+    [void](Close-Window $window)
+
     if ($Pseudo) {
         Write-Settings '{ "settings": { "language": "qps-ploc" } }'
         $window, $firstPart = Start-Searching 'pseudo'
         [void](Wait-Answer $window)
         Save-Screenshot $window.MainWindowHandle 'limit-pseudo'
-        if ($filesListed) { [void](Show-States $window 'pseudo' $menuIds) }
+        if ($filesListed) {
+            [void](Show-States $window 'pseudo' $menuIds)
+            # Show-States ends on the ext:cs search.
+            Select-Rows $window 0, 1
+            Start-Sleep -Milliseconds 500
+            Save-Screenshot $window.MainWindowHandle 'selection-pseudo'
+            Select-Rows $window @()
+            if (Export-To $window (Join-Path $exports 'pseudo.csv')) {
+                [void](Wait-Export $window)
+                Start-Sleep -Milliseconds 300
+                Save-Screenshot $window.MainWindowHandle 'exported-pseudo'
+            }
+        }
         [void](Close-Window $window)
     }
 }

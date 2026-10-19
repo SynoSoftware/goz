@@ -1,38 +1,48 @@
 //! The window's facts: the loaded language, the saved settings, what the
-//! controls ask for, what the list shows and what the service said last.
-//! Captions are built from these facts when they are shown, never stored
-//! (design rule 12). Every reply passes through [`Model::accept`], which says
-//! what changed and which request that makes necessary.
+//! controls ask for, what the list shows, the selection, the export and what
+//! the service said last. Captions are built from these facts when they are
+//! shown, never stored (design rule 12). The fields are private to the core:
+//! every reply passes through [`Model::accept`], and every change the person
+//! makes through a method of its own, and each says what changed and which
+//! request that makes necessary.
 
-use super::fetch::{Ask, DaemonFailure, Fetch, Fetched, Generation, Outcome, Purpose};
+use super::fetch::{
+    Ask, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose, WriteFailure,
+};
 use super::layout::{Dip, Panes};
 use super::query::{self, Matching};
 use super::results::{ListMessage, Results, RowsChange, Shown};
-use super::settings::Settings;
+use super::selection::Selection;
+use super::settings::{Placement, SavedColumn, Settings};
 use super::text::Strings;
-use gozler_core::proto::DaemonStatus;
+use gozler_core::escompat::EsPlan;
+use gozler_core::output::Format;
+use gozler_core::proto::{DaemonStatus, ResultItem};
 use gozler_core::query::QueryStart;
 use gozler_core::scope::{Coverage, leaves_matches_out};
-use gozler_core::types::{SortDir, SortKey, SortSpec, VolumePhase};
+use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 pub(crate) struct Model {
-    pub(crate) strings: Strings,
-    pub(crate) settings: Settings,
-    pub(crate) matching: Matching,
-    pub(crate) sort: SortSpec,
+    pub(super) strings: Strings,
+    /// Also the one copy of the match controls and the sort.
+    pub(super) settings: Settings,
     /// The columns the list shows, in the list's column order: Name first,
     /// because only the first column carries the icon.
-    pub(crate) columns: Vec<Column>,
-    pub(crate) panes: Panes,
+    pub(super) columns: Vec<Column>,
+    pub(super) panes: Panes,
     /// The typed search text.
-    pub(crate) text: String,
-    pub(crate) results: Results,
+    pub(super) text: String,
+    pub(super) results: Results,
     /// The latest status reply.
-    pub(crate) status: Option<DaemonStatus>,
-    /// How the latest request of any purpose failed; `None` once the
-    /// service answers.
+    pub(super) status: Option<DaemonStatus>,
+    pub(super) selection: Selection,
+    pub(super) export: Export,
+    /// How the latest request for the results or the status failed; `None`
+    /// once the service answers.
     failure: Option<DaemonFailure>,
     /// The status request in flight.
     status_asked: Option<Generation>,
@@ -50,16 +60,37 @@ pub(crate) struct Accepted {
 pub(crate) enum Then {
     Fetch(Fetch),
     /// The search again, with the clock of the moment it starts: the
-    /// service answers again, or every volume in scope became complete.
+    /// person changed a match control or the sort, the service answers
+    /// again, or every volume in scope became complete.
     SearchAgain,
+    /// The search, once the person has stopped typing for a moment.
+    SearchSoon,
+    /// [`Model::read_selection`], once the selection has stopped changing
+    /// for a moment, so one request serves a run of Shift+Down presses.
+    ReadSelectionSoon,
+    /// Ends the live request of the purpose; its reply would be stale.
+    Cancel(Purpose),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Change {
-    Stale,
+    Nothing,
+    /// The typed text, which the title shows.
+    Typed,
+    /// A match control or the sort, which their controls show.
+    Choice,
+    /// The column at `index` of [`Model::columns`] was added.
+    ColumnShown {
+        index: usize,
+    },
+    /// The column that was at `index` of [`Model::columns`] was removed.
+    ColumnHidden {
+        index: usize,
+    },
     /// A new search runs; the list keeps its rows.
     Searching,
-    /// A new search's first rows replace the old ones.
+    /// A new search's first rows replace the old ones, and nothing is
+    /// selected.
     NewSearch {
         count: u64,
     },
@@ -73,6 +104,92 @@ pub(crate) enum Change {
     /// The service's state changed, which the index part of the status bar
     /// and the status poll follow.
     Status,
+    /// The selection changed.
+    Selection,
+    /// The selection's files arrived, and the cached rows in `rows` are
+    /// now the ones of their moment.
+    SelectionRead {
+        rows: Range<u64>,
+    },
+    /// The export started, wrote more rows, ended or was cancelled.
+    Export,
+    /// The export to `path` failed and its partial file is deleted.
+    ExportFailed {
+        path: PathBuf,
+        error: ExportError,
+    },
+}
+
+/// Why an export failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ExportError {
+    Write(WriteFailure),
+    Daemon(DaemonFailure),
+}
+
+/// The export, which status part 3 shows (spec: Status bar).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Export {
+    Idle,
+    Running {
+        generation: Generation,
+        path: PathBuf,
+        rows: u64,
+    },
+    /// The last export's result, which stays until the next export starts.
+    Done {
+        path: PathBuf,
+        rows: u64,
+    },
+}
+
+/// The formats Export results… offers, in the save dialog's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExportFormat {
+    Csv,
+    Tsv,
+    Txt,
+}
+
+impl ExportFormat {
+    pub(crate) const ALL: [ExportFormat; 3] =
+        [ExportFormat::Csv, ExportFormat::Tsv, ExportFormat::Txt];
+
+    /// The extension, which the save dialog shows as `*.csv`.
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Tsv => "tsv",
+            ExportFormat::Txt => "txt",
+        }
+    }
+
+    /// The save dialog's name for the format.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "export.csv",
+            ExportFormat::Tsv => "export.tsv",
+            ExportFormat::Txt => "export.txt",
+        }
+    }
+
+    /// The format a chosen file's name asks for, or `chosen`, the type the
+    /// save dialog shows, when its extension is none of the formats.
+    pub(crate) fn of(path: &Path, chosen: ExportFormat) -> ExportFormat {
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        ExportFormat::ALL
+            .into_iter()
+            .find(|f| f.extension().eq_ignore_ascii_case(extension))
+            .unwrap_or(chosen)
+    }
+
+    fn table_format(self) -> Format {
+        match self {
+            ExportFormat::Csv => Format::Csv,
+            ExportFormat::Tsv => Format::Tsv,
+            ExportFormat::Txt => Format::Txt,
+        }
+    }
 }
 
 impl Accepted {
@@ -101,18 +218,61 @@ impl Model {
         }
         Model {
             strings,
-            matching: window.matching,
-            sort: window.sort,
             columns,
             panes: Panes::default(),
             settings,
             text: String::new(),
             results: Results::new(),
             status: None,
+            selection: Selection::None,
+            export: Export::Idle,
             failure: None,
             status_asked: None,
             last_generation: 0,
         }
+    }
+
+    pub(crate) fn strings(&self) -> &Strings {
+        &self.strings
+    }
+
+    pub(crate) fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+
+    pub(crate) fn panes(&self) -> Panes {
+        self.panes
+    }
+
+    pub(crate) fn results(&self) -> &Results {
+        &self.results
+    }
+
+    pub(crate) fn matching(&self) -> Matching {
+        self.settings.window.matching
+    }
+
+    pub(crate) fn sort(&self) -> SortSpec {
+        self.settings.window.sort
+    }
+
+    pub(crate) fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// The saved window placement, which the window opens at.
+    pub(crate) fn placement(&self) -> Option<Placement> {
+        self.settings.window.placement
+    }
+
+    /// The saved width of `column`, if it has one.
+    pub(crate) fn saved_width(&self, column: Column) -> Option<Dip> {
+        self.settings
+            .window
+            .columns
+            .iter()
+            .find(|s| s.column == column)
+            .map(|s| s.width)
     }
 
     fn generation(&mut self) -> Generation {
@@ -120,19 +280,70 @@ impl Model {
         Generation(self.last_generation)
     }
 
+    /// The person typed `text`; its search runs once they pause.
+    pub(crate) fn set_typed_search(&mut self, text: String) -> Accepted {
+        if text == self.text {
+            return Accepted::only(Change::Nothing);
+        }
+        self.text = text;
+        Accepted {
+            change: Change::Typed,
+            then: Some(Then::SearchSoon),
+        }
+    }
+
+    /// The person changed a match control; the search runs again.
+    pub(crate) fn set_matching(&mut self, matching: Matching) -> Accepted {
+        self.settings.window.matching = matching;
+        Accepted {
+            change: Change::Choice,
+            then: Some(Then::SearchAgain),
+        }
+    }
+
+    /// The person chose a sort; the search runs again (spec: C20).
+    pub(crate) fn sort_by(&mut self, sort: SortSpec) -> Accepted {
+        self.settings.window.sort = sort;
+        Accepted {
+            change: Change::Choice,
+            then: Some(Then::SearchAgain),
+        }
+    }
+
+    /// Shows or hides `column` (spec: C15). A shown column joins at the
+    /// end; Name cannot be hidden.
+    pub(crate) fn toggle_column(&mut self, column: Column) -> Accepted {
+        if !column.can_hide() {
+            return Accepted::only(Change::Nothing);
+        }
+        Accepted::only(match self.columns.iter().position(|c| *c == column) {
+            Some(index) => {
+                self.columns.remove(index);
+                Change::ColumnHidden { index }
+            }
+            None => {
+                self.columns.push(column);
+                Change::ColumnShown {
+                    index: self.columns.len() - 1,
+                }
+            }
+        })
+    }
+
     /// The search that the typed text and the controls ask for, or the
     /// parser's message when the text does not parse, which starts no
-    /// request. The shown rows stay until the new search's first rows
-    /// arrive.
+    /// request. The shown rows and the selection stay until the new
+    /// search's first rows arrive.
     pub(crate) fn start_search(&mut self, query_start: &QueryStart) -> Accepted {
-        match query::search(&self.text, self.matching, query_start) {
+        match query::search(&self.text, self.matching(), query_start) {
             Err(error) => {
                 self.results.show_message(ListMessage::Parse(error));
+                self.selection = Selection::None;
                 Accepted::only(Change::Message)
             }
             Ok(search) => {
                 let generation = self.generation();
-                let ask = self.results.start_search(generation, search, self.sort);
+                let ask = self.results.start_search(generation, search, self.sort());
                 Accepted {
                     change: Change::Searching,
                     then: Some(Then::Fetch(Fetch {
@@ -166,6 +377,128 @@ impl Model {
             generation,
             ask: Ask::Status,
         })
+    }
+
+    /// The positions the list says are selected, sorted and apart, read once
+    /// per user action. When the cache holds every one, the selection is
+    /// those rows, the files the person sees; otherwise it is read
+    /// (design: The selection).
+    pub(crate) fn set_selection(&mut self, positions: Vec<Range<u64>>) -> Accepted {
+        let positions: Vec<Range<u64>> = positions.into_iter().filter(|r| !r.is_empty()).collect();
+        self.selection = if positions.is_empty() || self.results.shown_ask().is_none() {
+            Selection::None
+        } else {
+            match self.results.cached_rows(&positions) {
+                Some(files) => Selection::Files(files),
+                None => Selection::Reading {
+                    positions,
+                    asked: None,
+                },
+            }
+        };
+        Accepted {
+            change: Change::Selection,
+            then: matches!(self.selection, Selection::Reading { .. })
+                .then_some(Then::ReadSelectionSoon),
+        }
+    }
+
+    /// The request for the selection's rows, if it waits for one.
+    pub(crate) fn read_selection(&mut self) -> Option<Fetch> {
+        let Selection::Reading {
+            positions,
+            asked: None,
+        } = &self.selection
+        else {
+            return None;
+        };
+        let ask = self.results.selection_ask(positions.clone())?;
+        let generation = self.generation();
+        if let Selection::Reading { asked, .. } = &mut self.selection {
+            *asked = Some(generation);
+        }
+        Some(Fetch {
+            generation,
+            ask: Ask::Selection(ask),
+        })
+    }
+
+    /// The selected files, once they are read.
+    pub(crate) fn selected_files(&self) -> Option<&[ResultItem]> {
+        self.selection.files()
+    }
+
+    /// Whether Export results… can run: the list shows results and no
+    /// export runs (spec: C4).
+    pub(crate) fn can_export(&self) -> bool {
+        self.results.shown_ask().is_some() && self.results.total() > 0 && !self.exporting()
+    }
+
+    pub(crate) fn exporting(&self) -> bool {
+        matches!(self.export, Export::Running { .. })
+    }
+
+    pub(crate) fn export(&self) -> &Export {
+        &self.export
+    }
+
+    /// Exports every match of the shown search to `path` (spec: Export).
+    /// The file holds the full path and each shown Size, Date modified,
+    /// Extension and Attributes column in `display_order`, the list's order
+    /// of [`Model::columns`], so it holds the bytes of `gozler -export-csv`
+    /// with those switches.
+    pub(crate) fn start_export(
+        &mut self,
+        path: PathBuf,
+        format: ExportFormat,
+        display_order: &[usize],
+    ) -> Accepted {
+        let Some(shown) = self.results.shown_ask().filter(|_| self.can_export()) else {
+            return Accepted::only(Change::Nothing);
+        };
+        let (search, sort) = (shown.search.clone(), shown.sort);
+        let columns: Vec<EsColumn> = display_order
+            .iter()
+            .filter_map(|&index| self.columns.get(index)?.export_column())
+            .collect();
+        let plan = EsPlan {
+            format: format.table_format(),
+            columns,
+            export: Some(path.display().to_string()),
+            ..EsPlan::default()
+        };
+        let generation = self.generation();
+        self.export = Export::Running {
+            generation,
+            path: path.clone(),
+            rows: 0,
+        };
+        Accepted {
+            change: Change::Export,
+            then: Some(Then::Fetch(Fetch {
+                generation,
+                ask: Ask::Export(ExportAsk {
+                    search,
+                    sort,
+                    path,
+                    want_attributes: plan.columns.contains(&EsColumn::Attributes),
+                    format: plan.result_format(),
+                }),
+            })),
+        }
+    }
+
+    /// Ends the running export; its thread deletes the partial file (spec:
+    /// C5).
+    pub(crate) fn cancel_export(&mut self) -> Accepted {
+        if !self.exporting() {
+            return Accepted::only(Change::Nothing);
+        }
+        self.export = Export::Idle;
+        Accepted {
+            change: Change::Export,
+            then: Some(Then::Cancel(Purpose::Export)),
+        }
     }
 
     /// Whether the window must ask for status every 2 seconds: the service
@@ -207,19 +540,38 @@ impl Model {
 
     /// Applies a reply; a reply of an older generation changes nothing.
     pub(crate) fn accept(&mut self, fetched: Fetched) -> Accepted {
-        match (fetched.purpose, fetched.outcome) {
-            (Purpose::Results, _) if !self.results.awaits(fetched.generation) => {
-                Accepted::only(Change::Stale)
+        let generation = fetched.generation;
+        match fetched.purpose {
+            Purpose::Results if self.results.awaits(generation) => {
+                self.accept_results(generation, fetched.outcome)
             }
-            (Purpose::Status, _) if self.status_asked != Some(fetched.generation) => {
-                Accepted::only(Change::Stale)
+            Purpose::Status if self.status_asked == Some(generation) => {
+                self.accept_status(fetched.outcome)
             }
-            (Purpose::Results, Outcome::Rows(chunk)) => {
+            Purpose::Selection if matches!(self.selection, Selection::Reading { asked: Some(g), .. } if g == generation) => {
+                self.accept_selection(fetched.outcome)
+            }
+            Purpose::Export if matches!(self.export, Export::Running { generation: g, .. } if g == generation) => {
+                self.accept_export(fetched.outcome)
+            }
+            Purpose::Results | Purpose::Status | Purpose::Selection | Purpose::Export => {
+                Accepted::only(Change::Nothing)
+            }
+        }
+    }
+
+    fn accept_results(&mut self, generation: Generation, outcome: Outcome) -> Accepted {
+        match outcome {
+            Outcome::Rows(chunk) => {
                 self.failure = None;
                 let flags = (chunk.volumes_incomplete, chunk.metadata_pending);
-                let change = match self.results.accept(fetched.generation, chunk) {
-                    RowsChange::Stale => Change::Stale,
-                    RowsChange::NewSearch { count } => Change::NewSearch { count },
+                let change = match self.results.accept(generation, chunk) {
+                    RowsChange::Stale => Change::Nothing,
+                    RowsChange::NewSearch { count } => {
+                        // A new search's rows are other files (spec: T2).
+                        self.selection = Selection::None;
+                        Change::NewSearch { count }
+                    }
                     RowsChange::Rows { rows, count } => Change::Rows { rows, count },
                 };
                 // A page's flags cover every volume in scope, and the status
@@ -236,8 +588,26 @@ impl Model {
                 };
                 Accepted { change, then }
             }
-            (Purpose::Status, Outcome::Status(status)) => {
-                self.status_asked = None;
+            Outcome::Failed(failure) => self.show_failure(failure),
+            other => unreachable!("a results request's reply is rows or a failure: {other:?}"),
+        }
+    }
+
+    /// The service failed while rows are shown: the list shows the failure
+    /// instead of the rows, nothing is selected, and the status poll runs
+    /// the search again once a failure that ends by itself has ended (spec:
+    /// T3, T4).
+    fn show_failure(&mut self, failure: DaemonFailure) -> Accepted {
+        self.failure = Some(failure.clone());
+        self.results.show_message(ListMessage::Failure(failure));
+        self.selection = Selection::None;
+        Accepted::only(Change::Message)
+    }
+
+    fn accept_status(&mut self, outcome: Outcome) -> Accepted {
+        self.status_asked = None;
+        match outcome {
+            Outcome::Status(status) => {
                 let answers_again = self.failure.as_ref().is_some_and(DaemonFailure::recovers);
                 let was_indexing = self.indexing_in_scope();
                 self.failure = None;
@@ -250,8 +620,7 @@ impl Model {
                     then: search_again.then_some(Then::SearchAgain),
                 }
             }
-            (Purpose::Status, Outcome::Failed(failure)) => {
-                self.status_asked = None;
+            Outcome::Failed(failure) => {
                 // A failure the list shows follows the service, so its
                 // message and button never offer the fix for a state the
                 // service has left. A search in flight shows its own reply.
@@ -269,15 +638,67 @@ impl Model {
                 self.failure = Some(failure);
                 Accepted::only(change)
             }
-            (Purpose::Results, Outcome::Failed(failure)) => {
-                self.failure = Some(failure.clone());
-                self.results.show_message(ListMessage::Failure(failure));
-                Accepted::only(Change::Message)
-            }
-            (Purpose::Results, Outcome::Status(_)) | (Purpose::Status, Outcome::Rows(_)) => {
-                unreachable!("a request's reply has its purpose's outcome")
-            }
+            other => unreachable!("a status request's reply is status or a failure: {other:?}"),
         }
+    }
+
+    fn accept_selection(&mut self, outcome: Outcome) -> Accepted {
+        let Selection::Reading { positions, .. } =
+            std::mem::replace(&mut self.selection, Selection::None)
+        else {
+            unreachable!("accept checked that the selection is read")
+        };
+        match outcome {
+            Outcome::Selection(reply) => {
+                let files: Vec<ResultItem> = positions
+                    .iter()
+                    .flat_map(Range::clone)
+                    .filter_map(|position| {
+                        let at = reply
+                            .rows
+                            .binary_search_by_key(&position, |(p, _)| *p)
+                            .ok()?;
+                        Some(reply.rows[at].1.clone())
+                    })
+                    .collect();
+                let rows = self.results.replace_cached(&reply.cached, &reply.rows);
+                if !files.is_empty() {
+                    self.selection = Selection::Files(files);
+                }
+                Accepted::only(Change::SelectionRead { rows })
+            }
+            Outcome::Failed(failure) if !self.results.searching() => self.show_failure(failure),
+            // A search in flight shows its own reply, which clears the
+            // list's selection.
+            Outcome::Failed(_) => Accepted::only(Change::Selection),
+            other => unreachable!("a selection request's reply is rows or a failure: {other:?}"),
+        }
+    }
+
+    fn accept_export(&mut self, outcome: Outcome) -> Accepted {
+        let Export::Running { path, rows, .. } = &mut self.export else {
+            unreachable!("accept checked that an export runs")
+        };
+        let failed = |path: &PathBuf, error| Change::ExportFailed {
+            path: path.clone(),
+            error,
+        };
+        let change = match outcome {
+            Outcome::ExportProgress { rows: written } => {
+                *rows = written;
+                return Accepted::only(Change::Export);
+            }
+            Outcome::Exported { rows } => {
+                let path = std::mem::take(path);
+                self.export = Export::Done { path, rows };
+                return Accepted::only(Change::Export);
+            }
+            Outcome::ExportFailed(failure) => failed(path, ExportError::Write(failure)),
+            Outcome::Failed(failure) => failed(path, ExportError::Daemon(failure)),
+            other => unreachable!("an export's reply is progress, its end or a failure: {other:?}"),
+        };
+        self.export = Export::Idle;
+        Accepted::only(change)
     }
 
     /// The list's display order of [`Model::columns`], as indexes into it:
@@ -303,10 +724,11 @@ impl Model {
     /// click on Size or Date modified, as gozler's sort keys do.
     pub(crate) fn header_sort(&self, column: Column) -> Option<SortSpec> {
         let key = column.sort_key()?;
-        Some(if self.sort.key == key {
+        let sort = self.sort();
+        Some(if sort.key == key {
             SortSpec {
                 key,
-                dir: match self.sort.dir {
+                dir: match sort.dir {
                     SortDir::Asc => SortDir::Desc,
                     SortDir::Desc => SortDir::Asc,
                 },
@@ -314,6 +736,35 @@ impl Model {
         } else {
             SortSpec::default_for(key)
         })
+    }
+
+    /// The sort View > Sort by's `key` asks for: the shown direction for the
+    /// shown key, else the key's own first direction.
+    pub(crate) fn key_sort(&self, key: SortKey) -> SortSpec {
+        let sort = self.sort();
+        if sort.key == key {
+            sort
+        } else {
+            SortSpec::default_for(key)
+        }
+    }
+
+    /// Saves the settings with the window's `placement` and `columns`, when
+    /// Windows gave them.
+    pub(crate) fn save_settings(
+        &mut self,
+        path: &Path,
+        placement: Option<Placement>,
+        columns: Option<Vec<SavedColumn>>,
+    ) -> io::Result<()> {
+        let window = &mut self.settings.window;
+        if placement.is_some() {
+            window.placement = placement;
+        }
+        if let Some(columns) = columns {
+            window.columns = columns;
+        }
+        self.settings.save(path)
     }
 }
 
@@ -378,6 +829,12 @@ impl Column {
         !matches!(self, Column::Extension | Column::Attributes)
     }
 
+    /// Name cannot be hidden, because the list would show rows that name
+    /// nothing (spec: C15).
+    pub(crate) fn can_hide(self) -> bool {
+        self != Column::Name
+    }
+
     /// Sizes are right-aligned, so their digits line up.
     pub(crate) fn right_aligned(self) -> bool {
         self == Column::Size
@@ -395,25 +852,43 @@ impl Column {
             Column::Attributes => None,
         }
     }
+
+    /// Its column in an export; Name and Path are parts of the full path,
+    /// which every export holds (spec: Export).
+    fn export_column(self) -> Option<EsColumn> {
+        match self {
+            Column::Name | Column::Path => None,
+            Column::Size => Some(EsColumn::Size),
+            Column::DateModified => Some(EsColumn::DateModified),
+            Column::Extension => Some(EsColumn::Extension),
+            Column::Attributes => Some(EsColumn::Attributes),
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
+#[allow(
+    clippy::single_range_in_vec_init,
+    reason = "a selection is a list of row ranges"
+)]
+pub(crate) mod tests {
     use super::*;
+    use crate::core::captions::{self, list_message};
+    use crate::core::fetch::{SelectionRows, WriteFailure};
     use crate::core::results::CHUNK_ROWS;
     use crate::core::results::tests::chunk;
     use crate::core::text::tests::{English, english};
-    use crate::core::text::{self, list_message};
     use gozler_client::NotRunning;
-    use gozler_core::proto::{DaemonStatus, VolumeStatus};
+    use gozler_core::escompat::{Command, parse_argv};
+    use gozler_core::proto::VolumeStatus;
 
-    fn model() -> Model {
+    pub(crate) fn model() -> Model {
         Model::new(english(), Settings::default())
     }
 
     /// Types `text` and starts its search; returns the first chunk's fetch.
-    fn search(model: &mut Model, text: &str) -> Fetch {
-        model.text = text.to_owned();
+    pub(crate) fn search(model: &mut Model, text: &str) -> Fetch {
+        model.set_typed_search(text.to_owned());
         let start = QueryStart {
             now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
             time_zone: jiff::tz::TimeZone::UTC,
@@ -428,10 +903,10 @@ mod tests {
     }
 
     /// The reply to `fetch`: its first rows of a search with `total` matches.
-    fn rows(fetch: &Fetch, total: u64) -> Fetched {
+    pub(crate) fn rows(fetch: &Fetch, total: u64) -> Fetched {
         let start = match &fetch.ask {
             Ask::Rows(ask) => ask.start,
-            Ask::Status => panic!("a rows fetch"),
+            other => panic!("a rows fetch: {other:?}"),
         };
         Fetched {
             purpose: Purpose::Results,
@@ -476,7 +951,7 @@ mod tests {
     }
 
     /// A model that shows the first rows of a search with `total` matches.
-    fn showing(total: u64) -> Model {
+    pub(crate) fn showing(total: u64) -> Model {
         let mut model = model();
         let fetch = search(&mut model, "report");
         model.accept(rows(&fetch, total));
@@ -489,11 +964,16 @@ mod tests {
     #[test]
     fn t1_a_new_search_keeps_the_rows_and_drops_the_older_search() {
         let mut model = showing(10);
+        let case = Matching {
+            case: true,
+            ..model.matching()
+        };
+        assert_eq!(model.set_matching(case).then, Some(Then::SearchAgain));
         let older = search(&mut model, "repo");
         assert_eq!(model.results.count(), 10, "the previous rows stay");
-        assert_eq!(text::results_status(&model, &English), "Searching…");
+        assert_eq!(captions::results_status(&model, &English), "Searching…");
         let _newest = search(&mut model, "report f");
-        assert_eq!(model.accept(rows(&older, 3)).change, Change::Stale);
+        assert_eq!(model.accept(rows(&older, 3)).change, Change::Nothing);
         assert_eq!(model.results.count(), 10);
     }
 
@@ -505,7 +985,7 @@ mod tests {
             model.accept(rows(&fetch, 3)).change,
             Change::NewSearch { count: 3 }
         );
-        assert_eq!(text::results_status(&model, &English), "3 results");
+        assert_eq!(captions::results_status(&model, &English), "3 results");
     }
 
     #[test]
@@ -561,7 +1041,7 @@ mod tests {
         let mut model = showing(10);
         let ask = model.status_needed().expect("no status request runs");
         model.accept(status(&ask, VolumePhase::Live));
-        assert_eq!(text::index_status(&model), "");
+        assert_eq!(captions::index_status(&model), "");
         assert!(!model.polls_status());
 
         let ask = model.status_needed().expect("no status request runs");
@@ -570,7 +1050,7 @@ mod tests {
         assert_eq!(model.results.count(), 10);
         // S13.
         assert_eq!(
-            text::index_status(&model),
+            captions::index_status(&model),
             r"C:\ is indexing — results may be incomplete."
         );
         assert!(model.polls_status());
@@ -599,7 +1079,7 @@ mod tests {
         ));
     }
 
-    /// t1 shows the same for the results.
+    /// t1 shows the same for the results, t6 for the selection.
     #[test]
     fn a_status_reply_of_an_older_generation_changes_nothing() {
         let mut model = showing(10);
@@ -610,7 +1090,7 @@ mod tests {
         };
         assert_eq!(
             model.accept(status(&older, VolumePhase::Rescanning)).change,
-            Change::Stale
+            Change::Nothing
         );
         assert_eq!(model.status, None);
     }
@@ -666,7 +1146,7 @@ mod tests {
     #[test]
     fn a_search_that_does_not_parse_starts_no_request() {
         let mut model = model();
-        model.text = "dz:x".into();
+        model.set_typed_search("dz:x".into());
         let start = QueryStart {
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
@@ -710,5 +1190,224 @@ mod tests {
             model.accept(status(&ask, phase.clone()));
             assert_eq!(model.polls_status(), polls, "{phase:?}");
         }
+    }
+
+    fn paths(model: &Model) -> Vec<&str> {
+        model
+            .selected_files()
+            .unwrap_or_default()
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect()
+    }
+
+    /// The cached rows are the files the person sees, so reading them again
+    /// from the service could name other files (design rule 10).
+    #[test]
+    fn a_selection_of_cached_rows_is_built_from_the_cache() {
+        let mut model = showing(50_000);
+        let accepted = model.set_selection(vec![3..5, 9..10]);
+        assert_eq!(accepted, Accepted::only(Change::Selection));
+        assert_eq!(paths(&model), [r"C:\row3", r"C:\row4", r"C:\row9"]);
+        assert_eq!(model.read_selection(), None);
+    }
+
+    /// The reply to the selection's one request: the rows it keeps, under
+    /// the folder `folder`, so the test sees which rows came from it.
+    fn selection_reply(fetch: &Fetch, folder: &str) -> Fetched {
+        let Ask::Selection(ask) = &fetch.ask else {
+            panic!("a selection fetch: {fetch:?}")
+        };
+        let span = ask.span.start..ask.span.start + ask.span.len;
+        let rows = span
+            .filter(|p| ask.keeps(*p))
+            .map(|p| {
+                let mut row = chunk(p, 1, 50_000).rows.remove(0);
+                row.path = format!(r"{folder}\row{p}");
+                (p, row)
+            })
+            .collect();
+        Fetched {
+            purpose: Purpose::Selection,
+            generation: fetch.generation,
+            outcome: Outcome::Selection(SelectionRows {
+                rows,
+                cached: ask.cached.clone(),
+            }),
+        }
+    }
+
+    /// S12: a selected row outside the cache is read in one request, whose
+    /// rows also replace the cached ones inside its span, so the list shows
+    /// the files the selection holds, of one moment.
+    #[test]
+    fn a_selected_row_outside_the_cache_is_read_with_the_cached_rows_beside_it() {
+        let mut model = showing(50_000);
+        let accepted = model.set_selection(vec![0..1, 40_000..40_001]);
+        assert_eq!(accepted.then, Some(Then::ReadSelectionSoon));
+        assert_eq!(
+            captions::selection_status(&model, &English),
+            "Reading the selection…"
+        );
+        let fetch = model.read_selection().expect("the selection is read");
+        assert_eq!(model.read_selection(), None, "one request");
+        let Ask::Selection(ask) = &fetch.ask else {
+            panic!("a selection fetch")
+        };
+        assert_eq!((ask.span.start, ask.span.len), (0, 40_001));
+        assert_eq!(ask.cached, [0..CHUNK_ROWS]);
+
+        assert_eq!(
+            model.accept(selection_reply(&fetch, "D:")).change,
+            Change::SelectionRead {
+                rows: 0..CHUNK_ROWS
+            }
+        );
+        assert_eq!(paths(&model), [r"D:\row0", r"D:\row40000"]);
+        let shown = model.results.row(5).map(|r| r.path.as_str());
+        assert_eq!(shown, Some(r"D:\row5"), "the cached rows are of its moment");
+    }
+
+    /// T6: a reply for a selection the person has changed since names other
+    /// files.
+    #[test]
+    fn t6_a_selection_changed_while_it_is_read_drops_the_older_reply() {
+        let mut model = showing(50_000);
+        model.set_selection(vec![40_000..40_001]);
+        let older = model.read_selection().expect("the selection is read");
+        model.set_selection(vec![40_000..40_002]);
+        assert_eq!(
+            model.accept(selection_reply(&older, "D:")).change,
+            Change::Nothing
+        );
+        assert_eq!(paths(&model), Vec::<&str>::new());
+        let newer = model.read_selection().expect("the new selection is read");
+        assert!(newer.generation > older.generation);
+    }
+
+    /// A failed read left unread would say "Reading the selection…", with
+    /// its commands disabled, until the person selected again, and nothing
+    /// would say why (spec: T3, T4); showing the failure over a search in
+    /// flight would drop that search's reply.
+    #[test]
+    fn a_selection_read_that_fails_shows_the_failure_and_polls() {
+        let mut model = showing(50_000);
+        model.set_selection(vec![40_000..40_001]);
+        let fetch = model.read_selection().expect("the selection is read");
+        assert_eq!(
+            model.accept(failed(&fetch, DaemonFailure::Lost)).change,
+            Change::Message
+        );
+        assert_eq!(model.selection, Selection::None);
+        let strings = english();
+        assert_eq!(
+            list_message(&model),
+            Some((strings.text("failure.lost").to_owned(), None))
+        );
+        assert!(model.polls_status());
+
+        let mut model = showing(50_000);
+        model.set_selection(vec![40_000..40_001]);
+        let read = model.read_selection().expect("the selection is read");
+        let newer = search(&mut model, "repo");
+        model.accept(failed(&read, DaemonFailure::Lost));
+        assert_eq!(
+            model.accept(rows(&newer, 3)).change,
+            Change::NewSearch { count: 3 },
+            "a search in flight shows its own reply"
+        );
+    }
+
+    /// T2: the rows of a new search are other files.
+    #[test]
+    fn a_new_search_clears_the_selection() {
+        let mut model = showing(10);
+        model.set_selection(vec![1..2]);
+        let fetch = search(&mut model, "repo");
+        assert_eq!(paths(&model), [r"C:\row1"], "the selection stays until");
+        model.accept(rows(&fetch, 3));
+        assert_eq!(model.selection, Selection::None);
+    }
+
+    /// Starts an export of the shown search as CSV; returns its fetch.
+    fn export(model: &mut Model) -> Fetch {
+        let order = model.column_order();
+        match model.start_export(r"D:\results.csv".into(), ExportFormat::Csv, &order) {
+            Accepted {
+                change: Change::Export,
+                then: Some(Then::Fetch(fetch)),
+            } => fetch,
+            other => panic!("the export starts a request: {other:?}"),
+        }
+    }
+
+    fn export_reply(fetch: &Fetch, outcome: Outcome) -> Fetched {
+        Fetched {
+            purpose: Purpose::Export,
+            generation: fetch.generation,
+            outcome,
+        }
+    }
+
+    /// The export must write what `gozler -export-csv` writes with the
+    /// switches of the shown columns, or the two disagree for one search
+    /// (spec: Export).
+    #[test]
+    fn an_export_writes_as_gozler_with_the_shown_columns() {
+        let mut model = showing(10);
+        let Ask::Export(ask) = export(&mut model).ask else {
+            panic!("an export fetch")
+        };
+        let args = ["report", "-export-csv", r"D:\results.csv", "-size", "-dm"];
+        let Ok(Command::Run(plan)) = parse_argv(&args.map(String::from)) else {
+            panic!("the command line is a search")
+        };
+        assert_eq!(ask.format, plan.result_format());
+        assert!(!ask.want_attributes);
+    }
+
+    /// T8: the export is not the search's, so a new search neither stops it
+    /// nor hides its result.
+    #[test]
+    fn t8_an_export_that_ends_while_a_search_runs_shows_its_result() {
+        let mut model = showing(10);
+        let fetch = export(&mut model);
+        assert!(!model.can_export(), "one export at a time");
+        let _search = search(&mut model, "repo");
+        let progress = Outcome::ExportProgress { rows: 4 };
+        model.accept(export_reply(&fetch, progress));
+        assert_eq!(
+            captions::export_status(&model, &English),
+            "Exporting… 4 rows"
+        );
+        let ended = model.accept(export_reply(&fetch, Outcome::Exported { rows: 10 }));
+        assert_eq!(ended, Accepted::only(Change::Export));
+        assert_eq!(
+            captions::export_status(&model, &English),
+            "Exported 10 rows to results.csv"
+        );
+        assert_eq!(captions::results_status(&model, &English), "Searching…");
+        assert!(model.can_export());
+    }
+
+    /// T9: the person must learn that the file was not written, and may
+    /// export again at once.
+    #[test]
+    fn t9_a_failed_export_reports_the_file_and_clears_part_3() {
+        let mut model = showing(10);
+        let fetch = export(&mut model);
+        let denied = WriteFailure {
+            kind: io::ErrorKind::PermissionDenied,
+            os_code: Some(5),
+        };
+        assert_eq!(
+            model.accept(export_reply(&fetch, Outcome::ExportFailed(denied))),
+            Accepted::only(Change::ExportFailed {
+                path: r"D:\results.csv".into(),
+                error: ExportError::Write(denied),
+            })
+        );
+        assert_eq!(captions::export_status(&model, &English), "");
+        assert!(model.can_export());
     }
 }

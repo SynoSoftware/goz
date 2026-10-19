@@ -6,6 +6,7 @@
 //! A handle is a plain value here. A Win32 call on a stale handle fails or
 //! does nothing, so a safe wrapper over one is sound.
 
+pub(crate) mod clipboard;
 pub(crate) mod controls;
 pub(crate) mod dialog;
 pub(crate) mod gdi;
@@ -23,11 +24,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, DrawMenuBar, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW,
-    GetWindowPlacement, GetWindowRect, IsIconic, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW,
-    SW_SHOWDEFAULT, SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
-    SetMenu, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
+    DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongPtrW, GetWindowPlacement,
+    GetWindowRect, IsIconic, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWNA,
+    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, SetWindowTextW,
+    ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WPF_RESTORETOMAXIMIZED,
 };
 use windows::core::HSTRING;
 
@@ -137,14 +137,6 @@ impl Hwnd {
         // SAFETY: the window procedure keeps its state alive while this
         // delivers WM_DESTROY and WM_NCDESTROY (design rule 2).
         let _ = unsafe { DestroyWindow(self.0) };
-    }
-
-    pub(crate) fn set_menu(self, menu: menu::Menu) {
-        // SAFETY: the menu is a menu bar that this window then owns.
-        unsafe {
-            let _ = SetMenu(self.0, Some(menu.handle()));
-            let _ = DrawMenuBar(self.0);
-        }
     }
 
     pub(crate) fn invalidate(self) {

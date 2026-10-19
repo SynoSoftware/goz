@@ -8,49 +8,52 @@
 use super::dialogs;
 use super::icons::Icons;
 use super::requests::Requests;
-use crate::core::commands::{self, CommandId, Focus, Menu, MenuItem, State};
-use crate::core::fetch::Fetch;
+use crate::core::captions::{self, StatusCaptions, WindowCaptions};
+use crate::core::clipboard::{ClipboardData, ClipboardFormat};
+use crate::core::commands::{self, CommandId, Focus, KeyAction, Keystroke, Menu, MenuItem, State};
+use crate::core::fetch::{Fetch, WriteFailure};
 use crate::core::ids::ControlId;
-use crate::core::layout::{self, Captions, Dpi, Layout, MessageArea, Px, Rect, Size};
-use crate::core::model::{Accepted, Change, Column, Model, Then};
-use crate::core::query::MatchMode;
+use crate::core::layout::{self, CaptionWidths, Dpi, Layout, MessageArea, Px, Rect, Size};
+use crate::core::model::{Accepted, Change, Column, ExportError, ExportFormat, Model, Then};
+use crate::core::query::{MatchMode, Matching};
 use crate::core::results::{Fix, Shown};
+use crate::core::selection::wide_path;
 use crate::core::settings::SavedColumn;
-use crate::core::text;
+use crate::win::clipboard::ClipboardBlock;
 use crate::win::controls::{
     Button, CheckBox, DropDownList, Edit, Label, ListColumn, ListView, StatusBar,
 };
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
-use crate::win::notify::{CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify, Notify};
+use crate::win::notify::{
+    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify,
+};
+use crate::win::shell::{self, FileType};
 use crate::win::wake::Waker;
-use crate::win::window::{Message, WindowProc};
+use crate::win::window::{DEFERRED, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_client::RELEASES;
 use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortSpec};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::ffi::OsString;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::os::windows::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use windows::Win32::Foundation::LRESULT;
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN;
-use windows::Win32::UI::WindowsAndMessaging::{
-    BN_CLICKED, CBN_SELCHANGE, EN_CHANGE, IDCANCEL, IDOK,
-};
 
 mod timer {
     /// Search as you type waits this long after the last keystroke.
     pub(super) const SEARCH: usize = 1;
     pub(super) const STATUS: usize = 2;
+    /// The selection is read this long after it last changed.
+    pub(super) const SELECTION: usize = 3;
 }
 
 const SEARCH_DELAY_MS: u32 = 150;
 const STATUS_POLL_MS: u32 = 2_000;
-
-/// The status bar's parts that stage 3 fills.
-const RESULTS_PART: usize = 0;
-const INDEX_PART: usize = 3;
+const SELECTION_DELAY_MS: u32 = 150;
 
 /// The controls, created in `WM_CREATE` in Tab order; Windows destroys them
 /// with the window.
@@ -84,23 +87,27 @@ impl Controls {
             list: ListView::create(parent, ControlId::List.id())?,
             status: StatusBar::create(parent, ControlId::Status.id())?,
         };
-        controls.message.0.set_visible(false);
-        controls.fix.0.set_visible(false);
+        controls.message.hwnd().set_visible(false);
+        controls.fix.hwnd().set_visible(false);
         Ok(controls)
     }
 
-    fn all(&self) -> [Hwnd; 9] {
-        [
-            self.search.0,
-            self.match_label.0,
-            self.match_mode.0,
-            self.match_case.0,
-            self.match_path.0,
-            self.message.0,
-            self.fix.0,
-            self.list.0,
-            self.status.0,
-        ]
+    /// Gives every control the window's font, at creation and on a monitor
+    /// with another DPI.
+    fn apply_fonts(&self, fonts: &Fonts) {
+        for control in [
+            self.search.hwnd(),
+            self.match_label.hwnd(),
+            self.match_mode.hwnd(),
+            self.match_case.hwnd(),
+            self.match_path.hwnd(),
+            self.message.hwnd(),
+            self.fix.hwnd(),
+            self.list.hwnd(),
+            self.status.hwnd(),
+        ] {
+            control.set_font(&fonts.ui);
+        }
     }
 }
 
@@ -123,31 +130,50 @@ impl Fonts {
 struct Metrics {
     dpi: Dpi,
     font_height: Px,
-    captions: Captions,
+    captions: CaptionWidths,
+}
+
+impl Metrics {
+    fn measure(fonts: &Fonts, captions: &WindowCaptions, dpi: Dpi) -> Metrics {
+        let meter = TextMeter::new(&fonts.ui);
+        Metrics {
+            dpi,
+            font_height: meter.height(),
+            captions: CaptionWidths::measure(captions, &|text| meter.width(text)),
+        }
+    }
+}
+
+/// What `WM_CREATE` makes, which every later handler uses: the window
+/// procedure calls no other handler before it exists.
+struct Created {
+    controls: Controls,
+    /// Replaced only after every control has the new fonts, because
+    /// `WM_SETFONT` does not take ownership.
+    fonts: RefCell<Fonts>,
+    metrics: Cell<Metrics>,
+    /// `None` while the window moves to a monitor with another DPI.
+    layout: RefCell<Option<Layout>>,
+    requests: Requests,
+    images: Option<ImageList>,
 }
 
 pub(crate) struct MainWindow {
-    controls: OnceCell<Controls>,
-    /// Replaced only after every control has the new fonts, because
-    /// `WM_SETFONT` does not take ownership.
-    fonts: RefCell<Option<Fonts>>,
-    metrics: Cell<Option<Metrics>>,
-    layout: RefCell<Option<Layout>>,
+    created: OnceCell<Created>,
     model: RefCell<Model>,
     numbers: RefCell<WindowsNumbers>,
     menus: Vec<Menu>,
-    menu_bar: Cell<Option<win::menu::Menu>>,
     /// The control that had the focus when the window was deactivated.
     focus_on_activate: Cell<Option<Hwnd>>,
     settings_file: PathBuf,
     settings_failure_shown: Cell<bool>,
     show_message: u32,
-    /// Made in `WM_CREATE`, which gives the window handle its waker needs.
-    requests: OnceCell<Requests>,
     icons: Icons,
-    images: Cell<Option<ImageList>>,
     /// Whether the status timer runs.
     polling: Cell<bool>,
+    /// Whether a [`Message::Deferred`] is posted to read the list's
+    /// selection, so one user action reads it once (design: The selection).
+    selection_pending: Cell<bool>,
 }
 
 impl MainWindow {
@@ -159,24 +185,19 @@ impl MainWindow {
         settings_file: PathBuf,
         show_message: u32,
     ) -> Hwnd {
-        let placement = model.settings.window.placement;
+        let placement = model.placement();
         let window = Rc::new(MainWindow {
-            controls: OnceCell::new(),
-            fonts: RefCell::new(None),
-            metrics: Cell::new(None),
-            layout: RefCell::new(None),
+            created: OnceCell::new(),
             model: RefCell::new(model),
             numbers: RefCell::new(WindowsNumbers::new()),
             menus: commands::menu_bar(),
-            menu_bar: Cell::new(None),
             focus_on_activate: Cell::new(None),
             settings_file,
             settings_failure_shown: Cell::new(false),
             show_message,
-            requests: OnceCell::new(),
             icons: Icons::default(),
-            images: Cell::new(None),
             polling: Cell::new(false),
+            selection_pending: Cell::new(false),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -190,211 +211,191 @@ impl MainWindow {
         hwnd
     }
 
+    fn created(&self) -> &Created {
+        self.created
+            .get()
+            .expect("the window procedure runs a handler only after WM_CREATE made the controls")
+    }
+
     fn on_create(&self, hwnd: Hwnd) -> bool {
         let dpi = hwnd.dpi();
         let (Ok(controls), Ok(fonts)) = (Controls::create(hwnd), Fonts::new(dpi)) else {
             return false;
         };
-        for control in controls.all() {
-            control.set_font(&fonts.ui);
-        }
-        let (columns, saved, order) = {
+        controls.apply_fonts(&fonts);
+        let (columns, order) = {
             let model = self.model.borrow();
-            (
-                model.columns.clone(),
-                model.settings.window.columns.clone(),
-                model.column_order(),
-            )
+            let columns: Vec<(Column, Px)> = model
+                .columns()
+                .iter()
+                .map(|c| (*c, layout::column_width(*c, model.saved_width(*c), dpi)))
+                .collect();
+            (columns, model.column_order())
         };
-        for (index, column) in columns.iter().enumerate() {
-            let width = saved.iter().find(|s| s.column == *column).map(|s| s.width);
+        for (index, (column, width)) in columns.into_iter().enumerate() {
             controls.list.insert_column(
                 index,
                 &ListColumn {
                     header: "",
-                    width: layout::column_width(*column, width, dpi),
+                    width,
                     right_aligned: column.right_aligned(),
                 },
             );
         }
         controls.list.set_column_order(&order);
-        if let Some(images) = ImageList::system_small() {
-            controls.list.set_small_images(&images);
-            self.images.set(Some(images));
+        let images = ImageList::system_small();
+        if let Some(images) = &images {
+            controls.list.set_small_images(images);
         }
-        let _ = self.requests.set(Requests::new(Waker::new(hwnd)));
-        self.fonts.replace(Some(fonts));
-        let _ = self.controls.set(controls);
-        self.show_sort();
-        self.refresh_text(hwnd);
+        let captions = self.captions();
+        let metrics = Metrics::measure(&fonts, &captions, dpi);
+        let _ = self.created.set(Created {
+            controls,
+            fonts: RefCell::new(fonts),
+            metrics: Cell::new(metrics),
+            layout: RefCell::new(None),
+            requests: Requests::new(Waker::new(hwnd)),
+            images,
+        });
+        self.apply_text(hwnd, &captions);
+        self.layout(hwnd);
         true
     }
 
-    /// Sets every caption from the model's facts and the current strings
-    /// (design rule 12), then measures the captions and lays out again.
-    /// Runs at creation and after a change to the regional format.
+    /// Every caption, from the model's facts and the current strings
+    /// (design rule 12).
+    fn captions(&self) -> WindowCaptions {
+        WindowCaptions::new(&self.model.borrow(), &*self.numbers.borrow())
+    }
+
+    /// Sets every caption, then measures them and lays out again. Runs
+    /// after a change to the regional format.
     fn refresh_text(&self, hwnd: Hwnd) {
-        self.apply_text(hwnd);
-        self.measure(hwnd.dpi());
+        let captions = self.captions();
+        self.apply_text(hwnd, &captions);
+        let created = self.created();
+        let metrics = Metrics::measure(&created.fonts.borrow(), &captions, hwnd.dpi());
+        created.metrics.set(metrics);
         self.layout(hwnd);
     }
 
-    fn apply_text(&self, hwnd: Hwnd) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
-        let (title, menus, cue, label, modes, selected_mode, case, path, headers, matching) = {
-            let model = self.model.borrow();
-            let strings = &model.strings;
-            (
-                text::title(strings, &model.text),
-                commands::render(&self.menus, strings),
-                strings.text("search.cue").to_owned(),
-                strings.text("match.label").to_owned(),
-                MatchMode::ALL.map(|m| strings.text(m.label()).to_owned()),
-                MatchMode::ALL
-                    .iter()
-                    .position(|m| *m == model.matching.mode)
-                    .expect("ALL holds every mode"),
-                strings.text("match.case").to_owned(),
-                strings.text("match.path").to_owned(),
-                model
-                    .columns
-                    .iter()
-                    .map(|c| strings.text(c.header()).to_owned())
-                    .collect::<Vec<_>>(),
-                model.matching,
-            )
-        };
-        hwnd.set_text(&title);
-        if let Ok(bar) = win::menu::Menu::bar(&menus) {
-            hwnd.set_menu(bar);
-            if let Some(old) = self.menu_bar.replace(Some(bar)) {
-                old.destroy();
-            }
-        }
-        controls.search.set_cue(&cue);
-        controls.match_label.0.set_text(&label);
-        controls
-            .match_mode
-            .set_items(&modes.each_ref().map(String::as_str), selected_mode);
-        controls.match_case.0.set_text(&case);
-        controls.match_case.set_checked(matching.case);
-        controls.match_path.0.set_text(&path);
-        controls.match_path.set_checked(matching.path);
-        for (index, header) in headers.iter().enumerate() {
+    fn apply_text(&self, hwnd: Hwnd, captions: &WindowCaptions) {
+        let controls = &self.created().controls;
+        hwnd.set_text(&captions.title);
+        let _ = win::menu::replace_menu_bar(hwnd, &captions.menu_bar);
+        controls.search.set_cue(&captions.search_cue);
+        controls.match_label.hwnd().set_text(&captions.match_label);
+        let mode = self.match_mode_index();
+        let modes = captions.match_modes.each_ref().map(String::as_str);
+        controls.match_mode.set_items(&modes, mode);
+        controls.match_case.hwnd().set_text(&captions.match_case);
+        controls.match_path.hwnd().set_text(&captions.match_path);
+        for (index, header) in captions.headers.iter().enumerate() {
             controls.list.set_header(index, header);
         }
-        self.update_controls();
-        self.update_status();
-        self.update_message();
+        self.show_status(&captions.status);
+        self.show_message(captions.message.as_ref());
+        self.update_bound_controls();
     }
 
-    /// Gives the match controls the state of their command (design rule 9).
-    fn update_controls(&self) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
-        let enabled = {
+    fn match_mode_index(&self) -> usize {
+        let mode = self.model.borrow().matching().mode;
+        MatchMode::ALL
+            .iter()
+            .position(|m| *m == mode)
+            .expect("ALL holds every mode")
+    }
+
+    /// Gives the controls bound to a command the command's state and
+    /// choice, after every change (design rule 9): the match controls and
+    /// the header's sort arrow.
+    fn update_bound_controls(&self) {
+        let controls = &self.created().controls;
+        let (enabled, matching) = {
             let model = self.model.borrow();
-            (CommandId::Match.row().enabled)(&State {
+            let state = State {
                 model: &model,
                 focus: Focus::Other,
-            })
+            };
+            ((CommandId::Match.row().enabled)(&state), model.matching())
         };
         for control in [
-            controls.match_label.0,
-            controls.match_mode.0,
-            controls.match_case.0,
-            controls.match_path.0,
+            controls.match_label.hwnd(),
+            controls.match_mode.hwnd(),
+            controls.match_case.hwnd(),
+            controls.match_path.hwnd(),
         ] {
             control.set_enabled(enabled);
         }
+        controls.match_mode.select(self.match_mode_index());
+        controls.match_case.set_checked(matching.case);
+        controls.match_path.set_checked(matching.path);
+        self.show_sort();
     }
 
-    /// Status parts 1 and 4: the results and the index state.
     fn update_status(&self) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
-        let (results, index) = {
-            let model = self.model.borrow();
-            let numbers = self.numbers.borrow();
-            (
-                text::results_status(&model, &*numbers),
-                text::index_status(&model),
-            )
-        };
-        controls.status.set_text(RESULTS_PART, &results);
-        controls.status.set_text(INDEX_PART, &index);
+        let status = StatusCaptions::new(&self.model.borrow(), &*self.numbers.borrow());
+        self.show_status(&status);
+    }
+
+    fn show_status(&self, status: &StatusCaptions) {
+        let bar = self.created().controls.status;
+        for (part, text) in status.parts().into_iter().enumerate() {
+            bar.set_text(part, text);
+        }
+    }
+
+    fn update_message(&self) {
+        let message = captions::list_message(&self.model.borrow());
+        self.show_message(message.as_ref());
     }
 
     /// Shows the list's message and its button, or hides them.
-    fn update_message(&self) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
-        let message = text::list_message(&self.model.borrow());
-        let (text, button) = match &message {
+    fn show_message(&self, message: Option<&(String, Option<String>)>) {
+        let controls = &self.created().controls;
+        let (text, button) = match message {
             Some((text, button)) => (text.as_str(), button.as_deref()),
             None => ("", None),
         };
-        controls.message.0.set_text(text);
-        controls.fix.0.set_text(button.unwrap_or_default());
+        controls.message.hwnd().set_text(text);
+        controls.fix.hwnd().set_text(button.unwrap_or_default());
         self.place_message(text, button);
-        controls.message.0.set_visible(message.is_some());
-        controls.fix.0.set_visible(button.is_some());
+        controls.message.hwnd().set_visible(message.is_some());
+        controls.fix.hwnd().set_visible(button.is_some());
     }
 
     /// Places the message below the list's header, and its button below it.
     fn place_message(&self, text: &str, button: Option<&str>) {
-        let (Some(controls), Some(metrics)) = (self.controls.get(), self.metrics.get()) else {
+        let created = self.created();
+        let Some(list) = created.layout.borrow().as_ref().map(|l| l.list) else {
             return;
         };
-        let Some(list) = self.layout.borrow().as_ref().map(|l| l.list) else {
-            return;
-        };
+        let controls = &created.controls;
+        let metrics = created.metrics.get();
         let header = controls.list.header().screen_rect().height;
         let area = MessageArea::new(list, header, metrics.dpi);
-        let placed = self.fonts.borrow().as_ref().map(|fonts| {
+        let (text, button) = {
+            let fonts = created.fonts.borrow();
             let meter = TextMeter::new(&fonts.ui);
             area.place(
                 meter.wrapped_height(text, area.text_width()),
                 metrics.font_height,
                 button.map(|b| meter.width(b)),
             )
-        });
-        let Some((text, button)) = placed else { return };
-        controls.message.0.set_rect(text);
-        if let Some(button) = button {
-            controls.fix.0.set_rect(button);
-        }
-    }
-
-    /// Measures every caption that the layout places, in the current font.
-    fn measure(&self, dpi: Dpi) {
-        let fonts = self.fonts.borrow();
-        let Some(fonts) = fonts.as_ref() else { return };
-        let meter = TextMeter::new(&fonts.ui);
-        let captions = {
-            let model = self.model.borrow();
-            let numbers = self.numbers.borrow();
-            Captions::measure(&model.strings, &*numbers, &|text| meter.width(text))
         };
-        self.metrics.set(Some(Metrics {
-            dpi,
-            font_height: meter.height(),
-            captions,
-        }));
+        controls.message.hwnd().set_rect(text);
+        if let Some(button) = button {
+            controls.fix.hwnd().set_rect(button);
+        }
     }
 
     /// Places every control where `Layout::compute` says (design rule 7).
     fn layout(&self, hwnd: Hwnd) {
-        let (Some(controls), Some(metrics)) = (self.controls.get(), self.metrics.get()) else {
-            return;
-        };
+        let created = self.created();
+        let controls = &created.controls;
+        let metrics = created.metrics.get();
         let status_height = controls.status.fit();
-        let panes = self.model.borrow().panes;
+        let panes = self.model.borrow().panes();
         let layout = Layout::compute(
             hwnd.client_size(),
             metrics.dpi,
@@ -403,60 +404,61 @@ impl MainWindow {
             &metrics.captions,
             &panes,
         );
-        controls.search.0.set_rect(layout.search);
-        controls.match_label.0.set_rect(layout.match_label);
+        controls.search.hwnd().set_rect(layout.search);
+        controls.match_label.hwnd().set_rect(layout.match_label);
         // A drop-down list's height includes its open list.
-        controls.match_mode.0.set_rect(Rect {
+        controls.match_mode.hwnd().set_rect(Rect {
             height: Px(layout.match_mode.height.0 * 10),
             ..layout.match_mode
         });
-        controls.match_case.0.set_rect(layout.match_case);
-        controls.match_path.0.set_rect(layout.match_path);
-        controls.list.0.set_rect(layout.list);
+        controls.match_case.hwnd().set_rect(layout.match_case);
+        controls.match_path.hwnd().set_rect(layout.match_path);
+        controls.list.hwnd().set_rect(layout.list);
         controls.status.set_parts(&layout.status_parts);
-        self.layout.replace(Some(layout));
+        created.layout.replace(Some(layout));
         self.update_message();
         hwnd.invalidate();
     }
 
     fn on_dpi_changed(&self, hwnd: Hwnd, dpi: Dpi, suggested: Rect) {
-        let (Some(controls), Some(metrics)) = (self.controls.get(), self.metrics.get()) else {
-            return;
-        };
+        let created = self.created();
+        let controls = &created.controls;
         let Ok(fonts) = Fonts::new(dpi) else { return };
-        for control in controls.all() {
-            control.set_font(&fonts.ui);
-        }
-        drop(self.fonts.replace(Some(fonts)));
-        let columns = self.model.borrow().columns.len();
+        controls.apply_fonts(&fonts);
+        drop(created.fonts.replace(fonts));
+        let old = created.metrics.get().dpi;
+        let columns = self.model.borrow().columns().len();
         for index in 0..columns {
             let width = controls.list.column_width(index);
             controls
                 .list
-                .set_column_width(index, width.rescale(metrics.dpi, dpi));
+                .set_column_width(index, width.rescale(old, dpi));
         }
-        self.measure(dpi);
+        let captions = self.captions();
+        created
+            .metrics
+            .set(Metrics::measure(&created.fonts.borrow(), &captions, dpi));
         // The minimum size is in the old DPI's pixels until the layout
         // runs again, so it does not hold the window to the old size.
-        self.layout.replace(None);
+        created.layout.replace(None);
         hwnd.set_rect(suggested);
         self.layout(hwnd);
     }
 
-    /// Which control has the focus, as the command table asks.
-    fn focus(&self) -> Focus {
-        match (self.controls.get(), Hwnd::focused()) {
-            (Some(controls), Some(focused)) if focused == controls.search.0 => Focus::SearchBox {
+    /// Which control of the window `control` is, as the command table asks.
+    fn focus_of(&self, control: Option<Hwnd>) -> Focus {
+        let controls = &self.created().controls;
+        match control {
+            Some(control) if control == controls.search.hwnd() => Focus::SearchBox {
                 text_selected: controls.search.has_selected_text(),
             },
+            Some(control) if control == controls.list.hwnd() => Focus::List,
             _ => Focus::Other,
         }
     }
 
-    fn search_box_focused(&self) -> bool {
-        self.controls
-            .get()
-            .is_some_and(|controls| Hwnd::focused() == Some(controls.search.0))
+    fn focus(&self) -> Focus {
+        self.focus_of(Hwnd::focused())
     }
 
     /// Each item's ID, whether it is enabled and whether it is checked, from
@@ -474,12 +476,30 @@ impl MainWindow {
             .collect()
     }
 
-    /// Sets every menu item's enabled state and mark from the command table.
-    fn update_menu(&self) {
-        let Some(bar) = self.menu_bar.get() else {
+    /// Sets every menu item's enabled state and mark from the command
+    /// table, with Export results… or Cancel export in its place, after the
+    /// selection of the action that opened the menu is read.
+    fn update_menu(&self, hwnd: Hwnd) {
+        self.read_list_selection(hwnd);
+        let Some(bar) = win::menu::Menu::of(hwnd) else {
             return;
         };
-        for (id, enabled, checked) in self.item_states(&commands::items(&self.menus)) {
+        let (slot, node) = {
+            let model = self.model.borrow();
+            let slot = commands::export_slot(&model);
+            (slot, commands::node(&slot, model.strings()))
+        };
+        let export = [CommandId::ExportResults, CommandId::CancelExport]
+            .map(|command| MenuItem::Run(command).id());
+        bar.replace_item(&export, &node);
+        let items: Vec<MenuItem> = commands::items(&self.menus)
+            .into_iter()
+            .map(|item| match item {
+                MenuItem::Run(CommandId::ExportResults) => slot,
+                item => item,
+            })
+            .collect();
+        for (id, enabled, checked) in self.item_states(&items) {
             bar.set_state(id, enabled, checked);
         }
     }
@@ -496,32 +516,36 @@ impl MainWindow {
                 focus,
             })
         };
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
         if !enabled {
             return;
         }
-        match item {
+        let controls = &self.created().controls;
+        let accepted = match item {
             MenuItem::Run(command) => match command {
-                CommandId::Exit => self.exit(hwnd),
-                CommandId::About => dialogs::about(hwnd, &self.model),
-                CommandId::Copy => controls.search.copy(),
-                CommandId::SelectAll => controls.search.select_all(),
+                CommandId::Exit => return self.exit(hwnd),
+                CommandId::About => return dialogs::about(hwnd, &self.model),
+                CommandId::Open => return self.open_selected(hwnd),
+                CommandId::OpenFileLocation => return self.show_selected(hwnd),
+                CommandId::Properties => return self.show_properties(hwnd),
+                CommandId::ExportResults => return self.export(hwnd),
+                CommandId::CancelExport => self.model.borrow_mut().cancel_export(),
+                CommandId::Copy => match focus {
+                    Focus::SearchBox { .. } => return controls.search.copy(),
+                    Focus::List | Focus::Other => return self.copy(hwnd, ClipboardFormat::Files),
+                },
+                CommandId::CopyAsPath => return self.copy(hwnd, ClipboardFormat::Paths),
+                CommandId::CopyName => return self.copy(hwnd, ClipboardFormat::Names),
+                CommandId::SelectAll => match focus {
+                    Focus::SearchBox { .. } => return controls.search.select_all(),
+                    Focus::List | Focus::Other => return controls.list.select_all(),
+                },
                 CommandId::Find => {
-                    controls.search.0.focus();
-                    controls.search.select_all();
+                    controls.search.hwnd().focus();
+                    return controls.search.select_all();
                 }
-                CommandId::Refresh => self.search(hwnd),
-                CommandId::SearchSyntax => dialogs::search_syntax(hwnd, &self.model),
-                CommandId::Open
-                | CommandId::OpenFileLocation
-                | CommandId::Properties
-                | CommandId::ExportResults
-                | CommandId::CancelExport
-                | CommandId::Settings
-                | CommandId::CopyAsPath
-                | CommandId::CopyName
+                CommandId::Refresh => return self.search(hwnd),
+                CommandId::SearchSyntax => return dialogs::search_syntax(hwnd, &self.model),
+                CommandId::Settings
                 | CommandId::SearchInThisFolder
                 | CommandId::Filters
                 | CommandId::Inspector
@@ -530,26 +554,22 @@ impl MainWindow {
                 | CommandId::Match
                 | CommandId::SortBy
                 | CommandId::ClearFilters
-                | CommandId::ShowWindow => {}
+                | CommandId::ShowWindow => return,
             },
-            MenuItem::Column(column) => self.toggle_column(hwnd, column),
+            MenuItem::Column(column) => self.model.borrow_mut().toggle_column(column),
             MenuItem::SortKey(key) => {
-                let sort = {
-                    let model = self.model.borrow();
-                    if model.sort.key == key {
-                        model.sort
-                    } else {
-                        SortSpec::default_for(key)
-                    }
-                };
-                self.sort_by(hwnd, sort);
+                let mut model = self.model.borrow_mut();
+                let sort = model.key_sort(key);
+                model.sort_by(sort)
             }
             MenuItem::SortDirection(dir) => {
-                let key = self.model.borrow().sort.key;
-                self.sort_by(hwnd, SortSpec { key, dir });
+                let mut model = self.model.borrow_mut();
+                let key = model.sort().key;
+                model.sort_by(SortSpec { key, dir })
             }
-            MenuItem::Language(_) => {}
-        }
+            MenuItem::Language(_) => return,
+        };
+        self.apply(hwnd, accepted);
     }
 
     /// Runs the search that the text and the controls ask for now.
@@ -571,19 +591,14 @@ impl MainWindow {
     }
 
     fn start(&self, fetch: Fetch) {
-        if let Some(requests) = self.requests.get() {
-            requests.start(fetch);
-        }
+        self.created().requests.start(fetch);
     }
 
     /// Asks for the chunk that the rows on screen still lack, so every
     /// chunk request comes from the rows visible now (design: Rows on
     /// demand).
     fn fetch_visible(&self) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
-        let visible = controls.list.visible_rows();
+        let visible = self.created().controls.list.visible_rows();
         let fetch = self.model.borrow_mut().rows_needed(visible);
         if let Some(fetch) = fetch {
             self.start(fetch);
@@ -593,17 +608,39 @@ impl MainWindow {
     /// Updates the controls for what a reply or an input changed, and starts
     /// the request it makes necessary.
     fn apply(&self, hwnd: Hwnd, accepted: Accepted) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
+        let created = self.created();
+        let controls = &created.controls;
         match accepted.then {
             Some(Then::Fetch(fetch)) => self.start(fetch),
             Some(Then::SearchAgain) => self.search(hwnd),
+            Some(Then::SearchSoon) => hwnd.set_timer(timer::SEARCH, SEARCH_DELAY_MS),
+            Some(Then::ReadSelectionSoon) => hwnd.set_timer(timer::SELECTION, SELECTION_DELAY_MS),
+            Some(Then::Cancel(purpose)) => created.requests.cancel(purpose),
             None => {}
         }
+        let mut failed_export = None;
         match accepted.change {
-            Change::Stale => {}
-            Change::Searching | Change::Status => self.update_status(),
+            Change::Nothing | Change::Choice => {}
+            Change::Typed => hwnd.set_text(&captions::title(&self.model.borrow())),
+            Change::ColumnShown { index } => {
+                let (column, header) = {
+                    let model = self.model.borrow();
+                    let column = model.columns()[index];
+                    (column, captions::header(model.strings(), column))
+                };
+                controls.list.insert_column(
+                    index,
+                    &ListColumn {
+                        header: &header,
+                        width: layout::column_width(column, None, hwnd.dpi()),
+                        right_aligned: column.right_aligned(),
+                    },
+                );
+            }
+            Change::ColumnHidden { index } => controls.list.delete_column(index),
+            Change::Searching | Change::Status | Change::Selection | Change::Export => {
+                self.update_status();
+            }
             Change::NewSearch { count } => {
                 // A new search shows its results from the top, with nothing
                 // selected (spec: T2).
@@ -632,10 +669,21 @@ impl MainWindow {
                 self.update_status();
                 self.update_message();
             }
+            Change::SelectionRead { rows } => {
+                controls.list.redraw_rows(rows);
+                self.update_status();
+            }
+            Change::ExportFailed { path, error } => {
+                self.update_status();
+                failed_export = Some((path, error));
+            }
         }
-        // Rule 9: a reply can change what a command allows.
-        self.update_controls();
+        self.update_bound_controls();
         self.update_poll(hwnd);
+        // Last, because the message box runs its own message loop.
+        if let Some((path, error)) = failed_export {
+            self.show_export_failure(hwnd, &path, &error);
+        }
     }
 
     /// Starts or stops the one status timer as the model says (design:
@@ -653,144 +701,117 @@ impl MainWindow {
 
     /// Accepts every reply that has arrived.
     fn on_wake(&self, hwnd: Hwnd) {
-        let Some(requests) = self.requests.get() else {
-            return;
-        };
-        for fetched in requests.drain() {
+        for fetched in self.created().requests.drain() {
             let accepted = self.model.borrow_mut().accept(fetched);
             self.apply(hwnd, accepted);
         }
     }
 
     /// A control's notification in `WM_COMMAND`.
-    fn on_control(&self, hwnd: Hwnd, id: u16, notification: u16) {
-        let Some(controls) = self.controls.get() else {
+    fn on_control(&self, hwnd: Hwnd, event: ControlEvent) {
+        let controls = &self.created().controls;
+        let matching = || self.model.borrow().matching();
+        let accepted = if controls.search.changed(event) {
+            let text = controls.search.text();
+            self.model.borrow_mut().set_typed_search(text)
+        } else if controls.match_mode.selection_changed(event) {
+            let Some(mode) = controls
+                .match_mode
+                .selected()
+                .and_then(|i| MatchMode::ALL.get(i).copied())
+            else {
+                return;
+            };
+            let choice = Matching { mode, ..matching() };
+            self.model.borrow_mut().set_matching(choice)
+        } else if controls.match_case.clicked(event) {
+            let choice = Matching {
+                case: controls.match_case.is_checked(),
+                ..matching()
+            };
+            self.model.borrow_mut().set_matching(choice)
+        } else if controls.match_path.clicked(event) {
+            let choice = Matching {
+                path: controls.match_path.is_checked(),
+                ..matching()
+            };
+            self.model.borrow_mut().set_matching(choice)
+        } else if controls.fix.clicked(event) {
+            let fix = match self.model.borrow().results().shown() {
+                Shown::Message(message) => message.fix(),
+                Shown::Nothing | Shown::Rows(_) => None,
+            };
+            if let Some(fix) = fix {
+                run_fix(hwnd, &fix);
+            }
+            return;
+        } else {
             return;
         };
-        let Some(control) = ControlId::from_id(id) else {
-            return;
-        };
-        match (control, u32::from(notification)) {
-            (ControlId::Search, EN_CHANGE) => {
-                let text = controls.search.text();
-                let title = {
-                    let mut model = self.model.borrow_mut();
-                    model.text = text;
-                    text::title(&model.strings, &model.text)
-                };
-                hwnd.set_text(&title);
-                hwnd.set_timer(timer::SEARCH, SEARCH_DELAY_MS);
-            }
-            (ControlId::MatchMode, CBN_SELCHANGE) => {
-                let Some(mode) = controls
-                    .match_mode
-                    .selected()
-                    .and_then(|i| MatchMode::ALL.get(i).copied())
-                else {
-                    return;
-                };
-                self.model.borrow_mut().matching.mode = mode;
-                self.search(hwnd);
-            }
-            (ControlId::MatchCase, BN_CLICKED) => {
-                let checked = controls.match_case.is_checked();
-                self.model.borrow_mut().matching.case = checked;
-                self.search(hwnd);
-            }
-            (ControlId::MatchPath, BN_CLICKED) => {
-                let checked = controls.match_path.is_checked();
-                self.model.borrow_mut().matching.path = checked;
-                self.search(hwnd);
-            }
-            (ControlId::Fix, BN_CLICKED) => {
-                let fix = match self.model.borrow().results.shown() {
-                    Shown::Message(message) => message.fix(),
-                    Shown::Nothing | Shown::Rows(_) => None,
-                };
-                if let Some(fix) = fix {
-                    run_fix(hwnd, &fix);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Sorts by `sort` and runs the search again (spec: C20).
-    fn sort_by(&self, hwnd: Hwnd, sort: SortSpec) {
-        self.model.borrow_mut().sort = sort;
-        self.show_sort();
-        self.search(hwnd);
+        self.apply(hwnd, accepted);
     }
 
     /// The arrow on the sorted column's header (spec: Results list).
     fn show_sort(&self) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
         let (count, sorted) = {
             let model = self.model.borrow();
+            let sort = model.sort();
             (
-                model.columns.len(),
+                model.columns().len(),
                 model
-                    .columns
+                    .columns()
                     .iter()
-                    .position(|c| c.sort_key() == Some(model.sort.key))
-                    .map(|index| (index, model.sort.dir == SortDir::Asc)),
+                    .position(|c| c.sort_key() == Some(sort.key))
+                    .map(|index| (index, sort.dir == SortDir::Asc)),
             )
         };
-        controls.list.show_sort(count, sorted);
+        self.created().controls.list.show_sort(count, sorted);
     }
 
-    /// Shows or hides a column (spec: C15). A shown column joins at the end.
-    fn toggle_column(&self, hwnd: Hwnd, column: Column) {
-        let Some(controls) = self.controls.get() else {
-            return;
-        };
-        let removed = {
-            let mut model = self.model.borrow_mut();
-            match model.columns.iter().position(|c| *c == column) {
-                Some(index) => {
-                    model.columns.remove(index);
-                    Some(index)
-                }
-                None => {
-                    model.columns.push(column);
-                    None
-                }
-            }
-        };
-        match removed {
-            Some(index) => controls.list.delete_column(index),
-            None => {
-                let (index, header) = {
-                    let model = self.model.borrow();
-                    (
-                        model.columns.len() - 1,
-                        model.strings.text(column.header()).to_owned(),
-                    )
-                };
-                controls.list.insert_column(
-                    index,
-                    &ListColumn {
-                        header: &header,
-                        width: layout::column_width(column, None, hwnd.dpi()),
-                        right_aligned: column.right_aligned(),
-                    },
-                );
-            }
-        }
-        self.show_sort();
-    }
-
-    /// The header's context menu, View > Columns' items (spec: C15).
-    fn header_menu(&self, hwnd: Hwnd, point: (i32, i32)) {
-        let items = commands::header_menu();
+    /// A context menu of `groups` at `point`; the chosen item runs after
+    /// the menu closes (design rule 9).
+    fn context_menu(
+        &self,
+        hwnd: Hwnd,
+        groups: &[Vec<MenuItem>],
+        point: (i32, i32),
+        default: Option<MenuItem>,
+    ) {
+        let items: Vec<MenuItem> = groups.iter().flatten().copied().collect();
         let states = self.item_states(&items);
-        let nodes = commands::render_popup(&items, &self.model.borrow().strings);
-        let chosen = win::menu::Menu::track_popup(hwnd, &nodes, point, &states);
+        let nodes = commands::render_popup(groups, self.model.borrow().strings());
+        let default = default.map(MenuItem::id);
+        let chosen = win::menu::Menu::track_popup(hwnd, &nodes, point, &states, default);
         if let Some(item) = chosen.and_then(MenuItem::from_id) {
             self.run(hwnd, item);
         }
+    }
+
+    /// The context menu of a row, at `point`, or at the focused row for the
+    /// Menu key and Shift+F10. A right-click below the last row shows none
+    /// (spec: Results list).
+    fn row_menu(&self, hwnd: Hwnd, point: Option<(i32, i32)>) {
+        let list = self.created().controls.list;
+        let point = match point {
+            Some(point) => list.row_at(point).map(|_| point),
+            None => list.focused_row_point(),
+        };
+        let Some(point) = point else { return };
+        // The right-click selected its row a moment ago.
+        self.read_list_selection(hwnd);
+        let open = MenuItem::Run(CommandId::Open);
+        self.context_menu(hwnd, &commands::row_menu(), point, Some(open));
+    }
+
+    /// Reads the list's selection, if it changed since it was last read
+    /// (design: The selection).
+    fn read_list_selection(&self, hwnd: Hwnd) {
+        if !self.selection_pending.replace(false) {
+            return;
+        }
+        let positions = self.created().controls.list.selected();
+        let accepted = self.model.borrow_mut().set_selection(positions);
+        self.apply(hwnd, accepted);
     }
 
     fn on_list_notify(&self, hwnd: Hwnd, notify: ListNotify) -> Option<LRESULT> {
@@ -807,15 +828,16 @@ impl MainWindow {
                 Some(LRESULT(0))
             }
             ListNotify::ColumnClick(index) => {
-                let sort = {
-                    let model = self.model.borrow();
-                    model
-                        .columns
+                let accepted = {
+                    let mut model = self.model.borrow_mut();
+                    let sort = model
+                        .columns()
                         .get(index)
-                        .and_then(|column| model.header_sort(*column))
+                        .and_then(|column| model.header_sort(*column));
+                    sort.map(|sort| model.sort_by(sort))
                 };
-                if let Some(sort) = sort {
-                    self.sort_by(hwnd, sort);
+                if let Some(accepted) = accepted {
+                    self.apply(hwnd, accepted);
                 }
                 Some(LRESULT(0))
             }
@@ -825,6 +847,17 @@ impl MainWindow {
                 DrawStage::Cell { row, column } => self.draw_cell(&draw, hwnd.dpi(), row, column),
                 DrawStage::Other => DrawAnswer::Default,
             })),
+            ListNotify::SelectionChanged => {
+                if !self.selection_pending.replace(true) {
+                    hwnd.post(DEFERRED);
+                }
+                None
+            }
+            ListNotify::Activated => {
+                self.read_list_selection(hwnd);
+                self.run(hwnd, MenuItem::Run(CommandId::Open));
+                None
+            }
             ListNotify::Other => None,
         }
     }
@@ -837,12 +870,12 @@ impl MainWindow {
         let (text, icon) = {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
-            let column = model.columns.get(info.column()).copied();
-            match (column, model.results.row(info.row())) {
+            let column = model.columns().get(info.column()).copied();
+            match (column, model.results().row(info.row())) {
                 (Some(column), Some(row)) => (
                     info.wants_text()
-                        .then(|| text::cell(&model.strings, &*numbers, column, row)),
-                    text::path_part(column, &row.path)
+                        .then(|| crate::core::text::cell(model.strings(), &*numbers, column, row)),
+                    crate::core::text::path_part(column, &row.path)
                         .filter(|_| column == Column::Name)
                         .map(|name| (row.path[name].to_owned(), row.is_dir)),
                 ),
@@ -863,14 +896,15 @@ impl MainWindow {
     fn draw_cell(&self, draw: &CustomDraw, dpi: Dpi, row: u64, column: usize) -> DrawAnswer {
         let cell = {
             let model = self.model.borrow();
-            let column = model.columns.get(column).copied();
-            let Some(item) = model.results.row(row) else {
+            let column = model.columns().get(column).copied();
+            let Some(item) = model.results().row(row) else {
                 return DrawAnswer::Default;
             };
-            let Some(span) = column.and_then(|c| text::path_part(c, &item.path)) else {
+            let Some(span) = column.and_then(|c| crate::core::text::path_part(c, &item.path))
+            else {
                 return DrawAnswer::Default;
             };
-            let bold = within(&model.results.matched_parts(item), &span);
+            let bold = within(&model.results().matched_parts(item), &span);
             if bold.is_empty() {
                 return DrawAnswer::Default;
             }
@@ -879,45 +913,197 @@ impl MainWindow {
         };
         let (text, bold, icon) = cell;
         let icon = icon.map(|is_folder| self.icons.index(&text, is_folder));
-        let fonts = self.fonts.borrow();
-        let Some(fonts) = fonts.as_ref() else {
-            return DrawAnswer::Default;
-        };
+        let created = self.created();
+        let fonts = created.fonts.borrow();
         draw.draw_cell(
             &text,
             &bold,
             (&fonts.ui, &fonts.bold),
-            self.images.get().zip(icon),
+            created.images.zip(icon),
             layout::cell_text_inset(column == 0, dpi),
         );
         DrawAnswer::Drawn
     }
 
-    /// `Down` in the search box moves the focus to the first row (spec:
-    /// Search box). Returns whether it took the key.
-    fn on_key(&self, target: Hwnd, key: u16) -> bool {
-        let Some(controls) = self.controls.get() else {
+    /// A key that the control `target` gives a meaning (design rule 8).
+    /// Returns whether the window took it.
+    fn on_key(&self, hwnd: Hwnd, target: Hwnd, keystroke: Keystroke) -> bool {
+        let Some(action) = commands::control_key(self.focus_of(Some(target)), keystroke) else {
             return false;
         };
-        if target != controls.search.0 || key != VK_DOWN.0 {
-            return false;
-        }
-        let count = self.model.borrow().results.count();
-        controls.list.0.focus();
-        if count > 0 {
-            controls.list.select_only(Some(0));
-            controls.list.ensure_visible(0);
+        let controls = &self.created().controls;
+        match action {
+            KeyAction::Run(command) => {
+                self.read_list_selection(hwnd);
+                self.run(hwnd, MenuItem::Run(command));
+            }
+            // The focus moves to the first row (spec: Search box).
+            KeyAction::FocusList => {
+                let count = self.model.borrow().results().count();
+                controls.list.hwnd().focus();
+                if count > 0 {
+                    controls.list.select_only(Some(0));
+                    controls.list.ensure_visible(0);
+                }
+            }
+            KeyAction::SearchNow => self.search(hwnd),
+            KeyAction::ClearSearch => controls.search.hwnd().set_text(""),
         }
         true
     }
 
     /// Whether `point`, in screen coordinates, is on the list's header.
     fn on_header(&self, point: (i32, i32)) -> bool {
-        self.controls.get().is_some_and(|controls| {
-            let header = controls.list.header().screen_rect();
-            (header.x.0..header.right().0).contains(&point.0)
-                && (header.y.0..header.bottom().0).contains(&point.1)
-        })
+        let header = self.created().controls.list.header().screen_rect();
+        (header.x.0..header.right().0).contains(&point.0)
+            && (header.y.0..header.bottom().0).contains(&point.1)
+    }
+
+    /// The selected entries' paths as Windows names them.
+    fn selected_paths(&self) -> Vec<Vec<u16>> {
+        let model = self.model.borrow();
+        model
+            .selected_files()
+            .unwrap_or_default()
+            .iter()
+            .map(wide_path)
+            .collect()
+    }
+
+    /// Opens each selected entry (spec: C1).
+    fn open_selected(&self, hwnd: Hwnd) {
+        let (present, missing) = present(self.selected_paths());
+        for path in &present {
+            shell::open_entry(hwnd, path);
+        }
+        self.report_missing(hwnd, missing);
+    }
+
+    /// Opens the folder of each selected entry with the entries selected
+    /// (spec: C2): one File Explorer window for each folder.
+    fn show_selected(&self, hwnd: Hwnd) {
+        let (present, missing) = present(self.selected_paths());
+        let mut folders: Vec<(Vec<u16>, Vec<Vec<u16>>)> = Vec::new();
+        for path in present {
+            let folder = folder_of(&path);
+            match folders.iter_mut().find(|(f, _)| *f == folder) {
+                Some((_, entries)) => entries.push(path),
+                None => folders.push((folder, vec![path])),
+            }
+        }
+        for (folder, entries) in &folders {
+            shell::show_in_folder(folder, entries);
+        }
+        self.report_missing(hwnd, missing);
+    }
+
+    /// The shell's Properties of the selected entry (spec: C3).
+    fn show_properties(&self, hwnd: Hwnd) {
+        let (present, missing) = present(self.selected_paths());
+        for path in &present {
+            shell::properties(hwnd, path);
+        }
+        self.report_missing(hwnd, missing);
+    }
+
+    /// Says that `missing`, which the person chose, no longer exists (spec:
+    /// Feedback).
+    fn report_missing(&self, hwnd: Hwnd, missing: Option<Vec<u16>>) {
+        let Some(path) = missing else { return };
+        let path = String::from_utf16_lossy(&path);
+        let text = self
+            .model
+            .borrow()
+            .strings()
+            .format("message.no_longer_exists", &[&path]);
+        self.error_box(hwnd, &text);
+    }
+
+    /// Puts the selected files on the clipboard in `format` (spec: C8, C9,
+    /// C10). The block is filled while the model is borrowed, which no call
+    /// that sends a message interrupts, and given to the clipboard after.
+    fn copy(&self, hwnd: Hwnd, format: ClipboardFormat) {
+        let block = {
+            let model = self.model.borrow();
+            let Some(files) = model.selected_files() else {
+                return;
+            };
+            ClipboardBlock::new(&ClipboardData::new(format, files))
+        };
+        let Some(block) = block else { return };
+        if block.set(hwnd).is_err() {
+            let text = self
+                .model
+                .borrow()
+                .strings()
+                .text("message.clipboard_busy")
+                .to_owned();
+            self.error_box(hwnd, &text);
+        }
+    }
+
+    /// Asks where to export the shown search, and starts the export (spec:
+    /// Export).
+    fn export(&self, hwnd: Hwnd) {
+        let (title, file_name, names) = {
+            let model = self.model.borrow();
+            let strings = model.strings();
+            (
+                strings.text("export.title").to_owned(),
+                strings.text("export.file_name").to_owned(),
+                ExportFormat::ALL
+                    .map(|f| format!("{} (*.{})", strings.text(f.label()), f.extension())),
+            )
+        };
+        let types: Vec<FileType> = ExportFormat::ALL
+            .iter()
+            .zip(&names)
+            .map(|(format, name)| FileType {
+                name,
+                extension: format.extension(),
+            })
+            .collect();
+        let Some((path, index)) = shell::save_dialog(hwnd, &title, &file_name, &types) else {
+            return;
+        };
+        let chosen = ExportFormat::ALL
+            .get(index)
+            .copied()
+            .unwrap_or(ExportFormat::Csv);
+        let columns = self.model.borrow().columns().len();
+        let order = self.created().controls.list.column_order(columns);
+        let format = ExportFormat::of(&path, chosen);
+        let accepted = self.model.borrow_mut().start_export(path, format, &order);
+        self.apply(hwnd, accepted);
+    }
+
+    /// The spec's message box for an export that failed (spec: T9).
+    fn show_export_failure(&self, hwnd: Hwnd, path: &Path, error: &ExportError) {
+        let text = {
+            let model = self.model.borrow();
+            let strings = model.strings();
+            let path = path.display().to_string();
+            match error {
+                ExportError::Write(failure) => {
+                    strings.format("message.export_failed", &[&path, &windows_reason(*failure)])
+                }
+                ExportError::Daemon(failure) => strings.format(
+                    "message.export_stopped",
+                    &[&path, &captions::failure_text(strings, failure)],
+                ),
+            }
+        };
+        self.error_box(hwnd, &text);
+    }
+
+    fn error_box(&self, hwnd: Hwnd, text: &str) {
+        let title = self
+            .model
+            .borrow()
+            .strings()
+            .text("window.title")
+            .to_owned();
+        win::dialog::error_box(Some(hwnd), text, &title);
     }
 
     /// Brings the window forward with the search box focused and its text
@@ -925,10 +1111,9 @@ impl MainWindow {
     /// lifetime).
     fn show_window(&self, hwnd: Hwnd) {
         hwnd.bring_to_front();
-        if let Some(controls) = self.controls.get() {
-            controls.search.0.focus();
-            controls.search.select_all();
-        }
+        let search = self.created().controls.search;
+        search.hwnd().focus();
+        search.select_all();
     }
 
     /// Saves the settings and ends Gozler (spec: C7, T14).
@@ -938,22 +1123,20 @@ impl MainWindow {
     }
 
     /// The shown columns in the header's order, with their widths in DIP.
-    fn saved_columns(&self) -> Option<Vec<SavedColumn>> {
-        let (controls, metrics) = (self.controls.get()?, self.metrics.get()?);
-        let columns = self.model.borrow().columns.clone();
-        Some(
-            controls
-                .list
-                .column_order(columns.len())
-                .into_iter()
-                .filter_map(|index| {
-                    Some(SavedColumn {
-                        column: *columns.get(index)?,
-                        width: layout::saved_width(controls.list.column_width(index), metrics.dpi),
-                    })
+    fn saved_columns(&self) -> Vec<SavedColumn> {
+        let created = self.created();
+        let list = created.controls.list;
+        let dpi = created.metrics.get().dpi;
+        let columns = self.model.borrow().columns().to_vec();
+        list.column_order(columns.len())
+            .into_iter()
+            .filter_map(|index| {
+                Some(SavedColumn {
+                    column: *columns.get(index)?,
+                    width: layout::saved_width(list.column_width(index), dpi),
                 })
-                .collect(),
-        )
+            })
+            .collect()
     }
 
     /// Saves the window's placement, match controls, sort and columns with
@@ -962,47 +1145,31 @@ impl MainWindow {
     fn save_settings(&self, hwnd: Hwnd, report_failure: bool) {
         let placement = hwnd.placement();
         let columns = self.saved_columns();
-        let saved = {
-            let mut model = self.model.borrow_mut();
-            let model = &mut *model;
-            let window = &mut model.settings.window;
-            if placement.is_some() {
-                window.placement = placement;
-            }
-            if let Some(columns) = columns {
-                window.columns = columns;
-            }
-            window.matching = model.matching;
-            window.sort = model.sort;
-            model.settings.save(&self.settings_file)
-        };
+        let saved =
+            self.model
+                .borrow_mut()
+                .save_settings(&self.settings_file, placement, Some(columns));
         let Err(error) = saved else { return };
         if !report_failure || self.settings_failure_shown.replace(true) {
             return;
         }
-        let (text, title) = {
-            let model = self.model.borrow();
-            let strings = &model.strings;
-            (
-                strings.format(
-                    "message.settings_not_saved",
-                    &[
-                        &self.settings_file.display().to_string(),
-                        &win::error_text(&error),
-                    ],
-                ),
-                strings.text("window.title").to_owned(),
-            )
-        };
-        win::dialog::error_box(Some(hwnd), &text, &title);
+        let text = self.model.borrow().strings().format(
+            "message.settings_not_saved",
+            &[
+                &self.settings_file.display().to_string(),
+                &win::error_text(&error),
+            ],
+        );
+        self.error_box(hwnd, &text);
     }
 
     fn min_window_size(&self, hwnd: Hwnd) -> Option<Size> {
-        let min_client = self.layout.borrow().as_ref()?.min_client;
+        let created = self.created();
+        let min_client = created.layout.borrow().as_ref()?.min_client;
         Some(win::window::window_size(
             hwnd,
             min_client,
-            self.metrics.get()?.dpi,
+            created.metrics.get().dpi,
         ))
     }
 }
@@ -1017,6 +1184,44 @@ fn within(ranges: &[Range<usize>], span: &Range<usize>) -> Vec<Range<usize>> {
             (start < end).then(|| start - span.start..end - span.start)
         })
         .collect()
+}
+
+/// `paths` that still exist, and the first that does not. An action on the
+/// selection acts on every entry it can (spec: The selection).
+fn present(paths: Vec<Vec<u16>>) -> (Vec<Vec<u16>>, Option<Vec<u16>>) {
+    let mut missing = None;
+    let present = paths
+        .into_iter()
+        .filter_map(|path| {
+            if std::fs::symlink_metadata(OsString::from_wide(&path)).is_ok() {
+                Some(path)
+            } else {
+                missing.get_or_insert(path);
+                None
+            }
+        })
+        .collect();
+    (present, missing)
+}
+
+/// The folder that holds `path`, a drive's root as `C:\`.
+fn folder_of(path: &[u16]) -> Vec<u16> {
+    let backslash = u16::from(b'\\');
+    let end = path.iter().rposition(|&u| u == backslash).unwrap_or(0);
+    let mut folder = path[..end].to_vec();
+    if folder.last() == Some(&u16::from(b':')) {
+        folder.push(backslash);
+    }
+    folder
+}
+
+/// Windows' own words for why a file could not be written.
+fn windows_reason(failure: WriteFailure) -> String {
+    let error = match failure.os_code {
+        Some(code) => std::io::Error::from_raw_os_error(code),
+        None => std::io::Error::from(failure.kind),
+    };
+    win::error_text(&error)
 }
 
 /// Runs a failure's fix: the commands that `gozler` prints for it, in one
@@ -1042,7 +1247,7 @@ impl WindowProc for MainWindow {
             Message::Create => Some(LRESULT(if self.on_create(hwnd) { 0 } else { -1 })),
             // Every other handler does nothing until WM_CREATE has made the
             // controls, because notifications arrive while it runs.
-            _ if self.controls.get().is_none() => None,
+            _ if self.created.get().is_none() => None,
             Message::Size => {
                 self.layout(hwnd);
                 Some(LRESULT(0))
@@ -1062,50 +1267,24 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::Activate { active: true } => {
-                let controls = self.controls.get()?;
                 self.focus_on_activate
                     .take()
-                    .unwrap_or(controls.search.0)
+                    .unwrap_or(self.created().controls.search.hwnd())
                     .focus();
                 Some(LRESULT(0))
             }
-            // IsDialogMessageW turns Enter into IDOK and Esc into IDCANCEL,
-            // which the focused control decides (design rule 8): in the
-            // search box, Enter runs the search and Esc clears the box.
-            Message::Command {
-                id,
-                from_control: false,
-                ..
-            } if id == IDOK.0 as u16 || id == IDCANCEL.0 as u16 => {
-                if self.search_box_focused() {
-                    if id == IDOK.0 as u16 {
-                        self.search(hwnd);
-                    } else if let Some(controls) = self.controls.get() {
-                        controls.search.0.set_text("");
-                    }
-                }
-                Some(LRESULT(0))
-            }
-            Message::Command {
-                id,
-                from_control: false,
-                ..
-            } => {
+            Message::Command(Command::Menu(id)) => {
                 self.run(hwnd, MenuItem::from_id(id)?);
                 Some(LRESULT(0))
             }
-            Message::Command {
-                id,
-                notification,
-                from_control: true,
-            } => {
-                self.on_control(hwnd, id, notification);
+            Message::Command(Command::Control(event)) => {
+                self.on_control(hwnd, event);
                 None
             }
-            Message::Notify(Notify { from, list }) if from == ControlId::List.id() => {
+            Message::Notify(notification) => {
+                let list = self.created().controls.list.notification(notification)?;
                 self.on_list_notify(hwnd, list)
             }
-            Message::Notify(_) => None,
             Message::Timer(timer::SEARCH) => {
                 self.search(hwnd);
                 Some(LRESULT(0))
@@ -1114,28 +1293,45 @@ impl WindowProc for MainWindow {
                 self.ask_status();
                 Some(LRESULT(0))
             }
+            Message::Timer(timer::SELECTION) => {
+                hwnd.kill_timer(timer::SELECTION);
+                let fetch = self.model.borrow_mut().read_selection();
+                if let Some(fetch) = fetch {
+                    self.start(fetch);
+                }
+                Some(LRESULT(0))
+            }
             Message::Timer(_) => None,
             Message::Wake => {
                 self.on_wake(hwnd);
                 Some(LRESULT(0))
             }
+            Message::Deferred => {
+                self.read_list_selection(hwnd);
+                Some(LRESULT(0))
+            }
             Message::ContextMenu {
                 point: Some(point), ..
             } if self.on_header(point) => {
-                self.header_menu(hwnd, point);
+                self.context_menu(hwnd, &commands::header_menu(), point, None);
+                Some(LRESULT(0))
+            }
+            Message::ContextMenu { from, point } if from == self.created().controls.list.hwnd() => {
+                self.row_menu(hwnd, point);
                 Some(LRESULT(0))
             }
             Message::ContextMenu { .. } => None,
-            Message::KeyDown { target, key } => {
-                Some(LRESULT(isize::from(self.on_key(target, key))))
+            Message::KeyDown { target, keystroke } => {
+                Some(LRESULT(isize::from(self.on_key(hwnd, target, keystroke))))
             }
             Message::InitMenuPopup => {
-                self.update_menu();
+                self.update_menu(hwnd);
                 Some(LRESULT(0))
             }
             Message::CtlColorStatic(colors) => Some(colors.window_background()),
             Message::Paint => {
                 let dividers = self
+                    .created()
                     .layout
                     .borrow()
                     .as_ref()
@@ -1165,9 +1361,7 @@ impl WindowProc for MainWindow {
             // still valid, so no wake-up reaches a reused handle (design
             // rule 5).
             Message::Destroy => {
-                if let Some(requests) = self.requests.get() {
-                    requests.shut_down();
-                }
+                self.created().requests.shut_down();
                 win::window::quit();
                 Some(LRESULT(0))
             }

@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(windows), allow(dead_code))]
 
+pub(crate) mod captions;
+pub(crate) mod clipboard;
 pub(crate) mod commands;
 pub(crate) mod fetch;
 pub(crate) mod ids;
@@ -14,5 +16,6 @@ pub(crate) mod layout;
 pub(crate) mod model;
 pub(crate) mod query;
 pub(crate) mod results;
+pub(crate) mod selection;
 pub(crate) mod settings;
 pub(crate) mod text;
