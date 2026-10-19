@@ -105,7 +105,7 @@ pub(crate) struct NameStore {
     garbage: usize,
 }
 
-fn hash_bytes(b: &[u8]) -> u64 {
+pub(crate) fn hash_bytes(b: &[u8]) -> u64 {
     use core::hash::{Hash, Hasher};
     let mut h = rustc_hash::FxHasher::default();
     b.hash(&mut h);
@@ -168,9 +168,7 @@ impl NameStore {
     /// Panics only if `name` exceeds 64 KiB, which no NTFS component can.
     pub(crate) fn intern(&mut self, name: &[u8]) -> NameId {
         let hash = hash_bytes(name);
-        if let Some(&id) = self.by_bytes.find(hash, |&id| {
-            self.raw_bytes_of(self.pairs[id as usize]) == name
-        }) {
+        if let Some(&id) = self.by_bytes.find(hash, |&id| self.raw_bytes(id) == name) {
             self.refcount[id as usize] += 1;
             return id;
         }
@@ -216,19 +214,7 @@ impl NameStore {
     /// The raw (original-case) bytes of `id`.
     #[inline]
     pub(crate) fn raw_bytes(&self, id: NameId) -> &[u8] {
-        self.raw_bytes_of(self.pairs[id as usize])
-    }
-
-    #[inline]
-    fn raw_bytes_of(&self, pair: NamePair) -> &[u8] {
-        let r = pair.raw;
-        let buf = if r.off & RAW_IN_FOLDED != 0 {
-            &self.folded
-        } else {
-            &self.raw
-        };
-        let off = (r.off & !RAW_IN_FOLDED) as usize;
-        &buf[off..off + r.len as usize]
+        raw_bytes_in(&self.pairs, &self.raw, &self.folded, id)
     }
 
     /// The folded bytes of `id`.
@@ -277,7 +263,7 @@ impl NameStore {
             "a name died while entries still chain to it"
         );
         let pair = self.pairs[i];
-        let hash = hash_bytes(self.raw_bytes_of(pair));
+        let hash = hash_bytes(self.raw_bytes(id));
         if let Ok(entry) = self.by_bytes.find_entry(hash, |&cand| cand == id) {
             entry.remove();
         }
@@ -332,14 +318,14 @@ impl NameStore {
                     len: folded.len,
                 }
             } else {
-                Self::push(&mut c.raw, self.raw_bytes_of(pair))
+                Self::push(&mut c.raw, self.raw_bytes(i as NameId))
             };
             let id = c.pairs.len() as NameId;
             c.remap[i] = id;
             c.pairs.push(NamePair { raw, folded });
             c.refcount.push(rc);
             c.head.push(self.head[i]);
-            let hash = hash_bytes(self.raw_bytes_of(pair));
+            let hash = hash_bytes(self.raw_bytes(i as NameId));
             let (pairs, raw, folded) = (&c.pairs, &c.raw, &c.folded);
             c.by_bytes.insert_unique(hash, id, |&i| {
                 hash_bytes(raw_bytes_in(pairs, raw, folded, i))
@@ -444,30 +430,26 @@ impl core::ops::Add for ComponentBytes {
 
 /// Per-entry flag bits.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct EntryFlags(u8);
+pub(crate) struct EntryFlags(u8);
 
 impl EntryFlags {
-    pub const DIR: EntryFlags = EntryFlags(1 << 0);
+    pub(crate) const DIR: EntryFlags = EntryFlags(1 << 0);
     /// The slot is dead and on the free list.
-    pub const TOMBSTONE: EntryFlags = EntryFlags(1 << 1);
-    /// The synthetic lost+found root.
-    pub const LOST_FOUND: EntryFlags = EntryFlags(1 << 2);
+    pub(crate) const TOMBSTONE: EntryFlags = EntryFlags(1 << 1);
     /// A parent stand-in created before its real record was seen; carries a
     /// synthetic name until the real record fills it in.
-    pub const PLACEHOLDER: EntryFlags = EntryFlags(1 << 3);
-    /// The name contained unpaired UTF-16 surrogates (WTF-8, not UTF-8).
-    pub const NON_UNICODE_NAME: EntryFlags = EntryFlags(1 << 4);
+    pub(crate) const PLACEHOLDER: EntryFlags = EntryFlags(1 << 2);
 
-    pub const EMPTY: EntryFlags = EntryFlags(0);
+    pub(crate) const EMPTY: EntryFlags = EntryFlags(0);
 
     #[inline]
-    pub fn contains(self, other: EntryFlags) -> bool {
+    pub(crate) fn contains(self, other: EntryFlags) -> bool {
         self.0 & other.0 == other.0
     }
 
     #[inline]
     #[must_use]
-    pub fn with(self, other: EntryFlags, on: bool) -> EntryFlags {
+    pub(crate) fn with(self, other: EntryFlags, on: bool) -> EntryFlags {
         if on {
             EntryFlags(self.0 | other.0)
         } else {
@@ -482,9 +464,7 @@ impl core::fmt::Debug for EntryFlags {
         for (bit, name) in [
             (Self::DIR, "DIR"),
             (Self::TOMBSTONE, "TOMBSTONE"),
-            (Self::LOST_FOUND, "LOST_FOUND"),
             (Self::PLACEHOLDER, "PLACEHOLDER"),
-            (Self::NON_UNICODE_NAME, "NON_UNICODE_NAME"),
         ] {
             if self.contains(bit) {
                 parts.push(name);

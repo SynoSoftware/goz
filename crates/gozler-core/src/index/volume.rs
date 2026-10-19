@@ -18,7 +18,7 @@
 
 use super::store::{
     ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId, NamePair, NameStore,
-    SIZE_UNKNOWN,
+    SIZE_UNKNOWN, hash_bytes,
 };
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::layout::LayoutFile;
@@ -46,29 +46,6 @@ const LOST_FOUND_FRN: Frn = Frn(u64::MAX as u128);
 /// but bounded; real NTFS trees are far shallower.
 pub(crate) const MAX_PATH_HOPS: usize = 4096;
 
-/// The `dir_children` key hash of a folded name. One fixed function for
-/// insert, remove, and lookup: the three must agree or the scope index
-/// silently loses directories.
-fn dir_key_hash(folded: &[u8]) -> u64 {
-    use core::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    folded.hash(&mut h);
-    h.finish()
-}
-
-/// A name plus whether it required WTF-8 (contained unpaired surrogates).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WtfName {
-    pub bytes: Vec<u8>,
-    pub lossy: bool,
-}
-
-impl WtfName {
-    pub fn new(bytes: Vec<u8>, lossy: bool) -> Self {
-        Self { bytes, lossy }
-    }
-}
-
 /// A compaction built off the exclusive lock, ready to install.
 ///
 /// Opaque: only [`VolumeIndex::plan_compaction`] makes one and only
@@ -82,7 +59,8 @@ pub struct CompactPlan(crate::index::store::CompactedNames);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkTarget {
     pub parent: EntryIdx,
-    pub name: WtfName,
+    /// The link name in WTF-8.
+    pub name: Vec<u8>,
 }
 
 /// Result of walking parent links to build a path.
@@ -219,13 +197,14 @@ pub struct VolumeIndex {
     /// Persistent `(parent entry, hash of folded name) → entry` index over
     /// real DIRECTORIES only, maintained on every mutation. Turns `-path`
     /// scope resolution into an O(depth) walk instead of an O(all-entries)
-    /// scan. Keyed by the folded name's hash rather than owned name bytes:
-    /// the bytes live once in the interned name store, and duplicating them
-    /// here cost ~13 MB of key heap on a large volume. Lookups verify the
-    /// candidate's actual folded name, so a hash collision can never resolve
-    /// a scope to the wrong directory. Directories are ~10x rarer than files,
-    /// so this stays small; placeholders and root/lost+found are excluded
-    /// (they are never a scope component).
+    /// scan. Keyed by the folded name's [`hash_bytes`] (insert, remove and
+    /// lookup must agree, or the index silently loses directories) rather
+    /// than owned name bytes: the bytes live once in the interned name store,
+    /// and duplicating them here cost ~13 MB of key heap on a large volume.
+    /// Lookups verify the candidate's actual folded name, so a hash collision
+    /// can never resolve a scope to the wrong directory. Directories are ~10x
+    /// rarer than files, so this stays small; placeholders and
+    /// root/lost+found are excluded (they are never a scope component).
     /// Values are a 1-inline SmallVec: a genuine 64-bit hash collision
     /// between two sibling directories is astronomically rare, but when it
     /// happens both live here and `child_dir` disambiguates by comparing the
@@ -263,7 +242,7 @@ impl VolumeIndex {
             LOST_FOUND_FRN,
             NIL,
             lf_name,
-            EntryFlags::DIR.with(EntryFlags::LOST_FOUND, true),
+            EntryFlags::DIR,
             SIZE_UNKNOWN,
             MTIME_UNKNOWN,
             PackedAttributes::default(),
@@ -327,13 +306,7 @@ impl VolumeIndex {
     /// Ingests one `FSCTL_ENUM_USN_DATA` record (bootstrap): the file exists
     /// with this name/parent and these attributes. Idempotent.
     pub fn insert_enum(&mut self, rec: &ParsedUsnRecord) {
-        self.upsert_link(
-            rec.frn,
-            rec.parent_frn,
-            &rec.name,
-            rec.name_lossy,
-            rec.is_dir(),
-        );
+        self.upsert_link(rec.frn, rec.parent_frn, &rec.name, rec.is_dir());
         self.set_attributes(rec.frn, rec.attributes);
     }
 
@@ -355,7 +328,7 @@ impl VolumeIndex {
                 .filter(|n| !n.dos_only)
                 .map(|n| LinkTarget {
                     parent: self.resolve_or_placeholder_parent(n.parent_frn),
-                    name: WtfName::new(n.name.clone(), n.name_lossy),
+                    name: n.name.clone(),
                 })
                 .collect();
             if desired.is_empty() {
@@ -371,7 +344,7 @@ impl VolumeIndex {
             for n in file.names.iter().filter(|n| !n.dos_only) {
                 let parent_idx = self.resolve_or_placeholder_parent(n.parent_frn);
                 if !self.chain_has_link(file.frn, parent_idx, &n.name) {
-                    self.add_link(file.frn, parent_idx, &n.name, n.name_lossy);
+                    self.add_link(file.frn, parent_idx, &n.name);
                 }
             }
         }
@@ -396,13 +369,7 @@ impl VolumeIndex {
         let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
         let first_name = file.names.iter().find(|n| !n.dos_only);
         if let Some(name) = first_name.filter(|n| n.parent_frn != file.frn) {
-            self.upsert_link(
-                file.frn,
-                name.parent_frn,
-                &name.name,
-                name.name_lossy,
-                is_dir,
-            );
+            self.upsert_link(file.frn, name.parent_frn, &name.name, is_dir);
         }
         self.enrich(file);
     }
@@ -421,13 +388,7 @@ impl VolumeIndex {
             && let Some(name) = file.names.first()
         {
             let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-            self.upsert_link(
-                file.frn,
-                name.parent_frn,
-                &name.name,
-                name.name_lossy,
-                is_dir,
-            );
+            self.upsert_link(file.frn, name.parent_frn, &name.name, is_dir);
         }
         self.enrich(file);
     }
@@ -440,16 +401,10 @@ impl VolumeIndex {
     pub fn apply_batch(&mut self, records: &[ParsedUsnRecord]) -> ApplyOutcome {
         let mut outcome = ApplyOutcome::default();
         for rec in records {
-            let ops: SmallVec<[UsnOp; 2]> = ops_for(rec);
-            for op in ops {
+            let frn = rec.frn;
+            for op in ops_for(rec) {
                 match op {
-                    UsnOp::Upsert {
-                        frn,
-                        parent,
-                        name,
-                        name_lossy,
-                        is_dir,
-                    } => {
+                    UsnOp::Upsert => {
                         // A rename of an entry the index lacks: the build
                         // missed it, so its size, its date and, for a folder,
                         // its contents are missing too. Reason bits
@@ -459,32 +414,32 @@ impl VolumeIndex {
                         let missed = rec.reason & USN_REASON_RENAME_NEW_NAME != 0
                             && self.head_of(frn).is_none_or(|h| self.is_synthetic(h));
                         if let UpsertResult::NeedsReconcile =
-                            self.upsert_link(frn, parent, &name, name_lossy, is_dir)
+                            self.upsert_link(frn, rec.parent_frn, &rec.name, rec.is_dir())
                         {
                             outcome.needs_link_reconcile.push(frn);
                         }
                         if missed {
                             outcome.needs_stat.push(frn);
-                            if is_dir {
+                            if rec.is_dir() {
                                 outcome.needs_walk.push(frn);
                             }
                         }
                     }
-                    UsnOp::Delete { frn } => {
+                    UsnOp::Delete => {
                         if !self.delete_frn(frn) {
                             self.stats.delete_of_unknown += 1;
                             outcome.anomalies.push(Anomaly::DeleteOfUnknown { frn });
                         }
                     }
-                    UsnOp::LinkDirty { frn } => outcome.needs_link_reconcile.push(frn),
-                    UsnOp::StatDirty { frn } => outcome.needs_stat.push(frn),
+                    UsnOp::LinkDirty => outcome.needs_link_reconcile.push(frn),
+                    UsnOp::StatDirty => outcome.needs_stat.push(frn),
                 }
             }
             // Every record carries the file's attributes as of the record, so
             // the last record of a batch leaves the current ones, whatever its
             // reason bits: an attribute change, a compression or encryption
             // change and a reparse point change each write one.
-            self.set_attributes(rec.frn, rec.attributes);
+            self.set_attributes(frn, rec.attributes);
         }
         // Reason bits accumulate, so one change reaches a batch in several
         // records, and each FRN reported costs the daemon a link walk.
@@ -629,7 +584,7 @@ impl VolumeIndex {
     /// real folded name, so a collision costs one extra compare, never a
     /// wrong directory.
     pub fn child_dir(&self, parent: EntryIdx, folded_name: Vec<u8>) -> Option<EntryIdx> {
-        let key = (parent, dir_key_hash(&folded_name));
+        let key = (parent, hash_bytes(&folded_name));
         let cands = self.dir_children.get(&key)?;
         cands
             .iter()
@@ -651,11 +606,9 @@ impl VolumeIndex {
     /// entries that do not correspond to a real, fully-resolved filesystem
     /// object.
     pub fn is_synthetic(&self, idx: EntryIdx) -> bool {
-        let flags = self.entries.flags(idx);
         idx == self.root
             || idx == self.lost_found
-            || flags.contains(EntryFlags::PLACEHOLDER)
-            || flags.contains(EntryFlags::LOST_FOUND)
+            || self.entries.flags(idx).contains(EntryFlags::PLACEHOLDER)
     }
 
     /// Forces an entry's parent link. Test-only: the public API never
@@ -681,10 +634,7 @@ impl VolumeIndex {
             {
                 continue;
             }
-            let key = (
-                self.entries.parent(idx),
-                dir_key_hash(self.folded_name(idx)),
-            );
+            let key = (self.entries.parent(idx), hash_bytes(self.folded_name(idx)));
             fresh.entry(key).or_default().push(idx);
         }
         if fresh.len() != self.dir_children.len() {
@@ -869,10 +819,7 @@ impl VolumeIndex {
         {
             return;
         }
-        let key = (
-            self.entries.parent(idx),
-            dir_key_hash(self.folded_name(idx)),
-        );
+        let key = (self.entries.parent(idx), hash_bytes(self.folded_name(idx)));
         let slot = self.dir_children.entry(key).or_default();
         if !slot.contains(&idx) {
             slot.push(idx);
@@ -887,10 +834,7 @@ impl VolumeIndex {
         if !self.entries.flags(idx).contains(EntryFlags::DIR) {
             return;
         }
-        let key = (
-            self.entries.parent(idx),
-            dir_key_hash(self.folded_name(idx)),
-        );
+        let key = (self.entries.parent(idx), hash_bytes(self.folded_name(idx)));
         if let Some(slot) = self.dir_children.get_mut(&key) {
             slot.retain(|&mut d| d != idx);
             if slot.is_empty() {
@@ -904,7 +848,6 @@ impl VolumeIndex {
         frn: Frn,
         parent_frn: Frn,
         name: &[u8],
-        name_lossy: bool,
         is_dir: bool,
     ) -> UpsertResult {
         let parent_idx = self.resolve_or_placeholder_parent(parent_frn);
@@ -912,7 +855,7 @@ impl VolumeIndex {
         if let Some(head) = self.by_frn.get(frn) {
             if self.entries.frn(head) == frn {
                 if self.entries.next_link(head) == NIL {
-                    self.rewrite_entry(head, parent_idx, name, name_lossy, is_dir);
+                    self.rewrite_entry(head, parent_idx, name, is_dir);
                     return UpsertResult::Ok;
                 }
                 return UpsertResult::NeedsReconcile;
@@ -921,14 +864,11 @@ impl VolumeIndex {
             self.reclaim_stale_slot(head);
         }
 
-        let flags = EntryFlags::EMPTY
-            .with(EntryFlags::DIR, is_dir)
-            .with(EntryFlags::NON_UNICODE_NAME, name_lossy);
         let idx = self.alloc_entry(
             frn,
             parent_idx,
             name,
-            flags,
+            EntryFlags::EMPTY.with(EntryFlags::DIR, is_dir),
             SIZE_UNKNOWN,
             MTIME_UNKNOWN,
             PackedAttributes::default(),
@@ -937,14 +877,7 @@ impl VolumeIndex {
         UpsertResult::Ok
     }
 
-    fn rewrite_entry(
-        &mut self,
-        idx: EntryIdx,
-        parent_idx: EntryIdx,
-        name: &[u8],
-        name_lossy: bool,
-        is_dir: bool,
-    ) {
+    fn rewrite_entry(&mut self, idx: EntryIdx, parent_idx: EntryIdx, name: &[u8], is_dir: bool) {
         // Drop the OLD (parent, name) dir key before the fields are overwritten;
         // re-index under the NEW ones afterward. This covers rename, a
         // placeholder being filled in, and dir↔file transitions uniformly.
@@ -963,7 +896,6 @@ impl VolumeIndex {
             .entries
             .flags(idx)
             .with(EntryFlags::DIR, is_dir)
-            .with(EntryFlags::NON_UNICODE_NAME, name_lossy)
             .with(EntryFlags::PLACEHOLDER, false);
         self.entries.set_flags(idx, flags);
         self.dir_index_insert(idx);
@@ -1060,13 +992,12 @@ impl VolumeIndex {
 
     /// Appends a new link (a file's additional hard-link name) to the tail of
     /// `frn`'s chain, leaving the existing head, and its identity, untouched.
-    fn add_link(&mut self, frn: Frn, parent_idx: EntryIdx, name: &[u8], name_lossy: bool) {
-        let flags = EntryFlags::EMPTY.with(EntryFlags::NON_UNICODE_NAME, name_lossy);
+    fn add_link(&mut self, frn: Frn, parent_idx: EntryIdx, name: &[u8]) {
         let idx = self.alloc_entry(
             frn,
             parent_idx,
             name,
-            flags,
+            EntryFlags::EMPTY,
             SIZE_UNKNOWN,
             MTIME_UNKNOWN,
             PackedAttributes::default(),
@@ -1126,20 +1057,17 @@ impl VolumeIndex {
             let existing = current.iter().enumerate().position(|(i, &e)| {
                 !used[i]
                     && self.entries.parent(e) == target.parent
-                    && self.names.raw_bytes(self.entries.name_id(e)) == target.name.bytes.as_slice()
+                    && self.names.raw_bytes(self.entries.name_id(e)) == target.name.as_slice()
             });
             if let Some(pos) = existing {
                 used[pos] = true;
                 kept.push(current[pos]);
             } else {
-                let flags = EntryFlags::EMPTY
-                    .with(EntryFlags::DIR, is_dir)
-                    .with(EntryFlags::NON_UNICODE_NAME, target.name.lossy);
                 let idx = self.alloc_entry(
                     frn,
                     target.parent,
-                    &target.name.bytes,
-                    flags,
+                    &target.name,
+                    EntryFlags::EMPTY.with(EntryFlags::DIR, is_dir),
                     size,
                     mtime,
                     attributes,

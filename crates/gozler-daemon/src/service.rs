@@ -313,16 +313,16 @@ fn run_service() -> Result<()> {
     // Start the engine on a dedicated thread, then serve until stopped. The
     // SCM thread stays free to pump checkpoints and receive Stop.
     let engine_thread = std::thread::spawn(move || -> Result<()> {
-        let engine = match run::start_engine() {
-            Ok(engine) => engine,
+        let supervisor = match run::start_engine() {
+            Ok(supervisor) => supervisor,
             Err(e) => {
                 let _ = ready_tx.send(Err(e.to_string()));
                 return Err(e);
             }
         };
         let _ = ready_tx.send(Ok(()));
-        let served = server::run(engine.volumes, stop_rx);
-        engine.supervisor.shutdown();
+        let served = server::run(supervisor.volumes(), stop_rx);
+        supervisor.shutdown();
         served
     });
 
@@ -446,25 +446,11 @@ fn init_service_tracing() {
     else {
         return;
     };
-    let file = Arc::new(file);
     let _ = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
-        .with_writer(move || FileWriter(file.clone()))
+        .with_writer(file)
         .try_init();
-}
-
-/// Adapts a shared `File` into a `MakeWriter` target (`&File: Write`).
-struct FileWriter(Arc<std::fs::File>);
-
-impl std::io::Write for FileWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // `&File: Write`; UFCS avoids needing the trait in scope.
-        std::io::Write::write(&mut &*self.0, buf)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        std::io::Write::flush(&mut &*self.0)
-    }
 }
 
 #[cfg(test)]

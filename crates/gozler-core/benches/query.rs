@@ -32,15 +32,11 @@ fn frn(rec: u64) -> Frn {
 
 fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
     ParsedUsnRecord {
-        major_version: 2,
         frn: f,
         parent_frn: parent,
-        usn: 0,
-        timestamp_ft: 0,
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
-        name_lossy: false,
     }
 }
 

@@ -927,13 +927,11 @@ fn match_switch(name: &str) -> Option<SwitchAction> {
     })
 }
 
-/// Parses the `-sort-KEY[-ascending|-descending]` family.
+/// Parses the `-sort-KEY[-ascending|-descending]` family: `sort`, then the
+/// dash that switch names make optional, then a `-sort` parameter.
 fn parse_sort_switch(name: &str) -> Option<SwitchAction> {
-    SORT_KEYS.iter().find_map(|row| {
-        row.names.iter().find_map(|alias| {
-            match_sort_form(name, &format!("sort-{alias}"), row.key).map(SwitchAction::SortFixed)
-        })
-    })
+    let rest = name.strip_prefix("sort")?;
+    parse_sort_param(rest.strip_prefix('-').unwrap_or(rest)).map(SwitchAction::SortFixed)
 }
 
 /// Parses the `/o` family, es's dir-style sorts: `/on`, `/os`, `/od` and

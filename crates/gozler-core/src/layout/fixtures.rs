@@ -53,11 +53,10 @@ impl LayoutNameFixture {
 
     fn expected(&self) -> LayoutName {
         let mut name = Vec::new();
-        let name_lossy = wtf8::from_utf16(&self.units, &mut name);
+        wtf8::from_utf16(&self.units, &mut name);
         LayoutName {
             parent_frn: Frn(self.parent_frn.into()),
             name,
-            name_lossy,
             dos_only: self.dos_only_flag(),
         }
     }

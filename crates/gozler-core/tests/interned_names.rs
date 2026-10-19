@@ -10,19 +10,15 @@ fn interned_shared_names_are_found() {
     };
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
-        major_version: 3,
         frn: Frn(u128::from(frn) | (1 << 48)),
         parent_frn: Frn(if parent < 100 {
             NTFS_ROOT_FRN.0
         } else {
             u128::from(parent) | (1 << 48)
         }),
-        usn: 0,
-        timestamp_ft: 0,
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
-        name_lossy: false,
     };
     let root = NTFS_ROOT_FRN.record_number();
     idx.insert_enum(&rec(1000, root, "dir_a", true));
@@ -65,19 +61,15 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
 
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
-        major_version: 3,
         frn: Frn(u128::from(frn) | (1 << 48)),
         parent_frn: Frn(if parent < 100 {
             NTFS_ROOT_FRN.0
         } else {
             u128::from(parent) | (1 << 48)
         }),
-        usn: 0,
-        timestamp_ft: 0,
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
-        name_lossy: false,
     };
     // root/{downloads,documents}/sub{0,1}/report-N.txt plus decoys at root.
     idx.insert_enum(&rec(1000, 0, "downloads", true));

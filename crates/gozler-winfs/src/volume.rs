@@ -59,14 +59,9 @@ pub fn enumerate_volumes() -> Result<Vec<VolumeInfo>, WinError> {
         // SAFETY: `find` is a live volume-search handle; `buf` is writable for
         // its capacity.
         if unsafe { FindNextVolumeW(find, buf.as_mut_ptr(), buf.len() as u32) } == 0 {
-            // SAFETY: GetLastError has no preconditions; captured before any
-            // other call can clobber it.
-            let code = unsafe { GetLastError() };
-            if code != ERROR_NO_MORE_FILES {
-                error = Some(WinError {
-                    code,
-                    context: "FindNextVolumeW",
-                });
+            let last = last_error("FindNextVolumeW");
+            if last.code != ERROR_NO_MORE_FILES {
+                error = Some(last);
             }
             break;
         }

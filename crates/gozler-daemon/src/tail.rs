@@ -1,6 +1,6 @@
-//! Per-volume USN journal tail: one dedicated OS thread that reads the change
-//! journal from the bootstrap cursor forward and applies each batch to the
-//! shared index, keeping it live.
+//! Per-volume USN journal tail: one dedicated OS thread that builds its
+//! volume's index, then reads the change journal from the build's cursor
+//! forward and applies each batch to the shared index, keeping it live.
 //!
 //! v1 polls with a non-blocking drain and a short sleep when caught up, which
 //! gives sub-100 ms freshness and a clean, `CancelSynchronousIo`-free shutdown
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use gozler_core::index::{LinkTarget, WtfName};
+use gozler_core::index::LinkTarget;
 use gozler_core::query::resolve_scope;
 use gozler_core::types::{Frn, VolumePhase};
 use gozler_core::usn::record::{
@@ -72,9 +72,9 @@ enum RescanReason {
     /// A corrupt buffer or cycle was detected while parsing/applying; we
     /// cannot prove what was missed.
     ParserAnomaly,
-    /// The tail started without a journal cursor, so nothing proves the index
-    /// is in sync with the journal: its supervisor revived it after the
-    /// previous tail exited, or bootstrap could not read the journal.
+    /// The tail started, so it has no journal cursor and nothing proves the
+    /// index is in sync with the journal: the volume was never indexed, or its
+    /// supervisor revived the tail after the previous one exited.
     NoCursor,
     /// Journal reads kept failing past the escalation window with codes no
     /// arm maps (observed live: `ERROR_INVALID_PARAMETER` against a cursor
@@ -116,7 +116,7 @@ const MAX_RESCANS: u32 = 3;
 /// A running tail thread and the flag that stops it.
 pub(crate) struct TailHandle {
     stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
+    join: JoinHandle<()>,
     /// Volume this tail serves, for supervisor log lines.
     pub(crate) mount: String,
     /// The tail's self-reported liveness: beating, busy in a rebuild, or
@@ -127,18 +127,16 @@ pub(crate) struct TailHandle {
     /// snapshot that needs no revival.
     pub(crate) pulse: Arc<TailPulse>,
     /// Real handle to the tail thread, target of `cancel_synchronous_io`.
-    pub(crate) io_handle: Arc<gozler_winfs::ThreadIoHandle>,
+    pub(crate) io_handle: gozler_winfs::ThreadIoHandle,
 }
 
 impl TailHandle {
     /// Signals the tail to stop and joins it. Only safe against a thread
     /// that will actually observe the flag; teardown of a possibly-wedged
     /// tail goes through the supervisor's cancel-and-poll loop instead.
-    pub(crate) fn shutdown(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
+    pub(crate) fn shutdown(self) {
+        self.signal_stop();
+        let _ = self.join.join();
     }
 
     /// Signals the tail to stop without joining, so teardown can flag every
@@ -149,23 +147,14 @@ impl TailHandle {
 
     /// Whether the tail thread has exited, i.e. a join would not block.
     pub(crate) fn is_finished(&self) -> bool {
-        self.join
-            .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished)
+        self.join.is_finished()
     }
 }
 
 /// Spawns the tail thread for one volume. `handle` is moved into the thread
-/// (it is not shared). `cursor: None` means the caller has no trustworthy
-/// starting point (a volume that was never indexed, or a supervisor reviving
-/// a tail whose predecessor exited, so the volume went untailed for a while)
-/// and the thread's first act is a full build, which builds the index and
-/// acquires a fresh cursor.
-pub(crate) fn spawn(
-    state: Arc<VolumeState>,
-    handle: VolumeHandle,
-    cursor: Option<JournalInfo>,
-) -> std::io::Result<TailHandle> {
+/// (it is not shared). The thread's first act is a full build, which builds
+/// the index and acquires a fresh cursor (see [`RescanReason::NoCursor`]).
+pub(crate) fn spawn(state: Arc<VolumeState>, handle: VolumeHandle) -> std::io::Result<TailHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let pulse = Arc::new(TailPulse::new());
@@ -201,7 +190,7 @@ pub(crate) fn spawn(
             // `Retired` is a promise that joining is instant, and a close is
             // itself an IRP a sick device can pend.
             let _retired = pulse_thread.retire_on_drop();
-            tail_loop(&state, handle, cursor, &stop_thread, &pulse_thread)
+            tail_loop(&state, handle, &stop_thread, &pulse_thread)
         })?;
     let io_handle = io_rx
         .recv()
@@ -209,10 +198,10 @@ pub(crate) fn spawn(
         .map_err(|e| std::io::Error::other(format!("duplicating tail thread handle: {e}")))?;
     Ok(TailHandle {
         stop,
-        join: Some(join),
+        join,
         mount,
         pulse,
-        io_handle: Arc::new(io_handle),
+        io_handle,
     })
 }
 
@@ -252,270 +241,209 @@ struct ReadFailures {
     degraded: bool,
 }
 
-fn tail_loop(
-    state: &VolumeState,
-    handle: VolumeHandle,
-    cursor: Option<JournalInfo>,
-    stop: &AtomicBool,
-    pulse: &TailPulse,
-) {
+fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse: &TailPulse) {
     // Owned so it drops in THIS frame, on return and on unwind alike, before
     // the spawning closure's retire guard publishes `Retired`. A thread that
     // claimed Retired while still wedged in its handle's CloseHandle would
     // draw an unbounded join from the supervisor's give-up or revive path.
     let handle = &handle;
     let mut rescans: u32 = 0;
-    // A tail without a cursor cannot prove the index is in sync: a new volume
-    // has no index yet, and a revived tail's volume kept changing while it
-    // had no tail. Build it and pick up a fresh cursor before tailing a
-    // single record. Deliberately NOT routed through `bounded_rescan`: this
-    // build is the price of a start, not a journal fault, and charging it
-    // would leave every incarnation one incident short of the documented
-    // budget (the counter only resets on a non-empty batch, so on a quiet
-    // volume the charge would never clear). Revival storms are bounded by the
+    // A starting tail cannot prove the index is in sync: a new volume has no
+    // index yet, and a revived tail's volume kept changing while it had no
+    // tail. Build it and pick up a fresh cursor before tailing a single
+    // record. Deliberately NOT routed through `bounded_rescan`: this build is
+    // the price of a start, not a journal fault, and charging it would leave
+    // every incarnation one incident short of the documented budget (the
+    // counter only resets on a non-empty batch, so on a quiet volume the
+    // charge would never clear). Revival storms are bounded by the
     // supervisor's own budget instead.
-    let cursor = match cursor {
-        Some(c) => c,
-        None => match rescan(state, handle, pulse, RescanReason::NoCursor, stop) {
-            Some(c) => c,
-            None => return,
-        },
+    let Some(mut pos) = rescan(state, handle, pulse, RescanReason::NoCursor, stop) else {
+        return;
     };
-    let mut pos = ReadPosition::at(cursor, state.filesystem);
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
 
-    while !stop.load(Ordering::Relaxed) {
+    'tail: while !stop.load(Ordering::Relaxed) {
         // Liveness stamp for the supervisor: as long as this loop is turning,
         // however unhealthily, no one cancels our I/O.
         pulse.beat();
-        match read_usn_journal(
-            handle,
-            state.filesystem.journal_records(),
-            pos.start_usn,
-            pos.journal_id,
-            REASON_MASK,
-            0,
-            &mut buf,
-        ) {
-            Ok(bytes) => {
-                if pos.failures.take().is_some_and(|f| f.degraded) {
-                    tracing::info!(
-                        volume = %state.mount_prefix(),
-                        "journal reads recovered; volume is tracking again"
-                    );
-                    *state.phase.write() = VolumePhase::Live;
-                }
-                let walk = match walk_journal_buffer(&buf[..bytes]) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        // A corrupt buffer means we cannot prove what we missed,
-                        // so rebuild the index from the MFT rather than drift.
-                        match bounded_rescan(
-                            state,
-                            handle,
-                            pulse,
-                            RescanReason::ParserAnomaly,
-                            &format!("{e:?}"),
-                            &mut rescans,
-                            stop,
-                        ) {
-                            Some(c) => {
-                                pos = ReadPosition::at(c, state.filesystem);
-                                continue;
-                            }
-                            None => return,
-                        }
+        // A path that can no longer prove the index is in sync breaks out
+        // with the reason to rebuild it; every other path continues.
+        let (reason, detail) = 'rescan: {
+            match read_usn_journal(
+                handle,
+                state.filesystem.journal_records(),
+                pos.start_usn,
+                pos.journal_id,
+                REASON_MASK,
+                0,
+                &mut buf,
+            ) {
+                Ok(bytes) => {
+                    if pos.failures.take().is_some_and(|f| f.degraded) {
+                        tracing::info!(
+                            volume = %state.mount_prefix(),
+                            "journal reads recovered; volume is tracking again"
+                        );
+                        *state.phase.write() = VolumePhase::Live;
                     }
-                };
-                if walk.records.is_empty() {
-                    // Caught up (or only filtered-out records): advance and idle.
-                    if bytes <= size_of::<i64>() {
-                        // Nothing past the next USN: the reads have passed
-                        // every change made during the build.
-                        pos.replaying_walk = false;
+                    let walk = match walk_journal_buffer(&buf[..bytes]) {
+                        Ok(w) => w,
+                        // A corrupt buffer means we cannot prove what we
+                        // missed, so rebuild the index from the MFT rather
+                        // than drift.
+                        Err(e) => break 'rescan (RescanReason::ParserAnomaly, format!("{e:?}")),
+                    };
+                    if walk.records.is_empty() {
+                        // Caught up (or only filtered-out records): advance and idle.
+                        if bytes <= size_of::<i64>() {
+                            // Nothing past the next USN: the reads have passed
+                            // every change made during the build.
+                            pos.replaying_walk = false;
+                        }
+                        pos.start_usn = walk.next_usn;
+                        std::thread::sleep(IDLE_POLL);
+                        continue 'tail;
+                    }
+                    // Apply structural changes under the write lock, then collect
+                    // the FRNs whose size/date must be refreshed (USN records carry
+                    // neither). Hard-link-dirty FRNs are stat'd too, which refreshes
+                    // their size/date but does NOT reconcile their names.
+                    //
+                    // Hold the write lock only for the mutation; the owned
+                    // `ApplyOutcome` needs no lock, so build the dirty list after
+                    // releasing it (keeps the query-blocking window minimal).
+                    //
+                    // The lock covers only the mutation. Arena compaction, which is
+                    // the one thing here that used to run long (~184 ms on a large
+                    // index), is no longer inline: `apply_batch` reports it and
+                    // `compact_index` does the copying off the exclusive lock.
+                    let mut outcome = {
+                        let mut index = state.index.write();
+                        index.apply_batch(&walk.records)
+                    };
+                    for anomaly in &outcome.anomalies {
+                        tracing::debug!(volume = %state.mount_prefix(), ?anomaly, "index anomaly");
+                    }
+                    if pos.replaying_walk {
+                        // A walk lists one folder at a time, so a hard link
+                        // renamed during it from a folder not yet listed into one
+                        // already listed was never listed, and its rename record
+                        // replaced the file's other name. The link reconcile
+                        // restores the file's real names.
+                        outcome.needs_link_reconcile.extend(
+                            walk.records
+                                .iter()
+                                .filter(|r| {
+                                    r.reason & USN_REASON_RENAME_NEW_NAME != 0 && !r.is_dir()
+                                })
+                                .map(|r| r.frn),
+                        );
+                        outcome.needs_link_reconcile.sort_unstable();
+                        outcome.needs_link_reconcile.dedup();
+                    }
+
+                    // Before the link reconcile, which finds each link's folder by
+                    // its path: that folder may be one this walk adds.
+                    if let Err(e) = walk_missed(state, handle, &outcome.needs_walk, stop, pulse) {
+                        break 'rescan (RescanReason::WalkFailed, format!("{e:#}"));
+                    }
+                    let mut dirty: Vec<Frn> = outcome
+                        .needs_stat
+                        .iter()
+                        .chain(&outcome.needs_link_reconcile)
+                        .copied()
+                        .collect();
+                    dirty.sort_unstable();
+                    dirty.dedup();
+                    enrich_stats(state, handle, &dirty, stop, pulse);
+                    // A hard-link change also alters the file's NAMES, which no stat
+                    // can refresh and which the record itself cannot be trusted for
+                    // (it may name a link that is already dead).
+                    reconcile_links(state, handle, &outcome.needs_link_reconcile, stop, pulse);
+                    if outcome.wants_compact {
+                        compact_index(state);
                     }
                     pos.start_usn = walk.next_usn;
-                    std::thread::sleep(IDLE_POLL);
-                    continue;
+                    rescans = 0; // a healthy batch resets the rescan storm guard
+                    continue 'tail;
                 }
-                // Apply structural changes under the write lock, then collect
-                // the FRNs whose size/date must be refreshed (USN records carry
-                // neither). Hard-link-dirty FRNs are stat'd too, which refreshes
-                // their size/date but does NOT reconcile their names.
-                //
-                // Hold the write lock only for the mutation; the owned
-                // `ApplyOutcome` needs no lock, so build the dirty list after
-                // releasing it (keeps the query-blocking window minimal).
-                //
-                // The lock covers only the mutation. Arena compaction, which is
-                // the one thing here that used to run long (~184 ms on a large
-                // index), is no longer inline: `apply_batch` reports it and
-                // `compact_index` does the copying off the exclusive lock.
-                let mut outcome = {
-                    let mut index = state.index.write();
-                    index.apply_batch(&walk.records)
-                };
-                for anomaly in &outcome.anomalies {
-                    tracing::debug!(volume = %state.mount_prefix(), ?anomaly, "index anomaly");
+                Err(e) if e.code == ERROR_JOURNAL_ENTRY_DELETED => {
+                    // Our cursor fell off the end of the journal (wrap / deletion):
+                    // the index can no longer prove it is in sync, so rebuild it in
+                    // place and resume tailing from a fresh cursor.
+                    (RescanReason::EntryDeletedError, e.to_string())
                 }
-                if pos.replaying_walk {
-                    // A walk lists one folder at a time, so a hard link
-                    // renamed during it from a folder not yet listed into one
-                    // already listed was never listed, and its rename record
-                    // replaced the file's other name. The link reconcile
-                    // restores the file's real names.
-                    outcome.needs_link_reconcile.extend(
-                        walk.records
-                            .iter()
-                            .filter(|r| r.reason & USN_REASON_RENAME_NEW_NAME != 0 && !r.is_dir())
-                            .map(|r| r.frn),
-                    );
-                    outcome.needs_link_reconcile.sort_unstable();
-                    outcome.needs_link_reconcile.dedup();
+                Err(e)
+                    if e.code == ERROR_JOURNAL_NOT_ACTIVE
+                        || e.code == ERROR_JOURNAL_DELETE_IN_PROGRESS =>
+                {
+                    // The journal we were tailing is gone or being deleted. Retrying
+                    // the same cursor against it can never succeed, so rebuild from
+                    // the MFT and pick up a fresh one.
+                    let reason = if e.code == ERROR_JOURNAL_NOT_ACTIVE {
+                        RescanReason::JournalNotActive
+                    } else {
+                        RescanReason::JournalDeleteInProgress
+                    };
+                    (reason, e.to_string())
                 }
-
-                // Before the link reconcile, which finds each link's folder by
-                // its path: that folder may be one this walk adds.
-                if let Err(e) = walk_missed(state, handle, &outcome.needs_walk, stop, pulse) {
-                    match bounded_rescan(
-                        state,
-                        handle,
-                        pulse,
-                        RescanReason::WalkFailed,
-                        &format!("{e:#}"),
-                        &mut rescans,
-                        stop,
-                    ) {
-                        Some(c) => {
-                            pos = ReadPosition::at(c, state.filesystem);
-                            continue;
-                        }
-                        None => return,
+                Err(e) => {
+                    // Some other read failure. It may be transient (a drive spinning
+                    // up answers ERROR_NOT_READY for a moment), so keep retrying
+                    // rather than abandoning the volume.
+                    //
+                    // What we must never do is retry silently while still claiming
+                    // `Live`: that is the third state the design forbids, where the
+                    // index has stopped tracking the volume and every query still
+                    // reports it complete. Past `DEGRADE_AFTER` the drift is real, so
+                    // say so and let `--status`, `Hello.ready`, and every result page
+                    // carry it.
+                    let failures = pos.failures.get_or_insert_with(|| ReadFailures {
+                        since: Instant::now(),
+                        backoff: RETRY_BACKOFF_MIN,
+                        degraded: false,
+                    });
+                    let since = failures.since;
+                    // Nor may we retry FOREVER: deleting the journal mid-read was
+                    // observed to answer the stale cursor with
+                    // ERROR_INVALID_PARAMETER (87), a code no arm maps, and no
+                    // retry of that can ever succeed, so the volume sat Offline
+                    // permanently while its tail beat away and the supervisor
+                    // (correctly) saw nothing to revive. Past `ESCALATE_AFTER`
+                    // the code no longer matters: reads that will not stop
+                    // failing mean the journal cannot be trusted, so rebuild.
+                    // Bounded: a rescan that fails retires the tail into the
+                    // supervisor's revival budget instead of looping here.
+                    if since.elapsed() >= ESCALATE_AFTER {
+                        break 'rescan (RescanReason::ReadsKeptFailing, e.to_string());
                     }
-                }
-                let mut dirty: Vec<Frn> = outcome
-                    .needs_stat
-                    .iter()
-                    .chain(&outcome.needs_link_reconcile)
-                    .copied()
-                    .collect();
-                dirty.sort_unstable();
-                dirty.dedup();
-                enrich_stats(state, handle, &dirty, stop, pulse);
-                // A hard-link change also alters the file's NAMES, which no stat
-                // can refresh and which the record itself cannot be trusted for
-                // (it may name a link that is already dead).
-                reconcile_links(state, handle, &outcome.needs_link_reconcile, stop, pulse);
-                if outcome.wants_compact {
-                    compact_index(state);
-                }
-                pos.start_usn = walk.next_usn;
-                rescans = 0; // a healthy batch resets the rescan storm guard
-            }
-            Err(e) if e.code == ERROR_JOURNAL_ENTRY_DELETED => {
-                // Our cursor fell off the end of the journal (wrap / deletion):
-                // the index can no longer prove it is in sync, so rebuild it in
-                // place and resume tailing from a fresh cursor.
-                match bounded_rescan(
-                    state,
-                    handle,
-                    pulse,
-                    RescanReason::EntryDeletedError,
-                    &e.to_string(),
-                    &mut rescans,
-                    stop,
-                ) {
-                    Some(c) => pos = ReadPosition::at(c, state.filesystem),
-                    None => return,
-                }
-            }
-            Err(e)
-                if e.code == ERROR_JOURNAL_NOT_ACTIVE
-                    || e.code == ERROR_JOURNAL_DELETE_IN_PROGRESS =>
-            {
-                // The journal we were tailing is gone or being deleted. Retrying
-                // the same cursor against it can never succeed, so rebuild from
-                // the MFT and pick up a fresh one.
-                let reason = if e.code == ERROR_JOURNAL_NOT_ACTIVE {
-                    RescanReason::JournalNotActive
-                } else {
-                    RescanReason::JournalDeleteInProgress
-                };
-                match bounded_rescan(
-                    state,
-                    handle,
-                    pulse,
-                    reason,
-                    &e.to_string(),
-                    &mut rescans,
-                    stop,
-                ) {
-                    Some(c) => pos = ReadPosition::at(c, state.filesystem),
-                    None => return,
-                }
-            }
-            Err(e) => {
-                // Some other read failure. It may be transient (a drive spinning
-                // up answers ERROR_NOT_READY for a moment), so keep retrying
-                // rather than abandoning the volume.
-                //
-                // What we must never do is retry silently while still claiming
-                // `Live`: that is the third state the design forbids, where the
-                // index has stopped tracking the volume and every query still
-                // reports it complete. Past `DEGRADE_AFTER` the drift is real, so
-                // say so and let `--status`, `Hello.ready`, and every result page
-                // carry it.
-                let failures = pos.failures.get_or_insert_with(|| ReadFailures {
-                    since: Instant::now(),
-                    backoff: RETRY_BACKOFF_MIN,
-                    degraded: false,
-                });
-                let since = failures.since;
-                // Nor may we retry FOREVER: deleting the journal mid-read was
-                // observed to answer the stale cursor with
-                // ERROR_INVALID_PARAMETER (87), a code no arm maps, and no
-                // retry of that can ever succeed, so the volume sat Offline
-                // permanently while its tail beat away and the supervisor
-                // (correctly) saw nothing to revive. Past `ESCALATE_AFTER`
-                // the code no longer matters: reads that will not stop
-                // failing mean the journal cannot be trusted, so rebuild.
-                // Bounded: a rescan that fails retires the tail into the
-                // supervisor's revival budget instead of looping here.
-                if since.elapsed() >= ESCALATE_AFTER {
-                    match bounded_rescan(
-                        state,
-                        handle,
-                        pulse,
-                        RescanReason::ReadsKeptFailing,
-                        &e.to_string(),
-                        &mut rescans,
-                        stop,
-                    ) {
-                        Some(c) => pos = ReadPosition::at(c, state.filesystem),
-                        None => return,
+                    if !failures.degraded && since.elapsed() >= DEGRADE_AFTER {
+                        tracing::error!(
+                            volume = %state.mount_prefix(),
+                            error = %e,
+                            failing_for_secs = since.elapsed().as_secs(),
+                            "journal reads keep failing; marking volume Offline (its index is no longer current)"
+                        );
+                        *state.phase.write() = VolumePhase::Offline;
+                        failures.degraded = true;
+                    } else {
+                        tracing::warn!(volume = %state.mount_prefix(), error = %e, "journal read failed; retrying");
                     }
-                    continue;
+                    // Growing backoff, so a permanently sick volume costs one line
+                    // per RETRY_BACKOFF_MAX instead of one every 500 ms forever.
+                    // Interruptible: a stop arriving mid-backoff must not wait out
+                    // up to 30 s, or teardown would mistake this tail for wedged.
+                    sleep_unless_stopped(stop, failures.backoff);
+                    failures.backoff = (failures.backoff * 2).min(RETRY_BACKOFF_MAX);
+                    continue 'tail;
                 }
-                if !failures.degraded && since.elapsed() >= DEGRADE_AFTER {
-                    tracing::error!(
-                        volume = %state.mount_prefix(),
-                        error = %e,
-                        failing_for_secs = since.elapsed().as_secs(),
-                        "journal reads keep failing; marking volume Offline (its index is no longer current)"
-                    );
-                    *state.phase.write() = VolumePhase::Offline;
-                    failures.degraded = true;
-                } else {
-                    tracing::warn!(volume = %state.mount_prefix(), error = %e, "journal read failed; retrying");
-                }
-                // Growing backoff, so a permanently sick volume costs one line
-                // per RETRY_BACKOFF_MAX instead of one every 500 ms forever.
-                // Interruptible: a stop arriving mid-backoff must not wait out
-                // up to 30 s, or teardown would mistake this tail for wedged.
-                sleep_unless_stopped(stop, failures.backoff);
-                failures.backoff = (failures.backoff * 2).min(RETRY_BACKOFF_MAX);
             }
-        }
+        };
+        let Some(fresh) = bounded_rescan(state, handle, pulse, reason, &detail, &mut rescans, stop)
+        else {
+            return;
+        };
+        pos = fresh;
     }
 }
 
@@ -610,12 +538,12 @@ fn reconcile_links(
         let mut unresolved = false;
         for wide in &links {
             let mut bytes = Vec::new();
-            let lossy = !gozler_core::wtf8::from_utf16(wide, &mut bytes);
+            gozler_core::wtf8::from_utf16(wide, &mut bytes);
             let (dir, name) = split_parent(&bytes);
             match resolve_scope(&index, dir, false) {
                 Some(parent) => targets.push(LinkTarget {
                     parent,
-                    name: WtfName::new(name.to_vec(), lossy),
+                    name: name.to_vec(),
                 }),
                 // A parent we have not indexed yet: reconciling to a partial set
                 // would delete the links we could not resolve.
@@ -741,8 +669,8 @@ fn walk_missed(
 }
 
 /// Rescan with a storm guard: rebuilds the index, capping consecutive attempts
-/// so a persistently broken journal cannot loop forever. Returns the fresh
-/// cursor to resume from, or `None` to stop the tail (rebuild failed, no journal
+/// so a persistently broken journal cannot loop forever. Returns where to
+/// resume reading, or `None` to stop the tail (rebuild failed, no journal
 /// after rebuild, or the cap was hit; the volume is left Failed in the first
 /// and last cases).
 fn bounded_rescan(
@@ -753,7 +681,7 @@ fn bounded_rescan(
     detail: &str,
     rescans: &mut u32,
     stop: &AtomicBool,
-) -> Option<JournalInfo> {
+) -> Option<ReadPosition> {
     *rescans += 1;
     if *rescans > MAX_RESCANS {
         mark_failed(
@@ -769,15 +697,15 @@ fn bounded_rescan(
 /// Builds this volume's index in place: its first build, or a rebuild after a
 /// journal loss (wrap, deletion, or parse anomaly). Reads the volume on the
 /// handle the tail already owns, swaps the fresh index in under the write lock,
-/// and acquires a journal cursor. Queries keep serving (flagged incomplete)
-/// during the build.
+/// and returns where to read the journal from, or `None` to stop the tail.
+/// Queries keep serving (flagged incomplete) during the build.
 fn rescan(
     state: &VolumeState,
     handle: &VolumeHandle,
     pulse: &TailPulse,
     reason: RescanReason,
     stop: &AtomicBool,
-) -> Option<JournalInfo> {
+) -> Option<ReadPosition> {
     // The rebuild rereads the whole volume without stamping the pulse.
     // `Busy` tells the supervisor this silence is legitimate; the guard
     // restores a fresh beat on every way out of this function.
@@ -833,7 +761,7 @@ fn rescan(
                 entries = state.index.read().len(),
                 "index built; tailing the journal"
             );
-            Some(c)
+            Some(ReadPosition::at(c, state.filesystem))
         }
         JournalSetup::Refused => {
             // Snapshot, not Offline: nothing is wrong and nothing will change,
@@ -897,15 +825,11 @@ mod tests {
 
     fn record_with(reason: u32) -> ParsedUsnRecord {
         ParsedUsnRecord {
-            major_version: 2,
             frn: Frn(42),
             parent_frn: Frn(5),
-            usn: 0,
-            timestamp_ft: 0,
             reason,
             attributes: 0,
             name: b"f.txt".to_vec(),
-            name_lossy: false,
         }
     }
 

@@ -810,7 +810,6 @@ fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
                 LayoutName {
                     parent_frn,
                     name: name.as_bytes().to_vec(),
-                    name_lossy: false,
                     dos_only: false,
                 }
             })

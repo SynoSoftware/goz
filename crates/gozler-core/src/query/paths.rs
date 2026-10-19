@@ -213,15 +213,11 @@ mod tests {
         let mut parent = NTFS_ROOT_FRN;
         let mut entries = Vec::new();
         let rec = |frn: u64, parent: Frn, name: String, dir: bool| ParsedUsnRecord {
-            major_version: 2,
             frn: Frn(u128::from(frn) | (1 << 48)),
             parent_frn: parent,
-            usn: 0,
-            timestamp_ft: 0,
             reason: USN_REASON_FILE_CREATE,
             attributes: if dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
             name: name.into_bytes(),
-            name_lossy: false,
         };
         for level in 0..(MAX_PATH_HOPS as u64 + 4) {
             let dir = rec(100 + 2 * level, parent, format!("folder{level:06}"), true);

@@ -12,10 +12,9 @@
 
 use super::dates::DateRange;
 use super::order::{OrderFields, compare};
-use super::parse::{
-    CodePointBuf, Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test, Wildcard,
-};
+use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
 use super::paths::{DirPaths, NameForm};
+use super::wildcard::{CodePointBuf, Wildcard};
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::fold::fold;
 use crate::index::{EntryView, VolumeIndex};
@@ -28,7 +27,6 @@ use smallvec::SmallVec;
 /// One matched entry. The daemon formats `mtime` for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryHit {
-    pub idx: EntryIdx,
     /// Full path: the volume's mount prefix, then every folder and the name
     /// (WTF-8).
     pub path: Vec<u8>,
@@ -149,6 +147,9 @@ struct CompiledTerm {
 
 /// A [`Test`] with its text folded unless the query matches case, its
 /// wildcards compiled and its substrings built into finders.
+// A query holds a handful of checks, and each tests every candidate, so
+// boxing the large `Text` would buy no memory and cost a load per test.
+#[allow(clippy::large_enum_variant)]
 enum Check {
     Kind(Kind),
     /// The entry has every packed attribute, and is a folder when `folder`
@@ -159,26 +160,33 @@ enum Check {
     },
     Size(SizeRange),
     DateModified(DateRange),
-    Name(memmem::Finder<'static>),
-    NameWildcard(Wildcard),
     /// Folded whatever the query's case, as es compares extensions.
     Extension(Vec<Vec<u8>>),
-    Path(memmem::Finder<'static>),
-    PathWildcard(Wildcard),
     /// The folder's full path, without a trailing separator, which the full
     /// path of the folder that holds the entry must equal.
     Parent(Vec<u8>),
-    NameWholeWord(memmem::Finder<'static>),
-    PathWholeWord(memmem::Finder<'static>),
-    NameWordStart(memmem::Finder<'static>),
-    PathWordStart(memmem::Finder<'static>),
-    NameStart(Vec<u8>),
-    PathStart(Vec<u8>),
+    Text(Target, Matcher),
+}
+
+/// The text a [`Check::Text`] reads, in the form the query compares: folded
+/// unless it matches case.
+enum Target {
+    Name,
+    Path,
+}
+
+/// How a [`Check::Text`] compares its text.
+enum Matcher {
+    Contains(memmem::Finder<'static>),
+    WholeWord(memmem::Finder<'static>),
+    WordStart(memmem::Finder<'static>),
+    Start(Vec<u8>),
+    /// Matches the whole text.
+    Wildcard(Wildcard),
     /// Compiled case-insensitive unless the query matches case, when it
-    /// tests the folded name or path like every other check. The pattern
-    /// itself is never folded, because folding would turn `\D` into `\d`.
-    NameRegex(Regex),
-    PathRegex(Regex),
+    /// tests the folded text like every other matcher. The pattern itself is
+    /// never folded, because folding would turn `\D` into `\d`.
+    Regex(Regex),
 }
 
 impl CompiledQuery {
@@ -213,22 +221,6 @@ impl CompiledQuery {
         }
 
         let match_case = parsed.match_case;
-        let text = |s: &str| {
-            if match_case {
-                s.as_bytes().to_vec()
-            } else {
-                fold(s.as_bytes())
-            }
-        };
-        let finder = |s: &str| memmem::Finder::new(&text(s)).into_owned();
-        let regex = |pattern: &str| {
-            RegexBuilder::new(pattern)
-                .case_insensitive(!match_case)
-                .size_limit(REGEX_SIZE_LIMIT)
-                .dfa_size_limit(REGEX_CACHE_LIMIT)
-                .build()
-                .map_err(|e| QueryError::Malformed(Malformed::Regex(e.to_string())))
-        };
         let mut clauses = parsed
             .clauses
             .iter()
@@ -237,38 +229,9 @@ impl CompiledQuery {
                     .terms
                     .iter()
                     .map(|term| {
-                        let check = match &term.test {
-                            Test::Name(s) => Check::Name(finder(s)),
-                            Test::Path(s) => Check::Path(finder(s)),
-                            Test::NameWildcard(s) => {
-                                Check::NameWildcard(Wildcard::compile(&text(s)))
-                            }
-                            Test::PathWildcard(s) => {
-                                Check::PathWildcard(Wildcard::compile(&text(s)))
-                            }
-                            Test::NameWholeWord(s) => Check::NameWholeWord(finder(s)),
-                            Test::PathWholeWord(s) => Check::PathWholeWord(finder(s)),
-                            Test::NameWordStart(s) => Check::NameWordStart(finder(s)),
-                            Test::PathWordStart(s) => Check::PathWordStart(finder(s)),
-                            Test::NameStart(s) => Check::NameStart(text(s)),
-                            Test::PathStart(s) => Check::PathStart(text(s)),
-                            Test::NameRegex(s) => Check::NameRegex(regex(s)?),
-                            Test::PathRegex(s) => Check::PathRegex(regex(s)?),
-                            Test::Extension(exts) => Check::Extension(
-                                exts.iter().map(|ext| fold(ext.as_bytes())).collect(),
-                            ),
-                            Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
-                            Test::Size(range) => Check::Size(*range),
-                            Test::DateModified(range) => Check::DateModified(*range),
-                            Test::Kind(kind) => Check::Kind(*kind),
-                            Test::Attributes(attributes) => {
-                                let (packed, folder) = attributes.pack();
-                                Check::Attributes { packed, folder }
-                            }
-                        };
                         Ok(CompiledTerm {
                             negated: term.negated,
-                            check,
+                            check: Check::new(&term.test, match_case)?,
                         })
                     })
                     .collect::<Result<_, QueryError>>()?;
@@ -310,11 +273,14 @@ impl CompiledClause {
             return None;
         }
         match &term.check {
-            Check::Name(finder) | Check::NameWholeWord(finder) | Check::NameWordStart(finder) => {
-                Some(finder.needle().to_vec())
-            }
-            Check::NameStart(start) => Some(start.clone()),
-            Check::NameWildcard(wildcard) => wildcard.longest_literal(),
+            Check::Text(Target::Name, matcher) => match matcher {
+                Matcher::Contains(finder)
+                | Matcher::WholeWord(finder)
+                | Matcher::WordStart(finder) => Some(finder.needle().to_vec()),
+                Matcher::Start(start) => Some(start.clone()),
+                Matcher::Wildcard(wildcard) => wildcard.longest_literal(),
+                Matcher::Regex(_) => None,
+            },
             Check::Extension(exts) => match exts.as_slice() {
                 [ext] if !ext.is_empty() => Some([b".", ext.as_slice()].concat()),
                 _ => None,
@@ -326,18 +292,10 @@ impl CompiledClause {
     /// Whether the clause tests the full path, then the cost of its dearest
     /// term: the order the scan tests clauses in.
     fn cost(&self) -> (bool, u8) {
-        let needs_path = self.terms.iter().any(|term| {
-            matches!(
-                term.check,
-                Check::Path(_)
-                    | Check::PathWildcard(_)
-                    | Check::PathWholeWord(_)
-                    | Check::PathWordStart(_)
-                    | Check::PathStart(_)
-                    | Check::PathRegex(_)
-                    | Check::Parent(_)
-            )
-        });
+        let needs_path = self
+            .terms
+            .iter()
+            .any(|term| matches!(term.check, Check::Text(Target::Path, _) | Check::Parent(_)));
         let cost = self.terms.iter().map(|term| term.check.cost()).max();
         (needs_path, cost.unwrap_or(0))
     }
@@ -353,15 +311,10 @@ impl CompiledClause {
 
 /// What the checks read of one entry.
 struct Subject<'a> {
-    is_dir: bool,
-    size: Option<u64>,
-    /// The entry, for a value only a rare check reads, such as the date
-    /// modified, which most queries never load.
+    /// The entry, whose columns a check loads only when it reads them.
     entry: EntryView<'a>,
     /// The name as the query compares it: folded unless it matches case.
     name: &'a [u8],
-    /// The name as stored, which an extension check folds itself.
-    raw_name: &'a [u8],
     /// The full path in the same form as `name`; set before the path
     /// clauses run.
     path: Option<&'a [u8]>,
@@ -375,19 +328,69 @@ struct Scratch {
 }
 
 impl Check {
+    /// Compiles `test`, its text folded unless `match_case`, or refuses a
+    /// malformed or oversized regular expression.
+    fn new(test: &Test, match_case: bool) -> Result<Self, QueryError> {
+        let text = |s: &str| {
+            if match_case {
+                s.as_bytes().to_vec()
+            } else {
+                fold(s.as_bytes())
+            }
+        };
+        let finder = |s: &str| memmem::Finder::new(&text(s)).into_owned();
+        let wildcard = |s: &str| Wildcard::compile(&text(s));
+        let regex = |pattern: &str| {
+            RegexBuilder::new(pattern)
+                .case_insensitive(!match_case)
+                .size_limit(REGEX_SIZE_LIMIT)
+                .dfa_size_limit(REGEX_CACHE_LIMIT)
+                .build()
+                .map_err(|e| QueryError::Malformed(Malformed::Regex(e.to_string())))
+        };
+        Ok(match test {
+            Test::Name(s) => Check::Text(Target::Name, Matcher::Contains(finder(s))),
+            Test::Path(s) => Check::Text(Target::Path, Matcher::Contains(finder(s))),
+            Test::NameWholeWord(s) => Check::Text(Target::Name, Matcher::WholeWord(finder(s))),
+            Test::PathWholeWord(s) => Check::Text(Target::Path, Matcher::WholeWord(finder(s))),
+            Test::NameWordStart(s) => Check::Text(Target::Name, Matcher::WordStart(finder(s))),
+            Test::PathWordStart(s) => Check::Text(Target::Path, Matcher::WordStart(finder(s))),
+            Test::NameStart(s) => Check::Text(Target::Name, Matcher::Start(text(s))),
+            Test::PathStart(s) => Check::Text(Target::Path, Matcher::Start(text(s))),
+            Test::NameWildcard(s) => Check::Text(Target::Name, Matcher::Wildcard(wildcard(s))),
+            Test::PathWildcard(s) => Check::Text(Target::Path, Matcher::Wildcard(wildcard(s))),
+            Test::NameRegex(s) => Check::Text(Target::Name, Matcher::Regex(regex(s)?)),
+            Test::PathRegex(s) => Check::Text(Target::Path, Matcher::Regex(regex(s)?)),
+            Test::Extension(exts) => {
+                Check::Extension(exts.iter().map(|ext| fold(ext.as_bytes())).collect())
+            }
+            Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
+            Test::Size(range) => Check::Size(*range),
+            Test::DateModified(range) => Check::DateModified(*range),
+            Test::Kind(kind) => Check::Kind(*kind),
+            Test::Attributes(attributes) => {
+                let (packed, folder) = attributes.pack();
+                Check::Attributes { packed, folder }
+            }
+        })
+    }
+
     /// Relative cost of testing one entry, cheapest first: the allocation-free
     /// checks reject most entries before the extension check folds anything.
     fn cost(&self) -> u8 {
         match self {
             Check::Kind(_) | Check::Attributes { .. } => 0,
             Check::Size(_) | Check::DateModified(_) => 1,
-            Check::Name(_) | Check::Path(_) | Check::Parent(_) => 2,
-            Check::NameWholeWord(_) | Check::PathWholeWord(_) => 2,
-            Check::NameWordStart(_) | Check::PathWordStart(_) => 2,
-            Check::NameStart(_) | Check::PathStart(_) => 2,
-            Check::NameWildcard(_) | Check::PathWildcard(_) => 3,
+            Check::Parent(_) => 2,
+            Check::Text(_, matcher) => match matcher {
+                Matcher::Contains(_)
+                | Matcher::WholeWord(_)
+                | Matcher::WordStart(_)
+                | Matcher::Start(_) => 2,
+                Matcher::Wildcard(_) => 3,
+                Matcher::Regex(_) => 5,
+            },
             Check::Extension(_) => 4,
-            Check::NameRegex(_) | Check::PathRegex(_) => 5,
         }
     }
 
@@ -399,20 +402,17 @@ impl Check {
                 .path
                 .expect("path clauses run after the path is set")
         };
+        let entry = &subject.entry;
         Some(match self {
-            Check::Kind(Kind::File) => !subject.is_dir,
-            Check::Kind(Kind::Folder) => subject.is_dir,
+            Check::Kind(Kind::File) => !entry.is_dir(),
+            Check::Kind(Kind::Folder) => entry.is_dir(),
             Check::Attributes { packed, folder } => {
-                subject.entry.packed_attributes().contains(*packed) && (subject.is_dir || !*folder)
+                entry.packed_attributes().contains(*packed) && (entry.is_dir() || !*folder)
             }
             // A folder's size is always unknown, so a size test skips folders.
-            Check::Size(range) => range.contains(subject.size?),
-            Check::DateModified(range) => range.contains(subject.entry.mtime()?),
-            Check::Name(finder) => finder.find(subject.name).is_some(),
-            Check::NameWildcard(wildcard) => {
-                wildcard.matches_into(subject.name, &mut scratch.code_points)
-            }
-            Check::Extension(exts) => match extension(subject.raw_name, subject.is_dir) {
+            Check::Size(range) => range.contains(entry.size()?),
+            Check::DateModified(range) => range.contains(entry.mtime()?),
+            Check::Extension(exts) => match extension(entry.name(), entry.is_dir()) {
                 Some(ext) => {
                     scratch.extension.clear();
                     crate::fold::fold_into(ext, &mut scratch.extension);
@@ -420,10 +420,6 @@ impl Check {
                 }
                 None => false,
             },
-            Check::Path(finder) => finder.find(path()).is_some(),
-            Check::PathWildcard(wildcard) => {
-                wildcard.matches_into(path(), &mut scratch.code_points)
-            }
             Check::Parent(folder) => {
                 // The path ends with the name in the same form, after the
                 // folder's path and, unless that is empty, a separator.
@@ -432,14 +428,22 @@ impl Check {
                     .expect("a full path ends with its name");
                 parent.strip_suffix(b"\\").unwrap_or(parent) == folder.as_slice()
             }
-            Check::NameWholeWord(finder) => contains_whole_word(finder, subject.name),
-            Check::PathWholeWord(finder) => contains_whole_word(finder, path()),
-            Check::NameWordStart(finder) => contains_at_word_start(finder, subject.name),
-            Check::PathWordStart(finder) => contains_at_word_start(finder, path()),
-            Check::NameStart(start) => subject.name.starts_with(start),
-            Check::PathStart(start) => path().starts_with(start),
-            Check::NameRegex(regex) => regex.is_match(subject.name),
-            Check::PathRegex(regex) => regex.is_match(path()),
+            Check::Text(target, matcher) => {
+                let text = match target {
+                    Target::Name => subject.name,
+                    Target::Path => path(),
+                };
+                match matcher {
+                    Matcher::Contains(finder) => finder.find(text).is_some(),
+                    Matcher::WholeWord(finder) => contains_whole_word(finder, text),
+                    Matcher::WordStart(finder) => contains_at_word_start(finder, text),
+                    Matcher::Start(start) => text.starts_with(start),
+                    Matcher::Wildcard(wildcard) => {
+                        wildcard.matches_into(text, &mut scratch.code_points)
+                    }
+                    Matcher::Regex(regex) => regex.is_match(text),
+                }
+            }
         })
     }
 }
@@ -610,23 +614,16 @@ fn scan<'q, 'i>(
     // expensive part this path exists to avoid); every other predicate is
     // identical to the scan paths below. Oversized scopes abort to those paths.
     if let Some(root) = scope {
-        let mut visited = 0usize;
-        let mut subtree_done = true;
-        for idx in index.subtree_entries(root) {
-            visited += 1;
-            if visited > SUBTREE_WALK_MAX {
-                scan.candidates.clear();
-                subtree_done = false;
-                break;
+        let mut walk = index.subtree_entries(root);
+        for idx in walk.by_ref().take(SUBTREE_WALK_MAX) {
+            if !index.is_synthetic(idx) {
+                scan.visit(idx, None);
             }
-            if index.is_synthetic(idx) {
-                continue;
-            }
-            scan.visit(idx, None);
         }
-        if subtree_done {
+        if walk.next().is_none() {
             return scan;
         }
+        scan.candidates.clear();
     }
 
     // Fast path: case-insensitive query with a usable literal → scan the
@@ -769,7 +766,6 @@ fn run_query_impl(
         }
         let entry = index.entry(c.idx);
         hits.push(QueryHit {
-            idx: c.idx,
             path,
             frn: entry.frn(),
             parent_frn: index.entry(entry.parent()).frn(),
@@ -837,16 +833,13 @@ impl<'q, 'i> Scan<'q, 'i> {
         let (entry_clauses, path_clauses) = query.clauses.split_at(query.path_clauses);
         let entry = index.entry(idx);
         let mut subject = Subject {
-            is_dir: entry.is_dir(),
-            size: entry.size(),
-            entry: index.entry(idx),
             // The precomputed folded name serves a case-insensitive query.
             name: if query.match_case {
                 entry.name()
             } else {
                 index.folded_name(idx)
             },
-            raw_name: entry.name(),
+            entry,
             path: None,
         };
         if !entry_clauses
@@ -1115,15 +1108,11 @@ mod tests {
 
     fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
         ParsedUsnRecord {
-            major_version: 2,
             frn: f,
             parent_frn: parent,
-            usn: 0,
-            timestamp_ft: 0,
             reason: USN_REASON_FILE_CREATE,
             attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
             name: name.as_bytes().to_vec(),
-            name_lossy: false,
         }
     }
 
@@ -1227,7 +1216,6 @@ mod tests {
             names: vec![LayoutName {
                 parent_frn,
                 name,
-                name_lossy: false,
                 dos_only: false,
             }],
         });
@@ -1973,7 +1961,6 @@ mod tests {
                 .map(|&(parent_frn, name)| LayoutName {
                     parent_frn,
                     name: name.as_bytes().to_vec(),
-                    name_lossy: false,
                     dos_only: false,
                 })
                 .collect(),

@@ -286,6 +286,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gozler_core::proto::ResultsPage;
     use tokio::net::windows::named_pipe::ServerOptions;
 
     /// A pipe name that no other test or program uses.
@@ -385,15 +386,7 @@ mod tests {
             };
             gozler_core::proto::encode_response_frame(&hello, &mut replies);
             for _ in 0..50 {
-                let page = Response::Results(QueryResults {
-                    total: 50,
-                    items: Vec::new(),
-                    more: true,
-                    volumes_incomplete: false,
-                    metadata_pending: false,
-                    generation: 0,
-                });
-                gozler_core::proto::encode_response_frame(&page, &mut replies);
+                replies.extend(ResultsPage::new(50, 0, false, false, 0).finish(true));
             }
             server
                 .write_all(&replies)

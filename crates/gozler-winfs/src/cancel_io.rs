@@ -8,15 +8,13 @@
 //! making it return `ERROR_OPERATION_ABORTED`, and the caller's normal retry
 //! path takes over.
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, ERROR_NOT_FOUND, GetLastError, HANDLE,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, ERROR_NOT_FOUND, HANDLE};
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetCurrentThreadId,
 };
 
-use crate::error::WinError;
+use crate::error::{WinError, last_error};
 
 /// A real (non-pseudo) handle to a thread, held so a supervisor can cancel
 /// that thread's blocked synchronous I/O. Closes the handle on drop.
@@ -63,10 +61,7 @@ pub fn current_thread_io_handle() -> Result<ThreadIoHandle, WinError> {
             DUPLICATE_SAME_ACCESS,
         );
         if ok == 0 {
-            return Err(WinError {
-                code: GetLastError(),
-                context: "DuplicateHandle(GetCurrentThread)",
-            });
+            return Err(last_error("DuplicateHandle(GetCurrentThread)"));
         }
         Ok(ThreadIoHandle {
             handle: real,
@@ -81,19 +76,14 @@ pub fn current_thread_io_handle() -> Result<ThreadIoHandle, WinError> {
 /// in a cancellable wait (nothing to do, not an error).
 pub fn cancel_synchronous_io(thread: &ThreadIoHandle) -> Result<bool, WinError> {
     // SAFETY: plain FFI on a live duplicated thread handle.
-    unsafe {
-        if CancelSynchronousIo(thread.handle) != 0 {
-            return Ok(true);
-        }
-        let code = GetLastError();
-        if code == ERROR_NOT_FOUND {
-            return Ok(false);
-        }
-        Err(WinError {
-            code,
-            context: "CancelSynchronousIo",
-        })
+    if unsafe { CancelSynchronousIo(thread.handle) } != 0 {
+        return Ok(true);
     }
+    let error = last_error("CancelSynchronousIo");
+    if error.code == ERROR_NOT_FOUND {
+        return Ok(false);
+    }
+    Err(error)
 }
 
 #[cfg(test)]
@@ -109,7 +99,7 @@ mod tests {
     /// supervisor performs on a stuck FSCTL_READ_USN_JOURNAL.
     #[test]
     fn cancels_a_blocked_synchronous_read() {
-        use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
+        use windows_sys::Win32::Foundation::{ERROR_OPERATION_ABORTED, GetLastError};
         use windows_sys::Win32::Storage::FileSystem::ReadFile;
         use windows_sys::Win32::System::Pipes::CreatePipe;
 

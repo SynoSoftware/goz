@@ -8,35 +8,34 @@
 
 /// Converts potentially ill-formed UTF-16 to WTF-8, appending to `out`.
 ///
-/// Returns `true` if the input contained at least one unpaired surrogate: the
-/// produced bytes are WTF-8-but-not-UTF-8, and consumers needing exact
-/// fidelity must ship the original code units alongside.
-pub fn from_utf16(units: &[u16], out: &mut Vec<u8>) -> bool {
-    let mut has_lone_surrogate = false;
-    let mut i = 0;
-    while i < units.len() {
-        let u = units[i];
-        let cp: u32 = if (0xD800..0xDC00).contains(&u) {
-            // High surrogate: pair it if a low surrogate follows.
-            if i + 1 < units.len() && (0xDC00..0xE000).contains(&units[i + 1]) {
-                let lo = units[i + 1] as u32;
-                i += 1;
-                0x10000 + (((u as u32 - 0xD800) << 10) | (lo - 0xDC00))
-            } else {
-                has_lone_surrogate = true;
-                u as u32
-            }
-        } else if (0xDC00..0xE000).contains(&u) {
-            // Lone low surrogate.
-            has_lone_surrogate = true;
-            u as u32
-        } else {
-            u as u32
+/// The bytes are valid UTF-8 exactly when every surrogate was paired, so a
+/// consumer tells a lossy name by `str::from_utf8` failing.
+pub fn from_utf16(units: &[u16], out: &mut Vec<u8>) {
+    extend_from_units(units.iter().copied(), out);
+}
+
+/// Converts a UTF-16LE name read from a disk structure to WTF-8. The caller
+/// rejects an odd byte length first, because a trailing odd byte is ignored.
+pub(crate) fn from_utf16le(bytes: &[u8]) -> Vec<u8> {
+    let units = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair));
+    let mut out = Vec::with_capacity(bytes.len());
+    extend_from_units(units, &mut out);
+    out
+}
+
+/// Appends the WTF-8 of `units` to `out`.
+fn extend_from_units(units: impl IntoIterator<Item = u16>, out: &mut Vec<u8>) {
+    for decoded in char::decode_utf16(units) {
+        let cp = match decoded {
+            Ok(c) => u32::from(c),
+            Err(e) => u32::from(e.unpaired_surrogate()),
         };
         encode_code_point(cp, out);
-        i += 1;
     }
-    has_lone_surrogate
 }
 
 /// Encodes one code point (surrogates permitted, the WTF-8 generalization)
@@ -150,9 +149,11 @@ pub fn to_string_lossy(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The WTF-8 of `units`, and whether a consumer sees it as lossy.
     fn wtf8(units: &[u16]) -> (Vec<u8>, bool) {
         let mut out = Vec::new();
-        let lossy = from_utf16(units, &mut out);
+        from_utf16(units, &mut out);
+        let lossy = core::str::from_utf8(&out).is_err();
         (out, lossy)
     }
 

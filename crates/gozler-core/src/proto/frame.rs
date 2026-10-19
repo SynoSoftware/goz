@@ -77,8 +77,8 @@ pub struct FrameDecoder {
     read: usize,
     /// Maximum accepted payload length.
     max_frame: u32,
-    /// Set when an oversize prefix was seen: `(len, max)`. Sticky.
-    poisoned: Option<(u32, u32)>,
+    /// The length an oversize prefix announced. Sticky.
+    poisoned: Option<u32>,
 }
 
 impl FrameDecoder {
@@ -106,8 +106,11 @@ impl FrameDecoder {
     /// sticky: once returned, the stream is poisoned and every subsequent
     /// call returns the same error (the connection must be dropped).
     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
-        if let Some((len, max)) = self.poisoned {
-            return Err(FrameError::TooLarge { len, max });
+        if let Some(len) = self.poisoned {
+            return Err(FrameError::TooLarge {
+                len,
+                max: self.max_frame,
+            });
         }
         let avail = &self.buf[self.read..];
         if avail.len() < PREFIX_LEN {
@@ -115,7 +118,7 @@ impl FrameDecoder {
         }
         let len = u32::from_le_bytes([avail[0], avail[1], avail[2], avail[3]]);
         if len > self.max_frame {
-            self.poisoned = Some((len, self.max_frame));
+            self.poisoned = Some(len);
             return Err(FrameError::TooLarge {
                 len,
                 max: self.max_frame,
@@ -168,25 +171,13 @@ pub enum RespFrameError {
     Empty,
 }
 
-/// Encodes a [`Response`] as one tagged frame (`[tag][body]`), appending to
-/// `out`. Results pages use the compact binary body from
-/// [`binary`](super::binary); every other response uses a JSON body. The daemon
-/// streams large result sets page-by-page instead of calling this, but it and
-/// the small control responses share the exact tagged framing this produces.
+/// Encodes a control [`Response`] as one frame with a JSON body, appending to
+/// `out`. Results pages are built in place with
+/// [`ResultsPage`](super::binary::ResultsPage) and its binary body instead.
 pub fn encode_response_frame(resp: &Response, out: &mut Vec<u8>) {
-    match resp {
-        Response::Results(page) => {
-            let mut payload = Vec::new();
-            super::binary::encode_results_payload(page, &mut payload);
-            encode_frame(&payload, out);
-        }
-        other => {
-            let mut payload = vec![super::binary::RESP_TAG_JSON];
-            serde_json::to_writer(&mut payload, other)
-                .expect("Response JSON serialization is infallible");
-            encode_frame(&payload, out);
-        }
-    }
+    let mut payload = vec![super::binary::RESP_TAG_JSON];
+    serde_json::to_writer(&mut payload, resp).expect("Response JSON serialization is infallible");
+    encode_frame(&payload, out);
 }
 
 /// Decodes one tagged response frame (as popped from [`FrameDecoder`]),

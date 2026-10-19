@@ -81,16 +81,9 @@ pub fn walk_listing_buffer(folder: Frn, buf: &[u8]) -> Result<Vec<LayoutFile>, L
             name_len as usize,
             "FILE_ID_EXTD_DIR_INFO.FileName",
         )?;
-        let units: Vec<u16> = name_bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&pair| u16::from_le_bytes(pair))
-            .collect();
-        if units != [u16::from(b'.')] && units != [u16::from(b'.'), u16::from(b'.')] {
+        let name = wtf8::from_utf16le(name_bytes);
+        if name != b"." && name != b".." {
             let attributes = raw.file_attributes.get();
-            let mut name = Vec::with_capacity(name_bytes.len());
-            let name_lossy = wtf8::from_utf16(&units, &mut name);
             files.push(LayoutFile {
                 frn: Frn(raw.file_id.get()),
                 attributes,
@@ -102,7 +95,6 @@ pub fn walk_listing_buffer(folder: Frn, buf: &[u8]) -> Result<Vec<LayoutFile>, L
                 names: vec![LayoutName {
                     parent_frn: folder,
                     name,
-                    name_lossy,
                     dos_only: false,
                 }],
             });
@@ -199,7 +191,6 @@ mod tests {
         let name = |name: &str| LayoutName {
             parent_frn: folder,
             name: name.as_bytes().to_vec(),
-            name_lossy: false,
             dos_only: false,
         };
         assert_eq!(

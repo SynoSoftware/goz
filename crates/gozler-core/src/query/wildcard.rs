@@ -1,0 +1,146 @@
+//! The `*` and `?` wildcard matcher the engine compiles a wildcard term into.
+
+use smallvec::SmallVec;
+
+/// Scratch buffer of decoded code points, reused across candidates so a
+/// wildcard scan doesn't heap-allocate per candidate. NTFS names are <= 255
+/// code points, so the inline capacity never spills.
+pub(super) type CodePointBuf = SmallVec<[u32; 256]>;
+
+/// A compiled wildcard pattern, matched against a whole name or, for a path
+/// wildcard, a whole full path.
+pub(super) struct Wildcard {
+    tokens: Vec<GlobTok>,
+}
+
+#[derive(PartialEq, Eq)]
+enum GlobTok {
+    Lit(u32),
+    /// `?`: exactly one code point.
+    AnyOne,
+    /// `*`: any run of code points (including empty).
+    AnyRun,
+}
+
+impl Wildcard {
+    /// Compiles a pattern whose bytes are already folded iff the query is
+    /// case-insensitive.
+    pub(super) fn compile(pattern: &[u8]) -> Self {
+        let mut tokens = Vec::new();
+        for cp in crate::wtf8::CodePoints::new(pattern) {
+            match cp {
+                0x2A => {
+                    // '*': collapse runs of '*' into one AnyRun.
+                    if tokens.last() != Some(&GlobTok::AnyRun) {
+                        tokens.push(GlobTok::AnyRun);
+                    }
+                }
+                0x3F => tokens.push(GlobTok::AnyOne),
+                other => tokens.push(GlobTok::Lit(other)),
+            }
+        }
+        Wildcard { tokens }
+    }
+
+    /// Matches the whole of `name`, decoding its code points into the caller's
+    /// reusable `buf` (cleared first) instead of allocating one per candidate.
+    /// NTFS names are <= 255 code points, so a name never spills the inline
+    /// capacity; a full path can, and the spilled buffer is then reused.
+    pub(super) fn matches_into(&self, name: &[u8], buf: &mut CodePointBuf) -> bool {
+        buf.clear();
+        buf.extend(crate::wtf8::CodePoints::new(name));
+        glob_match(&self.tokens, buf.as_slice())
+    }
+
+    /// The longest run of literal characters in the pattern, as WTF-8 bytes
+    /// (already folded iff the query is case-insensitive). A name matching the
+    /// pattern must contain this substring, so it can drive a prefilter scan.
+    /// `None` if the pattern is all wildcards (e.g. `*`, `?`).
+    pub(super) fn longest_literal(&self) -> Option<Vec<u8>> {
+        let mut best: Vec<u8> = Vec::new();
+        let mut run: Vec<u8> = Vec::new();
+        for tok in &self.tokens {
+            match tok {
+                GlobTok::Lit(cp) => crate::wtf8::encode_code_point(*cp, &mut run),
+                _ => {
+                    if run.len() > best.len() {
+                        best = std::mem::take(&mut run);
+                    }
+                    run.clear();
+                }
+            }
+        }
+        if run.len() > best.len() {
+            best = run;
+        }
+        (!best.is_empty()).then_some(best)
+    }
+}
+
+/// Iterative glob match with backtracking on `*` (linear-ish; patterns and
+/// names are short).
+fn glob_match(pat: &[GlobTok], text: &[u32]) -> bool {
+    let (mut ti, mut pi) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None; // (pattern idx after '*', text idx)
+    while ti < text.len() {
+        match pat.get(pi) {
+            Some(GlobTok::Lit(c)) if *c == text[ti] => {
+                pi += 1;
+                ti += 1;
+            }
+            Some(GlobTok::AnyOne) => {
+                pi += 1;
+                ti += 1;
+            }
+            Some(GlobTok::AnyRun) => {
+                star = Some((pi + 1, ti));
+                pi += 1;
+            }
+            _ => {
+                // Mismatch: backtrack to the last '*' and consume one more char.
+                if let Some((sp, st)) = star {
+                    pi = sp;
+                    ti = st + 1;
+                    star = Some((sp, st + 1));
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    while let Some(GlobTok::AnyRun) = pat.get(pi) {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fold::fold;
+
+    /// Whether the folded `name` matches the folded `pattern`, as a
+    /// case-insensitive query compares them.
+    fn matches(pattern: &str, name: &str) -> bool {
+        Wildcard::compile(&fold(pattern.as_bytes()))
+            .matches_into(&fold(name.as_bytes()), &mut CodePointBuf::new())
+    }
+
+    #[test]
+    fn wildcards_match_the_whole_name() {
+        assert!(matches("*.rs", "main.rs"));
+        assert!(!matches("*.rs", "main.rs.bak"));
+        assert!(matches("re*rt", "report"));
+        assert!(matches("re*rt", "rert")); // "re" + empty + "rt"
+        assert!(!matches("re*rt", "rt")); // missing the "re" prefix
+        assert!(!matches("re*rt", "reprtx"));
+    }
+
+    #[test]
+    fn question_mark_matches_one_code_point() {
+        assert!(matches("f?o", "foo"));
+        assert!(matches("f?o", "fao"));
+        assert!(!matches("f?o", "fo"));
+        assert!(!matches("f?o", "fooo"));
+    }
+}

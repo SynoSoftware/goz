@@ -13,6 +13,7 @@ pub mod engine;
 pub mod order;
 pub mod parse;
 mod paths;
+mod wildcard;
 
 pub use dates::{DateRange, QueryStart};
 pub use engine::{

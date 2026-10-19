@@ -26,7 +26,6 @@ const SDDL_REVISION_1: u32 = 1;
 /// points at it. Free-on-drop; keep it alive for as long as the pipe server
 /// uses the attributes pointer.
 pub struct PipeSecurity {
-    descriptor: *mut c_void,
     attributes: Box<SECURITY_ATTRIBUTES>,
 }
 
@@ -51,13 +50,11 @@ impl PipeSecurity {
 
 impl Drop for PipeSecurity {
     fn drop(&mut self) {
-        if !self.descriptor.is_null() {
-            // SAFETY: `descriptor` was allocated by
-            // ConvertStringSecurityDescriptorToSecurityDescriptorW, which
-            // documents LocalFree as the matching deallocator.
-            unsafe {
-                LocalFree(self.descriptor);
-            }
+        // SAFETY: the descriptor was allocated by
+        // ConvertStringSecurityDescriptorToSecurityDescriptorW, which
+        // documents LocalFree as the matching deallocator.
+        unsafe {
+            LocalFree(self.attributes.lpSecurityDescriptor);
         }
     }
 }
@@ -85,14 +82,12 @@ pub fn build_pipe_security() -> Result<PipeSecurity, WinError> {
         ));
     }
 
-    let attributes = Box::new(SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor,
-        bInheritHandle: 0,
-    });
     Ok(PipeSecurity {
-        descriptor,
-        attributes,
+        attributes: Box::new(SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        }),
     })
 }
 

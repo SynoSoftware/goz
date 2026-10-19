@@ -595,15 +595,11 @@ mod tests {
 
     fn dir_record(frn: u128, parent: u128, name: &str) -> ParsedUsnRecord {
         ParsedUsnRecord {
-            major_version: 2,
             frn: Frn(frn),
             parent_frn: Frn(parent),
-            usn: 0,
-            timestamp_ft: 0,
             reason: USN_REASON_FILE_CREATE,
             attributes: FILE_ATTRIBUTE_DIRECTORY,
             name: name.as_bytes().to_vec(),
-            name_lossy: false,
         }
     }
 
@@ -1203,7 +1199,6 @@ mod tests {
                     .map(|&(parent, name)| LayoutName {
                         parent_frn: Frn(parent),
                         name: name.as_bytes().to_vec(),
-                        name_lossy: false,
                         dos_only: false,
                     })
                     .collect(),

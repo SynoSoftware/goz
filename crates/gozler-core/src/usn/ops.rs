@@ -9,33 +9,23 @@
 
 use smallvec::SmallVec;
 
-use crate::types::Frn;
-
 use super::record::{
     ParsedUsnRecord, USN_REASON_BASIC_INFO_CHANGE, USN_REASON_DATA_EXTEND,
     USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
     USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
 };
 
-/// One normalized index operation derived from a USN record.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One normalized index operation derived from a USN record. It applies to
+/// the record it came from, which carries the file ID, name and parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UsnOp {
-    /// Create or update the entry for `frn`: the record's name and parent
-    /// are the file's current state (emitted for `FILE_CREATE` and for
+    /// Create or update the file's entry: the record's name and parent are
+    /// the file's current state (emitted for `FILE_CREATE` and for
     /// `RENAME_NEW_NAME`, which is authoritative and self-sufficient).
-    Upsert {
-        frn: Frn,
-        /// FRN of the directory that now contains the name.
-        parent: Frn,
-        /// Current file name in WTF-8.
-        name: Vec<u8>,
-        /// The name contained unpaired UTF-16 surrogates.
-        name_lossy: bool,
-        is_dir: bool,
-    },
+    Upsert,
     /// The file record died (last hard link gone): remove every entry for
-    /// `frn`.
-    Delete { frn: Frn },
+    /// the file.
+    Delete,
     /// A hard link was added or removed. The record may name a DEAD link, so
     /// the index must never upsert from it.
     ///
@@ -44,10 +34,10 @@ pub enum UsnOp {
     /// that walk (`gozler_winfs::link_paths`) and applies the result, so names
     /// added or removed by a hard-link change are reconciled live. A walk that
     /// cannot complete is skipped and counted rather than applied.
-    LinkDirty { frn: Frn },
+    LinkDirty,
     /// Size and/or timestamps may have changed; USN records carry neither,
     /// so the entry needs an external re-stat.
-    StatDirty { frn: Frn },
+    StatDirty,
 }
 
 /// Normalizes one record's accumulated reason bitmask into index ops.
@@ -62,30 +52,24 @@ pub enum UsnOp {
 /// | 3 | `HARD_LINK_CHANGE`                                                   | push `LinkDirty` (never upsert: the named link may be dead) |
 /// | 4 | `FILE_CREATE`/`DATA_OVERWRITE`/`DATA_EXTEND`/`DATA_TRUNCATION`/`BASIC_INFO_CHANGE` | push `StatDirty` (a USN record carries no size/mtime, so a create needs one too) |
 /// | 5 | none of the above (e.g. CLOSE-only, security-only, `RENAME_OLD_NAME` alone: the NEW record carries the committed state) | empty |
-pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 2]> {
+pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 3]> {
     let mut ops = SmallVec::new();
     let reason = rec.reason;
 
     // Row 1: delete wins over everything accumulated in the window.
     if reason & USN_REASON_FILE_DELETE != 0 {
-        ops.push(UsnOp::Delete { frn: rec.frn });
+        ops.push(UsnOp::Delete);
         return ops;
     }
 
     // Row 2: the record's name/parent are the file's current state.
     if reason & (USN_REASON_RENAME_NEW_NAME | USN_REASON_FILE_CREATE) != 0 {
-        ops.push(UsnOp::Upsert {
-            frn: rec.frn,
-            parent: rec.parent_frn,
-            name: rec.name.clone(),
-            name_lossy: rec.name_lossy,
-            is_dir: rec.is_dir(),
-        });
+        ops.push(UsnOp::Upsert);
     }
 
     // Row 3.
     if reason & USN_REASON_HARD_LINK_CHANGE != 0 {
-        ops.push(UsnOp::LinkDirty { frn: rec.frn });
+        ops.push(UsnOp::LinkDirty);
     }
 
     // Row 4. FILE_CREATE is here as well as in row 2: a USN record carries no
@@ -102,7 +86,7 @@ pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 2]> {
             | USN_REASON_BASIC_INFO_CHANGE)
         != 0
     {
-        ops.push(UsnOp::StatDirty { frn: rec.frn });
+        ops.push(UsnOp::StatDirty);
     }
 
     ops
@@ -111,35 +95,20 @@ pub fn ops_for(rec: &ParsedUsnRecord) -> SmallVec<[UsnOp; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usn::record::{
-        FILE_ATTRIBUTE_DIRECTORY, USN_REASON_CLOSE, USN_REASON_RENAME_OLD_NAME,
-    };
+    use crate::types::Frn;
+    use crate::usn::record::{USN_REASON_CLOSE, USN_REASON_RENAME_OLD_NAME};
 
     /// Reason bit not in any of our decision-table sets
     /// (`USN_REASON_SECURITY_CHANGE`).
     const SECURITY_ONLY: u32 = 0x0000_0800;
 
-    fn rec(reason: u32, attributes: u32) -> ParsedUsnRecord {
+    fn rec(reason: u32) -> ParsedUsnRecord {
         ParsedUsnRecord {
-            major_version: 2,
             frn: Frn(7),
             parent_frn: Frn(3),
-            usn: 100,
-            timestamp_ft: 0,
             reason,
-            attributes,
+            attributes: 0x20,
             name: b"a.txt".to_vec(),
-            name_lossy: false,
-        }
-    }
-
-    fn upsert(is_dir: bool) -> UsnOp {
-        UsnOp::Upsert {
-            frn: Frn(7),
-            parent: Frn(3),
-            name: b"a.txt".to_vec(),
-            name_lossy: false,
-            is_dir,
         }
     }
 
@@ -148,10 +117,10 @@ mod tests {
     /// unknown size forever, and the es CSV renders that as a folder.
     #[test]
     fn create_emits_upsert_and_stat() {
-        let r = rec(USN_REASON_FILE_CREATE, 0x20);
+        let r = rec(USN_REASON_FILE_CREATE);
         assert_eq!(
             ops_for(&r).into_vec(),
-            vec![upsert(false), UsnOp::StatDirty { frn: Frn(7) }]
+            vec![UsnOp::Upsert, UsnOp::StatDirty]
         );
     }
 
@@ -160,39 +129,25 @@ mod tests {
     /// follow, so this record is the only chance to learn its size.
     #[test]
     fn created_but_never_written_file_is_still_stat_dirty() {
-        let r = rec(USN_REASON_FILE_CREATE | USN_REASON_CLOSE, 0x20);
+        let r = rec(USN_REASON_FILE_CREATE | USN_REASON_CLOSE);
         assert!(
-            ops_for(&r)
-                .iter()
-                .any(|op| matches!(op, UsnOp::StatDirty { .. })),
+            ops_for(&r).contains(&UsnOp::StatDirty),
             "a create with no DATA_* bit must still schedule a stat, or the size stays unknown"
         );
     }
 
     #[test]
     fn rename_new_emits_upsert() {
-        let r = rec(USN_REASON_RENAME_NEW_NAME, 0x20);
-        assert_eq!(ops_for(&r).into_vec(), vec![upsert(false)]);
-    }
-
-    #[test]
-    fn upsert_carries_is_dir_from_attributes() {
-        let r = rec(USN_REASON_FILE_CREATE, FILE_ATTRIBUTE_DIRECTORY);
-        assert_eq!(
-            ops_for(&r).into_vec(),
-            vec![upsert(true), UsnOp::StatDirty { frn: Frn(7) }]
-        );
+        let r = rec(USN_REASON_RENAME_NEW_NAME);
+        assert_eq!(ops_for(&r).into_vec(), vec![UsnOp::Upsert]);
     }
 
     #[test]
     fn accumulated_create_data_close_emits_upsert_and_stat() {
-        let r = rec(
-            USN_REASON_FILE_CREATE | USN_REASON_DATA_EXTEND | USN_REASON_CLOSE,
-            0x20,
-        );
+        let r = rec(USN_REASON_FILE_CREATE | USN_REASON_DATA_EXTEND | USN_REASON_CLOSE);
         assert_eq!(
             ops_for(&r).into_vec(),
-            vec![upsert(false), UsnOp::StatDirty { frn: Frn(7) }]
+            vec![UsnOp::Upsert, UsnOp::StatDirty]
         );
     }
 
@@ -200,40 +155,31 @@ mod tests {
     /// from it would move the entry back until the NEW record arrives.
     #[test]
     fn rename_old_alone_emits_nothing() {
-        let r = rec(USN_REASON_RENAME_OLD_NAME, 0x20);
+        let r = rec(USN_REASON_RENAME_OLD_NAME);
         assert!(ops_for(&r).is_empty());
     }
 
     #[test]
     fn rename_old_and_new_in_one_record_emits_upsert_only() {
-        let r = rec(
-            USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME,
-            0x20,
-        );
-        assert_eq!(ops_for(&r).into_vec(), vec![upsert(false)]);
+        let r = rec(USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME);
+        assert_eq!(ops_for(&r).into_vec(), vec![UsnOp::Upsert]);
     }
 
     #[test]
     fn delete_wins_over_all_accumulated_bits() {
-        let r = rec(
-            USN_REASON_FILE_DELETE
-                | USN_REASON_FILE_CREATE
-                | USN_REASON_RENAME_OLD_NAME
-                | USN_REASON_HARD_LINK_CHANGE
-                | USN_REASON_DATA_EXTEND
-                | USN_REASON_CLOSE,
-            0x20,
-        );
-        assert_eq!(ops_for(&r).into_vec(), vec![UsnOp::Delete { frn: Frn(7) }]);
+        let r = rec(USN_REASON_FILE_DELETE
+            | USN_REASON_FILE_CREATE
+            | USN_REASON_RENAME_OLD_NAME
+            | USN_REASON_HARD_LINK_CHANGE
+            | USN_REASON_DATA_EXTEND
+            | USN_REASON_CLOSE);
+        assert_eq!(ops_for(&r).into_vec(), vec![UsnOp::Delete]);
     }
 
     #[test]
     fn hard_link_change_emits_link_dirty_never_upsert() {
-        let r = rec(USN_REASON_HARD_LINK_CHANGE | USN_REASON_CLOSE, 0x20);
-        assert_eq!(
-            ops_for(&r).into_vec(),
-            vec![UsnOp::LinkDirty { frn: Frn(7) }]
-        );
+        let r = rec(USN_REASON_HARD_LINK_CHANGE | USN_REASON_CLOSE);
+        assert_eq!(ops_for(&r).into_vec(), vec![UsnOp::LinkDirty]);
     }
 
     #[test]
@@ -244,10 +190,10 @@ mod tests {
             USN_REASON_DATA_TRUNCATION,
             USN_REASON_BASIC_INFO_CHANGE,
         ] {
-            let r = rec(reason, 0x20);
+            let r = rec(reason);
             assert_eq!(
                 ops_for(&r).into_vec(),
-                vec![UsnOp::StatDirty { frn: Frn(7) }],
+                vec![UsnOp::StatDirty],
                 "reason {reason:#x}"
             );
         }
@@ -255,45 +201,35 @@ mod tests {
 
     #[test]
     fn close_only_emits_nothing() {
-        let r = rec(USN_REASON_CLOSE, 0x20);
+        let r = rec(USN_REASON_CLOSE);
         assert!(ops_for(&r).is_empty());
     }
 
     #[test]
     fn security_only_emits_nothing() {
-        let r = rec(SECURITY_ONLY, 0x20);
+        let r = rec(SECURITY_ONLY);
         assert!(ops_for(&r).is_empty());
     }
 
     #[test]
     fn unrelated_bits_do_not_mask_matches() {
         // & semantics: extra accumulated bits never turn a match off.
-        let r = rec(
-            USN_REASON_FILE_CREATE | SECURITY_ONLY | USN_REASON_CLOSE,
-            0x20,
-        );
+        let r = rec(USN_REASON_FILE_CREATE | SECURITY_ONLY | USN_REASON_CLOSE);
         assert_eq!(
             ops_for(&r).into_vec(),
-            vec![upsert(false), UsnOp::StatDirty { frn: Frn(7) }]
+            vec![UsnOp::Upsert, UsnOp::StatDirty]
         );
     }
 
     #[test]
     fn full_accumulation_without_delete_emits_all_applicable_ops() {
-        let r = rec(
-            USN_REASON_RENAME_NEW_NAME
-                | USN_REASON_HARD_LINK_CHANGE
-                | USN_REASON_BASIC_INFO_CHANGE
-                | USN_REASON_CLOSE,
-            0x20,
-        );
+        let r = rec(USN_REASON_RENAME_NEW_NAME
+            | USN_REASON_HARD_LINK_CHANGE
+            | USN_REASON_BASIC_INFO_CHANGE
+            | USN_REASON_CLOSE);
         assert_eq!(
             ops_for(&r).into_vec(),
-            vec![
-                upsert(false),
-                UsnOp::LinkDirty { frn: Frn(7) },
-                UsnOp::StatDirty { frn: Frn(7) },
-            ]
+            vec![UsnOp::Upsert, UsnOp::LinkDirty, UsnOp::StatDirty]
         );
     }
 }

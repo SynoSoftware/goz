@@ -28,15 +28,11 @@ fn root_frn() -> Frn {
 
 fn record(frn: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> ParsedUsnRecord {
     ParsedUsnRecord {
-        major_version: 2,
         frn,
         parent_frn: parent,
-        usn: 0,
-        timestamp_ft: 0,
         reason,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
-        name_lossy: false,
     }
 }
 
@@ -281,7 +277,6 @@ fn layout_pass_never_leaks_a_retenanted_record() {
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"tenant.txt".to_vec(),
-            name_lossy: false,
             dos_only: false,
         }],
     });
@@ -639,11 +634,11 @@ fn reconcile_links_adds_and_removes_individual_links() {
         &[
             LinkTarget {
                 parent: a,
-                name: WtfName::new(b"only".to_vec(), false),
+                name: b"only".to_vec(),
             },
             LinkTarget {
                 parent: b,
-                name: WtfName::new(b"second".to_vec(), false),
+                name: b"second".to_vec(),
             },
         ],
     );
@@ -662,7 +657,7 @@ fn reconcile_links_adds_and_removes_individual_links() {
         frn(100),
         &[LinkTarget {
             parent: a,
-            name: WtfName::new(b"only".to_vec(), false),
+            name: b"only".to_vec(),
         }],
     );
     assert_eq!(
@@ -690,7 +685,7 @@ fn a_reconciled_link_gets_the_size_and_date_of_its_file() {
     let b = idx.head_of(frn(11)).unwrap();
     let link = |parent, name: &str| LinkTarget {
         parent,
-        name: WtfName::new(name.as_bytes().to_vec(), false),
+        name: name.as_bytes().to_vec(),
     };
     let stats = |idx: &VolumeIndex| -> Vec<(String, Option<u64>, Option<i64>)> {
         let mut out = Vec::new();
@@ -744,7 +739,7 @@ fn attributes_reach_every_link_of_a_file() {
     let b = idx.head_of(frn(11)).unwrap();
     let link = |parent, name: &str| LinkTarget {
         parent,
-        name: WtfName::new(name.as_bytes().to_vec(), false),
+        name: name.as_bytes().to_vec(),
     };
     idx.reconcile_links(frn(100), &[link(a, "orig.txt"), link(b, "link.txt")]);
 
@@ -789,18 +784,13 @@ fn attributes_reach_every_link_of_a_file() {
 fn lone_surrogate_names_round_trip_through_the_index() {
     let mut idx = new_index();
     let mut name = Vec::new();
-    let lossy = crate::wtf8::from_utf16(&[0x0061, 0xD800, 0x0062], &mut name);
-    assert!(lossy);
+    crate::wtf8::from_utf16(&[0x0061, 0xD800, 0x0062], &mut name);
     let rec = ParsedUsnRecord {
-        major_version: 2,
         frn: frn(100),
         parent_frn: root_frn(),
-        usn: 0,
-        timestamp_ft: 0,
         reason: USN_REASON_FILE_CREATE,
         attributes: 0,
         name: name.clone(),
-        name_lossy: true,
     };
     idx.insert_enum(&rec);
     let head = idx.head_of(frn(100)).unwrap();
@@ -916,7 +906,6 @@ fn listed(f: Frn, folder: Frn, name: &str, is_dir: bool) -> LayoutFile {
         names: vec![crate::layout::LayoutName {
             parent_frn: folder,
             name: name.as_bytes().to_vec(),
-            name_lossy: false,
             dos_only: false,
         }],
     }
@@ -1159,7 +1148,6 @@ proptest! {
                 names: vec![crate::layout::LayoutName {
                     parent_frn: r.parent_frn,
                     name: r.name.clone(),
-                    name_lossy: false,
                     dos_only: false,
                 }],
             });
@@ -1244,7 +1232,7 @@ proptest! {
                     continue; // gone: its delete record removes it
                 };
                 if let Some(parent) = idx.head_of(ids.id(*parent)) {
-                    let name = WtfName::new(name.clone().into_bytes(), false);
+                    let name = name.clone().into_bytes();
                     idx.reconcile_links(f, &[LinkTarget { parent, name }]);
                 }
             }
@@ -1310,7 +1298,6 @@ fn enrich_with_renamed_directory_never_orphans_children() {
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"docs".to_vec(),
-            name_lossy: false,
             dos_only: false,
         }],
     });

@@ -812,8 +812,8 @@ mod tests {
         // the item ships path_u16 with the exact original units.
         let units: Vec<u16> = vec![b'C' as u16, b':' as u16, b'\\' as u16, 0xD800, b'x' as u16];
         let mut wtf8_bytes = Vec::new();
-        let lossy = wtf8::from_utf16(&units, &mut wtf8_bytes);
-        assert!(lossy);
+        wtf8::from_utf16(&units, &mut wtf8_bytes);
+        assert!(core::str::from_utf8(&wtf8_bytes).is_err());
         let item = ResultItem {
             path: wtf8::to_string_lossy(&wtf8_bytes),
             path_u16: Some(units.clone()),

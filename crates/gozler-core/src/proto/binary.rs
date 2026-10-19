@@ -62,72 +62,6 @@ const IFLAG_HAS_ATTRIBUTES: u8 = 1 << 3;
 #[error("malformed binary results page: {0}")]
 pub struct BinError(&'static str);
 
-/// Writes a results-page frame payload header: the [`RESP_TAG_RESULTS`] tag byte
-/// followed by the fixed page fields. Callers then push `count` items with
-/// [`push_item`] and wrap the whole payload in a frame.
-fn push_results_header(
-    out: &mut Vec<u8>,
-    total: u64,
-    generation: u64,
-    more: bool,
-    volumes_incomplete: bool,
-    metadata_pending: bool,
-    count: u32,
-) {
-    out.push(RESP_TAG_RESULTS);
-    out.extend_from_slice(&total.to_le_bytes());
-    out.extend_from_slice(&generation.to_le_bytes());
-    let mut flags = 0u8;
-    if more {
-        flags |= FLAG_MORE;
-    }
-    if volumes_incomplete {
-        flags |= FLAG_VOLUMES_INCOMPLETE;
-    }
-    if metadata_pending {
-        flags |= FLAG_METADATA_PENDING;
-    }
-    out.push(flags);
-    out.extend_from_slice(&count.to_le_bytes());
-}
-
-/// Appends one item: raw WTF-8 path bytes (mount prefix already prepended) plus
-/// its metadata.
-fn push_item(
-    out: &mut Vec<u8>,
-    raw_path: &[u8],
-    is_dir: bool,
-    size: Option<u64>,
-    mtime: Option<i64>,
-    attributes: Option<Attributes>,
-) {
-    out.extend_from_slice(&(raw_path.len() as u32).to_le_bytes());
-    out.extend_from_slice(raw_path);
-    let mut iflags = 0u8;
-    if is_dir {
-        iflags |= IFLAG_IS_DIR;
-    }
-    if size.is_some() {
-        iflags |= IFLAG_HAS_SIZE;
-    }
-    if mtime.is_some() {
-        iflags |= IFLAG_HAS_MTIME;
-    }
-    if attributes.is_some() {
-        iflags |= IFLAG_HAS_ATTRIBUTES;
-    }
-    out.push(iflags);
-    if let Some(s) = size {
-        out.extend_from_slice(&s.to_le_bytes());
-    }
-    if let Some(m) = mtime {
-        out.extend_from_slice(&m.to_le_bytes());
-    }
-    if let Some(a) = attributes {
-        out.extend_from_slice(&a.bits().to_le_bytes());
-    }
-}
-
 /// One results page, built in place as a complete frame: the daemon
 /// [`push`](Self::push)es matched hits straight from their path bytes until
 /// the page refuses one, then [`finish`](Self::finish)es it and writes it to
@@ -160,30 +94,35 @@ impl ResultsPage {
         // The buffer is empty, so the frame starts at 0, where `finish` ends it.
         begin_frame(&mut frame);
         let payload_at = frame.len();
-        push_results_header(
-            &mut frame,
-            total,
-            generation,
-            false,
-            volumes_incomplete,
-            metadata_pending,
-            0,
-        );
-        let count_at = frame.len() - size_of::<u32>();
+        frame.push(RESP_TAG_RESULTS);
+        frame.extend_from_slice(&total.to_le_bytes());
+        frame.extend_from_slice(&generation.to_le_bytes());
+        let mut flags = 0u8;
+        if volumes_incomplete {
+            flags |= FLAG_VOLUMES_INCOMPLETE;
+        }
+        if metadata_pending {
+            flags |= FLAG_METADATA_PENDING;
+        }
+        let flags_at = frame.len();
+        frame.push(flags);
+        let count_at = frame.len();
+        frame.extend_from_slice(&0u32.to_le_bytes());
         Self {
             frame,
             payload_at,
-            flags_at: count_at - 1,
+            flags_at,
             count_at,
             count: 0,
         }
     }
 
-    /// Appends one item, or returns `false` and leaves the page unchanged
-    /// when the page is full: it holds [`PAGE_ROWS`] items, or the item would
-    /// take its payload past [`MAX_SERVER_FRAME`], the cap a client decodes
-    /// with. An empty page takes any item, so every page holds at least one;
-    /// NTFS limits a full path to far less than the cap.
+    /// Appends one item, whose `raw_path` is its WTF-8 path bytes with the
+    /// mount prefix, or returns `false` and leaves the page unchanged when the
+    /// page is full: it holds [`PAGE_ROWS`] items, or the item would take its
+    /// payload past [`MAX_SERVER_FRAME`], the cap a client decodes with. An
+    /// empty page takes any item, so every page holds at least one; NTFS
+    /// limits a full path to far less than the cap.
     pub fn push(
         &mut self,
         raw_path: &[u8],
@@ -196,7 +135,32 @@ impl ResultsPage {
             return false;
         }
         let before = self.frame.len();
-        push_item(&mut self.frame, raw_path, is_dir, size, mtime, attributes);
+        self.frame
+            .extend_from_slice(&(raw_path.len() as u32).to_le_bytes());
+        self.frame.extend_from_slice(raw_path);
+        let mut iflags = 0u8;
+        if is_dir {
+            iflags |= IFLAG_IS_DIR;
+        }
+        if size.is_some() {
+            iflags |= IFLAG_HAS_SIZE;
+        }
+        if mtime.is_some() {
+            iflags |= IFLAG_HAS_MTIME;
+        }
+        if attributes.is_some() {
+            iflags |= IFLAG_HAS_ATTRIBUTES;
+        }
+        self.frame.push(iflags);
+        if let Some(s) = size {
+            self.frame.extend_from_slice(&s.to_le_bytes());
+        }
+        if let Some(m) = mtime {
+            self.frame.extend_from_slice(&m.to_le_bytes());
+        }
+        if let Some(a) = attributes {
+            self.frame.extend_from_slice(&a.bits().to_le_bytes());
+        }
         if self.count > 0 && self.frame.len() - self.payload_at > MAX_SERVER_FRAME as usize {
             self.frame.truncate(before);
             return false;
@@ -215,41 +179,6 @@ impl ResultsPage {
             .copy_from_slice(&self.count.to_le_bytes());
         end_frame(&mut self.frame, 0);
         self.frame
-    }
-}
-
-/// Reconstructs the raw WTF-8 path bytes for an item: when the item carried
-/// exact UTF-16 (its `path` was lossy), decode those; otherwise the UTF-8
-/// `path` bytes are already the raw bytes. Lets [`encode_results_payload`]
-/// produce the exact bytes the daemon's from-hits path would.
-fn raw_path_bytes<'a>(item: &'a ResultItem, scratch: &'a mut Vec<u8>) -> &'a [u8] {
-    match &item.path_u16 {
-        Some(units) => {
-            scratch.clear();
-            wtf8::from_utf16(units, scratch);
-            scratch.as_slice()
-        }
-        None => item.path.as_bytes(),
-    }
-}
-
-/// Encodes a whole page as one frame payload (tag + header + items) into `out`.
-/// Convenience for tests and any non-streaming caller; the daemon builds each
-/// page in place with [`ResultsPage`].
-pub fn encode_results_payload(page: &QueryResults, out: &mut Vec<u8>) {
-    push_results_header(
-        out,
-        page.total,
-        page.generation,
-        page.more,
-        page.volumes_incomplete,
-        page.metadata_pending,
-        page.items.len() as u32,
-    );
-    let mut scratch = Vec::new();
-    for it in &page.items {
-        let raw = raw_path_bytes(it, &mut scratch);
-        push_item(out, raw, it.is_dir, it.size, it.mtime_ft, it.attributes);
     }
 }
 
@@ -336,67 +265,86 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::{FrameDecoder, Response, decode_response_frame};
     use proptest::prelude::*;
 
     fn hidden_archive() -> Attributes {
         Attributes::from_letters("ha").expect("H and A are attribute letters")
     }
 
-    fn round_trip(page: &QueryResults) {
-        let mut payload = Vec::new();
-        encode_results_payload(page, &mut payload);
-        assert_eq!(payload[0], RESP_TAG_RESULTS, "tag byte");
-        let back = decode_results_payload(&payload[1..]).expect("decode");
-        assert_eq!(&back, page);
+    /// Decodes a finished page as a client does: through the frame decoder,
+    /// which checks the length prefix, and the tagged response decoder.
+    fn decode(frame: &[u8]) -> QueryResults {
+        let mut decoder = FrameDecoder::new(MAX_SERVER_FRAME);
+        decoder.feed(frame);
+        let payload = decoder
+            .next_frame()
+            .expect("under the cap")
+            .expect("one whole frame");
+        assert_eq!(decoder.next_frame(), Ok(None), "nothing after the frame");
+        match decode_response_frame(&payload).expect("decodes") {
+            Response::Results(page) => page,
+            other => panic!("expected a results page, got {other:?}"),
+        }
     }
 
-    #[test]
-    fn empty_page_round_trips() {
-        round_trip(&QueryResults {
-            total: 0,
-            items: vec![],
-            more: false,
-            volumes_incomplete: false,
-            metadata_pending: false,
-            generation: 0,
-        });
-    }
-
+    /// [`ResultsPage`] fills in the more flag, the item count and the frame
+    /// length after the items; a slip there makes every client misread the
+    /// page. Every item field and page flag must come back as pushed.
     #[test]
     fn mixed_items_round_trip() {
-        round_trip(&QueryResults {
-            total: 987_654,
-            items: vec![
-                ResultItem {
-                    path: r"C:\Windows\System32\kernel32.dll".into(),
-                    path_u16: None,
-                    size: Some(1234),
-                    mtime_ft: Some(133_500_000_000_000_000),
-                    is_dir: false,
-                    attributes: Some(hidden_archive()),
-                },
-                ResultItem {
-                    path: r"D:\folder".into(),
-                    path_u16: None,
-                    size: None,
-                    mtime_ft: None,
-                    is_dir: true,
-                    attributes: None,
-                },
-                ResultItem {
-                    path: "E:\\ünïcode\\文件.txt".into(),
-                    path_u16: None,
-                    size: Some(0),
-                    mtime_ft: Some(-1),
-                    is_dir: false,
-                    attributes: None,
-                },
-            ],
-            more: true,
-            volumes_incomplete: true,
-            metadata_pending: true,
-            generation: 42,
-        });
+        let mut page = ResultsPage::new(987_654, 42, true, true, 3);
+        assert!(page.push(
+            br"C:\Windows\System32\kernel32.dll",
+            false,
+            Some(1234),
+            Some(133_500_000_000_000_000),
+            Some(hidden_archive()),
+        ));
+        assert!(page.push(br"D:\folder", true, None, None, None));
+        assert!(page.push(
+            "E:\\ünïcode\\文件.txt".as_bytes(),
+            false,
+            Some(0),
+            Some(-1),
+            None,
+        ));
+        assert_eq!(
+            decode(&page.finish(true)),
+            QueryResults {
+                total: 987_654,
+                items: vec![
+                    ResultItem {
+                        path: r"C:\Windows\System32\kernel32.dll".into(),
+                        path_u16: None,
+                        size: Some(1234),
+                        mtime_ft: Some(133_500_000_000_000_000),
+                        is_dir: false,
+                        attributes: Some(hidden_archive()),
+                    },
+                    ResultItem {
+                        path: r"D:\folder".into(),
+                        path_u16: None,
+                        size: None,
+                        mtime_ft: None,
+                        is_dir: true,
+                        attributes: None,
+                    },
+                    ResultItem {
+                        path: "E:\\ünïcode\\文件.txt".into(),
+                        path_u16: None,
+                        size: Some(0),
+                        mtime_ft: Some(-1),
+                        is_dir: false,
+                        attributes: None,
+                    },
+                ],
+                more: true,
+                volumes_incomplete: true,
+                metadata_pending: true,
+                generation: 42,
+            }
+        );
     }
 
     #[test]
@@ -405,51 +353,33 @@ mod tests {
         // WTF-8 bytes, the decoder flags it lossy and rebuilds the exact units.
         let units: Vec<u16> = vec![b'C' as u16, b':' as u16, b'\\' as u16, 0xD800, b'x' as u16];
         let mut wtf8_bytes = Vec::new();
-        let lossy = wtf8::from_utf16(&units, &mut wtf8_bytes);
-        assert!(lossy);
-        let item = ResultItem {
-            path: wtf8::to_string_lossy(&wtf8_bytes),
-            path_u16: Some(units.clone()),
-            size: Some(7),
-            mtime_ft: None,
-            is_dir: false,
-            attributes: None,
-        };
-        let page = QueryResults {
-            total: 1,
-            items: vec![item],
-            more: false,
-            volumes_incomplete: false,
-            metadata_pending: false,
-            generation: 0,
-        };
-        round_trip(&page);
+        wtf8::from_utf16(&units, &mut wtf8_bytes);
+        assert!(core::str::from_utf8(&wtf8_bytes).is_err());
+        let mut page = ResultsPage::new(1, 0, false, false, 1);
+        assert!(page.push(&wtf8_bytes, false, Some(7), None, None));
+        assert_eq!(
+            decode(&page.finish(false)).items,
+            [ResultItem {
+                path: wtf8::to_string_lossy(&wtf8_bytes),
+                path_u16: Some(units),
+                size: Some(7),
+                mtime_ft: None,
+                is_dir: false,
+                attributes: None,
+            }]
+        );
     }
 
     #[test]
     fn truncated_body_errors_not_panics() {
-        let mut payload = Vec::new();
-        encode_results_payload(
-            &QueryResults {
-                total: 1,
-                items: vec![ResultItem {
-                    path: r"C:\a.txt".into(),
-                    path_u16: None,
-                    size: Some(9),
-                    mtime_ft: None,
-                    is_dir: false,
-                    attributes: None,
-                }],
-                more: false,
-                volumes_incomplete: false,
-                metadata_pending: false,
-                generation: 0,
-            },
-            &mut payload,
-        );
-        // Chop bytes off the end at every length; none should panic.
-        for cut in 0..payload.len() {
-            let _ = decode_results_payload(&payload[1..cut.max(1)]);
+        let mut page = ResultsPage::new(1, 0, false, false, 1);
+        assert!(page.push(br"C:\a.txt", false, Some(9), None, None));
+        let frame = page.finish(false);
+        // The body follows the length prefix and the tag byte. Chop bytes off
+        // its end at every length; none should panic.
+        let body = &frame[5..];
+        for cut in 0..body.len() {
+            let _ = decode_results_payload(&body[..cut]);
         }
     }
 
@@ -462,12 +392,12 @@ mod tests {
             patches in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
             cut in any::<prop::sample::Index>(),
         ) {
-            let mut payload = Vec::new();
-            push_results_header(&mut payload, 1, 2, true, false, false, paths.len() as u32);
+            let mut page = ResultsPage::new(1, 2, false, false, paths.len());
             for path in &paths {
-                push_item(&mut payload, path, false, Some(3), Some(4), Some(hidden_archive()));
+                prop_assert!(page.push(path, false, Some(3), Some(4), Some(hidden_archive())));
             }
-            let mut body = payload.split_off(1);
+            // The body follows the length prefix and the tag byte.
+            let mut body = page.finish(true).split_off(5);
             let len = body.len();
             for (at, byte) in &patches {
                 body[at.index(len)] = *byte;
@@ -499,53 +429,5 @@ mod tests {
             3, 0, 0, 0, 0, 0, 0, 0, // mtime
         ];
         assert_eq!(frame[4..], *payload);
-    }
-
-    /// [`ResultsPage`] fills in the more flag, the item count and the frame
-    /// length after the items; a slip there makes every client misread the
-    /// page. It must write exactly the frame the canonical encoder writes.
-    #[test]
-    fn a_results_page_frame_matches_the_canonical_encoding() {
-        let mut built = ResultsPage::new(9, 3, true, true, 2);
-        assert!(built.push(
-            br"C:\Windows\notepad.exe",
-            false,
-            Some(55),
-            Some(7),
-            Some(hidden_archive()),
-        ));
-        assert!(built.push(br"C:\Windows", true, None, None, None));
-        let built = built.finish(true);
-
-        let mut canonical = Vec::new();
-        super::super::frame::encode_response_frame(
-            &super::super::Response::Results(QueryResults {
-                total: 9,
-                items: vec![
-                    ResultItem {
-                        path: r"C:\Windows\notepad.exe".into(),
-                        path_u16: None,
-                        size: Some(55),
-                        mtime_ft: Some(7),
-                        is_dir: false,
-                        attributes: Some(hidden_archive()),
-                    },
-                    ResultItem {
-                        path: r"C:\Windows".into(),
-                        path_u16: None,
-                        size: None,
-                        mtime_ft: None,
-                        is_dir: true,
-                        attributes: None,
-                    },
-                ],
-                more: true,
-                volumes_incomplete: true,
-                metadata_pending: true,
-                generation: 3,
-            }),
-            &mut canonical,
-        );
-        assert_eq!(built, canonical);
     }
 }

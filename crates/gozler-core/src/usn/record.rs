@@ -60,28 +60,20 @@ const LEADING_VALUE_LEN: usize = 8;
 ///
 /// `name` is the record's file name converted to WTF-8 (NTFS names are
 /// arbitrary `u16` sequences; WTF-8 keeps the conversion total and lossless).
-/// The record's `TimeStamp` is the journal-write time as a Windows FILETIME,
-/// not the file's mtime; USN records carry neither size nor mtime.
+/// USN records carry neither size nor mtime: the record's `TimeStamp` is the
+/// journal-write time, not the file's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedUsnRecord {
-    /// `MajorVersion` of the wire record this was parsed from (2 or 3).
-    pub major_version: u16,
     /// The file's ID.
     pub frn: Frn,
     /// FRN of the directory containing the name in this record.
     pub parent_frn: Frn,
-    pub usn: i64,
-    /// Journal-write time (Windows FILETIME, 100 ns ticks since 1601 UTC).
-    pub timestamp_ft: i64,
     /// Accumulated reason bitmask for the open-close window so far.
     pub reason: u32,
     /// `FileAttributes` as returned by `GetFileAttributes`.
     pub attributes: u32,
     /// File name in WTF-8.
     pub name: Vec<u8>,
-    /// `name` contained unpaired UTF-16 surrogates (the WTF-8 bytes are not
-    /// valid UTF-8; [`wtf8::to_utf16`] still round-trips them exactly).
-    pub name_lossy: bool,
 }
 
 impl ParsedUsnRecord {
@@ -192,8 +184,8 @@ struct RawV2 {
     _minor_version: U16,
     frn: U64,
     parent_frn: U64,
-    usn: I64,
-    timestamp: I64,
+    _usn: I64,
+    _timestamp: I64,
     reason: U32,
     _source_info: U32,
     _security_id: U32,
@@ -212,8 +204,8 @@ struct RawV3 {
     _minor_version: U16,
     frn: U128,
     parent_frn: U128,
-    usn: I64,
-    timestamp: I64,
+    _usn: I64,
+    _timestamp: I64,
     reason: U32,
     _source_info: U32,
     _security_id: U32,
@@ -272,7 +264,7 @@ fn walk_records(buf: &[u8]) -> Result<Vec<ParsedUsnRecord>, WalkError> {
 fn parse_v2(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
     let (hdr, _) =
         RawV2::ref_from_prefix(rec).map_err(|_| WalkError::TruncatedHeader { offset })?;
-    let (name, name_lossy) = extract_name(
+    let name = extract_name(
         rec,
         hdr.file_name_offset.get() as usize,
         hdr.file_name_length.get() as usize,
@@ -280,15 +272,11 @@ fn parse_v2(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
         offset,
     )?;
     Ok(ParsedUsnRecord {
-        major_version: 2,
         frn: Frn(hdr.frn.get().into()),
         parent_frn: Frn(hdr.parent_frn.get().into()),
-        usn: hdr.usn.get(),
-        timestamp_ft: hdr.timestamp.get(),
         reason: hdr.reason.get(),
         attributes: hdr.file_attributes.get(),
         name,
-        name_lossy,
     })
 }
 
@@ -296,7 +284,7 @@ fn parse_v2(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
 fn parse_v3(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
     let (hdr, _) =
         RawV3::ref_from_prefix(rec).map_err(|_| WalkError::TruncatedHeader { offset })?;
-    let (name, name_lossy) = extract_name(
+    let name = extract_name(
         rec,
         hdr.file_name_offset.get() as usize,
         hdr.file_name_length.get() as usize,
@@ -304,15 +292,11 @@ fn parse_v3(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
         offset,
     )?;
     Ok(ParsedUsnRecord {
-        major_version: 3,
         frn: Frn(hdr.frn.get()),
         parent_frn: Frn(hdr.parent_frn.get()),
-        usn: hdr.usn.get(),
-        timestamp_ft: hdr.timestamp.get(),
         reason: hdr.reason.get(),
         attributes: hdr.file_attributes.get(),
         name,
-        name_lossy,
     })
 }
 
@@ -328,7 +312,7 @@ fn extract_name(
     name_len: usize,
     min_name_off: usize,
     offset: usize,
-) -> Result<(Vec<u8>, bool), WalkError> {
+) -> Result<Vec<u8>, WalkError> {
     if !name_len.is_multiple_of(2) || name_len > MAX_NAME_UTF16_BYTES {
         return Err(WalkError::MalformedName { offset });
     }
@@ -347,15 +331,7 @@ fn extract_name(
     if span_end > rec.len() {
         return Err(WalkError::MalformedName { offset });
     }
-    let units: Vec<u16> = rec[name_off..span_end]
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&pair| u16::from_le_bytes(pair))
-        .collect();
-    let mut name = Vec::with_capacity(name_len);
-    let name_lossy = wtf8::from_utf16(&units, &mut name);
-    Ok((name, name_lossy))
+    Ok(wtf8::from_utf16le(&rec[name_off..span_end]))
 }
 
 #[cfg(test)]
@@ -381,14 +357,10 @@ mod tests {
         assert_eq!(walk.next_start_frn, 0x99);
         assert_eq!(walk.records.len(), 1);
         let r = &walk.records[0];
-        assert_eq!(r.major_version, 2);
         assert_eq!(r.frn, Frn(0x0005_0000_0000_002A));
         assert_eq!(r.parent_frn, Frn(0x0002_0000_0000_0005));
-        assert_eq!(r.usn, 1234);
-        assert_eq!(r.timestamp_ft, 133_800_000_000_000_000);
         assert_eq!(r.reason, USN_REASON_FILE_CREATE | USN_REASON_CLOSE);
         assert_eq!(r.name, b"report.pdf");
-        assert!(!r.name_lossy);
         assert!(!r.is_dir());
     }
 
@@ -404,11 +376,8 @@ mod tests {
         assert_eq!(walk.next_usn, 5000);
         assert_eq!(walk.records.len(), 1);
         let r = &walk.records[0];
-        assert_eq!(r.major_version, 3);
         assert_eq!(r.frn, Frn(0xABCD));
         assert_eq!(r.parent_frn, Frn(0x5));
-        assert_eq!(r.usn, -7);
-        assert_eq!(r.timestamp_ft, 42);
         assert_eq!(r.reason, USN_REASON_RENAME_NEW_NAME);
         assert_eq!(r.name, b"photos");
         assert!(r.is_dir());
@@ -491,9 +460,7 @@ mod tests {
                 .with_version(version);
             let buf = build_enum_buffer(0, &[fx]);
             let walk = walk_enum_buffer(&buf).unwrap();
-            let r = &walk.records[0];
-            assert!(r.name_lossy);
-            assert_eq!(wtf8::to_utf16(&r.name), name_units);
+            assert_eq!(wtf8::to_utf16(&walk.records[0].name), name_units);
         }
     }
 
@@ -506,7 +473,6 @@ mod tests {
         let r = &walk.records[0];
         assert_eq!(r.name.len(), 255);
         assert_eq!(wtf8::to_utf16(&r.name), name_units);
-        assert!(!r.name_lossy);
     }
 
     /// The layout parser rejected names past the NTFS limit, but the journal
@@ -683,7 +649,6 @@ mod tests {
         assert_eq!(walk.next_usn, 777);
         let names: Vec<&[u8]> = walk.records.iter().map(|r| r.name.as_slice()).collect();
         assert_eq!(names, [b"one".as_slice(), b"two", b"three"]);
-        assert_eq!(walk.records[1].major_version, 3);
         assert!(walk.records[1].is_dir());
     }
 
@@ -739,19 +704,15 @@ mod tests {
                     prop_assert_eq!(walk.next_start_frn, lead);
                     prop_assert_eq!(walk.records.len(), fixed.len());
                     for (r, f) in walk.records.iter().zip(&fixed) {
-                        prop_assert_eq!(r.major_version, version);
                         prop_assert_eq!(r.frn, Frn(f.frn));
                         prop_assert_eq!(r.parent_frn, Frn(f.parent));
-                        prop_assert_eq!(r.usn, f.usn);
-                        prop_assert_eq!(r.timestamp_ft, f.timestamp);
                         prop_assert_eq!(r.reason, f.reason);
                         prop_assert_eq!(r.attributes, f.attributes);
                         // Names compare via exact WTF-8 <-> UTF-16 round-trip.
                         prop_assert_eq!(wtf8::to_utf16(&r.name), f.name_units.clone());
                         let mut expected = Vec::new();
-                        let lossy = wtf8::from_utf16(&f.name_units, &mut expected);
+                        wtf8::from_utf16(&f.name_units, &mut expected);
                         prop_assert_eq!(&r.name, &expected);
-                        prop_assert_eq!(r.name_lossy, lossy);
                     }
                 }
             }

@@ -124,9 +124,6 @@ pub struct LayoutName {
     /// The link name, converted losslessly to WTF-8 (NTFS names are arbitrary
     /// `u16` sequences; unpaired surrogates survive the round trip).
     pub name: Vec<u8>,
-    /// `true` if the original UTF-16 contained at least one unpaired
-    /// surrogate, i.e. `name` is WTF-8 but not valid UTF-8.
-    pub name_lossy: bool,
     /// `true` if this entry is an 8.3 DOS-only alias (its `Flags` carry
     /// [`FILE_LAYOUT_NAME_ENTRY_DOS`] without
     /// [`FILE_LAYOUT_NAME_ENTRY_PRIMARY`]). Index builders normally skip
@@ -440,19 +437,10 @@ fn parse_file(
                 name_len as usize,
                 "FILE_LAYOUT_NAME_ENTRY.FileName",
             )?;
-            let units: Vec<u16> = name_bytes
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&pair| u16::from_le_bytes(pair))
-                .collect();
-            let mut name = Vec::with_capacity(name_bytes.len());
-            let name_lossy = wtf8::from_utf16(&units, &mut name);
             let flags = raw.flags.get();
             names.push(LayoutName {
                 parent_frn: Frn(raw.parent_file_reference_number.get().into()),
-                name,
-                name_lossy,
+                name: wtf8::from_utf16le(name_bytes),
                 dos_only: flags & FILE_LAYOUT_NAME_ENTRY_DOS != 0
                     && flags & FILE_LAYOUT_NAME_ENTRY_PRIMARY == 0,
             });
@@ -844,8 +832,6 @@ mod tests {
         let parsed = walk_layout_buffer(&buf).expect("valid fixture buffer");
         let names = &parsed[0].names;
         assert_eq!(names[0].name, "ağaç-🎉.pdf".as_bytes());
-        assert!(!names[0].name_lossy);
-        assert!(names[1].name_lossy);
         // WTF-8 round-trips the exact original code units.
         assert_eq!(wtf8::to_utf16(&names[1].name), lone_units);
     }

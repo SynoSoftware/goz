@@ -751,7 +751,7 @@ impl Supervised {
                 let _ = io_tx.send(gozler_winfs::current_thread_io_handle());
                 let outcome = bootstrap::open_volume(&state.guid)
                     .map_err(|e| std::io::Error::other(format!("{e:#}")))
-                    .and_then(|handle| tail::spawn(state, handle, None));
+                    .and_then(|handle| tail::spawn(state, handle));
                 if let Err(returned) = result_tx.send(outcome) {
                     // The supervisor stopped listening (teardown abandoned
                     // this worker). A tail built anyway must not run

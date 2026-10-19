@@ -11,8 +11,8 @@
 //! trusted well-known SIDs before sending any request, unless the user opts out
 //! with `--insecure-no-server-check`.
 //!
-//! This lives in `gozler-winfs` (the designated unsafe Win32 layer) rather than in
-//! the client so the raw FFI stays out of `gozler-cli`.
+//! `gozler-client` makes these checks; they live here because `gozler-winfs`
+//! holds the workspace's Win32 `unsafe`.
 
 use core::ffi::c_void;
 use core::ptr;

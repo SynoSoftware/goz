@@ -29,9 +29,11 @@
 //!   empty when the daemon did not send them.
 //! - A folder's full path carries no trailing backslash.
 
+use crate::output::format_date_local;
 use crate::proto::ResultItem;
 use crate::query::extension;
 use crate::types::EsColumn;
+use jiff::tz::TimeZone;
 use std::borrow::Cow;
 
 /// How the rows are written.
@@ -70,9 +72,8 @@ pub struct TableWriter {
     /// The byte order mark and the header, which the first page writes.
     preamble: Vec<u8>,
     double_quote: bool,
-    /// Formats a FILETIME for the Date Modified column; the caller chooses
-    /// the time zone.
-    format_date: Box<dyn Fn(i64) -> String>,
+    /// The time zone of the Date Modified column.
+    time_zone: TimeZone,
 }
 
 /// Width of the plain-text Size column: `99,999,999,999` fits, as in es.
@@ -85,7 +86,7 @@ const PLAIN_DATE_WIDTH: usize = 19;
 const PLAIN_ATTRIBUTES_WIDTH: usize = 4;
 
 impl TableWriter {
-    pub fn new(options: TableOptions, format_date: Box<dyn Fn(i64) -> String>) -> Self {
+    pub fn new(options: TableOptions, time_zone: TimeZone) -> Self {
         let mut columns = options.columns;
         if options.format == Format::Txt {
             columns = vec![EsColumn::FullPath];
@@ -111,7 +112,7 @@ impl TableWriter {
             columns,
             preamble,
             double_quote: options.double_quote,
-            format_date,
+            time_zone,
         }
     }
 
@@ -145,7 +146,7 @@ impl TableWriter {
                 },
                 EsColumn::DateModified => item
                     .mtime_ft
-                    .map(&self.format_date)
+                    .map(|ft| format_date_local(ft, &self.time_zone))
                     .unwrap_or_default()
                     .into(),
                 EsColumn::Attributes => match item.attributes {
@@ -284,7 +285,7 @@ mod tests {
 
     fn write(options: TableOptions, items: &[ResultItem]) -> Vec<u8> {
         let mut out = Vec::new();
-        TableWriter::new(options, Box::new(|ft: i64| ft.to_string())).write_page(items, &mut out);
+        TableWriter::new(options, TimeZone::UTC).write_page(items, &mut out);
         out
     }
 
@@ -419,7 +420,9 @@ mod tests {
                 };
                 expected.push(vec![
                     size_field,
-                    mtime.map(|ft| ft.to_string()).unwrap_or_default(),
+                    mtime
+                        .map(|ft| format_date_local(ft, &TimeZone::UTC))
+                        .unwrap_or_default(),
                     path.clone(),
                 ]);
             }

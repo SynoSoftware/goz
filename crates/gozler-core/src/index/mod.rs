@@ -15,10 +15,10 @@
 pub(crate) mod store;
 pub mod volume;
 
-pub use store::{ComponentBytes, EntryFlags};
+pub use store::ComponentBytes;
 pub use volume::{
     Anomaly, ApplyOutcome, EntryView, IndexMemory, IndexStats, LinkTarget, NTFS_ROOT_FRN,
-    PathStatus, VolumeIndex, WtfName,
+    PathStatus, VolumeIndex,
 };
 
 #[cfg(test)]

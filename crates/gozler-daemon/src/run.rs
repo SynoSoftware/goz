@@ -2,34 +2,20 @@
 //! (`gozlerd run --service`) modes: start indexing every volume, then serve
 //! queries over the pipe until stopped, while the volumes index.
 
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use tokio::sync::watch;
 
 use crate::supervisor::Supervisor;
-use crate::volume_state::VolumeRegistry;
 use crate::{bootstrap, server};
-
-/// The running index. Shared by console and service entry points.
-pub(crate) struct Engine {
-    pub volumes: Arc<VolumeRegistry>,
-    /// Owns every tail thread; see [`Supervisor::shutdown`] for teardown.
-    pub supervisor: Supervisor,
-}
 
 /// Starts indexing every fixed NTFS and ReFS volume and returns before any is indexed.
 ///
 /// The pipe opens right after this, so a client asking during the first
 /// bootstrap gets results flagged incomplete, not "the daemon is not running".
 /// Each volume is `Bootstrapping` until its tail has built its index.
-pub(crate) fn start_engine() -> Result<Engine> {
+pub(crate) fn start_engine() -> Result<Supervisor> {
     let enumerated = bootstrap::enumerate_all()?;
-    let supervisor = Supervisor::spawn(enumerated).context("starting the volume supervisor")?;
-    Ok(Engine {
-        volumes: supervisor.volumes(),
-        supervisor,
-    })
+    Supervisor::spawn(enumerated).context("starting the volume supervisor")
 }
 
 /// Best-effort post-bootstrap memory settling, which the supervisor runs once
@@ -83,17 +69,17 @@ pub(crate) fn run_console() -> Result<()> {
         tracing::warn!("gozlerd is not elevated; raw volume access will likely fail");
     }
 
-    let engine = start_engine()?;
+    let supervisor = start_engine()?;
     tracing::info!(
-        volumes = engine.volumes.current().len(),
+        volumes = supervisor.volumes().current().len(),
         "serving queries while the volumes index (Ctrl+C to stop)"
     );
 
     // A never-triggered channel: console stop comes from Ctrl+C inside the
     // server. `_stop_tx` is held so the receiver never sees a closed channel.
     let (_stop_tx, stop_rx) = watch::channel(false);
-    let result = server::run(engine.volumes, stop_rx);
+    let result = server::run(supervisor.volumes(), stop_rx);
 
-    engine.supervisor.shutdown();
+    supervisor.shutdown();
     result
 }

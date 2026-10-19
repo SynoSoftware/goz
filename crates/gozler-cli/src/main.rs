@@ -100,8 +100,8 @@ mod win {
     use super::overview::{Index, Service, render};
     use gozler_client::{CancelToken, Client, ClientError, folder_is_missing};
     use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
+    use gozler_core::output::TableWriter;
     use gozler_core::output::table::grouped;
-    use gozler_core::output::{TableWriter, format_date_local};
     use gozler_core::proto::{DaemonStatus, PIPE_NAME, QueryResults, VolumeStatus};
     use gozler_core::query::QueryStart;
     use gozler_core::scope::Scope;
@@ -120,8 +120,7 @@ mod win {
         let error = match connect(false) {
             Ok(mut connection) => {
                 let index = index(&mut connection)?;
-                print_overview(&Service::Running(index))?;
-                return Ok(ExitCode::Complete);
+                return super::print(&render(&Service::Running(index), super::console_color()));
             }
             Err(error) => error,
         };
@@ -130,17 +129,8 @@ mod win {
             ClientError::NotRunning(why) => Service::NotRunning(why),
             _ => return Err(error.into()),
         };
-        print_overview(&service)?;
+        super::print(&render(&service, super::console_color()))?;
         Ok(Failure::from(error).exit_code())
-    }
-
-    fn print_overview(service: &Service) -> Result<(), Failure> {
-        let text = render(service, super::console_color());
-        let mut out = std::io::stdout().lock();
-        output(
-            out.write_all(text.as_bytes()).and_then(|()| out.flush()),
-            "stdout",
-        )
     }
 
     /// The size of the index, with the total size of every file.
@@ -317,11 +307,7 @@ mod win {
             let rows = if plan.json && plan.export.is_none() {
                 Rows::Json(None)
             } else {
-                let format_date = move |filetime| format_date_local(filetime, &tz);
-                Rows::Table(TableWriter::new(
-                    plan.table_options(),
-                    Box::new(format_date),
-                ))
+                Rows::Table(TableWriter::new(plan.table_options(), tz))
             };
             Self { plan, out, rows }
         }

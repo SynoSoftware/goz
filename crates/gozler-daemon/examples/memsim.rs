@@ -132,11 +132,8 @@ fn main() {
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     for (rec_no, row) in (1000_u64..).zip(rows.iter()) {
         let r = ParsedUsnRecord {
-            major_version: 3,
             frn: Frn(u128::from(rec_no) | (1 << 48)),
             parent_frn: Frn(row.parent_rec),
-            usn: 0,
-            timestamp_ft: 0,
             reason: USN_REASON_FILE_CREATE,
             attributes: if row.is_dir {
                 FILE_ATTRIBUTE_DIRECTORY
@@ -144,7 +141,6 @@ fn main() {
                 0
             },
             name: row.name.clone(),
-            name_lossy: false,
         };
         idx.insert_enum(&r);
     }
@@ -162,15 +158,11 @@ fn main() {
         let mut name = row.name.clone();
         name.push(b'~');
         let r = ParsedUsnRecord {
-            major_version: 3,
             frn: Frn(u128::from(rec_no) | (1 << 48)),
             parent_frn: Frn(row.parent_rec),
-            usn: 0,
-            timestamp_ft: 0,
             reason: USN_REASON_FILE_CREATE,
             attributes: 0,
             name,
-            name_lossy: false,
         };
         idx.insert_enum(&r);
     }

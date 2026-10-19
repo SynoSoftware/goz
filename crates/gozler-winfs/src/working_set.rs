@@ -5,14 +5,13 @@
 
 use core::mem::{size_of, zeroed};
 
-use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx;
 use windows_sys::Win32::System::ProcessStatus::{
     GetProcessMemoryInfo, K32EmptyWorkingSet, PROCESS_MEMORY_COUNTERS,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-use crate::error::WinError;
+use crate::error::{WinError, last_error};
 
 // SetProcessWorkingSetSizeEx flags (winnt.h). Defined locally, matching this
 // crate's convention of not pulling constant-only symbols from windows-sys.
@@ -37,10 +36,7 @@ pub fn self_memory() -> Result<SelfMemory, WinError> {
         let mut counters: PROCESS_MEMORY_COUNTERS = zeroed();
         counters.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
         if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) == 0 {
-            return Err(WinError {
-                code: GetLastError(),
-                context: "GetProcessMemoryInfo",
-            });
+            return Err(last_error("GetProcessMemoryInfo"));
         }
         Ok(SelfMemory {
             working_set: counters.WorkingSetSize as u64,
@@ -63,13 +59,8 @@ pub fn self_memory() -> Result<SelfMemory, WinError> {
 /// storms.
 pub fn trim_working_set() -> Result<(), WinError> {
     // SAFETY: plain Win32 FFI with the current-process pseudo-handle.
-    unsafe {
-        if K32EmptyWorkingSet(GetCurrentProcess()) == 0 {
-            return Err(WinError {
-                code: GetLastError(),
-                context: "K32EmptyWorkingSet",
-            });
-        }
+    if unsafe { K32EmptyWorkingSet(GetCurrentProcess()) } == 0 {
+        return Err(last_error("K32EmptyWorkingSet"));
     }
     Ok(())
 }
@@ -86,33 +77,17 @@ pub fn trim_working_set() -> Result<(), WinError> {
 /// a large hard minimum can be refused (`ERROR_INVALID_PARAMETER`) when it
 /// exceeds the system's default working-set ceiling, so the caller logs quietly.
 pub fn pin_working_set() -> Result<(), WinError> {
-    // SAFETY: all three calls are plain Win32 FFI with a valid pseudo-handle
-    // (GetCurrentProcess) and a stack struct sized by its own `cb` field.
-    unsafe {
-        let process = GetCurrentProcess();
-
-        let mut counters: PROCESS_MEMORY_COUNTERS = zeroed();
-        counters.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        if GetProcessMemoryInfo(process, &mut counters, counters.cb) == 0 {
-            return Err(WinError {
-                code: GetLastError(),
-                context: "GetProcessMemoryInfo",
-            });
-        }
-
-        let floor = counters.WorkingSetSize;
-        // `dwMaximumWorkingSetSize` must still be greater than the minimum for
-        // the call to be accepted (equal is rejected with
-        // ERROR_INVALID_PARAMETER), but MAX_DISABLE means it is never enforced:
-        // it is an argument the API requires, not a ceiling on the index.
-        let ceiling = floor.saturating_mul(2);
-        let flags = QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE;
-        if SetProcessWorkingSetSizeEx(process, floor, ceiling, flags) == 0 {
-            return Err(WinError {
-                code: GetLastError(),
-                context: "SetProcessWorkingSetSizeEx",
-            });
-        }
+    // The counter starts as a SIZE_T, so the round trip through u64 is lossless.
+    let floor = self_memory()?.working_set as usize;
+    // `dwMaximumWorkingSetSize` must still be greater than the minimum for
+    // the call to be accepted (equal is rejected with
+    // ERROR_INVALID_PARAMETER), but MAX_DISABLE means it is never enforced:
+    // it is an argument the API requires, not a ceiling on the index.
+    let ceiling = floor.saturating_mul(2);
+    let flags = QUOTA_LIMITS_HARDWS_MIN_ENABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE;
+    // SAFETY: plain Win32 FFI with the current-process pseudo-handle.
+    if unsafe { SetProcessWorkingSetSizeEx(GetCurrentProcess(), floor, ceiling, flags) } == 0 {
+        return Err(last_error("SetProcessWorkingSetSizeEx"));
     }
     Ok(())
 }
