@@ -239,7 +239,8 @@
     "unknown": "The Gozler service is not running, and Gozler could not find out why: {0} Check the Gozler service in Services.",
     "not_ready": "The Gozler service is starting. Your search runs when it is ready.",
     "not_gozler": "The search service is not the Gozler service, so Gozler did not connect. Restart Windows, so that the Gozler service starts first, then search again.",
-    "too_old": "The installed Gozler service is older than this window. Download Gozler and run its setup to update the service.",
+    "too_old": "The Gozler service is older than this window, so Gozler cannot search. Download Gozler and run its setup, and Gozler searches again by itself.",
+    "too_old_update": "The Gozler service is older than this window, so Gozler cannot search. Update it, and Gozler searches again by itself.",
     "refused": "The Gozler service refused this search. Change the search, then try again.\n\n{0}",
     "lost": "The connection to the Gozler service was lost. Gozler reconnects when the service answers."
   },
@@ -247,6 +248,7 @@
     "start_service": "Sta&rt the service",
     "turn_on_service": "T&urn on the service",
     "install_service": "Install the se&rvice",
+    "update_service": "&Update the service",
     "download": "Download &Gozler",
     "open_services": "Open Se&rvices"
   },
@@ -291,6 +293,7 @@
     "title": "Search syntax"
   },
   "button": {
+    "clear": "Clear",
     "close": "Close",
     "ok": "OK",
     "cancel": "Cancel"
@@ -313,10 +316,13 @@
     "title": "Settings",
     "apply": "&Apply",
     "restore_defaults": "&Restore defaults",
+    "search_cue": "Search settings",
+    "no_match": "No setting matches the search.",
     "general": "General",
     "search": "Search",
+    "file_explorer": "File Explorer",
     "keyboard": "Keyboard",
-    "index": "Index"
+    "index": "Drives and service"
   },
   "settings_general": {
     "language": "&Language:",
@@ -325,7 +331,10 @@
     "sign_in": "Start Gozler when I &sign in to Windows",
     "updates": "Check for &updates when Gozler starts",
     "keep_running": "&Keep Gozler running in the notification area when I close its window",
-    "file_explorer": "File Explorer",
+    "one_window": "Allow only one Gozler &window at a time"
+  },
+  "settings_file_explorer": {
+    "open_with": "Open with",
     "search_with": "Show \"Search with Gozler\" on &folders",
     "verb": "Search with Gozler",
     "open_folders": "&Open folders:",
@@ -414,7 +423,7 @@
     "export_stopped": "Gozler could not export to {0}. {1}",
     "clipboard_busy": "The clipboard is in use by another program. Try again in a moment.",
     "no_longer_exists": "{0} no longer exists. Press F5 to search again.",
-    "open_failed": "Gozler could not start {0}. {1} Check the command in File > Settings > General.",
+    "open_failed": "Gozler could not start {0}. {1} Check the command in File > Settings > File Explorer.",
     "shortcut_taken": "Another program uses {0}, so it no longer shows Gozler. Choose another shortcut in File > Settings > Keyboard.",
     "registry_failed": "Gozler could not save \"{0}\" in the Windows registry. {1}"
   }

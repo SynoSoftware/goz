@@ -62,6 +62,12 @@ impl Font {
         Font::from_logfont(&logfont)
     }
 
+    /// A copy of `hwnd`'s font, which a control given another font can get
+    /// back.
+    pub(crate) fn of(hwnd: Hwnd) -> windows::core::Result<Font> {
+        Font::from_logfont(&logfont(hwnd.font())?)
+    }
+
     /// `hwnd`'s font in semibold, as the About dialog shows the version.
     pub(crate) fn semibold_of(hwnd: Hwnd) -> windows::core::Result<Font> {
         let mut logfont = logfont(hwnd.font())?;

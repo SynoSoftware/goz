@@ -6,7 +6,7 @@
 //! controls this dialog's procedure handles.
 
 use super::main_window::MainWindow;
-use crate::core::captions::{DialogCaptions, DialogItem, IndexCaptions, failure_text};
+use crate::core::captions::{self, DialogCaptions, DialogItem, IndexCaptions, failure_text};
 use crate::core::commands::{CommandId, Keystroke};
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::open::{browse_command, total_commander_command};
@@ -27,21 +27,12 @@ use std::cell::{Cell, OnceCell, RefCell};
 const INDEX_TIMER: usize = 1;
 const INDEX_REFRESH_MS: u32 = 2_000;
 
-/// The page's template.
-fn page_dialog(page: SettingsPage) -> DialogId {
-    match page {
-        SettingsPage::General => DialogId::SettingsGeneral,
-        SettingsPage::Search => DialogId::SettingsSearch,
-        SettingsPage::Keyboard => DialogId::SettingsKeyboard,
-        SettingsPage::Index => DialogId::SettingsIndex,
-    }
-}
-
 /// The page's heading, which shows its name in semibold.
 fn heading(page: SettingsPage) -> ControlId {
     match page {
         SettingsPage::General => ControlId::GeneralHeading,
         SettingsPage::Search => ControlId::SearchHeading,
+        SettingsPage::FileExplorer => ControlId::FileExplorerHeading,
         SettingsPage::Keyboard => ControlId::KeyboardHeading,
         SettingsPage::Index => ControlId::IndexHeading,
     }
@@ -51,7 +42,7 @@ fn heading(page: SettingsPage) -> ControlId {
 type Field<T> = fn(&mut SettingsValues) -> &mut T;
 
 /// Each check box, its page, and the value it shows.
-const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 8] = [
+const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 9] = [
     (SettingsPage::General, ControlId::GeneralSignIn, |v| {
         &mut v.start_at_sign_in
     }),
@@ -61,9 +52,14 @@ const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 8] = [
     (SettingsPage::General, ControlId::GeneralKeepRunning, |v| {
         &mut v.choices.keep_running
     }),
-    (SettingsPage::General, ControlId::GeneralSearchWith, |v| {
-        &mut v.search_with_gozler
+    (SettingsPage::General, ControlId::GeneralOneWindow, |v| {
+        &mut v.choices.one_window
     }),
+    (
+        SettingsPage::FileExplorer,
+        ControlId::FileExplorerSearchWith,
+        |v| &mut v.search_with_gozler,
+    ),
     (SettingsPage::Search, ControlId::SearchAsYouType, |v| {
         &mut v.choices.search_as_you_type
     }),
@@ -84,29 +80,30 @@ const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 8] = [
 /// shows.
 const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 3] = [
     (
-        ControlId::GeneralOpenFolders,
-        ControlId::GeneralOpenFoldersBrowse,
-        "settings_general.cue_explorer",
+        ControlId::FileExplorerOpenFolders,
+        ControlId::FileExplorerOpenFoldersBrowse,
+        "settings_file_explorer.cue_explorer",
         |v| &mut v.choices.open_folders,
     ),
     (
-        ControlId::GeneralOpenFiles,
-        ControlId::GeneralOpenFilesBrowse,
-        "settings_general.cue_default_program",
+        ControlId::FileExplorerOpenFiles,
+        ControlId::FileExplorerOpenFilesBrowse,
+        "settings_file_explorer.cue_default_program",
         |v| &mut v.choices.open_files,
     ),
     (
-        ControlId::GeneralOpenLocation,
-        ControlId::GeneralOpenLocationBrowse,
-        "settings_general.cue_explorer",
+        ControlId::FileExplorerOpenLocation,
+        ControlId::FileExplorerOpenLocationBrowse,
+        "settings_file_explorer.cue_explorer",
         |v| &mut v.choices.open_file_location,
     ),
 ];
 
 /// Each page's Restore defaults.
-const RESTORE: [(SettingsPage, ControlId); 3] = [
+const RESTORE: [(SettingsPage, ControlId); 4] = [
     (SettingsPage::General, ControlId::GeneralRestore),
     (SettingsPage::Search, ControlId::SearchRestore),
+    (SettingsPage::FileExplorer, ControlId::FileExplorerRestore),
     (SettingsPage::Keyboard, ControlId::KeyboardRestore),
 ];
 
@@ -124,6 +121,9 @@ pub(super) struct SettingsDialog<'a> {
     /// The pages in [`SettingsPage::ALL`]'s order, once the dialog made
     /// them.
     pages: RefCell<Vec<Hwnd>>,
+    /// The pages the page list shows, which the search box keeps; the
+    /// shown page is one of them, or none when the list is empty.
+    listed: RefCell<Vec<SettingsPage>>,
     shown: Cell<Option<SettingsPage>>,
     /// The commands the Keyboard page lists, after its filter.
     commands: RefCell<Vec<CommandRow>>,
@@ -134,6 +134,9 @@ pub(super) struct SettingsDialog<'a> {
     /// change nothing.
     filling: Cell<bool>,
     balloon: OnceCell<Balloon>,
+    /// The pages' font and its bold form, for the captions that the search
+    /// finds; they outlive the dialog's controls.
+    highlight: OnceCell<(Font, Font)>,
 }
 
 impl<'a> SettingsDialog<'a> {
@@ -149,11 +152,13 @@ impl<'a> SettingsDialog<'a> {
             strings,
             draft: RefCell::new(SettingsDraft::new(values)),
             pages: RefCell::new(Vec::new()),
+            listed: RefCell::new(SettingsPage::ALL.to_vec()),
             shown: Cell::new(None),
             commands: RefCell::new(Vec::new()),
             index: RefCell::new(None),
             filling: Cell::new(false),
             balloon: OnceCell::new(),
+            highlight: OnceCell::new(),
         }
     }
 
@@ -209,7 +214,7 @@ impl<'a> SettingsDialog<'a> {
     fn fill(&self, page: SettingsPage) {
         let mut values = self.draft.borrow().edited.clone();
         self.filling(|| match page {
-            SettingsPage::General | SettingsPage::Search => {
+            SettingsPage::General | SettingsPage::Search | SettingsPage::FileExplorer => {
                 for (on, control, value) in CHECK_BOXES {
                     if on == page
                         && let Some(check_box) = self.check_box(page, control)
@@ -217,13 +222,15 @@ impl<'a> SettingsDialog<'a> {
                         check_box.set_checked(*value(&mut values));
                     }
                 }
-                if page == SettingsPage::General {
-                    if let Some(list) = self.language_list() {
-                        // A saved tag that no longer ships shows as Windows
-                        // default; it stays saved unless the person chooses.
-                        let place = values.choices.language.shipped();
-                        list.select(place.map_or(0, |index| index + 1));
-                    }
+                if page == SettingsPage::General
+                    && let Some(list) = self.language_list()
+                {
+                    // A saved tag that no longer ships shows as Windows
+                    // default; it stays saved unless the person chooses.
+                    let place = values.choices.language.shipped();
+                    list.select(place.map_or(0, |index| index + 1));
+                }
+                if page == SettingsPage::FileExplorer {
                     for (control, _, _, command) in OPEN_COMMANDS {
                         if let Some(edit) = self.control(page, control) {
                             edit.set_text(command(&mut values));
@@ -241,6 +248,7 @@ impl<'a> SettingsDialog<'a> {
                     hotkey.require_two_modifiers(!windows);
                     hotkey.set(shortcut.map(ShowShortcut::keystroke));
                 }
+                self.update_clear_shortcut();
                 self.fill_commands(self.selected_command());
             }
             SettingsPage::Index => {}
@@ -372,6 +380,17 @@ impl<'a> SettingsDialog<'a> {
         if let Ok(shortcut) = self.read_shortcut() {
             self.draft.borrow_mut().edited.choices.show_shortcut = shortcut;
         }
+        self.update_clear_shortcut();
+    }
+
+    /// Clear is enabled while the shortcut box holds keys.
+    fn update_clear_shortcut(&self) {
+        if let (Some(hotkey), Some(clear)) = (
+            self.hotkey(),
+            self.control(SettingsPage::Keyboard, ControlId::KeyboardClear),
+        ) {
+            clear.set_enabled(hotkey.value() != HotkeyValue::Empty);
+        }
     }
 
     /// With the Windows key off, a shortcut needs two of `Ctrl`, `Alt` and
@@ -402,31 +421,83 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Shows `page`, and has the main window follow the service while the
-    /// Index page shows (DESIGN.md: Settings dialog).
-    fn show_page(&self, dialog: Hwnd, page: SettingsPage) {
-        let previous = self.shown.replace(Some(page));
-        if previous == Some(page) {
+    /// Shows `page`, or no page, and has the main window follow the service
+    /// while the Index page shows (DESIGN.md: Settings dialog).
+    fn show_page(&self, dialog: Hwnd, page: Option<SettingsPage>) {
+        let previous = self.shown.replace(page);
+        self.fill_page_list(dialog);
+        if previous == page {
             return;
         }
         let pages = self.pages.borrow().clone();
         for (each, hwnd) in SettingsPage::ALL.into_iter().zip(pages) {
-            hwnd.set_visible(each == page);
+            hwnd.set_visible(Some(each) == page);
         }
-        if let (Some(list), Some(index)) = (
-            ListBox::of_dialog(dialog, ControlId::SettingsPages.id()),
-            SettingsPage::ALL.iter().position(|p| *p == page),
-        ) {
-            let labels = SettingsPage::ALL.map(|p| self.strings.text(p.label()));
-            self.filling(|| list.set_items(&labels, index));
-        }
-        if page == SettingsPage::Index {
+        if page == Some(SettingsPage::Index) {
             self.main.show_index_page(self.window, true);
             dialog.set_timer(INDEX_TIMER, INDEX_REFRESH_MS);
             self.refresh_index();
         } else if previous == Some(SettingsPage::Index) {
             dialog.kill_timer(INDEX_TIMER);
             self.main.show_index_page(self.window, false);
+        }
+    }
+
+    /// Lists the pages that the search keeps, with the shown one selected.
+    fn fill_page_list(&self, dialog: Hwnd) {
+        let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) else {
+            return;
+        };
+        let (labels, index) = {
+            let listed = self.listed.borrow();
+            let shown = self.shown.get();
+            let labels: Vec<&str> = listed
+                .iter()
+                .map(|page| self.strings.text(page.label()))
+                .collect();
+            (labels, listed.iter().position(|page| Some(*page) == shown))
+        };
+        self.filling(|| list.set_items(&labels, index.unwrap_or(0)));
+    }
+
+    /// Keeps the pages that the search box's words find. The shown page
+    /// stays while it is one of them; otherwise the first one shows, or
+    /// none, with a line that says so.
+    fn search_changed(&self, dialog: Hwnd) {
+        let search = dialog::item(dialog, ControlId::SettingsSearch.id())
+            .map(Hwnd::text)
+            .unwrap_or_default();
+        let listed = captions::settings_pages_matching(&self.strings, &search);
+        let page = self
+            .shown
+            .get()
+            .filter(|shown| listed.contains(shown))
+            .or(listed.first().copied());
+        self.listed.replace(listed);
+        if let Some(clear) = dialog::item(dialog, ControlId::SettingsClearSearch.id()) {
+            clear.set_enabled(!search.is_empty());
+        }
+        if let Some(no_match) = dialog::item(dialog, ControlId::SettingsNoMatch.id()) {
+            no_match.set_visible(page.is_none());
+        }
+        self.show_page(dialog, page);
+        self.highlight(&search);
+    }
+
+    /// Shows in bold each caption that holds a word of `search`; a page's
+    /// heading keeps its own font.
+    fn highlight(&self, search: &str) {
+        let Some((normal, bold)) = self.highlight.get() else {
+            return;
+        };
+        for page in SettingsPage::ALL {
+            for (control, hit) in captions::settings_page_hits(&self.strings, page, search) {
+                if control != heading(page)
+                    && let Some(control) = self.control(page, control)
+                {
+                    control.set_font(if hit { bold } else { normal });
+                }
+            }
         }
     }
 
@@ -451,7 +522,13 @@ impl<'a> SettingsDialog<'a> {
     /// Points the balloon `text` at `control` on `page`, which shows, and
     /// focuses it.
     fn refuse(&self, dialog: Hwnd, page: SettingsPage, control: ControlId, text: &str) {
-        self.show_page(dialog, page);
+        // The search may have left the page out of the list.
+        let listed = self.listed.borrow().contains(&page);
+        if !listed && let Some(search) = dialog::item(dialog, ControlId::SettingsSearch.id()) {
+            self.filling(|| search.set_text(""));
+            self.search_changed(dialog);
+        }
+        self.show_page(dialog, Some(page));
         if let Some(control) = self.control(page, control) {
             control.focus();
             if let Some(balloon) = self.balloon.get() {
@@ -511,10 +588,10 @@ impl<'a> SettingsDialog<'a> {
     /// Writes the program that the person chooses into the open command
     /// box `edit`, as `"<program>" "%1"`.
     fn browse(&self, dialog: Hwnd, edit: ControlId) {
-        let title = self.strings.text("settings_general.browse_title");
-        let programs = self.strings.text("settings_general.programs");
+        let title = self.strings.text("settings_file_explorer.browse_title");
+        let programs = self.strings.text("settings_file_explorer.programs");
         if let Some(program) = win::shell::pick_program(dialog, title, programs)
-            && let Some(edit) = self.control(SettingsPage::General, edit)
+            && let Some(edit) = self.control(SettingsPage::FileExplorer, edit)
         {
             // EN_CHANGE then puts it in the draft.
             edit.set_text(&browse_command(&program));
@@ -526,12 +603,18 @@ impl<'a> SettingsDialog<'a> {
         let Some(found) = self.main.take_total_commander() else {
             return;
         };
-        let button = self.control(SettingsPage::General, ControlId::GeneralTotalCommander);
+        let button = self.control(
+            SettingsPage::FileExplorer,
+            ControlId::FileExplorerTotalCommander,
+        );
         let refusal = match found {
             Ok(Some(path)) => {
                 let command = total_commander_command(&path);
-                for control in [ControlId::GeneralOpenFolders, ControlId::GeneralOpenFiles] {
-                    if let Some(edit) = self.control(SettingsPage::General, control) {
+                for control in [
+                    ControlId::FileExplorerOpenFolders,
+                    ControlId::FileExplorerOpenFiles,
+                ] {
+                    if let Some(edit) = self.control(SettingsPage::FileExplorer, control) {
                         edit.set_text(&command);
                     }
                 }
@@ -539,7 +622,7 @@ impl<'a> SettingsDialog<'a> {
             }
             Ok(None) => self
                 .strings
-                .text("settings_general.no_total_commander")
+                .text("settings_file_explorer.no_total_commander")
                 .to_owned(),
             Err(failure) => failure_text(&self.strings, &failure),
         };
@@ -617,16 +700,18 @@ impl<'a> SettingsDialog<'a> {
         if is(id, ControlId::SettingsPages) {
             let selected = ListBox::of_dialog(dialog, id)
                 .and_then(ListBox::selected)
-                .and_then(|index| SettingsPage::ALL.get(index).copied());
-            if let Some(page) = selected {
-                self.show_page(dialog, page);
+                .and_then(|index| self.listed.borrow().get(index).copied());
+            if selected.is_some() {
+                self.show_page(dialog, selected);
             }
+        } else if is(id, ControlId::SettingsSearch) {
+            self.search_changed(dialog);
         } else if let Some((control, _, _, command)) = OPEN_COMMANDS
             .into_iter()
             .find(|(control, ..)| is(id, *control))
         {
             let text = self
-                .control(SettingsPage::General, control)
+                .control(SettingsPage::FileExplorer, control)
                 .map(Hwnd::text)
                 .unwrap_or_default();
             *command(&mut self.draft.borrow_mut().edited) = text;
@@ -661,10 +746,17 @@ impl<'a> SettingsDialog<'a> {
         } else if let Some((page, _)) = RESTORE.into_iter().find(|(_, c)| is(id, *c)) {
             self.draft.borrow_mut().edited.restore_defaults(page);
             self.fill(page);
-        } else if is(id, ControlId::GeneralTotalCommander) {
+        } else if is(id, ControlId::FileExplorerTotalCommander) {
             self.main.find_total_commander(dialog);
         } else if is(id, ControlId::KeyboardWindowsKey) {
             self.windows_key_changed();
+        } else if is(id, ControlId::KeyboardClear) {
+            // As Backspace in the box does.
+            if let Some(hotkey) = self.hotkey() {
+                hotkey.set(None);
+                hotkey.hwnd().focus();
+            }
+            self.shortcut_changed();
         } else if is(id, ControlId::KeyboardAdd) {
             self.edit_shortcut(dialog, false);
         } else if is(id, ControlId::KeyboardEdit) {
@@ -686,7 +778,7 @@ impl DialogProc for SettingsDialog<'_> {
         let pages_list = dialog::item(dialog, ControlId::SettingsPages.id());
         let mut pages = Vec::new();
         for page in SettingsPage::ALL {
-            let id = page_dialog(page);
+            let id = page.dialog();
             let Ok(hwnd) = dialog::create_page(dialog, id, &DialogCaptions::new(id, &self.strings))
             else {
                 dialog::end(dialog, DialogEnd::Cancel);
@@ -708,6 +800,14 @@ impl DialogProc for SettingsDialog<'_> {
             pages.push(hwnd);
         }
         self.pages.replace(pages);
+        if let Some(label) = self
+            .page(SettingsPage::General)
+            .and_then(|page| dialog::item(page, ControlId::GeneralLanguageLabel.id()))
+            && let Ok(normal) = Font::of(label)
+            && let Ok(bold) = normal.bold()
+        {
+            let _ = self.highlight.set((normal, bold));
+        }
 
         let text = |key: &'static str| self.strings.text(key);
         if let Some(list) = self.language_list() {
@@ -722,7 +822,7 @@ impl DialogProc for SettingsDialog<'_> {
                     .collect();
             list.set_items(&items, 0);
         }
-        if let Some(page) = self.page(SettingsPage::General) {
+        if let Some(page) = self.page(SettingsPage::FileExplorer) {
             for (control, _, cue, _) in OPEN_COMMANDS {
                 if let Some(edit) = Edit::of_dialog(page, control.id()) {
                     edit.set_cue(text(cue));
@@ -751,7 +851,10 @@ impl DialogProc for SettingsDialog<'_> {
         for page in SettingsPage::ALL {
             self.fill(page);
         }
-        self.show_page(dialog, SettingsPage::General);
+        if let Some(search) = Edit::of_dialog(dialog, ControlId::SettingsSearch.id()) {
+            search.set_cue(text("settings.search_cue"));
+        }
+        self.show_page(dialog, Some(SettingsPage::General));
         self.update_apply(dialog);
         Opened {
             focus: ControlId::SettingsPages.id(),
@@ -774,6 +877,14 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Command { id } if is(id, ControlId::SettingsApply) => {
                 self.apply(dialog);
+                return true;
+            }
+            DialogMessage::Command { id } if is(id, ControlId::SettingsClearSearch) => {
+                // The box's change shows every page again.
+                if let Some(search) = dialog::item(dialog, ControlId::SettingsSearch.id()) {
+                    search.set_text("");
+                    search.focus();
+                }
                 return true;
             }
             DialogMessage::Command { id } => self.clicked(dialog, id),

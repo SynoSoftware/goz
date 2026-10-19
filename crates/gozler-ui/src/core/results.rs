@@ -95,7 +95,11 @@ impl ListMessage {
                 DaemonFailure::NotRunning(why) => {
                     Some(why.repair().map_or(Fix::OpenServices, Fix::Repair))
                 }
-                DaemonFailure::TooOld => ClientError::TooOld.repair().map(Fix::Repair),
+                DaemonFailure::TooOld { update_from } => ClientError::TooOld {
+                    update_from: update_from.clone(),
+                }
+                .repair()
+                .map(Fix::Repair),
                 // The owner check is a security check, whose fix is not the
                 // window's; the others end by themselves or by a new search.
                 DaemonFailure::NotReady
@@ -115,6 +119,7 @@ impl Fix {
                 Repair::StartService => "fix.start_service",
                 Repair::TurnOnService => "fix.turn_on_service",
                 Repair::InstallService { .. } => "fix.install_service",
+                Repair::UpdateService { .. } => "fix.update_service",
                 Repair::Download => "fix.download",
             },
             Fix::OpenServices => "fix.open_services",

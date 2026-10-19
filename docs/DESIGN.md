@@ -203,9 +203,9 @@ The window builds its own `SearchRequest` in `core::query`, not through `build_s
 The UI thread never waits for the pipe (window rules 3 to 5).
 
 - **At start** the window asks for status beside the first search, because only a status reply names the volumes, which the Location list, status part 4 and the decision to poll need.
-- **The status poll.** The window asks for status every 2 seconds while `Model::polls_status` says so: the service is not running, runs but does not answer yet, or the connection was lost; a volume in scope is bootstrapping or rescanning; or Settings shows the Index page. One timer serves every reason. An offline or failed volume is not polled, because waiting does not complete it. When a status reply shows that the daemon answers again, or that every volume in scope is complete, the search runs again (`T4`).
+- **The status poll.** The window asks for status every 2 seconds while `Model::polls_status` says so: the service is not running, runs but does not answer yet, or the connection was lost; a volume in scope is bootstrapping or rescanning; or Settings shows the Drives and service page. One timer serves every reason. An offline or failed volume is not polled, because waiting does not complete it. When a status reply shows that the daemon answers again, or that every volume in scope is complete, the search runs again (`T4`).
 - **A results page** carries only the combined flags `volumes_incomplete` and `metadata_pending`. When a page sets a flag that the latest status does not explain, the model asks for status once.
-- **A refused request, a failed owner check and a daemon older than the window** start no poll and stay on screen until the person changes the search, because the same request would fail the same way.
+- **A refused request and a failed owner check** start no poll and stay on screen until the person changes the search, because the same request would fail the same way. A daemon older than the window is polled, because updating it ends the failure without a change to the search.
 - **A failure means something different for each purpose.** A `Results` failure shows its message in the list. A `Status` failure updates whether the daemon answers and replaces a failure that the list shows for another reason, so the list never offers the fix for a state the service has left; while a search is in flight, its own reply shows instead, and a `Status` failure that leaves the rows shows in status part 4 (`T10`). A `Selection` failure is the service failing while rows are shown, so it shows as a `Results` failure does and clears the selection (`T3`); a selection left unread would keep its commands disabled with nothing to say why. An `Export` failure is the export's message box and leaves the list alone.
 - **Exit** joins every request thread, and the join is bounded, because no request thread waits on anything without a token check: the client checks it while it waits for a reply and between connect retries, and an export checks it after each page. A stopped export deletes its partial file, and the settings are saved.
 
@@ -219,7 +219,7 @@ Every request scans every match before it sorts, about 0.3 seconds for the empty
 
 | Area | Control |
 | --- | --- |
-| Top | the menu bar, then a strip with the search box and its match controls |
+| Top | the menu bar, then a strip with the search box, its Clear button and its match controls |
 | Left | the filter pane |
 | Center | the results list: a list view in report and virtual mode |
 | Bottom | the inspector pane, under a splitter that the person drags |
@@ -248,7 +248,7 @@ The window is made of plain Windows controls, with only the tweaks that cost one
 
 ### Search box
 
-The search box shows the cue banner "Find files and folders" while it is focused and empty (`EM_SETCUEBANNER` with `wParam` TRUE), because the window opens with the box focused. Beside it are the match controls:
+The search box shows the cue banner "Find files and folders" while it is focused and empty (`EM_SETCUEBANNER` with `wParam` TRUE), because the window opens with the box focused. Clear, right of the box, empties it as `Esc` does and is disabled while the box is empty; it has no access key, because `Esc` is its key. Beside it are the match controls:
 
 | Control | Choices | Command line |
 | --- | --- | --- |
@@ -314,7 +314,8 @@ Part 4 shows the service's failure when the list keeps its rows or another messa
 
 ### Window lifetime
 
-- **One window per user session.** `main` creates the named mutex `Local\gozler.ui`, and the `Local\` namespace is already one per session. A second start finds the first window by its class name, calls `AllowSetForegroundWindow` for its process, posts it a registered message and exits; the first window comes forward, restored when it was minimized and still maximized when it was maximized, with the search box focused and its text selected (`MainWindow::show_window`, `C24`). A second start with `--location <folder>` also sets Location, through `WM_COPYDATA`. With `--data-dir`, the mutex and the class name end in an FNV-1a hash of the folder (`app::instance_suffix`), because a mutex name allows no backslash after `Local\`, so a test's window and the person's window never hand over to each other.
+- **One window per user session, unless the person allows more.** `main` creates the named mutex `Local\gozler.ui`, and the `Local\` namespace is already one per session. A second start finds the first window by its class name, calls `AllowSetForegroundWindow` for its process, posts it a registered message and exits; the first window comes forward, restored when it was minimized and still maximized when it was maximized, with the search box focused and its text selected (`MainWindow::show_window`, `C24`). A second start with `--location <folder>` also sets Location, through `WM_COPYDATA`. With `--data-dir`, the mutex and the class name end in an FNV-1a hash of the folder (`app::instance_suffix`), because a mutex name allows no backslash after `Local\`, so a test's window and the person's window never hand over to each other.
+- **"Allow only one Gozler window at a time"** (Settings > General, on by default, as Total Commander's "Allow only 1 copy of Total Commander at a time") decides what a second start does. Off, it opens another window in its own process, and `--location` sets that window's Location. Another window has no tray icon, no shortcut to show Gozler and no update check, because the first window does those; Close ends it; and it saves only what its Settings applies, so closing it never undoes a setting that another window saved. A setting that two windows change is the one saved last. A start at sign-in never opens another window. `main` reads `ui.json` before the mutex, so the second start knows the choice.
 - **"Keep Gozler running in the notification area when I close its window"** (Settings > General, on by default, as Everything's "Run in background"):
 
   | | Off | On |
@@ -411,7 +412,7 @@ What changes, and what does not, when an event arrives. The `Model` test for a r
 | T7 | The selection changes while a folder's size is counted | the inspector shows the new selection | the old size request is cancelled |
 | T8 | An export ends while a search runs | part 3 shows the export's result; part 1 still says Searching… | none |
 | T9 | An export fails | a message box names the file and Windows' reason; part 3 is cleared | the partial file is deleted |
-| T10 | The service stops while the Settings dialog is open | the dialog stays usable; its Index page shows the failure; the main window shows it behind | the status poll runs |
+| T10 | The service stops while the Settings dialog is open | the dialog stays usable; its Drives and service page shows the failure; the main window shows it behind | the status poll runs |
 | T11 | New results arrive while the context menu is open | the menu stays open; a command chosen from it acts on the selection when it is chosen, and does nothing when the selection was cleared meanwhile | none |
 | T12 | The language changes | every caption changes; nothing else does | none; no search runs |
 | T13 | The window moves to a monitor with another DPI | the layout and fonts scale; nothing else changes | none |
@@ -438,7 +439,8 @@ A failure empties the list, and its empty area shows the message and its button.
 | The service is stopped | Start the service |
 | The service is disabled | Turn on the service: it starts automatically from then on |
 | The service is not installed, and `gozlerd.exe` is beside the window | Install the service |
-| The service is not installed, and `gozlerd.exe` is missing; or the daemon is older than the window | Download Gozler |
+| The daemon is older than the window, and `gozlerd.exe` is beside the window | Update the service: it stops the service and runs the window's `gozlerd install`, which points the service at that `gozlerd.exe` and starts it |
+| The service is not installed, and `gozlerd.exe` is missing; or the daemon is older than the window and `gozlerd.exe` is missing | Download Gozler |
 | The service's state cannot be read | Open Services |
 | The service runs but does not answer yet; or the connection is lost, or the pipe cannot be opened or read | none: the window polls |
 | The owner check fails | none: the message says to restart Windows, so that the Gozler service starts first |
@@ -480,11 +482,13 @@ File > Export results… opens the Windows save dialog (`IFileSaveDialog`) with 
 
 ### Settings dialog
 
-File > Settings… opens a dialog with a page list on the left and the page on the right, as Everything's Options dialog does: General, Search, Keyboard and Index. Each page is a child-dialog template with its name as a heading, its controls in group boxes and, on the pages with settings, Restore defaults at its bottom right, which sets that page's controls to their defaults without applying them. Each group box holds more than one control, as Windows' guidelines ask.
+File > Settings… opens a dialog with a page list on the left and the page on the right, as Everything's Options dialog does: General, Search, File Explorer, Keyboard and Drives and service. Each page is a child-dialog template with its name as a heading, its controls in group boxes and, on the pages with settings, Restore defaults at its bottom right, which sets that page's controls to their defaults without applying them. Each group box holds more than one control, as Windows' guidelines ask.
+
+- **A search box across the top of the dialog**, with Clear at its right and the page list and the page in a row below it, keeps the pages whose name or captions hold every word typed, each at the start of a word, ignoring case, so a few letters find a setting without matching inside words: "upd" finds General, by "Check for updates", and "dates" finds nothing. The shown page stays while it is kept; otherwise the first kept page shows, and when none is kept, the page area says "No setting matches the search." A setting that Apply refuses shows its page, and empties the search when the search left that page out. On every page, a caption that holds a word of the search shows in bold, because the page list says only which page holds the setting; a page's heading keeps its own font.
 
 - **The settings change what Gozler does, never how it looks.** The look follows File Explorer and Windows ("Look"), because the owner does not want appearance settings. An option of Everything comes in only when it changes what Gozler finds or does, and Gozler does not already decide it (see "Not planned").
-- **General, Search and Keyboard are the person's settings,** saved in their `ui.json`. Index shows the service's state, which one service keeps for every user of the PC, so anyone can read it without administrator permission. The service settings that change what the index holds wait for their own plan (`docs/plans/service-settings.md`).
-- The dialog edits its own copy of the settings (window rule 1). While it runs, Windows disables the main window and the accelerators do not run, but replies still reach the main window, which handles them as usual. Apply and OK check the input (see "Dialogs"), then give the copy to the model and save it. The Index page tells the model when it is shown or hidden, so the main window's status poll serves it, and the page keeps its own 2-second timer only to show the model's latest status.
+- **General, Search, File Explorer and Keyboard are the person's settings,** saved in their `ui.json`. Drives and service shows the service's state, which one service keeps for every user of the PC, so anyone can read it without administrator permission. The service settings that change what the index holds wait for their own plan (`docs/plans/service-settings.md`).
+- The dialog edits its own copy of the settings (window rule 1). While it runs, Windows disables the main window and the accelerators do not run, but replies still reach the main window, which handles them as usual. Apply and OK check the input (see "Dialogs"), then give the copy to the model and save it. The Drives and service page tells the model when it is shown or hidden, so the main window's status poll serves it, and the page keeps its own 2-second timer only to show the model's latest status.
 
 | Page | Group | Setting | Default |
 | --- | --- | --- | --- |
@@ -492,16 +496,17 @@ File > Settings… opens a dialog with a page list on the left and the page on t
 | | Starting and closing | Start Gozler when I sign in to Windows | off |
 | | | Check for updates when Gozler starts | off |
 | | | Keep Gozler running in the notification area when I close its window | on, as in Everything |
-| | File Explorer | Show "Search with Gozler" on folders | off |
-| | | Open folders, Open files, Open file location: each an edit box with Browse… | empty |
-| | | Use Total &Commander: a button | — |
+| | | Allow only one Gozler window at a time | on |
 | Search | Search box | Search as you type | on; off, `Enter` runs the search |
 | | | Show every file and folder when the search is empty | on, as in Everything; off, the empty search shows nothing (`S6`) |
 | | | Select the search text when I click the search box | on |
 | | | Select the search text when Gozler is activated | off |
-| Keyboard | Show Gozler | Shortcut to show Gozler from any program: a hotkey control and a "Windows key" check box | none |
+| File Explorer | — | Show "Search with Gozler" on folders | off |
+| | Open with | Open folders, Open files, Open file location: each an edit box with Browse… | empty |
+| | | Use Total &Commander: a button | — |
+| Keyboard | Show Gozler | Shortcut to show Gozler from any program: a hotkey control, a "Windows key" check box and Clear, which removes the shortcut as `Backspace` in the box does | none |
 | | Commands | Show commands containing; the list of commands; Shortcuts for the selected command, with Add…, Edit… and Remove | the defaults of "Commands" |
-| Index | Drives | each fixed NTFS or ReFS drive, with its state and its entry count | — |
+| Drives and service | Drives | each fixed NTFS or ReFS drive, with its state and its entry count | — |
 | | What the index holds | names, sizes, folder sizes, dates modified and attributes: always held, because the search, the filters and the Size column need them | — |
 | | Service | the service's state and memory, and `gozler --status` for the full report | — |
 
@@ -511,7 +516,13 @@ File > Settings… opens a dialog with a page list on the left and the page on t
 
 - **Keep Gozler running in the notification area** decides what Close does and whether the shortcut works after the window closes (see "Window lifetime").
 - **Start at sign-in** writes the `gozler` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, `"<this gozler-ui.exe>" --sign-in`, which starts Gozler as "Window lifetime" says. The check box shows on only when that value exists and Windows has not turned it off: Task Manager's Startup apps page and Windows Settings turn an entry off without removing it, by a `gozler` value under `...\Explorer\StartupApproved\Run` whose first byte is odd. That format is not documented; Task Manager writes 2 for on and 3 for off. Turning the check box on deletes that value, and off deletes both. The registry is the only copy, so the check box and Task Manager never disagree. Uninstalling Gozler removes both values.
+- **Allow only one Gozler window at a time** decides what a second start does (see "Window lifetime").
 - **Check for updates** asks `https://api.github.com/repos/SynoSoftware/goz/releases/latest` with WinHTTP, from its own thread, at most once a day when Gozler starts. A newer tag shows in status part 4, and a click opens the release page; Gozler never downloads or installs anything. A failed request is ignored, because no update is worth a message. Off, Gozler makes no network request.
+
+### The File Explorer page
+
+The page holds how Gozler works with File Explorer and the programs that open what it finds, as Everything's Context Menu page does, apart from General, so each page has room for its settings.
+
 - **"Search with Gozler" on folders** writes the `gozler` verb under `HKCU\Software\Classes\Directory\shell` and `...\Directory\Background\shell`, with the command `"<this gozler-ui.exe>" --location "%V"`, which opens Gozler with Location set to that folder; a running Gozler takes the folder over. Off, and uninstalling Gozler, remove it.
 - **The three open commands,** as on Everything's Context Menu page: Open folders runs for Open (`C1`) on a folder, Open files for Open on a file, and Open file location for `C2`. A person who browses with another file manager, such as Total Commander, sets them, so Gozler opens everything there. An empty command does what File Explorer does: a folder opens in File Explorer, a file starts its default program, and Open file location opens the folder with the entry selected. Each empty box shows that as its cue, so the person sees what happens without a separate choice. In a command, `%1` is the entry's full path, as in Everything and Windows' own commands, so a command copied from inside Everything's `$exec(...)` works as it is. With several entries selected, the command runs once for each. A line under the three boxes says what `%1` is and what an empty box does.
 - **Browse…** opens the Windows file dialog for programs and writes the chosen program in quotes, followed by ` "%1"`. The three buttons have no access key, because one letter cannot name three buttons; Tab reaches them.
@@ -530,7 +541,7 @@ The page has two parts, as Everything's Keyboard page has: the one shortcut that
 - **A command shortcut needs `Ctrl`, `Alt` or a function key.** `Alt` with a letter or a digit is refused, because those keys open the menus and reach the window's controls ("Words"), and a key with neither `Ctrl` nor `Alt` is refused unless it is a function key, because the search box needs it for typing. A shortcut that another command has is refused with that command's name, so two commands never share one. Keys that belong to a control keep their meaning and are refused: `Tab`, `Enter`, `Esc`, `Shift+F10`, `Alt+F4`, `Ctrl+V`, `Ctrl+X`, `Ctrl+Z`, and `Ctrl` with an arrow, `Home`, `End`, `Page Up`, `Page Down`, `Backspace` or `Delete`.
 - **The menus show the person's shortcuts,** so what a menu says is always what the key does. Restore defaults gives every command its default keys again.
 
-### The Index page
+### The Drives and service page
 
 - The drive list shows each fixed NTFS or ReFS drive by its mount prefix and label, such as "C:\ Windows", with its state and its entry count. A live drive whose size and date pass failed or stopped reads "Live, some sizes and dates unknown". Removable drives, network drives and other filesystems are not in the list, because the daemon does not index them (see "Index coherence").
 - The page refreshes its states and counts every 2 seconds while it is shown.

@@ -3082,12 +3082,12 @@ try {
         }
         else {
             $dialog = Open-Settings $window
-            $openFolders = Dialog-Control $dialog 'IDC_GENERAL_OPEN_FOLDERS' 'Edit'
-            $openFiles = Dialog-Control $dialog 'IDC_GENERAL_OPEN_FILES' 'Edit'
-            $openLocation = Dialog-Control $dialog 'IDC_GENERAL_OPEN_LOCATION' 'Edit'
+            $openFolders = Dialog-Control $dialog 'IDC_FILE_EXPLORER_OPEN_FOLDERS' 'Edit'
+            $openFiles = Dialog-Control $dialog 'IDC_FILE_EXPLORER_OPEN_FILES' 'Edit'
+            $openLocation = Dialog-Control $dialog 'IDC_FILE_EXPLORER_OPEN_LOCATION' 'Edit'
             $newer = Join-Path $files 'tools\totalcmd\TOTALCMD64.EXE'
             $tcExpected = "`"$newer`" /O /A /P=L /L=`"%1`""
-            Click-Button $dialog 'IDC_GENERAL_TOTAL_COMMANDER'
+            Click-Button $dialog 'IDC_FILE_EXPLORER_TOTAL_COMMANDER'
             $filled = Wait-Until { [GozlerProbe.Win]::ControlText($openFolders) -eq $tcExpected } 15
             $boxes = [ordered]@{
                 open_folders = [GozlerProbe.Win]::ControlText($openFolders)
@@ -3108,8 +3108,8 @@ try {
             else {
                 Remove-Item -LiteralPath (Join-Path $files 'tools') -Recurse -Force
                 $gone = Wait-Until { -not @(& $gozler -n 5 'file:' 'totalcmd*.exe' 2>$null) } 60
-                Click-Button $dialog 'IDC_GENERAL_TOTAL_COMMANDER'
-                $noneText = Caption 'settings_general.no_total_commander'
+                Click-Button $dialog 'IDC_FILE_EXPLORER_TOTAL_COMMANDER'
+                $noneText = Caption 'settings_file_explorer.no_total_commander'
                 $balloon, $tip = Wait-Balloon $window $noneText
                 if ($tip) { Save-Balloon $dialog $tip 'settings-no-total-commander-en' }
                 $kept = [GozlerProbe.Win]::ControlText($openFolders) -eq $tcExpected

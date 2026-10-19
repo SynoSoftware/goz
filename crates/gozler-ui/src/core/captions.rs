@@ -22,6 +22,7 @@ use super::query::{
 };
 use super::results::{LIST_LIMIT, ListMessage, Shown};
 use super::selection::{FolderContents, Selection, Sums};
+use super::settings::SettingsPage;
 use super::text::{self, Numbers, Strings};
 use gozler_client::NotRunning;
 use gozler_core::proto::ResultItem;
@@ -34,6 +35,7 @@ pub(crate) struct WindowCaptions {
     pub(crate) title: String,
     pub(crate) menu_bar: Vec<MenuNode>,
     pub(crate) search_cue: String,
+    pub(crate) clear_search: String,
     pub(crate) match_label: String,
     /// In [`MatchMode::ALL`]'s order.
     pub(crate) match_modes: [String; 5],
@@ -342,7 +344,12 @@ impl CaptionTable {
             DialogId::Settings => CaptionTable {
                 title: "settings.title",
                 keyed: &[(Control(C::SettingsApply), "settings.apply")],
-                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+                plain: &[
+                    (Control(C::SettingsNoMatch), "settings.no_match"),
+                    (Control(C::SettingsClearSearch), "button.clear"),
+                    (Ok, "button.ok"),
+                    (Cancel, "button.cancel"),
+                ],
             },
             DialogId::SettingsGeneral => CaptionTable {
                 title: "settings.general",
@@ -357,52 +364,62 @@ impl CaptionTable {
                         Control(C::GeneralKeepRunning),
                         "settings_general.keep_running",
                     ),
-                    (
-                        Control(C::GeneralSearchWith),
-                        "settings_general.search_with",
-                    ),
-                    (
-                        Control(C::GeneralOpenFoldersLabel),
-                        "settings_general.open_folders",
-                    ),
-                    (
-                        Control(C::GeneralOpenFilesLabel),
-                        "settings_general.open_files",
-                    ),
-                    (
-                        Control(C::GeneralOpenLocationLabel),
-                        "settings_general.open_file_location",
-                    ),
-                    (
-                        Control(C::GeneralTotalCommander),
-                        "settings_general.total_commander",
-                    ),
+                    (Control(C::GeneralOneWindow), "settings_general.one_window"),
                     (Control(C::GeneralRestore), "settings.restore_defaults"),
                 ],
                 plain: &[
                     (Control(C::GeneralHeading), "settings.general"),
                     (Control(C::GeneralStarting), "settings_general.starting"),
+                ],
+            },
+            DialogId::SettingsFileExplorer => CaptionTable {
+                title: "settings.file_explorer",
+                keyed: &[
                     (
-                        Control(C::GeneralFileExplorer),
-                        "settings_general.file_explorer",
+                        Control(C::FileExplorerSearchWith),
+                        "settings_file_explorer.search_with",
+                    ),
+                    (
+                        Control(C::FileExplorerOpenFoldersLabel),
+                        "settings_file_explorer.open_folders",
+                    ),
+                    (
+                        Control(C::FileExplorerOpenFilesLabel),
+                        "settings_file_explorer.open_files",
+                    ),
+                    (
+                        Control(C::FileExplorerOpenLocationLabel),
+                        "settings_file_explorer.open_file_location",
+                    ),
+                    (
+                        Control(C::FileExplorerTotalCommander),
+                        "settings_file_explorer.total_commander",
+                    ),
+                    (Control(C::FileExplorerRestore), "settings.restore_defaults"),
+                ],
+                plain: &[
+                    (Control(C::FileExplorerHeading), "settings.file_explorer"),
+                    (
+                        Control(C::FileExplorerOpenGroup),
+                        "settings_file_explorer.open_with",
                     ),
                     // One letter cannot name three buttons (DESIGN.md: The
-                    // General page).
+                    // File Explorer page).
                     (
-                        Control(C::GeneralOpenFoldersBrowse),
-                        "settings_general.browse",
+                        Control(C::FileExplorerOpenFoldersBrowse),
+                        "settings_file_explorer.browse",
                     ),
                     (
-                        Control(C::GeneralOpenFilesBrowse),
-                        "settings_general.browse",
+                        Control(C::FileExplorerOpenFilesBrowse),
+                        "settings_file_explorer.browse",
                     ),
                     (
-                        Control(C::GeneralOpenLocationBrowse),
-                        "settings_general.browse",
+                        Control(C::FileExplorerOpenLocationBrowse),
+                        "settings_file_explorer.browse",
                     ),
                     (
-                        Control(C::GeneralCommandHint),
-                        "settings_general.command_hint",
+                        Control(C::FileExplorerCommandHint),
+                        "settings_file_explorer.command_hint",
                     ),
                 ],
             },
@@ -446,6 +463,7 @@ impl CaptionTable {
                 ],
                 plain: &[
                     (Control(C::KeyboardHeading), "settings.keyboard"),
+                    (Control(C::KeyboardClear), "button.clear"),
                     (
                         Control(C::KeyboardShowGroup),
                         "settings_keyboard.show_gozler",
@@ -492,6 +510,7 @@ impl CaptionTable {
         match dialog {
             DialogId::SettingsGeneral
             | DialogId::SettingsSearch
+            | DialogId::SettingsFileExplorer
             | DialogId::SettingsKeyboard
             | DialogId::SettingsIndex => Some(DialogId::Settings),
             DialogId::About
@@ -582,6 +601,65 @@ pub(crate) struct DialogCaptions {
     pub(crate) items: Vec<(u16, String)>,
 }
 
+/// The Settings pages, in their order, whose name and captions hold every
+/// word of `search` at the start of one of their words, ignoring case, so
+/// "upd" finds "Check for updates" and "dates" does not (DESIGN.md:
+/// Settings dialog). An empty search keeps every page.
+pub(crate) fn settings_pages_matching(strings: &Strings, search: &str) -> Vec<SettingsPage> {
+    let terms = words(search);
+    SettingsPage::ALL
+        .into_iter()
+        .filter(|page| {
+            let table = CaptionTable::of(page.dialog());
+            let page_words: Vec<String> = std::iter::once(page.label())
+                .chain(table.keyed.iter().chain(table.plain).map(|(_, key)| *key))
+                .flat_map(|key| words(strings.text(key)))
+                .collect();
+            terms.iter().all(|term| starts_a_word(&page_words, term))
+        })
+        .collect()
+}
+
+/// Each control of `page` with a caption, and whether that caption holds a
+/// word of `search` at the start of one of its words, so the dialog shows
+/// what the search found in bold (DESIGN.md: Settings dialog).
+pub(crate) fn settings_page_hits(
+    strings: &Strings,
+    page: SettingsPage,
+    search: &str,
+) -> Vec<(ControlId, bool)> {
+    let terms = words(search);
+    let table = CaptionTable::of(page.dialog());
+    table
+        .keyed
+        .iter()
+        .chain(table.plain)
+        .filter_map(|(item, key)| match item {
+            DialogItem::Control(control) => {
+                let caption = words(strings.text(key));
+                let hit = terms.iter().any(|term| starts_a_word(&caption, term));
+                Some((*control, hit))
+            }
+            DialogItem::Ok | DialogItem::Cancel => None,
+        })
+        .collect()
+}
+
+/// Whether one of `words` starts with `term`.
+fn starts_a_word(words: &[String], term: &str) -> bool {
+    words.iter().any(|word| word.starts_with(term))
+}
+
+/// The words of `text` in lower case: its runs of letters and digits. An
+/// access key's `&` joins the letters around it, as in "f&iles".
+fn words(text: &str) -> Vec<String> {
+    text.replace('&', "")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
 impl DialogCaptions {
     pub(crate) fn new(dialog: DialogId, strings: &Strings) -> DialogCaptions {
         let table = CaptionTable::of(dialog);
@@ -622,6 +700,7 @@ impl WindowCaptions {
             title: title(model),
             menu_bar: commands::render(&commands::menu_bar(), strings, &model.choices().shortcuts),
             search_cue: strings.text("search.cue").to_owned(),
+            clear_search: strings.text("button.clear").to_owned(),
             match_label: strings.text("match.label").to_owned(),
             match_modes: MatchMode::ALL.map(|m| strings.text(m.label()).to_owned()),
             match_case: strings.text("match.case").to_owned(),
@@ -1070,7 +1149,10 @@ pub(crate) fn failure_text(strings: &Strings, failure: &DaemonFailure) -> String
         },
         DaemonFailure::NotReady => strings.text("failure.not_ready").to_owned(),
         DaemonFailure::NotGozler => strings.text("failure.not_gozler").to_owned(),
-        DaemonFailure::TooOld => strings.text("failure.too_old").to_owned(),
+        DaemonFailure::TooOld {
+            update_from: Some(_),
+        } => strings.text("failure.too_old_update").to_owned(),
+        DaemonFailure::TooOld { update_from: None } => strings.text("failure.too_old").to_owned(),
         DaemonFailure::Refused { detail } => strings.format("failure.refused", &[detail]),
         DaemonFailure::Lost => strings.text("failure.lost").to_owned(),
     }
@@ -1148,6 +1230,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A search that matched inside a word would keep pages the person did
+    /// not mean, and one that needed the words in order would drop pages
+    /// they did.
+    #[test]
+    fn a_settings_search_matches_the_start_of_words() {
+        let strings = Strings::load(&LANGUAGES[0]);
+        let pages = |search| settings_pages_matching(&strings, search);
+        assert_eq!(pages("UPD"), [SettingsPage::General]);
+        assert!(pages("pdates").is_empty());
+        assert_eq!(pages("fil open"), [SettingsPage::FileExplorer]);
+        assert_eq!(pages(" "), SettingsPage::ALL);
+        let bold: Vec<ControlId> = settings_page_hits(&strings, SettingsPage::General, "upd start")
+            .into_iter()
+            .filter_map(|(control, hit)| hit.then_some(control))
+            .collect();
+        assert_eq!(
+            bold,
+            [
+                ControlId::GeneralSignIn,
+                ControlId::GeneralUpdates,
+                ControlId::GeneralStarting
+            ]
+        );
     }
 
     /// An attribute letter without a word is left out of the inspector, and

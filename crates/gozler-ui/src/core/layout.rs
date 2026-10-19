@@ -202,6 +202,7 @@ impl Default for Panes {
 /// the current language, font and DPI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CaptionWidths {
+    clear_search: Px,
     match_label: Px,
     match_modes: Px,
     match_case: Px,
@@ -241,6 +242,7 @@ impl CaptionWidths {
         let widest = |texts: &[String]| texts.iter().map(|t| measure(t)).max().unwrap_or_default();
         let filters = &captions.filters;
         CaptionWidths {
+            clear_search: measure(&captions.clear_search),
             match_label: measure(&captions.match_label),
             match_modes: widest(&captions.match_modes),
             match_case: measure(&captions.match_case),
@@ -688,6 +690,7 @@ impl InspectorLayout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
     pub(crate) search: Rect,
+    pub(crate) clear_search: Rect,
     pub(crate) match_label: Rect,
     pub(crate) match_mode: Rect,
     pub(crate) match_case: Rect,
@@ -724,8 +727,8 @@ impl Layout {
         let check_height = font_height + px(CHECK_BOX_PADDING);
         let centred = |height: Px| margin + Px((control_height.0 - height.0) / 2);
 
-        // The strip, from the right edge: the match controls keep their
-        // measured widths and the search box takes the rest.
+        // The strip, from the right edge: the match controls and Clear keep
+        // their measured widths and the search box takes the rest.
         let mut right = client.width - margin;
         let mut place_left = |width: Px, y: Px, height: Px| {
             let rect = Rect {
@@ -753,6 +756,11 @@ impl Layout {
             control_height,
         );
         let match_label = place_left(captions.match_label, centred(font_height), font_height);
+        let clear_search = place_left(
+            button_width(captions.clear_search, dpi),
+            margin,
+            control_height,
+        );
         let search = Rect {
             x: margin,
             y: margin,
@@ -761,9 +769,15 @@ impl Layout {
         };
         let strip_width = margin
             + px(SEARCH_MIN_WIDTH)
-            + [match_label, match_mode, match_case, match_path]
-                .iter()
-                .fold(Px(0), |sum, r| sum + related + r.width)
+            + [
+                clear_search,
+                match_label,
+                match_mode,
+                match_case,
+                match_path,
+            ]
+            .iter()
+            .fold(Px(0), |sum, r| sum + related + r.width)
             + margin;
 
         // The body, between the strip and the status bar.
@@ -844,6 +858,7 @@ impl Layout {
         };
         Layout {
             search,
+            clear_search,
             match_label,
             match_mode,
             match_case,
@@ -945,6 +960,7 @@ mod tests {
                         );
                         let mut controls = vec![
                             layout.search,
+                            layout.clear_search,
                             layout.match_label,
                             layout.match_mode,
                             layout.match_case,

@@ -107,6 +107,7 @@ struct UpdateCheck {
 /// with the window.
 struct Controls {
     search: Edit,
+    clear_search: Button,
     match_label: Label,
     match_mode: DropDownList,
     match_case: CheckBox,
@@ -127,6 +128,7 @@ impl Controls {
     fn create(parent: Hwnd) -> windows::core::Result<Controls> {
         let controls = Controls {
             search: Edit::create(parent, ControlId::Search.id())?,
+            clear_search: Button::create(parent, ControlId::ClearSearch.id())?,
             // The label comes right before its list, so its access key
             // focuses the list (DESIGN.md: C19).
             match_label: Label::create(parent, ControlId::MatchLabel.id())?,
@@ -144,6 +146,8 @@ impl Controls {
             status: StatusBar::create(parent, ControlId::Status.id())?,
         };
         controls.message.hwnd().set_visible(false);
+        // The search box starts empty; its changes enable Clear.
+        controls.clear_search.hwnd().set_enabled(false);
         for button in controls.message_buttons {
             button.hwnd().set_visible(false);
         }
@@ -155,6 +159,7 @@ impl Controls {
     fn apply_fonts(&self, fonts: &Fonts) {
         let controls = [
             self.search.hwnd(),
+            self.clear_search.hwnd(),
             self.match_label.hwnd(),
             self.match_mode.hwnd(),
             self.match_case.hwnd(),
@@ -444,8 +449,21 @@ struct Created {
     large_images: Option<ImageList>,
 }
 
+/// Which Gozler of the session a window is (DESIGN.md: Window lifetime).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Instance {
+    /// The first: it has the tray icon and the shortcut to show Gozler, and
+    /// checks for updates.
+    First,
+    /// A later start while "Allow only one Gozler window" is off: Close
+    /// ends it, and it saves only what Settings applies, so closing it
+    /// never undoes a setting that another window saved.
+    Another,
+}
+
 pub(crate) struct MainWindow {
     created: OnceCell<Created>,
+    instance: Instance,
     model: RefCell<Model>,
     numbers: RefCell<WindowsNumbers>,
     menus: Vec<Menu>,
@@ -510,6 +528,7 @@ impl MainWindow {
         model: Model,
         settings_file: PathBuf,
         show_message: u32,
+        instance: Instance,
         sign_in: bool,
     ) -> (Hwnd, Rc<MainWindow>) {
         let placement = model.placement();
@@ -517,6 +536,7 @@ impl MainWindow {
             accelerator_table(&model.choices().shortcuts).expect("the accelerator table builds");
         let window = Rc::new(MainWindow {
             created: OnceCell::new(),
+            instance,
             model: RefCell::new(model),
             numbers: RefCell::new(WindowsNumbers::new()),
             menus: commands::menu_bar(),
@@ -552,9 +572,11 @@ impl MainWindow {
         // the first search (DESIGN.md: Requests).
         window.search(hwnd);
         window.ask_status();
-        window.register_saved_shortcut(hwnd);
+        if instance == Instance::First {
+            window.register_saved_shortcut(hwnd);
+            window.check_for_updates(hwnd);
+        }
         window.update_tray(hwnd);
-        window.check_for_updates(hwnd);
         let keeps_running = window.model.borrow().choices().keep_running;
         // Showing the window activates it, and WM_ACTIVATE focuses the
         // search box.
@@ -662,6 +684,10 @@ impl MainWindow {
         hwnd.set_text(&captions.title);
         let _ = win::menu::replace_menu_bar(hwnd, &captions.menu_bar);
         controls.search.set_cue(&captions.search_cue);
+        controls
+            .clear_search
+            .hwnd()
+            .set_text(&captions.clear_search);
         controls.match_label.hwnd().set_text(&captions.match_label);
         let mode = self.match_mode_index();
         let modes = captions.match_modes.each_ref().map(String::as_str);
@@ -932,6 +958,7 @@ impl MainWindow {
             &panes,
         );
         controls.search.hwnd().set_rect(layout.search);
+        controls.clear_search.hwnd().set_rect(layout.clear_search);
         controls.match_label.hwnd().set_rect(layout.match_label);
         // A drop-down list's height includes its open list.
         controls.match_mode.hwnd().set_rect(Rect {
@@ -1529,7 +1556,13 @@ impl MainWindow {
         let matching = || self.model.borrow().matching();
         let accepted = if controls.search.changed(event) {
             let text = controls.search.text();
+            controls.clear_search.hwnd().set_enabled(!text.is_empty());
             self.model.borrow_mut().set_typed_search(text)
+        } else if controls.clear_search.clicked(event) {
+            // As Esc in the search box does; the box's change runs the search.
+            controls.search.hwnd().set_text("");
+            controls.search.hwnd().focus();
+            return;
         } else if controls.match_mode.selection_changed(event) {
             let Some(mode) = controls
                 .match_mode
@@ -2097,7 +2130,7 @@ impl MainWindow {
     /// notification area, the first time with a notification that says so,
     /// and exits otherwise (DESIGN.md: Window lifetime).
     fn close(&self, hwnd: Hwnd) {
-        if !self.model.borrow().choices().keep_running {
+        if self.instance == Instance::Another || !self.model.borrow().choices().keep_running {
             return self.exit(hwnd);
         }
         hwnd.hide();
@@ -2123,14 +2156,18 @@ impl MainWindow {
 
     /// Saves the settings and ends Gozler (DESIGN.md: C7, T14).
     fn exit(&self, hwnd: Hwnd) {
-        self.save_settings(hwnd, true);
+        if self.instance == Instance::First {
+            self.save_settings(hwnd, true);
+        }
         hwnd.destroy();
     }
 
     /// Adds the tray icon while Gozler keeps running in the notification
-    /// area, and removes it otherwise (DESIGN.md: Window lifetime).
+    /// area, and removes it otherwise; another window has none (DESIGN.md:
+    /// Window lifetime).
     fn update_tray(&self, hwnd: Hwnd) {
-        let keeps_running = self.model.borrow().choices().keep_running;
+        let keeps_running =
+            self.instance == Instance::First && self.model.borrow().choices().keep_running;
         if keeps_running == self.tray.borrow().is_some() {
             return;
         }
@@ -2290,7 +2327,9 @@ impl MainWindow {
         last: &SettingsValues,
     ) -> Result<Applied, String> {
         let shortcut = edited.choices.show_shortcut;
-        if shortcut != last.choices.show_shortcut {
+        // Another window saves the shortcut for the first window's next
+        // start, because the first window holds it.
+        if self.instance == Instance::First && shortcut != last.choices.show_shortcut {
             // The new shortcut is registered before the old one goes, so a
             // refusal leaves the old one working.
             let registration = match shortcut {
@@ -2308,7 +2347,7 @@ impl MainWindow {
             .model
             .borrow()
             .strings()
-            .text("settings_general.verb")
+            .text("settings_file_explorer.verb")
             .to_owned();
         let values = SettingsValues {
             choices: edited.choices.clone(),
@@ -2320,7 +2359,7 @@ impl MainWindow {
             ),
             search_with_gozler: self.write_registry(
                 (edited.search_with_gozler, last.search_with_gozler),
-                "settings_general.search_with",
+                "settings_file_explorer.search_with",
                 &mut failures,
                 |program| shell::set_search_with(edited.search_with_gozler, program, &verb),
             ),
@@ -2776,7 +2815,9 @@ impl WindowProc for MainWindow {
             }
             Message::SettingChange { .. } => None,
             Message::EndSession { ending: true } => {
-                self.save_settings(hwnd, false);
+                if self.instance == Instance::First {
+                    self.save_settings(hwnd, false);
+                }
                 Some(LRESULT(0))
             }
             Message::EndSession { .. } => None,

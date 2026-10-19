@@ -14,7 +14,7 @@ use crate::core::model::Model;
 use crate::core::settings::Settings;
 use crate::core::text::{LANGUAGES, Language, Strings};
 use crate::win;
-use main_window::MainWindow;
+use main_window::{Instance, MainWindow};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -42,17 +42,22 @@ pub(crate) fn run() {
         .unwrap_or_default();
     let window_class = format!("{WINDOW_CLASS}{suffix}");
     let show_message = win::instance::register_message(SHOW_MESSAGE);
-    let Some(_instance) = win::instance::claim(&format!("{INSTANCE_MUTEX}{suffix}"))
-        .expect("a named mutex can be created")
-    else {
-        win::instance::hand_over(&window_class, show_message, arguments.location.as_deref());
-        return;
+    let settings_file = data_dir.join("ui.json");
+    let settings = Settings::load(&settings_file);
+    let first = win::instance::claim(&format!("{INSTANCE_MUTEX}{suffix}"))
+        .expect("a named mutex can be created");
+    let instance = match first {
+        Some(_) => Instance::First,
+        // A start at sign-in never opens a second window.
+        None if settings.choices.one_window || arguments.sign_in => {
+            win::instance::hand_over(&window_class, show_message, arguments.location.as_deref());
+            return;
+        }
+        None => Instance::Another,
     };
     win::shell::initialize_com();
     win::controls::initialize();
 
-    let settings_file = data_dir.join("ui.json");
-    let settings = Settings::load(&settings_file);
     let language = settings
         .choices
         .language
@@ -72,6 +77,7 @@ pub(crate) fn run() {
         model,
         settings_file,
         show_message,
+        instance,
         arguments.sign_in,
     );
     win::window::run_message_loop(hwnd, &|| window.accelerators());

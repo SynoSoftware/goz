@@ -3,6 +3,7 @@
 //! format, so renaming one needs a migration. A value that is missing or
 //! damaged falls back to its default, and every other value still loads.
 
+use super::ids::DialogId;
 use super::layout::{Dip, Panes};
 use super::model::Column;
 use super::query::{Filters, Matching};
@@ -44,6 +45,10 @@ pub(crate) struct Choices {
     /// notification area (DESIGN.md: Window lifetime).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) keep_running: bool,
+    /// Starting Gozler again brings the open window forward; off, it opens
+    /// another window (DESIGN.md: Window lifetime).
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) one_window: bool,
     /// The open commands; empty does what File Explorer does (DESIGN.md: The
     /// General page).
     #[serde(default, deserialize_with = "or_default")]
@@ -78,6 +83,7 @@ impl Default for Choices {
             language: LanguageChoice::Windows,
             check_for_updates: false,
             keep_running: on(),
+            one_window: on(),
             open_folders: String::new(),
             open_files: String::new(),
             open_file_location: String::new(),
@@ -105,6 +111,7 @@ pub(crate) struct SettingsValues {
 pub(crate) enum SettingsPage {
     General,
     Search,
+    FileExplorer,
     Keyboard,
     /// The service's index, which the page shows and does not change yet
     /// (DESIGN.md: Settings dialog).
@@ -112,18 +119,31 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) const ALL: [SettingsPage; 4] = [
+    pub(crate) const ALL: [SettingsPage; 5] = [
         SettingsPage::General,
         SettingsPage::Search,
+        SettingsPage::FileExplorer,
         SettingsPage::Keyboard,
         SettingsPage::Index,
     ];
+
+    /// Its child-dialog template.
+    pub(crate) fn dialog(self) -> DialogId {
+        match self {
+            SettingsPage::General => DialogId::SettingsGeneral,
+            SettingsPage::Search => DialogId::SettingsSearch,
+            SettingsPage::FileExplorer => DialogId::SettingsFileExplorer,
+            SettingsPage::Keyboard => DialogId::SettingsKeyboard,
+            SettingsPage::Index => DialogId::SettingsIndex,
+        }
+    }
 
     /// Its name in the page list and its heading.
     pub(crate) fn label(self) -> &'static str {
         match self {
             SettingsPage::General => "settings.general",
             SettingsPage::Search => "settings.search",
+            SettingsPage::FileExplorer => "settings.file_explorer",
             SettingsPage::Keyboard => "settings.keyboard",
             SettingsPage::Index => "settings.index",
         }
@@ -141,17 +161,20 @@ impl SettingsValues {
                 choices.language = defaults.language;
                 choices.check_for_updates = defaults.check_for_updates;
                 choices.keep_running = defaults.keep_running;
-                choices.open_folders = defaults.open_folders;
-                choices.open_files = defaults.open_files;
-                choices.open_file_location = defaults.open_file_location;
+                choices.one_window = defaults.one_window;
                 self.start_at_sign_in = false;
-                self.search_with_gozler = false;
             }
             SettingsPage::Search => {
                 choices.search_as_you_type = defaults.search_as_you_type;
                 choices.show_all_when_empty = defaults.show_all_when_empty;
                 choices.select_on_click = defaults.select_on_click;
                 choices.select_on_activate = defaults.select_on_activate;
+            }
+            SettingsPage::FileExplorer => {
+                choices.open_folders = defaults.open_folders;
+                choices.open_files = defaults.open_files;
+                choices.open_file_location = defaults.open_file_location;
+                self.search_with_gozler = false;
             }
             SettingsPage::Keyboard => {
                 choices.show_shortcut = defaults.show_shortcut;
@@ -428,7 +451,7 @@ mod tests {
         assert!(draft.edited.choices.search_as_you_type);
         assert_eq!(
             draft.edited.choices.open_files, "notepad %1",
-            "General keeps"
+            "File Explorer keeps"
         );
         assert!(draft.edited.start_at_sign_in);
         assert!(draft.can_apply());
@@ -439,8 +462,10 @@ mod tests {
         draft.edited.choices.search_as_you_type = true;
         assert!(!draft.can_apply(), "a value changed back is no change");
         draft.edited.restore_defaults(SettingsPage::General);
-        assert_eq!(draft.edited.choices.open_files, "");
         assert!(!draft.edited.start_at_sign_in);
+        assert_eq!(draft.edited.choices.open_files, "notepad %1");
+        draft.edited.restore_defaults(SettingsPage::FileExplorer);
+        assert_eq!(draft.edited.choices.open_files, "");
     }
 
     /// A file another version or a person edited must not lose every

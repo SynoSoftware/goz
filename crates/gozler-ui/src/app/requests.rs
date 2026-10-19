@@ -265,7 +265,7 @@ fn failure(error: ClientError) -> DaemonFailure {
         ClientError::NotRunning(why) => DaemonFailure::NotRunning(why),
         ClientError::NotReady => DaemonFailure::NotReady,
         ClientError::Untrusted => DaemonFailure::NotGozler,
-        ClientError::TooOld => DaemonFailure::TooOld,
+        ClientError::TooOld { update_from } => DaemonFailure::TooOld { update_from },
         ClientError::Refused { message, .. } => DaemonFailure::Refused { detail: message },
         ClientError::Communication(_) | ClientError::Lost | ClientError::Cancelled => {
             DaemonFailure::Lost

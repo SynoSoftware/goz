@@ -238,8 +238,11 @@ pub(crate) enum DaemonFailure {
     NotReady,
     /// The pipe's server is not the elevated gozler service.
     NotGozler,
-    /// The service is older than the window.
-    TooOld,
+    /// The service is older than the window; `update_from` is the folder of
+    /// a gozlerd.exe beside the window that can replace it.
+    TooOld {
+        update_from: Option<PathBuf>,
+    },
     /// The service refused the request; `detail` is its English text.
     Refused {
         detail: String,
@@ -249,14 +252,16 @@ pub(crate) enum DaemonFailure {
 
 impl DaemonFailure {
     /// Whether the failure ends by itself, so the window asks for status
-    /// until the service answers. A refused request, a failed owner check
-    /// and an older service fail the same way again.
+    /// until the service answers. An older service ends when its update
+    /// runs; a refused request and a failed owner check fail the same way
+    /// again.
     pub(crate) fn recovers(&self) -> bool {
         match self {
-            DaemonFailure::NotRunning(_) | DaemonFailure::NotReady | DaemonFailure::Lost => true,
-            DaemonFailure::NotGozler | DaemonFailure::TooOld | DaemonFailure::Refused { .. } => {
-                false
-            }
+            DaemonFailure::NotRunning(_)
+            | DaemonFailure::NotReady
+            | DaemonFailure::TooOld { .. }
+            | DaemonFailure::Lost => true,
+            DaemonFailure::NotGozler | DaemonFailure::Refused { .. } => false,
         }
     }
 }

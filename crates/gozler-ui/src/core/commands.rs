@@ -1009,6 +1009,9 @@ mod tests {
                 Fix::Repair(Repair::InstallService {
                     folder: Default::default(),
                 }),
+                Fix::Repair(Repair::UpdateService {
+                    folder: Default::default(),
+                }),
                 Fix::Repair(Repair::Download),
                 Fix::OpenServices,
             ];

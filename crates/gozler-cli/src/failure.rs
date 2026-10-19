@@ -57,7 +57,7 @@ impl Failure {
                 ClientError::NotRunning(_) => ExitCode::DaemonNotRunning,
                 ClientError::NotReady
                 | ClientError::Communication(_)
-                | ClientError::TooOld
+                | ClientError::TooOld { .. }
                 | ClientError::Lost => ExitCode::Communication,
                 ClientError::Untrusted => ExitCode::Untrusted,
                 ClientError::Refused { code, .. } => match code {
@@ -117,7 +117,7 @@ impl Failure {
                          SYSTEM/Administrators), so gozler did not send the query. If this is \
                          expected, pass --insecure-no-server-check.",
                     ),
-                    ClientError::TooOld => line(
+                    ClientError::TooOld { .. } => line(
                         "the running gozlerd is older than this client; install the matching \
                          gozlerd",
                     ),
@@ -174,6 +174,7 @@ pub(crate) fn repair_lines(repair: &Repair) -> (&'static str, Vec<String>) {
         Repair::StartService => "To start it, open a terminal as administrator and run:",
         Repair::TurnOnService => "To turn it on, open a terminal as administrator and run:",
         Repair::InstallService { .. } => "To install it, open a terminal as administrator and run:",
+        Repair::UpdateService { .. } => "To update it, open a terminal as administrator and run:",
         Repair::Download => "To install it, run the gozler setup from:",
     };
     let lines = repair
@@ -300,7 +301,7 @@ mod tests {
                  expected, pass --insecure-no-server-check.",
             ),
             (
-                ClientError::TooOld.into(),
+                ClientError::TooOld { update_from: None }.into(),
                 7,
                 "gozler: the running gozlerd is older than this client; install the \
                  matching gozlerd",

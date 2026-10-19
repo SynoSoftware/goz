@@ -44,8 +44,9 @@ pub enum ClientError {
     /// it may be another user's program posing as the daemon.
     Untrusted,
     /// The daemon refused this client's protocol version, because it is
-    /// older than the client.
-    TooOld,
+    /// older than the client. `update_from` is this program's folder when
+    /// gozlerd.exe is in it, so a repair can replace the service from there.
+    TooOld { update_from: Option<PathBuf> },
     /// The daemon refused the request; `code` says why, and `message` is
     /// the daemon's text.
     Refused { code: ProtoError, message: String },
@@ -85,6 +86,11 @@ pub enum Repair {
     InstallService {
         folder: PathBuf,
     },
+    /// Stops the older service, and installs and starts the gozlerd.exe in
+    /// `folder` in its place.
+    UpdateService {
+        folder: PathBuf,
+    },
     /// Run the gozler setup from [`RELEASES`].
     Download,
 }
@@ -94,8 +100,13 @@ impl ClientError {
     pub fn repair(&self) -> Option<Repair> {
         match self {
             ClientError::NotRunning(why) => why.repair(),
+            ClientError::TooOld {
+                update_from: Some(folder),
+            } => Some(Repair::UpdateService {
+                folder: folder.clone(),
+            }),
             // The setup installs gozlerd and gozler together.
-            ClientError::TooOld => Some(Repair::Download),
+            ClientError::TooOld { update_from: None } => Some(Repair::Download),
             ClientError::NotReady
             | ClientError::Communication(_)
             | ClientError::Untrusted
@@ -145,6 +156,13 @@ impl Repair {
             // An administrator terminal opens in System32, and the folder is
             // not always on PATH. pushd also changes the drive in cmd.
             Repair::InstallService { folder } => vec![
+                format!("pushd \"{}\"", folder.display()),
+                r".\gozlerd.exe install".to_string(),
+            ],
+            // install points the service at this gozlerd.exe and starts it,
+            // but does not restart a service that runs.
+            Repair::UpdateService { folder } => vec![
+                format!("net stop {SERVICE_NAME}"),
                 format!("pushd \"{}\"", folder.display()),
                 r".\gozlerd.exe install".to_string(),
             ],
@@ -222,7 +240,17 @@ mod tests {
             NotRunning::Unknown("access is denied".into()).repair(),
             None
         );
-        // Both programs offer the setup for a daemon older than the client.
-        assert_eq!(ClientError::TooOld.repair(), Some(Repair::Download));
+        // A daemon older than the client is replaced from the gozlerd.exe
+        // beside the client; without one, both programs offer the setup.
+        let older = |update_from| ClientError::TooOld { update_from }.repair();
+        assert_eq!(older(None), Some(Repair::Download));
+        assert_eq!(
+            older(Some(PathBuf::from(r"C:\Program Files\Gozler"))).and_then(|r| r.commands()),
+            Some(vec![
+                "net stop gozler".to_string(),
+                r#"pushd "C:\Program Files\Gozler""#.to_string(),
+                r".\gozlerd.exe install".to_string()
+            ])
+        );
     }
 }
