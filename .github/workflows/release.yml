@@ -71,8 +71,8 @@ jobs:
           GOZLER_RELEASE: "1"
         run: ./installer/Build.ps1 -Compiler $env:INNO_COMPILER
 
-      # Bundle both binaries with the license and readme into one archive named
-      # after the tag, so the download is self-contained.
+      # Bundle the three programs with the license and readme into one archive
+      # named after the tag, so the download is self-contained.
       - name: Package archive
         shell: pwsh
         run: |
@@ -80,6 +80,7 @@ jobs:
           Compress-Archive -Force -DestinationPath "dist/gozler-${{ github.ref_name }}-windows-x86_64.zip" -Path `
             target/release/gozler.exe, `
             target/release/gozlerd.exe, `
+            target/release/gozler-ui.exe, `
             LICENSE, `
             README.md
 

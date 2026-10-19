@@ -20,6 +20,10 @@ VersionInfoVersion={#AppVersion}
 DefaultDirName={autopf}\gozler
 ; Installing the service and the machine PATH entry needs administrator rights.
 PrivilegesRequired=admin
+; The window's single-instance mutex, INSTANCE_MUTEX in gozler-ui's app
+; module. A running window locks gozler-ui.exe and does not exit when the
+; Restart Manager asks it to, so setup and uninstall ask the person to exit it.
+AppMutex=Local\gozler.ui
 ; The x86 setup engine is smaller; the installed binaries stay x64.
 SetupArchitecture=x86
 ArchitecturesAllowed=x64compatible
@@ -39,6 +43,10 @@ ChangesEnvironment=yes
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Messages]
+SetupAppRunningError=Gozler is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to exit Setup.
+UninstallAppRunningError=Gozler is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
+
 [CustomMessages]
 StartService=Starting the gozler service...
 ServiceFailed=The gozler service could not be installed (exit code %1). Search does not work until it runs. Run "gozlerd install" in an elevated terminal to retry.
@@ -53,8 +61,12 @@ GozFailed=goz could not be removed (exit code %1), so it stays installed beside 
 [Files]
 Source: "..\target\release\gozlerd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\gozler.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\gozler-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{autoprograms}\Gozler"; Filename: "{app}\gozler-ui.exe"
 
 [UninstallRun]
 Filename: "{app}\gozlerd.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
@@ -383,8 +395,24 @@ begin
         RemoveHandInstall(Found[I].Folder, 'gozler.exe', 'gozlerd.exe');
 end;
 
+// Removes what the window wrote for its user, the values in
+// gozler-ui's win::shell, so Windows neither starts a missing program at
+// sign-in nor shows "Search with Gozler" in File Explorer. Uninstall runs
+// elevated, so HKCU is the hive of the account that elevated it.
+procedure RemoveWindowRegistration;
+begin
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'gozler');
+  RegDeleteValue(HKCU,
+    'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'gozler');
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\Directory\shell\gozler');
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\Directory\Background\shell\gozler');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
+  begin
     RemoveFolderFromPath(HKLM, EnvironmentKey, ExpandConstant('{app}'));
+    RemoveWindowRegistration;
+  end;
 end;
