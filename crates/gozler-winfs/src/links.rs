@@ -107,7 +107,7 @@ pub fn file_links(volume: &VolumeHandle, id: u128) -> Result<Option<Vec<Link>>, 
 }
 
 /// `GetFinalPathNameByHandleW` into an owned NUL-terminated UTF-16 buffer.
-fn final_path(file: HANDLE, flags: u32) -> Result<Vec<u16>, WinError> {
+pub(crate) fn final_path(file: HANDLE, flags: u32) -> Result<Vec<u16>, WinError> {
     // SAFETY: `file` is live for this call. The first call passes a zero-length
     // buffer, which the API documents as "return the required length".
     let needed = unsafe { GetFinalPathNameByHandleW(file, ptr::null_mut(), 0, flags) };

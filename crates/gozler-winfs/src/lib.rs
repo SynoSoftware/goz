@@ -26,6 +26,8 @@ mod console;
 #[cfg(windows)]
 mod elevation;
 #[cfg(windows)]
+mod entry;
+#[cfg(windows)]
 mod file_id;
 #[cfg(windows)]
 mod file_layout;
@@ -73,6 +75,9 @@ pub use journal::{
     JournalInfo, JournalQuery, JournalRecords, create_usn_journal, enum_usn_data,
     query_usn_journal, read_usn_journal,
 };
+
+#[cfg(windows)]
+pub use entry::{Access, AttributeTag, Entry, FileIdentity, Reparse, open_entry};
 
 #[cfg(windows)]
 pub use file_id::{Folder, open_folder, root_folder_id};

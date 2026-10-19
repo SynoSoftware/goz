@@ -480,6 +480,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gozler-fileops"
+version = "0.3.0"
+dependencies = [
+ "gozler-core",
+ "gozler-winfs",
+ "thiserror",
+]
+
+[[package]]
 name = "gozler-ui"
 version = "0.3.0"
 dependencies = [

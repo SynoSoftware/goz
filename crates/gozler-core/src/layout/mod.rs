@@ -13,13 +13,16 @@
 //! instead, and [`walk_listing_buffer`] turns one folder listing into the
 //! same [`LayoutFile`] entries, one name each.
 //!
+//! `gozler-fileops` lists folders on any file system, FAT included, and
+//! [`walk_full_listing_buffer`] turns its listings into [`FolderEntry`]s.
+//!
 //! All parsing is little-endian [`zerocopy`] views over `&[u8]` with no
 //! `unsafe`; the Win32 layer only ever hands this module raw bytes.
 
 mod listing;
 mod parse;
 
-pub use listing::walk_listing_buffer;
+pub use listing::{FolderEntry, walk_full_listing_buffer, walk_listing_buffer};
 
 pub use parse::{
     FILE_LAYOUT_NAME_ENTRY_DOS, FILE_LAYOUT_NAME_ENTRY_PRIMARY,

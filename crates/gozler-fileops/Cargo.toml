@@ -1,0 +1,19 @@
+[package]
+name = "gozler-fileops"
+description = "The copy, move and delete engine of gozler's window: walks, queue and speed settings. No unsafe; Win32 goes through gozler-winfs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+gozler-core = { path = "../gozler-core" }
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+gozler-winfs = { path = "../gozler-winfs" }
+
+[lints]
+workspace = true

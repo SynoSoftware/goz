@@ -23,7 +23,7 @@ use crate::util::to_wide_nul;
 use crate::volume::VolumeHandle;
 
 /// An open file or folder; `CloseHandle` on drop.
-pub(crate) struct FileHandle(HANDLE);
+pub(crate) struct FileHandle(pub(crate) HANDLE);
 
 impl FileHandle {
     pub(crate) fn as_handle(&self) -> HANDLE {

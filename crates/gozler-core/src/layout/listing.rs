@@ -1,8 +1,10 @@
-//! Parser for one folder listing: the output buffer of
-//! `GetFileInformationByHandleEx` with `FileIdExtdDirectoryInfo`, a chain of
-//! `FILE_ID_EXTD_DIR_INFO` entries.
+//! Parsers for one folder listing: the output buffer of
+//! `GetFileInformationByHandleEx`, a chain of `FILE_ID_EXTD_DIR_INFO`
+//! entries for gozlerd's ReFS walk, or of `FILE_FULL_DIR_INFO` entries for
+//! the copy, move and delete engine, which every file system answers.
 //!
 //! <https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_extd_dir_info>
+//! <https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_full_dir_info>
 //!
 //! `NextEntryOffset` is relative to the entry that holds it, and 0 ends the
 //! chain. The call does not report how many bytes it wrote, so the chain is
@@ -17,6 +19,7 @@ use zerocopy::little_endian::{I64, U32, U128};
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// `FILE_ID_EXTD_DIR_INFO` fixed part (88 bytes); `FileName` (UTF-16LE,
 /// `FileNameLength` bytes, not null-terminated) follows.
@@ -115,6 +118,109 @@ pub fn walk_listing_buffer(folder: Frn, buf: &[u8]) -> Result<Vec<LayoutFile>, L
     }
 }
 
+/// `FILE_FULL_DIR_INFO` fixed part (68 bytes); `FileName` (UTF-16LE,
+/// `FileNameLength` bytes, not null-terminated) follows.
+#[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct RawFullDirEntry {
+    next_entry_offset: U32,
+    // Layout-bearing only; never read individually.
+    #[allow(dead_code)]
+    file_index: U32,
+    #[allow(dead_code)]
+    creation_time: I64,
+    #[allow(dead_code)]
+    last_access_time: I64,
+    last_write_time: I64,
+    #[allow(dead_code)]
+    change_time: I64,
+    end_of_file: I64,
+    #[allow(dead_code)]
+    allocation_size: I64,
+    file_attributes: U32,
+    file_name_length: U32,
+    ea_size: U32,
+}
+
+/// One entry of a `FILE_FULL_DIR_INFO` listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderEntry {
+    /// The name as raw UTF-16, which may hold unpaired surrogates, because
+    /// the engine opens the entry by it.
+    pub name: Vec<u16>,
+    pub attributes: u32,
+    /// The data stream's size in bytes; 0 for a folder.
+    pub size: u64,
+    /// The last write time as a `FILETIME` value.
+    pub last_write: i64,
+    /// The reparse tag of a reparse point. MS-FSCC puts it in `EaSize` when
+    /// `FILE_ATTRIBUTE_REPARSE_POINT` is set.
+    pub reparse_tag: Option<u32>,
+}
+
+/// Parses one `FileFullDirectoryInfo` listing page into its entries, without
+/// `.` and `..`. An empty buffer yields no entries.
+pub fn walk_full_listing_buffer(buf: &[u8]) -> Result<Vec<FolderEntry>, LayoutWalkError> {
+    let mut entries = Vec::new();
+    if buf.is_empty() {
+        return Ok(entries);
+    }
+    let mut entry_off = 0;
+    loop {
+        let raw: RawFullDirEntry = read_struct(buf, entry_off, "FILE_FULL_DIR_INFO")?;
+        let name_len = raw.file_name_length.get();
+        if name_len as usize > MAX_NAME_UTF16_BYTES {
+            return Err(LayoutWalkError::NameTooLong {
+                what: "FILE_FULL_DIR_INFO.FileName",
+                offset: entry_off,
+                len: name_len,
+                max: MAX_NAME_UTF16_BYTES as u32,
+            });
+        }
+        if !name_len.is_multiple_of(2) {
+            return Err(LayoutWalkError::OddUtf16Length {
+                what: "FILE_FULL_DIR_INFO.FileNameLength",
+                offset: entry_off,
+                len: name_len,
+            });
+        }
+        let name_bytes = read_bytes(
+            buf,
+            entry_off + size_of::<RawFullDirEntry>(),
+            name_len as usize,
+            "FILE_FULL_DIR_INFO.FileName",
+        )?;
+        let (units, _) = name_bytes.as_chunks::<2>();
+        let name: Vec<u16> = units.iter().map(|&unit| u16::from_le_bytes(unit)).collect();
+        if name != [u16::from(b'.')] && name != [u16::from(b'.'); 2] {
+            let attributes = raw.file_attributes.get();
+            entries.push(FolderEntry {
+                name,
+                attributes,
+                size: if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                    raw.end_of_file.get().max(0) as u64
+                } else {
+                    0
+                },
+                last_write: raw.last_write_time.get(),
+                reparse_tag: (attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                    .then_some(raw.ea_size.get()),
+            });
+        }
+        let next = raw.next_entry_offset.get();
+        if next == 0 {
+            return Ok(entries);
+        }
+        entry_off = follow_offset(
+            buf,
+            entry_off,
+            next,
+            size_of::<RawFullDirEntry>() + name_len as usize,
+            "FILE_FULL_DIR_INFO.NextEntryOffset",
+        )?;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +234,9 @@ mod tests {
         size: i64,
         mtime: i64,
         units: Vec<u16>,
+        /// `EaSize` in a `FILE_FULL_DIR_INFO` entry, where a reparse point's
+        /// tag goes.
+        ea: u32,
     }
 
     fn entry(id: u128, attributes: u32, size: i64, name: &str) -> EntryFixture {
@@ -137,6 +246,7 @@ mod tests {
             size,
             mtime: 133_800_000_000_000_000,
             units: name.encode_utf16().collect(),
+            ea: 0,
         }
     }
 
@@ -171,9 +281,79 @@ mod tests {
         buf
     }
 
+    /// Lays out `FILE_FULL_DIR_INFO` entries as [`build_listing`] does.
+    fn build_full_listing(entries: &[EntryFixture]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (i, e) in entries.iter().enumerate() {
+            let start = buf.len();
+            let len = (68 + 2 * e.units.len()).next_multiple_of(8);
+            let next = if i + 1 == entries.len() {
+                0
+            } else {
+                len as u32
+            };
+            buf.extend_from_slice(&next.to_le_bytes());
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            for time in [0, 0, e.mtime, 0] {
+                buf.extend_from_slice(&time.to_le_bytes());
+            }
+            buf.extend_from_slice(&e.size.to_le_bytes());
+            buf.extend_from_slice(&e.size.to_le_bytes());
+            buf.extend_from_slice(&e.attributes.to_le_bytes());
+            buf.extend_from_slice(&(2 * e.units.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&e.ea.to_le_bytes());
+            for unit in &e.units {
+                buf.extend_from_slice(&unit.to_le_bytes());
+            }
+            buf.resize(start + len, 0);
+        }
+        buf
+    }
+
     #[test]
     fn raw_view_matches_on_wire_size() {
         assert_eq!(size_of::<RawDirEntry>(), 88);
+        assert_eq!(size_of::<RawFullDirEntry>(), 68);
+    }
+
+    /// A junction's tag comes from `EaSize`, and only for a reparse point:
+    /// a plain file's `EaSize` is the size of its extended attributes.
+    #[test]
+    fn full_listing_gives_names_sizes_dates_and_reparse_tags() {
+        let junction = EntryFixture {
+            ea: 0xA000_0003,
+            ..entry(0, 0x410, 0, "link")
+        };
+        let file = EntryFixture {
+            ea: 64,
+            ..entry(0, 0x20, 4096, "a.txt")
+        };
+        let buf = build_full_listing(&[
+            entry(0, 0x10, 0, "."),
+            entry(0, 0x10, 0, ".."),
+            junction,
+            file,
+        ]);
+        let entries = walk_full_listing_buffer(&buf).expect("valid listing");
+        assert_eq!(
+            entries,
+            [
+                FolderEntry {
+                    name: "link".encode_utf16().collect(),
+                    attributes: 0x410,
+                    size: 0,
+                    last_write: 133_800_000_000_000_000,
+                    reparse_tag: Some(0xA000_0003),
+                },
+                FolderEntry {
+                    name: "a.txt".encode_utf16().collect(),
+                    attributes: 0x20,
+                    size: 4096,
+                    last_write: 133_800_000_000_000_000,
+                    reparse_tag: None,
+                },
+            ]
+        );
     }
 
     /// A ReFS listing: the folder's own `.` and `..`, a folder and a file,
@@ -221,13 +401,15 @@ mod tests {
             any::<i64>(),
             any::<i64>(),
             prop::collection::vec(any::<u16>(), 0..12),
+            any::<u32>(),
         )
-            .prop_map(|(id, attributes, size, mtime, units)| EntryFixture {
+            .prop_map(|(id, attributes, size, mtime, units, ea)| EntryFixture {
                 id,
                 attributes,
                 size,
                 mtime,
                 units,
+                ea,
             })
     }
 
@@ -251,6 +433,25 @@ mod tests {
                 let bytes: usize = files.iter().map(|f| f.names[0].name.len()).sum();
                 // WTF-8 takes at most 3 bytes per UTF-16 code unit.
                 prop_assert!(bytes <= buf.len() * 3 / 2, "{bytes} name bytes in {} bytes", buf.len());
+            }
+        }
+
+        /// The same for the engine's listing, whose names stay UTF-16.
+        #[test]
+        fn corrupted_full_listings_error_instead_of_panicking(
+            entries in prop::collection::vec(arb_entry(), 1..5),
+            patches in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let mut buf = build_full_listing(&entries);
+            let len = buf.len();
+            for (at, byte) in &patches {
+                buf[at.index(len)] = *byte;
+            }
+            buf.truncate(cut.index(len + 1));
+            if let Ok(entries) = walk_full_listing_buffer(&buf) {
+                let bytes: usize = entries.iter().map(|e| 2 * e.name.len()).sum();
+                prop_assert!(bytes <= buf.len(), "{bytes} name bytes in {} bytes", buf.len());
             }
         }
     }
