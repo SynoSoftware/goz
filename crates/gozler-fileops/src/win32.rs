@@ -38,8 +38,14 @@ pub(crate) const FILE_SUPPORTS_SPARSE_FILES: u32 = 0x40;
 pub(crate) const FILE_SUPPORTS_BLOCK_REFCOUNTING: u32 = 0x0800_0000;
 
 /// The first Windows build whose `CopyFile2` takes
-/// `COPY_FILE_ENABLE_SPARSE_COPY`.
-pub(crate) const SPARSE_COPY_BUILD: u32 = 22621;
+/// `COPY_FILE_ENABLE_SPARSE_COPY` and the version-2 extended parameters
+/// that carry `ioDesiredSize`. Microsoft does not document what an older
+/// Windows does with either, so neither is passed there.
+pub(crate) const COPY_FILE_22H2_BUILD: u32 = 22621;
+
+/// `ioDesiredSize` for an unbuffered `CopyFile2` (D9): the size that used
+/// the fewest CPU cycles in stage D's measurement (`docs/BENCHMARKS.md`).
+pub(crate) const IO_DESIRED_SIZE: u32 = 32 * 1024 * 1024;
 
 /// `IsReparseTagNameSurrogate`: the tag of a junction, a symbolic link or a
 /// mount point, which name another entry. A cloud placeholder's tag is not

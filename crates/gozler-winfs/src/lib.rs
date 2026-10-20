@@ -18,6 +18,8 @@ mod ioctl;
 mod util;
 
 #[cfg(windows)]
+mod cache;
+#[cfg(windows)]
 mod cancel_io;
 #[cfg(windows)]
 mod clock;
@@ -58,9 +60,11 @@ mod working_set;
 pub use error::WinError;
 
 #[cfg(windows)]
+pub use cache::empty_standby_list;
+#[cfg(windows)]
 pub use cancel_io::{ThreadIoHandle, cancel_synchronous_io, current_thread_io_handle};
 #[cfg(windows)]
-pub use clock::{awake_time, thread_cycles};
+pub use clock::{awake_time, own_process_cycles, process_cycles, thread_cycles};
 #[cfg(windows)]
 pub use console::enable_console_color;
 #[cfg(windows)]

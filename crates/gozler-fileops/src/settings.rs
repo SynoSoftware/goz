@@ -160,9 +160,9 @@ pub struct SpeedSettings {
 }
 
 impl SpeedSettings {
-    /// The default preset. It starts as the Parallel copy preset's values,
-    /// with the Ring copy preset's ring values, until stage D's
-    /// measurements replace each value they measure.
+    /// The default preset: the Parallel copy preset's values, with the Ring
+    /// copy preset's ring values, which stage D's measurements on an SSD
+    /// confirmed (`docs/BENCHMARKS.md`).
     pub fn automatic() -> Self {
         SpeedSettings {
             large_file_limit: LargeFileLimit(32),

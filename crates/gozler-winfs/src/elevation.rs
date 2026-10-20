@@ -56,7 +56,7 @@ pub fn enable_volume_privileges() -> Result<(), WinError> {
     result
 }
 
-fn open_current_process_token(access: u32) -> Result<HANDLE, WinError> {
+pub(crate) fn open_current_process_token(access: u32) -> Result<HANDLE, WinError> {
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a valid pseudo-handle; `token` is a
     // live out param written on success.
@@ -67,7 +67,7 @@ fn open_current_process_token(access: u32) -> Result<HANDLE, WinError> {
     Ok(token)
 }
 
-fn enable_privilege(token: HANDLE, name: &str) -> Result<(), WinError> {
+pub(crate) fn enable_privilege(token: HANDLE, name: &str) -> Result<(), WinError> {
     let wide = to_wide_nul(name);
     let mut luid = LUID {
         LowPart: 0,

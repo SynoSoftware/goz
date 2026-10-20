@@ -22,7 +22,7 @@ use crate::survey::{Surveying, survey};
 use crate::volumes::{CopyPlan, VolumeClass, read_volume};
 use crate::waits::Plan;
 use crate::win32::{
-    FILE_SUPPORTS_BLOCK_REFCOUNTING, FILE_SUPPORTS_SPARSE_FILES, SPARSE_COPY_BUILD,
+    COPY_FILE_22H2_BUILD, FILE_SUPPORTS_BLOCK_REFCOUNTING, FILE_SUPPORTS_SPARSE_FILES,
 };
 
 /// A prepared operation.
@@ -241,7 +241,7 @@ fn transfer(
         (copied.iter()).all(|source| source.selected.identity.volume() == target_volume);
     let clones = one_volume && flags & FILE_SUPPORTS_BLOCK_REFCOUNTING != 0;
     let sparse_files = flags & FILE_SUPPORTS_SPARSE_FILES != 0;
-    let sparse = sparse_files && windows_build() >= SPARSE_COPY_BUILD;
+    let sparse = sparse_files && windows_build() >= COPY_FILE_22H2_BUILD;
     let file_system = destination.entry.file_system_name().unwrap_or_default();
     let root: Vec<u16> = target_volume
         .iter()

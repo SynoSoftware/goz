@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use gozler_core::layout::FolderEntry;
 use gozler_winfs::{
     Access, CopyOptions, CopySource, Entry, EntryStat, FileIdentity, Reparse, copy_file,
-    create_folder, open_entry, path_attributes,
+    create_folder, open_entry, path_attributes, windows_build,
 };
 
 use crate::conflicts::{Decision, Rule, Wanted, decide};
@@ -35,10 +35,10 @@ use crate::receive::{Selected, listed};
 use crate::retry::{retry, retry_also};
 use crate::volumes::CopyPlan;
 use crate::win32::{
-    ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL, ERROR_OPERATION_ABORTED,
-    ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_SPARSE_FILE, IO_REPARSE_TAG_SYMLINK, is_gone,
-    is_name_surrogate,
+    COPY_FILE_22H2_BUILD, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL,
+    ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_SPARSE_FILE, IO_DESIRED_SIZE, IO_REPARSE_TAG_SYMLINK,
+    is_gone, is_name_surrogate,
 };
 use ring::Ring;
 
@@ -116,6 +116,7 @@ pub(crate) fn copy(
         listed: Mutex::default(),
         pool: Pool::new(items, &stopped),
         destination: Disposition::default(),
+        io_desired_size: (windows_build() >= COPY_FILE_22H2_BUILD).then_some(IO_DESIRED_SIZE),
         ring,
         to_windows: AtomicU64::new(0),
         clones_refused: AtomicU64::new(0),
@@ -206,6 +207,9 @@ struct Walk<'a> {
     pool: Pool<'a, Work>,
     /// How the destination volume deletes, for the temporary files.
     destination: Disposition,
+    /// `ioDesiredSize` for an unbuffered `CopyFile2`; `None` before
+    /// [`COPY_FILE_22H2_BUILD`].
+    io_desired_size: Option<u32>,
     /// `None` without the ring, or when its buffer could not be allocated.
     ring: Option<Ring>,
     /// The result's [`RingCounts`].
@@ -751,11 +755,13 @@ impl Walk<'_> {
                 folder: folder_link,
             }
         };
+        let unbuffered = self.is_large(file);
         let options = CopyOptions {
             source,
-            unbuffered: self.is_large(file),
+            unbuffered,
             sparse: self.copying.target.sparse_copy
                 && file.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
+            io_desired_size: self.io_desired_size.filter(|_| unbuffered),
         };
         let progress = self.copying.progress;
         let mut reported = 0u64;

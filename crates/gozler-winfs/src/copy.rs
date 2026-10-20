@@ -15,11 +15,12 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     COPY_FILE_COPY_SYMLINK, COPY_FILE_DIRECTORY, COPY_FILE_ENABLE_SPARSE_COPY,
     COPY_FILE_FAIL_IF_EXISTS, COPY_FILE_NO_BUFFERING, COPY_FILE_OPEN_AND_COPY_REPARSE_POINT,
-    COPYFILE2_CALLBACK_CHUNK_FINISHED, COPYFILE2_EXTENDED_PARAMETERS, COPYFILE2_MESSAGE,
-    COPYFILE2_MESSAGE_ACTION, COPYFILE2_PROGRESS_CANCEL, COPYFILE2_PROGRESS_CONTINUE, CopyFile2,
-    CreateDirectoryExW, CreateDirectoryW, GetCompressedFileSizeW, GetDiskFreeSpaceExW,
-    GetFileAttributesExW, GetFileExInfoStandard, INVALID_FILE_SIZE, MOVEFILE_REPLACE_EXISTING,
-    MoveFileExW, SetFileAttributesW, WIN32_FILE_ATTRIBUTE_DATA,
+    COPYFILE2_CALLBACK_CHUNK_FINISHED, COPYFILE2_EXTENDED_PARAMETERS,
+    COPYFILE2_EXTENDED_PARAMETERS_V2, COPYFILE2_MESSAGE, COPYFILE2_MESSAGE_ACTION,
+    COPYFILE2_PROGRESS_CANCEL, COPYFILE2_PROGRESS_CONTINUE, CopyFile2, CreateDirectoryExW,
+    CreateDirectoryW, GetCompressedFileSizeW, GetDiskFreeSpaceExW, GetFileAttributesExW,
+    GetFileExInfoStandard, INVALID_FILE_SIZE, MOVEFILE_REPLACE_EXISTING, MoveFileExW,
+    SetFileAttributesW, WIN32_FILE_ATTRIBUTE_DATA,
 };
 
 use crate::error::{WinError, last_error};
@@ -53,6 +54,10 @@ pub struct CopyOptions {
     /// `COPY_FILE_ENABLE_SPARSE_COPY`, which only Windows build 22621 and
     /// later knows.
     pub sparse: bool,
+    /// `COPYFILE2_EXTENDED_PARAMETERS_V2::ioDesiredSize` in bytes, which
+    /// only Windows build 22621 and later knows; `None` leaves the size to
+    /// `CopyFile2`.
+    pub io_desired_size: Option<u32>,
 }
 
 /// Copies `from` to `to`, which must not exist. `progress` receives the
@@ -89,17 +94,32 @@ pub fn copy_file(
     }
     let (from, to) = (nul(from), nul(to));
     let mut progress = progress;
-    let parameters = COPYFILE2_EXTENDED_PARAMETERS {
-        dwSize: size_of::<COPYFILE2_EXTENDED_PARAMETERS>() as u32,
+    // The version-2 parameters begin with the version-1 fields, and
+    // `CopyFile2` reads the version from `dwSize`.
+    let parameters = COPYFILE2_EXTENDED_PARAMETERS_V2 {
+        dwSize: match options.io_desired_size {
+            Some(_) => size_of::<COPYFILE2_EXTENDED_PARAMETERS_V2>(),
+            None => size_of::<COPYFILE2_EXTENDED_PARAMETERS>(),
+        } as u32,
         dwCopyFlags: flags,
         pfCancel: ptr::null_mut(),
         pProgressRoutine: Some(on_progress),
         pvCallbackContext: ptr::from_mut(&mut progress).cast(),
+        ioDesiredSize: options.io_desired_size.unwrap_or(0),
+        ..Default::default()
     };
     // SAFETY: both paths are NUL-terminated and outlive the call; the
-    // context points at `progress`, which outlives the call, and only
-    // `on_progress` reads it, on this thread, while the call runs.
-    let result = unsafe { CopyFile2(from.as_ptr(), to.as_ptr(), &parameters) };
+    // parameters are a version-2 struct whose `dwSize` names its version
+    // or the version-1 prefix; the context points at `progress`, which
+    // outlives the call, and only `on_progress` reads it, on this thread,
+    // while the call runs.
+    let result = unsafe {
+        CopyFile2(
+            from.as_ptr(),
+            to.as_ptr(),
+            ptr::from_ref(&parameters).cast(),
+        )
+    };
     if result < 0 {
         // A Win32 error comes as HRESULT_FROM_WIN32, its code in the low
         // 16 bits under facility 7; anything else keeps its HRESULT.

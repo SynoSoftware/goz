@@ -1,11 +1,14 @@
 //! Clocks that ignore what a wall clock counts: sleep, and other threads.
 
+use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 use std::time::Duration;
 
-use windows_sys::Win32::System::Threading::GetCurrentThread;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
 use windows_sys::Win32::System::WindowsProgramming::{
-    QueryThreadCycleTime, QueryUnbiasedInterruptTime,
+    QueryProcessCycleTime, QueryThreadCycleTime, QueryUnbiasedInterruptTime,
 };
+
+use crate::error::{WinError, last_error};
 
 /// How long the system has been awake since it booted: monotonic, and
 /// excluding sleep and hibernation (`QueryUnbiasedInterruptTime`). A wall
@@ -29,4 +32,25 @@ pub fn thread_cycles() -> u64 {
     // calling thread, and the call writes one u64 through a valid pointer.
     unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
     cycles
+}
+
+/// CPU cycles that every thread of `process` has run, in user and kernel
+/// mode (`QueryProcessCycleTime`). The handle needs
+/// `PROCESS_QUERY_LIMITED_INFORMATION`, as a spawned child's has.
+pub fn process_cycles(process: BorrowedHandle<'_>) -> Result<u64, WinError> {
+    let mut cycles: u64 = 0;
+    // SAFETY: `process` is a live process handle for the call, and the call
+    // writes one u64 through a valid pointer.
+    if unsafe { QueryProcessCycleTime(process.as_raw_handle(), &mut cycles) } == 0 {
+        return Err(last_error("QueryProcessCycleTime"));
+    }
+    Ok(cycles)
+}
+
+/// CPU cycles that every thread of this process has run.
+pub fn own_process_cycles() -> u64 {
+    // SAFETY: the pseudo-handle from GetCurrentProcess is always valid and
+    // is never closed.
+    let process = unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) };
+    process_cycles(process).expect("this process can always be queried")
 }
