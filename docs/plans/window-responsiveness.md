@@ -96,16 +96,44 @@ ends with `check.ps1` green and a commit.
 | 2 | Ranks 7, 9, 10 and 15; rank 8 once its short plan is decided | #87: one run that times a drag of 1,000 items into Explorer before and after, and checks that files and folders copy. If the bind-context ID lists do not drag, report it, and keep the current wait until the owner decides. #90: the queue test that submits, waits for Running and drops the queue still finds one saved operation, so the thread saves also when the queue is closing. |
 | 3 | Rank 11 | Unit tests of the chunk cache with partial chunks and a retargeted range |
 
-Ranks 12–14 and 16 wait for a measurement that shows a cost.
+## Measured
 
-## Not measured
+Release builds on the owner's laptop, median of 15 runs unless one run is
+named, on synthetic rows; the tests are `crates/gozler-ui/src/timing.rs` on
+branch `window-timing`. A paint is 40 rows. Each fix below was built only
+because its cost was measured; the rest stay unbuilt for the reason given.
 
-Every elapsed time above. A later measurement compares release builds on
-the same rows, columns and DPI, and records window-thread wall time and CPU
-time separately for: warm scrolling of cached rows, with the locale calls
-timed apart; ASCII against long non-ASCII paths; replies and wakes with a
-100,000-row selection; a search during a large operation with its window
-hidden; a scrollbar jump during a cache miss; a large Copy; a drag of 1,000
-items; a scoped search on a sleeping disk; and cold startup with and
-without an interrupted operation. A 60 Hz display allows about 16.7 ms a
-frame; DESIGN's 100 ms per message is too loose to show smooth scrolling.
+**Done** (stages 1 and 2, commit `da51c90`):
+
+| Rank | Before | After |
+| --- | --- | --- |
+| 6 (#85) | Path term over a 110-character Cyrillic path: 33 ms a paint; 2,000 characters: 11.9 s | 1.5 ms; 49 ms |
+| 1 (#86), the empty-taken check only | `set_taken` over 100,000 selected files: 44 ms a wake | 0.05 ms |
+| 2 (#93), the cached folder only | 221 ms every 500 ms at 100,000 sources | 272 ms once, when the operation appears |
+| 4 (#91) | Copy of 100,000 paths: 162–194 ms | 59 ms |
+| 7 (#87) | Naming 1,000 files for a drag: 685–1,130 ms | 9.6 ms; the shell's copy engine copied 990 files and 10 folders named this way intact |
+
+**Disproved:**
+
+| Rank | Measured |
+| --- | --- |
+| 1, the rest | Inspector sums of 100,000 rows: 0.5 ms; a paint's custom draw and refreshes were not material |
+| 2, the taskbar part | Not measured; it left progress blank after a taskbar button was recreated, so it was reverted |
+| 3 (#88) | `metadata` of a local folder and of an unreachable share: 0.07 ms each |
+| 5 (#94) | Compiling two words: 0.001 ms; a regex: 0.75 ms |
+| 9 (#89) | Listing subfolders of `C:\`, Program Files, Windows, System32 and a profile: 0.1–3.4 ms; only `C:\Windows\WinSxS` takes 727 ms |
+| 10 | Starting a program through `ShellExecuteW`: 30 ms |
+| 12 (#96) | The Copy retry under contention: four 20 ms sleeps, 82 ms |
+| 14 (#97) | Saving `ui.json`: 2 ms |
+| 15 | Hashing `gozlerd.exe`: 19 ms, one run |
+| 16 | Size and Date cells of a paint: 0.08 ms |
+
+**Proven, needs a plan:** rank 13 (#98). One run: `MainWindow::open`
+takes 627 ms before the window shows, 75 ms of it the File operations
+window, and opening Settings takes 325 ms in `SettingsDialog::init`. Ranks
+8 and 11 still need their plans.
+
+**Remaining costs of the done fixes:** a 2,000-character Cyrillic path
+still costs about three frames a paint, and an operation of 100,000
+sources pauses the window once for 272 ms. `DRAG_LIMIT` no longer has a
+measured reason; the owner decides its value.
