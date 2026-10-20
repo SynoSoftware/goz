@@ -1,8 +1,9 @@
 # The window: after install
 
-The owner's checklist for the window, from the stages of the window's plan.
-Each item needs the installed Gozler, the owner's own settings, registry or
-taskbar, or a second monitor, so no agent runs it. Delete this file when the
+The owner's checklist for the window, from the stages of the window's plan,
+and for the copy, move and delete engine. Each item needs the installed
+Gozler, the owner's own settings, registry or taskbar, a second monitor, or
+for the engine other disks or an elevated run, so no agent runs it. Delete this file when the
 owner has run it, and file an issue for each item that fails.
 
 ## Install
@@ -95,3 +96,38 @@ owner has run it, and file an issue for each item that fails.
   `core::layout`, controls in a column share their left edge, two states never
   look the same, and the list's rows, header and selection look like File
   Explorer's.
+
+## The copy, move and delete engine
+
+These need a second disk, a share, a USB drive, OneDrive or an elevated run.
+`crates/gozler-fileops/examples/measure.rs` runs the measurements, elevated,
+and its rows go into `docs/BENCHMARKS.md`. The decisions named here are those
+of [the engine spec](fast-copy-delete-spec.md).
+
+- The measurement's copy cases between two disks: on a hard disk with two
+  partitions, where the ring's hard-disk profile should help most, and to a
+  USB drive; and a small-file copy to a share with 1, 2 and 16 workers,
+  which also times the listing of each destination folder there. Their
+  winners replace the Automatic preset's hard-disk, USB and share values
+  (D7).
+- Showing the current file costs one allocation and one lock for each file
+  copied or deleted. The measurement's small-file copy and a delete of the
+  small tree, compared with the "Stage E" rows in `docs/BENCHMARKS.md`,
+  show whether that cost is visible.
+- A move across volumes, for example to a USB drive: the sources go, the
+  progress shows bytes, and a cancel leaves each file in one place.
+- A copy from a share whose server is switched off during the copy: the
+  operation shows Cancelling until the share times out, and Exit ends Gozler
+  within 3 seconds, leaving the copy Interrupted.
+- A delete of a tree with read-only files on a FAT32 USB drive, which takes
+  D1's classic fallback.
+- A copy of a folder symbolic link and of a file symbolic link by an
+  elevated Gozler, which holds the right to create them, and by Gozler
+  without elevation with Developer Mode off: each arrives as the same link,
+  or is listed with `ERROR_PRIVILEGE_NOT_HELD` (the spec's "Not verified").
+- One share folder reached through two drive mappings: a copy from one into
+  the other is refused as a copy into itself (D12).
+- A move to another drive of a OneDrive folder whose files are only in the
+  cloud: every file arrives with its data, and the source folder goes only
+  after its files (the spec's "What an operation receives", the second
+  handle).

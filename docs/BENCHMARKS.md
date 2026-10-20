@@ -40,7 +40,7 @@ Why the resident footprint is small: filenames are interned (only ~31% are uniqu
 
 ## Copy, move and delete engine
 
-Stage D of `docs/plans/fast-copy-delete-plan.md`, run once on 2026-10-19 by `crates/gozler-fileops/examples/measure.rs`, elevated, on the owner's laptop: Intel Core i7-8550U (4C/8T), 16 GB RAM, Windows 11 build 26200, Toshiba KXG50ZNV512G NVMe SSD. The fixtures were on C: (NTFS); the last row is on V:, a ReFS Dev Drive that is a virtual disk file on the same SSD. Gozler's engine and the program were release builds.
+The engine's stage D measurement, run once on 2026-10-19 by `crates/gozler-fileops/examples/measure.rs`, elevated, on the owner's laptop: Intel Core i7-8550U (4C/8T), 16 GB RAM, Windows 11 build 26200, Toshiba KXG50ZNV512G NVMe SSD. The fixtures were on C: (NTFS); the last row is on V:, a ReFS Dev Drive that is a virtual disk file on the same SSD. Gozler's engine and the program were release builds.
 
 **What is counted.** CPU cycles (`QueryProcessCycleTime`), at the owner's request, because other work on the machine changes wall time but not cycles: the measuring process's cycles, which hold Gozler's engine and the direct `CopyFile2` calls, plus the compared tool's process. Wall time is shown for reference. Time spent waiting for the disk costs no cycles, and the pages that Windows' lazy writer writes before a copy's closing flush count in the System process, which the program does not open.
 
@@ -81,7 +81,7 @@ What the rows decide, in the spec's terms:
 - **D10, the temporary name:** writing each small file under `.gozler-partial` and renaming it costs 43 % more cycles than writing it to its final name, and more than doubles the wall time; Gozler's engine costs the same as that pair, so the rename is its whole extra cost. Gozler's small-file copy costs the same cycles as `robocopy /e /mt:16` (140.35 G against 139.45 G, one run each) and is 24 % faster.
 - **D20, the clone:** `CopyFile2` with `COPY_FILE_NO_BUFFERING` still clones within the Dev Drive: it copied 1.28 GB in 0.14 s. Its clone costs fewer cycles than the ring's (0.22 G against 0.36 G for 20 files, about 7 M cycles more per file in the ring); both take under 0.4 s.
 
-Not measured here, and in the plan's "After install": two disks, a hard disk, a USB drive and a share, whose winners replace Automatic's hard-disk, USB and share values.
+Not measured here, and in the engine's checks of `docs/plans/ui-after-install.md`: two disks, a hard disk, a USB drive and a share, whose winners replace Automatic's hard-disk, USB and share values.
 
 ### Stage E: final names and resume
 

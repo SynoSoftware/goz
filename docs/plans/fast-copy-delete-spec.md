@@ -3,7 +3,7 @@
 `gozler-fileops` copies, moves and deletes files for the window's two modes,
 Two panels and Search. This spec says what the engine does and why each
 method was chosen. [The file manager spec](file-manager-spec.md) owns what
-the person sees; [the plan](fast-copy-delete-plan.md) owns the order of work.
+the person sees.
 
 Every claim about another tool or a Windows API, with its source and its
 numbers, is in [the research record](../research/fast-copy-delete.md). This
@@ -717,7 +717,7 @@ program and the engine's tests on real folders need a library.
 ## Not verified
 
 A stage runs each Win32 case once and writes the result here, or the case
-is in the plan's "After install".
+is in the engine's checks of [After install](ui-after-install.md).
 
 - The ring can set the true end of file on its unbuffered handle (stage C,
   run once on 2026-10-19 on the owner's Dev Drive, to 12288 and to 10000
@@ -814,11 +814,12 @@ is in the plan's "After install".
 - Whether the parallel walk is slower than one walker on a hard disk.
 - Every speed claim of D2 and D7 to D9 between two disks, on a hard disk,
   a USB drive or a share. Stage D measured them on one SSD
-  (`docs/BENCHMARKS.md`); the rest is in the plan's "After install".
+  (`docs/BENCHMARKS.md`); the rest is in the engine's checks of
+  [After install](ui-after-install.md).
 
 ## Done when
 
-- Every row of "Tests" in the plan passes, on folders the tests create.
+- Every test of `gozler-fileops` passes, on folders the tests create.
 - Stage D's measurements are in `docs/BENCHMARKS.md`, and each decision they
   test (D2, D7, D8, D9, D10) is confirmed or changed with the numbers beside
   it.

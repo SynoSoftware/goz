@@ -13,8 +13,8 @@ holds why a reviewer can trust them.
 - **Not found**: no primary source says it.
 
 A number a tool's author measured on their own machine is that author's
-measurement, not ours. Stage D of [the plan](../plans/fast-copy-delete-plan.md)
-measures on the owner's machine.
+measurement, not ours. Gozler's own measurements on the owner's machine are
+in `docs/BENCHMARKS.md`.
 
 **Reading limits.** TinyTorrent2 read the tools on 2026-10-18. gozler checked
 every claim against its primary source on 2026-10-19, through an agent that

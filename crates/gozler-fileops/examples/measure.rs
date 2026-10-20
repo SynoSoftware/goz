@@ -1,6 +1,6 @@
-//! Stage D's measurement of the engine (`docs/plans/fast-copy-delete-plan.md`,
-//! "Stage D: measure"), and with `--resume` stage E's: the copies that
-//! writing to the final name changes, and Continue's compare.
+//! The engine's measurement in `docs/BENCHMARKS.md`, and with `--resume`
+//! stage E's there: the copies that writing to the final name changes, and
+//! Continue's compare.
 //!
 //! ```text
 //! cargo run --release -p gozler-fileops --example measure -- <folder on an NTFS volume>

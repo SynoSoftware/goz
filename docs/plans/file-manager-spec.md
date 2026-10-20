@@ -432,9 +432,8 @@ difference was what the documents asked for around the code (`AGENTS.md`,
 
 ### The stages
 
-1. **The engine,** stages A to D of
-   [the engine plan](fast-copy-delete-plan.md): delete, copy and move, and the
-   measurement on the owner's machine.
+1. **The engine** of [the engine spec](fast-copy-delete-spec.md): delete,
+   copy and move, and the measurement on the owner's machine.
 2. **Search mode's commands,** straight after the engine, because Search's
    result list needs no panels: Delete, Copy to folder… and Move to folder…
    on the selected rows, Cut and Paste, dropping files onto a folder row,
