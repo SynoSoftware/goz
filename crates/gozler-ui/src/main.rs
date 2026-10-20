@@ -15,6 +15,9 @@ mod app;
 #[cfg(windows)]
 mod win;
 
+#[cfg(all(test, windows))]
+mod timing;
+
 #[cfg(windows)]
 fn main() {
     app::run();
