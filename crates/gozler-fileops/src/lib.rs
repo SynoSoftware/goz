@@ -36,6 +36,8 @@
 #![forbid(unsafe_code)]
 // The decisions are called only by the Windows disk work.
 #![cfg_attr(not(windows), allow(dead_code))]
+// The docs link the Windows-only queue and walks, which Windows' docs check.
+#![cfg_attr(not(windows), allow(rustdoc::broken_intra_doc_links))]
 
 mod conflicts;
 #[cfg(windows)]

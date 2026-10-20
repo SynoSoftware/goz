@@ -507,10 +507,12 @@ mod tests {
     /// running.
     #[test]
     fn use_local_installs_then_restarts_the_service() {
+        // `/` separates folders on every OS that CI tests on, `\` only on
+        // Windows.
         assert_eq!(
-            use_local_commands(Path::new(r"C:\Source\goz\target\debug\gozlerd.exe")),
+            use_local_commands(Path::new("C:/Source/goz/target/debug/gozlerd.exe")),
             [
-                r#"pushd "C:\Source\goz\target\debug""#,
+                r#"pushd "C:/Source/goz/target/debug""#,
                 r".\gozlerd.exe install",
                 "net stop gozler",
                 "net start gozler",

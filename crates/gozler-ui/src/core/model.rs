@@ -16,7 +16,7 @@ use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, Results, RowsChange, Shown};
-use super::selection::{FolderContents, Selection};
+use super::selection::{FolderContents, Selection, wide_path};
 use super::settings::{Choices, Placement, SavedColumn, Settings};
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
@@ -1619,11 +1619,7 @@ impl Column {
 /// Whether a delete or a move has taken `row`'s entry, by its exact name
 /// when its UTF-8 path lost an unpaired surrogate.
 fn is_taken(taken: &Taken, row: &ResultItem) -> bool {
-    use std::os::windows::ffi::OsStringExt;
-    match &row.path_u16 {
-        Some(units) => taken.contains(Path::new(&std::ffi::OsString::from_wide(units))),
-        None => taken.contains(Path::new(&row.path)),
-    }
+    taken.contains(&wide_path(row))
 }
 
 #[cfg(test)]

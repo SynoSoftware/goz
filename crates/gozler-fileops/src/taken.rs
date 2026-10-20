@@ -22,16 +22,16 @@ pub struct Taken(HashSet<Vec<u16>>);
 
 impl Taken {
     pub(crate) fn insert(&mut self, path: &Path) {
-        self.0.insert(key(path));
+        self.0.insert(folded(&units(path)));
     }
 
-    /// Whether `path` equals or is below a taken path, compared as Windows
-    /// compares names, ignoring case.
-    pub fn contains(&self, path: &Path) -> bool {
+    /// Whether `path`, as UTF-16, equals or is below a taken path, compared
+    /// as Windows compares names, ignoring case.
+    pub fn contains(&self, path: &[u16]) -> bool {
         if self.0.is_empty() {
             return false;
         }
-        let mut path = key(path);
+        let mut path = folded(path);
         loop {
             if self.0.contains(&path) {
                 return true;
@@ -44,8 +44,8 @@ impl Taken {
     }
 }
 
-fn key(path: &Path) -> Vec<u16> {
-    let mut units = fold(&units(path));
+fn folded(path: &[u16]) -> Vec<u16> {
+    let mut units = fold(path);
     // A volume root ends with a backslash; no other path does.
     while units.last() == Some(&BACKSLASH) {
         units.pop();
@@ -74,9 +74,10 @@ mod tests {
     fn rows_below_a_taken_path_are_taken() {
         let mut taken = Taken::default();
         taken.insert(Path::new(r"C:\a"));
-        assert!(taken.contains(Path::new(r"C:\a")));
-        assert!(taken.contains(Path::new(r"c:\A\b\c.txt")));
-        assert!(!taken.contains(Path::new(r"C:\ab")));
-        assert!(!taken.contains(Path::new(r"C:\")));
+        let contains = |path: &str| taken.contains(&path.encode_utf16().collect::<Vec<_>>());
+        assert!(contains(r"C:\a"));
+        assert!(contains(r"c:\A\b\c.txt"));
+        assert!(!contains(r"C:\ab"));
+        assert!(!contains(r"C:\"));
     }
 }
