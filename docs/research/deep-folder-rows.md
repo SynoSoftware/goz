@@ -9,8 +9,8 @@ for the deep tree are computed, not run.
 
 **Status.** Stages 1 and 2 are built: protocol 9, and the path sort by
 folder rank (`query::order::folder_ranks`). The wire rules are in
-`docs/DESIGN.md` ("Wire protocol"). "Where the cost is today" describes the
-code before them. Since then, a sorted index has replaced the copied hits
+`docs/DESIGN.md` ("Wire protocol"). "Where the cost was" describes the code
+before them. Since then, a sorted index has replaced the copied hits
 that this study measured: a reply holds a 16-byte row for each match and
 reads each page's names from the index ("Result order" and "Rows on demand"
 in `docs/DESIGN.md`); "The deep tree, measured" gives its figures.
@@ -34,19 +34,19 @@ I recommend two changes, in this order:
    `C:\` the pipe carries 73 MB instead of 251 MB. For the deep tree it
    carries about 0.1 GB instead of 12 GB, because no byte on the wire depends
    on the depth. `gozler-client` builds the full paths, so its callers and the
-   command line's output do not change. The page replaces today's page, and
+   command line's output do not change. The page replaces the page before it, and
    gozlerd stops serving the older protocols (see "What this changes in the
    contracts").
 2. **Sort by path with one rank per folder** instead of comparing full
-   folder paths. Today a path sort holds a copy of every distinct folder's
-   full path, with no limit, under the index read lock.
+   folder paths. Before it, a path sort held a copy of every distinct
+   folder's full path, with no limit, under the index read lock.
 
 What #84 asks for is then a scoped search that asks for this page with no
 sort; it needs only a "no order" choice (stage 3 below).
 
-## Where the cost is today
+## Where the cost was
 
-Read from the code. *L* is the length of a full path, *N* the matches and *F*
+Read from the code at `acc5696`. *L* is the length of a full path, *N* the matches and *F*
 the distinct folders that hold them.
 
 | Step | Code | Memory | Under the read lock | Grows with depth |
@@ -71,7 +71,7 @@ other fields cost the same in every format.
 
 | Format | Bytes on the pipe | Needs full paths in gozlerd |
 | --- | --- | --- |
-| Today: length and full path | 251 MB | yes |
+| Before: length and full path | 251 MB | yes |
 | Front coding (each path as its shared prefix with the row before), path order | 48 MB | yes |
 | Front coding, name order | 142 MB | yes |
 | Each folder once, each row as folder and name | 73 MB (66 MB rows, 7 MB folders) | **no** |
@@ -89,7 +89,7 @@ as WTF-8, which uses 1 byte for an ASCII character. The figures below use
 2,200 bytes. Names in a language that needs 2 or 3 bytes per character make
 every figure that grows with depth 2 or 3 times larger.
 
-| | Today | Recommended |
+| | Before | Recommended |
 | --- | --- | --- |
 | gozlerd memory for a full export | 12.6 GB (12.1 GB of paths, 0.5 GB of `QueryHit`s) | about 0.55 GB: about 100 bytes per row for the name, the folder and the fields |
 | … sorted by path | about 13.8 GB: `FolderPaths` adds a folded path for each of 550,000 folders | about 0.55 GB, and about 70 bytes per folder, about 40 MB, while the ranks are computed |
@@ -121,7 +121,9 @@ At 1/20: 280,330 entries, an index of 39 MB.
 | First 16,384 rows by name, as the window asks | 69 MB, 0.28 s | 6 MB, 0.04 s |
 | First 16,384 rows by path | 147 MB, 0.74 s | 9 MB, 0.08 s |
 
-At the full size of #84, after only: 5,602,990 entries, an index of 794 MB.
+At the full size of #84, after only: 5,602,990 entries, an index of 794 MB
+as the build leaves it, before `optimize_storage` returns the room the build
+reserved to grow.
 
 | Search | After stages 1 and 2 | After `order_hits` keeps one list of hits |
 | --- | --- | --- |
@@ -134,7 +136,10 @@ need about 25 GB for the export by name and 46 GB by path.
 
 With the sorted index, measured with the same steps in
 `crates/gozler-daemon/examples/deep_export.rs`, on an index of 667 MB: the
-time is the daemon's part, from the scan to the last page.
+time is the daemon's part, from the scan to the last page. The index is
+smaller here because this probe measures it after `optimize_storage`, as
+gozlerd runs it after each build; at 1/20 the same index measures 41 MB
+without that call and 33 MB with it.
 
 | Search | Before the sorted index | With it |
 | --- | --- | --- |
@@ -148,11 +153,11 @@ folders, so its peak stays near the full export's.
 
 After stages 1 and 2, `order_hits` copied every `QueryHit`, about 96 bytes,
 into a merged list, then again into the result order, so two lists of hits
-were alive at each copy. It now takes the first volume's list as the merged
-one and moves each hit into its place in that list. What remains is about
-190 bytes per row: the `QueryHit`, its copied name, the sort keys and the
-positions. A full export still holds every row, because each search sorts
-its matches and keeps them until they are sent.
+were alive at each copy. That change took the first volume's list as the
+merged one and moved each hit into its place in that list. What remained
+was about 190 bytes per row: the `QueryHit`, its copied name, the sort keys
+and the positions. A full export still held every row, because each search
+sorted its matches and kept them until they were sent.
 
 ## Options
 
@@ -173,7 +178,7 @@ sums, gains a folder section before the items, and each item carries its
 folder and its name instead of its full path:
 
 ```text
-total, generation, page_flags   as today
+total, generation, page_flags   as before
 folder_count: u32               folders this page adds
 folder_count folders, each:
   parent:    u32                the reply's id of its parent folder;
@@ -181,13 +186,13 @@ folder_count folders, each:
   name_len:  u32
   name:      name_len bytes     WTF-8; for a volume's root, its mount prefix
                                 without the last separator
-count: u32                      items, as today
+count: u32                      items, as before
 count items, each:
   folder:    u32                the reply's id of the item's folder
   name_len:  u32
   name:      name_len bytes     WTF-8
-  iflags, size, mtime, attributes   as today
-sums                            as today
+  iflags, size, mtime, attributes   as before
+sums                            as before
 ```
 
 - **A folder's id is its position in the reply.** The first folder that the
@@ -212,18 +217,18 @@ sums                            as today
   folder that the matches need, with its ancestors, once: its parent and
   its name. The walk up stops at a folder already copied, so each folder is
   visited once, at any depth. The hop limit and lost+found keep their rule:
-  an entry without a full path is left out, as today.
-- After the lock, order as today, then encode page by page. A row whose
+  an entry without a full path is left out, as before.
+- After the lock, order as before, then encode page by page. A row whose
   folder has no id yet gives its folder, and its ancestors that have none,
   the next ids, and those folders go into the page first.
 - gozlerd builds no full path for a row. It still builds full paths where
-  a search term tests the full path, as today, and those stay inside the
+  a search term tests the full path, as before, and those stay inside the
   scan.
 
 ### gozler-client
 
 The client decodes the page into the same `QueryResults` and
-`ResultItem`s as today: it joins the names on the walk up from the row's
+`ResultItem`s as before: it joins the names on the walk up from the row's
 folder, with a bounded cache of folder paths. So `gozler-cli`, the window
 and `gozler_core::output` do not change, and the command line writes the
 same bytes. Joining raw WTF-8 at `\` is exact, because a separator always
@@ -253,7 +258,7 @@ F × L before.
 Two exceptions need care when this is built:
 
 - Two sibling folders whose folded names are equal, which only a
-  case-sensitive folder holds, compare equal today, so they must share a
+  case-sensitive folder holds, compared equal before, so they must share a
   rank, and the folders below them must merge.
 - A volume mounted in a folder of another volume puts its paths among that
   volume's paths. Its tree must be ranked as if it hung at its mount folder.
@@ -264,8 +269,8 @@ Each stage is proven without the window.
 
 | Stage | Change | Proof |
 | --- | --- | --- |
-| 1 | Protocol 9: gozlerd keeps names and folders and sends the folder page; the client builds full paths; the older protocols go | a round trip of mixed pages; a proptest that malformed pages return an error (bad ids, loops, truncation); the command line's golden output unchanged; a bench over a deep fixture (the `deep_index` builder in `query::paths` scaled up) shows memory and time against today |
-| 2 | Path order by folder rank; remove `FolderPaths` | a proptest over random trees with names around the `\` and space case: the rank order equals today's string order |
+| 1 | Protocol 9: gozlerd keeps names and folders and sends the folder page; the client builds full paths; the older protocols go | a round trip of mixed pages; a proptest that malformed pages return an error (bad ids, loops, truncation); the command line's golden output unchanged; a bench over a deep fixture (the `deep_index` builder in `query::paths` scaled up) shows memory and time against the code before |
+| 2 | Path order by folder rank; remove `FolderPaths` | a proptest over random trees with names around the `\` and space case: the rank order equals the string order before it |
 | 3 | Only if #84 is scheduled: a "no order" choice that sends a scope's entries in the order of the subtree walk | the first page arrives without a sort; the delete takes its list from it |
 | 4 | Only if the owner wants the window's 16 MB budget to hold for deep trees: the window caches chunks as folders and names, and builds a path when it draws a row | the memory measurement in `DESIGN.md`'s "Memory budget" over a deep tree |
 
@@ -292,8 +297,8 @@ and output, not the pipe.
 
 ## Not measured
 
-- **The time today to build paths for folders deeper than 1,024 bytes,**
-  which `DirPaths` rebuilds for every row from the nearest cached ancestor.
+- **The time to build paths for folders deeper than 1,024 bytes,**
+  which `DirPaths` rebuilt for every row from the nearest cached ancestor.
   The code shows the cost grows with the depth past that point; it was not
   timed.
 - **The client's time to join paths,** which moves from gozlerd to the

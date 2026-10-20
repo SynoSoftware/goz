@@ -216,6 +216,10 @@ struct CachedChunk {
     start: u64,
     rows: Vec<ResultItem>,
     used: u64,
+    /// The chunk was asked for again after it came back short, so it is not
+    /// asked for a third time: a reply can stay short, as when a row has no
+    /// full path, and the window asks for the visible rows after each reply.
+    asked_again: bool,
 }
 
 /// The request whose reply the results wait for; a reply of another
@@ -450,9 +454,17 @@ impl Results {
         let mut missing = None;
         let mut start = visible.start - visible.start % CHUNK_ROWS;
         while start < visible.end {
+            let shown_end = visible.end.min(start + CHUNK_ROWS);
             match shown.chunks.iter_mut().find(|c| c.start == start) {
-                Some(chunk) => chunk.used = shown.clock,
-                None => {
+                // A chunk that came back short, or that a selection reply
+                // shortened, lacks rows the count still holds, so a visible
+                // position past its rows asks for it again, once.
+                Some(chunk)
+                    if chunk.asked_again || chunk.start + chunk.rows.len() as u64 >= shown_end =>
+                {
+                    chunk.used = shown.clock;
+                }
+                _ => {
                     missing.get_or_insert(start);
                 }
             }
@@ -512,17 +524,19 @@ impl Results {
 
 impl ShownRows {
     /// Caches a chunk, and drops the chunk used least recently when the
-    /// cache holds more than [`CACHE_ROWS`].
+    /// cache holds more than [`CACHE_ROWS`]. A chunk is asked for only when
+    /// the cache lacks it or holds it short, so one that replaces a cached
+    /// chunk was asked for again. An empty chunk is cached too, so an empty
+    /// reply is not asked for again without end.
     fn insert(&mut self, start: u64, rows: Vec<ResultItem>) {
         self.clock += 1;
+        let asked_again = self.chunks.iter().any(|c| c.start == start);
         self.chunks.retain(|c| c.start != start);
-        if rows.is_empty() {
-            return;
-        }
         self.chunks.push(CachedChunk {
             start,
             rows,
             used: self.clock,
+            asked_again,
         });
         while self.chunks.len() as u64 * CHUNK_ROWS > CACHE_ROWS {
             let oldest = self
@@ -611,6 +625,49 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(showing(LIST_LIMIT + 1).count(), LIST_LIMIT);
+    }
+
+    /// A chunk that comes back short, because the service left out a row
+    /// while its total still counts the rest, is asked for again once the
+    /// list shows a position past its rows; otherwise that cell stays empty
+    /// until the cache drops the chunk. It is asked for again once: a reply
+    /// can stay short, as when a row has no full path, and the window asks
+    /// for the visible rows after every reply, so a second short reply would
+    /// otherwise be asked for without end. An empty reply holds the same.
+    #[test]
+    fn a_short_chunk_is_asked_for_again_once_when_its_missing_rows_show() {
+        let mut results = showing(3 * CHUNK_ROWS);
+        let asked = results.next_chunk(CHUNK_ROWS..CHUNK_ROWS + 40, Generation(2));
+        assert_eq!(asked.map(|a| a.start), Some(CHUNK_ROWS));
+        let short = || chunk(CHUNK_ROWS, CHUNK_ROWS - 1, 3 * CHUNK_ROWS);
+        results.accept(Generation(2), short());
+        let within = CHUNK_ROWS..CHUNK_ROWS + 40;
+        assert_eq!(
+            results.next_chunk(within, Generation(3)),
+            None,
+            "its rows are cached"
+        );
+        let last = 2 * CHUNK_ROWS;
+        let asked = results.next_chunk(last - 40..last, Generation(3));
+        assert_eq!(asked.map(|a| a.start), Some(CHUNK_ROWS));
+        results.accept(Generation(3), short());
+        assert_eq!(
+            results.next_chunk(last - 40..last, Generation(4)),
+            None,
+            "a second short reply is not asked for again"
+        );
+
+        let mut results = showing(3 * CHUNK_ROWS);
+        let far = 2 * CHUNK_ROWS..2 * CHUNK_ROWS + 40;
+        for generation in [2, 3] {
+            let asked = results.next_chunk(far.clone(), Generation(generation));
+            assert_eq!(asked.map(|a| a.start), Some(2 * CHUNK_ROWS));
+            results.accept(
+                Generation(generation),
+                chunk(2 * CHUNK_ROWS, 0, 3 * CHUNK_ROWS),
+            );
+        }
+        assert_eq!(results.next_chunk(far, Generation(4)), None);
     }
 
     /// Without the eviction the cache grows with every chunk scrolled to,

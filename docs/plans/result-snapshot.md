@@ -200,7 +200,9 @@ dropped result snapshot costs only a new search.
 | The empty search on the benchmark machine | 3,970,000 | 64 MB | 525 MB committed |
 | The cap, on the owner's `C:` | 4,031,380 | 65 MB | |
 
-The records become the rows in place, so making it holds no second list.
+On NTFS the records become the rows in place, so making it holds no second
+list. A ReFS row is 24 bytes, larger than a record, so its rows take a second
+list while they are made.
 
 ## What changes in gozler-ui
 

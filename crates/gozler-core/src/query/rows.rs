@@ -6,10 +6,10 @@
 //! volume it reads: each row is the file as it is then, with its current
 //! name, size and date, as Everything's list shows a renamed file. A row
 //! whose slot is dead or holds another file, that left the search's scope,
-//! or whose folder has no full path is left out, and the reply's total counts it out, because
-//! `gozler` reads the last page's total and exits 10 when it shows fewer
-//! rows. A volume whose index was replaced or got new entry indexes sends no
-//! more rows, and the reply says so.
+//! or whose folder has no full path is left out, and the reply's total
+//! counts it out, because `gozler` reads the last page's total and exits 10
+//! when it shows fewer rows. A volume whose index was replaced or got new
+//! entry indexes sends no more rows, and the reply says so.
 //!
 //! [`Reply`] merges several volumes' rows one page at a time, by [`compare`]
 //! or, for a path sort, by the folders' folded paths, because folder ranks
@@ -22,7 +22,7 @@
 use super::CompiledQuery;
 use super::engine::{MatchSums, find_matches, in_scope};
 use super::order::{OrderFields, SortRecord, compare, compare_paths};
-use super::paths::{FolderCopy, FolderId, ResultNames};
+use super::paths::{FolderCopy, FolderId, ResultNames, root_name};
 use crate::attributes::Attributes;
 use crate::fold::fold;
 use crate::index::VolumeIndex;
@@ -42,6 +42,7 @@ struct NarrowRow {
 
 /// A row of a volume with 128-bit file IDs, as ReFS has, kept as two `u64`s
 /// so that a row takes 24 bytes, not the 32 that a `u128`'s alignment gives.
+/// It is larger than a [`SortRecord`], so these rows take a second list.
 #[derive(Clone, Copy, Debug)]
 struct WideRow {
     frn: [u64; 2],
@@ -53,17 +54,17 @@ const _: () = assert!(align_of::<NarrowRow>() == align_of::<SortRecord>());
 const _: () = assert!(size_of::<WideRow>() == 24);
 
 /// One volume's rows, at the width of its file IDs.
-enum Rows {
+enum RowList {
     Narrow(Vec<NarrowRow>),
     Wide(Vec<WideRow>),
 }
 
-impl Rows {
+impl RowList {
     /// The rows of `records`, with each entry's file ID from `index`.
     fn new(records: Vec<SortRecord>, index: &VolumeIndex) -> Self {
         let frn = |record: SortRecord| index.entry(record.idx()).frn().0;
         if index.has_wide_ids() {
-            Rows::Wide(
+            RowList::Wide(
                 records
                     .into_iter()
                     .map(|r| WideRow {
@@ -73,7 +74,7 @@ impl Rows {
                     .collect(),
             )
         } else {
-            Rows::Narrow(
+            RowList::Narrow(
                 records
                     .into_iter()
                     .map(|r| NarrowRow {
@@ -87,16 +88,16 @@ impl Rows {
 
     fn len(&self) -> usize {
         match self {
-            Rows::Narrow(rows) => rows.len(),
-            Rows::Wide(rows) => rows.len(),
+            RowList::Narrow(rows) => rows.len(),
+            RowList::Wide(rows) => rows.len(),
         }
     }
 
     /// The entry and the file ID of the row at `at`.
     fn get(&self, at: usize) -> (EntryIdx, Frn) {
         match self {
-            Rows::Narrow(rows) => (rows[at].idx, Frn(u128::from(rows[at].frn))),
-            Rows::Wide(rows) => {
+            RowList::Narrow(rows) => (rows[at].idx, Frn(u128::from(rows[at].frn))),
+            RowList::Wide(rows) => {
                 let [low, high] = rows[at].frn;
                 (
                     rows[at].idx,
@@ -110,15 +111,16 @@ impl Rows {
 /// One volume's answer to a search: its rows in the result order, from
 /// [`super::OrderedMatches::read_rows`].
 pub struct VolumeRows {
-    rows: Rows,
+    rows: RowList,
     /// [`VolumeIndex::instance`] of the index the rows name entries of.
     instance: u64,
     /// The scope folder and its file ID; `None` without a scope.
     scope: Option<(EntryIdx, Frn)>,
-    /// The matches, less those removed before the rows were read.
-    total: u64,
-    /// The limit cut off matches after the rows.
-    cut_off: bool,
+    /// The matches after the rows that the limit cut off, less those removed
+    /// before the rows were read.
+    past_cut: u64,
+    /// The order of the rows.
+    sort: SortSpec,
     sums: Option<MatchSums>,
     mount_prefix: String,
 }
@@ -128,16 +130,17 @@ impl VolumeRows {
         records: Vec<SortRecord>,
         index: &VolumeIndex,
         scope: Option<(EntryIdx, Frn)>,
-        total: u64,
+        past_cut: u64,
+        sort: SortSpec,
         sums: Option<MatchSums>,
         mount_prefix: String,
     ) -> Self {
         Self {
-            cut_off: total > records.len() as u64,
-            rows: Rows::new(records, index),
+            rows: RowList::new(records, index),
             instance: index.instance(),
             scope,
-            total,
+            past_cut,
+            sort,
             sums,
             mount_prefix,
         }
@@ -223,15 +226,23 @@ struct VolumeReader {
 }
 
 impl Reply {
-    /// A reply of `answers`, one for each volume, which skips the first
-    /// `offset` rows and sends at most `limit`.
-    pub fn new(sort: SortSpec, answers: Vec<VolumeRows>, offset: u32, limit: Option<u32>) -> Self {
+    /// A reply of `answers`, one for each volume of the same search, which
+    /// skips the first `offset` rows and sends at most `limit`.
+    pub fn new(answers: Vec<VolumeRows>, offset: u32, limit: Option<u32>) -> Self {
+        let sort = answers.first().map_or_else(SortSpec::default, |a| a.sort);
+        assert!(
+            answers.iter().all(|a| a.sort == sort),
+            "the answers of one search share its order"
+        );
         let merge = match sort.key {
             SortKey::Path => merge_paths(sort.dir, &answers),
             _ => Merge::Compare,
         };
         Self {
-            total: answers.iter().map(|a| a.total).sum(),
+            total: answers
+                .iter()
+                .map(|a| a.rows.len() as u64 + a.past_cut)
+                .sum(),
             volumes: answers
                 .into_iter()
                 .map(|answer| VolumeReader {
@@ -292,11 +303,14 @@ impl Reply {
     /// [`Self::new`], in their order: the index held under its read lock
     /// where [`Self::reads_volume`] says the page reads it, and `None`
     /// elsewhere. Hands each row to `push` with the folders it names, until
-    /// `push` refuses one or the page has no row left. Returns whether rows
-    /// are left: a row `push` refused is read again for the next page.
+    /// `push` refuses one, the page has no row left, or it read `page_rows`
+    /// rows, sent or skipped for the offset, so that one hold of the locks
+    /// does a page's work at most. Returns whether rows are left: a row
+    /// `push` refused is read again for the next page.
     pub fn fill(
         &mut self,
         indexes: &[Option<&VolumeIndex>],
+        page_rows: usize,
         mut push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
     ) -> bool {
         assert_eq!(
@@ -311,6 +325,7 @@ impl Reply {
                 self.index_changed = true;
             }
         }
+        let mut read = 0;
         loop {
             if self.left == Some(0) {
                 return false;
@@ -320,6 +335,10 @@ impl Reply {
                 Next::NotHeld => return true,
                 Next::End => return false,
             };
+            if read == page_rows {
+                return true;
+            }
+            read += 1;
             let index = indexes[v].expect("next_volume reads only the indexes held");
             let volume = &mut self.volumes[v];
             let folder = volume.head.take().expect("next_volume found the row");
@@ -373,7 +392,7 @@ impl Reply {
                         return Next::Volume(v);
                     }
                 }
-                if volume.answer.cut_off {
+                if volume.answer.past_cut > 0 {
                     return Next::End;
                 }
             }
@@ -389,7 +408,7 @@ impl Reply {
                     total,
                 );
             if !found {
-                if volumes[v].answer.cut_off {
+                if volumes[v].answer.past_cut > 0 {
                     return Next::End;
                 }
                 continue;
@@ -418,12 +437,11 @@ impl Reply {
 
 /// How a path sort merges `answers`: in turn, in the order of their root
 /// paths, when no root path starts another's, and otherwise by comparing
-/// paths. A root path is the folded mount prefix without the last
-/// separator, as [`FolderCopy`] names a root.
+/// paths. A root path is the folded [`root_name`].
 fn merge_paths(dir: SortDir, answers: &[VolumeRows]) -> Merge {
     let roots: Vec<Vec<u8>> = answers
         .iter()
-        .map(|a| fold(a.mount_prefix.trim_end_matches(['\\', '/']).as_bytes()))
+        .map(|a| fold(root_name(&a.mount_prefix)))
         .collect();
     let nested = roots.iter().enumerate().any(|(i, a)| {
         roots
@@ -446,8 +464,9 @@ impl VolumeReader {
     /// Starts a page under `index`'s read lock. A volume whose index changed
     /// and one whose scope folder is gone leave out every row left, which
     /// `total` stops counting, and the reply does not wait for their matches
-    /// past the limit: the scope holds none, and the reply says the changed
-    /// index's rows are incomplete. Returns whether the index changed.
+    /// past the limit. A gone scope holds none of them, so `total` stops
+    /// counting them too; for a changed index the reply says its rows are
+    /// incomplete. Returns whether the index changed.
     fn begin_page(
         &mut self,
         index: &VolumeIndex,
@@ -467,8 +486,11 @@ impl VolumeReader {
             .is_some_and(|(scope, frn)| !changed && !index.holds(scope, frn));
         if changed || scope_gone {
             *total -= left;
+            if scope_gone {
+                *total -= self.answer.past_cut;
+            }
             self.next = self.answer.rows.len();
-            self.answer.cut_off = false;
+            self.answer.past_cut = 0;
             return changed;
         }
         self.folders
@@ -636,9 +658,9 @@ pub fn run_query(
         .order()
         .read_rows(index)
         .expect("the index is borrowed for the whole query, so it cannot change");
-    let mut reply = Reply::new(sort, vec![answer], 0, None);
+    let mut reply = Reply::new(vec![answer], 0, None);
     let mut rows = Vec::new();
-    reply.fill(&[Some(index)], |row, names| {
+    reply.fill(&[Some(index)], usize::MAX, |row, names| {
         let mut path = Vec::new();
         names.full_path_into(row.folder, row.name, &mut path);
         rows.push(PathRow {
@@ -782,13 +804,13 @@ mod tests {
                     })
                     .collect();
 
-                let mut reply = Reply::new(sort, answers, 0, None);
+                let mut reply = Reply::new(answers, 0, None);
                 let mut merged = Vec::new();
                 loop {
                     let page: Vec<Option<&VolumeIndex>> = (0..held.len())
                         .map(|v| reply.reads_volume(v).then_some(held[v]))
                         .collect();
-                    let more = reply.fill(&page, |row, names| {
+                    let more = reply.fill(&page, usize::MAX, |row, names| {
                         let mut path = Vec::new();
                         names.full_path_into(row.folder, row.name, &mut path);
                         merged.push(path);

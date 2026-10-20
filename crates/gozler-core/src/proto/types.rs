@@ -156,7 +156,8 @@ pub enum Response {
 /// One page of matches for a [`SearchRequest`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueryResults {
-    /// Full match count regardless of paging (es `totitems` semantics).
+    /// The match count less the rows the reply left out up to this page;
+    /// the last page's total holds (es `totitems` semantics).
     pub total: u64,
     /// The matches in this page, at most [`PAGE_ROWS`].
     pub items: Vec<ResultItem>,

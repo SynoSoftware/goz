@@ -16,7 +16,7 @@
 use crate::index::VolumeIndex;
 use crate::index::volume::MAX_PATH_HOPS;
 use crate::types::{EntryIdx, Frn, NIL};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 /// Which spelling of each name a path is built from.
@@ -74,7 +74,7 @@ impl DirPaths {
     /// Paths of `index`'s entries under `mount_prefix` (`C:\`; empty for a
     /// path within the volume).
     pub(crate) fn new(index: &VolumeIndex, form: NameForm, mount_prefix: &str) -> Self {
-        let root_path = mount_prefix.trim_end_matches(['\\', '/']).as_bytes();
+        let root_path = root_name(mount_prefix);
         let arena = match form {
             NameForm::Raw => root_path.to_vec(),
             NameForm::Folded => crate::fold::fold(root_path),
@@ -294,6 +294,12 @@ impl ResultNames {
     }
 }
 
+/// The name of the root folder of the volume mounted at `mount_prefix`: the
+/// prefix without its last separator, as `C:` for `C:\`.
+pub(crate) fn root_name(mount_prefix: &str) -> &[u8] {
+    mount_prefix.trim_end_matches(['\\', '/']).as_bytes()
+}
+
 /// Appends `name` to the path in `out`, after a separator unless the path is
 /// still empty: the root of a volume mounted nowhere has an empty name.
 fn join_name(out: &mut Vec<u8>, name: &[u8]) {
@@ -317,9 +323,8 @@ pub(crate) struct FolderCopy {
     /// Each copied folder's file ID, with its place in the table and its
     /// depth, counted as [`DirPaths`] counts it.
     copied: FxHashMap<EntryIdx, (Frn, FolderId, usize)>,
-    /// The file ID of each folder found to have no path under this hold of
-    /// the lock.
-    missing: FxHashMap<EntryIdx, Frn>,
+    /// The folders found to have no path under this hold of the lock.
+    missing: FxHashSet<EntryIdx>,
 }
 
 impl FolderCopy {
@@ -327,13 +332,13 @@ impl FolderCopy {
     /// (`C:\`; empty for a path within the volume), into `names`, which it
     /// adds the volume's root to.
     pub(crate) fn new(index: &VolumeIndex, mount_prefix: &str, names: &mut ResultNames) -> Self {
-        let root = names.push_folder(None, mount_prefix.trim_end_matches(['\\', '/']).as_bytes());
+        let root = names.push_folder(None, root_name(mount_prefix));
         let mut copied = FxHashMap::default();
         let root_frn = index.entry(index.root()).frn();
         copied.insert(index.root(), (root_frn, root, 1));
         Self {
             copied,
-            missing: FxHashMap::default(),
+            missing: FxHashSet::default(),
         }
     }
 
@@ -371,13 +376,12 @@ impl FolderCopy {
         let mut chain: SmallVec<[EntryIdx; 32]> = SmallVec::new();
         let mut cur = dir;
         let base = loop {
-            let frn = index.entry(cur).frn();
-            if let Some(&(copied, folder, depth)) = self.copied.get(&cur)
-                && copied == frn
+            if let Some(&(frn, folder, depth)) = self.copied.get(&cur)
+                && frn == index.entry(cur).frn()
             {
                 break Some((folder, depth));
             }
-            if self.missing.get(&cur) == Some(&frn) {
+            if self.missing.contains(&cur) {
                 break None;
             }
             let parent = index.entry(cur).parent();
@@ -392,20 +396,15 @@ impl FolderCopy {
             chain.push(cur);
             cur = parent;
         };
-        let mut remember_missing = |dirs: &[EntryIdx]| {
-            for &dir in dirs {
-                self.missing.insert(dir, index.entry(dir).frn());
-            }
-        };
         let Some((mut folder, mut depth)) = base else {
-            remember_missing(&chain);
+            self.missing.extend(&chain);
             return None;
         };
         for (i, &dir) in chain.iter().rev().enumerate() {
             depth += 1;
             if depth > MAX_PATH_HOPS {
                 // This folder and every one below it walk too far.
-                remember_missing(&chain[..chain.len() - i]);
+                self.missing.extend(&chain[..chain.len() - i]);
                 return None;
             }
             folder = names.push_folder(Some(folder), index.entry(dir).name());

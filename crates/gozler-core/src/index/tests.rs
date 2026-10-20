@@ -1779,6 +1779,9 @@ enum NameChange {
     Release(prop::sample::Index),
     Merge,
     Compact,
+    /// A merge whose ranks the compaction then moves to the new ids, as
+    /// [`VolumeIndex::plan_compaction`] does when both are due.
+    MergeAndCompact,
 }
 
 fn name_change_strategy() -> impl Strategy<Value = NameChange> {
@@ -1787,6 +1790,7 @@ fn name_change_strategy() -> impl Strategy<Value = NameChange> {
         2 => any::<prop::sample::Index>().prop_map(NameChange::Release),
         1 => Just(NameChange::Merge),
         1 => Just(NameChange::Compact),
+        1 => Just(NameChange::MergeAndCompact),
     ]
 }
 
@@ -1825,6 +1829,14 @@ proptest! {
                     for id in &mut held {
                         *id = remap[*id as usize];
                     }
+                }
+                NameChange::MergeAndCompact => {
+                    let ranks = names.plan_ranks();
+                    let remap = names.install_compacted(names.plan_compact(&ranks));
+                    for id in &mut held {
+                        *id = remap[*id as usize];
+                    }
+                    exact = true;
                 }
             }
             for &a in &held {

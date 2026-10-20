@@ -313,12 +313,14 @@ impl VolumeIndex {
         this
     }
 
-    /// Whether any entry could fail to reconstruct to a real path.
+    /// Whether anything sits under lost+found: a placeholder for a parent
+    /// whose record has not arrived, or a child of a removed folder.
     ///
-    /// False means nothing sits under lost+found (no placeholder for a parent
-    /// whose record has not arrived, no child of a removed folder), so every
-    /// entry is presentable. The query engine uses this single load to skip its
-    /// per-directory presentability walk entirely on a healthy index.
+    /// False means every entry's walk ends at the root, but an entry whose
+    /// walk is longer than `MAX_PATH_HOPS` still has no full path. The
+    /// query engine uses this single load to skip its per-directory
+    /// presentability walk on a healthy index, so such an entry counts in a
+    /// search's total and is left out only when its page is read.
     pub fn has_orphans(&self) -> bool {
         self.entries.first_child(self.lost_found) != NIL
     }
@@ -1451,10 +1453,8 @@ impl VolumeIndex {
     /// swap the FRN map to its cheaper dense backing when the record space
     /// allows it, then return all growth slack. Runs under the write lock; call
     /// it once per volume, not per batch. It can give the entries new indexes,
-    /// so the index takes a new instance, which tells a search that its
-    /// matches no longer name these entries.
+    /// and then the index takes a new instance (`compact_entries`).
     pub fn optimize_storage(&mut self) {
-        self.instance = next_instance();
         self.compact_entries();
         self.by_frn.densify_if_smaller();
         self.shrink_to_fit();
@@ -1473,11 +1473,14 @@ impl VolumeIndex {
     /// Moves the live entries over the slots that removed entries left, so
     /// their memory returns: after the Include rules removed many entries,
     /// the free slots would otherwise hold it until new entries reuse them.
+    /// The entries get new indexes, so the index takes a new instance, which
+    /// tells a search that its matches no longer name these entries.
     fn compact_entries(&mut self) {
         if !self.entries.has_free_slots() {
             return;
         }
         let remap = self.entries.compact();
+        self.instance = next_instance();
         self.root = moved(&remap, self.root);
         self.lost_found = moved(&remap, self.lost_found);
         self.names.remap_heads(&remap);

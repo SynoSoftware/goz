@@ -15,7 +15,7 @@
 //! <branches> <name|path|merge> [limit]`
 
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::proto::{PageEnd, PageItem, ResultsPage, SentFolders};
+use gozler_core::proto::{PAGE_ROWS, PageEnd, PageItem, ResultsPage, SentFolders};
 use gozler_core::query::{CompiledQuery, Reply, find_matches, parse_query};
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
@@ -200,13 +200,13 @@ fn main() {
 
     // The pages, each read under the lock and sent after it.
     let sending = Instant::now();
-    let mut reply = Reply::new(sort, vec![answer], 0, None);
+    let mut reply = Reply::new(vec![answer], 0, None);
     let mut sent = SentFolders::default();
     let (mut pipe, mut pages, mut page_lock_s) = (0usize, 0usize, 0f64);
     loop {
         let mut page = ResultsPage::new(0, false, reply.rows_left());
         let filling = Instant::now();
-        let more = reply.fill(&[Some(&index)], |row, names| {
+        let more = reply.fill(&[Some(&index)], PAGE_ROWS as usize, |row, names| {
             let item = PageItem {
                 folder: row.folder,
                 name: row.name,
@@ -234,9 +234,11 @@ fn main() {
     let peak = lock_peak.max(peak_since(base));
 
     println!(
-        "{total} matches, sort {key:?}, limit {limit:?}
-         scan under the lock {scan_s:.3} s, order without it {order_s:.3} s,          rows under the lock again {read_s:.3} s; peak {:.1} MB
-         pages: {send_s:.2} s, longest page under the lock {page_lock_s:.3} s,          peak overall {:.1} MB ({:.0} bytes a match)
+        "{total} matches, sort {key:?}, limit {limit:?}\n\
+         scan under the lock {scan_s:.3} s, order without it {order_s:.3} s, \
+         rows under the lock again {read_s:.3} s; peak {:.1} MB\n\
+         pages: {send_s:.2} s, longest page under the lock {page_lock_s:.3} s, \
+         peak overall {:.1} MB ({:.0} bytes a match)\n\
          pipe {:.1} MB in {pages} pages",
         mb(lock_peak),
         mb(peak),

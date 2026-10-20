@@ -61,9 +61,10 @@ windows-sys = { version = "0.61", features = [
 ] }
 # daemon
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
-# thread-caching allocator: the query path allocates a path buffer per hit, and
-# on a broad query that is millions of small allocations the Windows default heap
-# serializes; mimalloc measured ~30% faster on that path.
+# thread-caching allocator: mimalloc measured ~30% faster than the Windows
+# default heap when the query path allocated a path buffer for each match. The
+# query path now keeps rows and allocates per page, and the gain on it is not
+# measured again.
 mimalloc = "0.1"
 # mi_collect: return freed bootstrap memory to the OS before pinning the
 # working set (the pin floors the current RSS, so purge first).

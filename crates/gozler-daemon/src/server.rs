@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use gozler_core::include::IncludeSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
-    DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
-    PageEnd, PageItem, ProtoError, QueryTotals, Request, Response, ResultsPage, Returns, Rows,
-    SentFolders, VolumeMemory, VolumeStatus, encode_response_frame,
+    DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PAGE_ROWS, PIPE_NAME,
+    PROTO_VERSION, PageEnd, PageItem, ProtoError, QueryTotals, Request, Response, ResultsPage,
+    Returns, Rows, SentFolders, VolumeMemory, VolumeStatus, encode_response_frame,
 };
 use gozler_core::query::{
     CompiledQuery, IndexChanged, MatchSums, Reply, SizeOverflow, Totals, find_matches,
@@ -299,7 +299,8 @@ fn refusal(message: String) -> Response {
 /// Whether the answer from the volumes a search ran on may be short.
 #[derive(Default)]
 struct Coverage {
-    /// A volume searched is indexing, rescanning or offline.
+    /// A volume searched is indexing, rescanning or offline, or its index
+    /// changed during the search.
     volumes_incomplete: bool,
     /// The size and date pass failed or stopped on a volume.
     metadata_pending: bool,
@@ -378,8 +379,7 @@ fn stream_rows(
                 volumes.push(vol);
                 answers.push(answer);
             }
-            // A rebuild replaced the index meanwhile, or new Include
-            // settings moved its entries, so this volume's rows are lost.
+            // `IndexChanged` says why this volume's rows are lost.
             Err(IndexChanged) => coverage.volumes_incomplete = true,
         }
     }
@@ -388,7 +388,7 @@ fn stream_rows(
         sums = sums.map(MatchSums::without_sizes);
     }
 
-    let mut reply = Reply::new(rows.sort, answers, rows.offset, rows.limit);
+    let mut reply = Reply::new(answers, rows.offset, rows.limit);
     let mut sent = SentFolders::default();
     loop {
         let mut page = ResultsPage::new(
@@ -407,7 +407,7 @@ fn stream_rows(
             .iter()
             .map(|read| read.as_ref().map(|read| read.index()))
             .collect();
-        let more = reply.fill(&indexes, |row, names| {
+        let more = reply.fill(&indexes, PAGE_ROWS as usize, |row, names| {
             let item = PageItem {
                 folder: row.folder,
                 name: row.name,
@@ -897,16 +897,8 @@ mod tests {
     /// the whole match count on every page, not the page's own length.
     #[test]
     fn pages_carry_more_until_the_last_and_a_stable_total() {
-        // One directory holding PAGE_ROWS + 1 matches, so the encoder pages.
-        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
-        index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "many"));
         let n = PAGE_ROWS as u64 + 1;
-        for i in 0..n {
-            let mut rec = dir_record(1000 + u128::from(i), 100, &format!("hit{i:05}.log"));
-            rec.attributes = 0;
-            index.insert_enum(&rec);
-        }
-        let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
+        let vols = set(&[volume(r"C:\", paging_index(), VolumePhase::Live)]);
 
         let pages = results(&encode_query_binary(&vols, query("hit")));
         assert_eq!(pages.len(), 2, "PAGE_ROWS + 1 matches must span two frames");
@@ -916,6 +908,51 @@ mod tests {
         assert_eq!(pages[1].items.len(), 1);
         assert_eq!(pages[0].total, n, "total is the whole match count");
         assert_eq!(pages[1].total, n, "total must not drift across pages");
+    }
+
+    /// One folder holding [`PAGE_ROWS`] + 1 matches of `hit`, so a reply
+    /// takes two pages.
+    fn paging_index() -> VolumeIndex {
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
+        index.insert_enum(&dir_record(100, NTFS_ROOT_FRN.0, "many"));
+        for i in 0..=u128::from(PAGE_ROWS) {
+            let mut rec = dir_record(1000 + i, 100, &format!("hit{i:05}.log"));
+            rec.attributes = 0;
+            index.insert_enum(&rec);
+        }
+        index
+    }
+
+    /// A volume whose index gets new entry indexes between two pages sends
+    /// no more rows, and the pages after it say the answer is incomplete, or
+    /// the client takes the short answer as whole.
+    #[test]
+    fn an_index_changed_between_pages_marks_the_answer_incomplete() {
+        let vol = volume(r"C:\", paging_index(), VolumePhase::Live);
+        let vols = set(&[Arc::clone(&vol)]);
+        let mut out = Vec::new();
+        serve(
+            &vols,
+            &defaults(),
+            &request_frame(&search(query("hit"))),
+            &mut |reply| {
+                if out.is_empty() {
+                    let mut index = vol.index_mut();
+                    let mut gone = dir_record(1000, 100, "");
+                    gone.reason = gozler_core::usn::record::USN_REASON_FILE_DELETE;
+                    index.apply_batch(&[gone]);
+                    index.optimize_storage();
+                }
+                out.extend_from_slice(&reply);
+                true
+            },
+        );
+        let pages = results(&out);
+        assert_eq!(pages.len(), 2);
+        assert!(!pages[0].volumes_incomplete);
+        assert!(pages[1].volumes_incomplete, "the rows stopped");
+        assert!(pages[1].items.is_empty());
+        assert_eq!(pages[1].total, u64::from(PAGE_ROWS), "the last row is out");
     }
 
     /// Every page must fit the 16 MiB frame cap the client decodes with, or

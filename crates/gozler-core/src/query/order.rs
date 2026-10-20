@@ -1,12 +1,14 @@
 //! The result order: which of two rows prints first.
 //!
-//! One comparison, `compare`, decides the order for every caller, so a
-//! limited query is always a prefix of the same query without a limit. The
-//! engine sorts one volume's matches as `SortRecord`s, whose keys order
-//! them as `compare` does, and orders each run of equal keys with `compare`
-//! under the volume's index lock. The page builder merges several volumes'
-//! rows with `compare`, or, for a path sort, with `compare_paths`, because
-//! folder ranks order only one volume's folders.
+//! One rule decides the order for every caller, so a limited query is
+//! always a prefix of the same query without a limit. `compare` decides it,
+//! except for a path sort across volumes: within one volume, `compare` orders
+//! folders by their folder ranks, and across volumes `compare_paths` orders
+//! them by their folded paths, because folder ranks order only one volume's
+//! folders. The engine sorts one volume's matches as `SortRecord`s, whose
+//! keys order them as `compare` does, and orders each run of equal keys with
+//! `compare` under the volume's index lock. The page builder merges several
+//! volumes' rows with `compare`, or, for a path sort, with `compare_paths`.
 //!
 //! The sort key decides first. `Path` is es's `(parent folder, name)` order,
 //! folded, not a byte compare of the whole path; an unknown size or date

@@ -6,9 +6,7 @@
 //! `--service` under the SCM); `scan` does a one-shot bootstrap and prints
 //! stats; `install`/`uninstall` register the auto-start Windows service.
 
-// Thread-caching allocator: the query path allocates a path buffer per hit, so a
-// broad query is millions of small allocations that the Windows default heap
-// serializes. See the workspace Cargo.toml note.
+// Thread-caching allocator; the workspace Cargo.toml note says why.
 #[cfg(windows)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

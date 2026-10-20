@@ -780,6 +780,7 @@ pub fn find_matches(
         mut records,
         folders,
         folder_names,
+        scope,
         ..
     } = scan(index, mount_prefix, query, scope);
     let sums = sums.then(|| match_sums(index, &records));
@@ -798,10 +799,7 @@ pub fn find_matches(
         origin: Origin {
             instance: index.instance(),
             reuse_mark: index.reuse_mark(),
-            // The volume root holds the whole volume, so it is no scope.
-            scope: scope
-                .filter(|&s| s != index.root())
-                .map(|s| (s, index.entry(s).frn())),
+            scope: scope.map(|s| (s, index.entry(s).frn())),
             sums,
             mount_prefix: mount_prefix.to_string(),
         },
@@ -852,7 +850,8 @@ struct Origin {
 /// [`OrderedMatches::read_rows`]: a rebuild replaced it, its entries got new
 /// indexes, or more of its slots got new entries than it keeps a note of, so
 /// the records no longer name its entries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the volume's index changed during the search")]
 pub struct IndexChanged;
 
 impl Matches {
@@ -955,11 +954,13 @@ impl OrderedMatches {
         if self.records.len() < self.records.capacity() / 2 {
             self.records.shrink_to_fit();
         }
+        let past_cut = (matches - removed - self.records.len()) as u64;
         Ok(VolumeRows::new(
             self.records,
             index,
             origin.scope,
-            (matches - removed) as u64,
+            past_cut,
+            self.sort,
             origin.sums,
             origin.mount_prefix,
         ))
@@ -1012,6 +1013,7 @@ fn scan<'q, 'i>(
     // as one it would walk the capped subtree and then pay an ancestry walk
     // per match for nothing.
     let scope = scope.filter(|&root| root != index.root());
+    scan.scope = scope;
 
     // Folder scope: walk the scope subtree via the child chains, so cost
     // tracks the folder, not the volume. Membership is by construction, so
@@ -1120,6 +1122,9 @@ struct Scan<'q, 'i> {
     scope_memo: FxHashMap<EntryIdx, bool>,
     scratch: Scratch,
     records: Vec<SortRecord>,
+    /// The folder the matches are in, set by [`scan`]; `None` for the whole
+    /// volume.
+    scope: Option<EntryIdx>,
 }
 
 impl<'q, 'i> Scan<'q, 'i> {
@@ -1141,6 +1146,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             scope_memo: FxHashMap::default(),
             scratch: Scratch::default(),
             records: Vec::new(),
+            scope: None,
         }
     }
 
@@ -1180,13 +1186,13 @@ impl<'q, 'i> Scan<'q, 'i> {
         }
 
         // An entry whose parent has no path (ancestry ends in lost+found) is
-        // dropped by the page loop. Reject it here so it never counts toward
-        // `total` and never occupies a page slot: otherwise `gozler -n 10 report`
-        // can print nothing while reporting a non-zero total, and the same
-        // query without `-n` prints the real hits.
+        // left out by `Reply`. Reject it here so it never takes one of the
+        // limit's rows: a left-out row in a volume whose limit cut off later
+        // matches ends the reply short, so `gozler -n 10 report` could print
+        // nothing while the same query without `-n` prints the real matches.
         //
-        // Asks the very memo the page loop uses rather than re-deriving its
-        // rules, so the two cannot drift. Gated on `has_orphans` because an
+        // Applies the same `FolderCopy::entry_folder` rule that `Reply`
+        // applies, so the two cannot drift. Gated on `has_orphans` because an
         // index with nothing under lost+found cannot contain an unpresentable
         // entry, and the walk it guards copies every distinct parent folder,
         // which a broad limited query would mostly never need.
@@ -1522,11 +1528,11 @@ mod tests {
 
     /// `total` and the page must count the same things.
     ///
-    /// The page loop drops any hit whose parent has no presentable path, but
-    /// `total` was counted before that and the orphans still occupied page slots.
-    /// So an unlimited query returned the 2 real hits while a limited one spent
-    /// its whole page on orphans and returned NOTHING, with total claiming 5.
-    /// Silent: the user sees an empty result for a file that exists.
+    /// A reply leaves out a row whose folder has no full path. Orphans that
+    /// the scan kept would take the limit's rows, and the volume would then
+    /// run out of rows while its limit cut off the real matches, which ends
+    /// the reply short: a limited query would return NOTHING for files that
+    /// exist, while the unlimited one returns the 2 real matches.
     #[test]
     fn orphans_are_excluded_from_total_and_never_eat_the_page() {
         let idx = index_with_orphans();
@@ -2437,7 +2443,7 @@ mod tests {
                 .map(|(v, i)| reply.reads_volume(v).then_some(&**i))
                 .collect();
             let mut taken = 0;
-            let more = reply.fill(&held, |row, names| {
+            let more = reply.fill(&held, usize::MAX, |row, names| {
                 if taken == page_rows {
                     return false;
                 }
@@ -2455,8 +2461,8 @@ mod tests {
     }
 
     /// The rows of one volume's `answer`, read as one page.
-    fn read_all(sort: SortSpec, answer: VolumeRows, index: &mut VolumeIndex) -> (Vec<String>, u64) {
-        let mut reply = Reply::new(sort, vec![answer], 0, None);
+    fn read_all(answer: VolumeRows, index: &mut VolumeIndex) -> (Vec<String>, u64) {
+        let mut reply = Reply::new(vec![answer], 0, None);
         read_pages(&mut reply, &mut [index], usize::MAX, |_, _| {})
     }
 
@@ -2574,14 +2580,22 @@ mod tests {
     }
 
     /// Matches whose index got new entry indexes between the two locks, as
-    /// `optimize_storage` gives them, make no rows, because their records
-    /// would name other entries.
+    /// `optimize_storage` gives them once a removed entry left a slot, make
+    /// no rows, because their records would name other entries. An
+    /// `optimize_storage` with no free slot moves no entry, so it keeps a
+    /// search's matches.
     #[test]
     fn matches_from_an_index_that_changed_make_no_rows() {
         let mut idx = sample_index();
         let parsed = compiled("");
-        let ordered =
-            find_matches(&idx, "", &parsed, None, SortSpec::default(), None, false).order();
+        let matches = |idx: &VolumeIndex| {
+            find_matches(idx, "", &parsed, None, SortSpec::default(), None, false).order()
+        };
+        let kept = matches(&idx);
+        idx.optimize_storage();
+        assert!(kept.read_rows(&idx).is_ok(), "no entry moved");
+        let ordered = matches(&idx);
+        idx.apply_batch(&[delete(frn(103))]);
         idx.optimize_storage();
         assert_eq!(ordered.read_rows(&idx).err(), Some(IndexChanged));
     }
@@ -2600,7 +2614,7 @@ mod tests {
         let answer = ordered
             .read_rows(&idx)
             .expect("the index kept its entry indexes");
-        let (paths, total) = read_all(sort, answer, &mut idx);
+        let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(paths, ["photo.JPG", "docs\\sub\\Report.PDF"]);
         assert_eq!(total, 4);
     }
@@ -2619,7 +2633,7 @@ mod tests {
         idx.apply_batch(&[enum_rec(frn(300), NTFS_ROOT_FRN, "new.txt", false)]);
         assert_eq!(idx.head_of(frn(300)), notes, "the new file took the slot");
         let answer = ordered.read_rows(&idx).expect("one reuse is kept");
-        let (paths, total) = read_all(sort, answer, &mut idx);
+        let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(
             paths,
             ["docs", "photo.JPG", "docs\\sub\\Report.PDF", "docs\\sub"]
@@ -2681,7 +2695,7 @@ mod tests {
             enum_rec(frn(500), frn(999), "orphan", true),
             rename(frn(103), frn(500), "c.txt", false),
         ]);
-        let (paths, total) = read_all(sort, answer, &mut idx);
+        let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(
             paths,
             [r"docs\b.txt", r"docs\sub\d.txt", "docs", r"docs\sub"]
@@ -2702,7 +2716,7 @@ mod tests {
             .read_rows(&idx)
             .expect("nothing changed");
         idx.apply_batch(&[rename(frn(102), NTFS_ROOT_FRN, "b.txt", false)]);
-        let (paths, total) = read_all(sort, answer, &mut idx);
+        let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(
             paths,
             [r"docs\a.txt", r"docs\c.txt", r"docs\sub\d.txt", r"docs\sub"]
@@ -2722,7 +2736,7 @@ mod tests {
             .read_rows(&idx)
             .expect("nothing changed");
         idx.apply_batch(&[rename(frn(104), NTFS_ROOT_FRN, "holiday.JPG", false)]);
-        let (paths, total) = read_all(sort, answer, &mut idx);
+        let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(paths, ["holiday.JPG"]);
         assert_eq!(total, 1);
     }
@@ -2747,7 +2761,7 @@ mod tests {
             .read_rows(&idx)
             .expect("nothing changed");
         let a = idx.head_of(frn(100));
-        let mut reply = Reply::new(sort, vec![answer], 0, None);
+        let mut reply = Reply::new(vec![answer], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
             let idx = &mut *indexes[0];
             idx.apply_batch(&[
@@ -2787,7 +2801,7 @@ mod tests {
             .read_rows(&idx)
             .expect("nothing changed");
         idx.apply_batch(&[rename(frn(100), frn(999), "sub", true)]);
-        let mut reply = Reply::new(sort, vec![answer], 0, None);
+        let mut reply = Reply::new(vec![answer], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
             indexes[0].apply_batch(&[enum_rec(frn(999), NTFS_ROOT_FRN, "found", true)]);
         });
@@ -2807,8 +2821,9 @@ mod tests {
             .order()
             .read_rows(&idx)
             .expect("nothing changed");
+        idx.apply_batch(&[delete(frn(103))]);
         idx.optimize_storage();
-        let mut reply = Reply::new(sort, vec![answer], 0, None);
+        let mut reply = Reply::new(vec![answer], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], usize::MAX, |_, _| {});
         assert!(paths.is_empty());
         assert_eq!(total, 0);
@@ -2835,7 +2850,7 @@ mod tests {
                             .expect("nothing changed")
                     })
                     .collect();
-                let mut reply = Reply::new(sort, answers, 0, limit);
+                let mut reply = Reply::new(answers, 0, limit);
                 let mut indexes: Vec<&mut VolumeIndex> =
                     volumes.iter_mut().map(|(_, idx)| idx).collect();
                 read_pages(&mut reply, &mut indexes, usize::MAX, |_, _| {}).0
@@ -2878,12 +2893,40 @@ mod tests {
                 })
                 .collect();
             c.apply_batch(&[delete(frn(101))]);
-            let mut reply = Reply::new(sort, answers, 0, Some(3));
+            let mut reply = Reply::new(answers, 0, Some(3));
             let (paths, total) =
                 read_pages(&mut reply, &mut [&mut c, &mut d], usize::MAX, |_, _| {});
             assert_eq!(paths, [r"C:\a.txt", r"C:\d.txt"], "{sort:?}");
             assert_eq!(total, 4, "{sort:?}");
         }
+    }
+
+    /// A row skipped for the offset counts against a page's rows, so an
+    /// offset far into the matches, such as a pipe client's `u32::MAX`, is
+    /// skipped a page at a time instead of under one hold of the lock: each
+    /// page skips at most its rows, and goes out empty with more to come.
+    #[test]
+    fn an_offset_is_skipped_a_page_of_rows_at_a_time() {
+        let idx = docs_tree();
+        let parsed = compiled("txt");
+        let answer = find_matches(&idx, "", &parsed, None, SortSpec::default(), None, false)
+            .order()
+            .read_rows(&idx)
+            .expect("nothing changed");
+        let mut reply = Reply::new(vec![answer], 3, None);
+        let mut pages: Vec<Vec<String>> = Vec::new();
+        loop {
+            let mut page = Vec::new();
+            let more = reply.fill(&[Some(&idx)], 2, |row, _| {
+                page.push(crate::wtf8::to_string_lossy(row.name));
+                true
+            });
+            pages.push(page);
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(pages, [vec![], vec!["d.txt".to_string()]]);
     }
 
     /// A file of [`packed_keys_agree_with_the_result_order`]: its name, which

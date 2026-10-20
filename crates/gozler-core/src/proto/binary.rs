@@ -17,7 +17,7 @@
 //! the control messages), [`RESP_TAG_RESULTS`] bodies are one results page:
 //!
 //! ```text
-//! total:      u64 LE    full match count (es totitems), repeated per page
+//! total:      u64 LE    match count less the rows left out so far; the last page's holds
 //! generation: u64 LE
 //! page_flags: u8        bit0 more, bit1 volumes_incomplete, bit2 metadata_pending,
 //!                       bit3 has_sums
