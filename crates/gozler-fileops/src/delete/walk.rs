@@ -17,7 +17,7 @@ use gozler_winfs::{Access, Entry, Reparse, WinError, open_entry};
 use super::{Disposition, remove};
 use crate::io_threads::IoThreads;
 use crate::listing::{FILES_PER_ITEM, LISTING_WORDS, is_folder, join, list};
-use crate::operation::{Listed, Progress};
+use crate::operation::{Listed, Pause, Progress};
 use crate::pool::{Lane, Pool};
 use crate::receive::{Selected, failure};
 use crate::win32::is_gone;
@@ -27,11 +27,13 @@ type Folder = crate::tree::Folder<()>;
 /// Deletes `entries` and everything below them on `workers` threads, and
 /// returns each entry it could not delete, in the order the failures
 /// happened. Counts each item deleted in `progress`. Stops when `cancel` is
-/// set, leaving what it has not deleted.
+/// set, leaving what it has not deleted, and waits between entries while
+/// `pause` holds it.
 pub(crate) fn delete(
     entries: Vec<Selected>,
     workers: usize,
     cancel: &AtomicBool,
+    pause: &Pause,
     progress: &Progress,
     io: &IoThreads,
 ) -> Vec<Listed> {
@@ -49,6 +51,7 @@ pub(crate) fn delete(
     let stopped = || cancel.load(Ordering::Relaxed);
     let walk = Walk {
         cancel,
+        pause,
         progress,
         failures: Mutex::default(),
         pool: Pool::new(items, &stopped),
@@ -72,6 +75,7 @@ enum Work {
 
 struct Walk<'a> {
     cancel: &'a AtomicBool,
+    pause: &'a Pause,
     progress: &'a Progress,
     failures: Mutex<Vec<Listed>>,
     pool: Pool<'a, Work>,
@@ -81,6 +85,7 @@ impl Walk<'_> {
     fn work(&self) {
         let mut page = vec![0u64; LISTING_WORDS];
         while let Some(work) = self.pool.next(Lane::Workers) {
+            self.pause.wait(self.cancel);
             match work {
                 Work::Selected(selected, disposition) => self.selected(selected, disposition),
                 Work::List(folder) => self.list(folder, &mut page),
@@ -241,14 +246,17 @@ impl Walk<'_> {
 
     fn files(&self, folder: Arc<Folder>, names: Vec<FolderEntry>) {
         for listed in names {
+            self.pause.wait(self.cancel);
             if self.cancelled() {
                 break;
             }
+            let path = join(&folder.path, &listed.name);
+            self.progress.start_file(&path, None, 0);
             let access = Access::delete(listed.attributes);
             let open = || (folder.children()).open_child(&listed.name, access, Reparse::Open);
             match remove(self.cancel, &folder.disposition, open) {
                 Ok(()) => self.progress.add_items(1),
-                Err(error) => self.fail(&join(&folder.path, &listed.name), error, Some(&folder)),
+                Err(error) => self.fail(&path, error, Some(&folder)),
             }
         }
         self.release(folder);
@@ -263,6 +271,7 @@ impl Walk<'_> {
         parent: Option<&Folder>,
         open: impl Fn() -> Result<Entry, WinError>,
     ) -> bool {
+        self.progress.start_file(path, None, 0);
         match remove(self.cancel, disposition, open) {
             Ok(()) => {
                 self.progress.add_items(1);

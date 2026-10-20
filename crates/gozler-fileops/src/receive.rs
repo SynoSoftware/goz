@@ -148,6 +148,22 @@ pub(crate) fn verbatim(path: &[u16]) -> Vec<u16> {
     }
 }
 
+/// A path that [`verbatim`] made, as the person writes it.
+pub(crate) fn plain(path: &[u16]) -> PathBuf {
+    let units = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    let plain = if let Some(share) = path.strip_prefix(&units(r"\\?\UNC\")[..]) {
+        units(r"\\")
+            .into_iter()
+            .chain(share.iter().copied())
+            .collect()
+    } else {
+        path.strip_prefix(&units(r"\\?\")[..])
+            .unwrap_or(path)
+            .to_vec()
+    };
+    PathBuf::from(std::ffi::OsString::from_wide(&plain))
+}
+
 pub(crate) fn listed(path: &[u16], reason: Reason) -> Listed {
     Listed {
         path: PathBuf::from(std::ffi::OsString::from_wide(path)),

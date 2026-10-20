@@ -284,9 +284,10 @@ mod measure {
         fn wait(&self, id: gozler_fileops::OperationId, until: impl Fn(&State) -> bool) -> State {
             loop {
                 let operations = self.queue.operations();
-                let (_, state) = (operations.into_iter())
-                    .find(|(i, _)| *i == id)
-                    .expect("the operation is in the queue");
+                let state = (operations.into_iter())
+                    .find(|operation| operation.id == id)
+                    .expect("the operation is in the queue")
+                    .state;
                 if until(&state) {
                     return state;
                 }
@@ -898,10 +899,11 @@ mod measure {
     /// Continues the one interrupted operation in `saved`, to its end.
     fn continue_saved(saved: &Path) {
         let engine = Engine::new(saved);
-        let (id, state) = (engine.queue.operations().into_iter())
+        let operation = (engine.queue.operations().into_iter())
             .next()
             .expect("the interrupted copy");
-        assert!(matches!(state, State::Interrupted(_)), "{state:?}");
+        let (id, state) = (operation.id, operation.state);
+        assert!(matches!(state, State::Interrupted), "{state:?}");
         engine.queue.resume(id).expect("the copy is interrupted");
         let State::Ended(outcome) = engine.wait(id, |state| matches!(state, State::Ended(_)))
         else {

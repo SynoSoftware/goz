@@ -22,7 +22,7 @@ use crate::copy::{Copied, Copying, Source, TargetVolume, copy};
 use crate::io_threads::IoThreads;
 use crate::listing::LISTING_WORDS;
 use crate::names::Names;
-use crate::operation::Progress;
+use crate::operation::{Pause, Progress};
 use crate::place::Target;
 use crate::receive::{receive, verbatim};
 use crate::ring_plan::Layout;
@@ -117,10 +117,10 @@ impl Watched {
 
     fn state(&self, id: OperationId) -> State {
         let operations = self.queue.operations();
-        let (_, state) = (operations.into_iter())
-            .find(|(i, _)| *i == id)
+        let operation = (operations.into_iter())
+            .find(|operation| operation.id == id)
             .expect("the operation");
-        state
+        operation.state
     }
 
     /// Waits until `id`'s state passes `until`, and returns it.
@@ -201,6 +201,7 @@ fn copy_directly(
         target: NTFS,
         cancel: &cancel,
         closing: &AtomicBool::new(false),
+        pause: &Pause::default(),
         progress: &progress,
         io: &IoThreads::default(),
     };
@@ -237,6 +238,7 @@ fn copy_unlisted(
         target: NTFS,
         cancel: &cancel,
         closing: &AtomicBool::new(false),
+        pause: &Pause::default(),
         progress: &progress,
         io: &IoThreads::default(),
     };
@@ -828,7 +830,7 @@ fn a_cancelled_copy_leaves_no_partial_file() {
     // Progress wakes nothing, so this reads it until it moves.
     loop {
         match watched.state(id) {
-            State::Running { bytes, .. } if bytes > 0 => break,
+            State::Running(running) if running.bytes > 0 => break,
             State::Ended(outcome) => panic!("ended before its first report: {outcome:?}"),
             _ => std::thread::yield_now(),
         }
@@ -838,6 +840,135 @@ fn a_cancelled_copy_leaves_no_partial_file() {
     assert_eq!(outcome.end, End::Cancelled);
     let left: Vec<_> = fs::read_dir(&out).expect("list").collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// Runs `run` on its own thread with a pause that its first progress report
+/// sets, and calls `parked` once an engine thread waits in the pause, so
+/// `parked` reads what the paused engine has done and then resumes or
+/// cancels it. Returns what each returned; the caller asserts on both, as a
+/// panic in `parked` would leave the engine paused.
+fn pause_at_first_report<T: Send, S>(
+    progress: &Progress,
+    run: impl FnOnce(&Pause) -> T + Send,
+    parked: impl FnOnce(&Pause) -> S,
+) -> (T, S) {
+    let pause = Arc::new(Pause::default());
+    let setting = Arc::clone(&pause);
+    *progress.at_first_report.lock().expect("no hook") = Some(Box::new(move || setting.set(true)));
+    let pause = &*pause;
+    std::thread::scope(|scope| {
+        let running = scope.spawn(move || run(pause));
+        while pause.waiting.load(Ordering::Relaxed) == 0 {
+            assert!(!running.is_finished(), "ended without waiting in the pause");
+            std::thread::yield_now();
+        }
+        let read = parked(pause);
+        (running.join().expect("no engine thread panics"), read)
+    })
+}
+
+/// A paused copy holds between blocks or inside the copy function's
+/// callback, in the ring and in the Windows engine. Resumed, it finishes the
+/// file; cancelled while paused, it leaves nothing at the final name.
+#[test]
+fn a_paused_copy_waits_until_resumed_or_cancelled() {
+    let scratch = Scratch::new("pause");
+    let size = 64 * 1024 * 1024;
+    let source = scratch.write(r"src\big.bin", &vec![7u8; size]);
+    let windows = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::TwoDisks,
+    );
+    let ring = CopyPlan::new(VolumeClass::Ssd, &ring_settings(), Layout::TwoDisks);
+    for (case, plan) in [("windows", windows), ("ring", ring)] {
+        for cancelled in [false, true] {
+            let out = scratch.path(format!("out-{case}-{cancelled}"));
+            fs::create_dir(&out).expect("a destination");
+            let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+            let (copied, bytes) = pause_at_first_report(
+                &progress,
+                |pause| {
+                    let copying = Copying {
+                        plan,
+                        rule: first_run(None),
+                        moving: false,
+                        target: NTFS,
+                        cancel: &cancel,
+                        closing: &AtomicBool::new(false),
+                        pause,
+                        progress: &progress,
+                        io: &IoThreads::default(),
+                    };
+                    copy_with(std::slice::from_ref(&source), &out, &copying)
+                },
+                |pause| {
+                    let bytes = progress.bytes();
+                    if cancelled {
+                        cancel.store(true, Ordering::Relaxed);
+                        pause.wake();
+                    } else {
+                        pause.set(false);
+                    }
+                    bytes
+                },
+            );
+            assert!(
+                bytes > 0 && bytes < size as u64,
+                "{case}: {bytes} at the pause"
+            );
+            assert_eq!(copied.ring.to_windows, 0, "{case}");
+            let copy = out.join("big.bin");
+            if cancelled {
+                assert!(!copy.exists(), "{case}: a partial file");
+            } else {
+                assert_eq!(copied.listed, [], "{case}");
+                assert_eq!(fs::metadata(&copy).expect("the copy").len(), size as u64);
+                assert!(fs::read(&copy).expect("the copy") == fs::read(&source).expect("source"));
+            }
+        }
+    }
+}
+
+/// A paused delete holds between entries. Cancelled while paused, it leaves
+/// every entry it had not deleted when it paused; resumed, it deletes them.
+#[test]
+fn a_paused_delete_waits_between_entries() {
+    let scratch = Scratch::new("pause-delete");
+    for cancelled in [false, true] {
+        let tree = scratch.path(format!("tree-{cancelled}"));
+        for i in 0..200 {
+            scratch.file(tree.join(format!("{i}.txt")));
+        }
+        let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+        let (received, _) = receive(std::slice::from_ref(&tree), None, &cancel).expect("received");
+        let (listed, (left, items)) = pause_at_first_report(
+            &progress,
+            |pause| {
+                let io = IoThreads::default();
+                crate::delete::walk::delete(received.entries, 1, &cancel, pause, &progress, &io)
+            },
+            |pause| {
+                let read = (files_below(&tree).len(), progress.items());
+                if cancelled {
+                    cancel.store(true, Ordering::Relaxed);
+                    pause.wake();
+                } else {
+                    pause.set(false);
+                }
+                read
+            },
+        );
+        assert!(left > 0 && left < 200, "{left} at the pause");
+        assert_eq!(items, 200 - left as u64);
+        assert_eq!(listed, []);
+        if cancelled {
+            assert_eq!(files_below(&tree).len(), left);
+            assert_eq!(progress.items(), 200 - left as u64);
+        } else {
+            assert!(!tree.exists());
+        }
+    }
 }
 
 /// Sets a file's last write time, so Continue's size-and-time rule sees a
@@ -872,10 +1003,12 @@ fn save(scratch: &Scratch, request: &Request, choice: Option<Choice>, started: i
 /// Continues the one interrupted operation of the saved file.
 fn resume(scratch: &Scratch) -> Outcome {
     let watched = Watched::new(&scratch.saved());
-    let (id, state) = (watched.queue.operations().into_iter())
+    let operation = (watched.queue.operations().into_iter())
         .next()
         .expect("the saved operation");
-    assert!(matches!(state, State::Interrupted(_)), "{state:?}");
+    let state = operation.state;
+    assert!(matches!(state, State::Interrupted), "{state:?}");
+    let id = operation.id;
     watched.queue.resume(id).expect("interrupted");
     watched.ended(id)
 }
@@ -1164,7 +1297,7 @@ fn a_move_keeps_a_source_that_changes_during_its_copy() {
     );
     let progress = Progress::default();
     let changed = source.clone();
-    *progress.at_first_bytes.lock().expect("no hook") = Some(Box::new(move || {
+    *progress.at_first_report.lock().expect("no hook") = Some(Box::new(move || {
         // Sharing does not limit attribute access, so this opens while the
         // copy holds the source.
         const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
@@ -1184,11 +1317,12 @@ fn a_move_keeps_a_source_that_changes_during_its_copy() {
         target: NTFS,
         cancel: &cancel,
         closing: &AtomicBool::new(false),
+        pause: &Pause::default(),
         progress: &progress,
         io: &IoThreads::default(),
     };
     let listed = copy_with(std::slice::from_ref(&source), &out, &copying).listed;
-    let ran = progress.at_first_bytes.lock().expect("no hook").is_none();
+    let ran = progress.at_first_report.lock().expect("no hook").is_none();
     assert!(ran, "the copy reported no bytes");
     let kept = Listed {
         path: source.clone(),
@@ -1298,8 +1432,11 @@ fn an_unfinished_operation_is_offered_again() {
     save(&scratch, &request, None, system_time());
     let watched = Watched::new(&scratch.saved());
     let operations = watched.queue.operations();
-    assert!(matches!(&operations[..], [(_, State::Interrupted(r))] if **r == request));
-    let (id, _) = operations[0];
+    assert!(matches!(
+        &operations[..],
+        [operation] if matches!(operation.state, State::Interrupted) && *operation.request == request
+    ));
+    let id = operations[0].id;
     watched.queue.dismiss(id).expect("interrupted");
     drop(watched);
     assert!(saved::read(&scratch.saved()).is_empty());
@@ -1361,6 +1498,7 @@ fn copy_ring(sources: &[PathBuf], destination: &Path, plan: CopyPlan) -> Copied 
         target: NTFS,
         cancel: &cancel,
         closing: &AtomicBool::new(false),
+        pause: &Pause::default(),
         progress: &progress,
         io: &IoThreads::default(),
     };
@@ -1539,6 +1677,7 @@ fn a_cancelled_ring_copy_leaves_no_partial_file() {
         target: NTFS,
         cancel: &cancel,
         closing: &AtomicBool::new(false),
+        pause: &Pause::default(),
         progress: &progress,
         io: &IoThreads::default(),
     };

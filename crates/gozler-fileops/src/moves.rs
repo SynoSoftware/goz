@@ -14,7 +14,7 @@ use crate::copy::Source;
 use crate::delete::{Disposition, remove};
 use crate::listing::{LISTING_WORDS, join, kind, list, read_names};
 use crate::names::Kind;
-use crate::operation::{Listed, Progress, Reason};
+use crate::operation::{Listed, Pause, Progress, Reason};
 use crate::place::{Placed, Placing, Target, place};
 use crate::receive::listed;
 use crate::tree::same_entry;
@@ -23,6 +23,7 @@ use crate::win32::{ERROR_ALREADY_EXISTS, FILE_ATTRIBUTE_DIRECTORY, is_gone};
 pub(crate) struct Moving<'a> {
     pub(crate) rule: Rule,
     pub(crate) cancel: &'a AtomicBool,
+    pub(crate) pause: &'a Pause,
     pub(crate) progress: &'a Progress,
 }
 
@@ -41,6 +42,7 @@ pub(crate) fn move_by_rename(
         disposition: Disposition::default(),
     };
     for source in sources {
+        moving.pause.wait(moving.cancel);
         if run.cancelled() {
             break;
         }
@@ -233,6 +235,7 @@ impl Run<'_> {
             emptied = false;
         }
         for child in children {
+            self.moving.pause.wait(self.moving.cancel);
             if self.cancelled() {
                 return false;
             }

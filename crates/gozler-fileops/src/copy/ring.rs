@@ -23,7 +23,7 @@ use gozler_winfs::{
 use super::streams::{finish_streams, has_other_streams};
 use super::{Handed, Snapshot, Walk, Write};
 use crate::listing::join;
-use crate::operation::Reason;
+use crate::operation::{CurrentFile, Reason};
 use crate::place::{Placed, place};
 use crate::retry::retry;
 use crate::ring_plan::{
@@ -88,6 +88,11 @@ struct Job {
     failed: Option<u32>,
     /// Bytes written, which the progress counts.
     written: u64,
+    /// Its path at the destination, with the prefix.
+    to: Vec<u16>,
+    /// Set when the loop reads its first block, which is when the person
+    /// would call it started: the hard-disk profile opens files ahead.
+    current: Option<Arc<CurrentFile>>,
 }
 
 /// One block's place in the buffer.
@@ -145,6 +150,9 @@ impl Ring {
     pub(super) fn open_and_close(&self, walk: &Walk) {
         let _entered = walk.copying.io.enter();
         loop {
+            // Opening creates a destination file and closing finishes one,
+            // so neither happens while paused.
+            walk.copying.pause.wait(walk.copying.cancel);
             let task = {
                 let mut shared = self.shared();
                 loop {
@@ -272,7 +280,7 @@ impl Ring {
         if file.write == Write::Resume {
             let path = join(&file.target.verbatim, &file.final_name);
             match open_in_place(cancel, &path, open) {
-                Ok(InPlace::File(destination)) => resumed = Some(destination),
+                Ok(InPlace::File(destination)) => resumed = Some((destination, path)),
                 // A link put at the name since the listing is not this
                 // operation's file, so the choice applies to it.
                 Ok(InPlace::Link(_)) => placing.replace = false,
@@ -288,12 +296,14 @@ impl Ring {
             }
         }
         let created = match resumed {
-            Some(destination) => Placed::Named((destination, true)),
+            Some((destination, path)) => Placed::Named((destination, true, path)),
             None => {
                 let create = |to: &[u16], existing| {
                     if existing == Existing::Replace {
                         match open_in_place(cancel, to, open) {
-                            Ok(InPlace::File(destination)) => return Ok((destination, true)),
+                            Ok(InPlace::File(destination)) => {
+                                return Ok((destination, true, to.to_vec()));
+                            }
                             // Deleted through the handle, which closes at the
                             // end of the arm, so the name is free for the
                             // create below.
@@ -305,12 +315,12 @@ impl Ring {
                         }
                     }
                     retry(cancel, || create_ring_destination(to, open).map_err(code))
-                        .map(|created| (created, false))
+                        .map(|created| (created, false, to.to_vec()))
                 };
                 place(&file.target, placing, walk.copying.rule.choice, create)
             }
         };
-        let (destination, compare) = match created {
+        let (destination, compare, to) = match created {
             Placed::Named(named) => named,
             Placed::Skipped => {
                 walk.list_entry(&file.path, Reason::Skipped, folder);
@@ -342,6 +352,8 @@ impl Ring {
             chunks: 0,
             failed: None,
             written: 0,
+            to,
+            current: None,
         };
         // The bytes of a file written in place that the copy keeps.
         let mut kept = 0;
@@ -739,7 +751,8 @@ impl Loop<'_, '_> {
                 // the error is never read.
                 self.stop(ERROR_WRITE_FAULT);
             }
-            if !self.stopped {
+            let paused = self.walk.copying.pause.is_paused();
+            if !self.stopped && !paused {
                 self.read();
                 if one_disk && !self.writing && self.reads == 0 && self.reading.is_empty() {
                     // Nothing more to read now: write what the buffer holds.
@@ -761,6 +774,11 @@ impl Loop<'_, '_> {
                     self.ring.changed.notify_all();
                     return;
                 }
+            }
+            if paused && !self.stopped && self.io.in_flight() == 0 {
+                // Between blocks, with nothing in flight.
+                self.walk.copying.pause.wait(self.walk.copying.cancel);
+                continue;
             }
             match self.io.wait(WAIT_MS) {
                 Ok(Some(Completion::Done { slot, result })) => self.completed(slot, result),
@@ -821,6 +839,13 @@ impl Loop<'_, '_> {
             job.blocks.pop_front();
             if job.blocks.is_empty() {
                 self.reading.pop_front();
+            }
+            if job.current.is_none() {
+                let progress = self.walk.copying.progress;
+                let file = &job.handed.file;
+                let current = progress.start_file(&file.path, Some(job.to.clone()), job.size);
+                current.set_done(job.written);
+                job.current = Some(current);
             }
             job.chunks += 1;
             let (overlapped, source) = (job.overlapped, Arc::clone(&job.source));
@@ -935,6 +960,9 @@ impl Loop<'_, '_> {
         let job = self.jobs.get(id);
         if job.failed.is_none() {
             job.written += len;
+            if let Some(current) = &job.current {
+                current.set_done(job.written);
+            }
             self.walk.copying.progress.add_bytes(len);
         }
         self.settle(id);

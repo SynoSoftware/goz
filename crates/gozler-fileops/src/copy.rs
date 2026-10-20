@@ -28,7 +28,7 @@ use crate::delete::{Disposition, remove};
 use crate::io_threads::IoThreads;
 use crate::listing::{FILES_PER_ITEM, LISTING_WORDS, is_folder, join, kind, list, read_names};
 use crate::names::{Kind, Names};
-use crate::operation::{Listed, Progress, Reason, RingCounts};
+use crate::operation::{Listed, Pause, Progress, Reason, RingCounts};
 use crate::place::{Placed, Placing, Target, place, remove_replaced};
 use crate::pool::{Lane, Pool};
 use crate::receive::{Selected, listed};
@@ -55,6 +55,7 @@ pub(crate) struct Copying<'a> {
     /// stays for Continue to resume, where the person's cancel deletes it
     /// (D13).
     pub(crate) closing: &'a AtomicBool,
+    pub(crate) pause: &'a Pause,
     pub(crate) progress: &'a Progress,
     pub(crate) io: &'a IoThreads,
 }
@@ -250,6 +251,7 @@ impl Walk<'_> {
         let _entered = self.copying.io.enter();
         let mut page = vec![0u64; LISTING_WORDS];
         while let Some(work) = self.pool.next(lane) {
+            self.copying.pause.wait(self.copying.cancel);
             match work {
                 Work::Selected(source, target, disposition) => {
                     self.selected(source, &target, disposition, &mut page);
@@ -257,6 +259,7 @@ impl Walk<'_> {
                 Work::List(folder) => self.list(folder, &mut page),
                 Work::Files(folder, files) => {
                     for file in files {
+                        self.copying.pause.wait(self.copying.cancel);
                         if self.stopped() {
                             break;
                         }
@@ -810,6 +813,7 @@ impl Walk<'_> {
                     && file.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
                 io_desired_size: self.io_desired_size.filter(|_| unbuffered),
             };
+            let current = progress.start_file(&file.path, Some(to.to_vec()), file.size);
             retry(self.copying.cancel, || {
                 if self.copying.moving {
                     let source = open_entry(&file.from, Access::Inspect, Reparse::Open);
@@ -820,6 +824,9 @@ impl Walk<'_> {
                     let copied = copied.min(file.size);
                     progress.add_bytes(copied.saturating_sub(reported));
                     reported = reported.max(copied);
+                    current.set_done(copied);
+                    // Pause holds the copy here, inside the callback.
+                    self.copying.pause.wait(self.copying.cancel);
                     // A stopped `CopyFile2` deletes what it wrote, so at Exit
                     // the copy goes on until the process ends (`Queue::close`).
                     !self.cancelled() || self.copying.closing.load(Ordering::Relaxed)

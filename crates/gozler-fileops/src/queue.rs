@@ -3,6 +3,8 @@
 //! thread.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,15 +19,16 @@ use crate::io_threads::IoThreads;
 use crate::listing::{BACKSLASH, LISTING_WORDS};
 use crate::moves::{Moving, move_by_rename};
 use crate::operation::{
-    End, Listed, OperationId, Outcome, Progress, Request, RingCounts, State, Wait,
+    Current, CurrentFile, End, Listed, Operation, OperationId, OrderRefused, Outcome, Pause,
+    Progress, Request, RingCounts, Running, State, Survey, Wait,
 };
 use crate::place::Target;
 use crate::prepare::{Ready, Transfer, Work, check_space, prepare};
-use crate::receive::failure;
+use crate::receive::{failure, plain};
 use crate::saved::{self, Restored, Saved};
 use crate::settings::SpeedSettings;
 use crate::taken::Taken;
-use crate::waits::{Plan, wait};
+use crate::waits::{Plan, reorder, waits};
 use crate::win32::ERROR_FILE_NOT_FOUND;
 
 /// `ERROR_INVALID_NAME`: a new name that is empty or holds a separator,
@@ -58,15 +61,17 @@ struct Shared {
 struct Operations {
     next_id: u64,
     next_order: u64,
-    by_id: BTreeMap<OperationId, Operation>,
+    next_start: u64,
+    by_id: BTreeMap<OperationId, Tracked>,
     taken: Arc<Taken>,
 }
 
-struct Operation {
+struct Tracked {
     request: Arc<Request>,
     settings: SpeedSettings,
     phase: Phase,
     cancel: Arc<AtomicBool>,
+    pause: Arc<Pause>,
     progress: Arc<Progress>,
     io: Arc<IoThreads>,
     /// Continue's prepare: it submits with the interrupted run's choice and
@@ -74,6 +79,10 @@ struct Operation {
     continuing: Option<Rule>,
     /// It was submitted, so its sources are taken while it lives.
     submitted: bool,
+    /// Prepare's counts, from submit on; `None` for a delete.
+    total: Option<Survey>,
+    /// [`Running::renames`], from submit on.
+    renames: bool,
 }
 
 enum Phase {
@@ -82,14 +91,16 @@ enum Phase {
     Waiting {
         plan: Plan,
         start: Box<Start>,
-        /// Its place in submit order.
+        /// Its place in the run order: submit order, which the person can
+        /// change.
         order: u64,
         /// Set under the same lock as the phase, by `schedule`.
         on: Option<(OperationId, Wait)>,
     },
     Running {
         plan: Plan,
-        order: u64,
+        /// Its place in start order.
+        started: u64,
     },
     /// An ended operation holds no plan, so it makes nothing wait.
     Ended(Arc<Outcome>),
@@ -126,7 +137,7 @@ impl Queue {
         for (saved, restored) in saved::read(&saved_path) {
             let id = OperationId(operations.next_id);
             operations.next_id += 1;
-            let operation = Operation::new(
+            let operation = Tracked::new(
                 Arc::new(restored.request.clone()),
                 restored.settings,
                 Phase::Interrupted(restored),
@@ -153,7 +164,7 @@ impl Queue {
             let mut operations = self.shared.lock();
             let id = OperationId(operations.next_id);
             operations.next_id += 1;
-            let operation = Operation::new(Arc::new(request), settings, Phase::Preparing);
+            let operation = Tracked::new(Arc::new(request), settings, Phase::Preparing);
             operations.by_id.insert(id, operation);
             id
         };
@@ -184,7 +195,7 @@ impl Queue {
 
     /// Cancels an operation. One that has not started ends at once; a
     /// running one stops within one `CopyFile2` chunk, or one delete and its
-    /// retries.
+    /// retries, also while it is paused.
     pub fn cancel(&self, id: OperationId) {
         let starts = {
             let mut operations = self.shared.lock();
@@ -192,6 +203,7 @@ impl Queue {
                 return;
             };
             operation.cancel.store(true, Ordering::Relaxed);
+            operation.pause.wake();
             operation.io.cancel();
             match operation.phase {
                 Phase::Preparing | Phase::Prepared(_) | Phase::Waiting { .. } => {
@@ -212,7 +224,7 @@ impl Queue {
     /// Removes an ended operation, once no list of the window needs it.
     pub fn remove(&self, id: OperationId) {
         let mut operations = self.shared.lock();
-        if let Some(Operation {
+        if let Some(Tracked {
             phase: Phase::Ended(_),
             ..
         }) = operations.by_id.get(&id)
@@ -251,7 +263,7 @@ impl Queue {
     pub fn dismiss(&self, id: OperationId) -> Result<(), NotInterrupted> {
         {
             let mut operations = self.shared.lock();
-            let Some(Operation {
+            let Some(Tracked {
                 phase: Phase::Interrupted(_),
                 ..
             }) = operations.by_id.get(&id)
@@ -265,30 +277,105 @@ impl Queue {
         Ok(())
     }
 
-    /// Every operation's state, in the order they were prepared.
-    pub fn operations(&self) -> Vec<(OperationId, State)> {
+    /// Every operation: the running ones in start order, then the waiting
+    /// ones in run order, then the rest in the order they were prepared.
+    pub fn operations(&self) -> Vec<Operation> {
         let operations = self.shared.lock();
-        (operations.by_id.iter())
+        let mut listed: Vec<((u8, u64), Operation)> = (operations.by_id.iter())
             .map(|(&id, operation)| {
-                let state = match &operation.phase {
-                    Phase::Preparing => State::Preparing,
-                    Phase::Prepared(ready) => State::Prepared(ready.prepared),
-                    Phase::Waiting { on, .. } => {
+                let (place, state) = match &operation.phase {
+                    Phase::Preparing => ((2, id.0), State::Preparing),
+                    Phase::Prepared(ready) => ((2, id.0), State::Prepared(ready.prepared)),
+                    Phase::Waiting { on, order, .. } => {
                         let (on, reason) = on.expect(
                             "schedule sets it under the same lock; it skips only while the queue drops, when nothing reads states",
                         );
-                        State::Waiting { on, reason }
+                        let total = operation.total;
+                        ((1, *order), State::Waiting { on, reason, total })
                     }
-                    Phase::Running { .. } => State::Running {
-                        items: operation.progress.items(),
-                        bytes: operation.progress.bytes(),
-                    },
-                    Phase::Ended(outcome) => State::Ended(Arc::clone(outcome)),
-                    Phase::Interrupted(_) => State::Interrupted(Arc::clone(&operation.request)),
+                    Phase::Running { started, .. } => {
+                        let progress = &operation.progress;
+                        let running = Running {
+                            items: progress.items(),
+                            bytes: progress.bytes(),
+                            total: operation.total,
+                            renames: operation.renames,
+                            paused: operation.pause.is_paused(),
+                            current: progress.current().map(|file| current(&file)),
+                        };
+                        ((0, *started), State::Running(running))
+                    }
+                    Phase::Ended(outcome) => ((2, id.0), State::Ended(Arc::clone(outcome))),
+                    Phase::Interrupted(_) => ((2, id.0), State::Interrupted),
                 };
-                (id, state)
+                let request = Arc::clone(&operation.request);
+                (place, Operation { id, request, state })
             })
-            .collect()
+            .collect();
+        listed.sort_unstable_by_key(|&(place, _)| place);
+        listed.into_iter().map(|(_, operation)| operation).collect()
+    }
+
+    /// Pauses or resumes a running operation. A paused one stops within one
+    /// `CopyFile2` chunk, one ring block, or one entry, and still makes other
+    /// operations wait. Does nothing to an operation that is not running.
+    pub fn set_paused(&self, id: OperationId, paused: bool) {
+        {
+            let operations = self.shared.lock();
+            let Some(Tracked {
+                phase: Phase::Running { .. },
+                pause,
+                ..
+            }) = operations.by_id.get(&id)
+            else {
+                return;
+            };
+            pause.set(paused);
+        }
+        (self.shared.wake)();
+    }
+
+    /// Moves the waiting operation `id` to run just before the waiting
+    /// operation `before`, or last, and starts what may then start. Refused
+    /// when it would pass an operation whose paths it overlaps (D14).
+    pub fn move_waiting(
+        &self,
+        id: OperationId,
+        before: Option<OperationId>,
+    ) -> Result<(), OrderRefused> {
+        let starts = {
+            let mut operations = self.shared.lock();
+            let order = operations.reordered(id, before)?;
+            let mut places: Vec<u64> = (order.iter())
+                .map(|id| match operations.by_id[id].phase {
+                    Phase::Waiting { order, .. } => order,
+                    _ => unreachable!("reordered lists waiting operations"),
+                })
+                .collect();
+            places.sort_unstable();
+            for (id, place) in order.into_iter().zip(places) {
+                if let Some(Tracked {
+                    phase: Phase::Waiting { order, .. },
+                    ..
+                }) = operations.by_id.get_mut(&id)
+                {
+                    *order = place;
+                }
+            }
+            self.shared.schedule(&mut operations)
+        };
+        self.shared.start(starts);
+        (self.shared.wake)();
+        Ok(())
+    }
+
+    /// Whether [`Queue::move_waiting`] would move `id`, without moving it.
+    pub fn check_move(
+        &self,
+        id: OperationId,
+        before: Option<OperationId>,
+    ) -> Result<(), OrderRefused> {
+        self.shared.lock().reordered(id, before).map(drop)
     }
 
     /// The taken entries, which the window leaves out of its lists. Take
@@ -297,16 +384,17 @@ impl Queue {
         Arc::clone(&self.shared.lock().taken)
     }
 
-    /// Exit: stops every operation so that Continue can finish it at the
-    /// next start, and returns at once; the window then ends the process
-    /// without dropping the queue. `CopyFile2` deletes what it wrote when
-    /// it is stopped, so a file the Windows engine is copying goes on until
-    /// the process ends, which leaves it at its final name. Every operation
-    /// that runs is already in the saved file.
+    /// Exit: stops every operation, a paused one too, so that Continue can
+    /// finish it at the next start, and returns at once; the window then
+    /// ends the process without dropping the queue. `CopyFile2` deletes what
+    /// it wrote when it is stopped, so a file the Windows engine is copying
+    /// goes on until the process ends, which leaves it at its final name.
+    /// Every operation that runs is already in the saved file.
     pub fn close(&self) {
         self.shared.closing.store(true, Ordering::Relaxed);
         for operation in self.shared.lock().by_id.values() {
             operation.cancel.store(true, Ordering::Relaxed);
+            operation.pause.wake();
         }
     }
 }
@@ -337,17 +425,46 @@ impl Drop for Queue {
     }
 }
 
-impl Operation {
-    fn new(request: Arc<Request>, settings: SpeedSettings, phase: Phase) -> Operation {
-        Operation {
+impl Operations {
+    /// The waiting operations in run order, with their plans.
+    fn waiting(&self) -> Vec<(OperationId, &Plan)> {
+        let mut waiting: Vec<(u64, OperationId, &Plan)> = (self.by_id.iter())
+            .filter_map(|(&id, operation)| match &operation.phase {
+                Phase::Waiting { plan, order, .. } => Some((*order, id, plan)),
+                _ => None,
+            })
+            .collect();
+        waiting.sort_unstable_by_key(|&(order, id, _)| (order, id));
+        (waiting.into_iter())
+            .map(|(_, id, plan)| (id, plan))
+            .collect()
+    }
+
+    /// The run order with `id` moved before `before`, or last; the one check
+    /// of both [`Queue::move_waiting`] and [`Queue::check_move`].
+    fn reordered(
+        &self,
+        id: OperationId,
+        before: Option<OperationId>,
+    ) -> Result<Vec<OperationId>, OrderRefused> {
+        reorder(&self.waiting(), id, before)
+    }
+}
+
+impl Tracked {
+    fn new(request: Arc<Request>, settings: SpeedSettings, phase: Phase) -> Tracked {
+        Tracked {
             request,
             settings,
             phase,
             cancel: Arc::default(),
+            pause: Arc::default(),
             progress: Arc::default(),
             io: Arc::default(),
             continuing: None,
             submitted: false,
+            total: None,
+            renames: false,
         }
     }
 }
@@ -429,6 +546,12 @@ impl Shared {
         operations.next_order += 1;
         let operation = operations.by_id.get_mut(&id).expect("the caller found it");
         operation.submitted = true;
+        operation.total = ready.prepared.survey;
+        operation.renames = match &ready.work {
+            Work::Transfer(transfer) => transfer.moving && transfer.copied.is_empty(),
+            Work::Rename { .. } => true,
+            Work::Delete { .. } | Work::NewFolder { .. } => false,
+        };
         operation.phase = Phase::Waiting {
             plan: ready.plan,
             start: Box::new(Start {
@@ -445,35 +568,30 @@ impl Shared {
         starts
     }
 
-    /// Starts each waiting operation, in submit order, that no earlier
-    /// operation which has not ended makes wait, and records what the others
-    /// wait for. Nothing starts while the queue closes.
+    /// Starts each waiting operation that no running operation, and no
+    /// operation before it in the run order, makes wait, and records what the
+    /// others wait for. Nothing starts while the queue closes.
     fn schedule(&self, operations: &mut Operations) -> Vec<(OperationId, Box<Start>)> {
         if self.closing.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        let mut waiting: Vec<(u64, OperationId)> = (operations.by_id.iter())
-            .filter_map(|(&id, operation)| match operation.phase {
-                Phase::Waiting { order, .. } => Some((order, id)),
-                _ => None,
-            })
-            .collect();
-        waiting.sort_unstable();
-        let mut starts = Vec::new();
-        for (order, id) in waiting {
-            let Phase::Waiting { plan, .. } = &operations.by_id[&id].phase else {
-                unreachable!("collected as waiting");
-            };
-            let blocker = (operations.by_id.iter()).find_map(|(&other, operation)| {
-                let earlier = match &operation.phase {
-                    Phase::Waiting { plan, order: o, .. } | Phase::Running { plan, order: o } => {
-                        (*o < order).then_some(plan)
-                    }
+        let decided = {
+            let running: Vec<(OperationId, &Plan)> = (operations.by_id.iter())
+                .filter_map(|(&id, operation)| match &operation.phase {
+                    Phase::Running { plan, .. } => Some((id, plan)),
                     _ => None,
-                }?;
-                wait(plan, earlier).map(|reason| (other, reason))
-            });
-            let operation = operations.by_id.get_mut(&id).expect("collected above");
+                })
+                .collect();
+            let waiting = operations.waiting();
+            let on = waits(&running, &waiting);
+            (waiting.into_iter().map(|(id, _)| id))
+                .zip(on)
+                .collect::<Vec<_>>()
+        };
+        let mut starts = Vec::new();
+        for (id, blocker) in decided {
+            let started = operations.next_start;
+            let operation = operations.by_id.get_mut(&id).expect("listed as waiting");
             if blocker.is_some() {
                 if let Phase::Waiting { on, .. } = &mut operation.phase {
                     *on = blocker;
@@ -483,9 +601,10 @@ impl Shared {
             let Phase::Waiting { plan, start, .. } =
                 std::mem::replace(&mut operation.phase, Phase::Preparing)
             else {
-                unreachable!("collected as waiting");
+                unreachable!("listed as waiting");
             };
-            operation.phase = Phase::Running { plan, order };
+            operation.phase = Phase::Running { plan, started };
+            operations.next_start += 1;
             starts.push((id, start));
         }
         starts
@@ -494,13 +613,14 @@ impl Shared {
     /// Runs each started operation on its own thread.
     fn start(self: &Arc<Self>, starts: Vec<(OperationId, Box<Start>)>) {
         for (id, mut start) in starts {
-            let (request, settings, cancel, progress, io) = {
+            let (request, settings, cancel, pause, progress, io) = {
                 let operations = self.lock();
                 let operation = &operations.by_id[&id];
                 (
                     Arc::clone(&operation.request),
                     operation.settings,
                     Arc::clone(&operation.cancel),
+                    Arc::clone(&operation.pause),
                     Arc::clone(&operation.progress),
                     Arc::clone(&operation.io),
                 )
@@ -527,7 +647,15 @@ impl Shared {
             let shared = Arc::clone(self);
             self.spawn(move || {
                 let _entered = io.enter();
-                let outcome = run(*start, &settings, &cancel, &shared.closing, &progress, &io);
+                let outcome = run(
+                    *start,
+                    &settings,
+                    &cancel,
+                    &shared.closing,
+                    &pause,
+                    &progress,
+                    &io,
+                );
                 if !shared.closing.load(Ordering::Relaxed) {
                     shared.unsave(id);
                 }
@@ -561,6 +689,15 @@ impl Shared {
     }
 }
 
+fn current(file: &CurrentFile) -> Current {
+    Current {
+        source: PathBuf::from(OsString::from_wide(&file.source)),
+        destination: file.destination.as_deref().map(plain),
+        done: file.done(),
+        size: file.size,
+    }
+}
+
 /// The sources of every submitted delete or move that has not been
 /// removed.
 fn taken(operations: &Operations) -> Arc<Taken> {
@@ -585,6 +722,7 @@ fn run(
     settings: &SpeedSettings,
     cancel: &AtomicBool,
     closing: &AtomicBool,
+    pause: &Pause,
     progress: &Progress,
     io: &IoThreads,
 ) -> Outcome {
@@ -602,10 +740,10 @@ fn run(
             // A selected entry that no longer exists counts as deleted.
             progress.add_items(missing);
             let workers = settings.delete_workers.get();
-            failures.extend(walk::delete(entries, workers, cancel, progress, io));
+            failures.extend(walk::delete(entries, workers, cancel, pause, progress, io));
         }
         Work::Transfer(transfer) => {
-            match run_transfer(transfer, rule, cancel, closing, progress, io) {
+            match run_transfer(transfer, rule, cancel, closing, pause, progress, io) {
                 Ok(copied) => {
                     failures.extend(copied.listed);
                     disk_full = copied.disk_full;
@@ -668,6 +806,7 @@ fn run_transfer(
     rule: Rule,
     cancel: &AtomicBool,
     closing: &AtomicBool,
+    pause: &Pause,
     progress: &Progress,
     io: &IoThreads,
 ) -> Result<Copied, End> {
@@ -719,6 +858,7 @@ fn run_transfer(
         let moves = Moving {
             rule,
             cancel,
+            pause,
             progress,
         };
         listed.extend(move_by_rename(renamed, &target, &moves));
@@ -736,6 +876,7 @@ fn run_transfer(
             target: target_volume,
             cancel,
             closing,
+            pause,
             progress,
             io,
         };

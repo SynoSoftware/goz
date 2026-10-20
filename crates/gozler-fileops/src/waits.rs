@@ -1,8 +1,9 @@
-//! Which operations wait for each other (D14). An operation waits for an
-//! earlier one that has not ended when one of them writes or deletes a path
-//! that the other reads or writes, a path counting as the entry and
-//! everything below it; copies that move bytes on one disk that seeks wait
-//! for each other; nothing else waits.
+//! Which operations wait for each other (D14). An operation waits for one
+//! that runs, or for one before it in the run order, when one of them
+//! writes or deletes a path that the other reads or writes, a path counting
+//! as the entry and everything below it; copies that move bytes on one disk
+//! that seeks wait for each other; nothing else waits. The person can
+//! change the run order only where no paths overlap.
 //!
 //! Paths are compared through a trie of their identity components (D12),
 //! folded as Windows compares names, so each path of one operation walks
@@ -13,7 +14,7 @@ use std::collections::HashMap;
 
 use crate::identity::Identity;
 use crate::names::{fold, is_numbered};
-use crate::operation::Wait;
+use crate::operation::{OperationId, OrderRefused, Side, Wait};
 use crate::volumes::Disk;
 
 /// A set of paths, and of the numbered names that Keep both may give.
@@ -133,10 +134,7 @@ pub(crate) struct Plan {
 
 /// Why `later` waits for `earlier`, or `None` when it does not.
 pub(crate) fn wait(later: &Plan, earlier: &Plan) -> Option<Wait> {
-    let paths = later.writes.meets_set(&earlier.reads)
-        || later.writes.meets_set(&earlier.writes)
-        || earlier.writes.meets_set(&later.reads);
-    if paths {
+    if overlaps(later, earlier) {
         return Some(Wait::Paths);
     }
     let shared_disk = || {
@@ -144,6 +142,56 @@ pub(crate) fn wait(later: &Plan, earlier: &Plan) -> Option<Wait> {
             .any(|(disk, seeks)| *seeks && earlier.disks.iter().any(|(other, _)| other == disk))
     };
     (later.moves_bytes && earlier.moves_bytes && shared_disk()).then_some(Wait::Disk)
+}
+
+/// One of the two writes or deletes a path that the other reads or writes.
+fn overlaps(a: &Plan, b: &Plan) -> bool {
+    a.writes.meets_set(&b.reads) || a.writes.meets_set(&b.writes) || b.writes.meets_set(&a.reads)
+}
+
+/// What each operation of `waiting`, in run order, waits for: an operation
+/// that runs, wherever it stands in the order, because a running operation
+/// is never passed, or one before it in the order. `None` lets it start.
+pub(crate) fn waits(
+    running: &[(OperationId, &Plan)],
+    waiting: &[(OperationId, &Plan)],
+) -> Vec<Option<(OperationId, Wait)>> {
+    (waiting.iter().enumerate())
+        .map(|(at, &(_, plan))| {
+            (running.iter().chain(&waiting[..at]))
+                .find_map(|&(other, earlier)| wait(plan, earlier).map(|reason| (other, reason)))
+        })
+        .collect()
+}
+
+/// The run order `waiting` with `id` moved to just before `before`, or
+/// last. A move never passes an operation whose paths it overlaps, so only
+/// the order of operations that wait for one disk changes; it is refused
+/// with the nearest such operation it would pass.
+pub(crate) fn reorder(
+    waiting: &[(OperationId, &Plan)],
+    id: OperationId,
+    before: Option<OperationId>,
+) -> Result<Vec<OperationId>, OrderRefused> {
+    let at = |id| (waiting.iter()).position(|&(other, _)| other == id);
+    let from = at(id).ok_or(OrderRefused::NotWaiting)?;
+    let to = match before {
+        Some(before) => at(before).ok_or(OrderRefused::NotWaiting)?,
+        None => waiting.len(),
+    };
+    let plan = waiting[from].1;
+    let (passed, side): (Vec<_>, _) = if to <= from {
+        (waiting[to..from].iter().rev().collect(), Side::After)
+    } else {
+        (waiting[from + 1..to].iter().collect(), Side::Before)
+    };
+    if let Some(&(other, _)) = (passed.into_iter()).find(|(_, other)| overlaps(plan, other)) {
+        return Err(OrderRefused::Overlaps { other, side });
+    }
+    let mut order: Vec<OperationId> = waiting.iter().map(|&(id, _)| id).collect();
+    let moved = order.remove(from);
+    order.insert(if to > from { to - 1 } else { to }, moved);
+    Ok(order)
 }
 
 #[cfg(test)]
@@ -211,5 +259,38 @@ mod tests {
         let mut deleting = delete(r"\\?\Volume{1}\elsewhere");
         deleting.disks = hdd.to_vec();
         assert_eq!(wait(&deleting, &a), None);
+    }
+
+    /// A waiting operation never passes one whose paths it overlaps: the
+    /// move is refused with the nearest such operation and the side it stays
+    /// on. A move past one that waits only for the same hard disk changes
+    /// which one runs next. A running operation counts as earlier wherever
+    /// it stands.
+    #[test]
+    fn a_waiting_operation_moves_only_past_what_it_does_not_overlap() {
+        let hdd = [(Disk::Number(1), true)];
+        let running = copy(r"\\?\Volume{1}\a\x.txt", r"\\?\Volume{1}\out", &hdd);
+        let first = copy(r"\\?\Volume{1}\b\y.txt", r"\\?\Volume{1}\one", &hdd);
+        let second = copy(r"\\?\Volume{1}\c\z.txt", r"\\?\Volume{1}\two", &hdd);
+        let third = delete(r"\\?\Volume{1}\one");
+        let [r, a, b, c] = [0, 1, 2, 3].map(OperationId);
+        let waiting = [(a, &first), (b, &second), (c, &third)];
+
+        let refused = |other, side| Err(OrderRefused::Overlaps { other, side });
+        assert_eq!(reorder(&waiting, c, Some(a)), refused(a, Side::After));
+        assert_eq!(reorder(&waiting, a, None), refused(c, Side::Before));
+        assert_eq!(reorder(&waiting, r, None), Err(OrderRefused::NotWaiting));
+        let moved = reorder(&waiting, b, Some(a)).expect("past a disk wait");
+        assert_eq!(moved, [b, a, c]);
+
+        // Once `running` ends, the first in the order starts.
+        let before = waits(&[], &waiting);
+        assert_eq!(before[..2], [None, Some((a, Wait::Disk))]);
+        let after = waits(&[], &[(b, &second), (a, &first), (c, &third)]);
+        assert_eq!(after[..2], [None, Some((b, Wait::Disk))]);
+        assert_eq!(
+            waits(&[(r, &running)], &[(b, &second)]),
+            [Some((r, Wait::Disk))]
+        );
     }
 }

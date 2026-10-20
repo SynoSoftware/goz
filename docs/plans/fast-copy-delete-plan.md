@@ -6,10 +6,9 @@ on the engine's real interface and measured numbers.
 
 ## Schedule
 
-Stages A to D are committed (3155fbc, 913eab6, 06ef84b, 155ab06). Stage E
-is reviewed and commits next; stage F follows it, for the File operations
-window that gozler-ui builds beside it. "After install" waits for the
-owner.
+Stages A to F are committed (3155fbc, 913eab6, 06ef84b, 155ab06, 262dc90,
+and the commit that adds this line). The File operations window builds on
+stage F in gozler-ui. "After install" waits for the owner.
 
 ## How every stage runs
 

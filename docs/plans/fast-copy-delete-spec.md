@@ -529,10 +529,38 @@ new window that reuses it.
    skipped file with its path and Windows error, in the order they happened.
 
 **Each operation's state** is one of: preparing; prepared, waiting for the
-person's answer; waiting, with the id of the operation it waits for and
-whether for its paths or its disk; running, with its progress; ended, with
-its result; or interrupted. An ended operation stays until the window
+person's answer; waiting, with the id of the operation it waits for,
+whether for its paths or its disk, and the totals prepare counted; running;
+ended, with its result; or interrupted. A running operation carries its
+counts of items and bytes, its totals, whether it only renames, whether it
+is paused, and its current file. An ended operation stays until the window
 removes it. The queue is the one owner of which operations exist.
+`Queue::operations()` lists each with its request: the running ones in the
+order they started, then the waiting ones in run order, then the rest in
+the order they were prepared.
+
+**Run order.** A waiting operation waits for one that runs, wherever it
+stands, and for one before it in the run order (D14). `move_waiting` moves
+a waiting operation to just before another waiting one, or last, and
+`check_move` answers whether that move is allowed without making it; both
+make the same check. A move never passes an operation whose paths it
+overlaps, because the later one would then change files that the earlier one
+uses first. It is refused with the nearest such operation and the side the
+moved one must stay on (`OrderRefused`), and nothing changes. So only the
+order of operations that wait for one disk really changes. After a move
+every wait is decided again, so an operation that no longer waits starts.
+
+**Pause** holds a running operation: the ring between blocks, once nothing
+it wrote is in flight; `CopyFile2` inside its progress callback; the copy,
+move and delete workers between entries. A paused operation keeps its paths
+and its disks, so the operations that wait for it go on waiting. Cancel
+works while paused, and so does `close()`: a paused `CopyFile2` then goes on
+toward the process end, as at Exit.
+
+**The current file** is the file the operation most recently started, with
+its destination, its bytes copied and its size; for a delete, the entry
+being deleted, with no destination and 0 for both. With several workers it
+is the one that started last.
 
 **Taken entries.** The queue answers whether a path is taken: it equals or
 is below a source of a waiting, running or ended delete or move, compared
@@ -642,8 +670,8 @@ so an existing name is refused, never replaced.
 counts a folder's items and bytes outside the queue, because it changes
 nothing; it can be cancelled.
 
-**Progress** is atomic counters of bytes or entries, which the window reads
-about twice a second.
+**Progress** is atomic counters of bytes or entries and the current file,
+which the window reads about twice a second.
 
 **Threads.** The queue owns every engine thread: one for each preparing or
 running operation, and the workers of each run, which are scoped threads

@@ -18,10 +18,10 @@
 //! a symbolic link or a mount point is deleted, never entered. Paths are
 //! compared by what they name on disk (`identity`), not by their text.
 //!
-//! A file being copied is written under a temporary name and renamed when
-//! complete, so a file at its final name is always complete, and a name
-//! that another program took meanwhile is never replaced without the
-//! person's choice.
+//! A file is copied straight to its final name with a create that refuses
+//! an existing name, so a name that another program took meanwhile is never
+//! replaced without the person's choice. An interrupted copy leaves its file
+//! there unfinished, and Continue resumes it.
 //!
 //! The decisions (names, conflicts, identities, the waits between
 //! operations, taken entries, retries, the saved file, the speed settings
@@ -73,8 +73,8 @@ mod win32;
 
 pub use conflicts::Choice;
 pub use operation::{
-    End, Listed, OperationId, Outcome, Prepared, Reason, Refusal, Request, RingCounts, State,
-    Survey, Wait,
+    Current, End, Listed, Operation, OperationId, OrderRefused, Outcome, Prepared, Reason, Refusal,
+    Request, RingCounts, Running, Side, State, Survey, Wait,
 };
 #[cfg(windows)]
 pub use queue::{NotInterrupted, NotPrepared, Queue};
