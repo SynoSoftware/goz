@@ -1,58 +1,80 @@
 //! The common controls of the main window, which are created here, and the
 //! wrappers of the dialogs' controls, which their templates create.
 
-use super::gdi::{ImageList, draw_text};
+use super::gdi::{
+    Font, ImageList, TextMeter, button_images, draw_glyph, draw_text, icons_shown, system_color,
+};
 use super::keys::{is_extended, key_of, virtual_key};
 use super::notify::ControlEvent;
 use super::{Hwnd, wide};
 use crate::core::commands::Keystroke;
-use crate::core::layout::{Px, list_box_text_inset};
+use crate::core::glyph::Glyph;
+use crate::core::layout::{
+    self, ColumnFit, Dpi, Px, glyph_gap, glyph_row_height, icon_glyph_height, list_box_text_inset,
+};
+use gozler_core::include::FolderCheck;
 use std::cell::RefCell;
 use std::ops::Range;
 use windows::Win32::Foundation::{
     COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen,
-    DT_CALCRECT, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawFocusRect, FillRect,
-    GetDC, GetSysColor, GetSysColorBrush, HGDIOBJ, ReleaseDC, ScreenToClient, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    BF_RECT, BeginPaint, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+    COLOR_WINDOWTEXT, ClientToScreen, DT_CALCRECT, DT_END_ELLIPSIS, DT_HIDEPREFIX, DT_NOPREFIX,
+    DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawEdge, DrawFocusRect, EDGE_ETCHED, EndPaint,
+    ExcludeClipRect, FillRect, GetDC, GetSysColor, GetSysColorBrush, GetTextColor, GetTextMetricsW,
+    HBRUSH, HDC, HGDIOBJ, InvalidateRect, MapWindowPoints, PAINTSTRUCT, RDW_ALLCHILDREN, RDW_ERASE,
+    RDW_INVALIDATE, RedrawWindow, ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject,
+    SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BCM_SETSHIELD, BST_CHECKED, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETSEL,
-    EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDI_FORMAT, HDITEMW,
-    HDM_GETITEMW, HDM_SETITEMW, HKCOMB_A, HKCOMB_C, HKCOMB_NONE, HKCOMB_S, HKM_GETHOTKEY,
-    HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT,
-    ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
-    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
+    BCM_SETIMAGELIST, BCM_SETSHIELD, BP_GROUPBOX, BST_CHECKED, BUTTON_IMAGELIST,
+    BUTTON_IMAGELIST_ALIGN_LEFT, CloseThemeData, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME,
+    DTM_SETSYSTEMTIME, DrawThemeBackground, EM_GETMARGINS, EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL,
+    GBS_DISABLED, GBS_NORMAL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO,
+    HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW, HDM_HITTEST, HDM_SETITEMW, HKCOMB_A,
+    HKCOMB_C, HKCOMB_NONE, HKCOMB_S, HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT,
+    HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT, HTREEITEM, ICC_BAR_CLASSES, ICC_DATE_CLASSES,
+    ICC_HOTKEY_CLASS, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
+    ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
     LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO,
-    LVIF_TEXT, LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
+    LVIF_TEXT, LVIR_BOUNDS, LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
     LVM_DELETECOLUMN, LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH,
     LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM,
     LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
     LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE,
     LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_HEADERDRAGDROP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, ODS_FLAGS, ODS_FOCUS, ODS_NOFOCUSRECT,
-    ODS_SELECTED, ODT_LISTBOX, SB_SETPARTS, SB_SETTEXTW, SBARS_SIZEGRIP, STATUSCLASSNAMEW,
-    SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW,
-    TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW,
-    TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
+    LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT,
+    LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR, ODS_FLAGS,
+    ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, ODT_LISTBOX, OpenThemeData, PBM_SETMARQUEE,
+    PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETRECT, SB_SETMINHEIGHT,
+    SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, SBT_OWNERDRAW,
+    STATUSCLASSNAMEW, SetWindowTheme, TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE,
+    TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH,
+    TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX,
+    TTTOOLINFOW, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVGN_ROOT, TVI_LAST, TVI_ROOT,
+    TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0,
+    TVIS_STATEIMAGEMASK, TVITEMEXW_CHILDREN, TVITEMW, TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW,
+    TVM_GETNEXTITEM, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETEXTENDEDSTYLE, TVM_SETITEMW,
+    TVS_CHECKBOXES, TVS_EX_DOUBLEBUFFER, TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
 };
+use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
     CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
-    CreateWindowExW, EN_CHANGE, EN_SETFOCUS, ES_AUTOHSCROLL, ES_READONLY, GetSystemMetrics,
-    GetWindowRect, HMENU, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT,
-    LB_GETTEXTLEN, LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMHEIGHT,
-    LBN_SELCHANGE, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED,
-    SM_CXVSCROLL, SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY, WM_GETFONT, WM_MOUSEMOVE,
-    WM_NCDESTROY, WM_SIZE, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP,
-    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_READONLY, GWL_STYLE,
+    GetClientRect, GetParent, GetWindowLongPtrW, GetWindowRect, HMENU, IsChild, LB_ADDSTRING,
+    LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT, LB_GETTEXTLEN, LB_ITEMFROMPOINT,
+    LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMDATA, LB_SETITEMHEIGHT, LBN_SELCHANGE, LBS_HASSTRINGS,
+    LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, SM_CXVSCROLL, SendMessageW,
+    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_COPY, WM_CTLCOLORSTATIC,
+    WM_ENABLE, WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SETTEXT, WM_SIZE,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT,
+    WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -65,7 +87,8 @@ pub(crate) fn initialize() {
             | ICC_BAR_CLASSES
             | ICC_LINK_CLASS
             | ICC_DATE_CLASSES
-            | ICC_HOTKEY_CLASS,
+            | ICC_HOTKEY_CLASS
+            | ICC_TREEVIEW_CLASSES,
     };
     // SAFETY: `classes` is complete.
     let _ = unsafe { InitCommonControlsEx(&classes) };
@@ -73,7 +96,7 @@ pub(crate) fn initialize() {
 
 /// Creates a visible child of `parent`; its place comes later from the
 /// layout.
-fn child(
+pub(super) fn child(
     parent: Hwnd,
     class: PCWSTR,
     style: u32,
@@ -102,7 +125,7 @@ fn child(
 }
 
 /// Sends a message whose parameters are plain values.
-fn send(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize {
+pub(super) fn send(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize {
     // SAFETY: neither parameter is a pointer, so the control reads no memory
     // of this process through them.
     unsafe { SendMessageW(hwnd.0, message, Some(WPARAM(wparam)), Some(LPARAM(lparam))) }.0
@@ -115,7 +138,12 @@ fn send(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize {
 /// `lparam` points to a valid value of the type `message` expects, which
 /// lives until this synchronous call returns, and is writable when the
 /// message fills it in.
-unsafe fn send_pointer<T>(hwnd: Hwnd, message: u32, wparam: usize, lparam: *const T) -> isize {
+pub(super) unsafe fn send_pointer<T>(
+    hwnd: Hwnd,
+    message: u32,
+    wparam: usize,
+    lparam: *const T,
+) -> isize {
     // SAFETY: the caller keeps `lparam` valid for the call.
     unsafe {
         SendMessageW(
@@ -207,6 +235,22 @@ impl Edit {
         event.is(self.0, EN_SETFOCUS)
     }
 
+    /// Whether `event` says that the box lost the focus.
+    pub(crate) fn unfocused(self, event: ControlEvent) -> bool {
+        event.is(self.0, EN_KILLFOCUS)
+    }
+
+    /// The room the box keeps beside its text: its left and right margins.
+    pub(crate) fn margins(self) -> Px {
+        let margins = send(self.0, EM_GETMARGINS, 0, 0) as usize;
+        Px(((margins & 0xffff) + ((margins >> 16) & 0xffff)) as i32)
+    }
+
+    /// The room the box keeps before its text.
+    pub(crate) fn left_margin(self) -> Px {
+        Px((send(self.0, EM_GETMARGINS, 0, 0) as usize & 0xffff) as i32)
+    }
+
     /// The grey hint the empty box shows, also while it has the focus.
     pub(crate) fn set_cue(self, text: &str) {
         let text = wide(text);
@@ -261,11 +305,30 @@ impl Label {
         child(parent, w!("STATIC"), SS_NOPREFIX, WINDOW_EX_STYLE(0), id).map(Label)
     }
 
+    /// One line that shows `&` as itself and ends in an ellipsis when it is
+    /// too long, such as a note after a value.
+    pub(crate) fn create_line(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        child(
+            parent,
+            w!("STATIC"),
+            SS_NOPREFIX | SS_ENDELLIPSIS,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Label)
+    }
+
+    /// A text that its parent draws on `WM_DRAWITEM`; its own text is what
+    /// screen readers say.
+    pub(crate) fn create_owner_drawn(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        const SS_OWNERDRAW: u32 = 0xd;
+        child(parent, w!("STATIC"), SS_OWNERDRAW, WINDOW_EX_STYLE(0), id).map(Label)
+    }
+
     /// One line, centred in its height, that shows `&` as itself and ends
     /// in an ellipsis when it is too long, such as a file's name.
     pub(crate) fn create_heading(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
         const SS_CENTERIMAGE: u32 = 0x200;
-        const SS_ENDELLIPSIS: u32 = 0x4000;
         child(
             parent,
             w!("STATIC"),
@@ -280,6 +343,7 @@ impl Label {
 /// The static control styles, which the windows crate has only in a feature
 /// for system services.
 const SS_NOPREFIX: u32 = 0x80;
+const SS_ENDELLIPSIS: u32 = 0x4000;
 
 /// A push button.
 #[derive(Clone, Copy)]
@@ -294,9 +358,36 @@ impl Button {
         event.is(self.0, BN_CLICKED)
     }
 
+    /// The button `id` of a dialog.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<Button> {
+        super::dialog::item(dialog, id).map(Button)
+    }
+
     /// Shows or hides the administrator shield before the caption.
     pub(crate) fn set_shield(self, shown: bool) {
         send(self.0, BCM_SETSHIELD, 0, isize::from(shown));
+    }
+
+    /// Shows `glyph` before the caption at the button's DPI, in the system
+    /// colours of now, or no icon while icons are hidden, so the owner calls
+    /// this again when any of them changes.
+    pub(crate) fn set_glyph(self, glyph: Glyph) {
+        let dpi = self.0.dpi();
+        let images = button_images(glyph, icon_glyph_height(dpi)).unwrap_or_default();
+        let gap = glyph_gap(dpi).0;
+        let list = BUTTON_IMAGELIST {
+            himl: images,
+            margin: RECT {
+                left: gap,
+                right: gap,
+                ..RECT::default()
+            },
+            uAlign: BUTTON_IMAGELIST_ALIGN_LEFT,
+        };
+        // SAFETY: `list` outlives the call; the button keeps the image list
+        // without owning it, and `button_images` keeps it alive. A null list
+        // removes the image.
+        unsafe { send_pointer(self.0, BCM_SETIMAGELIST, 0, &raw const list) };
     }
 
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
@@ -419,15 +510,18 @@ impl ListBox {
         super::dialog::item(dialog, id).map(ListBox)
     }
 
-    /// Its height is the layout's, not a whole number of rows.
-    pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<ListBox> {
-        ListBox::create_styled(parent, id, 0)
+    /// Its height is the layout's, not a whole number of rows. Each item
+    /// shows its icon, which [`ListBox::set_glyphs`] sets; its parent draws
+    /// the items with [`draw_list_item`], and gives it its row height with
+    /// [`ListBox::set_item_height`].
+    pub(crate) fn create_with_glyphs(parent: Hwnd, id: u16) -> windows::core::Result<ListBox> {
+        ListBox::create_styled(parent, id, (LBS_OWNERDRAWFIXED | LBS_HASSTRINGS) as u32)
     }
 
     /// A list of paths, such as the Location list. A path wider than its
     /// row loses its middle (`DT_PATH_ELLIPSIS`), so the drive and the last
     /// folder stay visible, and a tooltip shows it whole. Its parent draws
-    /// its items with [`draw_path_item`], and gives it its row height with
+    /// its items with [`draw_list_item`], and gives it its row height with
     /// [`ListBox::set_item_height`].
     pub(crate) fn create_paths(parent: Hwnd, id: u16) -> windows::core::Result<ListBox> {
         let style = (LBS_OWNERDRAWFIXED | LBS_HASSTRINGS) as u32;
@@ -483,15 +577,35 @@ impl ListBox {
     pub(crate) fn selected(self) -> Option<usize> {
         usize::try_from(send(self.0, LB_GETCURSEL, 0, 0)).ok()
     }
+
+    /// Sets the row height of a list from [`ListBox::create_with_glyphs`],
+    /// or the Settings page list, from its font, with room for the icons
+    /// while they show.
+    pub(crate) fn fit_glyph_rows(self) {
+        let Ok(font) = Font::of(self.0) else {
+            return;
+        };
+        let height = TextMeter::new(&font).height();
+        self.set_item_height(glyph_row_height(self.0.dpi(), height, icons_shown()));
+    }
+
+    /// Gives each item the icon at its index in `glyphs`, which the list
+    /// draws before its text.
+    pub(crate) fn set_glyphs(self, glyphs: impl IntoIterator<Item = Glyph>) {
+        for (index, glyph) in glyphs.into_iter().enumerate() {
+            send(self.0, LB_SETITEMDATA, index, glyph.data() as isize);
+        }
+        self.0.invalidate();
+    }
 }
 
 /// Draws the item of `WM_DRAWITEM`'s `lparam` when it belongs to a list
-/// from [`ListBox::create_paths`], in the system colours, and returns
+/// box, in the system colours, after its icon if it has one, and returns
 /// whether it did.
 ///
 /// # Safety
 /// `lparam` is the `lparam` of a `WM_DRAWITEM` that is being handled.
-pub(crate) unsafe fn draw_path_item(lparam: LPARAM) -> bool {
+pub(crate) unsafe fn draw_list_item(lparam: LPARAM) -> bool {
     // SAFETY: the caller passes WM_DRAWITEM's lparam, which points to a
     // DRAWITEMSTRUCT that lives while the message is handled.
     let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
@@ -513,6 +627,16 @@ pub(crate) unsafe fn draw_path_item(lparam: LPARAM) -> bool {
         if item.itemID != u32::MAX {
             let text = item_text(list, LB_GETTEXTLEN, LB_GETTEXT, item.itemID as usize);
             let mut rect = path_text_rect(list, item.rcItem);
+            if let Some(glyph) = Glyph::from_data(item.itemData).filter(|_| icons_shown()) {
+                let dpi = list.dpi();
+                let icon = icon_glyph_height(dpi);
+                let area = RECT {
+                    right: rect.left + icon.0,
+                    ..rect
+                };
+                draw_glyph(item.hDC, glyph, area, icon, system_color(foreground));
+                rect.left = area.right + glyph_gap(dpi).0;
+            }
             SetTextColor(item.hDC, COLORREF(GetSysColor(foreground)));
             SetBkMode(item.hDC, TRANSPARENT);
             draw_text(
@@ -701,6 +825,184 @@ unsafe extern "system" fn path_list_procedure(
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
+/// Draws the group box `group` of a dialog with `glyph` before its caption
+/// (DESIGN.md: Look). Windows draws a group box's caption itself, so the
+/// whole box is drawn here instead: its frame as the theme draws it, or
+/// etched without one, and the caption in the colours that its parent gives
+/// a static control, gray while the box is disabled.
+pub(crate) fn show_group_glyph(group: Hwnd, glyph: Glyph) {
+    // SAFETY: the subclass's data is the glyph's number, which needs no
+    // cleanup.
+    let _ = unsafe { SetWindowSubclass(group.0, Some(group_procedure), 0, glyph.data()) };
+}
+
+/// The procedure of a group box from [`show_group_glyph`], before its own.
+unsafe extern "system" fn group_procedure(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    data: usize,
+) -> LRESULT {
+    let group = Hwnd(hwnd);
+    match msg {
+        WM_PAINT => {
+            if let Some(glyph) = Glyph::from_data(data).filter(|_| icons_shown()) {
+                paint_group(group, glyph);
+                return LRESULT(0);
+            }
+        }
+        // The box draws a new caption at once, and an old one stays where
+        // the new one is shorter, so its parent draws that strip again.
+        WM_SETTEXT | WM_ENABLE => {
+            // SAFETY: the parameters are the ones Windows passed.
+            let answer = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+            redraw_group_caption(group);
+            return answer;
+        }
+        WM_NCDESTROY => {
+            // SAFETY: the subclass holds nothing to free.
+            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(group_procedure), 0) };
+        }
+        _ => {}
+    }
+    // SAFETY: the parameters are the ones Windows passed.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// The height of a group box's caption line: its font's, or its icon's.
+/// `dc` holds the box's font.
+fn group_caption_height(group: Hwnd, dc: HDC) -> i32 {
+    let mut metrics = TEXTMETRICW::default();
+    // SAFETY: `metrics` is a local the call fills in.
+    let _ = unsafe { GetTextMetricsW(dc, &mut metrics) };
+    metrics.tmHeight.max(icon_glyph_height(group.dpi()).0)
+}
+
+/// Has the parent of `group` draw the strip of its caption again, with the
+/// controls in it.
+fn redraw_group_caption(group: Hwnd) {
+    // SAFETY: the DC is released, with its font restored, in the block;
+    // the rectangles are locals the calls fill in and read.
+    unsafe {
+        let Ok(parent) = GetParent(group.0) else {
+            return;
+        };
+        let dc = GetDC(Some(group.0));
+        let previous = SelectObject(dc, HGDIOBJ(send(group, WM_GETFONT, 0, 0) as *mut _));
+        let height = group_caption_height(group, dc);
+        SelectObject(dc, previous);
+        ReleaseDC(Some(group.0), dc);
+        let mut rect = RECT::default();
+        let _ = GetWindowRect(group.0, &mut rect);
+        let mut corners = [
+            POINT {
+                x: rect.left,
+                y: rect.top,
+            },
+            POINT {
+                x: rect.right,
+                y: rect.top + height,
+            },
+        ];
+        MapWindowPoints(None, Some(parent), &mut corners);
+        let strip = RECT {
+            left: corners[0].x,
+            top: corners[0].y,
+            right: corners[1].x,
+            bottom: corners[1].y,
+        };
+        let _ = RedrawWindow(
+            Some(parent),
+            Some(&strip),
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
+        );
+    }
+}
+
+/// Paints the group box `group` with `glyph` before its caption.
+fn paint_group(group: Hwnd, glyph: Glyph) {
+    let text = group.text();
+    let dpi = group.dpi();
+    let (icon, gap) = (icon_glyph_height(dpi).0, glyph_gap(dpi).0);
+    let mut paint = PAINTSTRUCT::default();
+    // SAFETY: BeginPaint and EndPaint pair on the box; the DC's state is
+    // saved and restored around the drawing, and the theme is closed.
+    unsafe {
+        let dc = BeginPaint(group.0, &mut paint);
+        let saved = SaveDC(dc);
+        SelectObject(dc, HGDIOBJ(send(group, WM_GETFONT, 0, 0) as *mut _));
+        // The parent sets the caption's colours on the DC and gives its
+        // background, as it does for the box's own drawing.
+        let brush = GetParent(group.0).map_or(0, |parent| {
+            SendMessageW(
+                parent,
+                WM_CTLCOLORSTATIC,
+                Some(WPARAM(dc.0 as usize)),
+                Some(LPARAM(group.0.0 as isize)),
+            )
+            .0
+        });
+        let enabled = IsWindowEnabled(group.0).as_bool();
+        let color = if enabled {
+            GetTextColor(dc)
+        } else {
+            system_color(COLOR_GRAYTEXT)
+        };
+        let height = group_caption_height(group, dc);
+        let flags = DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX;
+        let mut measured = RECT::default();
+        draw_text(dc, &text, &mut measured, flags | DT_CALCRECT);
+        let mut client = RECT::default();
+        let _ = GetClientRect(group.0, &mut client);
+        // Half a line in from the frame, where Windows draws a group box's
+        // caption, with a little room on either side.
+        let pad = gap / 2;
+        let left = client.left + height / 2;
+        let caption = RECT {
+            left,
+            top: client.top,
+            right: (left + pad + icon + gap + measured.right + pad).min(client.right),
+            bottom: client.top + height,
+        };
+        let mut frame = RECT {
+            top: client.top + height / 2,
+            ..client
+        };
+        let inner = SaveDC(dc);
+        ExcludeClipRect(dc, caption.left, caption.top, caption.right, caption.bottom);
+        let theme = OpenThemeData(Some(group.0), w!("Button"));
+        if theme.is_invalid() {
+            let _ = DrawEdge(dc, &mut frame, EDGE_ETCHED, BF_RECT);
+        } else {
+            let state = if enabled { GBS_NORMAL } else { GBS_DISABLED };
+            let _ = DrawThemeBackground(theme, dc, BP_GROUPBOX.0, state.0, &frame, None);
+            let _ = CloseThemeData(theme);
+        }
+        let _ = RestoreDC(dc, inner);
+        if brush != 0 {
+            FillRect(dc, &caption, HBRUSH(brush as *mut _));
+        }
+        let glyph_area = RECT {
+            left: caption.left + pad,
+            right: caption.left + pad + icon,
+            ..caption
+        };
+        draw_glyph(dc, glyph, glyph_area, Px(icon), color);
+        SetTextColor(dc, color);
+        SetBkMode(dc, TRANSPARENT);
+        let mut text_area = RECT {
+            left: glyph_area.right + gap,
+            ..caption
+        };
+        draw_text(dc, &text, &mut text_area, flags | DT_END_ELLIPSIS);
+        let _ = RestoreDC(dc, saved);
+        let _ = EndPaint(group.0, &paint);
+    }
+}
+
 /// A date picker with a check box, which a dialog's template declares.
 #[derive(Clone, Copy)]
 pub(crate) struct DatePicker(Hwnd);
@@ -831,6 +1133,76 @@ impl Balloon {
         let tool = self.tool(&mut empty);
         // SAFETY: `tool` outlives the call, which reads it.
         unsafe { send_pointer(self.tip, TTM_TRACKACTIVATE, 0, &raw const tool) };
+    }
+}
+
+/// A tooltip over some of a window's child controls, which shows a
+/// control's text while the mouse rests on it. Windows destroys it with its
+/// owner, so a copy is only another handle.
+#[derive(Clone, Copy)]
+pub(crate) struct Tooltip {
+    tip: Hwnd,
+    parent: Hwnd,
+}
+
+impl Tooltip {
+    /// A tooltip for `controls`, children of `parent`, which show no tip
+    /// until [`Tooltip::set`] gives them text.
+    pub(crate) fn create(parent: Hwnd, controls: &[Hwnd]) -> windows::core::Result<Tooltip> {
+        // SAFETY: a tooltip window, as Windows documents it. When `parent`
+        // is a child window, Windows makes its top-level window the tip's
+        // owner, which destroys it.
+        let tip = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST,
+                TOOLTIPS_CLASSW,
+                PCWSTR::null(),
+                WINDOW_STYLE(WS_POPUP.0 | TTS_NOPREFIX),
+                0,
+                0,
+                0,
+                0,
+                Some(parent.0),
+                None,
+                None,
+                None,
+            )
+        }?;
+        let tooltip = Tooltip {
+            tip: Hwnd(tip),
+            parent,
+        };
+        for &control in controls {
+            let mut empty = wide("");
+            let tool = tooltip.tool(control, &mut empty);
+            // SAFETY: `tool` and its text outlive the call, which copies them.
+            unsafe { send_pointer(tooltip.tip, TTM_ADDTOOLW, 0, &raw const tool) };
+        }
+        // A width makes the tip start a new line at each "\r\n"; no path
+        // is this wide, so a path stays on its line.
+        send(tooltip.tip, TTM_SETMAXTIPWIDTH, 0, isize::from(i16::MAX));
+        Ok(tooltip)
+    }
+
+    /// Shows `text` while the mouse rests on `control`, one of the
+    /// tooltip's controls; an empty text shows no tip.
+    pub(crate) fn set(&self, control: Hwnd, text: &str) {
+        let mut text = wide(text);
+        let tool = self.tool(control, &mut text);
+        // SAFETY: `tool` and its text outlive the call, which copies them.
+        unsafe { send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
+    }
+
+    /// The tool of `control`, which the tooltip knows by its handle.
+    fn tool(&self, control: Hwnd, text: &mut [u16]) -> TTTOOLINFOW {
+        TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+            hwnd: self.parent.0,
+            uId: control.0.0 as usize,
+            lpszText: PWSTR(text.as_mut_ptr()),
+            ..TTTOOLINFOW::default()
+        }
     }
 }
 
@@ -1078,6 +1450,10 @@ impl ListView {
         self.set_state(usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
     }
 
+    pub(crate) fn deselect(self, row: u64) {
+        self.set_state(row as usize, LVIS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS(0));
+    }
+
     /// The selected rows, as sorted ranges that do not touch. A virtual
     /// list knows them only row by row, so a selection of every row, which
     /// Select all makes, is read without asking for each.
@@ -1179,6 +1555,69 @@ impl ListView {
         let page = send(self.0, LVM_GETCOUNTPERPAGE, 0, 0).max(0) as u64;
         top..top + page + 1
     }
+
+    /// The width the columns fill: the list's inside less a vertical scroll
+    /// bar, whether the bar shows or not, so rows that bring the bar never
+    /// push the columns past the right edge.
+    pub(crate) fn fill_width(self) -> Px {
+        let inside = self.0.client_size().width;
+        // SAFETY: plain values.
+        let style = unsafe { GetWindowLongPtrW(self.0.0, GWL_STYLE) } as u32;
+        if style & WS_VSCROLL.0 != 0 {
+            inside
+        } else {
+            inside - scroll_bar_width(self.0.dpi())
+        }
+    }
+
+    /// How far the first column's text area starts after the column's left
+    /// edge, past the row's icon, measured on `row`; `None` when the list
+    /// does not hold it.
+    pub(crate) fn first_label_offset(self, row: u64) -> Option<Px> {
+        let mut label = RECT {
+            left: LVIR_LABEL as i32,
+            ..RECT::default()
+        };
+        // SAFETY: `label` is a local that the list reads the part from and
+        // fills in.
+        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, row as usize, &raw mut label) } == 0 {
+            return None;
+        }
+        let header = self.header();
+        let mut column = RECT::default();
+        // SAFETY: `column` is a local that the header fills in.
+        if unsafe { send_pointer(header, HDM_GETITEMRECT, 0, &raw mut column) } == 0 {
+            return None;
+        }
+        // The header's coordinates differ from the list's while the list
+        // scrolls sideways.
+        let mut left = [POINT {
+            x: column.left,
+            y: 0,
+        }];
+        // SAFETY: `left` is a local the call converts in place.
+        unsafe { MapWindowPoints(Some(header.0), Some(self.0.0), &mut left) };
+        Some(Px(label.left - left[0].x))
+    }
+
+    /// The column whose header is at `point`, in screen coordinates.
+    pub(crate) fn column_at(self, point: (i32, i32)) -> Option<usize> {
+        let header = self.header();
+        let mut hit = HDHITTESTINFO {
+            pt: POINT {
+                x: point.0,
+                y: point.1,
+            },
+            ..Default::default()
+        };
+        // SAFETY: `hit.pt` is a local the call converts in place.
+        if !unsafe { ScreenToClient(header.0, &mut hit.pt) }.as_bool() {
+            return None;
+        }
+        // SAFETY: `hit` is a local that the header reads and fills in.
+        let column = unsafe { send_pointer(header, HDM_HITTEST, 0, &raw mut hit) };
+        usize::try_from(column).ok()
+    }
 }
 
 /// The status bar, which sizes itself to its font at the window's bottom.
@@ -1190,15 +1629,36 @@ impl StatusBar {
         self.0
     }
 
-    pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<StatusBar> {
-        child(
+    /// Creates the status bar as the parent of the controls in its parts,
+    /// whose notifications it passes to `parent`. `Tab` and the access keys
+    /// reach them, as `WS_EX_CONTROLPARENT` lets `IsDialogMessageW` look
+    /// inside it. A parent that the person resizes gets the size grip. A
+    /// part's tooltip shows only while its text is cut off.
+    pub(crate) fn create(
+        parent: Hwnd,
+        id: u16,
+        size_grip: bool,
+    ) -> windows::core::Result<StatusBar> {
+        let grip = if size_grip { SBARS_SIZEGRIP } else { 0 };
+        let bar = child(
             parent,
             STATUSCLASSNAMEW,
-            SBARS_SIZEGRIP,
-            WINDOW_EX_STYLE(0),
+            grip | SBARS_TOOLTIPS | WS_CLIPCHILDREN.0,
+            WS_EX_CONTROLPARENT,
             id,
-        )
-        .map(StatusBar)
+        )?;
+        // SAFETY: the procedure uses no data, and removes itself on
+        // WM_NCDESTROY, the status bar's last message.
+        if !unsafe { SetWindowSubclass(bar.0, Some(status_bar_procedure), 0, 0) }.as_bool() {
+            return Err(windows::core::Error::from_thread());
+        }
+        Ok(StatusBar(bar))
+    }
+
+    /// Sets the height of the drawing area, which Windows makes at least
+    /// as tall as the font; [`Self::fit`] applies it.
+    pub(crate) fn set_min_height(self, height: Px) {
+        send(self.0, SB_SETMINHEIGHT, height.0.max(0) as usize, 0);
     }
 
     /// Fits the status bar to the parent's new size and returns its height.
@@ -1231,6 +1691,122 @@ impl StatusBar {
         // SAFETY: `text` is NUL-terminated and outlives the call, which
         // copies it.
         unsafe { send_pointer(self.0, SB_SETTEXTW, part, text.as_ptr()) };
+    }
+
+    /// Makes `part` one that the status bar's parent draws on
+    /// `WM_DRAWITEM`, and has it drawn again.
+    pub(crate) fn redraw_owner_drawn(self, part: usize) {
+        send(self.0, SB_SETTEXTW, part | SBT_OWNERDRAW as usize, 0);
+        let mut rect = RECT::default();
+        // SAFETY: `rect` is a local the call fills in; plain values after.
+        unsafe {
+            send_pointer(self.0, SB_GETRECT, part, &raw mut rect);
+            let _ = InvalidateRect(Some(self.0.0), Some(&rect), true);
+        }
+    }
+
+    /// Sets the tooltip of `part`, which shows while its text is cut off.
+    pub(crate) fn set_tip(self, part: usize, text: &str) {
+        let text = wide(text);
+        // SAFETY: `text` is NUL-terminated and outlives the call, which
+        // copies it.
+        unsafe { send_pointer(self.0, SB_SETTIPTEXTW, part, text.as_ptr()) };
+    }
+}
+
+/// The procedure of the status bar, before its own: it passes the
+/// notifications of the controls in its parts to its parent, which handles
+/// them as its own controls'.
+unsafe extern "system" fn status_bar_procedure(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    let forwarded = match msg {
+        WM_COMMAND => true,
+        // SAFETY: a WM_NOTIFY's lparam points to an NMHDR. The bar's own
+        // tooltips are popups, not children, and their notifications stay
+        // the bar's, which answers them.
+        WM_NOTIFY => unsafe { IsChild(hwnd, (*(lparam.0 as *const NMHDR)).hwndFrom) }.as_bool(),
+        _ => false,
+    };
+    match msg {
+        _ if forwarded => {
+            // SAFETY: the parameters are the ones Windows passed, and the
+            // parent decodes them as its own controls'.
+            unsafe {
+                if let Ok(parent) = GetParent(hwnd) {
+                    return SendMessageW(parent, msg, Some(wparam), Some(lparam));
+                }
+            }
+        }
+        WM_NCDESTROY => {
+            // SAFETY: the status bar gets no message after this one.
+            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(status_bar_procedure), 0) };
+        }
+        _ => {}
+    }
+    // SAFETY: the parameters are the ones Windows passed.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// A progress bar that shows that work runs, without saying how much of it
+/// is done.
+#[derive(Clone, Copy)]
+pub(crate) struct ProgressBar(Hwnd);
+
+impl ProgressBar {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<ProgressBar> {
+        child(parent, PROGRESS_CLASSW, PBS_MARQUEE, WINDOW_EX_STYLE(0), id).map(ProgressBar)
+    }
+
+    /// Starts or stops the movement that measures nothing.
+    pub(crate) fn set_moving(self, moving: bool) {
+        if moving {
+            self.set_marquee(true);
+        }
+        // A period of 0 keeps Windows' default of 30 ms.
+        send(self.0, PBM_SETMARQUEE, usize::from(moving), 0);
+    }
+
+    /// Fills the bar to `done` of `total`.
+    pub(crate) fn set_measured(self, done: u64, total: u64) {
+        /// The bar's positions, so a size of any number of bytes fits.
+        const STEPS: u64 = 1000;
+        send(self.0, PBM_SETMARQUEE, 0, 0);
+        self.set_marquee(false);
+        let position = done.min(total).saturating_mul(STEPS) / total.max(1);
+        // A themed bar animates each increase, so at one update in 500 ms
+        // the fill trails the percent beside it; a decrease draws at once,
+        // so the bar goes one step past the position and back.
+        send(self.0, PBM_SETRANGE32, 0, (STEPS + 1) as isize);
+        send(self.0, PBM_SETPOS, position as usize + 1, 0);
+        send(self.0, PBM_SETPOS, position as usize, 0);
+        send(self.0, PBM_SETRANGE32, 0, STEPS as isize);
+    }
+
+    /// Only a bar without `PBS_MARQUEE` measures, and the bar takes the
+    /// style's change while it exists.
+    fn set_marquee(self, marquee: bool) {
+        // SAFETY: plain values on a window of this thread.
+        unsafe {
+            let style = GetWindowLongPtrW(self.0.0, GWL_STYLE);
+            let changed = if marquee {
+                style | PBS_MARQUEE as isize
+            } else {
+                style & !(PBS_MARQUEE as isize)
+            };
+            if changed != style {
+                SetWindowLongPtrW(self.0.0, GWL_STYLE, changed);
+            }
+        }
     }
 }
 
@@ -1325,6 +1901,18 @@ impl ReportList {
         super::dialog::item(dialog, id).map(ReportList)
     }
 
+    /// Shows the tooltip that the dialog's `DialogProc::info_tip` gives for
+    /// the row under the pointer, instead of the cut-off text in full. Call
+    /// it after [`ReportList::set_columns`].
+    pub(crate) fn show_info_tips(self) {
+        send(
+            self.0,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            (LVS_EX_INFOTIP | LVS_EX_LABELTIP) as usize,
+            LVS_EX_INFOTIP as isize,
+        );
+    }
+
     /// Gives the list File Explorer's look and `columns`, each a header,
     /// its share of the list's width in percent, and whether its cells are
     /// right-aligned, as numbers are.
@@ -1340,7 +1928,7 @@ impl ReportList {
         let _ = unsafe { SetWindowTheme(self.0.0, w!("Explorer"), PCWSTR::null()) };
         // The vertical scroll bar takes its width when the rows fill the
         // list.
-        let width = self.0.client_size().width.0 - scroll_bar_width();
+        let width = (self.0.client_size().width - scroll_bar_width(self.0.dpi())).0;
         for (index, (header, share, right_aligned)) in columns.iter().enumerate() {
             let mut header = wide(header);
             let column = LVCOLUMNW {
@@ -1406,10 +1994,178 @@ impl ReportList {
         ))
         .ok()
     }
+
+    /// Fits each column to `headers` and to the cells of `rows`, and fills
+    /// the list's width with them, as the results list does
+    /// ([`layout::fill_widths`]). The list's label tips show a cell that is
+    /// still cut off.
+    pub(crate) fn fit_columns<R: AsRef<[String]>>(self, headers: &[&str], rows: &[R]) {
+        let Ok(font) = Font::of(self.0) else {
+            return;
+        };
+        let meter = TextMeter::new(&font);
+        let dpi = self.0.dpi();
+        let fits: Vec<ColumnFit> = headers
+            .iter()
+            .enumerate()
+            .map(|(column, header)| {
+                let widest = rows
+                    .iter()
+                    .filter_map(|row| row.as_ref().get(column))
+                    .filter(|text| !text.is_empty())
+                    .map(|text| {
+                        layout::cell_width(meter.plain_width(text), Px(0), column == 0, dpi)
+                    })
+                    .max();
+                ColumnFit::new(meter.plain_width(header), widest, dpi)
+            })
+            .collect();
+        // The vertical scroll bar takes its width when the rows fill the
+        // list.
+        let width = self.0.client_size().width - scroll_bar_width(dpi);
+        for (column, width) in layout::fill_widths(&fits, width, dpi)
+            .into_iter()
+            .enumerate()
+        {
+            send(self.0, LVM_SETCOLUMNWIDTH, column, width.0 as isize);
+        }
+    }
 }
 
-/// The width of a vertical scroll bar at the system's DPI.
-fn scroll_bar_width() -> i32 {
+/// The width of a vertical scroll bar at `dpi`.
+fn scroll_bar_width(dpi: Dpi) -> Px {
     // SAFETY: plain values.
-    unsafe { GetSystemMetrics(SM_CXVSCROLL) }
+    Px(unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, dpi.get()) })
+}
+
+/// An item of a [`FolderTree`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TreeItem(pub(crate) HTREEITEM);
+
+/// A tree view with a check box on each item, which a dialog's template
+/// declares, such as Indexed folders' folders. Each item carries a number,
+/// which the dialog gives it, and a check box that shows a [`FolderCheck`].
+#[derive(Clone, Copy)]
+pub(crate) struct FolderTree(Hwnd);
+
+impl FolderTree {
+    /// The tree view `id` of a dialog.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<FolderTree> {
+        super::dialog::item(dialog, id).map(FolderTree)
+    }
+
+    /// Gives the tree check boxes that can show [`FolderCheck::Partial`],
+    /// and File Explorer's look. Call it before the first item is added.
+    pub(crate) fn show_check_boxes(self) {
+        // Windows makes the check boxes' images only when the style is set
+        // after the control exists and before it holds an item.
+        // SAFETY: plain values on a window of this thread.
+        unsafe {
+            let style = GetWindowLongPtrW(self.0.0, GWL_STYLE);
+            SetWindowLongPtrW(self.0.0, GWL_STYLE, style | TVS_CHECKBOXES as isize);
+        }
+        let extended = TVS_EX_PARTIALCHECKBOXES | TVS_EX_DOUBLEBUFFER;
+        send(
+            self.0,
+            TVM_SETEXTENDEDSTYLE,
+            extended as usize,
+            extended as isize,
+        );
+        // SAFETY: plain values; a missing theme leaves the classic look.
+        let _ = unsafe { SetWindowTheme(self.0.0, w!("Explorer"), PCWSTR::null()) };
+    }
+
+    /// Adds the item `text`, carrying `data`, as the last child of
+    /// `parent`, or as the last top item. With `may_have_children`, it shows
+    /// the button that expands it, before its children are added.
+    pub(crate) fn insert(
+        self,
+        parent: Option<TreeItem>,
+        text: &str,
+        data: usize,
+        may_have_children: bool,
+    ) -> Option<TreeItem> {
+        let mut text = wide(text);
+        let insert = TVINSERTSTRUCTW {
+            hParent: parent.map_or(TVI_ROOT, |p| p.0),
+            hInsertAfter: TVI_LAST,
+            Anonymous: TVINSERTSTRUCTW_0 {
+                item: TVITEMW {
+                    mask: TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN,
+                    pszText: PWSTR(text.as_mut_ptr()),
+                    cChildren: TVITEMEXW_CHILDREN(i32::from(may_have_children)),
+                    lParam: LPARAM(data as isize),
+                    ..Default::default()
+                },
+            },
+        };
+        // SAFETY: `insert` and its text outlive the call, which copies them.
+        let item = unsafe { send_pointer(self.0, TVM_INSERTITEMW, 0, &raw const insert) };
+        (item != 0).then_some(TreeItem(HTREEITEM(item)))
+    }
+
+    /// Shows that `item` has no children, after a listing found none.
+    pub(crate) fn set_childless(self, item: TreeItem) {
+        let change = TVITEMW {
+            mask: TVIF_CHILDREN,
+            hItem: item.0,
+            ..Default::default()
+        };
+        // SAFETY: `change` outlives the call, which reads it.
+        unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
+    }
+
+    pub(crate) fn set_check(self, item: TreeItem, check: FolderCheck) {
+        // The state images of TVS_EX_PARTIALCHECKBOXES, from 1.
+        let image: u32 = match check {
+            FolderCheck::Unchecked => 1,
+            FolderCheck::Checked => 2,
+            FolderCheck::Partial => 3,
+        };
+        let change = TVITEMW {
+            mask: TVIF_STATE,
+            hItem: item.0,
+            state: TREE_VIEW_ITEM_STATE_FLAGS(image << 12),
+            stateMask: TVIS_STATEIMAGEMASK,
+            ..Default::default()
+        };
+        // SAFETY: `change` outlives the call, which reads it.
+        unsafe { send_pointer(self.0, TVM_SETITEMW, 0, &raw const change) };
+    }
+
+    /// The number the item carries.
+    pub(crate) fn data(self, item: TreeItem) -> usize {
+        let mut read = TVITEMW {
+            mask: TVIF_PARAM,
+            hItem: item.0,
+            ..Default::default()
+        };
+        // SAFETY: `read` outlives the call, which fills it in.
+        unsafe { send_pointer(self.0, TVM_GETITEMW, 0, &raw mut read) };
+        read.lParam.0 as usize
+    }
+
+    /// The children of `parent`, or the top items, in their order.
+    pub(crate) fn children(self, parent: Option<TreeItem>) -> Vec<TreeItem> {
+        let mut children = Vec::new();
+        let mut next = match parent {
+            Some(parent) => send(self.0, TVM_GETNEXTITEM, TVGN_CHILD as usize, parent.0.0),
+            None => send(self.0, TVM_GETNEXTITEM, TVGN_ROOT as usize, 0),
+        };
+        while next != 0 {
+            children.push(TreeItem(HTREEITEM(next)));
+            next = send(self.0, TVM_GETNEXTITEM, TVGN_NEXT as usize, next);
+        }
+        children
+    }
+
+    pub(crate) fn expand(self, item: TreeItem) {
+        send(self.0, TVM_EXPAND, TVE_EXPAND.0 as usize, item.0.0);
+    }
+
+    /// Selects `item` and scrolls it into view.
+    pub(crate) fn select(self, item: TreeItem) {
+        send(self.0, TVM_SELECTITEM, TVGN_CARET as usize, item.0.0);
+        send(self.0, TVM_ENSUREVISIBLE, 0, item.0.0);
+    }
 }

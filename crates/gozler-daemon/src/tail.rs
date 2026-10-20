@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use gozler_core::include::VolumeRules;
 use gozler_core::index::settle::{Batch, settle_batch};
 use gozler_core::usn::record::{
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_CLOSE, USN_REASON_DATA_EXTEND,
@@ -69,6 +70,9 @@ enum RescanReason {
     /// A folder the index missed could not be listed, so its contents stay
     /// missing.
     WalkFailed,
+    /// The Include settings now keep entries the index left out, which only
+    /// a read of the volume brings back.
+    IncludeChanged,
 }
 
 /// 512 KiB journal read buffer.
@@ -251,6 +255,24 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
         // Liveness stamp for the supervisor: as long as this loop is turning,
         // however unhealthily, no one cancels our I/O.
         pulse.beat();
+        // Here, between batches, so a change of the rules never races one.
+        // Not a journal fault, so it costs nothing of the rescan budget.
+        if let Some(rules) = state.take_new_rules()
+            && !apply_rules_in_place(state, rules)
+        {
+            let Some(fresh) = rescan(
+                state,
+                handle,
+                pulse,
+                RescanReason::IncludeChanged,
+                "the Include settings keep entries the index left out",
+                stop,
+            ) else {
+                return;
+            };
+            pos = fresh;
+            continue 'tail;
+        }
         // A path that can no longer prove the index is in sync breaks out
         // with the reason to rebuild it; every other path continues.
         let (reason, detail) = 'rescan: {
@@ -453,19 +475,23 @@ fn rescan(
 
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full read.
-    let built = match bootstrap::build_index(handle, &state.guid, state.filesystem, Some(stop)) {
-        Ok(Some(built)) => built,
-        // Aborted by shutdown: leave the old index in place and stop cleanly;
-        // this is NOT a failure, so do not mark the volume Failed.
-        Ok(None) => return None,
-        Err(e) => {
-            mark_failed(state, reason, &format!("rescan rebuild failed: {e:#}"));
-            return None;
-        }
-    };
+    let rules = state.rules();
+    let built =
+        match bootstrap::build_index(handle, &state.guid, state.filesystem, &rules, Some(stop)) {
+            Ok(Some(built)) => built,
+            // Aborted by shutdown: leave the old index in place and stop cleanly;
+            // this is NOT a failure, so do not mark the volume Failed.
+            Ok(None) => return None,
+            Err(e) => {
+                mark_failed(state, reason, &format!("rescan rebuild failed: {e:#}"));
+                return None;
+            }
+        };
 
     let entries = built.index.len();
     building.finish(built, &journal);
+    // The entries the rules removed left their names behind.
+    state.compact_index();
 
     match journal {
         JournalSetup::Active(c) => {
@@ -491,6 +517,25 @@ fn rescan(
             None
         }
     }
+}
+
+/// Applies new Include rules to the index when they only leave more out, and
+/// answers whether it did. Rules that keep anything the index left out need a
+/// rebuild, because the index no longer holds it.
+fn apply_rules_in_place(state: &VolumeState, rules: Arc<VolumeRules>) -> bool {
+    let mut index = state.index_mut();
+    if index
+        .include_rules()
+        .is_some_and(|applied| rules.adds_to(applied))
+    {
+        return false;
+    }
+    tracing::info!(volume = %state.mount_prefix(), "applying the changed Include settings");
+    index.apply_rules(rules);
+    index.optimize_storage();
+    drop(index);
+    state.compact_index();
+    true
 }
 
 /// Sleeps up to `total`, waking early if `stop` flips. Plain `sleep` here

@@ -1,24 +1,27 @@
 //! The window's facts: the loaded language, the saved settings, what the
-//! controls ask for, what the list shows, the selection, the export and what
-//! the service said last. Captions are built from these facts when they are
-//! shown, never stored (DESIGN.md: window rule 12). The fields are private to
-//! the core: every reply passes through [`Model::accept`], and every change the
-//! person makes through a method of its own, and each says what changed and
-//! which request that makes necessary.
+//! controls ask for, what the list shows, the selection, the export, the
+//! service fix and what the service said last. Captions are built from
+//! these facts when they are shown, never stored (DESIGN.md: window rule
+//! 12). The fields are private to the core: every reply passes through
+//! [`Model::accept`], and every change the person makes through a method of
+//! its own, and each says what changed and which request that makes
+//! necessary.
 
 use super::fetch::{
     Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose,
     WriteFailure, inside,
 };
+use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::query::{self, Filters, LocationItem, Matching};
-use super::results::{ListButton, ListMessage, Results, RowsChange, Shown};
+use super::results::{Fix, ListButton, ListMessage, Results, RowsChange, Shown};
 use super::selection::{FolderContents, Selection};
 use super::settings::{Choices, Placement, SavedColumn, Settings};
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
 use gozler_core::escompat::EsPlan;
+use gozler_core::include::IncludeSettings;
 use gozler_core::output::Format;
 use gozler_core::proto::{DaemonStatus, ResultItem, VolumeStatus};
 use gozler_core::query::{ParsedQuery, QueryStart};
@@ -26,10 +29,12 @@ use gozler_core::scope::{Coverage, leaves_matches_out};
 use gozler_core::search::Search;
 use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
+use gozler_fileops::Taken;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) struct Model {
     pub(super) strings: Strings,
@@ -41,24 +46,61 @@ pub(crate) struct Model {
     pub(super) columns: Vec<Column>,
     /// The typed search text.
     pub(super) text: String,
+    /// Whether the search for the typed text waits for the person to stop
+    /// typing (`Then::SearchSoon`).
+    pub(super) search_due: bool,
+    /// Whether `Enter` in the search box asked to open the first row of
+    /// the search in flight once it answers (DESIGN.md: window rule 8).
+    pub(super) open_on_answer: bool,
     pub(super) results: Results,
     /// The latest status reply.
     pub(super) status: Option<DaemonStatus>,
     pub(super) selection: Selection,
     pub(super) export: Export,
+    fix: Fixer,
+    /// The job started last.
+    newest_job: Job,
     /// How the latest request for the results or the status failed; `None`
     /// once the service answers.
     failure: Option<DaemonFailure>,
     /// The status request in flight.
     status_asked: Option<Generation>,
-    /// Use Total Commander's search in flight.
+    /// The Use Total Commander link's search in flight.
     program_asked: Option<Generation>,
+    /// Settings > Include's count in flight.
+    include_count_asked: Option<Generation>,
+    /// The notice that the Include settings are saved, in flight.
+    settings_saved_asked: Option<Generation>,
     /// Whether Settings shows its Index page, which follows the service's
     /// state every 2 seconds (DESIGN.md: The Index page).
     index_page_shown: bool,
     /// The newer release that Check for updates found, such as `0.4.0`.
     newer_release: Option<String>,
+    latest_release: LatestRelease,
     last_generation: u64,
+    /// Whether this window offers the file operations: only the first
+    /// window does, because its queue owns the saved operations
+    /// (file-manager-spec.md: Interrupted operations).
+    file_operations: bool,
+    /// Whether the clipboard holds files, which Paste copies or moves.
+    clipboard_files: bool,
+    /// The entries that deletes and moves have taken, which the list shows
+    /// blank and the selection leaves out (file-manager-spec.md: The person
+    /// never waits for the disk).
+    taken: Arc<Taken>,
+}
+
+/// What the window knows of GitHub's latest release once the service is
+/// older than the window: whether it is older than the window too, which
+/// makes the service's fix a downgrade (DESIGN.md: Daemon failures).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LatestRelease {
+    Unknown,
+    Asking,
+    /// A release that could not be read counts as not older.
+    Known {
+        older: bool,
+    },
 }
 
 /// What a reply or an input changed, and what it makes necessary.
@@ -66,6 +108,17 @@ pub(crate) struct Model {
 pub(crate) struct Accepted {
     pub(crate) change: Change,
     pub(crate) then: Option<Then>,
+}
+
+/// What `Enter` in the search box does ([`Model::enter_in_search_box`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchBoxEnter {
+    /// The search runs at once.
+    Search,
+    /// The selected rows open, or the first row when none is selected.
+    Open,
+    /// The search in flight opens its first row when it answers.
+    Wait,
 }
 
 #[derive(Debug, PartialEq)]
@@ -84,6 +137,18 @@ pub(crate) enum Then {
     ReadSelectionSoon,
     /// Ends the live request of the purpose; its reply would be stale.
     Cancel(Purpose),
+    /// Asks GitHub whether its latest release is older than the window.
+    AskLatestRelease,
+    /// Runs the work on the fix's thread.
+    RunFix(FixWork),
+    /// Asks the person whether to download the setup the fix found.
+    ConfirmSetup,
+    /// Tells the person that the latest release gives no setup to install.
+    ExplainNoSetup,
+    /// Ends the fix's thread.
+    StopFix,
+    /// Starts the checked setup, and closes the window for it.
+    RunSetup(PathBuf),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -108,9 +173,11 @@ pub(crate) enum Change {
     /// A new search runs; the list keeps its rows.
     Searching,
     /// A new search's first rows replace the old ones, and nothing is
-    /// selected.
+    /// selected; `open_first` when `Enter` in the search box waited for
+    /// them to open the first row.
     NewSearch {
         count: u64,
+        open_first: bool,
     },
     /// Rows of the shown search arrived, and the count is `count`.
     Rows {
@@ -119,7 +186,7 @@ pub(crate) enum Change {
     },
     /// The list is empty and shows a message.
     Message,
-    /// The service's state changed, which the index part of the status bar
+    /// The service's state changed, which the status bar's right group
     /// and the status poll follow.
     Status,
     /// The selection changed.
@@ -134,6 +201,9 @@ pub(crate) enum Change {
     FolderCounted,
     /// The export started, wrote more rows, ended or was cancelled.
     Export,
+    /// The fix started, moved to another step, ended or was cancelled,
+    /// which the status bars and the fix buttons follow.
+    Fix,
     /// The export to `path` failed and its partial file is deleted.
     ExportFailed {
         path: PathBuf,
@@ -142,9 +212,12 @@ pub(crate) enum Change {
     /// Settings applied new choices, which the menus, the accelerators and
     /// the tray icon follow.
     Settings,
-    /// Use Total Commander's search answered: the path of the Total
+    /// The Use Total Commander link's search answered: the path of the Total
     /// Commander it takes, none, or why the service could not search.
     TotalCommander(Result<Option<String>, DaemonFailure>),
+    /// Settings > Include's count answered: the entries the index would
+    /// keep, or why the service could not count them.
+    IncludedCount(Result<u64, DaemonFailure>),
 }
 
 /// Why an export failed.
@@ -154,7 +227,8 @@ pub(crate) enum ExportError {
     Daemon(DaemonFailure),
 }
 
-/// The export, which status part 3 shows (DESIGN.md: Status bar).
+/// The export, which the status bar's middle group shows (DESIGN.md:
+/// Status bar).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Export {
     Idle,
@@ -168,6 +242,13 @@ pub(crate) enum Export {
         path: PathBuf,
         rows: u64,
     },
+}
+
+/// A job that the status bar's middle group shows ([`Model::job`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Job {
+    Export,
+    Fix,
 }
 
 /// The formats Export results… offers, in the save dialog's order.
@@ -221,8 +302,9 @@ impl ExportFormat {
     }
 }
 
-/// The most `totalcmd*.exe` rows Use Total Commander reads, newest first;
-/// a PC with more copies than this keeps its newest among them.
+/// The most `totalcmd*.exe` rows the Use Total Commander link reads,
+/// newest first; a PC with more copies than this keeps its newest among
+/// them.
 const PROGRAM_ROWS: u64 = 1_000;
 
 impl Accepted {
@@ -262,17 +344,104 @@ impl Model {
             columns,
             settings,
             text: String::new(),
+            search_due: false,
+            open_on_answer: false,
             results: Results::new(),
             status: None,
             selection: Selection::None,
             export: Export::Idle,
+            fix: Fixer::Idle,
+            newest_job: Job::Export,
             failure: None,
             status_asked: None,
             program_asked: None,
+            include_count_asked: None,
+            settings_saved_asked: None,
             index_page_shown: false,
             newer_release: None,
+            latest_release: LatestRelease::Unknown,
             last_generation: 0,
+            file_operations: false,
+            clipboard_files: false,
+            taken: Arc::default(),
         }
+    }
+
+    /// Makes this window the one that offers the file operations.
+    pub(crate) fn offer_file_operations(&mut self) {
+        self.file_operations = true;
+    }
+
+    pub(crate) fn offers_file_operations(&self) -> bool {
+        self.file_operations
+    }
+
+    /// Where the folder picker of Copy to folder… and Move to folder…
+    /// opens.
+    pub(crate) fn destination_folder(&self) -> Option<&str> {
+        self.settings.window.destination_folder.as_deref()
+    }
+
+    pub(crate) fn set_destination_folder(&mut self, folder: String) {
+        self.settings.window.destination_folder = Some(folder);
+    }
+
+    pub(crate) fn set_clipboard_holds_files(&mut self, holds: bool) {
+        self.clipboard_files = holds;
+    }
+
+    pub(crate) fn clipboard_holds_files(&self) -> bool {
+        self.clipboard_files
+    }
+
+    /// The row at `index` as the list shows it: `None` while its chunk has
+    /// not arrived, or while a delete or a move has taken its entry.
+    pub(crate) fn shown_row(&self, index: u64) -> Option<&ResultItem> {
+        self.results
+            .row(index)
+            .filter(|row| !is_taken(&self.taken, row))
+    }
+
+    /// Whether a delete or a move has taken the entry of the row at `index`.
+    pub(crate) fn row_taken(&self, index: u64) -> bool {
+        self.results
+            .row(index)
+            .is_some_and(|row| is_taken(&self.taken, row))
+    }
+
+    /// Takes the entries of `taken` out of the selection; the list shows
+    /// their rows blank once it draws them again.
+    pub(crate) fn set_taken(&mut self, taken: Arc<Taken>) -> Accepted {
+        self.taken = taken;
+        let selected = self.selection.files().map_or(0, <[_]>::len);
+        let files = match std::mem::replace(&mut self.selection, Selection::None) {
+            Selection::Files(files) => files,
+            Selection::Folder { folder, contents } => {
+                if !is_taken(&self.taken, &folder) {
+                    self.selection = Selection::Folder { folder, contents };
+                }
+                Vec::new()
+            }
+            other => {
+                self.selection = other;
+                Vec::new()
+            }
+        };
+        if !files.is_empty() {
+            let kept: Vec<ResultItem> = files
+                .into_iter()
+                .filter(|file| !is_taken(&self.taken, file))
+                .collect();
+            if !kept.is_empty() {
+                self.selection = Selection::Files(kept);
+            }
+        }
+        let change = if self.selection.files().map_or(0, <[_]>::len) == selected {
+            Change::Nothing
+        } else {
+            Change::Selection
+        };
+        Accepted { change, then: None }
     }
 
     pub(crate) fn strings(&self) -> &Strings {
@@ -320,6 +489,12 @@ impl Model {
         !std::mem::replace(&mut self.settings.window.tray_notice_shown, true)
     }
 
+    /// Shows the one-time notices again, as if Gozler had just been
+    /// installed, which Settings' Reset all asks for.
+    pub(crate) fn show_notices_again(&mut self) {
+        self.settings.window.tray_notice_shown = false;
+    }
+
     /// Whether Check for updates asks GitHub now, at `now` in seconds
     /// since 1970: it is on, and the last check was a day ago or more, or
     /// in the future of a clock that was set back. A check that is due
@@ -336,7 +511,8 @@ impl Model {
         due
     }
 
-    /// Check for updates found `version`, which status part 4 names.
+    /// Check for updates found `version`, which the status bar's right
+    /// group names.
     pub(crate) fn set_newer_release(&mut self, version: String) -> Accepted {
         self.newer_release = Some(version);
         Accepted::only(Change::Status)
@@ -346,8 +522,44 @@ impl Model {
         self.newer_release.as_deref()
     }
 
-    /// Use Total Commander's search, which cancels an earlier one: every
-    /// `totalcmd*.exe`, newest first (DESIGN.md: The General page).
+    /// GitHub's latest release is or is not older than the window, which
+    /// the service's fix button says.
+    pub(crate) fn set_latest_release_older(&mut self, older: bool) -> Accepted {
+        self.latest_release = LatestRelease::Known { older };
+        Accepted::only(Change::Fix)
+    }
+
+    /// Asks once whether GitHub's latest release is older than the window,
+    /// when the service is first found older than the window, so its fix
+    /// reads Downgrade before the person clicks it. With Check for updates
+    /// off, Gozler asks GitHub only after a click, so the button reads
+    /// Update and the question after the click says which it is.
+    fn ask_latest_release(&mut self, failure: &DaemonFailure) -> Option<Then> {
+        let ask = matches!(failure, DaemonFailure::TooOld { .. })
+            && self.settings.choices.check_for_updates
+            && self.latest_release == LatestRelease::Unknown;
+        ask.then(|| {
+            self.latest_release = LatestRelease::Asking;
+            Then::AskLatestRelease
+        })
+    }
+
+    /// The catalogue key of `button`'s caption: Update reads Downgrade
+    /// while GitHub's latest release is older than the window.
+    pub(crate) fn button_label(&self, button: &ListButton) -> &'static str {
+        match button {
+            ListButton::Fix(Fix::Update)
+                if self.latest_release == (LatestRelease::Known { older: true }) =>
+            {
+                Fix::DOWNGRADE_LABEL
+            }
+            _ => button.label(),
+        }
+    }
+
+    /// The Use Total Commander link's search, which cancels an earlier
+    /// one: every `totalcmd*.exe`, newest first (DESIGN.md: The Context
+    /// menu page).
     pub(crate) fn find_total_commander(&mut self) -> Fetch {
         let search = query::search(
             TOTAL_COMMANDER_SEARCH,
@@ -375,7 +587,7 @@ impl Model {
         }
     }
 
-    /// Settings closed, so Use Total Commander's search has nobody to
+    /// Settings closed, so the Use Total Commander link's search has nobody to
     /// answer; the window ends its request (rule 4).
     pub(crate) fn forget_total_commander(&mut self) -> Accepted {
         Accepted {
@@ -384,6 +596,29 @@ impl Model {
                 .program_asked
                 .take()
                 .map(|_| Then::Cancel(Purpose::Program)),
+        }
+    }
+
+    /// Settings > Include's preview, which cancels an earlier one: how
+    /// many entries the index keeps under `settings` (DESIGN.md: The
+    /// Include page).
+    pub(crate) fn count_included(&mut self, settings: IncludeSettings) -> Fetch {
+        let generation = self.generation();
+        self.include_count_asked = Some(generation);
+        Fetch {
+            generation,
+            ask: Ask::CountIncluded(settings),
+        }
+    }
+
+    /// An administrator saved the Include settings: the service reads and
+    /// applies them.
+    pub(crate) fn settings_saved(&mut self) -> Fetch {
+        let generation = self.generation();
+        self.settings_saved_asked = Some(generation);
+        Fetch {
+            generation,
+            ask: Ask::SettingsSaved,
         }
     }
 
@@ -414,13 +649,6 @@ impl Model {
         self.status.as_ref().map_or(&[], |s| &s.volumes)
     }
 
-    /// The volume that holds `path`, as the latest status reply names it.
-    pub(crate) fn volume_of(&self, path: &str) -> Option<&VolumeStatus> {
-        Coverage::of(self.volumes(), Some(path), false)
-            .volumes()
-            .next()
-    }
-
     /// The Location list's items.
     pub(crate) fn location_items(&self) -> Vec<LocationItem<'_>> {
         query::location_items(self.filters(), self.volumes())
@@ -445,9 +673,19 @@ impl Model {
             Shown::Message(ListMessage::MissingFolder(_)) => {
                 vec![ListButton::ChooseFolder, ListButton::SearchEverywhere]
             }
-            Shown::Message(message) => message.fix().map(ListButton::Fix).into_iter().collect(),
+            Shown::Message(message) => message.fixes().into_iter().map(ListButton::Fix).collect(),
             Shown::Nothing | Shown::Rows(_) => Vec::new(),
         }
+    }
+
+    /// Whether `button` can be clicked: a repair waits while a fix runs
+    /// (DESIGN.md: Service fixes).
+    pub(crate) fn list_button_enabled(&self, button: &ListButton) -> bool {
+        !(self.fix.running()
+            && matches!(
+                button,
+                ListButton::Fix(Fix::Repair(_) | Fix::UseLocal(_) | Fix::Update)
+            ))
     }
 
     pub(crate) fn results(&self) -> &Results {
@@ -471,16 +709,6 @@ impl Model {
         self.settings.window.placement
     }
 
-    /// The saved width of `column`, if it has one.
-    pub(crate) fn saved_width(&self, column: Column) -> Option<Dip> {
-        self.settings
-            .window
-            .columns
-            .iter()
-            .find(|s| s.column == column)
-            .map(|s| s.width)
-    }
-
     fn generation(&mut self) -> Generation {
         self.last_generation += 1;
         Generation(self.last_generation)
@@ -493,13 +721,33 @@ impl Model {
             return Accepted::only(Change::Nothing);
         }
         self.text = text;
+        // An open that waits is for the text before this one.
+        self.open_on_answer = false;
+        self.search_due = self.choices().search_as_you_type;
         Accepted {
             change: Change::Typed,
-            then: self
-                .choices()
-                .search_as_you_type
-                .then_some(Then::SearchSoon),
+            then: self.search_due.then_some(Then::SearchSoon),
         }
+    }
+
+    /// What `Enter` in the search box does (DESIGN.md: window rule 8). With
+    /// search as you type off, the search runs. On, the selected row or the
+    /// first opens; while the search for the text has not answered, it runs
+    /// at once if it still waits for the pause, and its first row opens
+    /// when it answers.
+    pub(crate) fn enter_in_search_box(&mut self) -> SearchBoxEnter {
+        if !self.choices().search_as_you_type {
+            return SearchBoxEnter::Search;
+        }
+        if self.search_due || self.results.searching() {
+            self.open_on_answer = true;
+            return if self.search_due {
+                SearchBoxEnter::Search
+            } else {
+                SearchBoxEnter::Wait
+            };
+        }
+        SearchBoxEnter::Open
     }
 
     /// The person changed a match control; the search runs again.
@@ -620,6 +868,7 @@ impl Model {
     /// S6). The shown rows and the selection stay until the new search's first
     /// rows arrive.
     pub(crate) fn start_search(&mut self, query_start: &QueryStart, scope: ScopeCheck) -> Accepted {
+        self.search_due = false;
         let search = query::search(&self.text, self.matching(), self.filters(), query_start);
         let missing = self
             .location()
@@ -646,6 +895,7 @@ impl Model {
         };
         self.results.show_message(message);
         self.selection = Selection::None;
+        self.open_on_answer = false;
         Accepted::only(Change::Message)
     }
 
@@ -707,6 +957,11 @@ impl Model {
     /// Selects `files`, which are read; one folder alone also asks for its
     /// contents, which the inspector shows (DESIGN.md: Inspector pane).
     fn select(&mut self, mut files: Vec<ResultItem>) -> Option<Then> {
+        files.retain(|file| !is_taken(&self.taken, file));
+        if files.is_empty() {
+            self.selection = Selection::None;
+            return None;
+        }
         let folder = match files.as_slice() {
             [entry] if entry.is_dir => files.pop().expect("the selection is one folder"),
             _ => {
@@ -802,6 +1057,7 @@ impl Model {
             path: path.clone(),
             rows: 0,
         };
+        self.newest_job = Job::Export;
         Accepted {
             change: Change::Export,
             then: Some(Then::Fetch(Fetch {
@@ -839,6 +1095,92 @@ impl Model {
         self.failure.as_ref().is_some_and(DaemonFailure::recovers)
             || self.indexing_in_scope()
             || self.index_page_shown
+            || self.fix.waits_for_service()
+    }
+
+    /// The job the status bar's middle group shows: the newest running
+    /// one, or the one started last when none or both run (DESIGN.md:
+    /// Status bar).
+    pub(crate) fn job(&self) -> Job {
+        match (self.exporting(), self.fix.running()) {
+            (true, false) => Job::Export,
+            (false, true) => Job::Fix,
+            (true, true) | (false, false) => self.newest_job,
+        }
+    }
+
+    pub(crate) fn fix(&self) -> &Fixer {
+        &self.fix
+    }
+
+    /// The fix the service's failure offers, which the list's message and
+    /// the Index page's Service group show (DESIGN.md: Daemon failures).
+    pub(crate) fn service_fix(&self) -> Option<Fix> {
+        self.failure.as_ref().and_then(Fix::of)
+    }
+
+    /// The Use local fix the service's failure offers before its other
+    /// fix, in the list's message and the Service group.
+    pub(crate) fn use_local_fix(&self) -> Option<Fix> {
+        self.failure.as_ref().and_then(Fix::use_local)
+    }
+
+    /// Starts `fix`, unless a fix runs (DESIGN.md: Service fixes). Open
+    /// Services is the window's own, and starts nothing here.
+    pub(crate) fn start_fix(&mut self, fix: &Fix) -> Accepted {
+        let Some(work) = self.fix.start(fix) else {
+            return Accepted::only(Change::Nothing);
+        };
+        self.newest_job = Job::Fix;
+        Accepted {
+            change: Change::Fix,
+            then: Some(Then::RunFix(work)),
+        }
+    }
+
+    /// The person answered whether to download the setup the fix found;
+    /// a fix they declined ends without a word in the status bar.
+    pub(crate) fn answer_setup(&mut self, download: bool) -> Accepted {
+        let setup = self.fix.answer(download);
+        Accepted {
+            change: Change::Fix,
+            then: setup.map(|setup| Then::RunFix(FixWork::Download(setup))),
+        }
+    }
+
+    /// The fix's thread reported `event`. Once the commands end well, the
+    /// window asks the service for its status until it answers; once the
+    /// downloaded setup is checked, the window starts it.
+    pub(crate) fn accept_fix(&mut self, event: FixEvent) -> Accepted {
+        if !self.fix.accept(event) {
+            return Accepted::only(Change::Nothing);
+        }
+        let then = if let Some(setup) = self.fix.starting_setup() {
+            Some(Then::RunSetup(setup.to_owned()))
+        } else if self.fix.confirming().is_some() {
+            Some(Then::ConfirmSetup)
+        } else if self.fix.found_no_setup() {
+            Some(Then::ExplainNoSetup)
+        } else if self.fix.waits_for_service() {
+            self.status_needed().map(Then::Fetch)
+        } else {
+            None
+        };
+        Accepted {
+            change: Change::Fix,
+            then,
+        }
+    }
+
+    /// Stops the fix, in a step that can stop.
+    pub(crate) fn cancel_fix(&mut self) -> Accepted {
+        if !self.fix.cancel() {
+            return Accepted::only(Change::Nothing);
+        }
+        Accepted {
+            change: Change::Fix,
+            then: Some(Then::StopFix),
+        }
     }
 
     /// What the latest status says about the volumes the shown search
@@ -897,11 +1239,31 @@ impl Model {
                     }
                 }))
             }
+            Purpose::IncludeCount if self.include_count_asked == Some(generation) => {
+                self.include_count_asked = None;
+                Accepted::only(Change::IncludedCount(match fetched.outcome {
+                    Outcome::IncludedCount(entries) => Ok(entries),
+                    Outcome::Failed(failure) => Err(failure),
+                    other => unreachable!("a count's reply is a count or a failure: {other:?}"),
+                }))
+            }
+            Purpose::SettingsSaved if self.settings_saved_asked == Some(generation) => {
+                self.settings_saved_asked = None;
+                // A service that is not running reads the settings when it
+                // starts, so a failure needs nothing. Once applied, the
+                // drives' states change, which status shows.
+                Accepted {
+                    change: Change::Nothing,
+                    then: self.status_needed().map(Then::Fetch),
+                }
+            }
             Purpose::Results
             | Purpose::Status
             | Purpose::Selection
             | Purpose::Export
-            | Purpose::Program => Accepted::only(Change::Nothing),
+            | Purpose::Program
+            | Purpose::IncludeCount
+            | Purpose::SettingsSaved => Accepted::only(Change::Nothing),
         }
     }
 
@@ -915,7 +1277,10 @@ impl Model {
                     RowsChange::NewSearch { count } => {
                         // A new search's rows are other files (DESIGN.md: T2).
                         self.selection = Selection::None;
-                        Change::NewSearch { count }
+                        Change::NewSearch {
+                            count,
+                            open_first: std::mem::take(&mut self.open_on_answer) && count > 0,
+                        }
                     }
                     RowsChange::Rows { rows, count } => Change::Rows { rows, count },
                 };
@@ -943,10 +1308,15 @@ impl Model {
     /// the search again once a failure that ends by itself has ended
     /// (DESIGN.md: T3, T4).
     fn show_failure(&mut self, failure: DaemonFailure) -> Accepted {
+        let then = self.ask_latest_release(&failure);
         self.failure = Some(failure.clone());
         self.results.show_message(ListMessage::Failure(failure));
         self.selection = Selection::None;
-        Accepted::only(Change::Message)
+        self.open_on_answer = false;
+        Accepted {
+            change: Change::Message,
+            then,
+        }
     }
 
     fn accept_status(&mut self, outcome: Outcome) -> Accepted {
@@ -957,6 +1327,8 @@ impl Model {
                 let was_indexing = self.indexing_in_scope();
                 self.failure = None;
                 self.status = Some(status);
+                // The fix's end shows with this status.
+                self.fix.service_answered();
                 let completed = was_indexing && !self.indexing_in_scope();
                 let search_again =
                     answers_again || completed && self.results.shown_search().is_some();
@@ -980,8 +1352,9 @@ impl Model {
                 } else {
                     Change::Status
                 };
+                let then = self.ask_latest_release(&failure);
                 self.failure = Some(failure);
-                Accepted::only(change)
+                Accepted { change, then }
             }
             other => unreachable!("a status request's reply is status or a failure: {other:?}"),
         }
@@ -1234,6 +1607,16 @@ impl Column {
     }
 }
 
+/// Whether a delete or a move has taken `row`'s entry, by its exact name
+/// when its UTF-8 path lost an unpaired surrogate.
+fn is_taken(taken: &Taken, row: &ResultItem) -> bool {
+    use std::os::windows::ffi::OsStringExt;
+    match &row.path_u16 {
+        Some(units) => taken.contains(Path::new(&std::ffi::OsString::from_wide(units))),
+        None => taken.contains(Path::new(&row.path)),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::single_range_in_vec_init,
@@ -1243,12 +1626,22 @@ pub(crate) mod tests {
     use super::*;
     use crate::core::captions::{self, list_message};
     use crate::core::fetch::{SelectionRows, WriteFailure};
+    use crate::core::fixer::CommandEvent;
     use crate::core::results::CHUNK_ROWS;
     use crate::core::results::tests::chunk;
     use crate::core::text::tests::{English, english};
     use gozler_client::NotRunning;
+    use gozler_client::Repair;
     use gozler_core::escompat::{Command, parse_argv};
     use gozler_core::proto::VolumeStatus;
+
+    /// The list's message and its buttons' captions.
+    fn message(model: &Model) -> Option<(String, Vec<String>)> {
+        list_message(model).map(|message| {
+            let buttons = message.buttons.into_iter();
+            (message.text, buttons.map(|button| button.label).collect())
+        })
+    }
 
     pub(crate) fn model() -> Model {
         Model::new(english(), Settings::default())
@@ -1314,6 +1707,8 @@ pub(crate) mod tests {
                 volumes_incomplete: false,
                 process_working_set: 0,
                 process_private_bytes: 0,
+                include: None,
+                left_out: Vec::new(),
             }),
         }
     }
@@ -1351,7 +1746,10 @@ pub(crate) mod tests {
         let fetch = search(&mut model, "repo");
         assert_eq!(
             model.accept(rows(&fetch, 3)).change,
-            Change::NewSearch { count: 3 }
+            Change::NewSearch {
+                count: 3,
+                open_first: false
+            }
         );
         assert_eq!(captions::results_status(&model, &English), "3 results");
     }
@@ -1369,7 +1767,7 @@ pub(crate) mod tests {
         assert_eq!(model.results.count(), 0);
         let strings = english();
         assert_eq!(
-            list_message(&model),
+            message(&model),
             Some((strings.text("failure.lost").to_owned(), vec![]))
         );
     }
@@ -1424,8 +1822,8 @@ pub(crate) mod tests {
         assert!(model.polls_status());
     }
 
-    /// A results page carries only combined flags, so part 4 would never
-    /// name a volume that became incomplete after the last status reply.
+    /// A results page carries only combined flags, so the status bar would
+    /// never name a volume that became incomplete after the last status reply.
     #[test]
     fn a_page_flag_that_the_status_does_not_explain_asks_for_status() {
         let mut model = showing(50_000);
@@ -1474,7 +1872,7 @@ pub(crate) mod tests {
             Change::Status
         );
         assert_eq!(model.results.count(), 10);
-        assert_eq!(list_message(&model), None);
+        assert_eq!(message(&model), None);
 
         let fetch = search(&mut model, "repo");
         let refused = DaemonFailure::Refused {
@@ -1502,7 +1900,7 @@ pub(crate) mod tests {
         assert_eq!(model.accept(failed(&ask, disabled)).change, Change::Message);
         let strings = english();
         assert_eq!(
-            list_message(&model),
+            message(&model),
             Some((
                 strings.text("failure.disabled").to_owned(),
                 vec![strings.text("fix.turn_on_service").to_owned()]
@@ -1525,7 +1923,7 @@ pub(crate) mod tests {
         );
         let strings = english();
         assert_eq!(
-            list_message(&model),
+            message(&model),
             Some((strings.format("query.unknown_function", &["dz:"]), vec![]))
         );
         assert!(!model.polls_status());
@@ -1547,7 +1945,7 @@ pub(crate) mod tests {
         );
         let strings = english();
         assert_eq!(
-            list_message(&model),
+            message(&model),
             Some((
                 strings.format("list.missing_folder", &[r"D:\Old"]),
                 vec![
@@ -1728,7 +2126,7 @@ pub(crate) mod tests {
         }
         model.accept(reply);
         let size = |model: &Model| {
-            captions::InspectorCaptions::new(model, &English).fields[3]
+            captions::InspectorCaptions::new(model, &English).fields[1]
                 .1
                 .clone()
         };
@@ -1775,7 +2173,7 @@ pub(crate) mod tests {
         assert_eq!(model.selection, Selection::None);
         let strings = english();
         assert_eq!(
-            list_message(&model),
+            message(&model),
             Some((strings.text("failure.lost").to_owned(), vec![]))
         );
         assert!(model.polls_status());
@@ -1787,7 +2185,10 @@ pub(crate) mod tests {
         model.accept(failed(&read, DaemonFailure::Lost));
         assert_eq!(
             model.accept(rows(&newer, 3)).change,
-            Change::NewSearch { count: 3 },
+            Change::NewSearch {
+                count: 3,
+                open_first: false
+            },
             "a search in flight shows its own reply"
         );
     }
@@ -1911,6 +2312,39 @@ pub(crate) mod tests {
         assert!(!model.polls_status());
     }
 
+    /// A service that answers again before its commands end stops the
+    /// poll, so a fix that waited for the poll would end as "did not
+    /// answer" with the service running (DESIGN.md: Service fixes).
+    #[test]
+    fn a_fix_asks_the_service_once_its_commands_end() {
+        let mut model = showing(10);
+        let started = model.start_fix(&Fix::Repair(Repair::StartService));
+        assert_eq!(
+            started.then,
+            Some(Then::RunFix(FixWork::Commands(vec![
+                "net start gozler".into()
+            ])))
+        );
+        let other = ListButton::Fix(Fix::Repair(Repair::TurnOnService));
+        assert!(!model.list_button_enabled(&other), "one fix runs at a time");
+        model.accept_fix(FixEvent::Commands(CommandEvent::Allowed));
+        assert!(!model.polls_status());
+        let ended = model.accept_fix(FixEvent::Commands(CommandEvent::Succeeded));
+        let Some(Then::Fetch(ask)) = ended.then else {
+            panic!("the fix asks the service: {ended:?}");
+        };
+        assert!(
+            model.polls_status(),
+            "the poll runs until the service answers"
+        );
+        model.accept(status(&ask, VolumePhase::Live));
+        assert!(!model.polls_status());
+        assert_eq!(
+            captions::StatusCaptions::new(&model, &English).job.text,
+            english().text("fixing.done")
+        );
+    }
+
     /// S6, and C6's search as you type: with them off, the empty search and
     /// typing start no request, and `Enter` still searches.
     #[test]
@@ -1931,7 +2365,7 @@ pub(crate) mod tests {
             Accepted::only(Change::Message)
         );
         assert_eq!(
-            list_message(&model),
+            message(&model),
             Some(("Type to search.".to_owned(), vec![]))
         );
         assert_eq!(model.set_typed_search("report".into()).then, None);
@@ -1941,8 +2375,9 @@ pub(crate) mod tests {
         ));
     }
 
-    /// Use Total Commander's reply goes to the dialog alone; a reply after
-    /// the dialog closed, or a failure, changes nothing the window shows.
+    /// The Use Total Commander link's reply goes to the dialog alone; a
+    /// reply after the dialog closed, or a failure, changes nothing the
+    /// window shows.
     #[test]
     fn use_total_commander_answers_the_dialog_only() {
         let mut model = showing(10);

@@ -17,11 +17,48 @@ is deleted, because a finished plan read as current misleads.
 `docs/WRITING.md` says how the help, the messages and the exit-code meanings
 read. Read it before you change any of them.
 
+**Owner ruling: button captions.** A button's caption is one word, or two
+when one word would confuse, and only words people already know from Windows
+buttons, such as Update, Install, Open, Clear or Report. What the button acts
+on goes in the text beside it or in the dialog it opens, and a tooltip on the
+button says what it does when the caption alone cannot. People click a
+familiar word without reading it, and a longer caption also widens every
+button that shares its row.
+
+**Owner ruling: the window never lags.** Gozler exists because Everything
+becomes unresponsive. If Gozler becomes unresponsive too, it has no reason to
+exist. So a wait in the window is a defect to remove, never a limit to
+document: find what the slow step reads, and use what the index already holds
+instead. When the task at hand cannot fix such a wait, file it at once as a
+GitHub issue (`gh issue create --repo SynoSoftware/goz`), so it is never
+lost. This holds for a wait that was measured and for one found or suspected
+while reading code, such as in a review. The issue names the slow step and
+what it reads, and says whether its cost was measured or is suspected.
+
+**Owner ruling: window text.** Write it in the Fluent 2 tone of
+`docs/WRITING.md`, and judge each string in its dialog or page, which reads
+top to bottom without saying anything twice. A dialog's title bar names its
+command, such as Update or Delete, because the person already knows which
+program asks. Gozler is a tool, so its name appears where it helps, such as
+the main window and the notification area, and is not repeated in every
+message.
+
 `docs/COMMENTS.md` says when code earns a comment and what a doc comment
 holds. Read it before you add, change or review a comment, and check every
 comment your diff adds against it before you finish.
 
 Use the vocabulary in `CONTEXT.md`.
+
+## Before asking the owner
+
+Apply common sense first. Often, when you look at the actual problem and its
+purpose, the answer becomes obvious.
+
+If it isn't, consider the perspectives of everyone affected and reason through
+what each needs. Use your judgment to choose the most sensible solution.
+
+Ask the owner only when a meaningful ambiguity remains that you cannot
+responsibly resolve yourself.
 
 ## Writing code
 

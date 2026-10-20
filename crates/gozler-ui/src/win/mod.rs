@@ -9,6 +9,7 @@
 pub(crate) mod clipboard;
 pub(crate) mod controls;
 pub(crate) mod dialog;
+pub(crate) mod file_operations;
 pub(crate) mod gdi;
 pub(crate) mod instance;
 pub(crate) mod keys;
@@ -219,6 +220,12 @@ impl Hwnd {
     pub(crate) fn set_foreground(self) {
         // SAFETY: plain values.
         let _ = unsafe { SetForegroundWindow(self.0) };
+    }
+
+    /// The control's parent window.
+    pub(crate) fn parent(self) -> Hwnd {
+        // SAFETY: plain values.
+        Hwnd(unsafe { GetParent(self.0) }.unwrap_or_default())
     }
 
     /// The window's rectangle in the client coordinates of `parent`.

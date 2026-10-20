@@ -16,6 +16,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(windows)]
 mod bootstrap;
 #[cfg(windows)]
+mod include;
+#[cfg(windows)]
 mod pulse;
 #[cfg(windows)]
 mod run;
@@ -68,6 +70,11 @@ enum Command {
     Uninstall,
     /// Show whether the gozler service is installed and running.
     Status,
+    /// Print the oldest and newest protocol versions this build serves, and
+    /// its version, separated by spaces. The window asks the gozlerd.exe
+    /// beside it before it offers Use local, without starting a service.
+    #[command(hide = true)]
+    Protocol,
 }
 
 /// Configure mimalloc for a long-lived cache-like process: purge freed
@@ -110,6 +117,14 @@ fn main() -> std::process::ExitCode {
         Command::Install => service::install(),
         Command::Uninstall => service::uninstall(),
         Command::Status => service::status(),
+        Command::Protocol => {
+            use gozler_core::proto::{OLDEST_PROTO_VERSION, PROTO_VERSION};
+            println!(
+                "{OLDEST_PROTO_VERSION} {PROTO_VERSION} {}",
+                gozler_core::escompat::version()
+            );
+            Ok(())
+        }
     };
     // One line with every cause, as gozler writes its errors, instead of
     // anyhow's multi-line `Error: ... Caused by:` report.

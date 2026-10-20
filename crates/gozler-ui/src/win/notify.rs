@@ -4,25 +4,32 @@
 //! so no handler can keep it past the message.
 
 use super::Hwnd;
-use super::controls::{ListView, StatusBar};
-use super::gdi::{Font, ImageList, draw_text};
-use crate::core::layout::Px;
+use super::controls::{Button, ListView, StatusBar};
+use super::gdi::{Font, ImageList, disabled_color, draw_lone_glyph, draw_text, system_color};
+use crate::core::glyph::Glyph;
+use crate::core::layout::{Px, icon_glyph_height};
 use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    GetSysColor, HGDIOBJ, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
+    DT_HIDEPREFIX, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawFocusRect,
+    FillRect, GetSysColor, GetSysColorBrush, HGDIOBJ, InflateRect, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
-    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON,
-    LVIR_LABEL, LVIS_SELECTED, LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_COLUMNCLICK,
-    LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED,
-    NM_CLICK, NM_CUSTOMDRAW, NMHDR, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW,
-    NMLVODSTATECHANGE, NMMOUSE,
+    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT,
+    CDIS_SELECTED, CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
+    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, CloseThemeData, DrawThemeBackground,
+    HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_SELECTED,
+    LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
+    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
+    LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW,
+    NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE, NMMOUSE, OpenThemeData,
+    TP_BUTTON, TS_HOT, TS_PRESSED,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+use windows::core::{PWSTR, w};
 
 /// A `WM_COMMAND`.
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +70,7 @@ pub(super) fn command(wparam: WPARAM, lparam: LPARAM) -> Command {
 /// A `WM_NOTIFY`, which only the control that sent it can decode, because
 /// each control class sends its own structures behind the `NMHDR`.
 pub(crate) struct Notification<'a> {
-    header: *mut NMHDR,
+    pub(super) header: *mut NMHDR,
     message: PhantomData<&'a mut NMHDR>,
 }
 
@@ -78,7 +85,7 @@ impl Notification<'_> {
         }
     }
 
-    fn header(&self) -> &NMHDR {
+    pub(super) fn header(&self) -> &NMHDR {
         // SAFETY: `new`'s contract.
         unsafe { &*self.header }
     }
@@ -101,6 +108,12 @@ pub(crate) enum ListNotify<'a> {
     SelectionChanged,
     /// A double-click on a row.
     Activated,
+    /// The person starts dragging the selected rows, with either button.
+    BeginDrag,
+    /// A double-click on the divider after the column at this index, which
+    /// the header sends and the list passes on after sizing the column
+    /// itself.
+    DividerDoubleClick(usize),
     Other,
 }
 
@@ -108,10 +121,18 @@ impl ListView {
     /// `notification` decoded, if this list sent it.
     pub(crate) fn notification<'a>(self, notification: Notification<'a>) -> Option<ListNotify<'a>> {
         let header = notification.header();
+        let pointer = notification.header;
+        if header.hwndFrom == self.header().0 && header.code == HDN_DIVIDERDBLCLICKW {
+            // SAFETY: a header sends HDN_DIVIDERDBLCLICKW with an NMHEADERW,
+            // valid for the notification's lifetime.
+            let item = unsafe { &*pointer.cast::<NMHEADERW>() }.iItem;
+            return usize::try_from(item)
+                .ok()
+                .map(ListNotify::DividerDoubleClick);
+        }
         if header.hwndFrom != self.hwnd().0 {
             return None;
         }
-        let pointer = notification.header;
         let selection_changed = |new: u32, old: u32| (new ^ old) & LVIS_SELECTED.0 != 0;
         // SAFETY: the sender is this list view, which `ListView::create`
         // made with the list view class, and each structure is read only
@@ -154,6 +175,7 @@ impl ListView {
                     }
                 }
                 LVN_ITEMACTIVATE => ListNotify::Activated,
+                LVN_BEGINDRAG | LVN_BEGINRDRAG => ListNotify::BeginDrag,
                 NM_CUSTOMDRAW => ListNotify::CustomDraw(CustomDraw {
                     draw: &mut *pointer.cast(),
                     list: self.hwnd(),
@@ -162,6 +184,112 @@ impl ListView {
             }
         };
         Some(list)
+    }
+}
+
+/// What a flat button shows.
+#[derive(Clone, Copy)]
+pub(crate) enum FlatFace<'a> {
+    /// Its caption and access key, in this font.
+    Caption(&'a Font),
+    /// An icon.
+    Glyph(Glyph),
+}
+
+/// The background a flat button stands on, which it fills.
+#[derive(Clone, Copy)]
+pub(crate) enum FlatGround {
+    /// The window's background, as a pane's.
+    Window,
+    /// The dialog face, as a status bar's.
+    Face,
+}
+
+impl Button {
+    /// Draws this button, if `notification` is its `NM_CUSTOMDRAW`, as a
+    /// flat button, as a toolbar's: `face` centred on `ground`, on the
+    /// toolbar's hot or pressed background while the
+    /// mouse is on it or it is pressed. The access key's line and a focus
+    /// rectangle show while the window shows keyboard cues. An icon's
+    /// caption stays the name that screen readers say. Returns the answer to
+    /// the notification.
+    pub(crate) fn draw_flat(
+        self,
+        notification: &Notification,
+        face: FlatFace,
+        ground: FlatGround,
+    ) -> Option<LRESULT> {
+        let header = notification.header();
+        if header.hwndFrom != self.hwnd().0 || header.code != NM_CUSTOMDRAW {
+            return None;
+        }
+        // SAFETY: a button sends NM_CUSTOMDRAW with an NMCUSTOMDRAW, valid
+        // for the notification's lifetime.
+        let draw = unsafe { &*notification.header.cast::<NMCUSTOMDRAW>() };
+        if draw.dwDrawStage != CDDS_PREPAINT {
+            return Some(LRESULT(CDRF_DODEFAULT as isize));
+        }
+        let state = draw.uItemState;
+        let dc = draw.hdc;
+        let mut rect = draw.rc;
+        let hot = if state.contains(CDIS_SELECTED) {
+            Some(TS_PRESSED.0)
+        } else if state.contains(CDIS_HOT) {
+            Some(TS_HOT.0)
+        } else {
+            None
+        };
+        let ground = match ground {
+            FlatGround::Window => COLOR_WINDOW,
+            FlatGround::Face => COLOR_BTNFACE,
+        };
+        let color = if state.contains(CDIS_DISABLED) {
+            disabled_color(ground)
+        } else {
+            system_color(COLOR_WINDOWTEXT)
+        };
+        // SAFETY: the DC is the notification's, which the button holds for
+        // it; the theme is closed and the DC's font restored before the
+        // answer.
+        unsafe {
+            FillRect(dc, &rect, GetSysColorBrush(ground));
+            if let Some(hot) = hot {
+                // High contrast has no theme, and its button face shows the
+                // state instead.
+                let theme = OpenThemeData(Some(self.hwnd().0), w!("Toolbar"));
+                if theme.is_invalid() {
+                    FillRect(dc, &rect, GetSysColorBrush(COLOR_BTNFACE));
+                } else {
+                    let _ = DrawThemeBackground(theme, dc, TP_BUTTON.0, hot, &rect, None);
+                    let _ = CloseThemeData(theme);
+                }
+            }
+            let cues = state.contains(CDIS_SHOWKEYBOARDCUES);
+            match face {
+                FlatFace::Glyph(glyph) => {
+                    let size = icon_glyph_height(self.hwnd().dpi());
+                    draw_lone_glyph(dc, glyph, rect, size, color);
+                }
+                FlatFace::Caption(font) => {
+                    let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
+                    SetBkMode(dc, TRANSPARENT);
+                    SetTextColor(dc, color);
+                    let flags = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
+                    draw_text(
+                        dc,
+                        &self.hwnd().text(),
+                        &mut rect,
+                        if cues { flags } else { flags | DT_HIDEPREFIX },
+                    );
+                    SelectObject(dc, previous);
+                }
+            }
+            if state.contains(CDIS_FOCUS) && cues {
+                let _ = InflateRect(&mut rect, -2, -2);
+                let _ = DrawFocusRect(dc, &rect);
+            }
+        }
+        Some(LRESULT(CDRF_SKIPDEFAULT as isize))
     }
 }
 
@@ -263,6 +391,17 @@ pub(crate) enum DrawAnswer {
 }
 
 impl CustomDraw<'_> {
+    /// # Safety
+    /// `notification` is an `NM_CUSTOMDRAW` that a list view sent.
+    pub(super) unsafe fn of_list(notification: &Notification) -> Self {
+        CustomDraw {
+            // SAFETY: a list view sends NM_CUSTOMDRAW with an
+            // NMLVCUSTOMDRAW, valid for the notification's lifetime.
+            draw: unsafe { &mut *notification.header.cast() },
+            list: Hwnd(notification.header().hwndFrom),
+        }
+    }
+
     pub(crate) fn stage(&self) -> DrawStage {
         let stage = self.draw.nmcd.dwDrawStage;
         if stage == CDDS_PREPAINT {
@@ -302,46 +441,12 @@ impl CustomDraw<'_> {
         inset: Px,
     ) {
         let dc = self.draw.nmcd.hdc;
-        let row = self.draw.nmcd.dwItemSpec;
-        let column = self.draw.iSubItem;
-        let rect = |part| {
-            let mut rect = RECT {
-                left: part as i32,
-                top: column,
-                ..RECT::default()
-            };
-            // The first column's label and icon are the item's own; the
-            // others are its subitems'.
-            let message = if column == 0 {
-                LVM_GETITEMRECT
-            } else {
-                LVM_GETSUBITEMRECT
-            };
-            // SAFETY: `rect` is a local that the list reads its part from
-            // and fills in.
-            unsafe {
-                SendMessageW(
-                    self.list.0,
-                    message,
-                    Some(WPARAM(row)),
-                    Some(LPARAM(&raw mut rect as isize)),
-                )
-            };
-            rect
-        };
-        let label = rect(LVIR_LABEL);
-        if let Some((images, index)) = icon.filter(|_| column == 0) {
-            let area = rect(LVIR_ICON);
+        let label = self.cell_part(LVIR_LABEL);
+        if let Some((images, index)) = icon.filter(|_| self.draw.iSubItem == 0) {
+            let area = self.cell_part(LVIR_ICON);
             images.draw(dc, index, area);
         }
-        let colour = match self.draw.clrText {
-            // CLR_DEFAULT
-            COLORREF(0xFF00_0000) => COLORREF(
-                // SAFETY: no parameters.
-                unsafe { GetSysColor(COLOR_WINDOWTEXT) },
-            ),
-            colour => colour,
-        };
+        let colour = self.text_colour();
         let mut x = label.left + inset.0;
         let right = label.right - inset.0;
         let mut parts = Vec::new();
@@ -378,6 +483,101 @@ impl CustomDraw<'_> {
                 x += measured.right - measured.left;
             }
             SelectObject(dc, previous);
+        }
+    }
+
+    /// Draws the cell at `DrawStage::Cell` as the list would, except that
+    /// its text, a path, loses its middle where it does not fit
+    /// (`DT_PATH_ELLIPSIS`), so the drive and the name stay. The cell keeps
+    /// its whole text, which the list's label tip shows.
+    pub(crate) fn draw_path(&self, inset: Px) {
+        let label = self.cell_part(LVIR_LABEL);
+        let mut area = RECT {
+            left: label.left + inset.0,
+            right: label.right - inset.0,
+            ..label
+        };
+        let dc = self.draw.nmcd.hdc;
+        // SAFETY: the list's DC for the length of the message, which holds
+        // the list's font.
+        unsafe {
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, self.text_colour());
+        }
+        draw_text(
+            dc,
+            &self.cell_text(),
+            &mut area,
+            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_PATH_ELLIPSIS,
+        );
+    }
+
+    /// The part `part`, such as `LVIR_LABEL`, of the cell being drawn.
+    fn cell_part(&self, part: u32) -> RECT {
+        let column = self.draw.iSubItem;
+        let mut rect = RECT {
+            left: part as i32,
+            top: column,
+            ..RECT::default()
+        };
+        // The first column's label and icon are the item's own; the others
+        // are its subitems'.
+        let message = if column == 0 {
+            LVM_GETITEMRECT
+        } else {
+            LVM_GETSUBITEMRECT
+        };
+        // SAFETY: `rect` is a local that the list reads its part from and
+        // fills in.
+        unsafe {
+            SendMessageW(
+                self.list.0,
+                message,
+                Some(WPARAM(self.draw.nmcd.dwItemSpec)),
+                Some(LPARAM(&raw mut rect as isize)),
+            )
+        };
+        rect
+    }
+
+    /// The colour the list gives the text of the row's state.
+    fn text_colour(&self) -> COLORREF {
+        match self.draw.clrText {
+            // CLR_DEFAULT
+            COLORREF(0xFF00_0000) => COLORREF(
+                // SAFETY: no parameters.
+                unsafe { GetSysColor(COLOR_WINDOWTEXT) },
+            ),
+            colour => colour,
+        }
+    }
+
+    /// The text of the cell being drawn, which the list holds.
+    fn cell_text(&self) -> String {
+        let mut buffer = vec![0u16; 260];
+        loop {
+            let mut item = LVITEMW {
+                iSubItem: self.draw.iSubItem,
+                pszText: PWSTR(buffer.as_mut_ptr()),
+                cchTextMax: buffer.len() as i32,
+                ..Default::default()
+            };
+            // SAFETY: `item` and the buffer it points to outlive the call,
+            // which writes at most `cchTextMax` characters.
+            let length = unsafe {
+                SendMessageW(
+                    self.list.0,
+                    LVM_GETITEMTEXTW,
+                    Some(WPARAM(self.draw.nmcd.dwItemSpec)),
+                    Some(LPARAM(&raw mut item as isize)),
+                )
+            }
+            .0 as usize;
+            // A text that fills the buffer may have been cut off.
+            if length + 1 < buffer.len() {
+                return String::from_utf16_lossy(&buffer[..length]);
+            }
+            buffer.resize(buffer.len() * 2, 0);
         }
     }
 }

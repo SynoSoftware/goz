@@ -45,6 +45,7 @@ fn results() -> QueryResults {
         volumes_incomplete: false,
         metadata_pending: false,
         generation: 0,
+        sums: None,
     }
 }
 

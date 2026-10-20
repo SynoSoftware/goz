@@ -7,7 +7,7 @@ use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
 use crate::core::text::Strings;
-use crate::win::controls::{Balloon, DatePicker, DropDownList};
+use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::Font;
 use crate::win::{self, Hwnd};
@@ -33,7 +33,7 @@ impl DialogProc for About {
         let mut fonts = Vec::new();
         if let Some(version) = dialog::item(dialog, ControlId::AboutVersion.id()) {
             version.set_text(&self.version);
-            if let Ok(font) = Font::semibold_of(version) {
+            if let Ok(font) = Font::of(version).and_then(|font| font.semibold()) {
                 version.set_font(&font);
                 fonts.push(font);
             }
@@ -58,10 +58,12 @@ impl DialogProc for About {
                 true
             }
             DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
             | DialogMessage::Command { .. }
             | DialogMessage::Edited { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -92,6 +94,56 @@ impl DialogProc for SearchSyntax {
 
     fn message(&self, _dialog: Hwnd, _message: DialogMessage) -> bool {
         false
+    }
+}
+
+/// The service's report (DESIGN.md: The Drives and service page): the text
+/// that `gozler --status` prints, in English, as `gozler` prints it, with
+/// Copy and Close.
+pub(super) struct ServiceReport {
+    pub(super) text: String,
+}
+
+impl DialogProc for ServiceReport {
+    fn init(&self, dialog: Hwnd) -> Opened {
+        let mut fonts = Vec::new();
+        if let Some(text) = dialog::item(dialog, ControlId::ServiceReportText.id()) {
+            // The report aligns its values in a column.
+            if let Ok(font) = Font::monospace_of(text) {
+                text.set_font(&font);
+                fonts.push(font);
+            }
+            // An edit control breaks lines only at "\r\n".
+            text.set_text(&self.text.replace('\n', "\r\n"));
+        }
+        // Close starts with the focus, so the text is not selected and
+        // Enter closes the dialog.
+        Opened {
+            focus: DialogItem::Cancel.id(),
+            fonts,
+        }
+    }
+
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        match message {
+            DialogMessage::Command { id } if id == ControlId::ServiceReportCopy.id() => {
+                // The whole report, as Windows' own Copy details buttons
+                // copy, selected so the person sees what was copied.
+                if let Some(text) = Edit::of_dialog(dialog, ControlId::ServiceReportText.id()) {
+                    text.select_all();
+                    text.copy();
+                }
+                true
+            }
+            DialogMessage::Command { .. }
+            | DialogMessage::Edited { .. }
+            | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
+            | DialogMessage::Other => false,
+        }
     }
 }
 
@@ -196,8 +248,10 @@ impl DialogProc for CustomDate {
             }
             DialogMessage::Command { .. }
             | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -334,8 +388,10 @@ impl DialogProc for CustomSize {
             }
             DialogMessage::Command { .. }
             | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
             | DialogMessage::Other => false,
         }
     }

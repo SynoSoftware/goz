@@ -8,7 +8,9 @@
 //! exited. Each scan the supervisor also lists the machine's volumes, adds the
 //! fixed NTFS and ReFS volumes it does not index yet, and removes the indexed
 //! volumes that are gone, so a query never silently leaves out an attached
-//! volume.
+//! volume. A volume that the Include settings leave out is not indexed; when
+//! the settings change, the supervisor wakes at once and brings the volumes
+//! and each volume's rules in step with them.
 //!
 //! For each tail it reads the [`Pulse`] and gives one of three verdicts, one
 //! per pulse state:
@@ -36,11 +38,14 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use gozler_core::include::IncludeSettings;
+use gozler_core::proto::LeftOutVolume;
 use gozler_core::types::VolumePhase;
 use gozler_winfs::{VolumeInfo, WinError};
 use parking_lot::{Condvar, Mutex};
 
 use crate::bootstrap;
+use crate::include::Include;
 use crate::pulse::{Pulse, awake_secs};
 use crate::tail::{self, TailHandle};
 use crate::volume_state::{VolumeRegistry, VolumeState};
@@ -156,12 +161,18 @@ fn accrue_health(
     }
 }
 
-/// Shutdown signal: a flag under a mutex so the scan sleep is interruptible.
-/// Teardown flips it and wakes the condvar, so stopping never waits out a
-/// full [`SCAN_INTERVAL`].
+/// What wakes the scan sleep: shutdown, and new Include settings. Teardown
+/// and [`Include::reload`] set their flag under the mutex and wake the
+/// condvar, so neither waits out a full [`SCAN_INTERVAL`].
 struct StopFlag {
-    stopped: Mutex<bool>,
+    signals: Mutex<Signals>,
     wake: Condvar,
+}
+
+#[derive(Default)]
+struct Signals {
+    stopped: bool,
+    settings_changed: bool,
 }
 
 /// The supervision thread and the means to stop it. Owns every tail: they
@@ -170,29 +181,43 @@ pub(crate) struct Supervisor {
     stop: Arc<StopFlag>,
     join: Option<JoinHandle<()>>,
     volumes: Arc<VolumeRegistry>,
+    include: Arc<Include>,
 }
 
 impl Supervisor {
     /// Starts indexing every fixed NTFS and ReFS volume in `enumerated`, the
-    /// machine's volumes at startup, and starts the supervision thread. Returns
-    /// as soon as each of those volumes is in [`Supervisor::volumes`] as
-    /// `Bootstrapping`, so queries are answered, flagged incomplete, while the
-    /// volumes index. Fails only when the OS refuses the thread; nothing would
-    /// index the volumes then.
-    pub(crate) fn spawn(enumerated: Vec<VolumeInfo>) -> std::io::Result<Supervisor> {
+    /// machine's volumes at startup, that `include` does not leave out, and
+    /// starts the supervision thread. Returns as soon as each of those volumes
+    /// is in [`Supervisor::volumes`] as `Bootstrapping`, so queries are
+    /// answered, flagged incomplete, while the volumes index. Fails only when
+    /// the OS refuses the thread; nothing would index the volumes then.
+    pub(crate) fn spawn(
+        enumerated: Vec<VolumeInfo>,
+        include: IncludeSettings,
+    ) -> std::io::Result<Supervisor> {
         let volumes = Arc::new(VolumeRegistry::default());
+        let stop = Arc::new(StopFlag {
+            signals: Mutex::new(Signals::default()),
+            wake: Condvar::new(),
+        });
+        let woken = stop.clone();
+        let include = Arc::new(Include::new(
+            include,
+            Box::new(move || {
+                woken.signals.lock().settings_changed = true;
+                woken.wake.notify_all();
+            }),
+        ));
         let mut fleet = Fleet {
             volumes: volumes.clone(),
+            include: include.clone(),
+            enumerated: Vec::new(),
             supervised: Vec::new(),
             skipped: HashSet::new(),
             discovery: None,
             starting: Some(Instant::now()),
         };
         fleet.reconcile(enumerated);
-        let stop = Arc::new(StopFlag {
-            stopped: Mutex::new(false),
-            wake: Condvar::new(),
-        });
         // `Builder::spawn` consumes its closure even when thread creation
         // fails, so the fleet rides in a slot the failure path can take back;
         // dropping it would detach tails that could then never be joined.
@@ -212,6 +237,7 @@ impl Supervisor {
                 stop,
                 join: Some(join),
                 volumes,
+                include,
             }),
             Err(e) => {
                 if let Some(fleet) = slot.lock().take() {
@@ -227,6 +253,11 @@ impl Supervisor {
         self.volumes.clone()
     }
 
+    /// The Include settings this supervisor applies.
+    pub(crate) fn include(&self) -> Arc<Include> {
+        self.include.clone()
+    }
+
     /// Stops supervision and every tail, joining all of it. The supervision
     /// thread stops the tails itself (it owns them).
     ///
@@ -234,7 +265,7 @@ impl Supervisor {
     /// what the thread's exit legitimately takes: stopping its tails
     /// ([`stop_tails`]) and resolving in-flight revivals ([`drain_pending`]).
     pub(crate) fn shutdown(mut self) {
-        *self.stop.stopped.lock() = true;
+        self.stop.signals.lock().stopped = true;
         self.stop.wake.notify_all();
         if let Some(join) = self.join.take() {
             let deadline = Instant::now() + SUPERVISOR_JOIN_WAIT;
@@ -255,6 +286,10 @@ impl Supervisor {
 /// Everything the supervision thread owns.
 struct Fleet {
     volumes: Arc<VolumeRegistry>,
+    include: Arc<Include>,
+    /// The machine's volumes as last listed, which new Include settings are
+    /// applied to at once.
+    enumerated: Vec<VolumeInfo>,
     /// The indexed volumes that have a tail or may get one. A volume leaves
     /// this list, and stays indexed, when its tail is given up on or when it
     /// is a snapshot, which needs no tail.
@@ -269,53 +304,92 @@ struct Fleet {
 
 impl Fleet {
     /// Brings the indexed volumes in step with `enumerated`, the volumes on
-    /// the machine now: starts indexing each fixed NTFS and ReFS volume that is
-    /// not indexed, and removes each indexed volume that is no longer listed.
+    /// the machine now, and with the Include settings: starts indexing each
+    /// fixed NTFS and ReFS volume that is not indexed and that the settings
+    /// do not leave out, and removes each indexed volume that is no longer
+    /// listed or that the settings leave out.
     ///
-    /// Only a volume that is no longer listed is removed. A listed volume
-    /// that now classifies differently stays: a filesystem query that fails
-    /// once must not cost a full rebuild.
+    /// A listed volume that now classifies differently stays: a filesystem
+    /// query that fails once must not cost a full rebuild.
     fn reconcile(&mut self, enumerated: Vec<VolumeInfo>) {
-        let indexed = self.volumes.current();
-        for gone in indexed
-            .iter()
-            .filter(|v| !enumerated.iter().any(|e| e.guid_path == v.guid))
-        {
-            self.remove(gone);
+        let settings = self.include.applied();
+        for indexed in self.volumes.current().iter() {
+            if !enumerated.iter().any(|e| e.guid_path == indexed.guid) {
+                self.remove(indexed, "volume is gone; no longer indexed");
+            } else if settings.rules_for(&indexed.guid).leaves_out_volume() {
+                self.remove(
+                    indexed,
+                    "the Include settings leave the volume out; no longer indexed",
+                );
+            }
         }
         self.skipped
             .retain(|guid| enumerated.iter().any(|e| &e.guid_path == guid));
-        for vol in enumerated {
+        let indexed = self.volumes.current();
+        let mut left_out = Vec::new();
+        for vol in &enumerated {
             if indexed.iter().any(|v| v.guid == vol.guid_path) {
                 continue;
             }
-            match bootstrap::indexed_filesystem(&vol) {
-                Err(reason) => {
-                    if self.skipped.insert(vol.guid_path.clone()) {
-                        tracing::info!(
-                            volume = %vol.guid_path,
-                            mounts = ?vol.mounts,
-                            reason,
-                            "volume not indexed"
-                        );
-                    }
+            let rules = settings.rules_for(&vol.guid_path);
+            match bootstrap::indexed_filesystem(vol) {
+                Err(reason) => self.skip(vol, &reason),
+                Ok(_) if rules.leaves_out_volume() => {
+                    left_out.push(LeftOutVolume {
+                        guid: vol.guid_path.clone(),
+                        mounts: vol.mounts.clone(),
+                    });
+                    self.skip(vol, "the Include settings leave it out");
                 }
                 Ok(filesystem) => {
                     self.skipped.remove(&vol.guid_path);
-                    let state = Arc::new(VolumeState::new(vol.guid_path, vol.mounts, filesystem));
+                    let state = Arc::new(VolumeState::new(
+                        vol.guid_path.clone(),
+                        vol.mounts.clone(),
+                        filesystem,
+                        Arc::new(rules),
+                    ));
                     tracing::info!(volume = %state.mount_prefix(), "volume found; indexing it");
                     self.volumes.add(state.clone());
                     self.supervised.push(Supervised::start(state));
                 }
             }
         }
+        self.include.set_left_out(left_out);
+        self.enumerated = enumerated;
     }
 
-    /// Stops indexing a volume that is gone: queries leave it out from now on,
-    /// and its tail stops.
-    fn remove(&mut self, gone: &VolumeState) {
+    /// Logs once why a volume is not indexed.
+    fn skip(&mut self, vol: &VolumeInfo, reason: &str) {
+        if self.skipped.insert(vol.guid_path.clone()) {
+            tracing::info!(
+                volume = %vol.guid_path,
+                mounts = ?vol.mounts,
+                reason,
+                "volume not indexed"
+            );
+        }
+    }
+
+    /// Applies new Include settings: gives each indexed volume its new rules,
+    /// which its tail applies, and adds and removes the volumes the settings
+    /// include and leave out.
+    fn apply_settings(&mut self) {
+        let settings = self.include.applied();
+        for state in self.volumes.current().iter() {
+            state.set_rules(Arc::new(settings.rules_for(&state.guid)));
+        }
+        // The reason a volume is skipped can change with the settings, so
+        // each is logged again.
+        self.skipped.clear();
+        self.reconcile(self.enumerated.clone());
+    }
+
+    /// Stops indexing a volume: queries leave it out from now on, and its
+    /// tail stops. `why` is the log line.
+    fn remove(&mut self, gone: &VolumeState, why: &str) {
         self.volumes.remove(&gone.guid);
-        tracing::info!(volume = %gone.mount_prefix(), "volume is gone; no longer indexed");
+        tracing::info!(volume = %gone.mount_prefix(), "{why}");
         if let Some(i) = self
             .supervised
             .iter()
@@ -482,9 +556,9 @@ fn supervise(mut fleet: Fleet, stop: &StopFlag) {
         tracing::error!(
             "volume supervisor panicked; tails keep running unsupervised (no stuck-I/O rescue, revival or new volumes) until shutdown"
         );
-        let mut stopped = stop.stopped.lock();
-        while !*stopped {
-            stop.wake.wait(&mut stopped);
+        let mut signals = stop.signals.lock();
+        while !signals.stopped {
+            stop.wake.wait(&mut signals);
         }
     }
     fleet.stop_all();
@@ -523,14 +597,21 @@ fn drain_pending(pending: PendingRevival, mount: &str, deadline: Instant) -> Opt
 /// Returns when the stop flag flips.
 fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
     loop {
-        {
-            let mut stopped = stop.stopped.lock();
-            if !*stopped {
-                stop.wake.wait_for(&mut stopped, SCAN_INTERVAL);
+        let settings_changed = {
+            let mut signals = stop.signals.lock();
+            if !signals.stopped && !signals.settings_changed {
+                stop.wake.wait_for(&mut signals, SCAN_INTERVAL);
             }
-            if *stopped {
+            if signals.stopped {
                 return;
             }
+            std::mem::take(&mut signals.settings_changed)
+        };
+        if settings_changed {
+            // Only the settings: scanning early would cut short the grace a
+            // starting tail gets before its first poll.
+            fleet.apply_settings();
+            continue;
         }
         let now = awake_secs();
         let supervised = &mut fleet.supervised;
@@ -958,13 +1039,17 @@ mod tests {
         let indexed = r"\\?\Volume{11111111-0000-0000-0000-000000000000}\";
         let usb_stick = r"\\?\Volume{22222222-0000-0000-0000-000000000000}\";
         let volumes = Arc::new(VolumeRegistry::default());
+        let defaults = IncludeSettings::default();
         volumes.add(Arc::new(VolumeState::new(
             indexed.into(),
             vec![r"E:\".into()],
             bootstrap::Filesystem::Ntfs,
+            Arc::new(defaults.rules_for(indexed)),
         )));
         let mut fleet = Fleet {
             volumes: volumes.clone(),
+            include: Arc::new(Include::new(defaults, Box::new(|| {}))),
+            enumerated: Vec::new(),
             supervised: Vec::new(),
             skipped: HashSet::new(),
             discovery: None,

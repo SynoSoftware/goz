@@ -15,7 +15,8 @@ use crate::{bootstrap, server};
 /// Each volume is `Bootstrapping` until its tail has built its index.
 pub(crate) fn start_engine() -> Result<Supervisor> {
     let enumerated = bootstrap::enumerate_all()?;
-    Supervisor::spawn(enumerated).context("starting the volume supervisor")
+    Supervisor::spawn(enumerated, crate::include::read_saved())
+        .context("starting the volume supervisor")
 }
 
 /// Best-effort post-bootstrap memory settling, which the supervisor runs once
@@ -77,7 +78,7 @@ pub(crate) fn run_console() -> Result<()> {
     // A never-triggered channel: console stop comes from Ctrl+C inside the
     // server. `_stop_tx` is held so the receiver never sees a closed channel.
     let (_stop_tx, stop_rx) = watch::channel(false);
-    let result = server::run(supervisor.volumes(), stop_rx);
+    let result = server::run(supervisor.volumes(), supervisor.include(), stop_rx);
 
     supervisor.shutdown();
     result

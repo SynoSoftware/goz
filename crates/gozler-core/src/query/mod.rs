@@ -13,12 +13,12 @@ pub mod engine;
 pub mod order;
 pub mod parse;
 mod paths;
-mod wildcard;
+pub(crate) mod wildcard;
 
 pub use dates::{DateRange, QueryStart};
 pub use engine::{
-    CompiledQuery, MatchedParts, QueryHit, QueryOutcome, SizeOverflow, Totals, extension,
-    resolve_scope, run_query, run_query_deferrable, run_totals,
+    CompiledQuery, MatchSums, MatchedParts, QueryHit, QueryOutcome, SizeOverflow, Totals,
+    extension, resolve_scope, run_query, run_query_deferrable, run_totals,
 };
 pub use order::{VolumeRun, order_hits};
 pub use parse::{

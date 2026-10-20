@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use gozler_core::include::IncludeSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
     DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
@@ -17,8 +18,8 @@ use gozler_core::proto::{
     SearchRequest, VolumeMemory, VolumeStatus, encode_response_frame,
 };
 use gozler_core::query::{
-    CompiledQuery, ParseOptions, QueryError, QueryStart, SizeOverflow, Totals, VolumeRun,
-    order_hits, parse_query_with, resolve_scope, run_query_deferrable, run_totals,
+    CompiledQuery, MatchSums, ParseOptions, QueryError, QueryStart, SizeOverflow, Totals,
+    VolumeRun, order_hits, parse_query_with, resolve_scope, run_query_deferrable, run_totals,
 };
 use gozler_core::scope::Scope;
 use gozler_core::types::EntryIdx;
@@ -27,6 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{Semaphore, watch};
 
+use crate::include::Include;
 use crate::volume_state::{VolumeRegistry, VolumeSet, VolumeState};
 
 /// Cap on concurrently-served pipe connections. A silent/hostile local client
@@ -62,17 +64,22 @@ const CONNECT_WARN_EVERY: Duration = Duration::from_secs(60);
 /// service-control handler's Stop/Shutdown path). Keep at least one
 /// `watch::Sender` alive for the duration in console mode: if every sender
 /// drops, `changed()` resolves and would end the loop prematurely.
-pub(crate) fn run(volumes: Arc<VolumeRegistry>, shutdown: watch::Receiver<bool>) -> Result<()> {
+pub(crate) fn run(
+    volumes: Arc<VolumeRegistry>,
+    include: Arc<Include>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
     let security = build_pipe_security().context("building pipe security descriptor")?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(accept_loop(volumes, security, shutdown))
+    rt.block_on(accept_loop(volumes, include, security, shutdown))
 }
 
 async fn accept_loop(
     volumes: Arc<VolumeRegistry>,
+    include: Arc<Include>,
     security: PipeSecurity,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -113,9 +120,10 @@ async fn accept_loop(
                 match Arc::clone(&conn_limit).try_acquire_owned() {
                     Ok(permit) => {
                         let vols = volumes.clone();
+                        let include = include.clone();
                         tokio::spawn(async move {
                             let _permit = permit; // held for the connection's lifetime
-                            if let Err(e) = handle_connection(connected, vols).await {
+                            if let Err(e) = handle_connection(connected, vols, include).await {
                                 tracing::debug!(error = %e, "connection ended");
                             }
                         });
@@ -155,6 +163,7 @@ fn create_instance(security: &PipeSecurity, first: bool) -> Result<NamedPipeServ
 async fn handle_connection(
     mut server: NamedPipeServer,
     volumes: Arc<VolumeRegistry>,
+    include: Arc<Include>,
 ) -> Result<()> {
     let mut decoder = gozler_core::proto::FrameDecoder::new(MAX_CLIENT_FRAME);
     let mut read_buf = vec![0u8; 16 * 1024];
@@ -183,11 +192,14 @@ async fn handle_connection(
             // QUERY_PAGE_BACKLOG pages are in flight, and encoding overlaps the
             // pipe writes instead of preceding them.
             let vols = volumes.current();
+            let include = include.clone();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
             let encoder = tokio::task::spawn_blocking(move || {
                 // A failed send means the receiver is gone (client vanished or
                 // write error): stop encoding.
-                serve(&vols, &frame, &mut |reply| tx.blocking_send(reply).is_ok());
+                serve(&vols, &include, &frame, &mut |reply| {
+                    tx.blocking_send(reply).is_ok()
+                });
             });
             let mut write_err: Option<std::io::Error> = None;
             while let Some(reply) = rx.recv().await {
@@ -218,7 +230,12 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
 /// Answers one request frame, handing each framed reply to `emit` as soon as
 /// it is encoded. `emit` returning `false` means the client is gone; encoding
 /// stops.
-fn serve(volumes: &VolumeSet, frame: &[u8], emit: &mut dyn FnMut(Vec<u8>) -> bool) {
+fn serve(
+    volumes: &VolumeSet,
+    include: &Include,
+    frame: &[u8],
+    emit: &mut dyn FnMut(Vec<u8>) -> bool,
+) {
     let search = match gozler_core::proto::decode_request(frame) {
         Ok(Request::Search(search)) => search,
         Ok(Request::Query(query)) => match text_search(query) {
@@ -230,7 +247,17 @@ fn serve(volumes: &VolumeSet, frame: &[u8], emit: &mut dyn FnMut(Vec<u8>) -> boo
             proto_max,
             ..
         }) => return reply(emit, hello(volumes, proto_min, proto_max)),
-        Ok(Request::Status) => return reply(emit, Response::Status(build_status(volumes))),
+        Ok(Request::Status) => {
+            return reply(emit, Response::Status(build_status(volumes, include)));
+        }
+        Ok(Request::SettingsSaved) => {
+            include.reload();
+            return reply(emit, Response::SettingsApplied);
+        }
+        Ok(Request::CountIncluded(settings)) => {
+            let entries = count_included(volumes, &settings);
+            return reply(emit, Response::IncludedCount { entries });
+        }
         Err(e) => return reply(emit, refusal(format!("malformed request: {e}"))),
     };
     let query = match CompiledQuery::new(&search.query) {
@@ -297,6 +324,7 @@ fn text_search(query: QueryRequest) -> Result<SearchRequest, QueryError> {
             want_size: query.want_size,
             want_mtime: query.want_mtime,
             want_attributes: false,
+            want_sums: false,
         }),
     })
 }
@@ -373,6 +401,7 @@ fn stream_rows(
     // at or above the match count) down the in-lock path, bringing back the
     // stall the deferral prevents.
     let mut total: u64 = 0;
+    let mut sums = rows.want_sums.then(MatchSums::default);
     let (runs, coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
         let outcome = run_query_deferrable(
             index,
@@ -381,8 +410,12 @@ fn stream_rows(
             scope,
             rows.sort,
             per_vol_limit,
+            rows.want_sums,
         );
         total += outcome.total;
+        if let (Some(sums), Some(volume)) = (sums.as_mut(), outcome.sums) {
+            sums.add(volume);
+        }
         VolumeRun {
             mount_prefix: vol.mount_prefix(),
             hits: outcome.hits,
@@ -398,6 +431,10 @@ fn stream_rows(
         .map(|l| (start + l as usize).min(collected.len()))
         .unwrap_or(collected.len());
     let n_rows = end - start;
+    // A size pass that has not completed leaves sums short.
+    if coverage.metadata_pending {
+        sums = sums.map(MatchSums::without_sizes);
+    }
 
     // Consuming iteration: each emitted page's hits DROP right after
     // encoding, so the held path bytes drain with export progress instead of
@@ -411,7 +448,8 @@ fn stream_rows(
             coverage.volumes_incomplete,
             coverage.metadata_pending,
             hits.len(),
-        );
+        )
+        .with_sums(sums);
         while let Some(hit) = hits.peek() {
             let size = rows.want_size.then_some(hit.size).flatten();
             let mtime = rows.want_mtime.then_some(hit.mtime).flatten();
@@ -492,7 +530,24 @@ fn all_volumes_live(volumes: &VolumeSet) -> bool {
     volumes.iter().all(|v| v.phase().is_complete())
 }
 
-fn build_status(volumes: &VolumeSet) -> DaemonStatus {
+/// How many entries the indexed volumes would hold under `settings`. A
+/// volume that is not indexed now adds nothing, and neither does what the
+/// applied settings left out, because the index does not hold it.
+fn count_included(volumes: &VolumeSet, settings: &IncludeSettings) -> u64 {
+    volumes
+        .iter()
+        .map(|v| {
+            let rules = settings.rules_for(&v.guid);
+            if rules.leaves_out_volume() {
+                0
+            } else {
+                v.read().index().count_kept(&rules)
+            }
+        })
+        .sum()
+}
+
+fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
     let mut incomplete = false;
     let vols = volumes
         .iter()
@@ -538,6 +593,8 @@ fn build_status(volumes: &VolumeSet) -> DaemonStatus {
         volumes_incomplete: incomplete,
         process_working_set: self_mem.working_set,
         process_private_bytes: self_mem.private_bytes,
+        include: Some((*include.applied()).clone()),
+        left_out: include.left_out(),
     }
 }
 
@@ -568,7 +625,9 @@ fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Option<Vec<(Arc<VolumeSt
 #[cfg(test)]
 mod tests {
     use super::{build_status, serve};
+    use crate::include::Include;
     use crate::volume_state::{Indexed, VolumeSet, VolumeState};
+    use gozler_core::include::{DriveChoice, FolderChoice, IncludeSettings};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
         FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, QueryRequest,
@@ -633,6 +692,11 @@ mod tests {
         Arc::new(vols.to_vec())
     }
 
+    /// The default Include settings, which keep everything.
+    fn defaults() -> Include {
+        Include::new(IncludeSettings::default(), Box::new(|| {}))
+    }
+
     /// A Snapshot volume must NOT taint results.
     ///
     /// It has no USN journal and never can (Windows refuses to create one on a
@@ -647,7 +711,7 @@ mod tests {
             volume(r"D:\", windows_index(), VolumePhase::Snapshot),
         ]);
         assert!(
-            !build_status(&vols).volumes_incomplete,
+            !build_status(&vols, &defaults()).volumes_incomplete,
             "a fully indexed journal-less volume must not flag results incomplete"
         );
         assert!(
@@ -664,7 +728,7 @@ mod tests {
     /// it must mark results incomplete, or the user trusts a partial index.
     #[test]
     fn status_is_incomplete_unless_every_volume_is_live() {
-        assert!(!build_status(&set(&[live_volume(r"C:\")])).volumes_incomplete);
+        assert!(!build_status(&set(&[live_volume(r"C:\")]), &defaults()).volumes_incomplete);
 
         for phase in [
             VolumePhase::Bootstrapping,
@@ -676,10 +740,43 @@ mod tests {
         ] {
             let vols = set(&[live_volume(r"C:\"), volume(r"D:\", windows_index(), phase)]);
             assert!(
-                build_status(&vols).volumes_incomplete,
+                build_status(&vols, &defaults()).volumes_incomplete,
                 "one non-Live volume must taint the whole status"
             );
         }
+    }
+
+    /// The preview counts what each volume would keep: a folder left out
+    /// takes everything below it, and a drive left out counts nothing.
+    #[test]
+    fn counting_included_entries_follows_the_settings() {
+        let vols = set(&[live_volume(r"C:\")]);
+        let all = vols[0].read().index().len() as u64;
+        let count = |settings| match answer(&vols, Request::CountIncluded(settings)) {
+            Response::IncludedCount { entries } => entries,
+            other => panic!("an entry count, not {other:?}"),
+        };
+        let drive = |indexed, folders| IncludeSettings {
+            drives: vec![DriveChoice {
+                volume: vols[0].guid.clone(),
+                name: String::new(),
+                indexed,
+                folders,
+            }],
+            ..IncludeSettings::default()
+        };
+        let windows = FolderChoice {
+            path: "Windows".into(),
+            indexed: false,
+        };
+
+        assert_eq!(count(IncludeSettings::default()), all);
+        assert_eq!(
+            count(drive(true, vec![windows])),
+            all - 2,
+            "Windows and System32 are left out"
+        );
+        assert_eq!(count(drive(false, Vec::new())), 0);
     }
 
     /// The payload of the frame a client sends for `request`.
@@ -693,10 +790,15 @@ mod tests {
     /// pipe carries them.
     fn reply_bytes(volumes: &VolumeSet, request: &Request) -> Vec<u8> {
         let mut out = Vec::new();
-        serve(volumes, &request_frame(request), &mut |reply| {
-            out.extend_from_slice(&reply);
-            true
-        });
+        serve(
+            volumes,
+            &defaults(),
+            &request_frame(request),
+            &mut |reply| {
+                out.extend_from_slice(&reply);
+                true
+            },
+        );
         out
     }
 
@@ -882,6 +984,7 @@ mod tests {
         let mut emitted = 0usize;
         serve(
             &vols,
+            &defaults(),
             &request_frame(&Request::Query(query("hit"))),
             &mut |_page| {
                 emitted += 1;
@@ -1042,7 +1145,7 @@ mod tests {
         );
         let attributes = |request: &str| {
             let mut replies = Vec::new();
-            serve(&vols, request.as_bytes(), &mut |reply| {
+            serve(&vols, &defaults(), request.as_bytes(), &mut |reply| {
                 replies.extend_from_slice(&reply);
                 true
             });
@@ -1067,7 +1170,7 @@ mod tests {
             r#""want_size":true,"want_mtime":true,"match_case":false}"#,
         );
         let mut replies = Vec::new();
-        serve(&vols, request.as_bytes(), &mut |reply| {
+        serve(&vols, &defaults(), request.as_bytes(), &mut |reply| {
             replies.extend_from_slice(&reply);
             true
         });
@@ -1147,7 +1250,7 @@ mod tests {
             };
             assert_eq!(
                 ready,
-                !build_status(&vols).volumes_incomplete,
+                !build_status(&vols, &defaults()).volumes_incomplete,
                 "ready must track the same bar as volumes_incomplete"
             );
         }

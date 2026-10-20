@@ -6,12 +6,30 @@ use super::wide;
 use crate::core::text::Numbers;
 use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Globalization::{
-    DATE_SHORTDATE, GetDateFormatEx, GetLocaleInfoEx, GetNumberFormatEx, GetTimeFormatEx,
+    CP_OEMCP, DATE_SHORTDATE, GetDateFormatEx, GetLocaleInfoEx, GetNumberFormatEx, GetTimeFormatEx,
     GetUserPreferredUILanguages, LOCALE_ILZERO, LOCALE_INEGNUMBER, LOCALE_RETURN_NUMBER,
-    LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND, MUI_LANGUAGE_NAME, NUMBERFMTW,
-    TIME_FORMAT_FLAGS, TIME_NOSECONDS,
+    LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND, MUI_LANGUAGE_NAME,
+    MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar, NUMBERFMTW, TIME_FORMAT_FLAGS,
+    TIME_NOSECONDS,
 };
 use windows::core::{PCWSTR, PWSTR};
+
+/// `bytes` in the console's code page, in which a program such as `net`
+/// writes to a file, as text.
+pub(crate) fn console_text(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    // SAFETY: the first call measures; the second writes at most the
+    // buffer's length.
+    unsafe {
+        let length = MultiByteToWideChar(CP_OEMCP, flags, bytes, None);
+        let mut text = vec![0u16; usize::try_from(length).unwrap_or(0)];
+        let written = MultiByteToWideChar(CP_OEMCP, flags, bytes, Some(&mut text));
+        String::from_utf16_lossy(&text[..usize::try_from(written).unwrap_or(0)])
+    }
+}
 
 /// The user's regional number format, read when created; a change to the
 /// regional format needs a new one.

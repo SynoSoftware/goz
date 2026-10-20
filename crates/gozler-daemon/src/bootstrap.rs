@@ -7,10 +7,12 @@
 //! `gozler-core` interprets them, and neither knows about the other. The daemon
 //! (here) owns the buffers and the loop.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
+use gozler_core::include::VolumeRules;
 use gozler_core::index::VolumeIndex;
 use gozler_core::index::settle::{self, FileLink, FileStat, VolumeReads};
 use gozler_core::layout::{
@@ -115,13 +117,18 @@ pub(crate) fn indexed_filesystem(vol: &VolumeInfo) -> Result<Filesystem, String>
     }
 }
 
-/// Bootstraps every fixed NTFS and ReFS volume once, for `gozlerd scan`. A
-/// volume that fails is logged and left out rather than aborting the whole
-/// run.
+/// Bootstraps every fixed NTFS and ReFS volume once, for `gozlerd scan`, as
+/// the saved Include settings say. A volume that fails is logged and left out
+/// rather than aborting the whole run.
 pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
-    let targets: Vec<(VolumeInfo, Filesystem)> = enumerate_all()?
+    let include = crate::include::read_saved();
+    let targets: Vec<(VolumeInfo, Filesystem, Arc<VolumeRules>)> = enumerate_all()?
         .into_iter()
-        .filter_map(|v| indexed_filesystem(&v).ok().map(|fs| (v, fs)))
+        .filter_map(|v| {
+            let filesystem = indexed_filesystem(&v).ok()?;
+            let rules = include.rules_for(&v.guid_path);
+            (!rules.leaves_out_volume()).then(|| (v, filesystem, Arc::new(rules)))
+        })
         .collect();
     if targets.is_empty() {
         bail!("no fixed NTFS or ReFS volumes found");
@@ -136,7 +143,7 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
     let results: Vec<Result<BootstrappedVolume>> = std::thread::scope(|s| {
         let threads: Vec<_> = targets
             .iter()
-            .map(|(vol, filesystem)| {
+            .map(|(vol, filesystem, rules)| {
                 let label = gozler_core::scope::VolumeMounts {
                     mounts: &vol.mounts,
                     guid: &vol.guid_path,
@@ -144,7 +151,7 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
                 .display_prefix();
                 std::thread::Builder::new()
                     .name(format!("gozler-bootstrap-{label}"))
-                    .spawn_scoped(s, move || bootstrap_volume(vol, *filesystem))
+                    .spawn_scoped(s, move || bootstrap_volume(vol, *filesystem, rules))
             })
             .collect();
         threads
@@ -159,7 +166,7 @@ pub(crate) fn scan_all() -> Result<Vec<BootstrappedVolume>> {
     });
 
     let mut ok = Vec::new();
-    for ((vol, _), result) in targets.iter().zip(results) {
+    for ((vol, ..), result) in targets.iter().zip(results) {
         match result {
             Ok(scan) => ok.push(scan),
             Err(e) => tracing::error!(
@@ -190,14 +197,18 @@ pub(crate) fn open_volume(guid_path: &str) -> Result<VolumeHandle> {
 }
 
 /// Bootstraps a single volume: journal setup, then [`build_index`].
-fn bootstrap_volume(vol: &VolumeInfo, filesystem: Filesystem) -> Result<BootstrappedVolume> {
+fn bootstrap_volume(
+    vol: &VolumeInfo,
+    filesystem: Filesystem,
+    rules: &Arc<VolumeRules>,
+) -> Result<BootstrappedVolume> {
     let handle = open_volume(&vol.guid_path)?;
 
     // The journal is only needed for the live tail; a one-shot scan reads the
     // volume directly, so an unavailable journal is not fatal here.
     let journal = ensure_journal(&handle, &vol.guid_path);
     // First-time bootstrap passes no stop flag, so the rebuild can never abort.
-    let built = build_index(&handle, &vol.guid_path, filesystem, None)?
+    let built = build_index(&handle, &vol.guid_path, filesystem, rules, None)?
         .expect("build_index cannot abort without a stop flag");
 
     Ok(BootstrappedVolume {
@@ -249,10 +260,14 @@ enum LayoutPass {
 /// ReFS answers neither request, so its build walks every folder from the
 /// root with [`settle::walk_folders`], which gives names, sizes and dates in
 /// one pass.
+///
+/// Either build reads the whole volume and then removes what `rules` leave
+/// out, because a folder's path is known only once every folder is read.
 pub(crate) fn build_index(
     handle: &VolumeHandle,
     guid_path: &str,
     filesystem: Filesystem,
+    rules: &Arc<VolumeRules>,
     stop: Option<&AtomicBool>,
 ) -> Result<Option<BuiltIndex>> {
     let cancelled = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
@@ -276,6 +291,7 @@ pub(crate) fn build_index(
         if !walked {
             return Ok(None);
         }
+        index.apply_rules(rules.clone());
         index.compute_folder_sizes();
         index.optimize_storage();
         return Ok(Some(BuiltIndex {
@@ -322,6 +338,7 @@ pub(crate) fn build_index(
         }
     };
 
+    index.apply_rules(rules.clone());
     // A stopped pass left some files' sizes unknown, so a folder's sum would
     // look exact while it was short: folder sizes stay unknown then.
     if pass == LayoutPass::Complete {

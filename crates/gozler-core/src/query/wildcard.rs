@@ -5,15 +5,16 @@ use smallvec::SmallVec;
 /// Scratch buffer of decoded code points, reused across candidates so a
 /// wildcard scan doesn't heap-allocate per candidate. NTFS names are <= 255
 /// code points, so the inline capacity never spills.
-pub(super) type CodePointBuf = SmallVec<[u32; 256]>;
+pub(crate) type CodePointBuf = SmallVec<[u32; 256]>;
 
 /// A compiled wildcard pattern, matched against a whole name or, for a path
 /// wildcard, a whole full path.
-pub(super) struct Wildcard {
+#[derive(Debug)]
+pub(crate) struct Wildcard {
     tokens: Vec<GlobTok>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum GlobTok {
     Lit(u32),
     /// `?`: exactly one code point.
@@ -25,7 +26,7 @@ enum GlobTok {
 impl Wildcard {
     /// Compiles a pattern whose bytes are already folded iff the query is
     /// case-insensitive.
-    pub(super) fn compile(pattern: &[u8]) -> Self {
+    pub(crate) fn compile(pattern: &[u8]) -> Self {
         let mut tokens = Vec::new();
         for cp in crate::wtf8::CodePoints::new(pattern) {
             match cp {
@@ -46,7 +47,7 @@ impl Wildcard {
     /// reusable `buf` (cleared first) instead of allocating one per candidate.
     /// NTFS names are <= 255 code points, so a name never spills the inline
     /// capacity; a full path can, and the spilled buffer is then reused.
-    pub(super) fn matches_into(&self, name: &[u8], buf: &mut CodePointBuf) -> bool {
+    pub(crate) fn matches_into(&self, name: &[u8], buf: &mut CodePointBuf) -> bool {
         buf.clear();
         buf.extend(crate::wtf8::CodePoints::new(name));
         glob_match(&self.tokens, buf.as_slice(), |_, _| {})

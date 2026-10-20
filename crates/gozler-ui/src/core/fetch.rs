@@ -4,8 +4,12 @@
 //! [`Fetch`] on its own thread and answers with a [`Fetched`].
 
 use gozler_client::NotRunning;
+use gozler_core::include::IncludeSettings;
 use gozler_core::output::ResultFormat;
-use gozler_core::proto::{DaemonStatus, QueryTotals, ResultItem, Returns, Rows, SearchRequest};
+use gozler_core::proto::{
+    DaemonStatus, PROTO_VERSION, QueryTotals, ResultItem, Returns, Rows, SearchRequest,
+};
+use gozler_core::query::MatchSums;
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
 use std::io;
@@ -25,17 +29,25 @@ pub(crate) enum Purpose {
     Selection,
     Status,
     Export,
-    /// Settings' search for a program, which Use Total Commander sends.
+    /// Settings' search for a program, which the Use Total Commander link
+    /// sends.
     Program,
+    /// Settings > Include's preview count.
+    IncludeCount,
+    /// Telling the service that the Include settings are saved; apart from
+    /// the count, so a new count never cancels it.
+    SettingsSaved,
 }
 
 impl Purpose {
-    pub(crate) const ALL: [Purpose; 5] = [
+    pub(crate) const ALL: [Purpose; 7] = [
         Purpose::Results,
         Purpose::Selection,
         Purpose::Status,
         Purpose::Export,
         Purpose::Program,
+        Purpose::IncludeCount,
+        Purpose::SettingsSaved,
     ];
 }
 
@@ -65,6 +77,10 @@ pub(crate) enum Ask {
     /// The rows of a search for a program, answered with
     /// [`Outcome::Rows`].
     Program(ChunkAsk),
+    /// How many entries the index would keep under the settings.
+    CountIncluded(IncludeSettings),
+    /// The Include settings are saved, so the service applies them.
+    SettingsSaved,
 }
 
 /// The rows of `search` in the order `sort` from the position `start`, at
@@ -89,6 +105,10 @@ impl ChunkAsk {
             // Four bytes a row, so showing the Attributes column needs no
             // second request.
             want_attributes: true,
+            // The status bar shows them beside the total. The service sums
+            // every match for them, so only the first chunk asks, and the
+            // later chunks keep its sums.
+            want_sums: self.start == 0,
         }))
     }
 }
@@ -142,6 +162,7 @@ impl ExportAsk {
             want_size: true,
             want_mtime: true,
             want_attributes: self.want_attributes,
+            want_sums: false,
         }))
     }
 }
@@ -154,6 +175,8 @@ impl Fetch {
             Ask::Export(_) => Purpose::Export,
             Ask::Status => Purpose::Status,
             Ask::Program(_) => Purpose::Program,
+            Ask::CountIncluded(_) => Purpose::IncludeCount,
+            Ask::SettingsSaved => Purpose::SettingsSaved,
         }
     }
 }
@@ -173,6 +196,10 @@ pub(crate) enum Outcome {
     Selection(SelectionRows),
     /// The reply to [`Ask::FolderSize`].
     Totals(QueryTotals),
+    /// The reply to [`Ask::CountIncluded`].
+    IncludedCount(u64),
+    /// The reply to [`Ask::SettingsSaved`].
+    SettingsApplied,
     Status(DaemonStatus),
     /// The rows an export has written so far.
     ExportProgress {
@@ -225,6 +252,9 @@ pub(crate) struct Chunk {
     pub(crate) volumes_incomplete: bool,
     /// Some sizes and dates in scope are unknown, as a page says.
     pub(crate) metadata_pending: bool,
+    /// Every match's files and folders and their sizes; `None` from a
+    /// service that does not send them.
+    pub(crate) sums: Option<MatchSums>,
 }
 
 /// The failures the window shows differently (DESIGN.md: Daemon failures);
@@ -238,10 +268,10 @@ pub(crate) enum DaemonFailure {
     NotReady,
     /// The pipe's server is not the elevated gozler service.
     NotGozler,
-    /// The service is older than the window; `update_from` is the folder of
-    /// a gozlerd.exe beside the window that can replace it.
+    /// The service is older than the window. `local` is the gozlerd.exe
+    /// beside the window, when it serves the window's protocol.
     TooOld {
-        update_from: Option<PathBuf>,
+        local: Option<LocalService>,
     },
     /// The service refused the request; `detail` is its English text.
     Refused {
@@ -250,10 +280,47 @@ pub(crate) enum DaemonFailure {
     Lost,
 }
 
+/// A gozlerd.exe that serves this window's protocol, which Use local puts
+/// in place of an older service (DESIGN.md: Service fixes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalService {
+    pub(crate) program: PathBuf,
+    /// Its version, as gozlerd's `protocol` command prints it.
+    pub(crate) version: String,
+    /// The version of the program the service runs, such as `0.3.0`, when
+    /// it could be read.
+    pub(crate) installed: Option<String>,
+}
+
+impl LocalService {
+    /// The gozlerd.exe at `program`, from what its hidden `protocol`
+    /// command printed: the oldest and newest protocol versions it serves,
+    /// and its version. `None` when it does not serve this window's
+    /// protocol, or printed something else.
+    pub(crate) fn from_protocol(
+        program: PathBuf,
+        printed: &str,
+        installed: Option<String>,
+    ) -> Option<LocalService> {
+        // The version may hold a space, before a local build's time.
+        let mut words = printed.trim().splitn(3, ' ');
+        let oldest: u16 = words.next()?.parse().ok()?;
+        let newest: u16 = words.next()?.parse().ok()?;
+        let version = words.next()?.to_owned();
+        (oldest..=newest)
+            .contains(&PROTO_VERSION)
+            .then_some(LocalService {
+                program,
+                version,
+                installed,
+            })
+    }
+}
+
 impl DaemonFailure {
     /// Whether the failure ends by itself, so the window asks for status
-    /// until the service answers. An older service ends when its update
-    /// runs; a refused request and a failed owner check fail the same way
+    /// until the service answers. An older service ends when the setup
+    /// replaces it; a refused request and a failed owner check fail the same way
     /// again.
     pub(crate) fn recovers(&self) -> bool {
         match self {
@@ -263,5 +330,30 @@ impl DaemonFailure {
             | DaemonFailure::Lost => true,
             DaemonFailure::NotGozler | DaemonFailure::Refused { .. } => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Use local over a service that refuses the window again would stop
+    /// searching for nothing, so only a gozlerd.exe whose range holds the
+    /// window's protocol is offered.
+    #[test]
+    fn only_a_gozlerd_that_serves_the_window_is_local() {
+        let local = |printed: &str| {
+            LocalService::from_protocol(PathBuf::from("gozlerd.exe"), printed, None)
+        };
+        assert_eq!(
+            local(&format!("1 {PROTO_VERSION} 0.5.0\r\n")),
+            Some(LocalService {
+                program: PathBuf::from("gozlerd.exe"),
+                version: "0.5.0".into(),
+                installed: None,
+            })
+        );
+        assert_eq!(local(&format!("1 {} 0.4.0", PROTO_VERSION - 1)), None);
+        assert_eq!(local(&format!("{} 99 0.9.0", PROTO_VERSION + 1)), None);
     }
 }

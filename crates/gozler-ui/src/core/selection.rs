@@ -12,6 +12,11 @@ use std::ops::Range;
 /// (DESIGN.md: Commands).
 pub(crate) const OPEN_LIMIT: usize = 15;
 
+/// A drag holds at most this many entries, because the shell reads each
+/// one's entry from the disk before the drag starts, about 1.5 ms each on a
+/// slow laptop, and the window waits for it (DESIGN.md: Dragging).
+pub(crate) const DRAG_LIMIT: usize = 1_000;
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum Selection {
     None,
@@ -70,7 +75,7 @@ impl Selection {
     }
 }
 
-/// What status part 2 and the inspector sum from the selected entries
+/// What the status bar and the inspector sum from the selected entries
 /// (DESIGN.md: Status bar, Inspector pane).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Sums {

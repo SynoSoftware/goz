@@ -21,7 +21,8 @@ use crate::index::{EntryView, VolumeIndex};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::ops::Range;
 
@@ -54,6 +55,101 @@ pub struct QueryOutcome {
     /// the CALLER must order the hits with [`super::order_hits`].
     /// Always `true` from [`run_query`]; only [`run_query_deferrable`] varies.
     pub sorted: bool,
+    /// Every match's [`MatchSums`], when the caller asked for them.
+    pub sums: Option<MatchSums>,
+}
+
+/// How many matches are files and how many are folders, and the space each
+/// kind takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchSums {
+    pub files: u64,
+    /// The matching files' summed size in bytes, each name of a hard-linked
+    /// file counted; `None` when a file's size is unknown, or when the sum
+    /// passes `u64::MAX`, which only a corrupt size makes it do.
+    pub file_bytes: Option<u64>,
+    pub folders: u64,
+    /// The matching folders' summed size in bytes, without a folder that
+    /// another matching folder holds, so it is the space they take; `None`
+    /// as for [`Self::file_bytes`].
+    pub folder_bytes: Option<u64>,
+}
+
+impl Default for MatchSums {
+    /// No match, whose sizes are known: nothing.
+    fn default() -> Self {
+        Self {
+            files: 0,
+            file_bytes: Some(0),
+            folders: 0,
+            folder_bytes: Some(0),
+        }
+    }
+}
+
+impl MatchSums {
+    /// Adds `other`, the sums of another volume's matches.
+    pub fn add(&mut self, other: MatchSums) {
+        self.files += other.files;
+        self.folders += other.folders;
+        self.file_bytes = plus(self.file_bytes, other.file_bytes);
+        self.folder_bytes = plus(self.folder_bytes, other.folder_bytes);
+    }
+
+    /// The counts, with both sizes unknown.
+    pub fn without_sizes(self) -> MatchSums {
+        MatchSums {
+            file_bytes: None,
+            folder_bytes: None,
+            ..self
+        }
+    }
+}
+
+/// `a + b`, unknown when either is or the sum overflows.
+fn plus(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    a?.checked_add(b?)
+}
+
+/// The [`MatchSums`] of `candidates`. A folder inside another matching
+/// folder adds to the count only, because its size is in that folder's.
+fn match_sums(index: &VolumeIndex, candidates: &[Candidate]) -> MatchSums {
+    let folders: FxHashSet<EntryIdx> = candidates
+        .iter()
+        .map(|c| c.idx)
+        .filter(|&idx| index.entry(idx).is_dir())
+        .collect();
+    // A loop in the parent links, which a move can make until the next
+    // journal record breaks it, never reaches the root; the walk stops after
+    // more folders than a Windows path can hold.
+    const MAX_DEPTH: usize = 1 << 15;
+    let held = |folder: EntryIdx| {
+        let mut parent = index.entry(folder).parent();
+        for _ in 0..MAX_DEPTH {
+            if parent == crate::types::NIL || parent == index.root() {
+                return false;
+            }
+            if folders.contains(&parent) {
+                return true;
+            }
+            parent = index.entry(parent).parent();
+        }
+        false
+    };
+    let mut sums = MatchSums::default();
+    for c in candidates {
+        let entry = index.entry(c.idx);
+        if entry.is_dir() {
+            sums.folders += 1;
+            if !held(c.idx) {
+                sums.folder_bytes = plus(sums.folder_bytes, entry.size());
+            }
+        } else {
+            sums.files += 1;
+            sums.file_bytes = plus(sums.file_bytes, entry.size());
+        }
+    }
+    sums
 }
 
 /// The number of matches and the summed size of the matching files.
@@ -710,7 +806,7 @@ pub fn run_query(
     sort: SortSpec,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(index, mount_prefix, query, scope, sort, limit, false)
+    run_query_impl(index, mount_prefix, query, scope, sort, limit, false, false)
 }
 
 /// Like [`run_query`], but allowed to hand back an UNSORTED page when ordering
@@ -735,6 +831,9 @@ pub fn run_query(
 ///
 /// The caller MUST check [`QueryOutcome::sorted`] and pass the hits through
 /// [`super::order_hits`] when it is `false`.
+///
+/// With `sums`, the outcome also holds every match's [`MatchSums`], from the
+/// same scan.
 pub fn run_query_deferrable(
     index: &VolumeIndex,
     mount_prefix: &str,
@@ -742,8 +841,9 @@ pub fn run_query_deferrable(
     scope: Option<EntryIdx>,
     sort: SortSpec,
     limit: Option<u32>,
+    sums: bool,
 ) -> QueryOutcome {
-    run_query_impl(index, mount_prefix, query, scope, sort, limit, true)
+    run_query_impl(index, mount_prefix, query, scope, sort, limit, true, sums)
 }
 
 /// The [`Totals`] of every match of `query` over `index`, with `scope` as in
@@ -877,6 +977,7 @@ fn scan<'q, 'i>(
 /// `allow_defer` lets the executor drop the ordering when the page turns out to
 /// cover every match (see [`run_query_deferrable`]); the reported
 /// [`QueryOutcome::sorted`] says which happened.
+#[allow(clippy::too_many_arguments)]
 fn run_query_impl(
     index: &VolumeIndex,
     mount_prefix: &str,
@@ -885,6 +986,7 @@ fn run_query_impl(
     sort: SortSpec,
     limit: Option<u32>,
     allow_defer: bool,
+    sums: bool,
 ) -> QueryOutcome {
     let Scan {
         mut candidates,
@@ -892,6 +994,7 @@ fn run_query_impl(
         ..
     } = scan(index, mount_prefix, query, scope);
     let total = candidates.len() as u64;
+    let sums = sums.then(|| match_sums(index, &candidates));
 
     let end = match limit {
         Some(n) => (n as usize).min(candidates.len()),
@@ -960,6 +1063,7 @@ fn run_query_impl(
         total,
         hits,
         sorted,
+        sums,
     }
 }
 
@@ -1604,7 +1708,7 @@ mod tests {
         assert!(total > 1, "fixture must have several matches to slice");
 
         for limit in [None, Some(u32::MAX), Some(total), Some(total + 1)] {
-            let out = run_query_deferrable(&idx, "", &parsed, None, sort, limit);
+            let out = run_query_deferrable(&idx, "", &parsed, None, sort, limit, false);
             assert!(
                 !out.sorted,
                 "limit {limit:?} covers all {total} matches; ordering must be deferred off-lock"
@@ -1618,7 +1722,7 @@ mod tests {
 
         // A limit that genuinely slices still orders here, where the index is
         // available to pick which matches survive.
-        let sliced = run_query_deferrable(&idx, "", &parsed, None, sort, Some(total - 1));
+        let sliced = run_query_deferrable(&idx, "", &parsed, None, sort, Some(total - 1), false);
         assert!(sliced.sorted, "a real slice must still order in-lock");
         assert_eq!(sliced.hits.len(), total as usize - 1);
 
@@ -2342,7 +2446,7 @@ mod tests {
         for query in ["qx7zv", ""] {
             let parsed = compiled(query);
             for sort in all_sorts() {
-                let deferred = run_query_deferrable(&idx, r"C:\", &parsed, None, sort, None);
+                let deferred = run_query_deferrable(&idx, r"C:\", &parsed, None, sort, None, false);
                 let unlimited = order_hits(
                     sort,
                     vec![VolumeRun {
@@ -2378,7 +2482,8 @@ mod tests {
                 let runs = volumes
                     .iter()
                     .map(|(prefix, idx)| {
-                        let out = run_query_deferrable(idx, prefix, &parsed, None, sort, limit);
+                        let out =
+                            run_query_deferrable(idx, prefix, &parsed, None, sort, limit, false);
                         VolumeRun {
                             mount_prefix: prefix,
                             hits: out.hits,

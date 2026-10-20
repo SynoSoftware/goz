@@ -205,6 +205,11 @@ impl PackedAttributes {
     pub(crate) fn contains(self, other: PackedAttributes) -> bool {
         self.0 & other.0 == other.0
     }
+
+    /// Whether an attribute of `other` is in `self`.
+    pub(crate) fn intersects(self, other: PackedAttributes) -> bool {
+        self.0 & other.0 != 0
+    }
 }
 
 #[cfg(test)]

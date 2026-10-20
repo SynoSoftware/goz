@@ -35,12 +35,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use gozler_core::include::VolumeRules;
 use gozler_core::index::settle::SharedIndex;
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::VolumePhase;
 use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard,
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, Mutex, RwLock, RwLockReadGuard,
     RwLockUpgradableReadGuard, RwLockWriteGuard,
 };
 
@@ -54,6 +55,14 @@ pub(crate) struct VolumeState {
     pub filesystem: Filesystem,
     indexed: RwLock<Indexed>,
     phase: RwLock<VolumePhase>,
+    /// The Include rules a build of the volume applies, and whether they
+    /// changed since the tail last took them. Never held with another lock.
+    rules: Mutex<Rules>,
+}
+
+struct Rules {
+    rules: Arc<VolumeRules>,
+    changed: bool,
 }
 
 /// An index and the facts of the build that made it, installed together.
@@ -132,7 +141,12 @@ impl VolumeState {
     /// The first build replaces the index with one rooted at the volume's own
     /// root. Until then, `--status` reports the NTFS root's map kind, even on
     /// ReFS.
-    pub(crate) fn new(guid: String, mounts: Vec<String>, filesystem: Filesystem) -> Self {
+    pub(crate) fn new(
+        guid: String,
+        mounts: Vec<String>,
+        filesystem: Filesystem,
+        rules: Arc<VolumeRules>,
+    ) -> Self {
         Self {
             guid,
             mounts,
@@ -144,7 +158,35 @@ impl VolumeState {
                 built: false,
             }),
             phase: RwLock::new(VolumePhase::Bootstrapping),
+            rules: Mutex::new(Rules {
+                rules,
+                changed: false,
+            }),
         }
+    }
+
+    /// The Include rules that a build of the volume applies.
+    pub(crate) fn rules(&self) -> Arc<VolumeRules> {
+        self.rules.lock().rules.clone()
+    }
+
+    /// Gives the volume new Include rules, which its tail applies at its next
+    /// turn. Rules that keep and leave out the same entries as the current
+    /// ones change nothing, so the tail does not check the index for them.
+    pub(crate) fn set_rules(&self, rules: Arc<VolumeRules>) {
+        let mut slot = self.rules.lock();
+        if rules.adds_to(&slot.rules) || slot.rules.adds_to(&rules) {
+            *slot = Rules {
+                rules,
+                changed: true,
+            };
+        }
+    }
+
+    /// The rules set since the last call, for the tail to apply.
+    pub(crate) fn take_new_rules(&self) -> Option<Arc<VolumeRules>> {
+        let mut slot = self.rules.lock();
+        std::mem::take(&mut slot.changed).then(|| slot.rules.clone())
     }
 
     /// Where the volume is mounted.
@@ -286,6 +328,10 @@ impl VolumeState {
             filesystem: Filesystem::Ntfs,
             indexed: RwLock::new(indexed),
             phase: RwLock::new(phase),
+            rules: Mutex::new(Rules {
+                rules: Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
+                changed: false,
+            }),
         }
     }
 }
@@ -410,6 +456,7 @@ mod tests {
     use gozler_core::types::{Frn, VolumePhase};
     use gozler_core::usn::record::{ParsedUsnRecord, USN_REASON_FILE_CREATE};
     use gozler_winfs::JournalInfo;
+    use std::sync::Arc;
 
     /// A finished build of an index holding the root and `files` files.
     fn built(files: u128, metadata_pending: bool) -> BuiltIndex {
@@ -441,6 +488,7 @@ mod tests {
             r"\\?\Volume{00000000-0000-0000-0000-000000000000}\".into(),
             vec![r"C:\".into()],
             Filesystem::Ntfs,
+            Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
         );
         let first = volume.begin_build();
         assert!(first.is_first());
@@ -539,6 +587,7 @@ mod tests {
             r"\\?\Volume{00000000-0000-0000-0000-000000000000}\".into(),
             vec![r"C:\".into()],
             Filesystem::Ntfs,
+            Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
         );
         let _ = volume.begin_build();
         volume.fail("x".into());

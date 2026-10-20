@@ -231,6 +231,7 @@ pub fn settle_batch<R: VolumeReads>(
             for file in &listed {
                 i.insert_listed(file);
             }
+            i.recheck_listed(&needs_walk);
         });
         settled.missed_folders = needs_walk.len();
         settled.missed_entries = listed.len();
@@ -282,6 +283,9 @@ pub fn settle_batch<R: VolumeReads>(
         let targets = index.read(|i| {
             links
                 .into_iter()
+                // A name in a folder the Include rules left out is no name
+                // the index keeps.
+                .filter(|link| !i.is_left_out(link.folder))
                 .map(|link| {
                     let parent = i.head_of(link.folder)?;
                     Some(LinkTarget {
@@ -484,6 +488,58 @@ mod tests {
     /// A missed folder that cannot be listed fails the settle, so the tail
     /// rescans. Treated like a gone folder, its contents would be lost for
     /// good, because the journal records no change to them.
+    /// A folder that moves out of a folder the Include rules left out is
+    /// listed, and the walk's names that the rules leave out stay out.
+    #[test]
+    fn a_folder_moved_out_of_a_left_out_folder_is_listed_by_the_rules() {
+        let (windows, users, old, file, modules, js) =
+            (id(100), id(101), id(102), id(200), id(103), id(201));
+        let index = index_of(&[
+            (windows, ROOT, "Windows", true),
+            (users, ROOT, "Users", true),
+            (old, windows, "Old", true),
+            (file, old, "a.txt", false),
+            (modules, old, "node_modules", true),
+            (js, modules, "m.js", false),
+        ]);
+        let settings = crate::include::IncludeSettings {
+            excluded_names: "node_modules".into(),
+            drives: vec![crate::include::DriveChoice {
+                volume: "V".into(),
+                name: String::new(),
+                indexed: true,
+                folders: vec![crate::include::FolderChoice {
+                    path: "Windows".into(),
+                    indexed: false,
+                }],
+            }],
+            ..crate::include::IncludeSettings::default()
+        };
+        index
+            .borrow_mut()
+            .apply_rules(std::sync::Arc::new(settings.rules_for("V")));
+        let mut reads = Fake::default();
+        reads.listings.insert(
+            old,
+            Ok(vec![
+                listed(file, old, "a.txt", false),
+                listed(modules, old, "node_modules", true),
+            ]),
+        );
+        reads
+            .listings
+            .insert(modules, Ok(vec![listed(js, modules, "m.js", false)]));
+        let moved = record(old, users, "Old", true, USN_REASON_RENAME_NEW_NAME);
+
+        settle(&index, &mut reads, &[moved], false).expect("settles");
+
+        assert_eq!(
+            paths(&index),
+            set(&["Users", r"Users\Old", r"Users\Old\a.txt"])
+        );
+        assert_eq!(index.borrow().stats().placeholders_created, 0);
+    }
+
     #[test]
     fn a_folder_that_cannot_be_listed_fails_the_settle() {
         let m = id(100);

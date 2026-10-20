@@ -9,7 +9,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::attributes::Attributes;
-use crate::query::ParsedQuery;
+use crate::include::IncludeSettings;
+use crate::query::{MatchSums, ParsedQuery};
 use crate::scope::VolumeMounts;
 use crate::types::{SortSpec, VolumePhase};
 
@@ -21,7 +22,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// meet, rather than agreeing on a version one side cannot actually speak.
 /// The client asks for this version alone, so a daemon older than the client
 /// refuses it.
-pub const PROTO_VERSION: u16 = 7;
+pub const PROTO_VERSION: u16 = 8;
 
 /// The oldest protocol version a daemon of this build serves: protocol 1's
 /// clients send [`Request::Query`] without a `Hello`.
@@ -66,6 +67,14 @@ pub enum Request {
     Status,
     /// From protocol 2: a search whose query the client parsed.
     Search(SearchRequest),
+    /// From protocol 8: an administrator saved the Include settings, so the
+    /// daemon reads them again and applies them when they changed. It reads
+    /// them from where only an administrator can write, so any client may
+    /// send this.
+    SettingsSaved,
+    /// From protocol 8: how many entries the index would keep under these
+    /// Include settings. Changes nothing.
+    CountIncluded(IncludeSettings),
 }
 
 /// Parameters of one protocol 1 search, which the daemon still serves.
@@ -127,6 +136,10 @@ pub struct Rows {
     /// each item is laid out as an older client reads it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_attributes: bool,
+    /// Fill [`QueryResults::sums`]. An older daemon ignores it and sends
+    /// none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_sums: bool,
 }
 
 /// A server→client message.
@@ -148,6 +161,15 @@ pub enum Response {
     Status(DaemonStatus),
     /// Reply to a [`Returns::Totals`] search.
     Totals(QueryTotals),
+    /// Reply to [`Request::SettingsSaved`]: the daemon applies the saved
+    /// settings.
+    SettingsApplied,
+    /// Reply to [`Request::CountIncluded`].
+    IncludedCount {
+        /// The entries every indexed volume would keep. A volume that the
+        /// settings add is not indexed yet, so it adds none.
+        entries: u64,
+    },
     /// The request failed.
     Error {
         /// Machine-readable failure class.
@@ -174,13 +196,18 @@ pub struct QueryResults {
     pub metadata_pending: bool,
     /// Index generation the results were computed against.
     pub generation: u64,
+    /// Every match's files and folders and their sizes, when the request
+    /// asked for them with [`Rows::want_sums`] and the daemon knows them;
+    /// both sizes are unknown while `metadata_pending` holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sums: Option<MatchSums>,
 }
 
 impl QueryResults {
     /// Folds `page`, the next page of the same result set, into this one, so
     /// every reader of a paged answer agrees on what the pages say together:
-    /// the rows join, `total` and `generation` are the latest page's, and a
-    /// flag holds when any page sets it.
+    /// the rows join, `total`, `generation` and `sums` are the latest page's,
+    /// and a flag holds when any page sets it.
     pub fn add_page(&mut self, page: QueryResults) {
         self.total = page.total;
         self.items.extend(page.items);
@@ -188,6 +215,7 @@ impl QueryResults {
         self.volumes_incomplete |= page.volumes_incomplete;
         self.metadata_pending |= page.metadata_pending;
         self.generation = page.generation;
+        self.sums = page.sums;
     }
 }
 
@@ -246,6 +274,33 @@ pub struct DaemonStatus {
     /// process holds regardless of what is currently resident. 0 = unavailable.
     #[serde(default)]
     pub process_private_bytes: u64,
+    /// The Include settings the daemon applies; `None` from a daemon before
+    /// protocol 8.
+    #[serde(default)]
+    pub include: Option<IncludeSettings>,
+    /// The fixed NTFS and ReFS volumes that the Include settings leave out,
+    /// which [`Self::volumes`] does not list.
+    #[serde(default)]
+    pub left_out: Vec<LeftOutVolume>,
+}
+
+/// A volume that the Include settings leave out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LeftOutVolume {
+    /// Stable volume GUID path identifier.
+    pub guid: String,
+    /// Mount points (drive letters / folder mounts) of the volume.
+    pub mounts: Vec<String>,
+}
+
+impl LeftOutVolume {
+    /// Where the volume is mounted.
+    pub fn mounted(&self) -> VolumeMounts<'_> {
+        VolumeMounts {
+            mounts: &self.mounts,
+            guid: &self.guid,
+        }
+    }
 }
 
 /// Heap bytes of one index component on the wire: live bytes and allocated
@@ -474,6 +529,7 @@ mod tests {
                 want_size: true,
                 want_mtime: false,
                 want_attributes: false,
+                want_sums: false,
             }),
         });
         let search_json = concat!(
@@ -618,6 +674,7 @@ mod tests {
                 want_size: false,
                 want_mtime: true,
                 want_attributes: false,
+                want_sums: false,
             }),
         });
         let json = concat!(
@@ -654,6 +711,7 @@ mod tests {
                 want_size: false,
                 want_mtime: false,
                 want_attributes: true,
+                want_sums: false,
             }),
         });
         let json = concat!(
@@ -728,6 +786,12 @@ mod tests {
             volumes_incomplete: true,
             metadata_pending: true,
             generation: 42,
+            sums: Some(MatchSums {
+                files: 3,
+                file_bytes: Some(7),
+                folders: 1,
+                folder_bytes: None,
+            }),
         }));
         // Empty page.
         rt_response(&Response::Results(QueryResults {
@@ -737,6 +801,7 @@ mod tests {
             volumes_incomplete: false,
             metadata_pending: false,
             generation: 0,
+            sums: None,
         }));
     }
 
@@ -781,6 +846,11 @@ mod tests {
             volumes_incomplete: true,
             process_working_set: 123_456_789,
             process_private_bytes: 987_654_321,
+            include: Some(crate::include::IncludeSettings::default()),
+            left_out: vec![LeftOutVolume {
+                guid: r"\\?\Volume{d}\".into(),
+                mounts: vec![r"D:\".into()],
+            }],
         }));
     }
 

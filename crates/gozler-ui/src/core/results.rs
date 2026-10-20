@@ -5,13 +5,14 @@
 //! names the rows the person sees even while the typed text has already
 //! changed.
 
-use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation, SelectionAsk};
-use gozler_client::{ClientError, Repair};
+use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation, LocalService, SelectionAsk};
+use gozler_client::Repair;
 use gozler_core::proto::ResultItem;
-use gozler_core::query::{MatchedParts, QueryError};
+use gozler_core::query::{MatchSums, MatchedParts, QueryError};
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
 use std::ops::Range;
+use std::path::PathBuf;
 
 /// The list reaches the first 100,000 rows of a search (DESIGN.md: Searching).
 pub(crate) const LIST_LIMIT: u64 = 100_000;
@@ -52,6 +53,12 @@ pub(crate) enum ListMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Fix {
     Repair(Repair),
+    /// Copies the gozlerd.exe beside the window over the program of a
+    /// service older than the window, which keeps its path.
+    UseLocal(LocalService),
+    /// Downloads the latest release's setup over a service older than the
+    /// window. A newer release's status text runs it too.
+    Update,
     /// Opens Services, where the person sees why the service is not
     /// running when Windows did not tell gozler.
     OpenServices,
@@ -78,40 +85,101 @@ impl ListButton {
         }
     }
 
-    /// Whether the button runs its fix as administrator, so it shows the
-    /// administrator shield, as Windows' buttons that ask for permission do.
+    /// Whether the button runs its fix as administrator
+    /// ([`Fix::needs_administrator`]).
     pub(crate) fn needs_administrator(&self) -> bool {
-        matches!(self, ListButton::Fix(Fix::Repair(repair)) if repair.commands().is_some())
+        matches!(self, ListButton::Fix(fix) if fix.needs_administrator())
     }
 }
 
 impl ListMessage {
-    pub(crate) fn fix(&self) -> Option<Fix> {
+    /// The message's fixes, in the order their buttons show.
+    pub(crate) fn fixes(&self) -> Vec<Fix> {
         match self {
             ListMessage::Parse(_) | ListMessage::MissingFolder(_) | ListMessage::TypeToSearch => {
-                None
+                Vec::new()
             }
-            ListMessage::Failure(failure) => match failure {
-                DaemonFailure::NotRunning(why) => {
-                    Some(why.repair().map_or(Fix::OpenServices, Fix::Repair))
-                }
-                DaemonFailure::TooOld { update_from } => ClientError::TooOld {
-                    update_from: update_from.clone(),
-                }
-                .repair()
-                .map(Fix::Repair),
-                // The owner check is a security check, whose fix is not the
-                // window's; the others end by themselves or by a new search.
-                DaemonFailure::NotReady
-                | DaemonFailure::NotGozler
-                | DaemonFailure::Refused { .. }
-                | DaemonFailure::Lost => None,
-            },
+            ListMessage::Failure(failure) => [Fix::use_local(failure), Fix::of(failure)]
+                .into_iter()
+                .flatten()
+                .collect(),
         }
     }
 }
 
 impl Fix {
+    /// The fix of `failure`, if the window has one.
+    pub(crate) fn of(failure: &DaemonFailure) -> Option<Fix> {
+        match failure {
+            DaemonFailure::NotRunning(why) => {
+                Some(why.repair().map_or(Fix::OpenServices, Fix::Repair))
+            }
+            DaemonFailure::TooOld { .. } => Some(Fix::Update),
+            // The owner check is a security check, whose fix is not the
+            // window's; the others end by themselves or by a new search.
+            DaemonFailure::NotReady
+            | DaemonFailure::NotGozler
+            | DaemonFailure::Refused { .. }
+            | DaemonFailure::Lost => None,
+        }
+    }
+
+    /// The Use local fix of `failure`, which shows before its other fix:
+    /// a service older than the window, with a gozlerd.exe beside the
+    /// window that serves the window's protocol.
+    pub(crate) fn use_local(failure: &DaemonFailure) -> Option<Fix> {
+        match failure {
+            DaemonFailure::TooOld { local: Some(local) } => Some(Fix::UseLocal(local.clone())),
+            _ => None,
+        }
+    }
+
+    /// Whether the fix runs commands as administrator, so its button shows
+    /// the administrator shield, as Windows' buttons that ask for
+    /// permission do. The setup asks for permission itself.
+    pub(crate) fn needs_administrator(&self) -> bool {
+        match self {
+            Fix::Repair(repair) => repair.commands().is_some(),
+            Fix::UseLocal(_) => true,
+            Fix::Update | Fix::OpenServices => false,
+        }
+    }
+
+    /// The catalogue key of Update's caption while GitHub's latest release
+    /// is older than the window.
+    pub(crate) const DOWNGRADE_LABEL: &'static str = "fix.downgrade";
+
+    /// The fix buttons that show together, each as its catalogue key and
+    /// whether it shows the administrator shield: Use local beside Update
+    /// or Downgrade, and every other fix alone. The list's message and the
+    /// Service group show them, so each group's access keys differ, and the
+    /// buttons are as wide as the widest of them from the start.
+    pub(crate) fn label_groups() -> Vec<Vec<(&'static str, bool)>> {
+        let label = |fix: &Fix| (fix.label(), fix.needs_administrator());
+        let use_local = label(&Fix::UseLocal(LocalService {
+            program: PathBuf::new(),
+            version: String::new(),
+            installed: None,
+        }));
+        let alone = [
+            Fix::Repair(Repair::StartService),
+            Fix::Repair(Repair::TurnOnService),
+            Fix::Repair(Repair::InstallService {
+                folder: PathBuf::new(),
+            }),
+            Fix::Repair(Repair::Download),
+            Fix::OpenServices,
+        ];
+        alone
+            .iter()
+            .map(|fix| vec![label(fix)])
+            .chain([
+                vec![use_local, label(&Fix::Update)],
+                vec![use_local, (Fix::DOWNGRADE_LABEL, false)],
+            ])
+            .collect()
+    }
+
     /// The button's catalogue key.
     pub(crate) fn label(&self) -> &'static str {
         match self {
@@ -119,9 +187,10 @@ impl Fix {
                 Repair::StartService => "fix.start_service",
                 Repair::TurnOnService => "fix.turn_on_service",
                 Repair::InstallService { .. } => "fix.install_service",
-                Repair::UpdateService { .. } => "fix.update_service",
                 Repair::Download => "fix.download",
             },
+            Fix::UseLocal(_) => "fix.use_local",
+            Fix::Update => "fix.update",
             Fix::OpenServices => "fix.open_services",
         }
     }
@@ -131,6 +200,8 @@ pub(crate) struct ShownRows {
     /// The ask of the first chunk; a later chunk changes its start.
     ask: ChunkAsk,
     total: u64,
+    /// As the latest chunk says, with `total`.
+    sums: Option<MatchSums>,
     chunks: Vec<CachedChunk>,
     /// `None` when the query's terms do not compile, which the daemon
     /// refuses before any row is shown.
@@ -202,6 +273,15 @@ impl Results {
         match &self.shown {
             Shown::Rows(rows) => rows.total,
             Shown::Nothing | Shown::Message(_) => 0,
+        }
+    }
+
+    /// Every match's files and folders and their sizes, when the service
+    /// sent them.
+    pub(crate) fn sums(&self) -> Option<MatchSums> {
+        match &self.shown {
+            Shown::Rows(rows) => rows.sums,
+            Shown::Nothing | Shown::Message(_) => None,
         }
     }
 
@@ -399,6 +479,7 @@ impl Results {
                 let mut shown = ShownRows {
                     ask,
                     total: chunk.total,
+                    sums: chunk.sums,
                     chunks: Vec::new(),
                     matched,
                     clock: 0,
@@ -415,6 +496,7 @@ impl Results {
                 };
                 let rows = chunk.start..chunk.start + chunk.rows.len() as u64;
                 shown.total = chunk.total;
+                shown.sums = chunk.sums.or(shown.sums);
                 shown.insert(chunk.start, chunk.rows);
                 RowsChange::Rows {
                     rows,
@@ -482,6 +564,7 @@ pub(crate) mod tests {
             total,
             volumes_incomplete: false,
             metadata_pending: false,
+            sums: None,
         }
     }
 

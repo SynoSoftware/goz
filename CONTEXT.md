@@ -16,9 +16,14 @@ is a proper noun.
 ## Index
 
 **Indexed volume**:
-A fixed NTFS or ReFS volume that is attached. gozler indexes it from when it appears
-until it is removed; removable drives, network drives and other filesystems are
-not indexed.
+A fixed NTFS or ReFS volume that is attached and that the Include settings do
+not leave out. gozler indexes it from when it appears until it is removed;
+removable drives, network drives and other filesystems are not indexed.
+
+**Left out**:
+A drive, folder or name that the Include settings keep out of the index. The
+index holds no entry for it, so no search finds it.
+_Avoid_: excluded, ignored
 
 **Entry**:
 One indexed name: a folder, or one name of a file.

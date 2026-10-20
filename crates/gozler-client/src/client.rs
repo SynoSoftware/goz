@@ -4,9 +4,9 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::windows::io::AsHandle;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use gozler_core::include::IncludeSettings;
 use gozler_core::proto::{
     DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PROTO_VERSION, ProtoError, QueryResults,
     QueryTotals, Request, Response, SERVICE_NAME, SearchRequest, decode_response_frame,
@@ -52,17 +52,6 @@ fn missing_pipe() -> ClientError {
         Err(error) => NotRunning::Unknown(error.to_string()),
     };
     ClientError::NotRunning(why)
-}
-
-/// This program's folder when gozlerd.exe is in it, so a repair can install
-/// that gozlerd.
-fn gozlerd_folder() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let folder = exe.parent()?;
-    folder
-        .join("gozlerd.exe")
-        .is_file()
-        .then(|| folder.to_path_buf())
 }
 
 /// One connection to the daemon, which serves its requests one at a time.
@@ -174,9 +163,7 @@ impl Client {
             Response::Error {
                 code: ProtoError::Unsupported,
                 ..
-            } => Err(ClientError::TooOld {
-                update_from: gozlerd_folder(),
-            }),
+            } => Err(ClientError::TooOld),
             _ => Err(ClientError::Communication(
                 "unexpected reply to hello".into(),
             )),
@@ -237,6 +224,31 @@ impl Client {
             Response::Error { code, message } => Err(ClientError::Refused { code, message }),
             _ => Err(ClientError::Communication(
                 "unexpected reply from daemon".into(),
+            )),
+        }
+    }
+
+    /// Tells the daemon that an administrator saved the Include settings, so
+    /// it reads and applies them.
+    pub fn settings_saved(&mut self) -> Result<(), ClientError> {
+        self.send(&Request::SettingsSaved)?;
+        match self.next_response()? {
+            Response::SettingsApplied => Ok(()),
+            Response::Error { code, message } => Err(ClientError::Refused { code, message }),
+            _ => Err(ClientError::Communication(
+                "unexpected reply to settings saved".into(),
+            )),
+        }
+    }
+
+    /// How many entries the index would keep under `settings`.
+    pub fn count_included(&mut self, settings: IncludeSettings) -> Result<u64, ClientError> {
+        self.send(&Request::CountIncluded(settings))?;
+        match self.next_response()? {
+            Response::IncludedCount { entries } => Ok(entries),
+            Response::Error { code, message } => Err(ClientError::Refused { code, message }),
+            _ => Err(ClientError::Communication(
+                "unexpected reply to count included".into(),
             )),
         }
     }

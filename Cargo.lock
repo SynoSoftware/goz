@@ -497,6 +497,8 @@ dependencies = [
  "embed-resource",
  "gozler-client",
  "gozler-core",
+ "gozler-fileops",
+ "gozler-winfs",
  "jiff",
  "serde",
  "serde_json",

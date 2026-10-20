@@ -758,6 +758,7 @@ foreach ($line in Get-Content (Join-Path $PSScriptRoot 'resources\ids.h')) {
 $SearchBoxId = $ids.IDC_SEARCH; $MatchLabelId = $ids.IDC_MATCH_LABEL; $MatchModeId = $ids.IDC_MATCH_MODE
 $MatchCaseId = $ids.IDC_MATCH_CASE; $MatchPathId = $ids.IDC_MATCH_PATH; $ListId = $ids.IDC_LIST
 $StatusBarId = $ids.IDC_STATUS; $MessageId = $ids.IDC_MESSAGE
+$StatusControlIds = "$($ids.IDC_STATUS_PROGRESS)", "$($ids.IDC_STATUS_CANCEL)"
 
 # The menu item ID of `command`, a CommandId variant, as MenuItem::id gives
 # it: the base of the commands, then the command's place in CommandId::ALL.
@@ -856,14 +857,21 @@ function Open-Custom($process, [string] $id) {
     return $openedByArrow, (Wait-Dialog $process)
 }
 
-# The status bar's part at `index`, from 0. UI Automation sees a new window's
-# controls a moment after the window, so a read is tried again.
+# The status bar's groups. The middle group's progress bar and Cancel are
+# the bar's children beside them.
+function Status-Groups($bar) {
+    [GozlerProbe.Ui]::Children($bar) | Where-Object AutomationId -NotIn $StatusControlIds
+}
+
+# The status bar's group at `index`, from 0: the results and the selection,
+# the job, and the service. UI Automation sees a new window's controls a
+# moment after the window, so a read is tried again.
 function Status-Part($process, [int] $index) {
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     do {
         $children = @([GozlerProbe.Ui]::Children((Window-Element $process)))
         $bar = $children | Where-Object AutomationId -EQ $StatusBarId | Select-Object -First 1
-        if ($bar) { return @([GozlerProbe.Ui]::Children($bar))[$index].Name }
+        if ($bar) { return @(Status-Groups $bar)[$index].Name }
         Start-Sleep -Milliseconds 10
     } until ([DateTime]::UtcNow -gt $deadline)
     throw "UI Automation does not see the status bar among: $($children -join '; ')"
@@ -873,12 +881,37 @@ function Status-Part($process, [int] $index) {
 # Automation leaves out.
 function Message-Text($process) { (Child-ById (Window-Element $process) $MessageId).Name }
 
-# "Searching…" is the one text of status part 1 with an ellipsis, in every
-# language.
-function Is-Searching([string] $text) { $text -like '*…*' }
+# The separator between the results and the selection in the status bar's
+# left group, which every catalogue writes the same way.
+$ViewSeparator = (Caption 'status.view').Replace('{0}', '').Replace('{1}', '')
 
-# Waits until status part 1 shows an answer: a count, or nothing when a
-# message replaces the rows.
+# "Searching…" is the one results text with an ellipsis, in every language,
+# and it comes before the selection, which can have one too.
+function Is-Searching([string] $text) {
+    ($text -split [regex]::Escape($ViewSeparator), 2)[0] -like '*…*'
+}
+
+# The selection's text at the end of the status bar's left group, after the
+# results, or '' while nothing is selected. Both texts can hold the
+# separator, so the shortest end of the group that is a whole selection
+# text is the selection.
+function Status-Selection($process) {
+    $text = "$(Status-Part $process 0)"
+    $separator = $ViewSeparator
+    $patterns = (Caption-Pattern 'status.selected'), (Caption-Pattern 'status.selected_only')
+    $ends = @(0) + @([regex]::Matches($text, [regex]::Escape($separator)) | ForEach-Object { $_.Index + $_.Length })
+    [array]::Reverse($ends)
+    foreach ($end in $ends) {
+        $selection = $text.Substring($end)
+        if ($selection -eq (Caption 'status.reading') -or ($patterns | Where-Object { $selection -match $_ })) {
+            return $selection
+        }
+    }
+    ''
+}
+
+# Waits until the status bar's left group shows an answer: a count, or
+# nothing when a message replaces the rows.
 function Wait-Answer($process, [int] $seconds = 30) {
     $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
     while ($true) {
@@ -888,13 +921,13 @@ function Wait-Answer($process, [int] $seconds = 30) {
     }
 }
 
-# Runs `change`, which starts a search, and returns status part 1 once that
-# search has answered. The search can start later, such as 150 ms after the
-# last typed change, so the old answer counts until part 1 has said
-# Searching… or changed. A change that starts no search, such as typing the
-# text already shown, changes nothing, and the wait for it ends after 2
-# seconds. Part 1 is read with one message to the status bar, which is fast
-# enough to see a search start.
+# Runs `change`, which starts a search, and returns the status bar's left
+# group once that search has answered. The search can start later, such as
+# 150 ms after the last typed change, so the old answer counts until the
+# left group has said Searching… or changed. A change that starts no
+# search, such as typing the text already shown, changes nothing, and the
+# wait for it ends after 2 seconds. The left group is read with one message
+# to the status bar, which is fast enough to see a search start.
 function Wait-OwnSearch($process, [scriptblock] $change) {
     $status = Control-Hwnd $process $StatusBarId
     $before = [GozlerProbe.Win]::ControlText($status)
@@ -905,8 +938,8 @@ function Wait-OwnSearch($process, [scriptblock] $change) {
     return Wait-Answer $process
 }
 
-# Types `text` into the search box through UI Automation and returns status
-# part 1 once its search has answered.
+# Types `text` into the search box through UI Automation and returns the
+# status bar's left group once its search has answered.
 function Search-For($process, [string] $text) {
     Wait-OwnSearch $process { [GozlerProbe.Ui]::SetValue((Child-ById (Window-Element $process) $SearchBoxId), $text) }
 }
@@ -1037,12 +1070,13 @@ function Export-To($process, [string] $path) {
     return $closed
 }
 
-# Status part 3 once an export has started and no longer runs.
+# The status bar's middle group once an export has started and no longer
+# runs.
 function Wait-Export($process, [int] $seconds = 60) {
     $running = (Caption 'status.exporting_other').Split('{')[0]
     $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
     do {
-        $text = Status-Part $process 2
+        $text = Status-Part $process 1
         if ($text -and -not $text.StartsWith($running)) { return $text }
         Start-Sleep -Milliseconds 100
     } until ([DateTime]::UtcNow -gt $deadline)
@@ -1083,15 +1117,17 @@ function Inspector-Hwnd($process, [string] $id, [string] $cls) {
 
 # The inspector's heading and its shown fields by label. Each control is read
 # with its own message, and the window can change between two of them, so
-# the controls are read until two reads in a row agree.
+# the controls are read until two reads in a row agree. The fourth value,
+# Attributes, is an owner-drawn Static that still holds its text.
 function Inspector-State($process) {
     $read = {
         $state = [ordered]@{ heading = [GozlerProbe.Win]::ControlText((Inspector-Hwnd $process 'IDC_INSPECTOR_HEADING' 'Static')); fields = [ordered]@{} }
-        for ($n = 1; $n -le 7; $n++) {
+        for ($n = 1; $n -le 4; $n++) {
             $label = Inspector-Hwnd $process "IDC_INSPECTOR_LABEL_$n" 'Static'
             if ([GozlerProbe.Win]::IsWindowVisible($label)) {
                 $name = [GozlerProbe.Win]::ControlText($label)
-                $state.fields[$name] = [GozlerProbe.Win]::ControlText((Inspector-Hwnd $process "IDC_INSPECTOR_VALUE_$n" 'Edit'))
+                $class = $n -eq 4 ? 'Static' : 'Edit'
+                $state.fields[$name] = [GozlerProbe.Win]::ControlText((Inspector-Hwnd $process "IDC_INSPECTOR_VALUE_$n" $class))
             }
         }
         $state
@@ -1134,9 +1170,9 @@ function Gozler-Entry([string] $path) {
 }
 
 # Starts a window and takes its screenshot before the first search answers
-# (S1). Returns the window and status part 1 just after the screenshot,
-# read with one message, so it shows what the screenshot shows whatever the
-# machine's speed; UI Automation would read it too late.
+# (S1). Returns the window and the status bar's left group just after the
+# screenshot, read with one message, so it shows what the screenshot shows
+# whatever the machine's speed; UI Automation would read it too late.
 function Start-Searching([string] $language) {
     $process = Start-Process -PassThru -FilePath $Exe -ArgumentList '--data-dir', "`"$dataDir`""
     $started.Add($process)
@@ -1190,7 +1226,7 @@ function Dialog-Control($dialog, $id, [string] $cls = 'Button') {
 }
 
 # The pages in the page list's order.
-$SettingsPages = @{ general = 0; search = 1; keyboard = 2; index = 3 }
+$SettingsPages = @{ general = 0; search = 1; context_menu = 2; keyboard = 3; file_operations = 4; index = 5; include = 6 }
 
 # Shows the Settings page `page` as a click in the page list does.
 function Show-SettingsPage($dialog, [string] $page) {
@@ -1218,6 +1254,13 @@ function Is-Enabled($dialog, $id) { [GozlerProbe.Win]::IsWindowEnabled((Dialog-C
 # click can open a modal dialog or a message box.
 function Click-Button($dialog, $id) {
     [GozlerProbe.Ui]::InvokeLater([GozlerProbe.Ui]::FromHandle((Dialog-Control $dialog $id)))
+}
+
+# Clicks the one link of the SysLink control `id` through UI Automation
+# without waiting: the link is the control's child, which invokes.
+function Click-Link($dialog, $id) {
+    $link = Children-Of (Dialog-Control $dialog $id 'SysLink') | Select-Object -First 1
+    if ($link) { [GozlerProbe.Ui]::InvokeLater($link) }
 }
 
 # Cancel, and whether the dialog then closed.
@@ -1416,8 +1459,8 @@ try {
         $element = Window-Element $window
         $results['match controls enabled'] = @($MatchLabelId, $MatchModeId, $MatchCaseId, $MatchPathId | ForEach-Object { (Child-ById $element $_).Enabled })
 
-        # The pseudo-language check compares its status bar parts with these.
-        $englishPartWidths = @([GozlerProbe.Ui]::Children((Child-ById $element $StatusBarId)) | ForEach-Object { [int]$_.Rect[2] })
+        # The pseudo-language check compares its status bar groups with these.
+        $englishPartWidths = @(Status-Groups (Child-ById $element $StatusBarId) | ForEach-Object { [int]$_.Rect[2] })
 
         Save-Screenshot $hwnd 'main-en'
 
@@ -1503,8 +1546,8 @@ try {
                 match       = @($MatchLabelId, $MatchCaseId, $MatchPathId | ForEach-Object { (Child-ById $element $_).Name })
                 filters     = @($ids.IDC_KIND_LABEL, $ids.IDC_LOCATION_LABEL, $ids.IDC_DATE_LABEL, $ids.IDC_SIZE_LABEL, $ids.IDC_ATTRIBUTES_LABEL | ForEach-Object { (Pane-Child $process $_).Name })
                 headers     = @([GozlerProbe.Ui]::Children($header) | ForEach-Object Name)
-                status_bars = @([GozlerProbe.Ui]::Children((Child-ById $element $StatusBarId)) | ForEach-Object { [int]$_.Rect[2] })
-                results     = @([GozlerProbe.Ui]::Children((Child-ById $element $StatusBarId)))[0].Name
+                status_bars = @(Status-Groups (Child-ById $element $StatusBarId) | ForEach-Object { [int]$_.Rect[2] })
+                results     = @(Status-Groups (Child-ById $element $StatusBarId))[0].Name
             }
         }
 
@@ -1520,8 +1563,8 @@ try {
             $window = Start-Window
             $captions = Read-Captions $window
             $pseudoText = @($captions.menus + $captions.match + $captions.filters + $captions.headers + $captions.results | Where-Object { $_ -notmatch '^\[.*\]$' })
-            # The longest text a part can show sets its width.
-            $wider = $captions.status_bars.Count -eq 4 -and $captions.status_bars[0] -gt $englishPartWidths[0]
+            # The longest text a group can show sets its width.
+            $wider = $captions.status_bars.Count -eq 3 -and $captions.status_bars[0] -gt $englishPartWidths[0]
             Check 'pseudo-language' ($pseudoText.Count -eq 0 -and $wider) ([ordered]@{ captions = $captions; not_pseudo = $pseudoText; english_status_widths = $englishPartWidths })
             # As before the English screenshot, so the window has painted.
             Start-Sleep -Seconds 2
@@ -1599,7 +1642,7 @@ try {
 
     # --- Search and results -------------------------------------------------
     if (Runs 'search') {
-        $firstDetail = "status part 1 after the screenshot: '$firstPart'"
+        $firstDetail = "the status bar's left group after the screenshot: '$firstPart'"
         # The first search is the empty one, which shows the limit (S4). That
         # answer after the screenshot means the reply came first, which says
         # nothing about the window.
@@ -1737,10 +1780,10 @@ try {
             }
             else { Report 'Alt and an access key reach the match controls' 'not run' 'the window was not in front' }
 
-            # Ten changes within one second: the rows stay while part 1 says
+            # Ten changes within one second: the rows stay while the left group says
             # Searching…, and the last text's results end it (S2, T1, T2). The
             # search starts 150 ms after the last change and the fixture answers
-            # within tens of milliseconds, so part 1 and the rows are read with
+            # within tens of milliseconds, so the left group and the rows are read with
             # one message each to their window handles, which takes far less time
             # than a read through UI Automation. WM_GETTEXT gives a status bar's
             # first part.
@@ -1763,7 +1806,7 @@ try {
             $previous = $null
             do {
                 $sample = [ordered]@{ ms = $clock.ElapsedMilliseconds; part = [GozlerProbe.Win]::ControlText($statusHwnd); rows = & $rowCount }
-                # Only the samples where part 1 or the rows change, so the
+                # Only the samples where the left group or the rows change, so the
                 # detail stays short.
                 $key = "$($sample.part)|$($sample.rows)"
                 if ($key -ne $previous) { $samples.Add($sample) }
@@ -1851,7 +1894,7 @@ try {
                 Start-Sleep -Milliseconds 300
                 $file = Item-States $window 0
                 [ordered]@{
-                    selected = $n; status = Status-Part $window 1
+                    selected = $n; status = Status-Selection $window
                     open = $file[$label.open]; open_file_location = $file[$label.open_file_location]; properties = $file[$label.properties]
                 }
             }
@@ -1862,7 +1905,7 @@ try {
                         $_.status -notmatch (Caption-Pattern 'status.selected' "$($_.selected)") })) $counted
 
             # A selection with a row that has left the cache is read from the
-            # service: part 2 says so and the selection commands wait (S12). A row
+            # service: the selection's text says so and the selection commands wait (S12). A row
             # of the second chunk, then the last row, are shown, so the first
             # chunk is the one used least recently and leaves the cache.
             Select-Rows $window @(0)
@@ -1874,12 +1917,12 @@ try {
                 Start-Sleep -Milliseconds 1500
             }
             [GozlerProbe.Win]::SetItemState($listHwnd, $rows - 1, 2, 2)
-            $reading = Status-Part $window 1
+            $reading = Status-Selection $window
             $edit = Item-States $window 1
             $deadline = [DateTime]::UtcNow.AddSeconds(10)
             do {
                 Start-Sleep -Milliseconds 100
-                $read = Status-Part $window 1
+                $read = Status-Selection $window
             } until ($read -ne (Caption 'status.reading') -or [DateTime]::UtcNow -gt $deadline)
             $after = Item-States $window 1
             Save-Screenshot $window.MainWindowHandle 'selection-read-en'
@@ -1906,7 +1949,7 @@ try {
                 $deadline = [DateTime]::UtcNow.AddSeconds(10)
                 do {
                     Start-Sleep -Milliseconds 100
-                    $read = Status-Part $window 1
+                    $read = Status-Selection $window
                 } until ($read -ne (Caption 'status.reading') -or [DateTime]::UtcNow -gt $deadline)
                 $detail = [ordered]@{
                     text_start = $selection -band 0xFFFF; text_end = ($selection -shr 16) -band 0xFFFF; text_length = $length
@@ -1931,7 +1974,7 @@ try {
                 $deadline = [DateTime]::UtcNow.AddSeconds(10)
                 do {
                     Start-Sleep -Milliseconds 100
-                    $read = Status-Part $window 1
+                    $read = Status-Selection $window
                 } until ($read -match (Caption-Pattern 'status.selected' '1') -or [DateTime]::UtcNow -gt $deadline)
                 # VK_SHIFT, VK_F10
                 $pressed = [GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x10, 0x79)
@@ -1966,7 +2009,7 @@ try {
             # it lasts, and no message waits more than 100 ms meanwhile
             # (DESIGN.md: Memory budget). The probe selects every row as Select
             # all does, while a watcher asks the window for WM_NULL without a
-            # pause, until part 2 shows the files. The memory while they are
+            # pause, until the selection's text shows the files. The memory while they are
             # held stays within the budget and the selection's allowance, and
             # falls back once they are dropped.
             [void](Search-For $window '')
@@ -1978,7 +2021,7 @@ try {
             $deadline = [DateTime]::UtcNow.AddSeconds(30)
             do {
                 Start-Sleep -Milliseconds 50
-                $part = Status-Part $window 1
+                $part = Status-Selection $window
                 if ($part -match (Caption-Pattern 'status.selected' '([\d.,\s]+)')) { $selected = [long]($Matches[1] -replace '\D', '') }
             } until ($selected -or [DateTime]::UtcNow -gt $deadline)
             $longest = $watcher.Stop()
@@ -1995,7 +2038,7 @@ try {
 
         if (Runs 'export') {
             # Export results… writes the bytes gozler writes with the switches
-            # of the shown columns, and part 3 says how many rows (C4).
+            # of the shown columns, and the middle group says how many rows (C4).
             [void](Search-For $window "$F ext:cs")
             $extension = Caption 'column.extension'; $attributes = Caption 'column.attributes'
             $formats = @(
@@ -2030,14 +2073,14 @@ try {
             Check 'Export results writes what gozler writes' (-not ($exported | Where-Object {
                         -not $_.same_bytes -or $_.status -notmatch (Caption-Pattern 'status.exported_other' "$csCount" ([regex]::Escape($_.file))) })) $exported
 
-            # During an export of the empty search, part 3 shows its progress and
+            # During an export of the empty search, the middle group shows its progress and
             # File shows Cancel export in place of Export results…; Cancel export
             # ends it and deletes its file (C5, S11).
             [void](Search-For $window '')
             $all = Join-Path $exports 'all.csv'
             $closed = Export-To $window $all
             Start-Sleep -Milliseconds 1000
-            $progress = Status-Part $window 2
+            $progress = Status-Part $window 1
             $file = Item-States $window 0
             Save-Screenshot $window.MainWindowHandle 'exporting-en'
             $existed = Test-Path -LiteralPath $all
@@ -2045,13 +2088,13 @@ try {
             for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath $all); $i++) { Start-Sleep -Milliseconds 100 }
             $detail = [ordered]@{
                 dialog_closed = $closed; progress = $progress; file_menu = @($file.Keys); cancel_export_enabled = $file[$label.cancel_export]
-                file_while_running = $existed; file_after = Test-Path -LiteralPath $all; status_after = Status-Part $window 2
+                file_while_running = $existed; file_after = Test-Path -LiteralPath $all; status_after = Status-Part $window 1
             }
             Check 'Cancel export' ($closed -and $progress -match (Caption-Pattern 'status.exporting_other') -and $file[$label.cancel_export] -and
                 -not $file.Contains($label.export_results) -and $existed -and -not $detail.file_after -and -not $detail.status_after) $detail
 
-            # A search runs when an export of the empty search ends: part 3 shows
-            # the export's result while part 1 says Searching…, and the export
+            # A search runs when an export of the empty search ends: the middle group shows
+            # the export's result while the left group says Searching…, and the export
             # ran on through every search's start (T1, T8). Each change of the
             # sort direction starts a search of the empty search. The probe times
             # one, then changes the direction three times as often during the
@@ -2069,7 +2112,7 @@ try {
             $all = Join-Path $exports 'all-sorted.csv'
             $closed = Export-To $window $all
             $clock.Restart()
-            while (-not "$(Status-Part $window 2)".StartsWith($running) -and $clock.ElapsedMilliseconds -lt 5000) { }
+            while (-not "$(Status-Part $window 1)".StartsWith($running) -and $clock.ElapsedMilliseconds -lt 5000) { }
             $samples = [System.Collections.Generic.List[object]]::new()
             $previous = $null
             $changes = 0
@@ -2080,7 +2123,7 @@ try {
                     $changes++
                     $nextChange = $clock.ElapsedMilliseconds + $interval
                 }
-                $sample = [ordered]@{ ms = $clock.ElapsedMilliseconds; part1 = Status-Part $window 0; part3 = Status-Part $window 2 }
+                $sample = [ordered]@{ ms = $clock.ElapsedMilliseconds; part1 = Status-Part $window 0; part3 = Status-Part $window 1 }
                 $key = "$($sample.part1)|$($sample.part3)"
                 if ($key -ne $previous) { $samples.Add($sample) }
                 $previous = $key
@@ -2110,7 +2153,7 @@ try {
         # --- The inspector ---------------------------------------------------
         if (Runs 'inspector') {
             $fieldLabel = @{}
-            foreach ($key in 'folder', 'full_path', 'type', 'size', 'date_modified', 'attributes', 'volume', 'total_size') {
+            foreach ($key in 'folder', 'size', 'date_modified', 'attributes', 'total_size') {
                 $fieldLabel[$key] = Caption "inspector.$key"
             }
             $reading = Caption 'status.reading'
@@ -2131,7 +2174,7 @@ try {
                 [void](Search-For $window $case.query)
                 Select-Rows $window @(0)
                 $item = Get-Item -LiteralPath $case.path -Force
-                $state = Wait-Inspector $window { param($s) $s.heading -eq $item.Name -and $s.fields.Count -eq 7 }
+                $state = Wait-Inspector $window { param($s) $s.heading -eq $item.Name -and $s.fields.Count -eq 4 }
                 if ($case.screenshot) { Save-Screenshot $window.MainWindowHandle $case.screenshot }
                 $cli = Gozler-Entry $case.path
                 $shown = $state.fields
@@ -2142,13 +2185,10 @@ try {
                 [ordered]@{
                     path = $case.path; heading = $state.heading; fields = $shown; gozler = $cli
                     passed = $state.heading -eq $item.Name -and $shown[$fieldLabel.folder] -eq (Split-Path $case.path) -and
-                    $shown[$fieldLabel.full_path] -eq $case.path -and
-                    $shown[$fieldLabel.type] -eq ((Caption 'inspector.file_type') -replace '\{0\}', $item.Extension.TrimStart('.')) -and
                     (Bytes-Of $shown[$fieldLabel.size]) -eq $case.size -and $cli.size -eq $case.size -and
                     $shown[$fieldLabel.date_modified] -eq "$($date.ToString('d')) $($date.ToString('T'))" -and
                     $cli.date -eq $date.ToString('yyyy-MM-ddTHH:mm:ss') -and
-                    ($words -join '|') -eq ($cliWords -join '|') -and -not ($given | Where-Object { $_ -notin $words }) -and
-                    [bool]$shown[$fieldLabel.volume]
+                    ($words -join '|') -eq ($cliWords -join '|') -and -not ($given | Where-Object { $_ -notin $words })
                 }
             }
             Check 'the inspector shows a file' (-not ($entryFields | Where-Object { -not $_.passed })) $entryFields
@@ -2160,7 +2200,7 @@ try {
             $buttonStates = foreach ($n in 1, 16) {
                 Select-Rows $window (0..($n - 1))
                 $deadline = [DateTime]::UtcNow.AddSeconds(10)
-                while ((Status-Part $window 1) -notmatch (Caption-Pattern 'status.selected' "$n") -and [DateTime]::UtcNow -lt $deadline) {
+                while ((Status-Selection $window) -notmatch (Caption-Pattern 'status.selected' "$n") -and [DateTime]::UtcNow -lt $deadline) {
                     Start-Sleep -Milliseconds 20
                 }
                 $file = Item-States $window 0
@@ -2223,7 +2263,7 @@ try {
             [void](Search-For $window "$F folder: many|src")
             $staleRows = Row-Count $window
             $headingHwnd = Inspector-Hwnd $window 'IDC_INSPECTOR_HEADING' 'Static'
-            $sizeHwnd = Inspector-Hwnd $window 'IDC_INSPECTOR_VALUE_4' 'Edit'
+            $sizeHwnd = Inspector-Hwnd $window 'IDC_INSPECTOR_VALUE_2' 'Edit'
             Select-Rows $window @(0)
             $clock = [Diagnostics.Stopwatch]::StartNew()
             do {
@@ -2277,7 +2317,7 @@ try {
             $fixtureSize = [long](Get-ChildItem -LiteralPath $files -Recurse -File -Force | Measure-Object Length -Sum).Sum
             $detail = [ordered]@{
                 while_reading = $whileReading; copy_button_while_reading = $buttonWhileReading; copy_menu_while_reading = $menuWhileReading
-                still_reading_after = $stillReading; after = $read; fixture_size = $fixtureSize; status = Status-Part $window 1
+                still_reading_after = $stillReading; after = $read; fixture_size = $fixtureSize; status = Status-Selection $window
             }
             Check 'Select all reads the selection' ($whileReading.heading -eq $reading -and $stillReading -and -not $buttonWhileReading -and
                 -not $menuWhileReading -and (Bytes-Of $read.fields[$fieldLabel.total_size]) -eq $fixtureSize) $detail
@@ -2298,7 +2338,7 @@ try {
                 $pressed = [GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x10, 0x26)
                 $after = Wait-Inspector $window { param($s) $s.heading -ne $reading -and $s.heading -ne $allHeading }
                 $deadline = [DateTime]::UtcNow.AddSeconds(10)
-                while ((Status-Part $window 1) -notmatch (Caption-Pattern 'status.selected' '2') -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 20 }
+                while ((Status-Selection $window) -notmatch (Caption-Pattern 'status.selected' '2') -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 20 }
                 # The heading and Total size of the first two rows, which
                 # gozler lists in the window's order.
                 $firstTwo = @(& $gozler $F -n 2 -size -dm -attributes -csv -no-header | ForEach-Object {
@@ -2314,7 +2354,7 @@ try {
                 $expectedBytes = [long]($firstTwo | Where-Object { -not $_.folder } | Measure-Object size -Sum).Sum
                 $total = $after.fields[$fieldLabel.total_size]
                 $detail = [ordered]@{
-                    before_keys = $before; after = $after; status = Status-Part $window 1
+                    before_keys = $before; after = $after; status = Status-Selection $window
                     # LVM_GETSELECTEDCOUNT
                     selected_rows = [long][GozlerProbe.Win]::SendMessageW($listHwnd, 0x1032, 0, 0)
                     expected_heading = $expectedHeading; expected_bytes = $expectedBytes
@@ -2485,7 +2525,7 @@ try {
                     message = $noResultsMessage; offered = $offered; after_clear = $cleared; with_location = $locationOffered; after_search_everywhere = $everywhere; after_pane_clear = $paneCleared
                 })
 
-            # View > Filters hides the pane, and with a filter set part 1 adds
+            # View > Filters hides the pane, and with a filter set the left group adds
             # "· Filtered" (C13, S10).
             $paneHwnd = Control-Hwnd $window $ids.IDC_FILTER_PANE
             Select-PaneItem $window $ids.IDC_KIND 5 $false
@@ -2582,8 +2622,8 @@ try {
             [void](Wait-Answer $window)
 
             # A Location folder deleted after it was chosen: F5 shows the
-            # message with Choose folder… and Search everywhere, and part 1 never
-            # says Searching… (S8). Status part 1 is read with one message to its
+            # message with Choose folder… and Search everywhere, and the left group never
+            # says Searching… (S8). The left group is read with one message to its
             # handle each time, which is fast enough to see a search start.
             $missing = Join-Path $files 'to-delete'
             [void](Search-For $window "$F gone")
@@ -3086,12 +3126,13 @@ try {
         }
         else {
             $dialog = Open-Settings $window
-            $openFolders = Dialog-Control $dialog 'IDC_FILE_EXPLORER_OPEN_FOLDERS' 'Edit'
-            $openFiles = Dialog-Control $dialog 'IDC_FILE_EXPLORER_OPEN_FILES' 'Edit'
-            $openLocation = Dialog-Control $dialog 'IDC_FILE_EXPLORER_OPEN_LOCATION' 'Edit'
+            Show-SettingsPage $dialog 'context_menu'
+            $openFolders = Dialog-Control $dialog 'IDC_CONTEXT_MENU_OPEN_FOLDERS' 'Edit'
+            $openFiles = Dialog-Control $dialog 'IDC_CONTEXT_MENU_OPEN_FILES' 'Edit'
+            $openLocation = Dialog-Control $dialog 'IDC_CONTEXT_MENU_OPEN_LOCATION' 'Edit'
             $newer = Join-Path $files 'tools\totalcmd\TOTALCMD64.EXE'
             $tcExpected = "`"$newer`" /O /A /P=L /L=`"%1`""
-            Click-Button $dialog 'IDC_FILE_EXPLORER_TOTAL_COMMANDER'
+            Click-Link $dialog 'IDC_CONTEXT_MENU_TOTAL_COMMANDER'
             $filled = Wait-Until { [GozlerProbe.Win]::ControlText($openFolders) -eq $tcExpected } 15
             $boxes = [ordered]@{
                 open_folders = [GozlerProbe.Win]::ControlText($openFolders)
@@ -3112,8 +3153,8 @@ try {
             else {
                 Remove-Item -LiteralPath (Join-Path $files 'tools') -Recurse -Force
                 $gone = Wait-Until { -not @(& $gozler -n 5 'file:' 'totalcmd*.exe' 2>$null) } 60
-                Click-Button $dialog 'IDC_FILE_EXPLORER_TOTAL_COMMANDER'
-                $noneText = Caption 'settings_file_explorer.no_total_commander'
+                Click-Link $dialog 'IDC_CONTEXT_MENU_TOTAL_COMMANDER'
+                $noneText = Caption 'settings_context_menu.no_total_commander'
                 $balloon, $tip = Wait-Balloon $window $noneText
                 if ($tip) { Save-Balloon $dialog $tip 'settings-no-total-commander-en' }
                 $kept = [GozlerProbe.Win]::ControlText($openFolders) -eq $tcExpected

@@ -431,7 +431,7 @@ mod tests {
     }
 
     /// A default the rules refuse could not be added back after the person
-    /// removed it, and Restore defaults would give a table the dialog
+    /// removed it, and Reset would give a table the dialog
     /// rejects.
     #[test]
     fn every_default_shortcut_passes_the_rules() {
@@ -511,7 +511,7 @@ mod tests {
             }]
         );
 
-        // Restore defaults is the empty table, which saves nothing.
+        // Reset is the empty table, which saves nothing.
         table.remove(CommandId::Find, key("Ctrl+K"));
         assert_eq!(table, CommandShortcuts::default());
     }

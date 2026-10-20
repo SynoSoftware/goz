@@ -15,7 +15,8 @@
 //! ```text
 //! total:      u64 LE    full match count (es totitems), repeated per page
 //! generation: u64 LE
-//! page_flags: u8        bit0 more, bit1 volumes_incomplete, bit2 metadata_pending
+//! page_flags: u8        bit0 more, bit1 volumes_incomplete, bit2 metadata_pending,
+//!                       bit3 has_sums
 //! count:      u32 LE    items in this page
 //! count items, each:
 //!   path_len: u32 LE    raw path byte length (WTF-8, mount prefix included)
@@ -25,7 +26,17 @@
 //!   size:     u64 LE    iff has_size
 //!   mtime:    i64 LE    iff has_mtime
 //!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
+//! sums, iff has_sums, after the items:
+//!   files:      u64 LE
+//!   folders:    u64 LE
+//!   known:      u8      bit0 file_bytes known, bit1 folder_bytes known
+//!   file_bytes: u64 LE  0 when unknown
+//!   folder_bytes: u64 LE  0 when unknown
 //! ```
+//!
+//! The sums follow the items because a decoder before them stops reading
+//! after the last item, so a page that holds them still reads. The daemon
+//! sends them only when the request asks, with `want_sums`.
 //!
 //! Items are positional, so a client that does not know a field misreads
 //! every item after the first that holds it. The daemon therefore sets
@@ -40,6 +51,7 @@
 use super::frame::{begin_frame, end_frame};
 use super::types::{MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem};
 use crate::attributes::Attributes;
+use crate::query::MatchSums;
 use crate::wtf8;
 
 /// Response frame tag: the body is a JSON [`super::Response`].
@@ -50,6 +62,12 @@ pub const RESP_TAG_RESULTS: u8 = 1;
 const FLAG_MORE: u8 = 1;
 const FLAG_VOLUMES_INCOMPLETE: u8 = 1 << 1;
 const FLAG_METADATA_PENDING: u8 = 1 << 2;
+const FLAG_SUMS: u8 = 1 << 3;
+
+const SUMS_FILE_BYTES: u8 = 1;
+const SUMS_FOLDER_BYTES: u8 = 1 << 1;
+/// The sums' bytes after the items.
+const SUMS_LEN: usize = 8 + 8 + 1 + 8 + 8;
 
 const IFLAG_IS_DIR: u8 = 1;
 const IFLAG_HAS_SIZE: u8 = 1 << 1;
@@ -74,6 +92,8 @@ pub struct ResultsPage {
     flags_at: usize,
     count_at: usize,
     count: u32,
+    /// Written after the items by [`finish`](Self::finish).
+    sums: Option<MatchSums>,
 }
 
 impl ResultsPage {
@@ -113,7 +133,18 @@ impl ResultsPage {
             flags_at,
             count_at,
             count: 0,
+            sums: None,
         }
+    }
+
+    /// Makes the page carry `sums` after its items. Called before the first
+    /// [`push`](Self::push), which keeps room for them.
+    pub fn with_sums(mut self, sums: Option<MatchSums>) -> Self {
+        if sums.is_some() {
+            self.frame[self.flags_at] |= FLAG_SUMS;
+        }
+        self.sums = sums;
+        self
     }
 
     /// Appends one item, whose `raw_path` is its WTF-8 path bytes with the
@@ -160,7 +191,10 @@ impl ResultsPage {
         if let Some(a) = attributes {
             self.frame.extend_from_slice(&a.bits().to_le_bytes());
         }
-        if self.count > 0 && self.frame.len() - self.payload_at > MAX_SERVER_FRAME as usize {
+        let trailer = if self.sums.is_some() { SUMS_LEN } else { 0 };
+        if self.count > 0
+            && self.frame.len() - self.payload_at + trailer > MAX_SERVER_FRAME as usize
+        {
             self.frame.truncate(before);
             return false;
         }
@@ -176,6 +210,22 @@ impl ResultsPage {
         }
         self.frame[self.count_at..self.count_at + size_of::<u32>()]
             .copy_from_slice(&self.count.to_le_bytes());
+        if let Some(sums) = self.sums {
+            let mut known = 0u8;
+            if sums.file_bytes.is_some() {
+                known |= SUMS_FILE_BYTES;
+            }
+            if sums.folder_bytes.is_some() {
+                known |= SUMS_FOLDER_BYTES;
+            }
+            self.frame.extend_from_slice(&sums.files.to_le_bytes());
+            self.frame.extend_from_slice(&sums.folders.to_le_bytes());
+            self.frame.push(known);
+            self.frame
+                .extend_from_slice(&sums.file_bytes.unwrap_or(0).to_le_bytes());
+            self.frame
+                .extend_from_slice(&sums.folder_bytes.unwrap_or(0).to_le_bytes());
+        }
         end_frame(&mut self.frame, 0);
         self.frame
     }
@@ -251,6 +301,21 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
             attributes,
         });
     }
+    let sums = (flags & FLAG_SUMS != 0)
+        .then(|| -> Result<MatchSums, BinError> {
+            let files = r.u64()?;
+            let folders = r.u64()?;
+            let known = r.u8()?;
+            let file_bytes = r.u64()?;
+            let folder_bytes = r.u64()?;
+            Ok(MatchSums {
+                files,
+                file_bytes: (known & SUMS_FILE_BYTES != 0).then_some(file_bytes),
+                folders,
+                folder_bytes: (known & SUMS_FOLDER_BYTES != 0).then_some(folder_bytes),
+            })
+        })
+        .transpose()?;
     Ok(QueryResults {
         total,
         items,
@@ -258,6 +323,7 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
         volumes_incomplete: flags & FLAG_VOLUMES_INCOMPLETE != 0,
         metadata_pending: flags & FLAG_METADATA_PENDING != 0,
         generation,
+        sums,
     })
 }
 
@@ -342,6 +408,7 @@ mod tests {
                 volumes_incomplete: true,
                 metadata_pending: true,
                 generation: 42,
+                sums: None,
             }
         );
     }
@@ -428,5 +495,34 @@ mod tests {
             3, 0, 0, 0, 0, 0, 0, 0, // mtime
         ];
         assert_eq!(frame[4..], *payload);
+    }
+
+    /// A client from before the sums reads a page's items and stops, so the
+    /// sums must follow the items, with every byte before them as that client
+    /// reads it but the flag it ignores. A client that knows them reads them
+    /// back, an unknown size as `None`.
+    #[test]
+    fn sums_follow_the_items_of_an_unchanged_page() {
+        let sums = MatchSums {
+            files: 3,
+            file_bytes: Some(7),
+            folders: 1,
+            folder_bytes: None,
+        };
+        let page = |sums: Option<MatchSums>| {
+            let mut page = ResultsPage::new(1, 0, false, false, 1).with_sums(sums);
+            assert!(page.push(br"C:", false, Some(2), None, None));
+            page.finish(false)
+        };
+        let (plain, with) = (page(None), page(Some(sums)));
+        // After the length prefix: the tag, the total and the generation,
+        // then the flags.
+        let flags = 4 + 1 + 8 + 8;
+        assert_eq!(with[4..flags], plain[4..flags]);
+        assert_eq!(with[flags], plain[flags] | FLAG_SUMS);
+        assert_eq!(with[flags + 1..plain.len()], plain[flags + 1..]);
+        let read = decode(&with);
+        assert_eq!(read.sums, Some(sums));
+        assert_eq!(read.items, decode(&plain).items);
     }
 }

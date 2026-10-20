@@ -224,6 +224,7 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
                     None,
                     SortSpec::default(),
                     None,
+                    false,
                 );
                 black_box(out.hits.len())
             })

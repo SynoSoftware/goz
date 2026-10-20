@@ -59,10 +59,10 @@ them before stage 2.
    groups its copies in one window. It does not move the main window's
    controls, which a pane that appears by itself would (DESIGN.md: "Nothing
    moves by itself").
-8. **A panel shows the disk as it is,** `.gozler-partial` files included:
-   while a copy runs they appear and leave, and after a crash they show what
-   Continue or the person must clean up. The prototype shows this, so the
-   owner can choose to hide them instead.
+8. **A panel shows the disk as it is.** A copy writes each file under its
+   final name (engine spec D10), so a file that an interrupted copy left
+   unfinished looks like any other file, with the time it was last written.
+   Continue in the File operations window finishes it.
 
 ## The window in Two panels
 
@@ -156,9 +156,22 @@ row when nothing is selected, as in Norton Commander.
    and what happens to a conflict that appears after the question.
 4. **The operation then runs in the background.** The person goes on
    browsing, searching and starting other operations.
-5. **The File operations window** opens when an operation starts and lists
-   each one: what it does, its progress in bytes or items, its speed, and
-   Cancel. A waiting operation says what it waits for (see "Waits"). The window closes when
+5. **The File operations window** opens when an operation starts. It is one
+   window that never blocks Gozler, modelled on Total Commander's copy window
+   with its background queue under it (owner, 2026-10-20). At the top, the
+   running operation: its title (Copy, Move or Delete), From and To with the
+   current file's paths shortened in the middle, a bar with a percentage for
+   the current file and one for the whole operation, files and bytes done of
+   the total, the speed in bytes and in files per second, and Pause, Cancel and Hide. Every operation runs in the
+   background and never blocks Gozler, so Hide only hides the window; the
+   work goes on. A delete deletes while it walks and never knows
+   its total, so it shows a moving bar and the number of entries deleted so
+   far and per second, with no percentage and no time left. A move on the
+   same drive renames and moves no data, so it shows its entries done of
+   the total and per second, with no bytes and no bar for the current file. Under it, the list of
+   every operation in the queue: what it does, its progress in bytes or
+   items, its speed, and Cancel. A waiting operation says what it waits for
+   (see "Waits"). A speed limit is not planned. The window closes when
    the last operation ends, and the person can close it at any time; View >
    File operations shows it again. The taskbar button shows the progress of
    all operations together.

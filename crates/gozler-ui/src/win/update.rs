@@ -1,11 +1,18 @@
-//! The one network request Gozler makes: GitHub's latest release, for Check
-//! for updates (DESIGN.md: The General page).
+//! Gozler's network requests: GitHub's latest release, for Check for updates
+//! (DESIGN.md: The General page), and its setup, for Download and install
+//! Gozler, with the setup's SHA-256 (DESIGN.md: Service fixes).
 
+use crate::core::update::{LATEST_RELEASE_HOST, LATEST_RELEASE_PATH};
+use std::io::{self, Read};
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
     WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect,
     WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
     WinHttpSendRequest, WinHttpSetTimeouts,
+};
+use windows::Win32::Security::Cryptography::{
+    BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCryptCreateHash, BCryptDestroyHash,
+    BCryptFinishHash, BCryptHashData,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -35,15 +42,29 @@ impl Drop for Internet {
     }
 }
 
-/// The body of an HTTPS GET of `path` on `host`, when it answers 200 OK;
-/// `None` for any failure, which Check for updates ignores.
-pub(crate) fn get(host: &str, path: &str, agent: &str) -> Option<String> {
+/// GitHub's description of Gozler's latest release; `None` for any
+/// failure, which Check for updates ignores.
+pub(crate) fn latest_release() -> Option<String> {
+    let mut body = Vec::new();
+    read(LATEST_RELEASE_HOST, LATEST_RELEASE_PATH, &mut |piece| {
+        body.extend_from_slice(piece);
+        body.len() <= MOST_BYTES
+    })?;
+    String::from_utf8(body).ok()
+}
+
+/// An HTTPS GET of `path` on `host`, which follows redirects, giving the
+/// body to `piece` as it arrives; `piece` returns false to stop. Returns
+/// `Some` when the server answered 200 OK and every piece was taken. It
+/// sends the user agent GitHub asks every client to send.
+pub(crate) fn read(host: &str, path: &str, piece: &mut dyn FnMut(&[u8]) -> bool) -> Option<()> {
+    let agent = format!("Gozler/{}", gozler_core::escompat::version());
     // SAFETY: every string outlives the call that reads it; each handle is
     // used only while its owner lives, and the buffer is written only up
     // to its length.
     unsafe {
         let session = Internet::new(WinHttpOpen(
-            &HSTRING::from(agent),
+            &HSTRING::from(agent.as_str()),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
@@ -88,8 +109,7 @@ pub(crate) fn get(host: &str, path: &str, agent: &str) -> Option<String> {
         if status != 200 {
             return None;
         }
-        let mut body = Vec::new();
-        let mut buffer = vec![0u8; 16 * 1024];
+        let mut buffer = vec![0u8; 64 * 1024];
         loop {
             let mut read = 0u32;
             WinHttpReadData(
@@ -100,13 +120,47 @@ pub(crate) fn get(host: &str, path: &str, agent: &str) -> Option<String> {
             )
             .ok()?;
             if read == 0 {
-                break;
+                return Some(());
             }
-            body.extend_from_slice(&buffer[..read as usize]);
-            if body.len() > MOST_BYTES {
+            if !piece(&buffer[..read as usize]) {
                 return None;
             }
         }
-        String::from_utf8(body).ok()
     }
+}
+
+/// The SHA-256 of everything `file` holds from where it is read.
+pub(crate) fn sha256(file: &mut impl Read) -> io::Result<[u8; 32]> {
+    /// A hash object, destroyed on drop.
+    struct Hash(BCRYPT_HASH_HANDLE);
+    impl Drop for Hash {
+        fn drop(&mut self) {
+            // SAFETY: the handle is this value's own.
+            let _ = unsafe { BCryptDestroyHash(self.0) };
+        }
+    }
+    let mut handle = BCRYPT_HASH_HANDLE::default();
+    // SAFETY: the pseudo-handle names SHA-256 on every Windows that Gozler
+    // runs on; with no buffer, Windows keeps the object's memory itself.
+    unsafe { BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE, &mut handle, None, None, 0) }
+        .ok()
+        .map_err(io::Error::other)?;
+    let hash = Hash(handle);
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        // SAFETY: the handle is open and the slice is valid for the call.
+        unsafe { BCryptHashData(hash.0, &buffer[..read], 0) }
+            .ok()
+            .map_err(io::Error::other)?;
+    }
+    let mut digest = [0u8; 32];
+    // SAFETY: SHA-256's digest is 32 bytes, the output's length.
+    unsafe { BCryptFinishHash(hash.0, &mut digest, 0) }
+        .ok()
+        .map_err(io::Error::other)?;
+    Ok(digest)
 }

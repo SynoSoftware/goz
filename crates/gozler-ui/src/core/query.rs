@@ -1,6 +1,7 @@
 //! What the person asks for besides the typed text: the match controls, the
 //! filters, the sort, and the search that they make with the text.
 
+use super::glyph::Glyph;
 use gozler_core::proto::VolumeStatus;
 use gozler_core::query::{QueryError, QueryStart, SIZE_WORDS, TermMatch};
 use gozler_core::search::{Search, SearchInput, TextMatch};
@@ -204,6 +205,21 @@ impl Kind {
             Kind::Executables => "filter.executables",
             Kind::Pictures => "filter.pictures",
             Kind::Videos => "filter.videos",
+        }
+    }
+
+    /// The icon before its label in the Kind list.
+    pub(crate) fn glyph(self) -> Glyph {
+        match self {
+            Kind::All => Glyph::ViewAll,
+            Kind::Folders => Glyph::Folder,
+            Kind::Files => Glyph::Page,
+            Kind::Audio => Glyph::MusicNote,
+            Kind::Archives => Glyph::Package,
+            Kind::Documents => Glyph::Document,
+            Kind::Executables => Glyph::CommandPrompt,
+            Kind::Pictures => Glyph::Picture,
+            Kind::Videos => Glyph::Video,
         }
     }
 

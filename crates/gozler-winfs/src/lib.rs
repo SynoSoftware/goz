@@ -46,6 +46,8 @@ mod pipe_sd;
 #[cfg(windows)]
 mod pipe_trust;
 #[cfg(windows)]
+mod registry;
+#[cfg(windows)]
 mod ring;
 #[cfg(windows)]
 mod service;
@@ -123,4 +125,7 @@ pub use pipe_sd::{PipeSecurity, build_pipe_security};
 pub use pipe_trust::{pipe_bytes_available, pipe_server_is_trusted};
 
 #[cfg(windows)]
-pub use service::{ServiceState, service_state};
+pub use registry::machine_string;
+
+#[cfg(windows)]
+pub use service::{ServiceState, service_program, service_state};

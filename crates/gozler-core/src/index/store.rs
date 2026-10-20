@@ -133,6 +133,27 @@ fn push_eighth<T>(v: &mut Vec<T>, value: T) {
     v.push(value);
 }
 
+/// Where an entry compaction's `remap` moved `idx`; [`NIL`] stays [`NIL`].
+pub(crate) fn moved(remap: &[EntryIdx], idx: EntryIdx) -> EntryIdx {
+    if idx == NIL { NIL } else { remap[idx as usize] }
+}
+
+/// Moves each live slot of `column` to its place in `remap`, through `map`,
+/// and drops the rest. A slot only moves down, so one forward pass is safe.
+fn compact_column<T: Copy>(
+    column: &mut Vec<T>,
+    remap: &[EntryIdx],
+    live: usize,
+    map: impl Fn(T) -> T,
+) {
+    for (old, &new) in remap.iter().enumerate() {
+        if new != NIL {
+            column[new as usize] = map(column[old]);
+        }
+    }
+    column.truncate(live);
+}
+
 /// `NameStore::raw_bytes` over explicit tables: the intern table's rehash
 /// closures need to hash names while `by_bytes` is mutably borrowed, so they
 /// borrow the byte tables disjointly and go through this.
@@ -369,6 +390,14 @@ impl NameStore {
             }
     }
 
+    /// Rewrites every chain head through an entry compaction's `remap`
+    /// ([`EntryTable::compact`]).
+    pub(crate) fn remap_heads(&mut self, remap: &[EntryIdx]) {
+        for head in &mut self.head {
+            *head = moved(remap, *head);
+        }
+    }
+
     /// Returns growth slack to the OS, keeping ~1.6% headroom. Called once
     /// post-bootstrap: the buffers grew by [`reserve_eighth`], so up to a
     /// ninth of their allocation, and all of the intern table's power-of-two
@@ -517,6 +546,13 @@ impl FrnColumn {
         match self {
             FrnColumn::Narrow(v) => push_eighth(v, narrow(frn)),
             FrnColumn::Wide(v) => push_eighth(v, frn.0),
+        }
+    }
+
+    fn compact(&mut self, remap: &[EntryIdx], live: usize) {
+        match self {
+            FrnColumn::Narrow(v) => compact_column(v, remap, live, |id| id),
+            FrnColumn::Wide(v) => compact_column(v, remap, live, |id| id),
         }
     }
 
@@ -775,6 +811,43 @@ impl EntryTable {
         self.prev_child[idx as usize] = prev;
     }
 
+    /// Whether a removed entry left a slot that [`Self::compact`] would
+    /// return.
+    pub(crate) fn has_free_slots(&self) -> bool {
+        !self.free.is_empty()
+    }
+
+    /// Moves every live entry down over the free slots, in order, and returns
+    /// where each slot went: `remap[old]` is the new index, or [`NIL`] for a
+    /// free slot. The columns that hold entry indexes are rewritten through
+    /// it; the caller rewrites the indexes it holds elsewhere.
+    pub(crate) fn compact(&mut self) -> Vec<EntryIdx> {
+        let mut remap = vec![NIL; self.capacity()];
+        let mut live = 0;
+        for (old, new) in remap.iter_mut().enumerate() {
+            if !self.is_tombstone(old as EntryIdx) {
+                *new = live as EntryIdx;
+                live += 1;
+            }
+        }
+        let link = |idx| moved(&remap, idx);
+        self.frn.compact(&remap, live);
+        compact_column(&mut self.parent, &remap, live, link);
+        compact_column(&mut self.name_id, &remap, live, |id| id);
+        compact_column(&mut self.flags, &remap, live, |flags| flags);
+        compact_column(&mut self.size, &remap, live, |size| size);
+        compact_column(&mut self.mtime, &remap, live, |mtime| mtime);
+        compact_column(&mut self.attributes, &remap, live, |a| a);
+        compact_column(&mut self.next_link, &remap, live, link);
+        compact_column(&mut self.next_same, &remap, live, link);
+        compact_column(&mut self.prev_same, &remap, live, link);
+        compact_column(&mut self.first_child, &remap, live, link);
+        compact_column(&mut self.next_child, &remap, live, link);
+        compact_column(&mut self.prev_child, &remap, live, link);
+        self.free.clear();
+        remap
+    }
+
     pub(crate) fn iter_live(&self) -> impl Iterator<Item = EntryIdx> + '_ {
         (0..self.frn.len() as EntryIdx).filter(|&i| !self.is_tombstone(i))
     }
@@ -938,6 +1011,16 @@ impl FrnMap {
                 v[record as usize] = idx;
             }
             *self = FrnMap::Dense(v);
+        }
+    }
+
+    /// Rewrites every entry through an entry compaction's `remap`
+    /// ([`EntryTable::compact`]).
+    pub(crate) fn remap(&mut self, remap: &[EntryIdx]) {
+        match self {
+            FrnMap::Dense(v) => v.iter_mut().for_each(|idx| *idx = moved(remap, *idx)),
+            FrnMap::Sparse(m) => m.values_mut().for_each(|idx| *idx = moved(remap, *idx)),
+            FrnMap::Wide(m) => m.values_mut().for_each(|idx| *idx = moved(remap, *idx)),
         }
     }
 

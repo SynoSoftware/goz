@@ -31,8 +31,8 @@ owner has run it, and file an issue for each item that fails.
   starts and the search runs by itself.
 - Restart the service while the window shows results and scrolls: the list
   says that the connection was lost, then searches again by itself.
-- After a restart of Windows, while C:\ indexes, status part 4 says so, and
-  the results complete by themselves.
+- After a restart of Windows, while C:\ indexes, the status bar's service
+  group says so, and the results complete by themselves.
 - With the Settings dialog open, stop the service: the dialog stays usable,
   its Index page shows the failure, and the main window shows it behind the
   dialog.
@@ -56,7 +56,7 @@ owner has run it, and file an issue for each item that fails.
 
 - Each open command runs for its own case, and emptying a box brings back File
   Explorer's way.
-- Use Total Commander fills
+- Total Commander fills
   `"C:\Program Files\totalcmd\TOTALCMD64.EXE" /O /A /P=L /L="%1"` into Open
   folders and Open files. Then Open on a folder and on a file opens it in
   Total Commander, and Open file location, left empty, opens File Explorer
@@ -67,9 +67,8 @@ owner has run it, and file an issue for each item that fails.
   shortcut or the tray icon shows it. Turned off, the `gozler` value under the
   current user's `Run` key is gone. Turned off in Task Manager's Startup apps,
   the check box shows off; turned on again, Task Manager shows the entry on.
-- With "Search with Gozler" on, File Explorer's menu on a folder and on a
-  folder's background shows it, and it opens Gozler with Location set to that
-  folder, also when Gozler already runs; off, the item is gone.
+- After an earlier version added "Search with Gozler", File Explorer's menu
+  on a folder no longer shows it once Gozler has started.
 - With "Check for updates" on and an older version installed, the status bar
   names the newer release and its link opens the release page; off, Gozler
   makes no request (Resource Monitor's Network page shows none).

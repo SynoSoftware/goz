@@ -17,8 +17,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// How often an export reports the rows it has written, which status part
-/// 3 shows (DESIGN.md: Export).
+/// How often an export reports the rows it has written, which the status
+/// bar's middle group shows (DESIGN.md: Export).
 const EXPORT_PROGRESS: Duration = Duration::from_millis(500);
 
 struct Running {
@@ -143,6 +143,10 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
                 .totals(search.request(Returns::Totals))
                 .map(Outcome::Totals),
             Ask::Export(ask) => Ok(export(&mut client, &ask, cancel, reply)),
+            Ask::CountIncluded(settings) => {
+                client.count_included(settings).map(Outcome::IncludedCount)
+            }
+            Ask::SettingsSaved => client.settings_saved().map(|()| Outcome::SettingsApplied),
         });
     match result {
         Ok(outcome) => Some(outcome),
@@ -169,6 +173,7 @@ fn rows(client: &mut Client, ask: &ChunkAsk) -> Result<Chunk, ClientError> {
         total: all.total,
         volumes_incomplete: all.volumes_incomplete,
         metadata_pending: all.metadata_pending,
+        sums: all.sums,
     })
 }
 
@@ -265,7 +270,9 @@ fn failure(error: ClientError) -> DaemonFailure {
         ClientError::NotRunning(why) => DaemonFailure::NotRunning(why),
         ClientError::NotReady => DaemonFailure::NotReady,
         ClientError::Untrusted => DaemonFailure::NotGozler,
-        ClientError::TooOld { update_from } => DaemonFailure::TooOld { update_from },
+        ClientError::TooOld => DaemonFailure::TooOld {
+            local: super::local_service::local_service(),
+        },
         ClientError::Refused { message, .. } => DaemonFailure::Refused { detail: message },
         ClientError::Communication(_) | ClientError::Lost | ClientError::Cancelled => {
             DaemonFailure::Lost

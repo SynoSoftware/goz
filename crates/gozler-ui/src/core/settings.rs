@@ -3,12 +3,16 @@
 //! format, so renaming one needs a migration. A value that is missing or
 //! damaged falls back to its default, and every other value still loads.
 
+use super::commands::{CommandId, MenuItem, row_menu};
+use super::glyph::Glyph;
 use super::ids::DialogId;
 use super::layout::{Dip, Panes};
 use super::model::Column;
 use super::query::{Filters, Matching};
 use super::shortcuts::{CommandShortcuts, ShowShortcut};
+use super::speed::Speed;
 use super::text::LanguageChoice;
+use gozler_core::include::IncludeSettings;
 use gozler_core::types::SortSpec;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -25,10 +29,10 @@ pub(crate) struct Settings {
     pub(crate) window: WindowState,
 }
 
-/// The person's settings of Settings > General, Search and Keyboard (DESIGN.md:
-/// Settings dialog). Start at sign-in and Search with Gozler are not here:
-/// the registry holds them, because Task Manager and the uninstaller change
-/// them there.
+/// The person's settings of Settings > General, Search, Context menu,
+/// Keyboard and File operations (DESIGN.md: Settings dialog). Start at sign-in is not here: the
+/// registry holds it, because Task Manager and the uninstaller change it
+/// there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Choices {
     /// A language tag, such as `de`; absent for Windows default.
@@ -49,14 +53,21 @@ pub(crate) struct Choices {
     /// another window (DESIGN.md: Window lifetime).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) one_window: bool,
+    /// Icons before the text of menu items, buttons, list items, group
+    /// captions and the status bar's totals (DESIGN.md: Look).
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) show_icons: bool,
     /// The open commands; empty does what File Explorer does (DESIGN.md: The
-    /// General page).
+    /// Context menu page).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) open_folders: String,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) open_files: String,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) open_file_location: String,
+    /// Which items a row's context menu shows.
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) context_menu: ContextMenu,
     /// Off: only `Enter` runs the search.
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) search_as_you_type: bool,
@@ -75,6 +86,10 @@ pub(crate) struct Choices {
     pub(crate) show_shortcut: Option<ShowShortcut>,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) shortcuts: CommandShortcuts,
+    /// The speed settings that copies, moves and deletes start with
+    /// (file-manager-spec.md: Speed settings).
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) speed: Speed,
 }
 
 impl Default for Choices {
@@ -84,26 +99,36 @@ impl Default for Choices {
             check_for_updates: false,
             keep_running: on(),
             one_window: on(),
+            show_icons: on(),
             open_folders: String::new(),
             open_files: String::new(),
             open_file_location: String::new(),
+            context_menu: ContextMenu::default(),
             search_as_you_type: on(),
             show_all_when_empty: on(),
             select_on_click: on(),
             select_on_activate: false,
             show_shortcut: None,
             shortcuts: CommandShortcuts::default(),
+            speed: Speed::default(),
         }
     }
 }
 
-/// What the Settings dialog edits: the choices, and the two settings whose
-/// one copy is in the registry, read when the dialog opens.
+/// What the Settings dialog edits: the choices, the two settings whose
+/// one copy is in the registry, read when the dialog opens, and the
+/// service's Include settings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SettingsValues {
     pub(crate) choices: Choices,
     pub(crate) start_at_sign_in: bool,
-    pub(crate) search_with_gozler: bool,
+    /// The settings the service applies, with an entry for each connected
+    /// drive; `None` while the service gives no status, and the Include page
+    /// then changes nothing.
+    pub(crate) include: Option<IncludeSettings>,
+    /// Whether applying shows the one-time notices again, such as the first
+    /// hide's notification, which Reset all asks for.
+    pub(crate) show_notices_again: bool,
 }
 
 /// A page of the Settings dialog, in the page list's order.
@@ -111,20 +136,27 @@ pub(crate) struct SettingsValues {
 pub(crate) enum SettingsPage {
     General,
     Search,
-    FileExplorer,
+    ContextMenu,
     Keyboard,
+    /// The speed settings of file operations (file-manager-spec.md: Speed
+    /// settings).
+    FileOperations,
     /// The service's index, which the page shows and does not change yet
     /// (DESIGN.md: Settings dialog).
     Index,
+    /// What the service indexes (DESIGN.md: The Include page).
+    Include,
 }
 
 impl SettingsPage {
-    pub(crate) const ALL: [SettingsPage; 5] = [
+    pub(crate) const ALL: [SettingsPage; 7] = [
         SettingsPage::General,
         SettingsPage::Search,
-        SettingsPage::FileExplorer,
+        SettingsPage::ContextMenu,
         SettingsPage::Keyboard,
+        SettingsPage::FileOperations,
         SettingsPage::Index,
+        SettingsPage::Include,
     ];
 
     /// Its child-dialog template.
@@ -132,9 +164,11 @@ impl SettingsPage {
         match self {
             SettingsPage::General => DialogId::SettingsGeneral,
             SettingsPage::Search => DialogId::SettingsSearch,
-            SettingsPage::FileExplorer => DialogId::SettingsFileExplorer,
+            SettingsPage::ContextMenu => DialogId::SettingsContextMenu,
             SettingsPage::Keyboard => DialogId::SettingsKeyboard,
+            SettingsPage::FileOperations => DialogId::SettingsFileOperations,
             SettingsPage::Index => DialogId::SettingsIndex,
+            SettingsPage::Include => DialogId::SettingsInclude,
         }
     }
 
@@ -143,14 +177,39 @@ impl SettingsPage {
         match self {
             SettingsPage::General => "settings.general",
             SettingsPage::Search => "settings.search",
-            SettingsPage::FileExplorer => "settings.file_explorer",
+            SettingsPage::ContextMenu => "settings.context_menu",
             SettingsPage::Keyboard => "settings.keyboard",
+            SettingsPage::FileOperations => "settings.file_operations",
             SettingsPage::Index => "settings.index",
+            SettingsPage::Include => "settings.include",
+        }
+    }
+
+    /// The icon before its name in the page list.
+    pub(crate) fn glyph(self) -> Glyph {
+        match self {
+            SettingsPage::General => Glyph::Settings,
+            SettingsPage::Search => Glyph::Search,
+            SettingsPage::ContextMenu => Glyph::BulletedList,
+            SettingsPage::Keyboard => Glyph::KeyboardClassic,
+            SettingsPage::FileOperations => Glyph::SpeedHigh,
+            SettingsPage::Index => Glyph::HardDrive,
+            SettingsPage::Include => Glyph::CheckList,
         }
     }
 }
 
 impl SettingsValues {
+    /// Sets every page's settings to their defaults, and the one-time
+    /// notices to show again, which Apply or OK then applies (DESIGN.md:
+    /// Settings dialog).
+    pub(crate) fn restore_all_defaults(&mut self) {
+        for page in SettingsPage::ALL {
+            self.restore_defaults(page);
+        }
+        self.show_notices_again = true;
+    }
+
     /// Sets `page`'s settings to their defaults, which Apply or OK then
     /// applies (DESIGN.md: Settings dialog).
     pub(crate) fn restore_defaults(&mut self, page: SettingsPage) {
@@ -162,6 +221,7 @@ impl SettingsValues {
                 choices.check_for_updates = defaults.check_for_updates;
                 choices.keep_running = defaults.keep_running;
                 choices.one_window = defaults.one_window;
+                choices.show_icons = defaults.show_icons;
                 self.start_at_sign_in = false;
             }
             SettingsPage::Search => {
@@ -170,17 +230,178 @@ impl SettingsValues {
                 choices.select_on_click = defaults.select_on_click;
                 choices.select_on_activate = defaults.select_on_activate;
             }
-            SettingsPage::FileExplorer => {
+            SettingsPage::ContextMenu => {
                 choices.open_folders = defaults.open_folders;
                 choices.open_files = defaults.open_files;
                 choices.open_file_location = defaults.open_file_location;
-                self.search_with_gozler = false;
+                choices.context_menu = defaults.context_menu;
             }
             SettingsPage::Keyboard => {
                 choices.show_shortcut = defaults.show_shortcut;
                 choices.shortcuts = defaults.shortcuts;
             }
+            SettingsPage::FileOperations => choices.speed = defaults.speed,
             SettingsPage::Index => {}
+            SettingsPage::Include => {
+                if let Some(include) = &mut self.include {
+                    // Every drive the page knows, checked, as the defaults
+                    // index every drive.
+                    let drives: Vec<(String, String)> = include
+                        .drives
+                        .iter()
+                        .map(|d| (d.volume.clone(), d.name.clone()))
+                        .collect();
+                    *include = IncludeSettings::default().with_drives(&drives);
+                }
+            }
+        }
+    }
+}
+
+/// An item of a row's context menu, as Settings > Context menu lists it:
+/// Open is two, for folders and for files (DESIGN.md: The Context menu
+/// page).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContextItem {
+    OpenFolders,
+    OpenFiles,
+    OpenFileLocation,
+    Explore,
+    Copy,
+    CopyName,
+    CopyFolder,
+    CopyAsPath,
+    SearchInThisFolder,
+    Properties,
+}
+
+impl ContextItem {
+    /// Every item, in the row menu's order.
+    pub(crate) fn all() -> Vec<ContextItem> {
+        row_menu()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| match item {
+                MenuItem::Run(command) => Some(command),
+                _ => None,
+            })
+            .flat_map(|command| match command {
+                CommandId::Open => [Some(ContextItem::OpenFolders), Some(ContextItem::OpenFiles)],
+                command => [ContextItem::of(command, false), None],
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The item of the row menu that runs `command`, on a folder when
+    /// `folder`; `None` for a command the row menu does not hold.
+    pub(crate) fn of(command: CommandId, folder: bool) -> Option<ContextItem> {
+        Some(match command {
+            CommandId::Open if folder => ContextItem::OpenFolders,
+            CommandId::Open => ContextItem::OpenFiles,
+            CommandId::OpenFileLocation => ContextItem::OpenFileLocation,
+            CommandId::Explore => ContextItem::Explore,
+            CommandId::Copy => ContextItem::Copy,
+            CommandId::CopyAsPath => ContextItem::CopyAsPath,
+            CommandId::CopyName => ContextItem::CopyName,
+            CommandId::CopyFolder => ContextItem::CopyFolder,
+            CommandId::SearchInThisFolder => ContextItem::SearchInThisFolder,
+            CommandId::Properties => ContextItem::Properties,
+            _ => return None,
+        })
+    }
+
+    /// The command the item runs.
+    pub(crate) fn command(self) -> CommandId {
+        match self {
+            ContextItem::OpenFolders | ContextItem::OpenFiles => CommandId::Open,
+            ContextItem::OpenFileLocation => CommandId::OpenFileLocation,
+            ContextItem::Explore => CommandId::Explore,
+            ContextItem::Copy => CommandId::Copy,
+            ContextItem::CopyAsPath => CommandId::CopyAsPath,
+            ContextItem::CopyName => CommandId::CopyName,
+            ContextItem::CopyFolder => CommandId::CopyFolder,
+            ContextItem::SearchInThisFolder => CommandId::SearchInThisFolder,
+            ContextItem::Properties => CommandId::Properties,
+        }
+    }
+
+    /// The catalogue key of its name on the page: its command's, and Open's
+    /// own for folders and for files.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ContextItem::OpenFolders => "settings_context_menu.item_open_folders",
+            ContextItem::OpenFiles => "settings_context_menu.item_open_files",
+            item => item.command().row().label,
+        }
+    }
+}
+
+/// When a row's context menu shows an item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ItemVisibility {
+    #[default]
+    Shown,
+    /// Shown when Shift is down as the menu opens.
+    WithShift,
+    Hidden,
+}
+
+impl ItemVisibility {
+    /// Whether the menu shows the item, with Shift down when `shift`.
+    pub(crate) fn shows(self, shift: bool) -> bool {
+        match self {
+            ItemVisibility::Shown => true,
+            ItemVisibility::WithShift => shift,
+            ItemVisibility::Hidden => false,
+        }
+    }
+}
+
+/// When a row's context menu shows each item. A hidden item still runs
+/// from its shortcut, the menu bar and the inspector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContextMenu {
+    #[serde(default, deserialize_with = "or_default")]
+    open_folders: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    open_files: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    open_file_location: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    explore: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    copy: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    copy_path: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    copy_name: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    copy_folder: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    search_in_this_folder: ItemVisibility,
+    #[serde(default, deserialize_with = "or_default")]
+    properties: ItemVisibility,
+}
+
+impl ContextMenu {
+    pub(crate) fn visibility(mut self, item: ContextItem) -> ItemVisibility {
+        *self.visibility_mut(item)
+    }
+
+    pub(crate) fn visibility_mut(&mut self, item: ContextItem) -> &mut ItemVisibility {
+        match item {
+            ContextItem::OpenFolders => &mut self.open_folders,
+            ContextItem::OpenFiles => &mut self.open_files,
+            ContextItem::OpenFileLocation => &mut self.open_file_location,
+            ContextItem::Explore => &mut self.explore,
+            ContextItem::Copy => &mut self.copy,
+            ContextItem::CopyAsPath => &mut self.copy_path,
+            ContextItem::CopyName => &mut self.copy_name,
+            ContextItem::CopyFolder => &mut self.copy_folder,
+            ContextItem::SearchInThisFolder => &mut self.search_in_this_folder,
+            ContextItem::Properties => &mut self.properties,
         }
     }
 }
@@ -263,6 +484,15 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) last_update_check: Option<i64>,
+    /// The folder last chosen for Copy to folder… or Move to folder…,
+    /// where their folder picker opens next (file-manager-spec.md: Search
+    /// mode).
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) destination_folder: Option<String>,
 }
 
 impl Default for WindowState {
@@ -278,16 +508,17 @@ impl Default for WindowState {
             inspector_height: inspector_height(),
             tray_notice_shown: false,
             last_update_check: None,
+            destination_folder: None,
         }
     }
 }
 
-/// A shown column and its width in device-independent pixels, so the width
-/// is the same on a monitor with another DPI.
+/// A shown column. Its width is the live list's, which fills the list's
+/// width, so it is not saved, and the width a file from an earlier version
+/// holds is ignored (DESIGN.md: Results list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SavedColumn {
     pub(crate) column: Column,
-    pub(crate) width: Dip,
 }
 
 /// The window's restored rectangle, in the workspace coordinates that
@@ -443,7 +674,8 @@ mod tests {
                 ..Choices::default()
             },
             start_at_sign_in: true,
-            search_with_gozler: false,
+            include: None,
+            show_notices_again: false,
         };
         let mut draft = SettingsDraft::new(values.clone());
         assert!(!draft.can_apply());
@@ -464,7 +696,7 @@ mod tests {
         draft.edited.restore_defaults(SettingsPage::General);
         assert!(!draft.edited.start_at_sign_in);
         assert_eq!(draft.edited.choices.open_files, "notepad %1");
-        draft.edited.restore_defaults(SettingsPage::FileExplorer);
+        draft.edited.restore_defaults(SettingsPage::ContextMenu);
         assert_eq!(draft.edited.choices.open_files, "");
     }
 
@@ -505,6 +737,28 @@ mod tests {
         let text = r#"{ "window": { "inspector_height": 2147483647 } }"#;
         let settings: Settings = serde_json::from_str(text).expect("the file is an object");
         assert_eq!(settings.window.inspector_height, inspector_height());
+    }
+
+    /// An earlier version saved each column's width, and its file keeps its
+    /// columns and their order.
+    #[test]
+    fn saved_column_widths_are_ignored() {
+        let text = r#"{ "window": { "columns": [
+            { "column": "size", "width": 90 },
+            { "column": "name", "width": 300 }
+        ] } }"#;
+        let settings: Settings = serde_json::from_str(text).expect("the file is an object");
+        assert_eq!(
+            settings.window.columns,
+            [
+                SavedColumn {
+                    column: Column::Size
+                },
+                SavedColumn {
+                    column: Column::Name
+                },
+            ]
+        );
     }
 
     /// The keys written must be the keys read, and the second save must
@@ -548,11 +802,9 @@ mod tests {
                 columns: vec![
                     SavedColumn {
                         column: Column::Size,
-                        width: Dip(90),
                     },
                     SavedColumn {
                         column: Column::Name,
-                        width: Dip(300),
                     },
                 ],
                 filter_pane: false,
@@ -569,6 +821,7 @@ mod tests {
                 inspector_height: Dip(250),
                 tray_notice_shown: true,
                 last_update_check: Some(1_790_000_000),
+                destination_folder: Some(r"E:\Backup".into()),
             },
         };
         Settings::default()

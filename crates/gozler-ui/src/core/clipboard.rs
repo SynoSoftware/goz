@@ -1,25 +1,49 @@
-//! What Copy, Copy as path and Copy name put on the clipboard (DESIGN.md: C8,
-//! C9, C10). [`ClipboardData`] knows each format's exact size before it
-//! writes a byte, so `win::clipboard` allocates one block of that size and
-//! the files are written into it once (DESIGN.md: Copy).
+//! What Copy, Cut, Copy name, Copy folder and Copy path put on the
+//! clipboard (DESIGN.md: C8, C9, C10, C25). [`ClipboardData`] knows each
+//! format's exact size before it writes a byte, so `win::clipboard`
+//! allocates one block of that size and the files are written into it once
+//! (DESIGN.md: Copy).
 
 use gozler_core::proto::ResultItem;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardFormat {
-    /// `CF_HDROP`, as File Explorer copies files.
+    /// `CF_HDROP` with the copy effect, as File Explorer's Copy puts
+    /// files there.
     Files,
+    /// `CF_HDROP` with the move effect, as File Explorer's Cut puts files
+    /// there.
+    CutFiles,
     /// `CF_UNICODETEXT`: each full path in double quotes, as File Explorer's
     /// Copy as path.
     Paths,
     /// `CF_UNICODETEXT`: each name.
     Names,
+    /// `CF_UNICODETEXT`: the folder that holds each entry, a drive's root
+    /// with its backslash, as `C:\`.
+    Folders,
+}
+
+impl ClipboardFormat {
+    /// Whether it is a file list, `CF_HDROP`.
+    pub(crate) fn is_files(self) -> bool {
+        matches!(self, ClipboardFormat::Files | ClipboardFormat::CutFiles)
+    }
+}
+
+/// The part of a file's path that a text format writes.
+#[derive(Clone, Copy)]
+enum Part {
+    Full,
+    Name,
+    Folder,
 }
 
 /// The size of `DROPFILES`: `pFiles`, `pt`, `fNC` and `fWide`.
 const DROPFILES_SIZE: usize = 20;
 const QUOTE: u16 = b'"' as u16;
 const BACKSLASH: u16 = b'\\' as u16;
+const COLON: u16 = b':' as u16;
 const LINE_BREAK: [u16; 2] = [b'\r' as u16, b'\n' as u16];
 
 pub(crate) struct ClipboardData<'a> {
@@ -40,7 +64,7 @@ impl<'a> ClipboardData<'a> {
     pub(crate) fn len(&self) -> usize {
         let mut units = 0;
         self.each_unit(|_| units += 1);
-        DROPFILES_SIZE * usize::from(self.format == ClipboardFormat::Files) + 2 * units
+        DROPFILES_SIZE * usize::from(self.format.is_files()) + 2 * units
     }
 
     /// Writes the format into `block`, which is [`len`](Self::len) bytes
@@ -48,7 +72,7 @@ impl<'a> ClipboardData<'a> {
     pub(crate) fn write_into(&self, block: &mut [u8]) {
         assert_eq!(block.len(), self.len(), "the block is len() bytes long");
         let mut at = 0;
-        if self.format == ClipboardFormat::Files {
+        if self.format.is_files() {
             let pfiles = DROPFILES_SIZE as u32;
             let fwide = 1u32;
             // pFiles, then pt and fNC, which stay 0, then fWide.
@@ -68,8 +92,8 @@ impl<'a> ClipboardData<'a> {
     fn each_unit(&self, mut unit: impl FnMut(u16)) {
         for (i, file) in self.files.iter().enumerate() {
             match self.format {
-                ClipboardFormat::Files => {
-                    path_units(file, false, &mut unit);
+                ClipboardFormat::Files | ClipboardFormat::CutFiles => {
+                    path_units(file, Part::Full, &mut unit);
                     unit(0);
                 }
                 ClipboardFormat::Paths => {
@@ -77,14 +101,19 @@ impl<'a> ClipboardData<'a> {
                         LINE_BREAK.into_iter().for_each(&mut unit);
                     }
                     unit(QUOTE);
-                    path_units(file, false, &mut unit);
+                    path_units(file, Part::Full, &mut unit);
                     unit(QUOTE);
                 }
-                ClipboardFormat::Names => {
+                ClipboardFormat::Names | ClipboardFormat::Folders => {
                     if i > 0 {
                         LINE_BREAK.into_iter().for_each(&mut unit);
                     }
-                    path_units(file, true, &mut unit);
+                    let part = if self.format == ClipboardFormat::Names {
+                        Part::Name
+                    } else {
+                        Part::Folder
+                    };
+                    path_units(file, part, &mut unit);
                 }
             }
         }
@@ -92,30 +121,33 @@ impl<'a> ClipboardData<'a> {
     }
 }
 
-/// Calls `unit` with each UTF-16 unit of `file`'s full path, or of its name
-/// alone, from its exact units when its UTF-8 path lost an unpaired
-/// surrogate.
-fn path_units(file: &ResultItem, name_only: bool, unit: &mut impl FnMut(u16)) {
-    match &file.path_u16 {
-        Some(units) => {
-            let start = if name_only {
-                units
-                    .iter()
-                    .rposition(|&u| u == BACKSLASH)
-                    .map_or(0, |i| i + 1)
-            } else {
-                0
-            };
-            units[start..].iter().copied().for_each(unit);
-        }
+/// Calls `unit` with each UTF-16 unit of `part` of `file`'s path, from its
+/// exact units when its UTF-8 path lost an unpaired surrogate.
+fn path_units(file: &ResultItem, part: Part, unit: &mut impl FnMut(u16)) {
+    let encoded: Vec<u16>;
+    let path = match &file.path_u16 {
+        Some(units) => units,
         None => {
-            let start = if name_only {
-                file.path.rfind('\\').map_or(0, |i| i + 1)
-            } else {
-                0
-            };
-            file.path[start..].encode_utf16().for_each(unit);
+            encoded = file.path.encode_utf16().collect();
+            &encoded
         }
+    };
+    let last = path.iter().rposition(|&u| u == BACKSLASH);
+    let part = match (part, last) {
+        (Part::Full, _) | (Part::Name, None) => path,
+        (Part::Name, Some(i)) => &path[i + 1..],
+        (Part::Folder, _) => folder_of(path),
+    };
+    part.iter().copied().for_each(unit);
+}
+
+/// The folder that holds `path`, a drive's root with its backslash, as
+/// `C:\`; empty when `path` has no backslash.
+pub(crate) fn folder_of(path: &[u16]) -> &[u16] {
+    match path.iter().rposition(|&u| u == BACKSLASH) {
+        None => &[],
+        Some(i) if i > 0 && path[i - 1] == COLON => &path[..=i],
+        Some(i) => &path[..i],
     }
 }
 

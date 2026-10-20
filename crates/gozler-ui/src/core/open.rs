@@ -1,7 +1,8 @@
-//! The open commands of Settings > General (DESIGN.md: The General page): Open
-//! folders, Open files and Open file location, in which `%1` is the
-//! entry's full path, as in Everything and in Windows' own commands. An
-//! empty command does what File Explorer does, which `app` runs instead.
+//! The open commands of Settings > Context menu (DESIGN.md: The Context
+//! menu page): Open folders, Open files and Open file location, in which
+//! `%1` is the entry's full path, as in Everything and in Windows' own
+//! commands. An empty command does what File Explorer does, which `app`
+//! runs instead.
 
 use super::text::name_of;
 use gozler_core::proto::ResultItem;
@@ -23,10 +24,10 @@ pub(crate) fn total_commander_command(path: &str) -> String {
 /// The search that finds Total Commander in the index, newest first.
 pub(crate) const TOTAL_COMMANDER_SEARCH: &str = "file: totalcmd*.exe";
 
-/// The Total Commander that Use Total Commander takes from `rows`, which
-/// are sorted by date modified, newest first: the newest `TOTALCMD64.EXE`,
-/// or the newest `TOTALCMD.EXE` when there is no 64-bit one, because an
-/// older copy is usually a backup.
+/// The Total Commander that the Use Total Commander link takes from
+/// `rows`, which are sorted by date modified, newest first: the newest
+/// `TOTALCMD64.EXE`, or the newest `TOTALCMD.EXE` when there is no 64-bit
+/// one, because an older copy is usually a backup.
 pub(crate) fn newest_total_commander(rows: &[ResultItem]) -> Option<&str> {
     ["TOTALCMD64.EXE", "TOTALCMD.EXE"]
         .into_iter()

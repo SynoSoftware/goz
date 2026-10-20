@@ -6,25 +6,38 @@
 //! to this window before they return.
 
 use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
+use super::file_operations::FileOperations;
+use super::fix_thread::FixThread;
 use super::icons::Icons;
+use super::include::{self, NotSaved};
 use super::requests::Requests;
 use super::settings::SettingsDialog;
+use super::status_bar::StatusBar;
 use crate::core::captions::{
-    self, DialogCaptions, FilterCaptions, IndexCaptions, InspectorCaptions, ListCaption,
-    StatusCaptions, WindowCaptions,
+    self, ATTRIBUTES_ROW, DialogCaptions, FilterCaptions, IndexCaptions, InspectorCaptions,
+    ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart, WindowCaptions,
 };
-use crate::core::clipboard::{ClipboardData, ClipboardFormat};
+use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
 use crate::core::commands::{
-    self, CommandId, Focus, INSPECTOR_BUTTONS, KeyAction, Keystroke, Menu, MenuItem, State,
+    self, CommandButton, CommandId, Focus, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
+    INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, Menu, MenuItem, SHOW_DETAILS,
+    State,
 };
 use crate::core::fetch::{DaemonFailure, Fetch, Purpose, WriteFailure};
+use crate::core::file_operations::{delete_question, exit_question};
+use crate::core::fixer::{FixEvent, SetupEvent, SetupResult};
+use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId, IconId};
+use crate::core::include::{
+    IncludeDrive, SummaryRow, connected_drives, include_drives, preview, summary_rows,
+};
 use crate::core::layout::{
-    self, CaptionWidths, Dpi, FilterLayout, InspectorLayout, Layout, MessageArea, Px, Rect,
-    ScrollRequest, Size,
+    self, CaptionWidths, ColumnFit, Dpi, FilterLayout, InspectorLayout, Layout, MessageArea, Px,
+    Rect, ScrollRequest, Size, StatusLayout,
 };
 use crate::core::model::{
-    Accepted, Change, Column, ExportError, ExportFormat, Model, ScopeCheck, Then,
+    Accepted, Change, Column, ExportError, ExportFormat, Job, Model, ScopeCheck, SearchBoxEnter,
+    Then,
 };
 use crate::core::open::{self, CommandLine};
 use crate::core::query::{
@@ -32,32 +45,35 @@ use crate::core::query::{
     date_items, size_items,
 };
 use crate::core::results::{Fix, ListButton};
-use crate::core::selection::wide_path;
+use crate::core::selection::{DRAG_LIMIT, wide_path};
 use crate::core::settings::{SavedColumn, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
-use crate::win::clipboard::ClipboardBlock;
+use crate::win::clipboard::{self as clipboard, ClipboardBlock, ClipboardFiles};
 use crate::win::controls::{
     Button, CheckBox, DropDownList, Edit, Label, ListBox, ListClosing, ListColumn, ListView,
-    StatusBar,
+    Tooltip,
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
+use crate::win::file_operations::TAKEN_CHANGED;
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Accelerators;
 use crate::win::notify::{
-    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify,
+    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, FlatFace, FlatGround,
+    ListNotify,
 };
-use crate::win::shell::{self, FileType};
+use crate::win::shell::{self, FileType, PromptOwner};
 use crate::win::shortcut::{self, RegisterError, Registration};
 use crate::win::tray::{self, TrayEvent, TrayIcon};
-use crate::win::wake::Waker;
+use crate::win::wake::{OpenWaker, Waker};
 use crate::win::window::{DEFERRED, Message, WindowProc};
 use crate::win::{self, Hwnd};
-use gozler_client::RELEASES;
+use gozler_core::include::IncludeSettings;
 use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortSpec};
+use gozler_fileops::Request;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::OsString;
 use std::io;
@@ -66,6 +82,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 use windows::Win32::Foundation::LRESULT;
 
 mod timer {
@@ -74,14 +91,18 @@ mod timer {
     pub(super) const STATUS: usize = 2;
     /// The selection is read this long after it last changed.
     pub(super) const SELECTION: usize = 3;
+    /// The inspector's age of the modification time, while it shows one.
+    pub(super) const AGE: usize = 4;
+    /// The columns are fitted again this long after the list's width last
+    /// changed.
+    pub(super) const FILL: usize = 5;
 }
 
 const SEARCH_DELAY_MS: u32 = 150;
 const STATUS_POLL_MS: u32 = 2_000;
 const SELECTION_DELAY_MS: u32 = 150;
-
-/// Status part 4, which names a newer release that a click then opens.
-const INDEX_PART: usize = 3;
+const AGE_REFRESH_MS: u32 = 60_000;
+const FILL_SETTLE_MS: u32 = 150;
 
 /// What Settings' OK or Apply applied (DESIGN.md: Settings dialog).
 pub(super) struct Applied {
@@ -92,15 +113,13 @@ pub(super) struct Applied {
     pub(super) failures: Vec<String>,
 }
 
-/// What the update check's thread found. The thread is not joined, because
-/// a WinHTTP call cannot be ended at once and joining it would hold Exit for
-/// as long as the network waits. Instead it wakes the window only while
-/// `window_open`, which `WM_DESTROY` clears under the lock, so no wake-up
-/// reaches a reused handle (DESIGN.md: window rule 5).
+/// What the threads that ask GitHub for its latest release found: the
+/// update check, and the question whether the release is older than the
+/// window. [`MainWindow::ask_github`] runs them.
 #[derive(Default)]
 struct UpdateCheck {
-    window_open: bool,
     newer: Option<String>,
+    older: Option<bool>,
 }
 
 /// The controls, created in `WM_CREATE` in Tab order; Windows destroys them
@@ -119,6 +138,7 @@ struct Controls {
     message: Label,
     /// In [`Model::list_buttons`]' order.
     message_buttons: [Button; 2],
+    message_tips: Tooltip,
     list: ListView,
     inspector: Inspector,
     status: StatusBar,
@@ -126,6 +146,12 @@ struct Controls {
 
 impl Controls {
     fn create(parent: Hwnd) -> windows::core::Result<Controls> {
+        let message_buttons = [
+            Button::create(parent, ControlId::MessageButton1.id())?,
+            Button::create(parent, ControlId::MessageButton2.id())?,
+        ];
+        // Show filters comes first in the Tab order, as it stands first.
+        let show_filters = Button::create(parent, ControlId::ShowFilters.id())?;
         let controls = Controls {
             search: Edit::create(parent, ControlId::Search.id())?,
             clear_search: Button::create(parent, ControlId::ClearSearch.id())?,
@@ -135,15 +161,13 @@ impl Controls {
             match_mode: DropDownList::create(parent, ControlId::MatchMode.id())?,
             match_case: CheckBox::create(parent, ControlId::MatchCase.id())?,
             match_path: CheckBox::create(parent, ControlId::MatchPath.id())?,
-            filters: FilterPane::create(parent)?,
+            filters: FilterPane::create(parent, show_filters)?,
             message: Label::create_message(parent, ControlId::Message.id())?,
-            message_buttons: [
-                Button::create(parent, ControlId::MessageButton1.id())?,
-                Button::create(parent, ControlId::MessageButton2.id())?,
-            ],
+            message_buttons,
+            message_tips: Tooltip::create(parent, &message_buttons.map(Button::hwnd))?,
             list: ListView::create(parent, ControlId::List.id())?,
             inspector: Inspector::create(parent)?,
-            status: StatusBar::create(parent, ControlId::Status.id())?,
+            status: StatusBar::for_window(parent)?,
         };
         controls.message.hwnd().set_visible(false);
         // The search box starts empty; its changes enable Clear.
@@ -168,26 +192,52 @@ impl Controls {
             self.message_buttons[0].hwnd(),
             self.message_buttons[1].hwnd(),
             self.list.hwnd(),
-            self.status.hwnd(),
         ];
         let pane = self.filters.controls();
         let inspector = self.inspector.controls();
-        for control in controls.into_iter().chain(pane).chain(inspector) {
+        let status = self.status.text_controls();
+        for control in controls
+            .into_iter()
+            .chain(pane)
+            .chain(inspector)
+            .chain(status)
+        {
             control.set_font(&fonts.ui);
         }
         self.inspector.heading.hwnd().set_font(&fonts.heading);
-        // Rows as tall as the Kind list's, which Windows draws.
+        self.filters.title.hwnd().set_font(&fonts.semibold);
+        self.filters.clear.hwnd().set_font(&fonts.ui);
+        // Rows as tall as a list's that Windows draws.
         let height = TextMeter::new(&fonts.ui).height();
         self.filters.location.set_item_height(height);
     }
+
+    /// Gives the inspector's buttons their icons and the Kind list its row
+    /// height, at creation, on a monitor with another DPI, when the system
+    /// colours change and when icons are shown or hidden.
+    fn apply_glyphs(&self) {
+        self.filters.kind.fit_glyph_rows();
+        for (button, control) in self.inspector.text_buttons() {
+            if let Some(glyph) = button.command.glyph() {
+                control.set_glyph(glyph);
+            }
+        }
+    }
 }
 
-/// The filter pane's window and its controls, in Tab order. Each label
-/// comes right before its control, so its access key focuses the control
-/// (DESIGN.md: Filter pane).
+/// The filter pane's header, its window and its controls, in Tab order, and
+/// Show filters. Each label comes right before its control, so its access
+/// key focuses the control (DESIGN.md: Filter pane).
 struct FilterPane {
-    pane: Hwnd,
+    /// In the search row while the pane is hidden.
+    show: Button,
+    /// The header, in the main window above the pane's window, so it stays
+    /// while the pane scrolls.
+    title: Label,
     clear: Button,
+    hide: Button,
+    tips: Tooltip,
+    pane: Hwnd,
     kind_label: Label,
     kind: ListBox,
     location_label: Label,
@@ -222,15 +272,23 @@ enum RangeFilter {
 }
 
 impl FilterPane {
-    fn create(parent: Hwnd) -> windows::core::Result<FilterPane> {
+    fn create(parent: Hwnd, show: Button) -> windows::core::Result<FilterPane> {
+        let title = Label::create_heading(parent, ControlId::FilterTitle.id())?;
+        let clear = Button::create(parent, ControlId::ClearFilters.id())?;
+        let hide = Button::create(parent, ControlId::HideFilters.id())?;
+        let tips = Tooltip::create(parent, &[show.hwnd(), clear.hwnd(), hide.hwnd()])?;
         let pane = win::pane::create(parent, ControlId::FilterPane.id())?;
         let label = |id: ControlId| Label::create(pane, id.id());
         let drop_down = |id: ControlId| DropDownList::create(pane, id.id());
         let mut filters = FilterPane {
+            show,
+            title,
+            clear,
+            hide,
+            tips,
             pane,
-            clear: Button::create(pane, ControlId::ClearFilters.id())?,
             kind_label: label(ControlId::KindLabel)?,
-            kind: ListBox::create(pane, ControlId::Kind.id())?,
+            kind: ListBox::create_with_glyphs(pane, ControlId::Kind.id())?,
             location_label: label(ControlId::LocationLabel)?,
             location: ListBox::create_paths(pane, ControlId::Location.id())?,
             choose_folder: Button::create(pane, ControlId::ChooseFolder.id())?,
@@ -246,6 +304,12 @@ impl FilterPane {
             filters.attributes.push((label(name)?, drop_down(choice)?));
         }
         Ok(filters)
+    }
+
+    /// Whether `control` is the header's or the pane's.
+    fn contains(&self, control: Hwnd) -> bool {
+        [self.title.hwnd(), self.clear.hwnd(), self.hide.hwnd()].contains(&control)
+            || self.pane.is_parent_of(control)
     }
 
     /// Every control in the pane.
@@ -269,7 +333,6 @@ impl FilterPane {
     fn placed_with(&self, layout: Option<&FilterLayout>) -> Vec<(Hwnd, Option<Rect>, bool)> {
         let at = |rect: fn(&FilterLayout) -> Rect| layout.map(rect);
         let mut placed = vec![
-            (self.clear.hwnd(), at(|l| l.clear), false),
             (self.kind_label.hwnd(), at(|l| l.kind_label), false),
             (self.kind.hwnd(), at(|l| l.kind), false),
             (self.location_label.hwnd(), at(|l| l.location_label), false),
@@ -294,9 +357,17 @@ impl FilterPane {
         placed
     }
 
-    /// Sets the labels and the buttons' captions.
+    /// Sets the labels and the buttons' captions and tips.
     fn set_captions(&self, captions: &FilterCaptions) {
+        self.title.hwnd().set_text(&captions.title);
         self.clear.hwnd().set_text(&captions.clear);
+        self.tips.set(self.clear.hwnd(), &captions.clear_tip);
+        // The buttons draw their icons, and their captions are the names
+        // that screen readers say.
+        for (icon, name) in [(self.hide, &captions.hide), (self.show, &captions.show)] {
+            icon.hwnd().set_text(name);
+            self.tips.set(icon.hwnd(), name);
+        }
         self.kind_label.hwnd().set_text(&captions.kind);
         self.location_label.hwnd().set_text(&captions.location);
         self.choose_folder.hwnd().set_text(&captions.choose_folder);
@@ -329,45 +400,127 @@ impl FilterPane {
 /// is painted by the window.
 struct Inspector {
     heading: Label,
+    /// [`INSPECTOR_COPY_NAME`], after the heading.
+    copy_name: Button,
+    /// [`HIDE_DETAILS`], at the right end of the heading's row.
+    hide: Button,
+    /// [`INSPECTOR_COPY_FOLDER`], after the folder's value.
+    copy_folder: Button,
+    /// [`INSPECTOR_COPY_PATH`], at the end of the Date modified row.
+    copy_path: Button,
     /// In [`INSPECTOR_BUTTONS`]' order.
-    buttons: [Button; 3],
+    buttons: [Button; INSPECTOR_BUTTONS.len()],
+    tips: Tooltip,
     /// Each field row's label and value.
-    fields: Vec<(Label, Edit)>,
+    fields: Vec<(Label, FieldValue)>,
+    /// The muted age after Date modified's value.
+    age: Label,
     /// The gray hint while nothing is selected.
     note: Label,
 }
 
+/// A field row's value: a read-only box, so the person can select and copy
+/// it, or for Attributes a text the window draws in two colours.
+#[derive(Clone, Copy)]
+enum FieldValue {
+    Text(Edit),
+    Parts(Label),
+}
+
+impl FieldValue {
+    fn hwnd(self) -> Hwnd {
+        match self {
+            FieldValue::Text(edit) => edit.hwnd(),
+            FieldValue::Parts(label) => label.hwnd(),
+        }
+    }
+
+    fn text(self) -> Option<Edit> {
+        match self {
+            FieldValue::Text(edit) => Some(edit),
+            FieldValue::Parts(_) => None,
+        }
+    }
+}
+
 /// The controls of each inspector field row's label and value.
-const FIELD_CONTROLS: [(ControlId, ControlId); 7] = [
+const FIELD_CONTROLS: [(ControlId, ControlId); 4] = [
     (ControlId::InspectorLabel1, ControlId::InspectorValue1),
     (ControlId::InspectorLabel2, ControlId::InspectorValue2),
     (ControlId::InspectorLabel3, ControlId::InspectorValue3),
     (ControlId::InspectorLabel4, ControlId::InspectorValue4),
-    (ControlId::InspectorLabel5, ControlId::InspectorValue5),
-    (ControlId::InspectorLabel6, ControlId::InspectorValue6),
-    (ControlId::InspectorLabel7, ControlId::InspectorValue7),
 ];
 
 impl Inspector {
+    /// Creates the controls in reading order, so Tab reaches each button
+    /// after the text it stands beside.
     fn create(parent: Hwnd) -> windows::core::Result<Inspector> {
-        let button = |id: ControlId| Button::create(parent, id.id());
-        let mut inspector = Inspector {
-            heading: Label::create_heading(parent, ControlId::InspectorHeading.id())?,
-            buttons: [
-                button(ControlId::InspectorOpen)?,
-                button(ControlId::InspectorOpenFileLocation)?,
-                button(ControlId::InspectorCopyAsPath)?,
-            ],
-            fields: Vec::new(),
-            note: Label::create_message(parent, ControlId::InspectorNote.id())?,
-        };
-        for (label, value) in FIELD_CONTROLS {
-            inspector.fields.push((
-                Label::create(parent, label.id())?,
-                Edit::create_read_only(parent, value.id())?,
-            ));
+        let button = |button: CommandButton| Button::create(parent, button.control.id());
+        let heading = Label::create_heading(parent, ControlId::InspectorHeading.id())?;
+        let copy_name = button(INSPECTOR_COPY_NAME)?;
+        let hide = button(HIDE_DETAILS)?;
+        let mut fields = Vec::new();
+        let mut copy_folder = None;
+        let mut copy_path = None;
+        let mut age = None;
+        for (index, (label, value)) in FIELD_CONTROLS.into_iter().enumerate() {
+            let label = Label::create(parent, label.id())?;
+            let value = if index == ATTRIBUTES_ROW {
+                FieldValue::Parts(Label::create_owner_drawn(parent, value.id())?)
+            } else {
+                FieldValue::Text(Edit::create_read_only(parent, value.id())?)
+            };
+            fields.push((label, value));
+            if index == 0 {
+                copy_folder = Some(button(INSPECTOR_COPY_FOLDER)?);
+            } else if index == MODIFIED_ROW {
+                age = Some(Label::create_line(parent, ControlId::InspectorAge.id())?);
+                copy_path = Some(button(INSPECTOR_COPY_PATH)?);
+            }
         }
-        Ok(inspector)
+        let buttons = INSPECTOR_BUTTONS.map(button);
+        let [explore, open_file_location, open] = buttons;
+        let buttons = [explore?, open_file_location?, open?];
+        let copy_folder = copy_folder.expect("the folder is the first field row");
+        let copy_path = copy_path.expect("the inspector has a Date modified row");
+        let tipped: Vec<Hwnd> = buttons
+            .iter()
+            .chain([&copy_name, &copy_folder, &hide])
+            .map(|b| b.hwnd())
+            .collect();
+        Ok(Inspector {
+            heading,
+            copy_name,
+            hide,
+            copy_folder,
+            copy_path,
+            buttons,
+            tips: Tooltip::create(parent, &tipped)?,
+            fields,
+            age: age.expect("the inspector has a Date modified row"),
+            note: Label::create_message(parent, ControlId::InspectorNote.id())?,
+        })
+    }
+
+    /// The buttons with a caption, each with what it runs.
+    fn text_buttons(&self) -> [(CommandButton, Button); INSPECTOR_BUTTONS.len() + 1] {
+        let [explore, open_file_location, open] = INSPECTOR_BUTTONS;
+        let [b0, b1, b2] = self.buttons;
+        [
+            (explore, b0),
+            (open_file_location, b1),
+            (open, b2),
+            (INSPECTOR_COPY_PATH, self.copy_path),
+        ]
+    }
+
+    /// Every button, each with what it runs.
+    fn command_buttons(&self) -> impl Iterator<Item = (CommandButton, Button)> {
+        self.text_buttons().into_iter().chain([
+            (INSPECTOR_COPY_NAME, self.copy_name),
+            (INSPECTOR_COPY_FOLDER, self.copy_folder),
+            (HIDE_DETAILS, self.hide),
+        ])
     }
 
     /// Every control but the heading, which has a font of its own.
@@ -376,11 +529,10 @@ impl Inspector {
             .fields
             .iter()
             .flat_map(|(label, value)| [label.hwnd(), value.hwnd()]);
-        self.buttons
-            .iter()
-            .map(|b| b.hwnd())
+        self.command_buttons()
+            .map(|(_, b)| b.hwnd())
             .chain(fields)
-            .chain([self.note.hwnd()])
+            .chain([self.age.hwnd(), self.note.hwnd()])
             .collect()
     }
 
@@ -392,16 +544,18 @@ impl Inspector {
     fn value(&self, control: Hwnd) -> Option<Edit> {
         self.fields
             .iter()
-            .map(|(_, value)| *value)
+            .filter_map(|(_, value)| value.text())
             .find(|value| value.hwnd() == control)
     }
 }
 
-/// The controls' font, its bold form for the matched part of a cell, and
-/// the inspector's heading font.
+/// The controls' font, its bold form for the matched part of a cell, its
+/// semibold form for the filter pane's title, and the inspector's heading
+/// font.
 struct Fonts {
     ui: Font,
     bold: Font,
+    semibold: Font,
     heading: Font,
 }
 
@@ -409,8 +563,14 @@ impl Fonts {
     fn new(dpi: Dpi) -> windows::core::Result<Fonts> {
         let ui = Font::message(dpi)?;
         let bold = ui.bold()?;
+        let semibold = ui.semibold()?;
         let heading = ui.heading()?;
-        Ok(Fonts { ui, bold, heading })
+        Ok(Fonts {
+            ui,
+            bold,
+            semibold,
+            heading,
+        })
     }
 }
 
@@ -444,9 +604,21 @@ struct Created {
     /// `None` while the window moves to a monitor with another DPI.
     layout: RefCell<Option<Layout>>,
     requests: Requests,
+    fixer: FixThread,
+    /// Wakes the window from the threads it does not join: GitHub's and a
+    /// fix's.
+    waker: OpenWaker,
     images: Option<ImageList>,
     /// The inspector's icons; their indexes are those of `images`.
     large_images: Option<ImageList>,
+}
+
+/// The open Settings dialog, which replies and the window's job go to.
+#[derive(Clone, Copy)]
+struct OpenSettings {
+    dialog: Hwnd,
+    /// `None` when Windows could not make the dialog's status bar.
+    status: Option<StatusBar>,
 }
 
 /// Which Gozler of the session a window is (DESIGN.md: Window lifetime).
@@ -487,12 +659,23 @@ pub(crate) struct MainWindow {
     /// dialog in [`Message::Deferred`], after the list has said which item
     /// it closed on, in whichever order it sends that.
     range_closed: Cell<Option<RangeFilter>>,
+    /// Whether the downloaded setup started, so the window closes once its
+    /// message loop has ended.
+    closing_for_setup: Cell<bool>,
     /// What the inspector shows, so a reply that changes none of it sets no
     /// text, and the index of its icon in the system image lists.
     inspector_shown: RefCell<(InspectorCaptions, Option<i32>)>,
+    /// What the status bar's right group shows, which the window draws.
+    status_right: RefCell<Vec<ValuePart>>,
     /// While the person drags the splitter: the pointer's client `y` and the
     /// inspector's height when the drag started.
     splitter_drag: Cell<Option<(i32, Px)>>,
+    /// The width the list's columns last filled, so a layout that keeps it
+    /// fills nothing.
+    filled_width: Cell<Option<Px>>,
+    /// The columns' fits while the list's width keeps changing, which each
+    /// fill of the burst reuses until the width settles.
+    settling_fits: RefCell<Option<Vec<ColumnFit>>>,
     /// The person's command shortcuts, which Settings replaces; the message
     /// loop translates with the table of the moment.
     accelerators: RefCell<Rc<Accelerators>>,
@@ -508,14 +691,17 @@ pub(crate) struct MainWindow {
     /// Whether the window has not shown yet, because Gozler started in the
     /// notification area; its first show restores the saved placement.
     unshown: Cell<bool>,
-    /// The open Settings dialog, which Use Total Commander's reply goes to,
-    /// and that reply until the dialog reads it.
-    settings_dialog: Cell<Option<Hwnd>>,
+    /// The open Settings dialog, from its WM_INITDIALOG until it closes.
+    settings: Cell<Option<OpenSettings>>,
     total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
+    included_count: RefCell<Option<Result<u64, DaemonFailure>>>,
     /// Whether a click gave the search box the focus, so its text is
     /// selected once the click is handled (Settings > Search).
     select_search: Cell<bool>,
     update: Arc<Mutex<UpdateCheck>>,
+    /// The File operations window and its queue, which only the first
+    /// window has (file-manager-spec.md: Interrupted operations).
+    file_operations: RefCell<Option<FileOperations>>,
 }
 
 impl MainWindow {
@@ -525,13 +711,16 @@ impl MainWindow {
     /// message loop reads its accelerators.
     pub(crate) fn open(
         class: &str,
-        model: Model,
+        mut model: Model,
         settings_file: PathBuf,
         show_message: u32,
         instance: Instance,
         sign_in: bool,
     ) -> (Hwnd, Rc<MainWindow>) {
         let placement = model.placement();
+        if instance == Instance::First {
+            model.offer_file_operations();
+        }
         let accelerators =
             accelerator_table(&model.choices().shortcuts).expect("the accelerator table builds");
         let window = Rc::new(MainWindow {
@@ -550,21 +739,24 @@ impl MainWindow {
             filter_scroll: Cell::new(Px(0)),
             range_closing: Cell::new(None),
             range_closed: Cell::new(None),
+            closing_for_setup: Cell::new(false),
             inspector_shown: RefCell::new((InspectorCaptions::default(), None)),
+            status_right: RefCell::new(Vec::new()),
             splitter_drag: Cell::new(None),
+            filled_width: Cell::new(None),
+            settling_fits: RefCell::new(None),
             accelerators: RefCell::new(Rc::new(accelerators)),
             tray: RefCell::new(None),
             taskbar_created: win::instance::register_message("TaskbarCreated"),
             shortcut: RefCell::new(None),
             shortcut_failure: RefCell::new(None),
             unshown: Cell::new(false),
-            settings_dialog: Cell::new(None),
+            settings: Cell::new(None),
             total_commander: RefCell::new(None),
+            included_count: RefCell::new(None),
             select_search: Cell::new(false),
-            update: Arc::new(Mutex::new(UpdateCheck {
-                window_open: true,
-                newer: None,
-            })),
+            update: Arc::new(Mutex::new(UpdateCheck::default())),
+            file_operations: RefCell::new(None),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -574,7 +766,8 @@ impl MainWindow {
         window.ask_status();
         if instance == Instance::First {
             window.register_saved_shortcut(hwnd);
-            window.check_for_updates(hwnd);
+            window.check_for_updates();
+            window.open_file_operations(hwnd);
         }
         window.update_tray(hwnd);
         let keeps_running = window.model.borrow().choices().keep_running;
@@ -606,12 +799,14 @@ impl MainWindow {
             return false;
         };
         controls.apply_fonts(&fonts);
+        win::gdi::show_icons(self.model.borrow().choices().show_icons);
+        controls.apply_glyphs();
         let (columns, order) = {
             let model = self.model.borrow();
             let columns: Vec<(Column, Px)> = model
                 .columns()
                 .iter()
-                .map(|c| (*c, layout::column_width(*c, model.saved_width(*c), dpi)))
+                .map(|c| (*c, layout::column_width(*c, dpi)))
                 .collect();
             (columns, model.column_order())
         };
@@ -632,12 +827,15 @@ impl MainWindow {
         }
         let captions = self.captions();
         let metrics = Metrics::measure(&fonts, &captions, dpi);
+        let waker = OpenWaker::new(hwnd);
         let _ = self.created.set(Created {
             controls,
             fonts: RefCell::new(fonts),
             metrics: Cell::new(metrics),
             layout: RefCell::new(None),
             requests: Requests::new(Waker::new(hwnd)),
+            fixer: FixThread::new(waker.clone()),
+            waker,
             images,
             large_images: ImageList::system_large(),
         });
@@ -677,6 +875,9 @@ impl MainWindow {
             .set_language(choice, Strings::load(language));
         super::set_panic_report(|report| report.language = Some(language));
         self.refresh_text(hwnd);
+        if let Some(operations) = self.file_operations.borrow().as_ref() {
+            operations.set_strings(Strings::load(language));
+        }
     }
 
     fn apply_text(&self, hwnd: Hwnd, captions: &WindowCaptions) {
@@ -699,15 +900,25 @@ impl MainWindow {
         for (index, header) in captions.headers.iter().enumerate() {
             controls.list.set_header(index, header);
         }
-        for (button, caption) in controls
-            .inspector
-            .buttons
-            .iter()
-            .zip(&captions.inspector_buttons)
-        {
-            button.hwnd().set_text(caption);
+        let inspector = &controls.inspector;
+        let [explore, open_file_location, open] = &captions.inspector_buttons;
+        for (button, caption) in [
+            (inspector.buttons[0], explore),
+            (inspector.buttons[1], open_file_location),
+            (inspector.buttons[2], open),
+            (inspector.copy_path, &captions.copy_path),
+            (inspector.copy_name, &captions.copy_name),
+            (inspector.copy_folder, &captions.copy_folder),
+            (inspector.hide, &captions.hide_details),
+        ] {
+            button.hwnd().set_text(&caption.caption);
+            inspector.tips.set(button.hwnd(), &caption.tip);
         }
         self.show_inspector(hwnd, captions.inspector.clone());
+        controls.status.set_cancel_caption(&captions.status_cancel);
+        controls
+            .status
+            .set_show_details_caption(&captions.show_details);
         self.show_status(&captions.status);
         self.show_message(captions.message.as_ref());
         self.update_bound_controls();
@@ -727,6 +938,7 @@ impl MainWindow {
             )
         };
         pane.kind.set_items(&captions.kinds, positions.kind);
+        pane.kind.set_glyphs(Kind::ALL.map(Kind::glyph));
         pane.location
             .set_items(&captions.locations, positions.location);
         // Only directly in a folder needs a folder.
@@ -786,12 +998,16 @@ impl MainWindow {
             (
                 (CommandId::Match.row().enabled)(&state),
                 (CommandId::ClearFilters.row().enabled)(&state),
-                INSPECTOR_BUTTONS.map(|(command, _)| (command.row().enabled)(&state)),
+                controls
+                    .inspector
+                    .command_buttons()
+                    .map(|(button, control)| (control, (button.command.row().enabled)(&state)))
+                    .collect::<Vec<_>>(),
                 model.matching(),
             )
         };
         controls.filters.clear.hwnd().set_enabled(can_clear);
-        for (button, enabled) in controls.inspector.buttons.iter().zip(buttons) {
+        for (button, enabled) in buttons {
             button.hwnd().set_enabled(enabled);
         }
         for control in [
@@ -831,8 +1047,16 @@ impl MainWindow {
                 .map_or(("", ""), |(l, v)| (l.as_str(), v.as_str()));
             label.hwnd().set_text(label_text);
             value.hwnd().set_text(value_text);
+            if let FieldValue::Parts(parts) = value {
+                parts.hwnd().invalidate();
+            }
         }
         inspector.note.hwnd().set_text(&captions.note);
+        if captions.modified.is_some() {
+            hwnd.set_timer(timer::AGE, AGE_REFRESH_MS);
+        } else {
+            hwnd.kill_timer(timer::AGE);
+        }
         // The shell call can dispatch messages, so no borrow is held
         // (DESIGN.md: window rule 1).
         let icon = captions
@@ -841,23 +1065,46 @@ impl MainWindow {
             .map(|(name, is_folder)| self.icons.index(name, *is_folder));
         let icon_changed = self.inspector_shown.borrow().1 != icon;
         self.inspector_shown.replace((captions, icon));
+        self.show_age();
         self.show_fields();
         if icon_changed {
             hwnd.invalidate();
         }
     }
 
+    /// Writes how long ago the shown entry was modified, from the current
+    /// time, so a minute's refresh keeps it true (DESIGN.md: Inspector pane).
+    fn show_age(&self) {
+        let age = self.inspector_shown.borrow().0.modified.map(|modified| {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |since| {
+                    i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+                });
+            captions::age(
+                self.model.borrow().strings(),
+                &*self.numbers.borrow(),
+                modified,
+                gozler_core::output::filetime::unix_ms_to_filetime(now),
+            )
+        });
+        let inspector = &self.created().controls.inspector;
+        inspector.age.hwnd().set_text(age.as_deref().unwrap_or(""));
+    }
+
     /// Shows each field row that has a field and room in the pane, and
-    /// hides the others, so Tab skips them; the note likewise.
+    /// hides the others, so Tab skips them; the note and the age likewise.
     fn show_fields(&self) {
-        let (rows, note) = {
+        let (rows, note, age) = {
             let layout = self.created().layout.borrow();
             let placed = layout.as_ref().and_then(|l| l.inspector.as_ref());
             let room = placed.map_or(0, |i| i.fields.len());
             let shown = self.inspector_shown.borrow();
+            let rows = room.min(shown.0.fields.len());
             (
-                room.min(shown.0.fields.len()),
+                rows,
                 placed.is_some_and(|i| i.note.is_some()) && !shown.0.note.is_empty(),
+                MODIFIED_ROW < rows && shown.0.modified.is_some(),
             )
         };
         let inspector = &self.created().controls.inspector;
@@ -866,13 +1113,247 @@ impl MainWindow {
             value.hwnd().set_visible(index < rows);
         }
         inspector.note.hwnd().set_visible(note);
+        inspector.age.hwnd().set_visible(age);
+        self.fit_inspector();
+    }
+
+    /// Fits the inspector's texts to their lines: a copy icon stands 8 px
+    /// after the text it copies, for one entry only, whose name and folder
+    /// it copies, the age a space after the modification time, and a value
+    /// too long for its line ends in "…", a path losing its middle as
+    /// Windows shortens one (DESIGN.md: Inspector pane). The name, the age
+    /// and Attributes end in an ellipsis themselves, and a value that has
+    /// the focus keeps its whole text, so the person selects what is there.
+    fn fit_inspector(&self) {
+        let created = self.created();
+        let inspector = &created.controls.inspector;
+        let layout = created.layout.borrow();
+        let Some(placed) = layout.as_ref().and_then(|l| l.inspector.as_ref()) else {
+            for copy in [inspector.copy_name, inspector.copy_folder] {
+                copy.hwnd().set_visible(false);
+            }
+            return;
+        };
+        let shown = self.inspector_shown.borrow();
+        // The copy icons copy one entry's name and folder.
+        let one_entry = shown.0.icon.is_some();
+        let fonts = created.fonts.borrow();
+        let meter = TextMeter::new(&fonts.ui);
+        let focused = Hwnd::focused();
+        let mut moves = Vec::new();
+        let mut heading = placed.heading;
+        let mut folder_shown = false;
+        if one_entry {
+            let width = TextMeter::new(&fonts.heading).plain_width(&shown.0.heading);
+            let (text, icon) = placed.copy_beside(heading, width);
+            heading = text;
+            moves.push((inspector.copy_name.hwnd(), icon));
+        }
+        moves.push((inspector.heading.hwnd(), heading));
+        let mut texts: Vec<(Edit, String)> = Vec::new();
+        for (index, ((_, line), (_, value))) in
+            placed.fields.iter().zip(&inspector.fields).enumerate()
+        {
+            let value = match value {
+                FieldValue::Text(edit) => *edit,
+                // Its text starts where a box's does.
+                FieldValue::Parts(parts) => {
+                    let inset = inspector
+                        .fields
+                        .iter()
+                        .find_map(|(_, v)| v.text())
+                        .map_or(Px(0), Edit::left_margin);
+                    moves.push((parts.hwnd(), InspectorLayout::drawn_value(*line, inset)));
+                    continue;
+                }
+            };
+            let text = shown.0.fields.get(index).map_or("", |(_, v)| v.as_str());
+            let margins = value.margins();
+            let mut rect = *line;
+            if index == 0 && one_entry {
+                let (fitted, icon) = placed.copy_beside(rect, meter.plain_width(text) + margins);
+                rect = fitted;
+                moves.push((inspector.copy_folder.hwnd(), icon));
+                folder_shown = true;
+            } else if index == MODIFIED_ROW && shown.0.modified.is_some() {
+                let (fitted, age) = placed.age_beside(
+                    rect,
+                    meter.plain_width(text) + margins,
+                    meter.plain_width(" "),
+                    meter.plain_width(&inspector.age.hwnd().text()),
+                );
+                rect = fitted;
+                moves.push((inspector.age.hwnd(), age));
+            }
+            moves.push((value.hwnd(), rect));
+            let room = rect.width - margins;
+            let fitting = if focused == Some(value.hwnd()) {
+                text.to_owned()
+            } else {
+                meter.compact_path(text, room)
+            };
+            texts.push((value, fitting));
+        }
+        // A new text notifies the window, whose handlers may borrow these.
+        drop((meter, shown, fonts, layout));
+        for (value, text) in texts {
+            if value.text() != text {
+                value.hwnd().set_text(&text);
+            }
+        }
+        win::move_children(&moves);
+        inspector.copy_name.hwnd().set_visible(one_entry);
+        inspector.copy_folder.hwnd().set_visible(folder_shown);
     }
 
     fn show_status(&self, status: &StatusCaptions) {
-        let bar = self.created().controls.status;
-        for (part, text) in status.parts().into_iter().enumerate() {
-            bar.set_text(part, text);
+        let controls = &self.created().controls;
+        self.status_right.replace(status.right.clone());
+        // Cancel hides when the job ends, and a hidden control would keep
+        // the focus but take no key.
+        if controls.status.show(status) {
+            controls.search.hwnd().focus();
         }
+        if let Some(OpenSettings {
+            dialog,
+            status: Some(bar),
+        }) = self.settings.get()
+            && bar.show_work(&status.job, &status.service)
+            && let Some(pages) = win::dialog::item(dialog, ControlId::SettingsPages.id())
+        {
+            pages.focus();
+        }
+    }
+
+    /// The Settings dialog has opened, with its status bar when Windows
+    /// made one, which shows the window's job and service at once.
+    pub(super) fn settings_opened(&self, dialog: Hwnd, status: Option<StatusBar>) {
+        self.settings.set(Some(OpenSettings { dialog, status }));
+        self.update_status();
+    }
+
+    /// Tells the open Settings dialog that a reply waits for it: Use Total
+    /// Commander's, Include's count, or a fix's step, which the Drives and
+    /// service page follows.
+    fn post_settings_reply(&self) {
+        if let Some(open) = self.settings.get() {
+            win::dialog::post_reply(open.dialog);
+        }
+    }
+
+    /// The Settings dialog's status bar's widest texts and Cancel's
+    /// caption, which it measures in its own font.
+    pub(super) fn settings_status_texts(&self) -> (StatusWidest, String) {
+        let model = self.model.borrow();
+        let strings = model.strings();
+        (
+            captions::settings_status_widest(strings, &*self.numbers.borrow()),
+            strings.text("button.cancel").to_owned(),
+        )
+    }
+
+    /// The status bar's Cancel, in the window or in Settings: stops the job
+    /// that the bar shows.
+    pub(super) fn cancel_job(&self, hwnd: Hwnd) {
+        let job = self.model.borrow().job();
+        match job {
+            Job::Export => self.run(hwnd, MenuItem::Run(CommandId::CancelExport)),
+            Job::Fix => {
+                let accepted = self.model.borrow_mut().cancel_fix();
+                self.apply(hwnd, accepted);
+            }
+        }
+    }
+
+    /// Runs a failure's fix (DESIGN.md: Service fixes). The list's button
+    /// and the Index page's call it, with the main window as `hwnd`, which
+    /// owns Windows' permission prompt and outlives the fix's thread.
+    pub(super) fn run_fix(&self, hwnd: Hwnd, fix: Fix) {
+        match &fix {
+            Fix::OpenServices => return win::shell::open("services.msc"),
+            Fix::UseLocal(local) => {
+                let question = captions::use_local_question(self.model.borrow().strings(), local);
+                if !win::dialog::ask(self.fix_owner(hwnd), &question) {
+                    return;
+                }
+            }
+            Fix::Repair(_) | Fix::Update => {}
+        }
+        let accepted = self.model.borrow_mut().start_fix(&fix);
+        self.apply(hwnd, accepted);
+    }
+
+    /// Runs the fix that `shown` gives, the one a button of the Index
+    /// page's Service group shows, such as [`Model::service_fix`].
+    pub(super) fn run_shown_fix(&self, hwnd: Hwnd, shown: fn(&Model) -> Option<Fix>) {
+        let fix = shown(&self.model.borrow());
+        if let Some(fix) = fix {
+            self.run_fix(hwnd, fix);
+        }
+    }
+
+    /// The window that owns a fix's question or message: the Settings
+    /// dialog while it is open, because the main window under it takes no
+    /// input, else the main window.
+    fn fix_owner(&self, hwnd: Hwnd) -> Hwnd {
+        self.settings.get().map_or(hwnd, |open| open.dialog)
+    }
+
+    /// Asks the person whether to download the setup the fix found, in a
+    /// task dialog, and goes on as they answer (DESIGN.md: Service fixes).
+    fn confirm_setup(&self, hwnd: Hwnd) {
+        let question = captions::setup_question(&self.model.borrow(), &*self.numbers.borrow());
+        let Some(question) = question else {
+            return;
+        };
+        let download = win::dialog::ask(self.fix_owner(hwnd), &question);
+        let accepted = self.model.borrow_mut().answer_setup(download);
+        self.apply(hwnd, accepted);
+    }
+
+    /// Says why the fix found no setup to install, so it downloads nothing.
+    fn explain_no_setup(&self, hwnd: Hwnd) {
+        let text = self
+            .model
+            .borrow()
+            .strings()
+            .text("fixing.no_setup")
+            .to_owned();
+        self.error_box(self.fix_owner(hwnd), &text);
+    }
+
+    /// Starts the checked setup and closes the window, because the setup
+    /// does not run while a Gozler window is open (DESIGN.md: Service
+    /// fixes). The window ends the message loop instead of closing at once,
+    /// because Settings, a message box or another modal loop may be
+    /// running, and closes in [`MainWindow::close_for_setup`] once none
+    /// runs.
+    fn run_setup(&self, hwnd: Hwnd, setup: &Path) {
+        match shell::start_program(hwnd, setup) {
+            Ok(()) => {
+                self.closing_for_setup.set(true);
+                win::window::quit_modal_loops();
+            }
+            Err(error) => {
+                let failed = SetupResult::Failed(win::error_text(&error));
+                let failed = FixEvent::Setup(SetupEvent::End(failed));
+                let accepted = self.model.borrow_mut().accept_fix(failed);
+                self.apply(hwnd, accepted);
+            }
+        }
+    }
+
+    /// Closes the window after its message loop has ended, when the setup
+    /// asked for it in [`MainWindow::run_setup`].
+    pub(super) fn close_for_setup(&self, hwnd: Hwnd) {
+        if self.closing_for_setup.get() {
+            self.exit(hwnd);
+        }
+    }
+
+    /// The service's report, which the Index page's Show report shows.
+    pub(super) fn service_report(&self) -> Option<String> {
+        captions::service_report(&self.model.borrow())
     }
 
     fn update_message(&self) {
@@ -884,18 +1365,12 @@ impl MainWindow {
     fn show_message(&self, message: Option<&ListCaption>) {
         let controls = &self.created().controls;
         let (text, buttons) = match message {
-            Some((text, buttons)) => (text.as_str(), buttons.as_slice()),
+            Some(message) => (message.text.as_str(), message.buttons.as_slice()),
             None => ("", &[][..]),
         };
-        // The same model state the captions came from, read before any
-        // Win32 call (DESIGN.md: window rule 1).
-        let shields: Vec<bool> = self
-            .model
-            .borrow()
-            .list_buttons()
-            .iter()
-            .map(ListButton::needs_administrator)
-            .collect();
+        // Read first, because Windows takes the focus from a control it
+        // disables.
+        let focused = Hwnd::focused();
         // Setting a control's text takes the window manager's lock also
         // when the text is the same, and every resize comes through here.
         let set_text = |control: Hwnd, text: &str| {
@@ -905,22 +1380,40 @@ impl MainWindow {
         };
         set_text(controls.message.hwnd(), text);
         for (index, button) in controls.message_buttons.iter().enumerate() {
-            set_text(button.hwnd(), buttons.get(index).map_or("", String::as_str));
-            button.set_shield(shields.get(index).copied().unwrap_or(false));
+            let shown = buttons.get(index);
+            set_text(
+                button.hwnd(),
+                shown.map_or("", |shown| shown.label.as_str()),
+            );
+            button.set_shield(shown.is_some_and(|shown| shown.shield));
+            button
+                .hwnd()
+                .set_enabled(shown.is_none_or(|shown| shown.enabled));
+            let tip = shown.and_then(|shown| shown.tooltip.as_deref());
+            controls
+                .message_tips
+                .set(button.hwnd(), tip.unwrap_or_default());
         }
         // A hidden message is placed when it shows again.
         if message.is_some() {
-            self.place_message(text, buttons, &shields);
+            self.place_message(text, buttons.len());
         }
         controls.message.hwnd().set_visible(message.is_some());
+        let mut focus_lost = false;
         for (index, button) in controls.message_buttons.iter().enumerate() {
+            let usable = buttons.get(index).is_some_and(|shown| shown.enabled);
+            focus_lost |= !usable && focused == Some(button.hwnd());
             button.hwnd().set_visible(index < buttons.len());
+        }
+        // A hidden or disabled button would keep the focus but take no key.
+        if focus_lost {
+            controls.search.hwnd().focus();
         }
     }
 
-    /// Places the message below the list's header, and its buttons below
-    /// it; `shields` says which buttons show the administrator shield.
-    fn place_message(&self, text: &str, buttons: &[String], shields: &[bool]) {
+    /// Places the message below the list's header, and its `buttons`
+    /// buttons below it.
+    fn place_message(&self, text: &str, buttons: usize) {
         let created = self.created();
         let Some(list) = created.layout.borrow().as_ref().map(|l| l.list) else {
             return;
@@ -932,15 +1425,11 @@ impl MainWindow {
         let (text, rects) = {
             let fonts = created.fonts.borrow();
             let meter = TextMeter::new(&fonts.ui);
-            let widths: Vec<Px> = buttons
-                .iter()
-                .zip(shields.iter().chain(std::iter::repeat(&false)))
-                .map(|(b, &shielded)| layout::button_content(meter.width(b), shielded, metrics.dpi))
-                .collect();
             area.place(
                 meter.wrapped_height(text, area.text_width()),
                 metrics.font_height,
-                &widths,
+                buttons,
+                metrics.captions.button_width(metrics.dpi),
             )
         };
         let mut moves = vec![(controls.message.hwnd(), text)];
@@ -954,7 +1443,9 @@ impl MainWindow {
         let created = self.created();
         let controls = &created.controls;
         let metrics = created.metrics.get();
-        let status_height = controls.status.fit();
+        let status_height = controls
+            .status
+            .fit(StatusLayout::min_height(metrics.dpi, metrics.font_height));
         let panes = self.model.borrow().panes();
         let layout = Layout::compute(
             hwnd.client_size(),
@@ -980,12 +1471,23 @@ impl MainWindow {
             (controls.match_path.hwnd(), layout.match_path),
             (controls.list.hwnd(), layout.list),
         ];
+        let pane = &controls.filters;
         if let Some(filters) = &layout.filters {
-            moves.push((controls.filters.pane, filters.pane));
+            moves.extend([
+                (pane.title.hwnd(), filters.title),
+                (pane.clear.hwnd(), filters.clear),
+                (pane.hide.hwnd(), filters.hide),
+                (pane.pane, filters.pane),
+            ]);
+        }
+        if let Some(show) = layout.show_filters {
+            moves.push((pane.show.hwnd(), show));
         }
         let inspector = &controls.inspector;
         if let Some(placed) = &layout.inspector {
             moves.push((inspector.heading.hwnd(), placed.heading));
+            moves.push((inspector.hide.hwnd(), placed.hide));
+            moves.push((inspector.copy_path.hwnd(), placed.copy_path));
             moves.extend(
                 inspector
                     .buttons
@@ -1007,17 +1509,150 @@ impl MainWindow {
         if let Some(filters) = &layout.filters {
             self.place_filters(filters, self.filter_scroll.get());
         }
-        controls.filters.pane.set_visible(layout.filters.is_some());
+        let shown = layout.filters.is_some();
+        for control in [
+            pane.title.hwnd(),
+            pane.clear.hwnd(),
+            pane.hide.hwnd(),
+            pane.pane,
+        ] {
+            control.set_visible(shown);
+        }
+        pane.show.hwnd().set_visible(!shown);
         let shown = layout.inspector.is_some();
         inspector.heading.hwnd().set_visible(shown);
+        inspector.hide.hwnd().set_visible(shown);
+        inspector.copy_path.hwnd().set_visible(shown);
         for button in inspector.buttons {
             button.hwnd().set_visible(shown);
         }
-        controls.status.set_parts(&layout.status_parts);
+        controls.status.place(&layout.status);
         created.layout.replace(Some(layout));
+        self.fill_on_resize(hwnd);
         self.show_fields();
         self.update_message();
         hwnd.invalidate();
+    }
+
+    /// Fills the list's width with its columns when the width changed: when
+    /// the window shows, is resized, or a pane beside the list shows, hides
+    /// or moves (DESIGN.md: Results list). A burst of changes, such as a
+    /// window resize, fits the columns once and scales those fits at each
+    /// change, so the widths follow the pointer; once the width has kept
+    /// for a moment, the columns are fitted again at the final width.
+    fn fill_on_resize(&self, hwnd: Hwnd) {
+        let width = self.created().controls.list.fill_width();
+        if self.filled_width.replace(Some(width)) == Some(width) {
+            return;
+        }
+        let columns = self.model.borrow().columns().len();
+        let fits = self
+            .settling_fits
+            .take()
+            .filter(|fits| fits.len() == columns)
+            .unwrap_or_else(|| self.column_fits());
+        self.fill_columns(&fits);
+        self.settling_fits.replace(Some(fits));
+        hwnd.set_timer(timer::FILL, FILL_SETTLE_MS);
+    }
+
+    /// Gives the columns the widths that scale `fits` to end at the list's
+    /// right edge.
+    fn fill_columns(&self, fits: &[ColumnFit]) {
+        let created = self.created();
+        let list = created.controls.list;
+        let widths = layout::fill_widths(fits, list.fill_width(), created.metrics.get().dpi);
+        for (index, width) in widths.into_iter().enumerate() {
+            list.set_column_width(index, width);
+        }
+    }
+
+    /// Fits the column at `index` to its header and the rows it shows, as
+    /// a double-click on its divider and Fit column do; the others keep
+    /// their widths.
+    fn fit_column(&self, index: usize) {
+        if let Some(fit) = self.column_fits().get(index) {
+            self.created()
+                .controls
+                .list
+                .set_column_width(index, fit.width);
+        }
+    }
+
+    /// Each column's fit, from its header and the cells of the rows the
+    /// list shows and one row above and below them, which are the rows the
+    /// person reads and those a small scroll brings (DESIGN.md: Results
+    /// list). While the list holds none of those rows, every column would
+    /// fit its header and Size would get as much room as Name, so each
+    /// column's first width stands for its fit until the rows arrive.
+    fn column_fits(&self) -> Vec<ColumnFit> {
+        let created = self.created();
+        let list = created.controls.list;
+        let dpi = created.metrics.get().dpi;
+        let shown = list.visible_rows();
+        let rows = shown.start.saturating_sub(1)..(shown.end + 1).min(list.count());
+        let label = list.first_label_offset(rows.start).unwrap_or_default();
+        // The model is borrowed while the texts are formatted, and the
+        // measuring follows.
+        let (headers, cells) = {
+            let model = self.model.borrow();
+            let numbers = self.numbers.borrow();
+            let strings = model.strings();
+            let results = model.results();
+            let items: Vec<_> = rows.filter_map(|row| results.row(row)).collect();
+            if items.is_empty() {
+                return model
+                    .columns()
+                    .iter()
+                    .map(|column| ColumnFit::first(*column, dpi))
+                    .collect();
+            }
+            let headers: Vec<String> = model
+                .columns()
+                .iter()
+                .map(|column| captions::header(strings, *column))
+                .collect();
+            let cells: Vec<Vec<(String, Vec<Range<usize>>)>> = model
+                .columns()
+                .iter()
+                .map(|&column| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            let bold = crate::core::text::path_part(column, &item.path)
+                                .map(|span| within(&results.matched_parts(item), &span))
+                                .unwrap_or_default();
+                            (
+                                crate::core::text::cell(strings, &*numbers, column, item),
+                                bold,
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            (headers, cells)
+        };
+        let fonts = created.fonts.borrow();
+        let plain = TextMeter::new(&fonts.ui);
+        let bold = TextMeter::new(&fonts.bold);
+        headers
+            .iter()
+            .zip(cells)
+            .enumerate()
+            .map(|(index, (header, cells))| {
+                let first = index == 0;
+                let label = if first { label } else { Px(0) };
+                let widest = cells
+                    .iter()
+                    .filter(|(text, _)| !text.is_empty())
+                    .map(|(text, parts)| {
+                        let text = matched_width(&plain, &bold, text, parts);
+                        layout::cell_width(text, label, first, dpi)
+                    })
+                    .max();
+                ColumnFit::new(plain.plain_width(header), widest, dpi)
+            })
+            .collect()
     }
 
     /// Places the pane's controls for the scroll position nearest
@@ -1085,6 +1720,7 @@ impl MainWindow {
         let controls = &created.controls;
         let Ok(fonts) = Fonts::new(dpi) else { return };
         controls.apply_fonts(&fonts);
+        controls.apply_glyphs();
         drop(created.fonts.replace(fonts));
         let old = created.metrics.get().dpi;
         let columns = self.model.borrow().columns().len();
@@ -1211,6 +1847,7 @@ impl MainWindow {
                 }
                 CommandId::Open => return self.open_selected(hwnd),
                 CommandId::OpenFileLocation => return self.show_selected(hwnd),
+                CommandId::Explore => return self.explore_selected(hwnd),
                 CommandId::Properties => return self.show_properties(hwnd),
                 CommandId::ExportResults => return self.export(hwnd),
                 CommandId::CancelExport => self.model.borrow_mut().cancel_export(),
@@ -1228,6 +1865,7 @@ impl MainWindow {
                 },
                 CommandId::CopyAsPath => return self.copy(hwnd, ClipboardFormat::Paths),
                 CommandId::CopyName => return self.copy(hwnd, ClipboardFormat::Names),
+                CommandId::CopyFolder => return self.copy(hwnd, ClipboardFormat::Folders),
                 CommandId::SelectAll => match focus {
                     Focus::SearchBox { .. } => return controls.search.select_all(),
                     Focus::Value { .. } => {
@@ -1255,11 +1893,43 @@ impl MainWindow {
                 CommandId::ClearFilters => self.model.borrow_mut().clear_filters(),
                 CommandId::Settings => return self.open_settings(hwnd),
                 CommandId::ShowWindow => return self.show_window(hwnd),
+                CommandId::CopyToFolder => return self.copy_to_folder(hwnd, false),
+                CommandId::MoveToFolder => return self.copy_to_folder(hwnd, true),
+                CommandId::Delete => return self.delete_selected(hwnd),
+                CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
+                CommandId::Paste => return self.paste(),
+                CommandId::FileOperations => {
+                    if let Some(operations) = self.file_operations.borrow().as_ref() {
+                        operations.show();
+                    }
+                    return;
+                }
                 CommandId::Columns | CommandId::Language | CommandId::Match | CommandId::SortBy => {
                     return;
                 }
             },
             MenuItem::Column(column) => self.model.borrow_mut().toggle_column(column),
+            MenuItem::FitColumn(column) => {
+                let index = self
+                    .model
+                    .borrow()
+                    .columns()
+                    .iter()
+                    .position(|c| *c == column);
+                if let Some(index) = index {
+                    self.fit_column(index);
+                }
+                return;
+            }
+            MenuItem::FitColumns => {
+                for (index, fit) in self.column_fits().into_iter().enumerate() {
+                    self.created()
+                        .controls
+                        .list
+                        .set_column_width(index, fit.width);
+                }
+                return;
+            }
             MenuItem::SortKey(key) => {
                 let mut model = self.model.borrow_mut();
                 let sort = model.key_sort(key);
@@ -1425,6 +2095,12 @@ impl MainWindow {
                 hwnd.set_timer(timer::SELECTION, SELECTION_DELAY_MS);
             }
             Some(Then::Cancel(purpose)) => created.requests.cancel(purpose),
+            Some(Then::AskLatestRelease) => self.ask_latest_release(),
+            Some(Then::RunFix(work)) => created.fixer.start(PromptOwner::new(hwnd), work),
+            Some(Then::ConfirmSetup) => self.confirm_setup(hwnd),
+            Some(Then::ExplainNoSetup) => self.explain_no_setup(hwnd),
+            Some(Then::StopFix) => created.fixer.stop(),
+            Some(Then::RunSetup(setup)) => self.run_setup(hwnd, &setup),
             None => {}
         }
         let mut failed_export = None;
@@ -1433,15 +2109,29 @@ impl MainWindow {
             Change::Filters => self.update_filters(),
             Change::Panes => {
                 let panes = self.model.borrow().panes();
-                // A hidden control keeps the focus but takes no key.
-                let hidden = |focused: Hwnd| {
-                    !panes.filters && controls.filters.pane.is_parent_of(focused)
-                        || !panes.inspector && controls.inspector.contains(focused)
-                };
-                if Hwnd::focused().is_some_and(hidden) {
-                    controls.search.hwnd().focus();
-                }
+                // A hidden control keeps the focus but takes no key, so the
+                // focus moves to the button that brings the pane back, or
+                // the one that hides it again, or else to the search box.
+                let filters = &controls.filters;
+                let inspector = &controls.inspector;
+                let show_details = controls.status.show_details().map(|show| show.hwnd());
+                let focus = Hwnd::focused().and_then(|focused| {
+                    if !panes.filters && filters.contains(focused) {
+                        Some(filters.show.hwnd())
+                    } else if panes.filters && focused == filters.show.hwnd() {
+                        Some(filters.hide.hwnd())
+                    } else if !panes.inspector && inspector.contains(focused) {
+                        show_details.or(Some(controls.search.hwnd()))
+                    } else if panes.inspector && Some(focused) == show_details {
+                        Some(inspector.hide.hwnd())
+                    } else {
+                        None
+                    }
+                });
                 self.layout(hwnd);
+                if let Some(focus) = focus {
+                    focus.focus();
+                }
                 self.update_status();
             }
             Change::Typed => hwnd.set_text(&captions::title(&self.model.borrow())),
@@ -1455,7 +2145,7 @@ impl MainWindow {
                     index,
                     &ListColumn {
                         header: &header,
-                        width: layout::column_width(column, None, hwnd.dpi()),
+                        width: layout::column_width(column, hwnd.dpi()),
                         right_aligned: column.right_aligned(),
                     },
                 );
@@ -1468,7 +2158,12 @@ impl MainWindow {
             Change::Searching | Change::Selection | Change::Export => {
                 self.update_status();
             }
-            Change::NewSearch { count } => {
+            Change::Fix => {
+                self.update_status();
+                self.update_message();
+                self.post_settings_reply();
+            }
+            Change::NewSearch { count, open_first } => {
                 // A new search shows its results from the top, with nothing
                 // selected (DESIGN.md: T2).
                 controls.list.select_only(None);
@@ -1476,9 +2171,17 @@ impl MainWindow {
                 if count > 0 {
                     controls.list.ensure_visible(0);
                 }
+                // The new rows no longer hold what the ended deletes and
+                // moves took, and show again what they failed on.
+                if let Some(operations) = self.file_operations.borrow().as_ref() {
+                    operations.release_ended();
+                }
                 self.update_status();
                 self.update_message();
                 self.fetch_visible();
+                if open_first {
+                    self.open_first_or_selected(hwnd);
+                }
             }
             Change::Rows { rows, count } => {
                 if controls.list.count() == count {
@@ -1520,9 +2223,11 @@ impl MainWindow {
             }
             Change::TotalCommander(found) => {
                 self.total_commander.replace(Some(found));
-                if let Some(dialog) = self.settings_dialog.get() {
-                    win::dialog::post_reply(dialog);
-                }
+                self.post_settings_reply();
+            }
+            Change::IncludedCount(counted) => {
+                self.included_count.replace(Some(counted));
+                self.post_settings_reply();
             }
         }
         self.update_bound_controls();
@@ -1554,6 +2259,10 @@ impl MainWindow {
             let accepted = self.model.borrow_mut().accept(fetched);
             self.apply(hwnd, accepted);
         }
+        for event in self.created().fixer.drain() {
+            let accepted = self.model.borrow_mut().accept_fix(event);
+            self.apply(hwnd, accepted);
+        }
         let newer = self
             .update
             .lock()
@@ -1564,11 +2273,32 @@ impl MainWindow {
             let accepted = self.model.borrow_mut().set_newer_release(version);
             self.apply(hwnd, accepted);
         }
+        let older = self
+            .update
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .older
+            .take();
+        if let Some(older) = older {
+            let accepted = self.model.borrow_mut().set_latest_release_older(older);
+            self.apply(hwnd, accepted);
+        }
     }
 
     /// A control's notification in `WM_COMMAND`.
     fn on_control(&self, hwnd: Hwnd, event: ControlEvent) {
         let controls = &self.created().controls;
+        if controls
+            .inspector
+            .fields
+            .iter()
+            .filter_map(|(_, value)| value.text())
+            .any(|value| value.focused(event) || value.unfocused(event))
+        {
+            // A value shows its whole text while it has the focus.
+            self.fit_inspector();
+            return;
+        }
         if controls.search.focused(event) {
             // The click places the caret after the focus arrives, so the
             // text is selected once the click is handled.
@@ -1617,7 +2347,7 @@ impl MainWindow {
         {
             let button = self.model.borrow().list_buttons().get(index).cloned();
             match button {
-                Some(ListButton::Fix(fix)) => run_fix(hwnd, &fix),
+                Some(ListButton::Fix(fix)) => self.run_fix(hwnd, fix),
                 Some(ListButton::ClearFilters) => {
                     self.run(hwnd, MenuItem::Run(CommandId::ClearFilters));
                 }
@@ -1629,16 +2359,23 @@ impl MainWindow {
                 None => {}
             }
             return;
-        } else if let Some(index) = controls
+        } else if let Some((button, _)) = controls
             .inspector
-            .buttons
-            .iter()
-            .position(|button| button.clicked(event))
+            .command_buttons()
+            .chain(
+                controls
+                    .status
+                    .show_details()
+                    .map(|show| (SHOW_DETAILS, show)),
+            )
+            .find(|(_, control)| control.clicked(event))
         {
             // The button runs its menu item's command (DESIGN.md:
             // window rule 9).
             self.read_list_selection(hwnd);
-            return self.run(hwnd, MenuItem::Run(INSPECTOR_BUTTONS[index].0));
+            return self.run(hwnd, MenuItem::Run(button.command));
+        } else if controls.status.cancel_clicked(event) {
+            return self.cancel_job(hwnd);
         } else {
             return self.on_filter(hwnd, event);
         };
@@ -1650,6 +2387,8 @@ impl MainWindow {
         let pane = &self.created().controls.filters;
         if pane.clear.clicked(event) {
             self.run(hwnd, MenuItem::Run(CommandId::ClearFilters));
+        } else if pane.hide.clicked(event) || pane.show.clicked(event) {
+            self.run(hwnd, MenuItem::Run(CommandId::Filters));
         } else if pane.kind.selection_changed(event) {
             if let Some(kind) = pane.kind.selected().and_then(|i| Kind::ALL.get(i)) {
                 self.change_filters(hwnd, |f| f.kind = *kind);
@@ -1764,8 +2503,31 @@ impl MainWindow {
         let Some(point) = point else { return };
         // The right-click selected its row a moment ago.
         self.read_list_selection(hwnd);
+        // The first selected row's kind decides which Open shows, and Shift
+        // the items shown only with it (DESIGN.md: The Context menu page).
+        let groups = {
+            let model = self.model.borrow();
+            let folder = list
+                .selected()
+                .first()
+                .and_then(|rows| model.results().row(rows.start))
+                .is_some_and(|row| row.is_dir);
+            commands::shown_row_menu(
+                model.choices().context_menu,
+                folder,
+                win::window::shift_held(),
+            )
+        };
+        if groups.is_empty() {
+            return;
+        }
         let open = MenuItem::Run(CommandId::Open);
-        self.context_menu(hwnd, &commands::row_menu(), point, Some(open));
+        let default = groups
+            .iter()
+            .flatten()
+            .any(|item| *item == open)
+            .then_some(open);
+        self.context_menu(hwnd, &groups, point, default);
     }
 
     /// Reads the list's selection, if it changed since it was last read
@@ -1823,6 +2585,14 @@ impl MainWindow {
                 self.run(hwnd, MenuItem::Run(CommandId::Open));
                 None
             }
+            ListNotify::BeginDrag => {
+                self.drag_selected(hwnd);
+                None
+            }
+            ListNotify::DividerDoubleClick(index) => {
+                self.fit_column(index);
+                None
+            }
             ListNotify::Other => None,
         }
     }
@@ -1836,7 +2606,7 @@ impl MainWindow {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
             let column = model.columns().get(info.column()).copied();
-            match (column, model.results().row(info.row())) {
+            match (column, model.shown_row(info.row())) {
                 (Some(column), Some(row)) => (
                     info.wants_text()
                         .then(|| crate::core::text::cell(model.strings(), &*numbers, column, row)),
@@ -1862,7 +2632,7 @@ impl MainWindow {
         let cell = {
             let model = self.model.borrow();
             let column = model.columns().get(column).copied();
-            let Some(item) = model.results().row(row) else {
+            let Some(item) = model.shown_row(row) else {
                 return DrawAnswer::Default;
             };
             let Some(span) = column.and_then(|c| crate::core::text::path_part(c, &item.path))
@@ -1911,7 +2681,14 @@ impl MainWindow {
                     controls.list.ensure_visible(0);
                 }
             }
-            KeyAction::SearchNow => self.search(hwnd),
+            KeyAction::SearchBoxEnter => {
+                let enter = self.model.borrow_mut().enter_in_search_box();
+                match enter {
+                    SearchBoxEnter::Search => self.search(hwnd),
+                    SearchBoxEnter::Open => self.open_first_or_selected(hwnd),
+                    SearchBoxEnter::Wait => {}
+                }
+            }
             KeyAction::ClearSearch => controls.search.hwnd().set_text(""),
             KeyAction::ChooseCustom => {
                 if let Some(range) = controls.filters.range_of(target) {
@@ -1920,6 +2697,19 @@ impl MainWindow {
             }
         }
         true
+    }
+
+    /// Opens the selected rows, or the first row when none is selected,
+    /// with the Open command that `Enter` in the list runs (DESIGN.md:
+    /// window rule 8).
+    fn open_first_or_selected(&self, hwnd: Hwnd) {
+        let list = self.created().controls.list;
+        if list.selected().is_empty() && self.model.borrow().results().count() > 0 {
+            list.select_only(Some(0));
+            list.ensure_visible(0);
+        }
+        self.read_list_selection(hwnd);
+        self.run(hwnd, MenuItem::Run(CommandId::Open));
     }
 
     /// Whether `point`, in client coordinates, is on the splitter above the
@@ -1957,6 +2747,36 @@ impl MainWindow {
             .collect()
     }
 
+    /// Drags the selected entries out of the window, as File Explorer drags
+    /// its own, once they are read (DESIGN.md: Dragging).
+    fn drag_selected(&self, hwnd: Hwnd) {
+        self.read_list_selection(hwnd);
+        let paths: Vec<Vec<u16>> = self
+            .selected_entries()
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        if paths.len() > DRAG_LIMIT {
+            let text = {
+                let numbers = self.numbers.borrow();
+                let count = |n: usize| numbers.integer(n as u64);
+                self.model.borrow().strings().format(
+                    "message.drag_limit",
+                    &[&count(DRAG_LIMIT), &count(paths.len())],
+                )
+            };
+            self.error_box(hwnd, &text);
+            return;
+        }
+        if paths.is_empty() {
+            return;
+        }
+        // The drag runs its own message loop, so no borrow is held
+        // (DESIGN.md: window rule 1).
+        let missing = shell::drag(&paths);
+        self.report_missing(hwnd, missing);
+    }
+
     /// Opens each selected entry with the Open folders or Open files
     /// command, or as File Explorer does when it is empty (DESIGN.md: C1).
     fn open_selected(&self, hwnd: Hwnd) {
@@ -1987,17 +2807,7 @@ impl MainWindow {
         let (present, missing) = present(self.selected_entries());
         let command = self.model.borrow().choices().open_file_location.clone();
         if command.trim().is_empty() {
-            let mut folders: Vec<(Vec<u16>, Vec<Vec<u16>>)> = Vec::new();
-            for Selected { path, .. } in present {
-                let folder = folder_of(&path);
-                match folders.iter_mut().find(|(f, _)| *f == folder) {
-                    Some((_, entries)) => entries.push(path),
-                    None => folders.push((folder, vec![path])),
-                }
-            }
-            for (folder, entries) in &folders {
-                shell::show_in_folder(folder, entries);
-            }
+            show_in_folders(present);
         } else {
             for entry in &present {
                 if let Some(line) = open::expand(&command, &String::from_utf16_lossy(&entry.path))
@@ -2010,7 +2820,21 @@ impl MainWindow {
         self.report_missing(hwnd, missing);
     }
 
-    /// Runs an open command of Settings > General, and answers whether it
+    /// Shows each selected entry in File Explorer, whatever the open
+    /// commands say: a folder opens, and a file's folder opens with the
+    /// file selected (DESIGN.md: C26).
+    fn explore_selected(&self, hwnd: Hwnd) {
+        let (present, missing) = present(self.selected_entries());
+        let (folders, files): (Vec<Selected>, Vec<Selected>) =
+            present.into_iter().partition(|entry| entry.is_folder);
+        for folder in &folders {
+            shell::explore(hwnd, &folder.path);
+        }
+        show_in_folders(files);
+        self.report_missing(hwnd, missing);
+    }
+
+    /// Runs an open command of Settings > Context menu, and answers whether it
     /// started; one that cannot start says why, and the rest of the
     /// selection is not tried, because it would fail the same way.
     fn run_open_command(&self, hwnd: Hwnd, line: &CommandLine) -> bool {
@@ -2068,6 +2892,163 @@ impl MainWindow {
                 .to_owned();
             self.error_box(hwnd, &text);
         }
+    }
+
+    /// Opens the File operations window and its queue, hidden, and starts
+    /// following the clipboard for Paste.
+    fn open_file_operations(&self, hwnd: Hwnd) {
+        let strings = self.model.borrow().strings().clone();
+        let saved = self.settings_file.with_file_name("operations.json");
+        match FileOperations::open(hwnd, &saved, strings) {
+            Ok(operations) => {
+                self.file_operations.replace(Some(operations));
+            }
+            Err(error) => super::write_log(
+                &self.settings_file.with_file_name("ui-error.log"),
+                &format!("The File operations window did not open: {error}"),
+            ),
+        }
+        clipboard::listen(hwnd);
+        self.model
+            .borrow_mut()
+            .set_clipboard_holds_files(clipboard::holds_files());
+    }
+
+    /// Prepares `request` in the queue, with the speed settings.
+    fn start_operation(&self, request: Request, paste: Option<ClipboardFiles>) {
+        let settings = self.model.borrow().choices().speed.settings();
+        if let Some(operations) = self.file_operations.borrow().as_ref() {
+            operations.start(request, settings, paste);
+        }
+    }
+
+    /// The selected entries' full paths, as Windows names them.
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        self.model
+            .borrow()
+            .selected_files()
+            .unwrap_or_default()
+            .iter()
+            .map(|file| PathBuf::from(OsString::from_wide(&wide_path(file))))
+            .collect()
+    }
+
+    /// Copy to folder… and Move to folder…: the folder picker, at the folder
+    /// chosen last, then the operation (file-manager-spec.md: Search mode).
+    fn copy_to_folder(&self, hwnd: Hwnd, moves: bool) {
+        let sources = self.selected_paths();
+        if sources.is_empty() {
+            return;
+        }
+        let (start, title, ok) = {
+            let model = self.model.borrow();
+            let strings = model.strings();
+            let (title, ok) = if moves {
+                ("file_operations.move_to_title", "file_operations.move")
+            } else {
+                ("file_operations.copy_to_title", "file_operations.copy")
+            };
+            (
+                model.destination_folder().map(str::to_owned),
+                strings.text(title).to_owned(),
+                strings.text(ok).to_owned(),
+            )
+        };
+        // The picker runs its own message loop, so nothing is borrowed here.
+        let Some(folder) = shell::pick_destination(hwnd, start.as_deref(), &title, &ok) else {
+            return;
+        };
+        self.model
+            .borrow_mut()
+            .set_destination_folder(folder.clone());
+        let destination = PathBuf::from(folder);
+        let request = if moves {
+            Request::Move {
+                sources,
+                destination,
+            }
+        } else {
+            Request::Copy {
+                sources,
+                destination,
+            }
+        };
+        self.start_operation(request, None);
+    }
+
+    /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete
+    /// question, then the permanent delete (file-manager-spec.md: File
+    /// operations, step 2).
+    fn delete_selected(&self, hwnd: Hwnd) {
+        let sources = self.selected_paths();
+        if sources.is_empty() {
+            return;
+        }
+        let question = {
+            let model = self.model.borrow();
+            delete_question(model.strings(), &*self.numbers.borrow(), &sources)
+        };
+        // The question runs its own message loop, so nothing is borrowed
+        // here.
+        if win::dialog::ask(hwnd, &question) {
+            self.start_operation(Request::Delete { sources }, None);
+        }
+    }
+
+    /// Paste on one selected folder: copies the files on the clipboard into
+    /// it, or moves them when they were cut (file-manager-spec.md: Search
+    /// mode).
+    fn paste(&self) {
+        let folder = self.selected_paths();
+        let [destination] = folder.as_slice() else {
+            return;
+        };
+        let Some(files) = clipboard::read_files() else {
+            return;
+        };
+        let (sources, destination) = (files.paths.clone(), destination.clone());
+        let request = if files.cut {
+            Request::Move {
+                sources,
+                destination,
+            }
+        } else {
+            Request::Copy {
+                sources,
+                destination,
+            }
+        };
+        self.start_operation(request, Some(files));
+    }
+
+    /// Shows the rows that deletes and moves have taken blank, and takes
+    /// them out of the selection.
+    fn show_taken(&self, hwnd: Hwnd) {
+        let Some(taken) = self
+            .file_operations
+            .borrow()
+            .as_ref()
+            .map(FileOperations::taken)
+        else {
+            return;
+        };
+        let accepted = self.model.borrow_mut().set_taken(taken);
+        self.apply(hwnd, accepted);
+        let list = self.created().controls.list;
+        // The list would still draw the taken rows it selects highlighted.
+        let selected_taken: Vec<u64> = {
+            let model = self.model.borrow();
+            list.selected()
+                .into_iter()
+                .flatten()
+                .filter(|&row| model.row_taken(row))
+                .collect()
+        };
+        // Each deselect notifies the window, so nothing is borrowed here.
+        for row in selected_taken {
+            list.deselect(row);
+        }
+        list.redraw_rows(list.visible_rows());
     }
 
     /// Asks where to export the shown search, and starts the export (DESIGN.md:
@@ -2179,8 +3160,29 @@ impl MainWindow {
         self.save_settings(hwnd, true);
     }
 
-    /// Saves the settings and ends Gozler (DESIGN.md: C7, T14).
+    /// Saves the settings and ends Gozler (DESIGN.md: C7, T14). While file
+    /// operations run or wait, it asks first, and stops them
+    /// (file-manager-spec.md: File operations, step 8).
     fn exit(&self, hwnd: Hwnd) {
+        let counts = self
+            .file_operations
+            .borrow()
+            .as_ref()
+            .map(FileOperations::running_and_waiting);
+        if let Some((running, waiting)) = counts.filter(|(r, w)| r + w > 0) {
+            let question = {
+                let model = self.model.borrow();
+                exit_question(model.strings(), &*self.numbers.borrow(), running, waiting)
+            };
+            // The question runs its own message loop, so nothing is
+            // borrowed here.
+            if !win::dialog::ask(hwnd, &question) {
+                return;
+            }
+            if let Some(operations) = self.file_operations.borrow().as_ref() {
+                operations.stop_all();
+            }
+        }
         if self.instance == Instance::First {
             self.save_settings(hwnd, true);
         }
@@ -2284,36 +3286,59 @@ impl MainWindow {
     /// Asks GitHub for the latest release on a thread of its own, when
     /// Check for updates is on and the last check is a day old (DESIGN.md: The
     /// General page).
-    fn check_for_updates(&self, hwnd: Hwnd) {
+    fn check_for_updates(&self) {
         let now = jiff::Timestamp::now().as_second();
         if !self.model.borrow_mut().update_check_due(now) {
             return;
         }
-        let found = Arc::clone(&self.update);
-        let waker = Waker::new(hwnd);
-        std::thread::spawn(move || {
-            let version = gozler_core::escompat::version();
-            let newer = win::update::get(
-                update::LATEST_RELEASE_HOST,
-                update::LATEST_RELEASE_PATH,
-                &format!("Gozler/{version}"),
-            )
-            .and_then(|reply| update::newer_release(&reply, version));
-            let Some(newer) = newer else { return };
-            let mut found = found.lock().unwrap_or_else(PoisonError::into_inner);
-            if found.window_open {
-                found.newer = Some(newer);
-                waker.wake();
-            }
+        self.ask_github(|reply, found| {
+            found.newer = reply
+                .and_then(|reply| update::newer_release(&reply, gozler_core::escompat::version()));
+            found.newer.is_some()
         });
     }
 
-    /// A click on status part 4 opens the release page while the part
-    /// names a newer release (DESIGN.md: The General page).
-    fn on_status_click(&self) {
+    /// Asks GitHub on a thread of its own whether its latest release is
+    /// older than the window, which the fix of an older service says
+    /// (DESIGN.md: Daemon failures). A reply that is not a release counts
+    /// as not older.
+    fn ask_latest_release(&self) {
+        self.ask_github(|reply, found| {
+            let older = reply.and_then(|reply| {
+                update::latest_is_older(&reply, gozler_core::escompat::version())
+            });
+            found.older = Some(older.unwrap_or(false));
+            true
+        });
+    }
+
+    /// Asks GitHub for its latest release on a thread of its own, which
+    /// gives the reply, or `None` for a failure, to `found`, while the
+    /// window is open. `found` returns whether it left the window a result
+    /// in [`UpdateCheck`], which the window reads once it wakes.
+    fn ask_github(
+        &self,
+        found: impl FnOnce(Option<String>, &mut UpdateCheck) -> bool + Send + 'static,
+    ) {
+        let check = Arc::clone(&self.update);
+        let waker = self.created().waker.clone();
+        std::thread::spawn(move || {
+            let reply = win::update::latest_release();
+            waker.deliver(|| {
+                found(
+                    reply,
+                    &mut check.lock().unwrap_or_else(PoisonError::into_inner),
+                )
+            });
+        });
+    }
+
+    /// A click on the status bar's right group updates Gozler while the
+    /// group names a newer release (DESIGN.md: The General page).
+    fn on_status_click(&self, hwnd: Hwnd) {
         let shows_update = captions::shows_update(&self.model.borrow());
         if shows_update {
-            shell::open(update::RELEASES_PAGE);
+            self.run_fix(hwnd, Fix::Update);
         }
     }
 
@@ -2325,15 +3350,25 @@ impl MainWindow {
             let model = self.model.borrow();
             (model.choices().clone(), model.strings().clone())
         };
+        let applied = {
+            let model = self.model.borrow();
+            model.service().0.and_then(|status| status.include.clone())
+        };
+        let include = applied.map(|applied| {
+            let drives = self.include_drives(&applied);
+            applied.with_drives(&connected_drives(&drives))
+        });
         let values = SettingsValues {
             choices,
             start_at_sign_in: shell::starts_at_sign_in(),
-            search_with_gozler: shell::shows_search_with(),
+            include,
+            show_notices_again: false,
         };
         let dialog = SettingsDialog::new(self, hwnd, strings, values);
         self.open_dialog(hwnd, DialogId::Settings, &dialog);
-        self.settings_dialog.set(None);
+        self.settings.set(None);
         self.total_commander.replace(None);
+        self.included_count.replace(None);
         let accepted = self.model.borrow_mut().forget_total_commander();
         self.apply(hwnd, accepted);
         self.show_index_page(hwnd, false);
@@ -2368,12 +3403,6 @@ impl MainWindow {
             self.shortcut_failure.replace(None);
         }
         let mut failures = Vec::new();
-        let verb = self
-            .model
-            .borrow()
-            .strings()
-            .text("settings_file_explorer.verb")
-            .to_owned();
         let values = SettingsValues {
             choices: edited.choices.clone(),
             start_at_sign_in: self.write_registry(
@@ -2382,17 +3411,23 @@ impl MainWindow {
                 &mut failures,
                 |program| shell::set_start_at_sign_in(edited.start_at_sign_in, program),
             ),
-            search_with_gozler: self.write_registry(
-                (edited.search_with_gozler, last.search_with_gozler),
-                "settings_file_explorer.search_with",
-                &mut failures,
-                |program| shell::set_search_with(edited.search_with_gozler, program, &verb),
-            ),
+            // The Settings dialog saves them apart, as administrator.
+            include: last.include.clone(),
+            show_notices_again: false,
         };
+        if edited.show_notices_again {
+            self.model.borrow_mut().show_notices_again();
+        }
         let accepted = self.model.borrow_mut().set_choices(values.choices.clone());
         self.apply(hwnd, accepted);
         if edited.choices.language != last.choices.language {
             self.set_language(hwnd, edited.choices.language.clone());
+        }
+        if edited.choices.show_icons != last.choices.show_icons {
+            win::gdi::show_icons(edited.choices.show_icons);
+            self.created().controls.apply_glyphs();
+            // The menus, the button widths and the Kind list follow.
+            self.refresh_text(hwnd);
         }
         self.save_settings(hwnd, true);
         Ok(Applied { values, failures })
@@ -2439,62 +3474,125 @@ impl MainWindow {
 
     /// What the Index page shows of the service's latest state.
     pub(super) fn index_captions(&self) -> IndexCaptions {
+        let labels = self.volume_labels();
+        let label = |prefix: &str| label_of(&labels, prefix);
+        IndexCaptions::new(&self.model.borrow(), &*self.numbers.borrow(), &label)
+    }
+
+    /// The volume label of each drive in the service's status, indexed or
+    /// left out, by its mount prefix.
+    fn volume_labels(&self) -> Vec<(String, Option<String>)> {
         let prefixes: Vec<String> = {
             let model = self.model.borrow();
             let (status, _) = model.service();
             status
                 .map(|status| {
-                    let volumes = status.volumes.iter();
-                    volumes
-                        .map(|volume| volume.mounted().display_prefix().to_owned())
+                    let indexed = status.volumes.iter().map(|v| v.mounted());
+                    let left_out = status.left_out.iter().map(|v| v.mounted());
+                    indexed
+                        .chain(left_out)
+                        .map(|mounted| mounted.display_prefix().to_owned())
                         .collect()
                 })
                 .unwrap_or_default()
         };
         // Windows reads the labels with no borrow held (DESIGN.md:
         // window rule 1).
-        let labels: Vec<(String, Option<String>)> = prefixes
+        prefixes
             .into_iter()
             .map(|prefix| {
                 let label = shell::volume_label(&prefix);
                 (prefix, label)
             })
-            .collect();
-        let label = |prefix: &str| {
-            labels
-                .iter()
-                .find(|(p, _)| p == prefix)
-                .and_then(|(_, label)| label.clone())
-        };
-        IndexCaptions::new(&self.model.borrow(), &*self.numbers.borrow(), &label)
+            .collect()
     }
 
-    /// Use Total Commander: searches the index for Total Commander, whose
-    /// answer goes to the Settings dialog `dialog` (DESIGN.md: The General
-    /// page).
-    pub(super) fn find_total_commander(&self, dialog: Hwnd) {
-        self.settings_dialog.set(Some(dialog));
+    /// The drives Settings > Include shows: the service's, and those
+    /// `settings` names that are not connected.
+    pub(super) fn include_drives(&self, settings: &IncludeSettings) -> Vec<IncludeDrive> {
+        let labels = self.volume_labels();
+        let label = |prefix: &str| label_of(&labels, prefix);
+        let model = self.model.borrow();
+        model
+            .service()
+            .0
+            .map_or_else(Vec::new, |status| include_drives(status, settings, &label))
+    }
+
+    /// The entries the index holds now.
+    pub(super) fn indexed_entries(&self) -> u64 {
+        let model = self.model.borrow();
+        model
+            .service()
+            .0
+            .map_or(0, |status| status.volumes.iter().map(|v| v.entries).sum())
+    }
+
+    /// The rows of the summary of the indexed folders, which Settings >
+    /// Include and Indexed folders show, in the person's numbers.
+    pub(super) fn include_summary(
+        &self,
+        drives: &[IncludeDrive],
+        settings: &IncludeSettings,
+    ) -> Vec<SummaryRow> {
+        let model = self.model.borrow();
+        summary_rows(drives, settings, model.strings(), &*self.numbers.borrow())
+    }
+
+    /// Settings > Include's preview line, in the person's numbers.
+    pub(super) fn include_preview(&self, now: u64, after: Option<u64>, adds: bool) -> String {
+        let model = self.model.borrow();
+        preview(model.strings(), &*self.numbers.borrow(), now, after, adds)
+    }
+
+    /// Settings > Include's preview: counts the entries the index keeps
+    /// under `settings`, whose answer goes to the Settings dialog.
+    pub(super) fn count_included(&self, settings: IncludeSettings) {
+        let fetch = self.model.borrow_mut().count_included(settings);
+        self.start(fetch);
+    }
+
+    /// Include's count, once it arrived.
+    pub(super) fn take_included_count(&self) -> Option<Result<u64, DaemonFailure>> {
+        self.included_count.take()
+    }
+
+    /// Saves the Include settings as administrator, after Windows asks the
+    /// person for permission, and tells the service, which applies them
+    /// (DESIGN.md: The Include page).
+    pub(super) fn save_include(
+        &self,
+        dialog: Hwnd,
+        settings: &IncludeSettings,
+    ) -> Result<(), NotSaved> {
+        include::save(dialog, settings)?;
+        let fetch = self.model.borrow_mut().settings_saved();
+        self.start(fetch);
+        Ok(())
+    }
+
+    /// The Use Total Commander link: searches the index for Total
+    /// Commander, whose answer goes to the Settings dialog (DESIGN.md: The
+    /// Context menu page).
+    pub(super) fn find_total_commander(&self) {
         let fetch = self.model.borrow_mut().find_total_commander();
         self.start(fetch);
     }
 
-    /// Use Total Commander's answer, once it arrived.
+    /// The Use Total Commander link's answer, once it arrived.
     pub(super) fn take_total_commander(&self) -> Option<Result<Option<String>, DaemonFailure>> {
         self.total_commander.take()
     }
 
-    /// The shown columns in the header's order, with their widths in DIP.
+    /// The shown columns in the header's order.
     fn saved_columns(&self) -> Vec<SavedColumn> {
-        let created = self.created();
-        let list = created.controls.list;
-        let dpi = created.metrics.get().dpi;
+        let list = self.created().controls.list;
         let columns = self.model.borrow().columns().to_vec();
         list.column_order(columns.len())
             .into_iter()
             .filter_map(|index| {
                 Some(SavedColumn {
                     column: *columns.get(index)?,
-                    width: list.column_width(index).to_dip(dpi),
                 })
             })
             .collect()
@@ -2547,6 +3645,20 @@ fn within(ranges: &[Range<usize>], span: &Range<usize>) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// The width of `text` with its parts `bold` in the bold font, as
+/// `CustomDraw::draw_cell` draws a matched cell.
+fn matched_width(plain: &TextMeter, bold: &TextMeter, text: &str, parts: &[Range<usize>]) -> Px {
+    let mut width = Px(0);
+    let mut at = 0;
+    for part in parts {
+        width = width
+            + plain.plain_width(&text[at..part.start])
+            + bold.plain_width(&text[part.clone()]);
+        at = part.end;
+    }
+    width + plain.plain_width(&text[at..])
+}
+
 /// A selected entry, by its path as Windows names it.
 struct Selected {
     path: Vec<u16>,
@@ -2580,15 +3692,20 @@ fn accelerator_table(shortcuts: &CommandShortcuts) -> windows::core::Result<Acce
     Accelerators::new(&table)
 }
 
-/// The folder that holds `path`, a drive's root as `C:\`.
-fn folder_of(path: &[u16]) -> Vec<u16> {
-    let backslash = u16::from(b'\\');
-    let end = path.iter().rposition(|&u| u == backslash).unwrap_or(0);
-    let mut folder = path[..end].to_vec();
-    if folder.last() == Some(&u16::from(b':')) {
-        folder.push(backslash);
+/// Opens the folder of each of `entries` with them selected, one File
+/// Explorer window for each folder.
+fn show_in_folders(entries: Vec<Selected>) {
+    let mut folders: Vec<(Vec<u16>, Vec<Vec<u16>>)> = Vec::new();
+    for Selected { path, .. } in entries {
+        let folder = folder_of(&path).to_vec();
+        match folders.iter_mut().find(|(f, _)| *f == folder) {
+            Some((_, entries)) => entries.push(path),
+            None => folders.push((folder, vec![path])),
+        }
     }
-    folder
+    for (folder, entries) in &folders {
+        shell::show_in_folder(folder, entries);
+    }
 }
 
 /// Windows' own words for why a file could not be written.
@@ -2598,23 +3715,6 @@ fn windows_reason(failure: WriteFailure) -> String {
         None => std::io::Error::from(failure.kind),
     };
     win::error_text(&error)
-}
-
-/// Runs a failure's fix: the commands that `gozler` prints for it, in one
-/// `cmd /c` as administrator, so Windows asks for permission once (DESIGN.md:
-/// Daemon failures).
-fn run_fix(hwnd: Hwnd, fix: &Fix) {
-    match fix {
-        Fix::Repair(repair) => match repair.commands() {
-            Some(commands) => win::shell::run_as_administrator(
-                hwnd,
-                "cmd.exe",
-                &format!("/c {}", commands.join(" && ")),
-            ),
-            None => win::shell::open(RELEASES),
-        },
-        Fix::OpenServices => win::shell::open("services.msc"),
-    }
 }
 
 impl WindowProc for MainWindow {
@@ -2654,7 +3754,13 @@ impl WindowProc for MainWindow {
                     search.hwnd().focus();
                     search.select_all();
                 } else {
-                    saved.unwrap_or(search.hwnd()).focus();
+                    // A control that hid or turned off while the window was
+                    // inactive, such as Cancel after its export, would keep
+                    // the focus but take no key.
+                    saved
+                        .filter(|control| control.is_visible() && control.is_enabled())
+                        .unwrap_or(search.hwnd())
+                        .focus();
                 }
                 if self.shortcut_failure.borrow().is_some() {
                     hwnd.post(DEFERRED);
@@ -2671,8 +3777,32 @@ impl WindowProc for MainWindow {
             }
             Message::Notify(notification) => {
                 let controls = &self.created().controls;
-                if controls.status.clicked_part(&notification) == Some(INDEX_PART) {
-                    self.on_status_click();
+                {
+                    let fonts = self.created().fonts.borrow();
+                    let filters = &controls.filters;
+                    let inspector = &controls.inspector;
+                    let window = |button, face| (button, face, FlatGround::Window);
+                    let flat =
+                        [
+                            window(inspector.copy_name, FlatFace::Glyph(Glyph::Copy)),
+                            window(inspector.copy_folder, FlatFace::Glyph(Glyph::Copy)),
+                            window(inspector.hide, FlatFace::Glyph(Glyph::ChevronDown)),
+                            window(filters.clear, FlatFace::Caption(&fonts.ui)),
+                            window(filters.hide, FlatFace::Glyph(Glyph::OpenPane)),
+                            window(filters.show, FlatFace::Glyph(Glyph::ClosePane)),
+                        ]
+                        .into_iter()
+                        .chain(controls.status.show_details().map(|show| {
+                            (show, FlatFace::Glyph(Glyph::ChevronUp), FlatGround::Face)
+                        }));
+                    for (button, face, ground) in flat {
+                        if let Some(answer) = button.draw_flat(&notification, face, ground) {
+                            return Some(answer);
+                        }
+                    }
+                }
+                if controls.status.service_clicked(&notification) {
+                    self.on_status_click(hwnd);
                     return Some(LRESULT(0));
                 }
                 let list = controls.list.notification(notification)?;
@@ -2684,6 +3814,17 @@ impl WindowProc for MainWindow {
             }
             Message::Timer(timer::STATUS) => {
                 self.ask_status();
+                Some(LRESULT(0))
+            }
+            Message::Timer(timer::FILL) => {
+                hwnd.kill_timer(timer::FILL);
+                self.settling_fits.take();
+                self.fill_columns(&self.column_fits());
+                Some(LRESULT(0))
+            }
+            Message::Timer(timer::AGE) => {
+                self.show_age();
+                self.fit_inspector();
                 Some(LRESULT(0))
             }
             Message::Timer(timer::SELECTION) => {
@@ -2740,7 +3881,10 @@ impl WindowProc for MainWindow {
             Message::ContextMenu {
                 point: Some(point), ..
             } if self.on_header(point) => {
-                self.context_menu(hwnd, &commands::header_menu(), point, None);
+                let column = self.created().controls.list.column_at(point);
+                let column =
+                    column.and_then(|index| self.model.borrow().columns().get(index).copied());
+                self.context_menu(hwnd, &commands::header_menu(column), point, None);
                 Some(LRESULT(0))
             }
             Message::ContextMenu { from, point } if from == self.created().controls.list.hwnd() => {
@@ -2806,13 +3950,34 @@ impl WindowProc for MainWindow {
                 self.splitter_drag.set(None);
                 None
             }
-            Message::CtlColorStatic { colors, control } => Some(
-                if control == self.created().controls.inspector.note.hwnd() {
+            Message::CtlColorStatic { colors, control } => {
+                let inspector = &self.created().controls.inspector;
+                Some(if control == inspector.note.hwnd() {
                     colors.gray_text()
+                } else if control == inspector.age.hwnd() {
+                    colors.muted_text()
                 } else {
                     colors.window_background()
-                },
-            ),
+                })
+            }
+            Message::DrawItem(item) if item.control() == self.created().controls.status.hwnd() => {
+                let fonts = self.created().fonts.borrow();
+                item.draw_status_parts(&fonts.ui, &self.status_right.borrow());
+                Some(LRESULT(1))
+            }
+            Message::DrawItem(item) => {
+                let inspector = &self.created().controls.inspector;
+                let attributes = inspector
+                    .fields
+                    .iter()
+                    .any(|(_, v)| matches!(v, FieldValue::Parts(_)) && v.hwnd() == item.control());
+                if !attributes {
+                    return None;
+                }
+                let fonts = self.created().fonts.borrow();
+                item.draw_parts(&fonts.ui, &self.inspector_shown.borrow().0.attributes);
+                Some(LRESULT(1))
+            }
             Message::Paint => {
                 let created = self.created();
                 let (dividers, icon) = {
@@ -2839,6 +4004,10 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::SettingChange { .. } => None,
+            Message::SysColorChange => {
+                self.created().controls.apply_glyphs();
+                None
+            }
             Message::EndSession { ending: true } => {
                 if self.instance == Instance::First {
                     self.save_settings(hwnd, false);
@@ -2856,13 +4025,21 @@ impl WindowProc for MainWindow {
             // The shortcut and the tray icon go with the window, so Windows'
             // own use of the shortcut's keys returns at once.
             Message::Destroy => {
-                self.update
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .window_open = false;
+                // A window gone before the loop ended leaves nothing for
+                // close_for_setup to close.
+                self.closing_for_setup.set(false);
+                self.created().waker.close();
                 self.shortcut.replace(None);
                 self.tray.replace(None);
                 self.created().requests.shut_down();
+                self.created().fixer.shut_down();
+                // The queue is never dropped: dropping it waits for every
+                // Windows copy, which deletes the file it stops, while the
+                // process ending leaves that file for Continue.
+                if let Some(operations) = self.file_operations.borrow_mut().take() {
+                    operations.close();
+                    std::mem::forget(operations);
+                }
                 win::window::quit();
                 Some(LRESULT(0))
             }
@@ -2874,8 +4051,8 @@ impl WindowProc for MainWindow {
                 self.on_tray(hwnd, event);
                 Some(LRESULT(0))
             }
-            // A second start with `--location`, from File Explorer's
-            // "Search with Gozler" (DESIGN.md: Window lifetime).
+            // A second start with `--location`, such as from Total Commander
+            // or a script (DESIGN.md: Window lifetime).
             Message::CopyData { tag, text } if tag == self.show_message as usize => {
                 let accepted = self.model.borrow_mut().choose_folder(text);
                 self.apply(hwnd, accepted);
@@ -2887,6 +4064,16 @@ impl WindowProc for MainWindow {
                 self.show_window(hwnd);
                 Some(LRESULT(0))
             }
+            Message::Other(clipboard::CLIPBOARD_CHANGED) => {
+                self.model
+                    .borrow_mut()
+                    .set_clipboard_holds_files(clipboard::holds_files());
+                Some(LRESULT(0))
+            }
+            Message::Other(TAKEN_CHANGED) => {
+                self.show_taken(hwnd);
+                Some(LRESULT(0))
+            }
             Message::Other(msg) if msg == self.taskbar_created => {
                 if let Some(tray) = self.tray.borrow().as_ref() {
                     tray.add_again();
@@ -2896,4 +4083,12 @@ impl WindowProc for MainWindow {
             Message::Other(_) => None,
         }
     }
+}
+
+/// The label of the mount prefix `prefix` in `labels`.
+fn label_of(labels: &[(String, Option<String>)], prefix: &str) -> Option<String> {
+    labels
+        .iter()
+        .find(|(p, _)| p == prefix)
+        .and_then(|(_, label)| label.clone())
 }

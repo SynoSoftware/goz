@@ -3,9 +3,12 @@
 //! surface reads a command's label, shortcut, enabled state and check mark from
 //! here, so the menus, the keys and the controls cannot disagree.
 
+use super::glyph::Glyph;
+use super::ids::ControlId;
 use super::model::{Column, Model};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
 use super::selection::OPEN_LIMIT;
+use super::settings::{ContextItem, ContextMenu};
 use super::shortcuts::CommandShortcuts;
 use super::text::{LANGUAGES, LanguageChoice, Strings, menu_label};
 use gozler_core::types::{SortDir, SortKey};
@@ -18,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum CommandId {
     Open,
     OpenFileLocation,
+    Explore,
     Properties,
     ExportResults,
     CancelExport,
@@ -26,6 +30,7 @@ pub(crate) enum CommandId {
     Copy,
     CopyAsPath,
     CopyName,
+    CopyFolder,
     SelectAll,
     SearchInThisFolder,
     Filters,
@@ -40,12 +45,19 @@ pub(crate) enum CommandId {
     SearchSyntax,
     About,
     ShowWindow,
+    CopyToFolder,
+    MoveToFolder,
+    Delete,
+    Cut,
+    Paste,
+    FileOperations,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 24] = [
+    pub(crate) const ALL: [CommandId; 32] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
+        CommandId::Explore,
         CommandId::Properties,
         CommandId::ExportResults,
         CommandId::CancelExport,
@@ -54,6 +66,7 @@ impl CommandId {
         CommandId::Copy,
         CommandId::CopyAsPath,
         CommandId::CopyName,
+        CommandId::CopyFolder,
         CommandId::SelectAll,
         CommandId::SearchInThisFolder,
         CommandId::Filters,
@@ -68,6 +81,12 @@ impl CommandId {
         CommandId::SearchSyntax,
         CommandId::About,
         CommandId::ShowWindow,
+        CommandId::CopyToFolder,
+        CommandId::MoveToFolder,
+        CommandId::Delete,
+        CommandId::Cut,
+        CommandId::Paste,
+        CommandId::FileOperations,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -82,6 +101,7 @@ impl CommandId {
                     open,
                     None,
                 ),
+                C::Explore => ("command.explore", &[], open, None),
                 C::Properties => (
                     "command.properties",
                     const { &[Keystroke::alt(Key::Enter)] },
@@ -115,6 +135,7 @@ impl CommandId {
                     None,
                 ),
                 C::CopyName => ("command.copy_name", &[], files, None),
+                C::CopyFolder => ("command.copy_folder", &[], files, None),
                 C::SelectAll => (
                     "command.select_all",
                     const { &[Keystroke::ctrl(Key::Letter(b'A'))] },
@@ -174,6 +195,18 @@ impl CommandId {
                     |s| s.model.choices().keep_running,
                     None,
                 ),
+                // Delete, Cut and Paste are keys of the list (control_key).
+                C::CopyToFolder => ("command.copy_to_folder", &[], file_operation, None),
+                C::MoveToFolder => ("command.move_to_folder", &[], file_operation, None),
+                C::Delete => ("command.delete", &[], file_operation, None),
+                C::Cut => ("command.cut", &[], cut, None),
+                C::Paste => ("command.paste", &[], paste, None),
+                C::FileOperations => (
+                    "command.file_operations",
+                    &[],
+                    |s| s.model.offers_file_operations(),
+                    None,
+                ),
             };
         Command {
             label,
@@ -181,6 +214,46 @@ impl CommandId {
             enabled,
             checked,
         }
+    }
+
+    /// The icon before its label in a menu, if it has one (DESIGN.md: Look).
+    /// A command with a check mark has none, because the mark takes the
+    /// icon's place.
+    pub(crate) fn glyph(self) -> Option<Glyph> {
+        use CommandId as C;
+        Some(match self {
+            C::Open => Glyph::OpenFile,
+            C::OpenFileLocation => Glyph::FolderOpen,
+            C::Explore => Glyph::FileExplorer,
+            C::Properties => Glyph::Info,
+            C::ExportResults => Glyph::Export,
+            C::Settings => Glyph::Settings,
+            C::Exit => Glyph::ChromeClose,
+            C::Copy => Glyph::Copy,
+            C::CopyName => Glyph::Rename,
+            C::CopyFolder => Glyph::Folder,
+            C::CopyAsPath => Glyph::Link,
+            C::SelectAll => Glyph::SelectAll,
+            C::Find | C::SearchInThisFolder => Glyph::Search,
+            C::Refresh => Glyph::Refresh,
+            C::SearchSyntax => Glyph::Help,
+            C::About => Glyph::Info,
+            C::ShowWindow => Glyph::BackToWindow,
+            C::CopyToFolder => Glyph::CopyTo,
+            C::MoveToFolder => Glyph::MoveToFolder,
+            C::Delete => Glyph::Delete,
+            C::Cut => Glyph::Cut,
+            C::Paste => Glyph::Paste,
+            C::CancelExport
+            | C::FileOperations
+            | C::Filters
+            | C::Inspector
+            | C::Columns
+            | C::Language
+            | C::Match
+            | C::SortBy
+            | C::ClearFilters => return None,
+        })
     }
 }
 
@@ -237,7 +310,7 @@ fn files(state: &State) -> bool {
     state.model.selected_files().is_some()
 }
 
-/// Open and Open file location (DESIGN.md: C1, C2).
+/// Open, Open file location and Explore (DESIGN.md: C1, C2, C26).
 fn open(state: &State) -> bool {
     state
         .model
@@ -252,6 +325,32 @@ fn one_file(state: &State) -> bool {
         .model
         .selected_files()
         .is_some_and(|files| files.len() == 1)
+}
+
+/// Copy to folder…, Move to folder…, Delete and Cut act on the selected
+/// entries, in the window that owns the file operations
+/// (file-manager-spec.md: Search mode).
+fn file_operation(state: &State) -> bool {
+    state.model.offers_file_operations() && files(state)
+}
+
+/// Cut acts on the selected files while the list has the focus, as Copy
+/// does (DESIGN.md: C8); the search box cuts its own text.
+fn cut(state: &State) -> bool {
+    state.focus == Focus::List && file_operation(state)
+}
+
+/// Paste copies or moves the clipboard's files into the one selected
+/// folder while the list has the focus (file-manager-spec.md: Search
+/// mode); the search box pastes text itself.
+fn paste(state: &State) -> bool {
+    state.focus == Focus::List
+        && state.model.offers_file_operations()
+        && state.model.clipboard_holds_files()
+        && state
+            .model
+            .selected_files()
+            .is_some_and(|files| matches!(files, [folder] if folder.is_dir))
 }
 
 /// Copy acts on the focused control (DESIGN.md: C8).
@@ -486,8 +585,9 @@ pub(crate) enum KeyAction {
     Run(CommandId),
     /// `Down` in the search box: the focus moves to the list's first row.
     FocusList,
-    /// `Enter` in the search box: the search runs at once.
-    SearchNow,
+    /// `Enter` in the search box: the search runs, or the result opens
+    /// ([`Model::enter_in_search_box`]).
+    SearchBoxEnter,
     /// `Esc` in the search box: the box is emptied.
     ClearSearch,
     /// `Enter` in a closed Date modified or Size list.
@@ -504,17 +604,41 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
             const {
                 &[
                     (Keystroke::plain(Key::Down), KeyAction::FocusList),
-                    (Keystroke::plain(Key::Enter), KeyAction::SearchNow),
+                    (Keystroke::plain(Key::Enter), KeyAction::SearchBoxEnter),
                     (Keystroke::plain(Key::Escape), KeyAction::ClearSearch),
                 ]
             }
         }
         Focus::List => {
             const {
-                &[(
-                    Keystroke::plain(Key::Enter),
-                    KeyAction::Run(CommandId::Open),
-                )]
+                &[
+                    (
+                        Keystroke::plain(Key::Enter),
+                        KeyAction::Run(CommandId::Open),
+                    ),
+                    // Gozler never uses the Recycle Bin, so Shift+Delete,
+                    // File Explorer's permanent delete, deletes as Delete
+                    // does.
+                    (
+                        Keystroke::plain(Key::Delete),
+                        KeyAction::Run(CommandId::Delete),
+                    ),
+                    (
+                        Keystroke {
+                            shift: true,
+                            ..Keystroke::plain(Key::Delete)
+                        },
+                        KeyAction::Run(CommandId::Delete),
+                    ),
+                    (
+                        Keystroke::ctrl(Key::Letter(b'X')),
+                        KeyAction::Run(CommandId::Cut),
+                    ),
+                    (
+                        Keystroke::ctrl(Key::Letter(b'V')),
+                        KeyAction::Run(CommandId::Paste),
+                    ),
+                ]
             }
         }
         Focus::RangeFilter => const { &[(Keystroke::plain(Key::Enter), KeyAction::ChooseCustom)] },
@@ -532,6 +656,10 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
 pub(crate) enum MenuItem {
     Run(CommandId),
     Column(Column),
+    /// Fits the column, of the header's menu (DESIGN.md: Results list).
+    FitColumn(Column),
+    /// Fits every shown column, of the header's menu.
+    FitColumns,
     SortKey(SortKey),
     SortDirection(SortDir),
     /// `None` is Windows default, else an index into [`LANGUAGES`].
@@ -566,6 +694,10 @@ impl MenuItem {
             }
             MenuItem::Language(None) => 0x500,
             MenuItem::Language(Some(language)) => 0x501 + index(Some(language)),
+            MenuItem::FitColumn(column) => {
+                0x600 + index(Column::ALL.iter().position(|c| *c == column))
+            }
+            MenuItem::FitColumns => 0x700,
         }
     }
 
@@ -579,6 +711,8 @@ impl MenuItem {
             0x400 => SORT_DIRECTIONS.get(n).copied().map(MenuItem::SortDirection),
             0x500 if n == 0 => Some(MenuItem::Language(None)),
             0x500 if n <= LANGUAGES.len() => Some(MenuItem::Language(Some(n - 1))),
+            0x600 => Column::ALL.get(n).copied().map(MenuItem::FitColumn),
+            0x700 if n == 0 => Some(MenuItem::FitColumns),
             _ => None,
         }
     }
@@ -592,6 +726,10 @@ impl MenuItem {
             MenuItem::SortDirection(dir) => sort_direction_label(dir),
             MenuItem::Language(None) => "command.windows_default",
             MenuItem::Language(Some(language)) => return LANGUAGES[language].label(strings),
+            MenuItem::FitColumn(column) => {
+                return strings.format("column.fit", &[strings.text(column.header())]);
+            }
+            MenuItem::FitColumns => "column.fit_columns",
         };
         strings.text(key).to_owned()
     }
@@ -610,7 +748,9 @@ impl MenuItem {
     fn command(self) -> CommandId {
         match self {
             MenuItem::Run(command) => command,
-            MenuItem::Column(_) => CommandId::Columns,
+            MenuItem::Column(_) | MenuItem::FitColumn(_) | MenuItem::FitColumns => {
+                CommandId::Columns
+            }
             MenuItem::SortKey(_) | MenuItem::SortDirection(_) => CommandId::SortBy,
             MenuItem::Language(_) => CommandId::Language,
         }
@@ -624,6 +764,19 @@ impl MenuItem {
         (self.command().row().enabled)(state) && shown
     }
 
+    /// The icon before its label, which only a command without a mark has.
+    pub(crate) fn glyph(self) -> Option<Glyph> {
+        match self {
+            MenuItem::Run(command) => command.glyph(),
+            MenuItem::Column(_)
+            | MenuItem::FitColumn(_)
+            | MenuItem::FitColumns
+            | MenuItem::SortKey(_)
+            | MenuItem::SortDirection(_)
+            | MenuItem::Language(_) => None,
+        }
+    }
+
     pub(crate) fn mark(self) -> Mark {
         match self {
             MenuItem::Run(command) => match command.row().checked {
@@ -631,6 +784,7 @@ impl MenuItem {
                 None => Mark::None,
             },
             MenuItem::Column(_) => Mark::Check,
+            MenuItem::FitColumn(_) | MenuItem::FitColumns => Mark::None,
             MenuItem::SortKey(_) | MenuItem::SortDirection(_) | MenuItem::Language(_) => {
                 Mark::Radio
             }
@@ -642,6 +796,7 @@ impl MenuItem {
         match self {
             MenuItem::Run(command) => command.row().checked.is_some_and(|checked| checked(state)),
             MenuItem::Column(column) => model.columns.contains(&column),
+            MenuItem::FitColumn(_) | MenuItem::FitColumns => false,
             MenuItem::SortKey(key) => model.sort().key == key,
             MenuItem::SortDirection(dir) => model.sort().dir == dir,
             MenuItem::Language(None) => model.settings.choices.language == LanguageChoice::Windows,
@@ -688,6 +843,7 @@ pub(crate) fn menu_bar() -> Vec<Menu> {
             "menu.file",
             vec![
                 run(&[C::Open, C::OpenFileLocation, C::Properties]),
+                run(&[C::CopyToFolder, C::MoveToFolder, C::Delete]),
                 run(&[C::ExportResults]),
                 run(&[C::Settings]),
                 run(&[C::Exit]),
@@ -696,7 +852,14 @@ pub(crate) fn menu_bar() -> Vec<Menu> {
         menu(
             "menu.edit",
             vec![
-                run(&[C::Copy, C::CopyAsPath, C::CopyName]),
+                run(&[
+                    C::Cut,
+                    C::Copy,
+                    C::Paste,
+                    C::CopyAsPath,
+                    C::CopyName,
+                    C::CopyFolder,
+                ]),
                 run(&[C::SelectAll]),
                 run(&[C::Find]),
             ],
@@ -723,6 +886,7 @@ pub(crate) fn menu_bar() -> Vec<Menu> {
                     ],
                 }],
                 run(&[C::Refresh]),
+                run(&[C::FileOperations]),
             ],
         ),
         menu("menu.help", vec![run(&[C::SearchSyntax]), run(&[C::About])]),
@@ -747,6 +911,7 @@ pub(crate) enum MenuNode {
         id: u16,
         text: String,
         mark: Mark,
+        glyph: Option<Glyph>,
     },
     Separator,
     Submenu {
@@ -756,9 +921,20 @@ pub(crate) enum MenuNode {
     },
 }
 
-/// The header's context menu: View > Columns' items (DESIGN.md: C15).
-pub(crate) fn header_menu() -> Vec<Vec<MenuItem>> {
-    vec![Column::ALL.into_iter().map(MenuItem::Column).collect()]
+/// The header's context menu, opened on the header of `column` or on
+/// none (DESIGN.md: Results list): Fit column for that column, then Fit
+/// columns, then View > Columns' items (C15), as TableView's header menu
+/// orders them.
+pub(crate) fn header_menu(column: Option<Column>) -> Vec<Vec<MenuItem>> {
+    let active: Vec<MenuItem> = column.map(MenuItem::FitColumn).into_iter().collect();
+    [
+        active,
+        vec![MenuItem::FitColumns],
+        Column::ALL.into_iter().map(MenuItem::Column).collect(),
+    ]
+    .into_iter()
+    .filter(|group| !group.is_empty())
+    .collect()
 }
 
 /// A row's context menu (DESIGN.md: Menus). Its first item, Open, is the
@@ -767,11 +943,43 @@ pub(crate) fn row_menu() -> Vec<Vec<MenuItem>> {
     use CommandId as C;
     let run = |commands: &[CommandId]| commands.iter().map(|c| MenuItem::Run(*c)).collect();
     vec![
-        run(&[C::Open, C::OpenFileLocation]),
-        run(&[C::Copy, C::CopyAsPath, C::CopyName]),
+        run(&[C::Open, C::OpenFileLocation, C::Explore]),
+        run(&[
+            C::Cut,
+            C::Copy,
+            C::Paste,
+            C::CopyAsPath,
+            C::CopyName,
+            C::CopyFolder,
+            C::CopyToFolder,
+            C::MoveToFolder,
+            C::Delete,
+        ]),
         run(&[C::SearchInThisFolder]),
         run(&[C::Properties]),
     ]
+}
+
+/// The row menu with the items that `menu` shows for a row that is a
+/// folder when `folder`, with Shift down when `shift`, and without the
+/// groups that are left empty (DESIGN.md: The Context menu page). Paste
+/// shows only on a folder, which it pastes into.
+pub(crate) fn shown_row_menu(menu: ContextMenu, folder: bool, shift: bool) -> Vec<Vec<MenuItem>> {
+    row_menu()
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .filter(|item| match item {
+                    MenuItem::Run(CommandId::Paste) => folder,
+                    MenuItem::Run(command) => ContextItem::of(*command, folder)
+                        .is_none_or(|item| menu.visibility(item).shows(shift)),
+                    _ => true,
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 /// The tray icon's menu (DESIGN.md: Window lifetime). Its first item, Show
@@ -783,14 +991,84 @@ pub(crate) fn tray_menu() -> Vec<Vec<MenuItem>> {
     ]
 }
 
-/// The inspector's buttons: each runs its command, and its caption differs
-/// from the command's menu label only in an access key that the main
-/// window's other controls leave free (DESIGN.md: Inspector pane).
-pub(crate) const INSPECTOR_BUTTONS: [(CommandId, &str); 3] = [
-    (CommandId::Open, "inspector.open"),
-    (CommandId::OpenFileLocation, "inspector.open_file_location"),
-    (CommandId::CopyAsPath, "inspector.copy_as_path"),
+/// A button that runs a command: a text button, or an icon-only one.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CommandButton {
+    pub(crate) control: ControlId,
+    pub(crate) command: CommandId,
+    /// The key of a text button's caption, of one or two words whose access
+    /// key the main window's other controls leave free; `None` for an icon.
+    pub(crate) caption: Option<&'static str>,
+    /// The key of its tooltip, where the caption alone cannot say what it
+    /// does; an icon without one has its command's name.
+    pub(crate) tip: Option<&'static str>,
+}
+
+/// The inspector's buttons from the left, at the right end of the last
+/// field row, with Open, the one used most, at the right edge (DESIGN.md:
+/// Inspector pane).
+pub(crate) const INSPECTOR_BUTTONS: [CommandButton; 3] = [
+    CommandButton {
+        control: ControlId::InspectorExplore,
+        command: CommandId::Explore,
+        caption: Some("inspector.explore"),
+        tip: Some("inspector.explore_tooltip"),
+    },
+    CommandButton {
+        control: ControlId::InspectorOpenFileLocation,
+        command: CommandId::OpenFileLocation,
+        caption: Some("inspector.open_file_location"),
+        tip: Some("inspector.open_file_location_tooltip"),
+    },
+    CommandButton {
+        control: ControlId::InspectorOpen,
+        command: CommandId::Open,
+        caption: Some("inspector.open"),
+        tip: None,
+    },
 ];
+
+/// The inspector's Copy path, at the right end of the field row above the
+/// buttons, because the full path has no line of its own.
+pub(crate) const INSPECTOR_COPY_PATH: CommandButton = CommandButton {
+    control: ControlId::InspectorCopyAsPath,
+    command: CommandId::CopyAsPath,
+    caption: Some("inspector.copy_as_path"),
+    tip: None,
+};
+
+/// The copy icon after one entry's name.
+pub(crate) const INSPECTOR_COPY_NAME: CommandButton = CommandButton {
+    control: ControlId::InspectorCopyName,
+    command: CommandId::CopyName,
+    caption: None,
+    tip: None,
+};
+
+/// The copy icon after one entry's folder.
+pub(crate) const INSPECTOR_COPY_FOLDER: CommandButton = CommandButton {
+    control: ControlId::InspectorCopyFolder,
+    command: CommandId::CopyFolder,
+    caption: None,
+    tip: None,
+};
+
+/// Hide details, the icon at the right end of the inspector's heading row.
+pub(crate) const HIDE_DETAILS: CommandButton = CommandButton {
+    control: ControlId::InspectorHide,
+    command: CommandId::Inspector,
+    caption: None,
+    tip: Some("inspector.hide"),
+};
+
+/// Show details, the icon at the right end of the status bar while the
+/// inspector is hidden, where the inspector comes up from.
+pub(crate) const SHOW_DETAILS: CommandButton = CommandButton {
+    control: ControlId::StatusShowDetails,
+    command: CommandId::Inspector,
+    caption: None,
+    tip: Some("inspector.show"),
+};
 
 /// The item that File shows in Export results…' place: Cancel export while
 /// an export runs (DESIGN.md: Menus).
@@ -809,6 +1087,7 @@ pub(crate) fn render_popup(groups: &[Vec<MenuItem>], strings: &Strings) -> Vec<M
         id: item.id(),
         text: item.label(strings),
         mark: item.mark(),
+        glyph: item.glyph(),
     })
 }
 
@@ -821,6 +1100,7 @@ pub(crate) fn node(item: &MenuItem, strings: &Strings, shortcuts: &CommandShortc
             item.shortcut(shortcuts).map(|s| s.text(strings)),
         ),
         mark: item.mark(),
+        glyph: item.glyph(),
     }
 }
 
@@ -891,7 +1171,6 @@ mod tests {
     use crate::core::model::tests::{rows, search, showing};
     use crate::core::results::{Fix, ListButton};
     use crate::core::text::{Strings, access_key};
-    use gozler_client::Repair;
     use std::collections::HashSet;
 
     /// `WM_COMMAND` carries only the ID, so two items with one ID, or an ID
@@ -984,7 +1263,7 @@ mod tests {
                 "match.label",
                 "match.case",
                 "match.path",
-                "command.clear_filters",
+                "filter.clear",
                 "filter.kind",
                 "filter.location",
                 "filter.choose_folder",
@@ -994,32 +1273,27 @@ mod tests {
                 "filter.attributes",
             ]
             .into_iter()
-            .chain(INSPECTOR_BUTTONS.map(|(_, key)| key))
+            .chain(
+                INSPECTOR_BUTTONS
+                    .iter()
+                    .chain([&INSPECTOR_COPY_PATH])
+                    .filter_map(|button| button.caption),
+            )
             .map(|key| strings.text(key));
             assert_unique(language.tag, window, &mut bar_keys);
             // The list's message offers Clear filters and Choose folder…
-            // with the pane's captions, which do what the pane's buttons do.
+            // with the pane's access keys, which do what the pane's buttons
+            // do.
             assert_unique(
                 language.tag,
                 [strings.text(ListButton::SearchEverywhere.label())],
                 &mut bar_keys,
             );
-            // The list shows one message, with at most one of these buttons.
-            let fixes = [
-                Fix::Repair(Repair::StartService),
-                Fix::Repair(Repair::TurnOnService),
-                Fix::Repair(Repair::InstallService {
-                    folder: Default::default(),
-                }),
-                Fix::Repair(Repair::UpdateService {
-                    folder: Default::default(),
-                }),
-                Fix::Repair(Repair::Download),
-                Fix::OpenServices,
-            ];
-            for fix in fixes {
-                let button = [strings.text(fix.label())];
-                assert_unique(language.tag, button, &mut bar_keys.clone());
+            // The list shows one message with the fix buttons that show
+            // together.
+            for shown in Fix::label_groups() {
+                let buttons = shown.iter().map(|(key, _)| strings.text(key));
+                assert_unique(language.tag, buttons, &mut bar_keys.clone());
             }
         }
     }

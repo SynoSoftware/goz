@@ -12,34 +12,38 @@ use super::{Hwnd, from_rect, to_rect, wide};
 use crate::core::commands::{Key, Keystroke};
 use crate::core::layout::{Dpi, Px, Rect, ScrollRequest, Size};
 use crate::core::settings::Placement;
+use std::cell::Cell;
 use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
-    ScreenToClient,
+    MonitorFromWindow, ScreenToClient,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON,
     VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-    GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW,
-    KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG, PostQuitMessage,
-    RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
-    SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON,
-    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer,
-    SetWindowLongPtrW, SetWindowPlacement, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT,
-    WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
-    WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_ENDSESSION, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
-    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL,
-    WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
+    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, EndMenu,
+    GWLP_USERDATA, GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsChild,
+    IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
+    PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP,
+    SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO,
+    SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL,
+    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateMessage,
+    WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
+    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
+    WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
+    WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -123,6 +127,8 @@ pub(crate) enum Message<'a> {
     /// window's.
     CaptureChanged,
     InitMenuPopup,
+    /// An owner-drawn control asks to be drawn.
+    DrawItem(super::gdi::OwnerDraw<'a>),
     /// A label or check box asks for its colors.
     CtlColorStatic {
         colors: super::gdi::StaticColors,
@@ -132,6 +138,8 @@ pub(crate) enum Message<'a> {
     SettingChange {
         regional_format: bool,
     },
+    /// The system colours changed, as a high contrast theme does.
+    SysColorChange,
     EndSession {
         ending: bool,
     },
@@ -159,6 +167,11 @@ impl MinMaxInfo<'_> {
             x: size.width.0,
             y: size.height.0,
         };
+    }
+
+    /// Lets the person resize the window only up to `height`.
+    pub(crate) fn set_max_track_height(&mut self, height: Px) {
+        self.0.ptMaxTrackSize.y = height.0;
     }
 }
 
@@ -247,6 +260,37 @@ pub(crate) fn create_window<W: WindowProc>(
             width,
             height,
             None,
+            None,
+            GetModuleHandleW(PCWSTR::null()).ok().map(Into::into),
+            Some(raw.cast()),
+        )
+    }?;
+    Ok(Hwnd(hwnd))
+}
+
+/// Creates a hidden top-level window of the class `class`, owned by `state`,
+/// that `owner` owns: it stays in front of `owner`, minimizes with it and
+/// has no taskbar button of its own. It has a sizing border and a close
+/// button, and Windows places it.
+pub(crate) fn create_owned_window<W: WindowProc>(
+    class: &str,
+    state: Rc<W>,
+    owner: Hwnd,
+) -> windows::core::Result<Hwnd> {
+    let raw = Rc::into_raw(state);
+    // SAFETY: as in create_window; the owner is passed as the parent of a
+    // window without WS_CHILD, which makes it the owner.
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_LEFT,
+            &HSTRING::from(class),
+            PCWSTR::null(),
+            WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            Some(owner.0),
             None,
             GetModuleHandleW(PCWSTR::null()).ok().map(Into::into),
             Some(raw.cast()),
@@ -373,12 +417,27 @@ pub(crate) const DEFERRED: u32 = super::wake::WAKE + 2;
 /// focus ([`Message::FocusMoved`]).
 const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
 
+thread_local! {
+    /// The window that [`set_modeless`] names, or none.
+    static MODELESS: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+}
+
+/// Names the top-level window besides the main one whose controls take Tab,
+/// the access keys, `Enter` and `Esc` as a dialog's do, such as the File
+/// operations window, or none. Its messages skip the main window's
+/// accelerators and keys, which would act on the main window's selection.
+pub(crate) fn set_modeless(window: Option<Hwnd>) {
+    MODELESS.set(window.map_or(HWND(std::ptr::null_mut()), |window| window.0));
+}
+
 /// Runs the thread's message loop until `WM_QUIT`. The accelerators come
 /// first, then the keys the main window takes for its focused control, then
 /// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
 /// main window's controls (DESIGN.md: window rule 8). A key that
 /// `IsDialogMessageW` moves the focus with is reported to the main window,
-/// which no control notifies of it.
+/// which no control notifies of it. A message for the window that
+/// [`set_modeless`] names, or for one of its controls, goes only through
+/// that window's `IsDialogMessageW`.
 ///
 /// `accelerators` gives the table of the moment, because Settings replaces
 /// it; the loop holds each table until the command it sent returns.
@@ -387,6 +446,16 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
     // SAFETY: `msg` is a local that each call fills in or reads.
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            let modeless = MODELESS.get();
+            if !modeless.is_invalid()
+                && (msg.hwnd == modeless || IsChild(modeless, msg.hwnd).as_bool())
+            {
+                if !IsDialogMessageW(modeless, &msg).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                continue;
+            }
             if accelerators().translate(main, &msg) {
                 continue;
             }
@@ -424,6 +493,33 @@ pub(crate) fn quit() {
     unsafe { PostQuitMessage(0) };
 }
 
+/// Ends the message loop from inside any modal loop that runs on this
+/// thread. A dialog's, a message box's and the file dialog's loops end on
+/// `WM_QUIT` and post it again, but a menu's neither ends on it nor posts
+/// it again, so an open menu is ended first.
+pub(crate) fn quit_modal_loops() {
+    // SAFETY: plain calls on this thread's menu and queue; with no menu
+    // open, EndMenu does nothing.
+    unsafe {
+        let _ = EndMenu();
+        PostQuitMessage(0);
+    }
+}
+
+/// Whether a `WM_QUIT` waits in this thread's queue, which stays there.
+pub(crate) fn quit_pending() -> bool {
+    let mut msg = MSG::default();
+    // SAFETY: `msg` is a local that the call fills in. Taking WM_QUIT out
+    // and posting it again leaves the queue as it was.
+    unsafe {
+        let pending = PeekMessageW(&mut msg, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool();
+        if pending {
+            PostQuitMessage(msg.wParam.0 as i32);
+        }
+        pending
+    }
+}
+
 /// The window procedure of every window whose class [`register_class`]
 /// registered for `W`.
 unsafe extern "system" fn procedure<W: WindowProc>(
@@ -457,6 +553,10 @@ unsafe extern "system" fn procedure<W: WindowProc>(
             drop(Rc::from_raw(raw));
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
+    }
+    // SAFETY: the parameters are the ones Windows passed.
+    if let Some(answer) = unsafe { super::menu::icon_message(Hwnd(hwnd), msg, lparam) } {
+        return answer;
     }
     // SAFETY: the window's reference keeps the state alive until
     // WM_NCDESTROY; this clone keeps it alive for the length of this call.
@@ -572,6 +672,12 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_LBUTTONUP => Message::LeftButtonUp,
         WM_CAPTURECHANGED => Message::CaptureChanged,
         WM_INITMENUPOPUP => Message::InitMenuPopup,
+        WM_DRAWITEM => {
+            // SAFETY: WM_DRAWITEM's lparam points to a DRAWITEMSTRUCT that
+            // is valid for the length of the message.
+            let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+            Message::DrawItem(super::gdi::OwnerDraw(item))
+        }
         WM_CTLCOLORSTATIC => Message::CtlColorStatic {
             colors: super::gdi::StaticColors::from_wparam(wparam),
             control: Hwnd(HWND(lparam.0 as *mut _)),
@@ -584,6 +690,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                 && unsafe { PCWSTR(lparam.0 as *const u16).to_string() }
                     .is_ok_and(|area| area == "intl"),
         },
+        WM_SYSCOLORCHANGE => Message::SysColorChange,
         WM_ENDSESSION => Message::EndSession {
             ending: wparam.0 != 0,
         },
@@ -671,6 +778,11 @@ fn keystroke(key: VIRTUAL_KEY) -> Option<Keystroke> {
     })
 }
 
+/// Whether Shift was down when the message being handled was read.
+pub(crate) fn shift_held() -> bool {
+    held(VK_SHIFT)
+}
+
 /// Whether `key` was down when the message being handled was read.
 fn held(key: VIRTUAL_KEY) -> bool {
     // SAFETY: plain values; the high bit of the state is set while the key
@@ -690,6 +802,32 @@ impl Hwnd {
         // SAFETY: a stale handle gives 0, which falls back to 96.
         let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.0) };
         Dpi::new(dpi).unwrap_or(Dpi::new(96).expect("96 is not zero"))
+    }
+
+    /// The width of the work area of the monitor that shows the window,
+    /// which leaves out the taskbar.
+    pub(crate) fn work_area_width(self) -> Px {
+        self.work_area().width
+    }
+
+    /// The work area of the monitor that shows the window, which leaves out
+    /// the taskbar, in screen coordinates; empty when Windows cannot say.
+    pub(crate) fn work_area(self) -> Rect {
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `info` is a local with its size set; a stale handle
+        // gives the nearest monitor.
+        let found = unsafe {
+            let monitor = MonitorFromWindow(self.0, MONITOR_DEFAULTTONEAREST);
+            GetMonitorInfoW(monitor, &mut info).as_bool()
+        };
+        if found {
+            from_rect(info.rcWork)
+        } else {
+            Rect::default()
+        }
     }
 
     /// Starts or restarts the timer `id`, which sends `WM_TIMER` every

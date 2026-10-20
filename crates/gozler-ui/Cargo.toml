@@ -22,11 +22,13 @@ pseudo-language = ["dep:serde_json"]
 [dependencies]
 gozler-core = { path = "../gozler-core" }
 gozler-client = { path = "../gozler-client" }
+gozler-fileops = { path = "../gozler-fileops" }
 jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+gozler-winfs = { path = "../gozler-winfs" }
 windows.workspace = true
 
 [build-dependencies]

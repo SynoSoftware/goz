@@ -13,6 +13,7 @@
 pub mod attributes;
 pub mod escompat;
 pub mod fold;
+pub mod include;
 pub mod index;
 pub mod layout;
 pub mod output;

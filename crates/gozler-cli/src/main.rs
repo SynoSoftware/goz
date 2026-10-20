@@ -357,6 +357,8 @@ mod win {
                     volumes_incomplete: false,
                     process_working_set: 0,
                     process_private_bytes: 0,
+                    include: None,
+                    left_out: Vec::new(),
                 })
                 .len()
             };

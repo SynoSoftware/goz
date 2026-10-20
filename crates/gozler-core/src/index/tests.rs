@@ -1537,3 +1537,215 @@ proptest! {
         }
     }
 }
+
+// -- the Include rules ---------------------------------------------------
+
+use crate::include::{DriveChoice, FolderChoice, IncludeSettings};
+use std::sync::Arc;
+
+/// The rules of a volume whose drive is `drive`, with `folders` and the
+/// name patterns `names`.
+fn include_rules(
+    drive: bool,
+    folders: &[(&str, bool)],
+    names: &str,
+) -> Arc<crate::include::VolumeRules> {
+    let settings = IncludeSettings {
+        drives: vec![DriveChoice {
+            volume: "V".into(),
+            name: String::new(),
+            indexed: drive,
+            folders: folders
+                .iter()
+                .map(|&(path, indexed)| FolderChoice {
+                    path: path.into(),
+                    indexed,
+                })
+                .collect(),
+        }],
+        excluded_names: names.into(),
+        ..IncludeSettings::default()
+    };
+    Arc::new(settings.rules_for("V"))
+}
+
+/// `Windows\System32\a.dll`, `Windows\Temp\t.txt`, `Users\ana\doc.txt`,
+/// `Users\ana\x.tmp` and `Users\ana\node_modules\m.js`, with the folders.
+fn include_fixture() -> VolumeIndex {
+    let r = root_frn();
+    index_from_enum(&[
+        create(frn(10), r, "Windows", true),
+        create(frn(11), frn(10), "System32", true),
+        create(frn(12), frn(11), "a.dll", false),
+        create(frn(13), frn(10), "Temp", true),
+        create(frn(14), frn(13), "t.txt", false),
+        create(frn(20), r, "Users", true),
+        create(frn(21), frn(20), "ana", true),
+        create(frn(22), frn(21), "doc.txt", false),
+        create(frn(23), frn(21), "x.tmp", false),
+        create(frn(24), frn(21), "node_modules", true),
+        create(frn(25), frn(24), "m.js", false),
+    ])
+}
+
+fn paths(list: &[&str]) -> BTreeSet<String> {
+    list.iter().map(|p| p.to_string()).collect()
+}
+
+/// The rules remove what they leave out, keep the folder above a checked
+/// folder as its path, and count before they apply what applying leaves.
+/// The compaction that returns the memory keeps every chain and the scope
+/// index exact.
+#[test]
+fn include_rules_remove_what_they_leave_out() {
+    let mut idx = include_fixture();
+    let rules = include_rules(
+        true,
+        &[("Windows", false), (r"Windows\Temp", true)],
+        "*.tmp;node_modules",
+    );
+    let counted = idx.count_kept(&rules);
+    idx.apply_rules(rules);
+    idx.optimize_storage();
+    assert_eq!(counted, idx.len() as u64);
+    assert_eq!(
+        path_set(&idx),
+        paths(&[
+            "Windows",
+            r"Windows\Temp",
+            r"Windows\Temp\t.txt",
+            "Users",
+            r"Users\ana",
+            r"Users\ana\doc.txt"
+        ])
+    );
+    assert!(idx.dir_index_matches_rebuild());
+    assert!(idx.child_chains_match_rebuild());
+    assert!(idx.name_chains_match_rebuild());
+    assert!(idx.is_left_out(frn(11)) && idx.is_left_out(frn(24)));
+}
+
+/// A record inside a left-out folder is dropped and leaves no placeholder;
+/// an entry that moves or is renamed to where the rules leave it out leaves
+/// the index with what is below it; a folder that moves out of a left-out
+/// folder is reported for a walk.
+#[test]
+fn journal_records_follow_the_include_rules() {
+    let mut idx = include_fixture();
+    idx.apply_rules(include_rules(true, &[("Windows", false)], "*.tmp"));
+
+    let outcome = idx.apply_batch(&[
+        create(frn(30), frn(11), "new.dll", false),
+        create(frn(31), frn(11), "Sub", true),
+        create(frn(32), frn(31), "deep.txt", false),
+        rename(frn(22), frn(21), "doc.tmp", false),
+        rename(frn(21), frn(10), "ana", true),
+        rename(frn(13), frn(20), "Temp", true),
+    ]);
+
+    assert_eq!(idx.stats().placeholders_created, 0);
+    assert!(!idx.has_orphans());
+    assert_eq!(path_set(&idx), paths(&["Users", r"Users\Temp"]));
+    assert_eq!(outcome.needs_walk, vec![frn(13)]);
+    assert!(idx.is_left_out(frn(31)) && idx.is_left_out(frn(21)));
+}
+
+/// An entry that Exclude hidden left out comes back when it is no longer
+/// hidden, through a record that neither creates nor renames it.
+#[test]
+fn an_entry_that_is_no_longer_hidden_comes_back() {
+    let r = root_frn();
+    let mut idx = index_from_enum(&[ParsedUsnRecord {
+        attributes: 0x2 | FILE_ATTRIBUTE_DIRECTORY,
+        ..create(frn(10), r, "secret", true)
+    }]);
+    let settings = IncludeSettings {
+        exclude_hidden: true,
+        ..IncludeSettings::default()
+    };
+    idx.apply_rules(Arc::new(settings.rules_for("V")));
+    assert!(path_set(&idx).is_empty());
+
+    let shown = ParsedUsnRecord {
+        attributes: FILE_ATTRIBUTE_DIRECTORY,
+        ..record(frn(10), r, "secret", true, USN_REASON_BASIC_INFO_CHANGE)
+    };
+    let outcome = idx.apply_batch(&[shown]);
+
+    assert_eq!(path_set(&idx), paths(&["secret"]));
+    assert_eq!(outcome.needs_walk, vec![frn(10)]);
+}
+
+/// A file with two names that becomes hidden leaves the index under
+/// Exclude hidden: the link reconcile judges its names by the new
+/// attributes, not the ones the build stored.
+#[test]
+fn a_hard_linked_file_that_becomes_hidden_leaves_the_index() {
+    let r = root_frn();
+    let mut idx = index_from_enum(&[
+        create(frn(10), r, "dirA", true),
+        create(frn(11), r, "dirB", true),
+        create(frn(100), frn(10), "only", false),
+    ]);
+    let names = [
+        LinkTarget {
+            parent: idx.head_of(frn(10)).unwrap(),
+            name: b"only".to_vec(),
+        },
+        LinkTarget {
+            parent: idx.head_of(frn(11)).unwrap(),
+            name: b"second".to_vec(),
+        },
+    ];
+    idx.reconcile_links(frn(100), &names);
+    let settings = IncludeSettings {
+        exclude_hidden: true,
+        ..IncludeSettings::default()
+    };
+    idx.apply_rules(Arc::new(settings.rules_for("V")));
+    assert_eq!(
+        path_set(&idx),
+        paths(&["dirA", "dirB", "dirA\\only", "dirB\\second"])
+    );
+
+    let hidden = ParsedUsnRecord {
+        attributes: 0x2 | 0x20,
+        ..record(
+            frn(100),
+            frn(10),
+            "only",
+            false,
+            USN_REASON_BASIC_INFO_CHANGE,
+        )
+    };
+    let outcome = idx.apply_batch(&[hidden]);
+    assert_eq!(outcome.needs_link_reconcile, vec![frn(100)]);
+    idx.reconcile_links(frn(100), &names);
+
+    assert_eq!(path_set(&idx), paths(&["dirA", "dirB"]));
+}
+
+proptest! {
+    /// Removing what the rules leave out and compacting the entry table
+    /// keep every chain, the scope index and the folder sizes exact, after
+    /// any history of index changes, and the count beforehand is what stays.
+    #[test]
+    fn applying_rules_keeps_the_index_exact(
+        changes in prop::collection::vec(index_change_strategy(), 0..60),
+    ) {
+        let mut idx = new_index();
+        for change in &changes {
+            apply_change(&mut idx, change);
+        }
+        idx.compute_folder_sizes();
+        let rules = include_rules(true, &[], "l1*;l2?");
+        let counted = idx.count_kept(&rules);
+        idx.apply_rules(rules);
+        idx.optimize_storage();
+        prop_assert_eq!(counted, idx.len() as u64);
+        prop_assert!(idx.dir_index_matches_rebuild());
+        prop_assert!(idx.child_chains_match_rebuild());
+        prop_assert!(idx.name_chains_match_rebuild());
+        prop_assert!(idx.folder_sizes_match_rebuild());
+    }
+}

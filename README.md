@@ -54,7 +54,7 @@ Or install it as an auto-start Windows service (elevated):
 .\target\release\gozlerd.exe uninstall   # stop and remove
 ```
 
-To build an installer instead, double-click `Release.cmd`, or run `pwsh ./installer/Build.ps1`, with Inno Setup 7.1 or later installed. It writes `target\installer\gozler-<version>-x64-Setup.exe`, the installer the release publishes. Each local run first raises the patch version in `Cargo.toml`, such as 0.2.0 to 0.2.1, so each setup upgrades the one before; the release builds the version its tag names. Uninstalling removes the binaries, the Start menu shortcut, the `PATH` entry and the service, and, for the person who uninstalls, the window's sign-in entry and its "Search with Gozler" command in File Explorer.
+To build an installer instead, double-click `Release.cmd`, or run `pwsh ./installer/Build.ps1`, with Inno Setup 7.1 or later installed. It writes `target\installer\gozler-<version>-x64-Setup.exe`, the installer the release publishes. Each local run first raises the patch version in `Cargo.toml`, such as 0.2.0 to 0.2.1, so each setup upgrades the one before; the release builds the version its tag names. Uninstalling removes the binaries, the Start menu shortcut, the `PATH` entry and the service, and, for the person who uninstalls, the window's sign-in entry and the "Search with Gozler" command that earlier versions added to File Explorer.
 
 ## Usage
 

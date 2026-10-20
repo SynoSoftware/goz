@@ -4,10 +4,16 @@
 #![forbid(unsafe_code)]
 
 mod dialogs;
+mod file_operations;
+mod fix_thread;
 mod icons;
+mod include;
+mod indexed_folders;
+mod local_service;
 mod main_window;
 mod requests;
 mod settings;
+mod status_bar;
 
 use crate::core::ids::IconId;
 use crate::core::model::Model;
@@ -29,6 +35,10 @@ const SHOW_MESSAGE: &str = "gozler.ui.show";
 pub(crate) fn run() {
     install_panic_hook();
     let arguments = Arguments::read();
+    if let Some(file) = &arguments.save_include {
+        // The copy that Settings starts as administrator saves and exits.
+        std::process::exit(include::save_as_administrator(file));
+    }
     let data_dir = arguments.data_dir.clone().unwrap_or_else(|| {
         win::shell::local_app_data()
             .expect("Windows names the local application data folder")
@@ -55,7 +65,11 @@ pub(crate) fn run() {
         }
         None => Instance::Another,
     };
+    if instance == Instance::First {
+        win::shell::remove_search_with();
+    }
     win::shell::initialize_com();
+    win::shell::initialize_ole();
     win::controls::initialize();
 
     let language = settings
@@ -81,17 +95,23 @@ pub(crate) fn run() {
         arguments.sign_in,
     );
     win::window::run_message_loop(hwnd, &|| window.accelerators());
+    window.close_for_setup(hwnd);
 }
 
 /// The command line: `--data-dir <folder>`, `--sign-in`, which the `Run`
-/// value passes, and `--location <folder>`, which File Explorer's "Search
-/// with Gozler" passes (DESIGN.md: The General page).
+/// value passes, `--location <folder>`, which starts the search in that folder
+/// (DESIGN.md: Window lifetime), and `--save-include
+/// <file>`, which Settings passes to the copy it runs as administrator
+/// (DESIGN.md: The Include page).
 struct Arguments {
     /// The folder of `ui.json` and `ui-error.log`; without it, `run` uses
     /// `%LOCALAPPDATA%\Gozler`.
     data_dir: Option<PathBuf>,
     sign_in: bool,
     location: Option<String>,
+    /// The Include settings to save, which Settings writes to this file
+    /// before it starts this copy as administrator.
+    save_include: Option<PathBuf>,
 }
 
 impl Arguments {
@@ -100,6 +120,7 @@ impl Arguments {
             data_dir: None,
             sign_in: false,
             location: None,
+            save_include: None,
         };
         let mut args = std::env::args_os().skip(1);
         while let Some(arg) = args.next() {
@@ -107,6 +128,8 @@ impl Arguments {
                 arguments.data_dir = args.next().map(PathBuf::from);
             } else if arg == "--sign-in" {
                 arguments.sign_in = true;
+            } else if arg == include::SAVE_ARGUMENT {
+                arguments.save_include = args.next().map(PathBuf::from);
             } else if arg == "--location" {
                 arguments.location = args
                     .next()
@@ -117,9 +140,9 @@ impl Arguments {
     }
 }
 
-/// The folder of `--location "%V"`. File Explorer gives a drive's root as
-/// `C:\`, so the argument `"C:\"` reaches the program as `C:"`, because
-/// Windows reads `\"` as a quote; this gives back `C:\`.
+/// The folder of `--location`. A program that quotes a drive's root, as
+/// `"C:\"`, passes `C:"`, because Windows reads `\"` as a quote; this gives
+/// back `C:\`.
 fn location(argument: &str) -> String {
     match argument.strip_suffix('"') {
         Some(drive) => format!(r"{drive}\"),

@@ -1,37 +1,133 @@
-//! COM, the known folders, the save dialog, the folder and program
+//! COM and OLE, the known folders, the save dialog, the folder and program
 //! pickers, the shell's verbs: open, show in File Explorer, Properties and
-//! run as administrator, and what Settings > General keeps in the registry.
+//! run as administrator, dragging entries out, and what Settings > General
+//! keeps in the registry.
 
 use super::Hwnd;
 use std::io;
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE, HWND, WAIT_OBJECT_0,
+    WAIT_TIMEOUT, WIN32_ERROR,
+};
 use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-    CoInitializeEx, CoTaskMemFree, IBindCtx,
+    CoInitializeEx, CoTaskMemFree, IBindCtx, IDataObject,
+};
+use windows::Win32::System::Ole::{
+    DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource, OleInitialize,
 };
 use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_ROUTINE_FLAGS, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ,
-    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_ROUTINE_FLAGS, REG_SZ, RRF_RT_REG_BINARY,
+    RRF_RT_REG_SZ, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW,
 };
+use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOTESTFILECREATE,
     FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileOpenDialog,
-    IFileSaveDialog, ILCreateFromPathW, ILFindLastID, ILFree, IShellItem, KF_FLAG_DEFAULT,
-    SEE_MASK_FLAG_NO_UI, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, SHGetKnownFolderPath,
-    SHOP_FILEPATH, SHObjectProperties, SHOpenFolderAndSelectItems, SIGDN_FILESYSPATH,
-    ShellExecuteExW, ShellExecuteW,
+    IFileSaveDialog, ILClone, ILCreateFromPathW, ILFindLastID, ILFree, ILIsParent, ILRemoveLastID,
+    IShellItem, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject,
+    SHCreateItemFromParsingName, SHDoDragDrop, SHELLEXECUTEINFOW, SHGetKnownFolderPath,
+    SHOP_FILEPATH, SHObjectProperties, SHOpenFolderAndSelectItems, SHParseDisplayName,
+    SIGDN_FILESYSPATH, ShellExecuteExW, ShellExecuteW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    IDC_WAIT, LoadCursorW, SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL, SetCursor,
+};
 use windows::core::{HSTRING, PCWSTR, w};
 
 /// Starts COM on this thread in the apartment model, which the shell's
 /// dialogs and `ShellExecuteW` need.
 pub(crate) fn initialize_com() {
-    // SAFETY: called once, on the UI thread, before any COM or shell call.
+    // SAFETY: called once on each thread that makes COM or shell calls,
+    // before the first.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+}
+
+/// Starts OLE on the window's thread, which a drag needs; the thread's COM
+/// apartment stays as [`initialize_com`] made it.
+pub(crate) fn initialize_ole() {
+    // SAFETY: called once on the window's thread, after `initialize_com`.
+    let _ = unsafe { OleInitialize(None) };
+}
+
+/// Drags `paths`, each UTF-16 without a NUL, as File Explorer drags its
+/// selection: the shell's own data object, so a drop target gets the files
+/// and the shell's item list, with Explorer's drag image, and the target
+/// copies, moves or links them. Returns when the drop ends, with the first
+/// path that the shell could not name, such as one that no longer exists;
+/// the others are dragged.
+pub(crate) fn drag(paths: &[Vec<u16>]) -> Option<Vec<u16>> {
+    // Naming each path reads the file system, which takes a moment for many.
+    // SAFETY: a system cursor, which is never freed.
+    if let Ok(wait) = unsafe { LoadCursorW(None, IDC_WAIT) } {
+        // SAFETY: as above.
+        unsafe { SetCursor(Some(wait)) };
+    }
+    let mut missing = None;
+    let mut lists = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut list = std::ptr::null_mut();
+        // SAFETY: the path outlives the call, which writes `list`.
+        let named = unsafe {
+            SHParseDisplayName(
+                &HSTRING::from_wide(path),
+                None::<&IBindCtx>,
+                &mut list,
+                0,
+                None,
+            )
+        };
+        if named.is_ok() && !list.is_null() {
+            lists.push(list);
+        } else {
+            missing.get_or_insert_with(|| path.clone());
+        }
+    }
+    let Some(&first) = lists.first() else {
+        return missing;
+    };
+    // SAFETY: every list is this function's own until it is freed below, and
+    // the last item of a list names its entry inside its folder.
+    unsafe {
+        let parent = ILClone(first);
+        let _ = ILRemoveLastID(Some(parent));
+        let shared = lists
+            .iter()
+            .all(|list| ILIsParent(parent, *list, true).as_bool());
+        let data: windows::core::Result<IDataObject> = if shared {
+            let children: Vec<*const ITEMIDLIST> = lists
+                .iter()
+                .map(|list| ILFindLastID(*list).cast_const())
+                .collect();
+            SHCreateDataObject(
+                Some(parent),
+                Some(children.as_slice()),
+                None::<&IDataObject>,
+            )
+        } else {
+            // Each list names its entry from the desktop.
+            let absolute: Vec<*const ITEMIDLIST> =
+                lists.iter().map(|list| list.cast_const()).collect();
+            SHCreateDataObject(None, Some(absolute.as_slice()), None::<&IDataObject>)
+        };
+        if let Ok(data) = data {
+            // A move needs nothing here: the index follows the journal.
+            let _ = SHDoDragDrop(
+                None,
+                &data,
+                None::<&IDropSource>,
+                DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK,
+            );
+        }
+        ILFree(Some(parent));
+        for list in lists {
+            ILFree(Some(list));
+        }
+    }
+    missing
 }
 
 /// The user's local application data folder, such as
@@ -74,6 +170,32 @@ pub(crate) fn open_entry(owner: Hwnd, path: &[u16]) {
             PCWSTR::null(),
             &HSTRING::from_wide(path),
             PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Opens the folder `folder`, UTF-16 without a NUL, in File Explorer,
+/// whatever program opens folders on this computer.
+pub(crate) fn explore(owner: Hwnd, folder: &[u16]) {
+    // A root's last backslash is doubled, so it cannot escape the closing
+    // quote.
+    let quote = u16::from(b'"');
+    let mut parameters = vec![quote];
+    parameters.extend_from_slice(folder);
+    if folder.last() == Some(&u16::from(b'\\')) {
+        parameters.push(u16::from(b'\\'));
+    }
+    parameters.push(quote);
+    // SAFETY: the parameters outlive the call; a null verb is the default
+    // one.
+    unsafe {
+        ShellExecuteW(
+            Some(owner.0),
+            PCWSTR::null(),
+            w!("explorer.exe"),
+            &HSTRING::from_wide(&parameters),
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
@@ -190,6 +312,26 @@ pub(crate) fn save_dialog(
 /// cancels. It runs its own message loop, so the caller holds no borrow
 /// across it (DESIGN.md: window rule 1).
 pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
+    pick_folder_for(owner, start, None)
+}
+
+/// [`pick_folder`] for a destination, with the title `title` and `ok` as
+/// its OK button's caption, such as "Copy to folder" and "Copy"
+/// (file-manager-spec.md: Search mode).
+pub(crate) fn pick_destination(
+    owner: Hwnd,
+    start: Option<&str>,
+    title: &str,
+    ok: &str,
+) -> Option<String> {
+    pick_folder_for(owner, start, Some((title, ok)))
+}
+
+fn pick_folder_for(
+    owner: Hwnd,
+    start: Option<&str>,
+    labels: Option<(&str, &str)>,
+) -> Option<String> {
     // SAFETY: every string outlives the call that reads it; the chosen
     // path is copied, then freed as the call requires.
     unsafe {
@@ -207,6 +349,10 @@ pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
             )
         {
             let _ = dialog.SetFolder(&folder);
+        }
+        if let Some((title, ok)) = labels {
+            let _ = dialog.SetTitle(&HSTRING::from(title));
+            let _ = dialog.SetOkButtonLabel(&HSTRING::from(ok));
         }
         dialog.Show(Some(owner.0)).ok()?;
         let path = dialog
@@ -253,8 +399,8 @@ pub(crate) fn pick_program(owner: Hwnd, title: &str, programs: &str) -> Option<S
     }
 }
 
-/// Runs `program` with `parameters`, an open command of Settings > General
-/// (DESIGN.md: The General page). Windows shows no message of its own; a
+/// Runs `program` with `parameters`, an open command of Settings > Context
+/// menu (DESIGN.md: The Context menu page). Windows shows no message of its own; a
 /// program that cannot start gives Windows' reason.
 pub(crate) fn run_command(owner: Hwnd, program: &str, parameters: &str) -> io::Result<()> {
     let program = HSTRING::from(program);
@@ -321,10 +467,10 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// entry off.
 const STARTUP_APPROVED_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
-/// The name of Gozler's values and verbs.
+/// The name of Gozler's values.
 const GOZLER: &str = "gozler";
 /// The keys of File Explorer's "Search with Gozler" on a folder and on a
-/// folder's background.
+/// folder's background, which earlier versions added.
 const VERB_KEYS: [&str; 2] = [
     r"Software\Classes\Directory\shell\gozler",
     r"Software\Classes\Directory\Background\shell\gozler",
@@ -338,12 +484,22 @@ fn value_name(name: Option<&str>) -> HSTRING {
 /// Writes the string `value` as the value `name` of the current user's key
 /// `key`, which it creates when it is missing.
 fn set_string(key: &str, name: Option<&str>, value: &str) -> io::Result<()> {
+    set_string_in(HKEY_CURRENT_USER, key, name, value)
+}
+
+/// Writes the string `value` as the value `name` of the machine's key `key`,
+/// which it creates when it is missing. Only an administrator can.
+pub(crate) fn set_machine_string(key: &str, name: &str, value: &str) -> io::Result<()> {
+    set_string_in(HKEY_LOCAL_MACHINE, key, Some(name), value)
+}
+
+fn set_string_in(root: HKEY, key: &str, name: Option<&str>, value: &str) -> io::Result<()> {
     let data: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: the names and the data outlive the call, and the length is
     // the data's, with its NUL, in bytes.
     registry(unsafe {
         RegSetKeyValueW(
-            HKEY_CURRENT_USER,
+            root,
             &HSTRING::from(key),
             &value_name(name),
             REG_SZ.0,
@@ -419,48 +575,142 @@ pub(crate) fn set_start_at_sign_in(on: bool, program: &Path) -> io::Result<()> {
     delete_value(STARTUP_APPROVED_KEY, GOZLER)
 }
 
-/// Whether File Explorer shows "Search with Gozler" on folders.
-pub(crate) fn shows_search_with() -> bool {
-    VERB_KEYS
-        .iter()
-        .all(|key| get_value(&format!(r"{key}\command"), None, RRF_RT_REG_SZ, None).is_some())
+/// Removes "Search with Gozler" from File Explorer's menus, which an
+/// earlier version added, so no item that Gozler no longer serves stays
+/// there (DESIGN.md: The Context menu page). Keys that are gone stay gone.
+pub(crate) fn remove_search_with() {
+    for key in VERB_KEYS {
+        // SAFETY: the name outlives the call.
+        let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key)) };
+    }
 }
 
-/// Adds "Search with Gozler", labelled `label`, to File Explorer's menu
-/// for folders and for a folder's background, which starts `program` with
-/// `--location` and the folder; or removes it.
-pub(crate) fn set_search_with(on: bool, program: &Path, label: &str) -> io::Result<()> {
-    let program = program.display().to_string();
-    for key in VERB_KEYS {
-        if on {
-            set_string(key, None, label)?;
-            set_string(key, Some("Icon"), &program)?;
-            set_string(
-                &format!(r"{key}\command"),
-                None,
-                &format!("\"{program}\" --location \"%V\""),
-            )?;
-        } else {
-            // SAFETY: the name outlives the call.
-            registry(unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key)) })?;
+/// The window that owns Windows' permission prompt, which another thread
+/// passes to [`start_as_administrator`].
+#[derive(Clone, Copy)]
+pub(crate) struct PromptOwner(isize);
+
+// SAFETY: ShellExecuteExW only reads the handle to place its prompt, and
+// the window joins the thread that holds it in WM_DESTROY, while the handle
+// is valid.
+unsafe impl Send for PromptOwner {}
+
+impl PromptOwner {
+    pub(crate) fn new(window: Hwnd) -> PromptOwner {
+        PromptOwner(window.0.0 as isize)
+    }
+}
+
+/// A program that runs as administrator. Dropping it closes the handle,
+/// not the program.
+pub(crate) struct ElevatedProcess(HANDLE);
+
+// SAFETY: any thread may wait on and close a process handle.
+unsafe impl Send for ElevatedProcess {}
+
+impl ElevatedProcess {
+    /// Waits up to `timeout_ms` for the program to end, and gives its exit
+    /// code; `None` while it still runs.
+    pub(crate) fn wait(&self, timeout_ms: u32) -> io::Result<Option<u32>> {
+        // SAFETY: the handle is open until `drop`.
+        unsafe {
+            match WaitForSingleObject(self.0, timeout_ms) {
+                WAIT_OBJECT_0 => {
+                    let mut code = 0;
+                    GetExitCodeProcess(self.0, &mut code).map_err(io_error)?;
+                    Ok(Some(code))
+                }
+                WAIT_TIMEOUT => Ok(None),
+                _ => Err(io::Error::last_os_error()),
+            }
         }
     }
-    Ok(())
 }
 
-/// Runs `program` with `parameters` as administrator, without a console
-/// window, after Windows asks the person for permission. The window never
-/// sees or passes credentials (DESIGN.md: Daemon failures).
-pub(crate) fn run_as_administrator(owner: Hwnd, program: &str, parameters: &str) {
-    // SAFETY: every string outlives the call; `owner` only owns the prompt.
-    unsafe {
-        ShellExecuteW(
-            Some(owner.0),
-            w!("runas"),
-            &HSTRING::from(program),
-            &HSTRING::from(parameters),
-            PCWSTR::null(),
-            SW_HIDE,
-        );
+impl Drop for ElevatedProcess {
+    fn drop(&mut self) {
+        // SAFETY: ShellExecuteExW opened the handle, which this closes once.
+        let _ = unsafe { CloseHandle(self.0) };
     }
+}
+
+/// Starts `program` with `parameters` as administrator, without a console
+/// window, after Windows asks the person for permission; the call returns
+/// once the person answers. A person who says no gives the error
+/// `ERROR_CANCELLED`. The window never sees or passes credentials
+/// (DESIGN.md: Daemon failures).
+pub(crate) fn start_as_administrator(
+    owner: PromptOwner,
+    program: &str,
+    parameters: &str,
+) -> io::Result<ElevatedProcess> {
+    let process = execute(
+        HWND(owner.0 as *mut _),
+        w!("runas"),
+        program,
+        parameters,
+        SEE_MASK_NOCLOSEPROCESS,
+        SW_HIDE,
+    )?;
+    // An executable always starts a process, so SEE_MASK_NOCLOSEPROCESS
+    // gives its handle.
+    Ok(ElevatedProcess(process))
+}
+
+/// Starts `program`, as a double-click on it does.
+pub(crate) fn start_program(owner: Hwnd, program: &Path) -> io::Result<()> {
+    let program = program.display().to_string();
+    execute(owner.0, w!("open"), &program, "", 0, SW_SHOWNORMAL).map(|_| ())
+}
+
+/// Whether `error` says that the person said no to Windows' permission
+/// prompt.
+pub(crate) fn refused(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(ERROR_CANCELLED.0 as i32)
+}
+
+/// `ShellExecuteExW` with `verb`, without Windows' own error messages,
+/// because the caller says what failed. Gives the process handle that
+/// `SEE_MASK_NOCLOSEPROCESS` in `mask` asks for.
+fn execute(
+    owner: HWND,
+    verb: PCWSTR,
+    program: &str,
+    parameters: &str,
+    mask: u32,
+    show: SHOW_WINDOW_CMD,
+) -> io::Result<HANDLE> {
+    let program = HSTRING::from(program);
+    let parameters = HSTRING::from(parameters);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: mask | SEE_MASK_FLAG_NO_UI,
+        hwnd: owner,
+        lpVerb: verb,
+        lpFile: PCWSTR(program.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
+        nShow: show.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` is complete, with its size set, and its strings outlive
+    // the call.
+    unsafe { ShellExecuteExW(&mut info) }.map_err(io_error)?;
+    Ok(info.hProcess)
+}
+
+/// How long [`run_as_administrator_and_wait`] waits for the program to end.
+const ELEVATED_WAIT_MS: u32 = 30_000;
+
+/// Runs `program` with `parameters` as administrator, as
+/// [`start_as_administrator`] does, waits for it to end, and gives its exit
+/// code. The program must end quickly, because this thread waits for it, at
+/// most [`ELEVATED_WAIT_MS`].
+pub(crate) fn run_as_administrator_and_wait(
+    owner: Hwnd,
+    program: &str,
+    parameters: &str,
+) -> io::Result<u32> {
+    start_as_administrator(PromptOwner::new(owner), program, parameters)?
+        .wait(ELEVATED_WAIT_MS)?
+        .ok_or_else(|| io::ErrorKind::TimedOut.into())
 }

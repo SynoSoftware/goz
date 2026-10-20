@@ -86,9 +86,10 @@ impl Hwnd {
     }
 }
 
-/// Draws the Location list's items, and passes the controls' notifications
-/// and colour requests to the main window, and the scroll bar's requests
-/// with the pane as their sender, as a scroll bar control sends them.
+/// Draws the Kind and Location lists' items, and passes the controls'
+/// notifications and colour requests to the main window, and the scroll
+/// bar's requests with the pane as their sender, as a scroll bar control
+/// sends them.
 unsafe extern "system" fn procedure(
     hwnd: HWND,
     msg: u32,
@@ -109,7 +110,7 @@ unsafe extern "system" fn procedure(
         WM_COMMAND | WM_CTLCOLORSTATIC => forward(lparam),
         WM_VSCROLL => forward(LPARAM(hwnd.0 as isize)),
         // SAFETY: the lparam is the one Windows passed with WM_DRAWITEM.
-        WM_DRAWITEM if unsafe { super::controls::draw_path_item(lparam) } => LRESULT(1),
+        WM_DRAWITEM if unsafe { super::controls::draw_list_item(lparam) } => LRESULT(1),
         // SAFETY: the parameters are the ones Windows passed.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }

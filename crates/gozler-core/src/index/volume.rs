@@ -22,15 +22,20 @@
 
 use super::store::{
     ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId, NamePair, NameStore,
-    SIZE_UNKNOWN, hash_bytes,
+    SIZE_UNKNOWN, hash_bytes, moved,
 };
 use crate::attributes::{Attributes, PackedAttributes};
+use crate::include::VolumeRules;
 use crate::layout::LayoutFile;
 use crate::types::{EntryIdx, Frn, NIL};
 use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, USN_REASON_RENAME_NEW_NAME};
 use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use std::sync::Arc;
+
+mod include;
+use include::Screen;
 
 /// NTFS reserves MFT record 5 for the volume root directory. The daemon reads
 /// each volume's root ID from the volume; tests and benches build NTFS-shaped
@@ -223,6 +228,12 @@ pub struct VolumeIndex {
     /// happens both live here and `child_dir` disambiguates by comparing the
     /// actual folded names.
     dir_children: FxHashMap<(EntryIdx, u64), SmallVec<[EntryIdx; 1]>>,
+    /// The Include rules the index was cut down to, which every journal
+    /// batch is checked against; `None` while they keep every entry.
+    include: Option<Arc<VolumeRules>>,
+    /// The file IDs of the folders the rules left out, so a journal record
+    /// inside one is dropped.
+    left_out: FxHashSet<Frn>,
 }
 
 impl VolumeIndex {
@@ -274,6 +285,8 @@ impl VolumeIndex {
             #[cfg(test)]
             dirty: 0,
             dir_children: FxHashMap::default(),
+            include: None,
+            left_out: FxHashSet::default(),
         };
         this.link_same_name(root, root_name);
         this.link_same_name(lost_found, lf_name);
@@ -413,9 +426,27 @@ impl VolumeIndex {
     /// [`ApplyOutcome::wants_compact`] whether the arenas need compacting.
     pub fn apply_batch(&mut self, records: &[ParsedUsnRecord]) -> ApplyOutcome {
         let mut outcome = ApplyOutcome::default();
+        let mut screening = self.include.clone().map(include::Screening::new);
         for rec in records {
             let frn = rec.frn;
-            for op in ops_for(rec) {
+            let mut ops = ops_for(rec);
+            let screen = match &mut screening {
+                Some(screening) => self.screen(screening, rec),
+                None => Screen::Apply,
+            };
+            match screen {
+                Screen::Apply => {}
+                Screen::Drop => continue,
+                Screen::Relink => {
+                    // The link reconcile judges each name by the stored
+                    // attributes, so they must be the record's.
+                    self.set_attributes(frn, rec.attributes);
+                    outcome.needs_link_reconcile.push(frn);
+                    continue;
+                }
+                Screen::Missed => ops.insert(0, UsnOp::Upsert),
+            }
+            for op in ops {
                 match op {
                     UsnOp::Upsert => {
                         // A rename of an entry the index lacks: the build
@@ -423,8 +454,11 @@ impl VolumeIndex {
                         // its contents are missing too. Reason bits
                         // accumulate while a handle stays open, so the rename
                         // of an entry created before the build can carry
-                        // FILE_CREATE too; only the rename bit tells.
-                        let missed = rec.reason & USN_REASON_RENAME_NEW_NAME != 0
+                        // FILE_CREATE too; only the rename bit tells. An
+                        // entry the Include rules left out is missed in the
+                        // same way when it comes back.
+                        let missed = (rec.reason & USN_REASON_RENAME_NEW_NAME != 0
+                            || screen == Screen::Missed)
                             && self.head_of(frn).is_none_or(|h| self.is_synthetic(h));
                         if let UpsertResult::NeedsReconcile =
                             self.upsert_link(frn, rec.parent_frn, &rec.name, rec.is_dir())
@@ -436,6 +470,12 @@ impl VolumeIndex {
                             if rec.is_dir() {
                                 outcome.needs_walk.push(frn);
                             }
+                        } else if rec.is_dir()
+                            && let Some(screening) = &mut screening
+                        {
+                            // A folder that moved brings what is below it to
+                            // a place the rules may decide differently.
+                            self.recheck_below(screening, frn);
                         }
                     }
                     UsnOp::Delete => {
@@ -477,6 +517,14 @@ impl VolumeIndex {
     /// Reconciles the hard-link set of `frn` to exactly `actual` (the daemon's
     /// `FindFirstFileNameW` result). An empty `actual` deletes the file.
     pub fn reconcile_links(&mut self, frn: Frn, actual: &[LinkTarget]) {
+        let kept;
+        let actual = match self.include.clone() {
+            Some(rules) => {
+                kept = self.kept_links(&rules, frn, actual);
+                &kept[..]
+            }
+            None => actual,
+        };
         if actual.is_empty() {
             self.delete_frn(frn);
             return;
@@ -1326,8 +1374,30 @@ impl VolumeIndex {
     /// allows it, then return all growth slack. Runs under the write lock; call
     /// it once per volume, not per batch.
     pub fn optimize_storage(&mut self) {
+        self.compact_entries();
         self.by_frn.densify_if_smaller();
         self.shrink_to_fit();
+    }
+
+    /// Moves the live entries over the slots that removed entries left, so
+    /// their memory returns: after the Include rules removed many entries,
+    /// the free slots would otherwise hold it until new entries reuse them.
+    fn compact_entries(&mut self) {
+        if !self.entries.has_free_slots() {
+            return;
+        }
+        let remap = self.entries.compact();
+        self.root = moved(&remap, self.root);
+        self.lost_found = moved(&remap, self.lost_found);
+        self.names.remap_heads(&remap);
+        self.by_frn.remap(&remap);
+        self.dir_children = std::mem::take(&mut self.dir_children)
+            .into_iter()
+            .map(|((parent, hash), dirs)| {
+                let dirs = dirs.into_iter().map(|d| moved(&remap, d)).collect();
+                ((moved(&remap, parent), hash), dirs)
+            })
+            .collect();
     }
 
     // -- folded-arena query support --------------------------------------

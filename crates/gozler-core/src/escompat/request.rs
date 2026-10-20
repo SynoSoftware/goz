@@ -34,6 +34,7 @@ pub fn build_search(
             want_size: true,
             want_mtime: true,
             want_attributes: plan.columns.contains(&EsColumn::Attributes),
+            want_sums: false,
         }),
     };
     let scope = plan.scope.as_ref().map(|scope| match scope {

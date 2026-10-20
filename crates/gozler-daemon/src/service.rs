@@ -320,7 +320,7 @@ fn run_service() -> Result<()> {
             }
         };
         let _ = ready_tx.send(Ok(()));
-        let served = server::run(supervisor.volumes(), stop_rx);
+        let served = server::run(supervisor.volumes(), supervisor.include(), stop_rx);
         supervisor.shutdown();
         served
     });

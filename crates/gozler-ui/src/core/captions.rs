@@ -11,16 +11,23 @@
 //! A catalogue key is written whole, as a literal, so the test below finds
 //! every key the code uses in `en.json`.
 
-use super::commands::{self, INSPECTOR_BUTTONS, MenuNode};
-use super::fetch::DaemonFailure;
+use super::commands::{
+    self, CommandButton, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
+    INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, MenuNode, SHOW_DETAILS,
+};
+use super::fetch::{DaemonFailure, LocalService};
+use super::fixer::{
+    CommandFix, CommandResult, CommandStep, FixState, Fixer, SetupFix, SetupResult, SetupStep,
+};
+use super::glyph::Glyph;
 use super::ids::{ControlId, DialogId};
 use super::layout::WIDEST_TOTAL;
-use super::model::{Column, Export, Model};
+use super::model::{Column, Export, Job, Model};
 use super::query::{
     ATTRIBUTES, AttributeChoice, DateModified, DateRange, Day, Kind, LocationItem, MatchMode,
     RangeItem, SizeFilter, SizeRange, SizeUnit, SizeWord, date_items, size_items,
 };
-use super::results::{LIST_LIMIT, ListMessage, Shown};
+use super::results::{Fix, LIST_LIMIT, ListButton, ListMessage, Shown};
 use super::selection::{FolderContents, Selection, Sums};
 use super::settings::SettingsPage;
 use super::text::{self, Numbers, Strings};
@@ -28,10 +35,14 @@ use gozler_client::NotRunning;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{Malformed, QueryError};
 use gozler_core::types::VolumePhase;
+use std::path::PathBuf;
 
 /// The main window's captions, in the language and regional format of the
 /// moment they are built.
 pub(crate) struct WindowCaptions {
+    /// Whether icons show beside text (Settings > General), which makes
+    /// the inspector's buttons and the Kind list's rows larger.
+    pub(crate) icons: bool,
     pub(crate) title: String,
     pub(crate) menu_bar: Vec<MenuNode>,
     pub(crate) search_cue: String,
@@ -44,36 +55,120 @@ pub(crate) struct WindowCaptions {
     pub(crate) filters: FilterCaptions,
     /// In [`Model::columns`]' order.
     pub(crate) headers: Vec<String>,
-    /// The inspector's Open, Open file location and Copy as path.
-    pub(crate) inspector_buttons: [String; 3],
+    /// The inspector's buttons, in [`INSPECTOR_BUTTONS`]' order.
+    pub(crate) inspector_buttons: [ButtonCaption; INSPECTOR_BUTTONS.len()],
+    pub(crate) copy_path: ButtonCaption,
+    pub(crate) copy_name: ButtonCaption,
+    pub(crate) copy_folder: ButtonCaption,
+    pub(crate) hide_details: ButtonCaption,
+    pub(crate) show_details: ButtonCaption,
+    /// Every caption a button below the list's message can show, with
+    /// whether the administrator shield shows beside it.
+    pub(crate) list_buttons: Vec<(String, bool)>,
     /// Every label an inspector field can have, which the layout sizes the
     /// label column for, so the values keep their place in every state.
-    pub(crate) inspector_labels: [String; 8],
+    pub(crate) inspector_labels: [String; FIELD_LABELS.len()],
     pub(crate) inspector: InspectorCaptions,
     pub(crate) status: StatusCaptions,
+    /// The status bar's Cancel, which stops the running job.
+    pub(crate) status_cancel: String,
+    pub(crate) status_widest: StatusWidest,
     pub(crate) message: Option<ListCaption>,
-    /// The texts each fixed status part can show at its widest, which the
-    /// layout sizes the part for, so a part never moves with its text
-    /// (DESIGN.md: Look).
-    pub(crate) status_widest: [Vec<String>; 3],
 }
 
-/// The status bar's four parts (DESIGN.md: Status bar).
+/// What a [`CommandButton`] says: its caption, which for an icon is the name
+/// screen readers say, and its tooltip, empty for none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ButtonCaption {
+    pub(crate) caption: String,
+    pub(crate) tip: String,
+}
+
+impl ButtonCaption {
+    fn new(strings: &Strings, button: CommandButton) -> ButtonCaption {
+        let tip = button.tip.map(|key| strings.text(key).to_owned());
+        match button.caption {
+            Some(key) => ButtonCaption {
+                caption: strings.text(key).to_owned(),
+                tip: tip.unwrap_or_default(),
+            },
+            None => {
+                let name = tip.unwrap_or_else(|| {
+                    text::without_access_key(strings.text(button.command.row().label))
+                });
+                ButtonCaption {
+                    caption: name.clone(),
+                    tip: name,
+                }
+            }
+        }
+    }
+}
+
+/// The status bar's three groups (DESIGN.md: Status bar).
 pub(crate) struct StatusCaptions {
-    pub(crate) results: String,
-    pub(crate) selection: String,
-    pub(crate) export: String,
-    pub(crate) index: String,
+    /// What the view holds: the results and the selection.
+    pub(crate) view: String,
+    pub(crate) job: JobCaption,
+    /// The service and the index, and a newer release, as the Settings
+    /// dialog's right group shows them.
+    pub(crate) service: String,
+    /// The main window's right group: `service`, then the search's totals,
+    /// each after its icon.
+    pub(crate) right: Vec<ValuePart>,
 }
 
-/// What the list's empty area says instead of rows: the message, and the
-/// labels of its buttons, in [`Model::list_buttons`]' order.
-pub(crate) type ListCaption = (String, Vec<String>);
+/// The status bar's middle group: the running job, or the last job's
+/// result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JobCaption {
+    pub(crate) text: String,
+    pub(crate) progress: JobProgress,
+    /// Whether Cancel shows, because the job can stop now.
+    pub(crate) cancel: bool,
+}
+
+/// The progress bar beside a job's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JobProgress {
+    /// No bar: the job waits for the person, or it ended.
+    None,
+    /// A bar that moves without measuring, because the job does not know
+    /// how much is left.
+    Unmeasured,
+    /// A bar filled to `done` of `total`.
+    Measured { done: u64, total: u64 },
+}
+
+/// The texts each fixed group of the status bar can show at its widest,
+/// which the layout sizes the group for, so a group never moves with its
+/// text (DESIGN.md: Look).
+pub(crate) struct StatusWidest {
+    pub(crate) view: Vec<String>,
+    /// A running job's texts, which share the middle group with its
+    /// progress bar and Cancel.
+    pub(crate) running: Vec<String>,
+    /// A job's results, which have the middle group to themselves.
+    pub(crate) done: Vec<String>,
+}
+
+/// What the list's empty area says instead of rows: the message, and its
+/// buttons, in [`Model::list_buttons`]' order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListCaption {
+    pub(crate) text: String,
+    pub(crate) buttons: Vec<MessageButton>,
+}
 
 /// The filter pane's captions and the items of its lists, in the lists'
 /// orders.
 pub(crate) struct FilterCaptions {
+    pub(crate) title: String,
     pub(crate) clear: String,
+    pub(crate) clear_tip: String,
+    /// The names and tips of the icons that hide and show the pane.
+    pub(crate) hide: String,
+    pub(crate) show: String,
     pub(crate) kind: String,
     /// In [`Kind::ALL`]'s order.
     pub(crate) kinds: [String; 9],
@@ -132,7 +227,11 @@ impl FilterCaptions {
             })),
         ];
         FilterCaptions {
-            clear: text("command.clear_filters"),
+            title: text("filter.title"),
+            clear: text("filter.clear"),
+            clear_tip: text("filter.clear_tooltip"),
+            hide: text("filter.hide"),
+            show: text("filter.show"),
             kind: text("filter.kind"),
             kinds: Kind::ALL.map(|kind| text(kind.label())),
             location: text("filter.location"),
@@ -294,6 +393,24 @@ impl DialogItem {
     }
 }
 
+/// The group boxes of the Settings pages, each with the icon before its
+/// caption.
+pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 13] = [
+    (ControlId::GeneralStarting, Glyph::PowerButton),
+    (ControlId::SearchBoxGroup, Glyph::Search),
+    (ControlId::ContextMenuItemGroup, Glyph::BulletedList),
+    (ControlId::ContextMenuOpenGroup, Glyph::OpenFile),
+    (ControlId::KeyboardShowGroup, Glyph::BackToWindow),
+    (ControlId::KeyboardCommandsGroup, Glyph::KeyboardShortcut),
+    (ControlId::IndexDrivesGroup, Glyph::HardDrive),
+    (ControlId::IndexHoldsGroup, Glyph::Library),
+    (ControlId::IndexServiceGroup, Glyph::Processing),
+    (ControlId::IncludeFoldersGroup, Glyph::Folder),
+    (ControlId::IncludeNamesGroup, Glyph::Rename),
+    (ControlId::SpeedCopyingGroup, Glyph::Copy),
+    (ControlId::SpeedRingGroup, Glyph::Sync),
+];
+
 /// The catalogue keys of a dialog's title and fixed captions. A text that
 /// depends on a fact, such as About's version, is the dialog's own.
 pub(crate) struct CaptionTable {
@@ -343,7 +460,10 @@ impl CaptionTable {
             },
             DialogId::Settings => CaptionTable {
                 title: "settings.title",
-                keyed: &[(Control(C::SettingsApply), "settings.apply")],
+                keyed: &[
+                    (Control(C::SettingsResetAll), "settings.reset_all"),
+                    (Control(C::SettingsApply), "settings.apply"),
+                ],
                 plain: &[
                     (Control(C::SettingsNoMatch), "settings.no_match"),
                     (Control(C::SettingsClearSearch), "button.clear"),
@@ -365,61 +485,70 @@ impl CaptionTable {
                         "settings_general.keep_running",
                     ),
                     (Control(C::GeneralOneWindow), "settings_general.one_window"),
-                    (Control(C::GeneralRestore), "settings.restore_defaults"),
+                    (Control(C::GeneralShowIcons), "settings_general.show_icons"),
+                    (Control(C::GeneralRestore), "settings.reset"),
                 ],
                 plain: &[
                     (Control(C::GeneralHeading), "settings.general"),
                     (Control(C::GeneralStarting), "settings_general.starting"),
                 ],
             },
-            DialogId::SettingsFileExplorer => CaptionTable {
-                title: "settings.file_explorer",
+            // The item group's caption names the selected item, which the
+            // page sets.
+            DialogId::SettingsContextMenu => CaptionTable {
+                title: "settings.context_menu",
                 keyed: &[
                     (
-                        Control(C::FileExplorerSearchWith),
-                        "settings_file_explorer.search_with",
+                        Control(C::ContextMenuItemsLabel),
+                        "settings_context_menu.items_label",
+                    ),
+                    (Control(C::ContextMenuShow), "settings_context_menu.show"),
+                    (
+                        Control(C::ContextMenuShowWithShift),
+                        "settings_context_menu.show_with_shift",
+                    ),
+                    (Control(C::ContextMenuHide), "settings_context_menu.hide"),
+                    (
+                        Control(C::ContextMenuOpenFoldersLabel),
+                        "settings_context_menu.open_folders",
                     ),
                     (
-                        Control(C::FileExplorerOpenFoldersLabel),
-                        "settings_file_explorer.open_folders",
+                        Control(C::ContextMenuOpenFilesLabel),
+                        "settings_context_menu.open_files",
                     ),
                     (
-                        Control(C::FileExplorerOpenFilesLabel),
-                        "settings_file_explorer.open_files",
+                        Control(C::ContextMenuOpenLocationLabel),
+                        "settings_context_menu.open_file_location",
                     ),
-                    (
-                        Control(C::FileExplorerOpenLocationLabel),
-                        "settings_file_explorer.open_file_location",
-                    ),
-                    (
-                        Control(C::FileExplorerTotalCommander),
-                        "settings_file_explorer.total_commander",
-                    ),
-                    (Control(C::FileExplorerRestore), "settings.restore_defaults"),
+                    (Control(C::ContextMenuRestore), "settings.reset"),
                 ],
                 plain: &[
-                    (Control(C::FileExplorerHeading), "settings.file_explorer"),
+                    (Control(C::ContextMenuHeading), "settings.context_menu"),
                     (
-                        Control(C::FileExplorerOpenGroup),
-                        "settings_file_explorer.open_with",
+                        Control(C::ContextMenuOpenGroup),
+                        "settings_context_menu.open_with",
                     ),
                     // One letter cannot name three buttons (DESIGN.md: The
-                    // File Explorer page).
+                    // Context menu page).
                     (
-                        Control(C::FileExplorerOpenFoldersBrowse),
-                        "settings_file_explorer.browse",
+                        Control(C::ContextMenuOpenFoldersBrowse),
+                        "settings_context_menu.browse",
                     ),
                     (
-                        Control(C::FileExplorerOpenFilesBrowse),
-                        "settings_file_explorer.browse",
+                        Control(C::ContextMenuOpenFilesBrowse),
+                        "settings_context_menu.browse",
                     ),
                     (
-                        Control(C::FileExplorerOpenLocationBrowse),
-                        "settings_file_explorer.browse",
+                        Control(C::ContextMenuOpenLocationBrowse),
+                        "settings_context_menu.browse",
                     ),
                     (
-                        Control(C::FileExplorerCommandHint),
-                        "settings_file_explorer.command_hint",
+                        Control(C::ContextMenuCommandHint),
+                        "settings_context_menu.command_hint",
+                    ),
+                    (
+                        Control(C::ContextMenuTotalCommander),
+                        "settings_context_menu.total_commander",
                     ),
                 ],
             },
@@ -436,7 +565,7 @@ impl CaptionTable {
                         Control(C::SearchSelectOnActivate),
                         "settings_search.select_on_activate",
                     ),
-                    (Control(C::SearchRestore), "settings.restore_defaults"),
+                    (Control(C::SearchRestore), "settings.reset"),
                 ],
                 plain: &[
                     (Control(C::SearchHeading), "settings.search"),
@@ -459,7 +588,7 @@ impl CaptionTable {
                     (Control(C::KeyboardAdd), "settings_keyboard.add"),
                     (Control(C::KeyboardEdit), "settings_keyboard.edit"),
                     (Control(C::KeyboardRemove), "settings_keyboard.remove"),
-                    (Control(C::KeyboardRestore), "settings.restore_defaults"),
+                    (Control(C::KeyboardRestore), "settings.reset"),
                 ],
                 plain: &[
                     (Control(C::KeyboardHeading), "settings.keyboard"),
@@ -480,15 +609,145 @@ impl CaptionTable {
             },
             DialogId::SettingsIndex => CaptionTable {
                 title: "settings.index",
-                keyed: &[],
+                keyed: &[(Control(C::IndexReport), "settings_index.report")],
                 plain: &[
                     (Control(C::IndexHeading), "settings.index"),
                     (Control(C::IndexDrivesGroup), "settings_index.drives"),
                     (Control(C::IndexHoldsGroup), "settings_index.holds"),
                     (Control(C::IndexHolds), "settings_index.holds_text"),
                     (Control(C::IndexServiceGroup), "settings_index.service"),
-                    (Control(C::IndexStatusHint), "settings_index.status_hint"),
                 ],
+            },
+            DialogId::SettingsInclude => CaptionTable {
+                title: "settings.include",
+                keyed: &[
+                    (
+                        Control(C::IncludeFoldersLabel),
+                        "settings_include.folders_label",
+                    ),
+                    (Control(C::IncludeModify), "settings_include.modify"),
+                    (Control(C::IncludeNewDrives), "settings_include.new_drives"),
+                    (
+                        Control(C::IncludeNamesLabel),
+                        "settings_include.names_label",
+                    ),
+                    (Control(C::IncludeHidden), "settings_include.hidden"),
+                    (Control(C::IncludeSystem), "settings_include.system"),
+                    (Control(C::IncludeRestore), "settings.reset"),
+                ],
+                plain: &[
+                    (Control(C::IncludeHeading), "settings.include"),
+                    (Control(C::IncludeAdminNote), "settings_include.admin_note"),
+                    (Control(C::IncludeFoldersGroup), "settings_include.folders"),
+                    (Control(C::IncludeNamesGroup), "settings_include.names"),
+                    (Control(C::IncludeNamesHint), "settings_include.names_hint"),
+                ],
+            },
+            DialogId::SettingsFileOperations => CaptionTable {
+                title: "settings.file_operations",
+                keyed: &[
+                    (
+                        Control(C::SpeedPresetLabel),
+                        "settings_file_operations.speed",
+                    ),
+                    (
+                        Control(C::SpeedLargeFileLimitLabel),
+                        "settings_file_operations.large_file_limit",
+                    ),
+                    (
+                        Control(C::SpeedLargeBetweenSsdsLabel),
+                        "settings_file_operations.large_between_ssds",
+                    ),
+                    (
+                        Control(C::SpeedHardDiskLabel),
+                        "settings_file_operations.hard_disk",
+                    ),
+                    (
+                        Control(C::SpeedWorkersSsdLabel),
+                        "settings_file_operations.workers_ssd",
+                    ),
+                    (
+                        Control(C::SpeedWorkersUsbLabel),
+                        "settings_file_operations.workers_usb",
+                    ),
+                    (
+                        Control(C::SpeedWorkersHardDiskLabel),
+                        "settings_file_operations.workers_hard_disk",
+                    ),
+                    (
+                        Control(C::SpeedWorkersShareLabel),
+                        "settings_file_operations.workers_share",
+                    ),
+                    (
+                        Control(C::SpeedRingSsdLabel),
+                        "settings_file_operations.ring_ssd",
+                    ),
+                    (
+                        Control(C::SpeedRingHardDiskLabel),
+                        "settings_file_operations.ring_hard_disk",
+                    ),
+                    (
+                        Control(C::SpeedDeleteWorkersLabel),
+                        "settings_file_operations.delete_workers",
+                    ),
+                    (
+                        Control(C::SpeedPerProcessor),
+                        "settings_file_operations.per_processor",
+                    ),
+                    (Control(C::SpeedRestore), "settings.reset"),
+                ],
+                plain: &[
+                    (Control(C::SpeedHeading), "settings.file_operations"),
+                    (
+                        Control(C::SpeedCopyingGroup),
+                        "settings_file_operations.copying",
+                    ),
+                    (
+                        Control(C::SpeedLargeFileLimitUnit),
+                        "settings_file_operations.mib",
+                    ),
+                    (
+                        Control(C::SpeedWorkersLabel),
+                        "settings_file_operations.workers",
+                    ),
+                    (Control(C::SpeedRingGroup), "settings_file_operations.ring"),
+                    (
+                        Control(C::SpeedBlockSizeLabel),
+                        "settings_file_operations.block_size",
+                    ),
+                    (
+                        Control(C::SpeedInFlightLabel),
+                        "settings_file_operations.in_flight",
+                    ),
+                    (
+                        Control(C::SpeedBufferLabel),
+                        "settings_file_operations.buffer",
+                    ),
+                ],
+            },
+            DialogId::IndexedFolders => CaptionTable {
+                title: "indexed_folders.title",
+                keyed: &[
+                    (Control(C::FoldersTreeLabel), "indexed_folders.tree"),
+                    (Control(C::FoldersSummaryLabel), "indexed_folders.summary"),
+                ],
+                plain: &[
+                    (Control(C::FoldersHint), "indexed_folders.hint"),
+                    (Ok, "button.ok"),
+                    (Cancel, "button.cancel"),
+                ],
+            },
+            DialogId::ServiceReport => CaptionTable {
+                title: "service_report.title",
+                keyed: &[(Control(C::ServiceReportCopy), "service_report.copy")],
+                plain: &[(Cancel, "button.close")],
+            },
+            // The window sets the operation's name as the title, and the
+            // texts and the list from what failed.
+            DialogId::FileOperationsFailed => CaptionTable {
+                title: "file_operations.title",
+                keyed: &[],
+                plain: &[(Cancel, "button.close")],
             },
             // DialogCaptions::command_shortcut fills in the command and the
             // title of Edit….
@@ -510,27 +769,66 @@ impl CaptionTable {
         match dialog {
             DialogId::SettingsGeneral
             | DialogId::SettingsSearch
-            | DialogId::SettingsFileExplorer
+            | DialogId::SettingsContextMenu
             | DialogId::SettingsKeyboard
-            | DialogId::SettingsIndex => Some(DialogId::Settings),
+            | DialogId::SettingsIndex
+            | DialogId::SettingsInclude
+            | DialogId::SettingsFileOperations => Some(DialogId::Settings),
             DialogId::About
             | DialogId::SearchSyntax
             | DialogId::CustomDate
             | DialogId::CustomSize
             | DialogId::Settings
+            | DialogId::IndexedFolders
+            | DialogId::ServiceReport
+            | DialogId::FileOperationsFailed
             | DialogId::CommandShortcut => None,
         }
     }
 }
 
 /// What Settings > Index shows (DESIGN.md: The Index page): each drive by its
-/// mount prefix and label, its state and its entry count, and the
-/// service's state and memory.
+/// mount prefix and label, its state and its entry count, the service's
+/// state and memory, the failure's fix, and whether the service has a
+/// report to show.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct IndexCaptions {
     /// Each drive's name, state and entry count, as the list's columns.
     pub(crate) drives: Vec<[String; 3]>,
+    /// What the drive list's empty area says, or empty.
+    pub(crate) no_drives: String,
     pub(crate) service: String,
+    /// The Use local button, which shows before the fix's.
+    pub(crate) use_local: Option<MessageButton>,
+    pub(crate) fix: Option<MessageButton>,
+    pub(crate) has_report: bool,
+}
+
+/// A button of the list's message or of the Service group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MessageButton {
+    pub(crate) label: String,
+    /// Whether the button shows the administrator shield.
+    pub(crate) shield: bool,
+    pub(crate) enabled: bool,
+    pub(crate) tooltip: Option<String>,
+}
+
+impl MessageButton {
+    fn new(model: &Model, button: &ListButton) -> MessageButton {
+        let strings = model.strings();
+        MessageButton {
+            label: strings.text(model.button_label(button)).to_owned(),
+            shield: button.needs_administrator(),
+            enabled: model.list_button_enabled(button),
+            tooltip: match button {
+                ListButton::Fix(fix) => fix_tooltip(strings, fix),
+                ListButton::ClearFilters
+                | ListButton::SearchEverywhere
+                | ListButton::ChooseFolder => None,
+            },
+        }
+    }
 }
 
 impl IndexCaptions {
@@ -544,43 +842,50 @@ impl IndexCaptions {
         let strings = model.strings();
         let (status, failure) = model.service();
         if let Some(failure) = failure {
+            let fix_button = |fix: Fix| MessageButton::new(model, &ListButton::Fix(fix));
             return IndexCaptions {
                 drives: Vec::new(),
+                no_drives: strings.text("settings_index.no_drives").to_owned(),
                 service: failure_text(strings, failure),
+                use_local: model.use_local_fix().map(fix_button),
+                fix: model.service_fix().map(fix_button),
+                has_report: false,
             };
         }
         let Some(status) = status else {
             return IndexCaptions {
-                drives: Vec::new(),
                 service: strings.text("settings_index.asking").to_owned(),
+                ..IndexCaptions::default()
             };
         };
-        let drives = status
-            .volumes
-            .iter()
-            .map(|volume| {
-                let prefix = volume.mounted().display_prefix();
-                let name = match label(prefix).filter(|label| !label.is_empty()) {
-                    Some(label) => format!("{prefix} {label}"),
-                    None => prefix.to_owned(),
-                };
-                let state = match volume.phase {
-                    VolumePhase::Live if volume.metadata_pending => "settings_index.live_pending",
-                    VolumePhase::Live => "settings_index.live",
-                    VolumePhase::Snapshot => "settings_index.snapshot",
-                    VolumePhase::Bootstrapping | VolumePhase::Rescanning => {
-                        "settings_index.indexing"
-                    }
-                    VolumePhase::Offline => "settings_index.offline",
-                    VolumePhase::Failed { .. } => "settings_index.failed",
-                };
-                [
-                    name,
-                    strings.text(state).to_owned(),
-                    numbers.integer(volume.entries),
-                ]
-            })
-            .collect();
+        let name = |prefix: &str| match label(prefix).filter(|label| !label.is_empty()) {
+            Some(label) => format!("{prefix} {label}"),
+            None => prefix.to_owned(),
+        };
+        let indexed = status.volumes.iter().map(|volume| {
+            let state = match volume.phase {
+                VolumePhase::Live if volume.metadata_pending => "settings_index.live_pending",
+                VolumePhase::Live => "settings_index.live",
+                VolumePhase::Snapshot => "settings_index.snapshot",
+                VolumePhase::Bootstrapping | VolumePhase::Rescanning => "settings_index.indexing",
+                VolumePhase::Offline => "settings_index.offline",
+                VolumePhase::Failed { .. } => "settings_index.failed",
+            };
+            [
+                name(volume.mounted().display_prefix()),
+                strings.text(state).to_owned(),
+                numbers.integer(volume.entries),
+            ]
+        });
+        // A drive the Include settings leave out has no entries.
+        let left_out = status.left_out.iter().map(|volume| {
+            [
+                name(volume.mounted().display_prefix()),
+                strings.text("settings_index.left_out").to_owned(),
+                String::new(),
+            ]
+        });
+        let drives = indexed.chain(left_out).collect();
         // 0 is a service that could not read its own memory.
         let service = match status.process_private_bytes {
             0 => strings.text("settings_index.running").to_owned(),
@@ -589,8 +894,24 @@ impl IndexCaptions {
                 &[&text::bytes(strings, numbers, bytes)],
             ),
         };
-        IndexCaptions { drives, service }
+        IndexCaptions {
+            drives,
+            service,
+            has_report: true,
+            ..IndexCaptions::default()
+        }
     }
+}
+
+/// The text that `gozler --status` prints for the service's latest status,
+/// which Show report shows; `None` while the service does not answer.
+pub(crate) fn service_report(model: &Model) -> Option<String> {
+    let (Some(status), None) = model.service() else {
+        return None;
+    };
+    let mut report = Vec::new();
+    gozler_core::output::write_status(status, &mut report).expect("writing to memory cannot fail");
+    Some(String::from_utf8_lossy(&report).into_owned())
 }
 
 /// A dialog's title and fixed captions in the language of the moment,
@@ -651,9 +972,12 @@ fn starts_a_word(words: &[String], term: &str) -> bool {
 }
 
 /// The words of `text` in lower case: its runs of letters and digits. An
-/// access key's `&` joins the letters around it, as in "f&iles".
+/// access key's `&` joins the letters around it, as in "f&iles", and a
+/// link's `<a>` and `</a>` are not words.
 fn words(text: &str) -> Vec<String> {
     text.replace('&', "")
+        .replace("<a>", "")
+        .replace("</a>", "")
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
@@ -697,6 +1021,7 @@ impl WindowCaptions {
     pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> WindowCaptions {
         let strings = model.strings();
         WindowCaptions {
+            icons: model.choices().show_icons,
             title: title(model),
             menu_bar: commands::render(&commands::menu_bar(), strings, &model.choices().shortcuts),
             search_cue: strings.text("search.cue").to_owned(),
@@ -711,43 +1036,77 @@ impl WindowCaptions {
                 .iter()
                 .map(|c| header(strings, *c))
                 .collect(),
-            inspector_buttons: INSPECTOR_BUTTONS.map(|(_, key)| strings.text(key).to_owned()),
+            inspector_buttons: INSPECTOR_BUTTONS.map(|button| ButtonCaption::new(strings, button)),
+            copy_path: ButtonCaption::new(strings, INSPECTOR_COPY_PATH),
+            copy_name: ButtonCaption::new(strings, INSPECTOR_COPY_NAME),
+            copy_folder: ButtonCaption::new(strings, INSPECTOR_COPY_FOLDER),
+            hide_details: ButtonCaption::new(strings, HIDE_DETAILS),
+            show_details: ButtonCaption::new(strings, SHOW_DETAILS),
+            list_buttons: [
+                ListButton::ClearFilters,
+                ListButton::SearchEverywhere,
+                ListButton::ChooseFolder,
+            ]
+            .iter()
+            .map(|button| (button.label(), false))
+            .chain(Fix::label_groups().into_iter().flatten())
+            .map(|(key, shielded)| (strings.text(key).to_owned(), shielded))
+            .collect(),
             inspector_labels: FIELD_LABELS.map(|key| strings.text(key).to_owned()),
             inspector: InspectorCaptions::new(model, numbers),
             status: StatusCaptions::new(model, numbers),
-            message: list_message(model),
+            status_cancel: strings.text("button.cancel").to_owned(),
             status_widest: status_widest(strings, numbers),
+            message: list_message(model),
         }
     }
 }
 
 impl StatusCaptions {
     pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> StatusCaptions {
+        let service = index_status(model);
         StatusCaptions {
-            results: results_status(model, numbers),
-            selection: selection_status(model, numbers),
-            export: export_status(model, numbers),
-            index: index_status(model),
+            view: joined(
+                model.strings(),
+                results_status(model, numbers),
+                selection_status(model, numbers),
+            ),
+            job: match model.job() {
+                Job::Export => JobCaption {
+                    text: export_status(model, numbers),
+                    progress: if model.exporting() {
+                        JobProgress::Unmeasured
+                    } else {
+                        JobProgress::None
+                    },
+                    cancel: model.exporting(),
+                },
+                Job::Fix => fix_status(model.strings(), numbers, model.fix()),
+            },
+            right: joined_parts(
+                model.strings(),
+                std::iter::once(ValuePart::plain(service.clone()))
+                    .chain(totals_status(model, numbers)),
+            ),
+            service,
         }
-    }
-
-    pub(crate) fn parts(&self) -> [&str; 4] {
-        [&self.results, &self.selection, &self.export, &self.index]
     }
 }
 
 /// The labels of the inspector's fields: one entry's, in the pane's order,
 /// then the several entries' Total size.
-const FIELD_LABELS: [&str; 8] = [
+const FIELD_LABELS: [&str; 5] = [
     "inspector.folder",
-    "inspector.full_path",
-    "inspector.type",
     "inspector.size",
     "inspector.date_modified",
     "inspector.attributes",
-    "inspector.volume",
     "inspector.total_size",
 ];
+
+/// The rows of [`FIELD_LABELS`] that show more than a text: the age after
+/// Date modified, and Attributes in two colours.
+pub(crate) const MODIFIED_ROW: usize = 2;
+pub(crate) const ATTRIBUTES_ROW: usize = 3;
 
 /// What the inspector shows for the selection (DESIGN.md: Inspector pane).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -758,8 +1117,34 @@ pub(crate) struct InspectorCaptions {
     pub(crate) icon: Option<(String, bool)>,
     /// Each field's label and value, in the pane's order.
     pub(crate) fields: Vec<(String, String)>,
+    /// The one selected entry's modification time, a FILETIME, whose
+    /// [`age`] the window shows after it and keeps current.
+    pub(crate) modified: Option<i64>,
+    /// The one selected entry's Attributes value in parts, separators
+    /// included; its field's value is their text. Empty for any other
+    /// selection.
+    pub(crate) attributes: Vec<ValuePart>,
     /// The gray hint under the heading, or empty.
     pub(crate) note: String,
+}
+
+/// A part of a value that the window draws in the normal or the muted text
+/// colour, after its icon if it has one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ValuePart {
+    pub(crate) glyph: Option<Glyph>,
+    pub(crate) text: String,
+    pub(crate) muted: bool,
+}
+
+impl ValuePart {
+    pub(crate) fn plain(text: String) -> ValuePart {
+        ValuePart {
+            glyph: None,
+            text,
+            muted: false,
+        }
+    }
 }
 
 impl InspectorCaptions {
@@ -804,19 +1189,6 @@ fn entry(
     let unknown = || strings.text("cell.unknown").to_owned();
     let exact = |bytes: u64| exact_size(strings, numbers, bytes);
     let name = text::name_of(&entry.path);
-    let kind = if entry.is_dir {
-        strings.text("inspector.folder_type").to_owned()
-    } else {
-        match gozler_core::query::extension(name.as_bytes(), false) {
-            // The extension in capitals, as File Explorer writes a type,
-            // such as "PDF File".
-            Some(extension) => strings.format(
-                "inspector.file_type",
-                &[&String::from_utf8_lossy(extension).to_uppercase()],
-            ),
-            None => strings.text("inspector.file").to_owned(),
-        }
-    };
     let size = match contents {
         Some(FolderContents::Calculating(_)) => strings.text("inspector.calculating").to_owned(),
         Some(FolderContents::Counted(totals)) => {
@@ -829,43 +1201,39 @@ fn entry(
         }
         None => entry.size.map_or_else(unknown, exact),
     };
-    let attributes = entry.attributes.map_or_else(unknown, |attributes| {
-        let words: Vec<&str> = attributes
-            .letters()
-            .chars()
-            .filter_map(attribute_word)
-            .map(|key| strings.text(key))
-            .collect();
-        if words.is_empty() {
-            strings.text("inspector.no_attributes").to_owned()
-        } else {
-            words.join(", ")
-        }
-    });
-    let volume = model
-        .volume_of(&entry.path)
-        .map(|volume| {
-            let prefix = volume.mounted().display_prefix();
-            let key = match volume.phase {
-                VolumePhase::Live => "inspector.volume_live",
-                VolumePhase::Snapshot => "inspector.volume_snapshot",
-                VolumePhase::Bootstrapping | VolumePhase::Rescanning => "filter.location_indexing",
-                VolumePhase::Offline => "filter.location_offline",
-                VolumePhase::Failed { .. } => "filter.location_failed",
-            };
-            strings.format(key, &[prefix])
-        })
-        .unwrap_or_default();
+    let plain = |text: String| vec![ValuePart::plain(text)];
+    let attributes = entry.attributes.map_or_else(
+        || plain(unknown()),
+        |attributes| {
+            let mut parts = Vec::new();
+            for letter in attributes.letters().chars() {
+                let Some(key) = attribute_word(letter) else {
+                    continue;
+                };
+                if !parts.is_empty() {
+                    parts.extend(plain(", ".to_owned()));
+                }
+                // Gray for the entries that File Explorer hides by default.
+                parts.push(ValuePart {
+                    glyph: None,
+                    text: strings.text(key).to_owned(),
+                    muted: matches!(letter, 'H' | 'S'),
+                });
+            }
+            if parts.is_empty() {
+                plain(strings.text("inspector.no_attributes").to_owned())
+            } else {
+                parts
+            }
+        },
+    );
     let values = [
         gozler_core::winpath::parent_of(&entry.path),
-        entry.path.clone(),
-        kind,
         size,
         entry
             .mtime_ft
             .map_or_else(unknown, |ft| numbers.date_time_seconds(ft)),
-        attributes,
-        volume,
+        attributes.iter().map(|part| part.text.as_str()).collect(),
     ];
     InspectorCaptions {
         heading: name.to_owned(),
@@ -875,8 +1243,33 @@ fn entry(
             .zip(values)
             .map(|(key, value)| (strings.text(key).to_owned(), value))
             .collect(),
+        modified: entry.mtime_ft,
+        attributes,
         note: String::new(),
     }
+}
+
+/// How long ago the FILETIME `modified` was at `now`, or how long until it
+/// comes, after a "·": in the largest whole unit, rounded down, or "just
+/// now" under a minute (DESIGN.md: Inspector pane). A month is 30 days, so
+/// 360 to 364 days read 11 months, under a year.
+pub(crate) fn age(strings: &Strings, numbers: &dyn Numbers, modified: i64, now: i64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const MONTH: u64 = 30 * DAY;
+    const YEAR: u64 = 365 * DAY;
+    let seconds = now.abs_diff(modified) / 10_000_000;
+    let (ago, ahead, count) = match seconds {
+        ..MINUTE => return strings.format("inspector.age", &[strings.text("age.just_now")]),
+        MINUTE..HOUR => ("age.minutes_ago", "age.in_minutes", seconds / MINUTE),
+        HOUR..DAY => ("age.hours_ago", "age.in_hours", seconds / HOUR),
+        DAY..MONTH => ("age.days_ago", "age.in_days", seconds / DAY),
+        MONTH..YEAR => ("age.months_ago", "age.in_months", (seconds / MONTH).min(11)),
+        YEAR.. => ("age.years_ago", "age.in_years", seconds / YEAR),
+    };
+    let key = if modified > now { ahead } else { ago };
+    strings.format("inspector.age", &[&strings.count(key, count, numbers, &[])])
 }
 
 /// Several selected entries: how many files and folders, and the size of
@@ -907,19 +1300,20 @@ fn several(strings: &Strings, numbers: &dyn Numbers, sums: Sums) -> InspectorCap
 }
 
 /// A size as the inspector shows it, with its exact bytes, as File
-/// Explorer's Properties does: "1.20 KB (1,234 bytes)".
+/// Explorer's Properties does: "1.20 KB (1,234 bytes)", or "16 bytes" once
+/// when the two read the same.
 fn exact_size(strings: &Strings, numbers: &dyn Numbers, bytes: u64) -> String {
-    strings.format(
-        "inspector.size_exact",
-        &[
-            &text::bytes(strings, numbers, bytes),
-            &strings.count("size.bytes", bytes, numbers, &[]),
-        ],
-    )
+    let size = text::bytes(strings, numbers, bytes);
+    let exact = strings.count("size.bytes", bytes, numbers, &[]);
+    if size == exact {
+        size
+    } else {
+        strings.format("inspector.size_exact", &[&size, &exact])
+    }
 }
 
 /// The catalogue key of an attribute letter's word, as `attrib:` names the
-/// letters. D has none, because the Type field already says Folder.
+/// letters. D has none, because the icon already shows a folder.
 fn attribute_word(letter: char) -> Option<&'static str> {
     Some(match letter {
         'R' => "attribute.r",
@@ -942,18 +1336,123 @@ fn attribute_word(letter: char) -> Option<&'static str> {
     })
 }
 
-fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> [Vec<String>; 3] {
+/// The Settings dialog's status bar's left group: the dialog and its shown
+/// page, or the dialog alone while the search shows no page.
+pub(crate) fn settings_status_view(strings: &Strings, page: Option<SettingsPage>) -> String {
+    match page {
+        Some(page) => strings.format("settings.status_view", &[strings.text(page.label())]),
+        None => strings.text("settings.title").to_owned(),
+    }
+}
+
+/// The Settings dialog's status bar's widest texts: the main window's, with
+/// the dialog's own left group.
+pub(crate) fn settings_status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
+    let view = std::iter::once(None)
+        .chain(SettingsPage::ALL.map(Some))
+        .map(|page| settings_status_view(strings, page))
+        .collect();
+    StatusWidest {
+        view,
+        ..status_widest(strings, numbers)
+    }
+}
+
+/// A release's version at its widest, which the status bar's middle group
+/// is sized for.
+const WIDEST_VERSION: &str = "10.10.10";
+
+/// The texts a fix shows in the status bar's middle group while it runs,
+/// and once it ended, which the group is sized for. Windows' words for a
+/// failure have no widest form, and a development build's instructions
+/// would widen the window for a case only developers meet, so a long one
+/// is cut off, as an exported file's long name is, and its tooltip shows
+/// it whole.
+fn fix_widest(strings: &Strings, numbers: &dyn Numbers, sizes: &[u64]) -> [Vec<String>; 2] {
+    let version = || WIDEST_VERSION.to_owned();
+    let commands = |fix, state| Fixer::Commands { fix, state };
+    let setup = |state| Fixer::Setup {
+        fix: SetupFix::Update,
+        state,
+    };
+    let fixes = [CommandFix::Start, CommandFix::Install, CommandFix::UseLocal];
+    let mut running: Vec<Fixer> = fixes
+        .map(|fix| commands(fix, FixState::Running(CommandStep::RunningCommands)))
+        .into_iter()
+        .chain([
+            commands(
+                CommandFix::Start,
+                FixState::Running(CommandStep::AskingWindows),
+            ),
+            commands(
+                CommandFix::Start,
+                FixState::Running(CommandStep::WaitingForService),
+            ),
+            setup(FixState::Running(SetupStep::FindingRelease)),
+            setup(FixState::Running(SetupStep::CheckingFile {
+                version: version(),
+            })),
+            setup(FixState::Running(SetupStep::StartingSetup {
+                version: version(),
+                path: PathBuf::new(),
+            })),
+        ])
+        .collect();
+    running.extend(sizes.iter().map(|&size| {
+        setup(FixState::Running(SetupStep::Downloading {
+            version: version(),
+            bytes: size,
+            size,
+        }))
+    }));
+    let failed = CommandResult::CommandsFailed {
+        code: u32::MAX,
+        said: None,
+    };
+    let ended: Vec<Fixer> = fixes
+        .map(|fix| commands(fix, FixState::Ended(failed.clone())))
+        .into_iter()
+        .chain(
+            [
+                CommandResult::Done,
+                CommandResult::Cancelled,
+                CommandResult::Refused,
+                CommandResult::NoAnswer,
+            ]
+            .map(|result| commands(CommandFix::Start, FixState::Ended(result))),
+        )
+        .chain(
+            [
+                SetupResult::Cancelled,
+                SetupResult::DownloadFailed,
+                SetupResult::Damaged,
+            ]
+            .map(|result| setup(FixState::Ended(result))),
+        )
+        .collect();
+    [running, ended].map(|fixes| {
+        fixes
+            .iter()
+            .map(|fix| fix_status(strings, numbers, fix).text)
+            .collect()
+    })
+}
+
+fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
     let limit = numbers.integer(LIST_LIMIT);
     let showing = strings.format("status.showing", &[&limit, &numbers.integer(WIDEST_TOTAL)]);
     // Which size is widest depends on the font and the language, so every
     // unit's widest forms are measured: 1,023 bytes, then a three-digit size
     // with two, one and no decimals in each unit.
-    let sizes = std::iter::once(1023).chain(
-        (1..=4)
-            .flat_map(|unit| [9.99, 99.9, 999.0].map(|value| (value * 1024f64.powi(unit)) as u64)),
-    );
+    let sizes: Vec<u64> =
+        std::iter::once(1023)
+            .chain((1..=4).flat_map(|unit| {
+                [9.99, 99.9, 999.0].map(|value| (value * 1024f64.powi(unit)) as u64)
+            }))
+            .collect();
     let mut selected: Vec<String> = sizes
-        .map(|n| {
+        .iter()
+        .map(|&n| {
             strings.format(
                 "status.selected",
                 &[&limit, &text::bytes(strings, numbers, n)],
@@ -962,17 +1461,32 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> [Vec<String>; 3] {
         .collect();
     selected.push(strings.format("status.selected_only", &[&limit]));
     selected.push(strings.text("status.reading").to_owned());
-    [
-        vec![
-            strings.format("status.filtered", &[&showing]),
-            strings.text("status.searching").to_owned(),
-        ],
-        selected,
-        vec![
-            strings.count("status.exporting", WIDEST_TOTAL, numbers, &[]),
-            strings.count("status.exported", WIDEST_TOTAL, numbers, &["results.csv"]),
-        ],
-    ]
+    let results = [
+        strings.format("status.filtered", &[&showing]),
+        strings.text("status.searching").to_owned(),
+    ];
+    let [fix_running, fix_ended] = fix_widest(strings, numbers, &sizes);
+    StatusWidest {
+        view: results
+            .iter()
+            .flat_map(|results| {
+                selected
+                    .iter()
+                    .map(|selection| joined(strings, results.clone(), selection.clone()))
+            })
+            .collect(),
+        running: std::iter::once(strings.count("status.exporting", WIDEST_TOTAL, numbers, &[]))
+            .chain(fix_running)
+            .collect(),
+        done: std::iter::once(strings.count(
+            "status.exported",
+            WIDEST_TOTAL,
+            numbers,
+            &["results.csv"],
+        ))
+        .chain(fix_ended)
+        .collect(),
+    }
 }
 
 /// The window's title: the typed search and the product's name, as Windows
@@ -992,8 +1506,69 @@ pub(crate) fn header(strings: &Strings, column: Column) -> String {
     strings.text(column.header()).to_owned()
 }
 
-/// Status part 1: how many results, or that a search runs. A filter that
-/// the hidden pane cannot show adds "· Filtered" (DESIGN.md: S10).
+/// Two texts of a status bar group with a dot between them, or the one
+/// that is not empty, such as the results and the selection.
+fn joined(strings: &Strings, first: String, second: String) -> String {
+    if second.is_empty() {
+        first
+    } else if first.is_empty() {
+        second
+    } else {
+        strings.format("status.view", &[&first, &second])
+    }
+}
+
+/// `parts` with the dot of [`joined`] between them, and the empty ones left
+/// out.
+fn joined_parts(strings: &Strings, parts: impl Iterator<Item = ValuePart>) -> Vec<ValuePart> {
+    let dot = strings.format("status.view", &["", ""]);
+    let mut joined = Vec::new();
+    for part in parts.filter(|part| !part.text.is_empty()) {
+        if !joined.is_empty() {
+            joined.push(ValuePart::plain(dot.clone()));
+        }
+        joined.push(part);
+    }
+    joined
+}
+
+/// The shown search's files and folders, each kind after its icon and with
+/// the space it takes, and a kind no match is left out; none while a search
+/// runs, or when the service sent no sums (DESIGN.md: Status bar).
+fn totals_status(model: &Model, numbers: &dyn Numbers) -> Vec<ValuePart> {
+    let strings = model.strings();
+    let results = model.results();
+    let Some(sums) = results.sums().filter(|_| !results.searching()) else {
+        return Vec::new();
+    };
+    let kind = |glyph: Glyph, key: &str, count: u64, bytes: Option<u64>| {
+        let size = bytes.map_or_else(
+            || strings.text("status.size_unknown").to_owned(),
+            |bytes| text::bytes(strings, numbers, bytes),
+        );
+        ValuePart {
+            glyph: Some(glyph),
+            text: strings.count(key, count, numbers, &[&size]),
+            muted: false,
+        }
+    };
+    [
+        (Glyph::Page, "status.files", sums.files, sums.file_bytes),
+        (
+            Glyph::Folder,
+            "status.folders",
+            sums.folders,
+            sums.folder_bytes,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, _, count, _)| *count > 0)
+    .map(|(glyph, key, count, bytes)| kind(glyph, key, count, bytes))
+    .collect()
+}
+
+/// How many results, or that a search runs. A filter that the hidden pane
+/// cannot show adds "· Filtered" (DESIGN.md: S10).
 pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     let results = model.results();
@@ -1021,8 +1596,8 @@ pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// Status part 2: how many entries are selected and the size of the
-/// selected files, or that the selection is read.
+/// How many entries are selected and the size of the selected files, or
+/// that the selection is read.
 pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     match model.selection() {
@@ -1044,7 +1619,7 @@ pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// Status part 3: the export's progress, or the last export's result.
+/// The export's progress, or the last export's result.
 pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     match model.export() {
@@ -1057,11 +1632,220 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// Status part 4: the service's failure while the list shows rows or
-/// another message, so the window says that the service stopped also when
-/// it keeps its rows (DESIGN.md: T10); else the index state, only when it
-/// affects the answer (DESIGN.md: Status bar); else a newer release that Check
-/// for updates found (DESIGN.md: The General page).
+/// A fix's step, with its progress and whether Cancel stops it, or its
+/// result (DESIGN.md: Service fixes).
+fn fix_status(strings: &Strings, numbers: &dyn Numbers, fix: &Fixer) -> JobCaption {
+    let ended = |text: String| JobCaption {
+        text,
+        progress: JobProgress::None,
+        cancel: false,
+    };
+    let running = |(text, progress), cancel| JobCaption {
+        text,
+        progress,
+        cancel,
+    };
+    match fix {
+        Fixer::Idle => ended(String::new()),
+        Fixer::Commands {
+            fix,
+            state: FixState::Running(step),
+        } => running(command_step(strings, *fix, step), step.can_cancel()),
+        Fixer::Commands {
+            fix,
+            state: FixState::Ended(result),
+        } => ended(command_result(strings, *fix, result)),
+        Fixer::Setup {
+            state: FixState::Running(step),
+            ..
+        } => running(setup_step(strings, numbers, step), step.can_cancel()),
+        Fixer::Setup {
+            state: FixState::Ended(result),
+            ..
+        } => ended(setup_result(strings, result)),
+    }
+}
+
+fn command_step(strings: &Strings, fix: CommandFix, step: &CommandStep) -> (String, JobProgress) {
+    let text = |key: &'static str| strings.text(key).to_owned();
+    match step {
+        CommandStep::AskingWindows => (text("fixing.asking"), JobProgress::None),
+        CommandStep::RunningCommands => {
+            let key = match fix {
+                CommandFix::Start => "fixing.starting",
+                CommandFix::Install => "fixing.installing",
+                CommandFix::UseLocal => "fixing.updating",
+            };
+            (text(key), JobProgress::Unmeasured)
+        }
+        CommandStep::WaitingForService => (text("fixing.waiting"), JobProgress::Unmeasured),
+    }
+}
+
+fn setup_step(strings: &Strings, numbers: &dyn Numbers, step: &SetupStep) -> (String, JobProgress) {
+    let text = |key: &'static str| strings.text(key).to_owned();
+    match step {
+        SetupStep::FindingRelease => (text("fixing.finding"), JobProgress::Unmeasured),
+        SetupStep::Confirming { .. } => (text("fixing.finding"), JobProgress::None),
+        SetupStep::Downloading {
+            version,
+            bytes,
+            size,
+        } => (
+            strings.format(
+                "fixing.downloading",
+                &[
+                    version,
+                    &text::bytes(strings, numbers, *bytes),
+                    &text::bytes(strings, numbers, *size),
+                ],
+            ),
+            JobProgress::Measured {
+                done: *bytes,
+                total: *size,
+            },
+        ),
+        SetupStep::CheckingFile { .. } => (text("fixing.checking"), JobProgress::Unmeasured),
+        SetupStep::StartingSetup { version, .. } => (
+            strings.format("fixing.closing", &[version]),
+            JobProgress::None,
+        ),
+    }
+}
+
+fn command_result(strings: &Strings, fix: CommandFix, result: &CommandResult) -> String {
+    let text = |key: &'static str| strings.text(key).to_owned();
+    match result {
+        CommandResult::Done => text("fixing.done"),
+        CommandResult::Cancelled => text("fixing.cancelled"),
+        CommandResult::Refused => text("fixing.refused"),
+        CommandResult::Failed(why) => strings.format("fixing.failed", &[why]),
+        CommandResult::CommandsFailed { code, said } => {
+            let reason = said
+                .clone()
+                .unwrap_or_else(|| strings.format("fixing.exit_code", &[&code.to_string()]));
+            let key = match fix {
+                CommandFix::Start => "fixing.start_failed",
+                CommandFix::Install => "fixing.install_failed",
+                CommandFix::UseLocal => "fixing.update_failed",
+            };
+            strings.format(key, &[&reason])
+        }
+        CommandResult::NoAnswer => text("fixing.no_answer"),
+    }
+}
+
+fn setup_result(strings: &Strings, result: &SetupResult) -> String {
+    let text = |key: &'static str| strings.text(key).to_owned();
+    match result {
+        SetupResult::Cancelled => text("fixing.download_cancelled"),
+        // The person said no, or a message box said why there is no
+        // setup, so the status bar adds nothing.
+        SetupResult::Declined | SetupResult::NoSetup => String::new(),
+        SetupResult::DownloadFailed => text("fixing.download_failed"),
+        SetupResult::NotSaved { folder, why } => {
+            strings.format("fixing.not_saved", &[&folder.display().to_string(), why])
+        }
+        SetupResult::Damaged => text("fixing.damaged"),
+        SetupResult::Failed(why) => strings.format("fixing.setup_failed", &[why]),
+    }
+}
+
+/// A task dialog's question (DESIGN.md: Service fixes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Question {
+    /// The dialog's title, which names the command, as Windows' own
+    /// dialogs do.
+    pub(crate) title: String,
+    pub(crate) instruction: String,
+    pub(crate) body: QuestionBody,
+    /// A line below the buttons, beside an information icon.
+    pub(crate) footer: Option<String>,
+    pub(crate) confirm: String,
+    pub(crate) cancel: String,
+    /// The confirm button may be regretted, such as a downgrade, so the
+    /// dialog warns and Cancel is its default.
+    pub(crate) risky: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum QuestionBody {
+    Text(String),
+    /// Lines of a label and a value, whose values the dialog lines up.
+    Lines(Vec<(String, String)>),
+}
+
+/// The question for the setup the fix asks about, while it asks.
+pub(crate) fn setup_question(model: &Model, numbers: &dyn Numbers) -> Option<Question> {
+    let strings = model.strings();
+    let (fix, setup) = model.fix().confirming()?;
+    let size = text::bytes(strings, numbers, setup.size);
+    let cancel = strings.text("button.cancel").to_owned();
+    if fix == SetupFix::Download {
+        return Some(Question {
+            title: strings.text("window.title").to_owned(),
+            instruction: strings.format("fixing.install_question", &[&setup.version]),
+            body: QuestionBody::Text(strings.format("fixing.install_details", &[&size])),
+            footer: None,
+            confirm: strings.text("fixing.install").to_owned(),
+            cancel,
+            risky: false,
+        });
+    }
+    let [title, question, confirm] = if setup.older {
+        [
+            "fixing.downgrade_caption",
+            "fixing.downgrade_question",
+            "fixing.downgrade",
+        ]
+    } else {
+        [
+            "fixing.update_caption",
+            "fixing.update_question",
+            "fixing.update",
+        ]
+    };
+    Some(Question {
+        title: strings.text(title).to_owned(),
+        instruction: strings.format(question, &[&setup.version]),
+        body: QuestionBody::Lines(vec![label_and_value(
+            strings,
+            "fixing.installed_version",
+            gozler_core::escompat::version(),
+        )]),
+        footer: Some(strings.format("fixing.download_size", &[&size])),
+        confirm: strings.text(confirm).to_owned(),
+        cancel,
+        risky: setup.older,
+    })
+}
+
+/// The question before Use local switches the service to the gozlerd.exe
+/// `local` beside the window (DESIGN.md: Service fixes).
+pub(crate) fn use_local_question(strings: &Strings, local: &LocalService) -> Question {
+    let folder = local.program.parent().unwrap_or(&local.program);
+    let installed = local
+        .installed
+        .as_ref()
+        .map(|installed| label_and_value(strings, "fixing.installed_version", installed));
+    let compatible = label_and_value(strings, "fixing.compatible_version", &local.version);
+    Question {
+        title: strings.text("fixing.use_local_caption").to_owned(),
+        instruction: strings.text("fixing.use_local_question").to_owned(),
+        body: QuestionBody::Lines(installed.into_iter().chain([compatible]).collect()),
+        footer: Some(strings.format("fixing.found_in", &[&folder.display().to_string()])),
+        confirm: strings.text("fixing.switch").to_owned(),
+        cancel: strings.text("button.cancel").to_owned(),
+        risky: false,
+    }
+}
+
+/// The status bar's right group: the service's failure while the list
+/// shows rows or another message, so the window says that the service
+/// stopped also when it keeps its rows (DESIGN.md: T10); else the index
+/// state, only when it affects the answer (DESIGN.md: Status bar); else a
+/// newer release that Check for updates found (DESIGN.md: The General
+/// page).
 pub(crate) fn index_status(model: &Model) -> String {
     let strings = model.strings();
     if let (_, Some(failure)) = model.service()
@@ -1099,8 +1883,8 @@ fn update_text(strings: &Strings, version: &str) -> String {
     strings.format("status.update_available", &[version])
 }
 
-/// Whether status part 4 names a newer release, which a click on it then
-/// opens (DESIGN.md: The General page).
+/// Whether the status bar's right group names a newer release, so a click
+/// on it runs Update (DESIGN.md: The General page).
 pub(crate) fn shows_update(model: &Model) -> bool {
     model
         .newer_release()
@@ -1125,9 +1909,31 @@ pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
     let buttons = model
         .list_buttons()
         .iter()
-        .map(|button| strings.text(button.label()).to_owned())
+        .map(|button| MessageButton::new(model, button))
         .collect();
-    Some((text, buttons))
+    Some(ListCaption { text, buttons })
+}
+
+/// The label and the value of the line `key`, such as "Installed version:
+/// {0}" with `value` in place of `{0}`, for a dialog that lines up its
+/// values. The label leaves out the space before the value.
+fn label_and_value(strings: &Strings, key: &str, value: &str) -> (String, String) {
+    let line = strings.text(key);
+    let (label, after) = line.split_once("{0}").unwrap_or((line, ""));
+    (label.trim_end().to_owned(), format!("{value}{after}"))
+}
+
+/// The tooltip of `fix`'s button, if it has one: Use local's names the
+/// version it puts in place and, on its own line, the program it copies.
+fn fix_tooltip(strings: &Strings, fix: &Fix) -> Option<String> {
+    match fix {
+        Fix::UseLocal(local) => Some(format!(
+            "{}\r\n{}",
+            strings.format("fix.use_local_tooltip", &[&local.version]),
+            local.program.display()
+        )),
+        Fix::Repair(_) | Fix::Update | Fix::OpenServices => None,
+    }
 }
 
 /// What a failure of the service means for the person (DESIGN.md: Daemon
@@ -1137,22 +1943,12 @@ pub(crate) fn failure_text(strings: &Strings, failure: &DaemonFailure) -> String
         DaemonFailure::NotRunning(why) => match why {
             NotRunning::Stopped => strings.text("failure.stopped").to_owned(),
             NotRunning::Disabled => strings.text("failure.disabled").to_owned(),
-            NotRunning::NotInstalled {
-                gozlerd_beside: true,
-                ..
-            } => strings.text("failure.not_installed").to_owned(),
-            NotRunning::NotInstalled {
-                gozlerd_beside: false,
-                ..
-            } => strings.text("failure.missing").to_owned(),
+            NotRunning::NotInstalled { .. } => strings.text("failure.not_installed").to_owned(),
             NotRunning::Unknown(detail) => strings.format("failure.unknown", &[detail]),
         },
         DaemonFailure::NotReady => strings.text("failure.not_ready").to_owned(),
         DaemonFailure::NotGozler => strings.text("failure.not_gozler").to_owned(),
-        DaemonFailure::TooOld {
-            update_from: Some(_),
-        } => strings.text("failure.too_old_update").to_owned(),
-        DaemonFailure::TooOld { update_from: None } => strings.text("failure.too_old").to_owned(),
+        DaemonFailure::TooOld { .. } => strings.text("failure.too_old").to_owned(),
         DaemonFailure::Refused { detail } => strings.format("failure.refused", &[detail]),
         DaemonFailure::Lost => strings.text("failure.lost").to_owned(),
     }
@@ -1228,6 +2024,22 @@ mod tests {
                         language.tag
                     );
                 }
+                // The Service group shows the fix buttons that show
+                // together.
+                if dialog == DialogId::SettingsIndex {
+                    for shown in Fix::label_groups() {
+                        let mut keys = keys.clone();
+                        for (key, _) in shown {
+                            let caption = strings.text(key);
+                            assert!(
+                                access_key(caption).is_some_and(|k| keys.insert(k)),
+                                "{}: {caption} on the Index page has no access key, or one \
+                                 the dialog already uses",
+                                language.tag
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1241,7 +2053,7 @@ mod tests {
         let pages = |search| settings_pages_matching(&strings, search);
         assert_eq!(pages("UPD"), [SettingsPage::General]);
         assert!(pages("pdates").is_empty());
-        assert_eq!(pages("fil open"), [SettingsPage::FileExplorer]);
+        assert_eq!(pages("cont ite"), [SettingsPage::ContextMenu]);
         assert_eq!(pages(" "), SettingsPage::ALL);
         let bold: Vec<ControlId> = settings_page_hits(&strings, SettingsPage::General, "upd start")
             .into_iter()
