@@ -277,6 +277,10 @@ waits for them.
   or is listed with `ERROR_PRIVILEGE_NOT_HELD` (the spec's "Not verified").
 - One share folder reached through two drive mappings: a copy from one into
   the other is refused as a copy into itself (D12).
+- Stage F's current file costs one allocation and one lock for each file
+  copied or deleted. Stage E's measurement, elevated, with its small-file
+  copy and a delete of the small tree, compared with stage E's rows in
+  `docs/BENCHMARKS.md`, shows whether that cost is visible.
 - A move to another drive of a OneDrive folder whose files are only in the
   cloud: every file arrives with its data, and the source folder goes only
   after its files ("What an operation receives", the second handle).
