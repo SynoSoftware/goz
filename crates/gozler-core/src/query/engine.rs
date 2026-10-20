@@ -13,7 +13,9 @@
 //! [`ResultNames`].
 
 use super::dates::DateRange;
-use super::order::{OrderFields, compare, folder_ranks};
+use super::order::{
+    KeyValue, OrderFields, SortRecord, compare, folder_ranks, packed_folder_rank, primary_key,
+};
 use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
 use super::paths::{DirPaths, FolderCopy, FolderId, NameForm, NameRef, ResultNames};
 use super::wildcard::{CodePointBuf, Wildcard};
@@ -51,14 +53,8 @@ pub struct QueryHit {
 pub struct QueryOutcome {
     /// Total matches before the limit (es `totitems` semantics).
     pub total: u64,
-    /// The requested page of hits, ordered per [`Self::sorted`].
+    /// The requested page of hits, in the result order.
     pub hits: Vec<QueryHit>,
-    /// Whether [`Self::hits`] is already in result order.
-    ///
-    /// `false` means the executor declined to order under the index lock and
-    /// the CALLER must order the hits with [`super::order_hits`].
-    /// Always `true` from [`run_query`]; only [`run_query_deferrable`] varies.
-    pub sorted: bool,
     /// Every match's [`MatchSums`], when the caller asked for them.
     pub sums: Option<MatchSums>,
     /// The folders and names of [`Self::hits`].
@@ -117,12 +113,12 @@ fn plus(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     a?.checked_add(b?)
 }
 
-/// The [`MatchSums`] of `candidates`. A folder inside another matching
-/// folder adds to the count only, because its size is in that folder's.
-fn match_sums(index: &VolumeIndex, candidates: &[Candidate]) -> MatchSums {
-    let folders: FxHashSet<EntryIdx> = candidates
+/// The [`MatchSums`] of `records`. A folder inside another matching folder
+/// adds to the count only, because its size is in that folder's.
+fn match_sums(index: &VolumeIndex, records: &[SortRecord]) -> MatchSums {
+    let folders: FxHashSet<EntryIdx> = records
         .iter()
-        .map(|c| c.idx)
+        .map(|r| r.idx())
         .filter(|&idx| index.entry(idx).is_dir())
         .collect();
     // A loop in the parent links, which a move can make until the next
@@ -143,11 +139,11 @@ fn match_sums(index: &VolumeIndex, candidates: &[Candidate]) -> MatchSums {
         false
     };
     let mut sums = MatchSums::default();
-    for c in candidates {
-        let entry = index.entry(c.idx);
+    for r in records {
+        let entry = index.entry(r.idx());
         if entry.is_dir() {
             sums.folders += 1;
-            if !held(c.idx) {
+            if !held(r.idx()) {
                 sums.folder_bytes = plus(sums.folder_bytes, entry.size());
             }
         } else {
@@ -780,30 +776,9 @@ impl<'a> Compared<'a> {
     }
 }
 
-/// A matched entry before its path is built (deferred to the final page).
-/// Every other field is read from the index when needed: a broad query holds
-/// millions of candidates.
-struct Candidate {
-    idx: EntryIdx,
-    /// The parent folder's [`folder_ranks`] rank; filled only for a path
-    /// sort.
-    folder: u32,
-}
-
-/// Runs a query over `index`, the volume mounted at `mount_prefix` (`C:\`).
-///
-/// `scope` (if any) restricts results to descendants of that directory entry;
-/// the daemon resolves the `-path` folder via [`resolve_scope`]. Results are
-/// sorted per `sort`, then the first `limit` form the page; `total` reports
-/// the full match count. There is no offset: the daemon applies a request's
-/// offset after it merges the volumes, so an offset here would page each
-/// volume on its own.
-///
-/// The common case, a case-insensitive query with a name literal, scans the
-/// index's contiguous folded-name arena with a single prebuilt `memmem`
-/// finder (SIMD over the whole buffer), maps each hit back to its entry, and
-/// defers path reconstruction to the final page. That keeps the hot path off
-/// per-query folding and off per-match path building.
+/// Runs a query over `index`, the volume mounted at `mount_prefix` (`C:\`):
+/// [`find_matches`], [`Matches::order`] and [`OrderedMatches::read_hits`] in one
+/// call, for a caller that holds the index for the whole query.
 pub fn run_query(
     index: &VolumeIndex,
     mount_prefix: &str,
@@ -812,35 +787,34 @@ pub fn run_query(
     sort: SortSpec,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    run_query_impl(index, mount_prefix, query, scope, sort, limit, false, false)
+    find_matches(index, mount_prefix, query, scope, sort, limit, false)
+        .order()
+        .read_hits(index)
+        .expect("the index is borrowed for the whole query, so it cannot change")
 }
 
-/// Like [`run_query`], but allowed to hand back an UNSORTED page when ordering
-/// under the index lock would buy nothing.
+/// Finds the matches of a query over `index`, the volume mounted at
+/// `mount_prefix` (`C:\`), with the keys they sort by. The caller holds the
+/// index's read lock for this call, releases it for [`Matches::order`], and
+/// holds it again for [`OrderedMatches::read_hits`], so the folder ranks of a path
+/// sort and the sort of millions of matches never hold the journal back.
 ///
-/// Ordering inside the lock earns its keep only when the page is a strict slice
-/// of the match set: picking which `limit` matches survive needs the index, and
-/// only that many paths are then reconstructed. When the page already covers
-/// every match there is nothing to pick, so this returns the matches in scan
-/// order with [`QueryOutcome::sorted`] set to `false` and leaves the ordering to
-/// the caller, which can do it after releasing the lock.
+/// `scope` (if any) restricts results to descendants of that directory entry;
+/// the daemon resolves the `-path` folder via [`resolve_scope`]. The matches
+/// are ordered per `sort`, then the first `limit` form the page; `total`
+/// reports the full match count. There is no offset: the daemon applies a
+/// request's offset after it merges the volumes, so an offset here would page
+/// each volume on its own. With `sums`, the outcome also holds every match's
+/// [`MatchSums`], from the same scan.
 ///
-/// That distinction is not knowable before the scan (it depends on the match
-/// count), which is why it lives here rather than in the caller's dispatch.
-///
-/// It matters because of who is waiting. The caller holds the volume's index
-/// READ lock for as long as this runs, and the volume's tail thread cannot apply
-/// a single journal record until that lock is released, so a large sort inside
-/// the lock stalls live updates and one after it stalls nothing. Every key of
-/// the result order is in the returned [`QueryHit`], so ordering after the
-/// lock needs no index.
-///
-/// The caller MUST check [`QueryOutcome::sorted`] and pass the hits through
-/// [`super::order_hits`] when it is `false`.
-///
-/// With `sums`, the outcome also holds every match's [`MatchSums`], from the
-/// same scan.
-pub fn run_query_deferrable(
+/// The common case, a case-insensitive query with a name literal, scans the
+/// index's contiguous folded-name arena with a single prebuilt `memmem`
+/// finder (SIMD over the whole buffer), maps each hit back to its entry, and
+/// defers path reconstruction to the final page. That keeps the hot path off
+/// per-query folding and off per-match path building. The matches sort by
+/// numbers, from the index's name ranks, so the sort compares no names but
+/// within the runs of matches whose keys are equal.
+pub fn find_matches(
     index: &VolumeIndex,
     mount_prefix: &str,
     query: &CompiledQuery,
@@ -848,8 +822,192 @@ pub fn run_query_deferrable(
     sort: SortSpec,
     limit: Option<u32>,
     sums: bool,
-) -> QueryOutcome {
-    run_query_impl(index, mount_prefix, query, scope, sort, limit, true, sums)
+) -> Matches {
+    let Scan {
+        mut records,
+        folders,
+        ..
+    } = scan(index, mount_prefix, query, scope);
+    let sums = sums.then(|| match_sums(index, &records));
+    let end = match limit {
+        Some(n) => (n as usize).min(records.len()),
+        None => records.len(),
+    };
+    let path_folders = (end > 0)
+        .then(|| key_records(index, &mut records, folders, sort))
+        .flatten();
+    Matches {
+        records,
+        path_folders,
+        sort,
+        end,
+        sums,
+        mount_prefix: mount_prefix.to_string(),
+        instance: index.instance(),
+    }
+}
+
+/// The keyed matches of one search on one volume, after the first hold of
+/// the volume's index read lock (see [`find_matches`]).
+pub struct Matches {
+    records: Vec<SortRecord>,
+    /// For a path sort: the folders of the records, while each record's
+    /// primary key holds its folder's place in this table.
+    path_folders: Option<ResultNames>,
+    sort: SortSpec,
+    /// How many records the page holds.
+    end: usize,
+    sums: Option<MatchSums>,
+    mount_prefix: String,
+    /// [`VolumeIndex::instance`] of the index the records name.
+    instance: u64,
+}
+
+/// The matches of [`Matches::order`], for the second hold of the volume's
+/// index read lock.
+pub struct OrderedMatches {
+    /// Sorted by their keys up to `end`. From `end` to `ties_end` lie the
+    /// other records with the keys of the page's last place, unsorted, which
+    /// [`Self::read_hits`] orders with the page; the rest are in no order.
+    records: Vec<SortRecord>,
+    sort: SortSpec,
+    end: usize,
+    ties_end: usize,
+    sums: Option<MatchSums>,
+    mount_prefix: String,
+    instance: u64,
+}
+
+/// The index changed between [`find_matches`] and [`OrderedMatches::read_hits`]:
+/// a rebuild replaced it, or its entries got new indexes, so the records no
+/// longer name its entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexChanged;
+
+impl Matches {
+    /// Puts the page's records in the order of their keys, without the
+    /// index, after a path sort's folder ranks complete their keys. When the
+    /// page is a part of the matches, quickselect finds it in O(M) and only
+    /// it is sorted; the records with the keys of its last place can then lie
+    /// on both sides of the cut, so they are all gathered at the cut, to be
+    /// ordered with the page.
+    pub fn order(self) -> OrderedMatches {
+        use rayon::slice::ParallelSliceMut;
+        // A broad query with no limit sorts millions of records, which is
+        // done in parallel across cores; a small sort is not worth the rayon
+        // fan-out. A page asking for all but a handful of matches selects
+        // nearly everything, so the selected part is not always small.
+        const PARALLEL_SORT_MIN: usize = 100_000;
+        let sort_by_keys = |records: &mut [SortRecord]| {
+            if records.len() >= PARALLEL_SORT_MIN {
+                records.par_sort_unstable();
+            } else {
+                records.sort_unstable();
+            }
+        };
+        let Self {
+            mut records,
+            path_folders,
+            sort,
+            end,
+            sums,
+            mount_prefix,
+            instance,
+        } = self;
+        if let Some(folders) = path_folders {
+            let ranks = folder_ranks(&folders);
+            for record in &mut records {
+                let value = KeyValue::Path {
+                    folder_rank: ranks[record.primary() as usize],
+                    name_key: record.name_key(),
+                };
+                let primary = primary_key(sort.dir, value);
+                *record = SortRecord::keyed(primary, record.name_key(), record.idx());
+            }
+        }
+        let mut ties_end = end;
+        if end > 0 && end < records.len() {
+            records.select_nth_unstable(end - 1);
+            let last = records[end - 1].keys();
+            for at in end..records.len() {
+                if records[at].keys() == last {
+                    records.swap(at, ties_end);
+                    ties_end += 1;
+                }
+            }
+            sort_by_keys(&mut records[..end]);
+        } else if end > 0 {
+            sort_by_keys(&mut records);
+        }
+        OrderedMatches {
+            records,
+            sort,
+            end,
+            ties_end,
+            sums,
+            mount_prefix,
+            instance,
+        }
+    }
+}
+
+impl OrderedMatches {
+    /// Orders the runs of equal keys and reads the page's hits from `index`.
+    /// The caller holds the index's read lock again. A match whose entry was
+    /// removed since [`find_matches`], and a match of the page whose folder
+    /// has no full path now, are left out and counted out of the total, so
+    /// the page can hold fewer hits than the limit.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexChanged`] when `index` is not the index the matches were found
+    /// in, or its entries got new indexes since.
+    pub fn read_hits(mut self, index: &VolumeIndex) -> Result<QueryOutcome, IndexChanged> {
+        if index.instance() != self.instance {
+            return Err(IndexChanged);
+        }
+        let total = self.records.len() as u64;
+        let removed = self
+            .records
+            .iter()
+            .filter(|r| !index.is_live(r.idx()))
+            .count();
+        self.records.truncate(self.ties_end);
+        // A removed entry's slot names no name, which the tie runs read.
+        self.records.retain(|r| index.is_live(r.idx()));
+        order_ties(index, self.sort, &mut self.records);
+
+        // Copy names only for the requested page. A broad result set holds
+        // millions of files under far fewer distinct folders, and `folders`
+        // copies each folder once. The copy is made now, not at the scan,
+        // because a folder's slot may hold another folder since.
+        let mut folders = FolderCopy::new(index, &self.mount_prefix);
+        let end = self.end.min(self.records.len());
+        let mut hits = Vec::with_capacity(end);
+        for r in &self.records[..end] {
+            let Some(folder) = folders.entry_folder(index, r.idx()) else {
+                continue;
+            };
+            let entry = index.entry(r.idx());
+            hits.push(QueryHit {
+                folder,
+                name: folders.push_name(entry.name()),
+                frn: entry.frn(),
+                parent_frn: index.entry(entry.parent()).frn(),
+                is_dir: entry.is_dir(),
+                size: entry.size(),
+                mtime: entry.mtime(),
+                attributes: entry.attributes(),
+            });
+        }
+        let without_path = end - hits.len();
+        Ok(QueryOutcome {
+            total: total - (removed + without_path) as u64,
+            hits,
+            sums: self.sums,
+            names: folders.finish(),
+        })
+    }
 }
 
 /// The [`Totals`] of every match of `query` over `index`, with `scope` as in
@@ -860,14 +1018,14 @@ pub fn run_totals(
     query: &CompiledQuery,
     scope: Option<EntryIdx>,
 ) -> Result<Totals, SizeOverflow> {
-    let candidates = scan(index, mount_prefix, query, scope).candidates;
+    let records = scan(index, mount_prefix, query, scope).records;
     let mut totals = Totals {
-        count: candidates.len() as u64,
+        count: records.len() as u64,
         size: 0,
     };
-    for size in candidates
+    for size in records
         .iter()
-        .map(|c| index.entry(c.idx))
+        .map(|r| index.entry(r.idx()))
         .filter(|e| !e.is_dir())
         .filter_map(|e| e.size())
     {
@@ -885,7 +1043,8 @@ pub fn run_totals(
 /// while the walk touches only the folder.
 const SUBTREE_WALK_MAX: usize = 200_000;
 
-/// Finds every match of `query` over `index`, as unordered candidates.
+/// Finds every match of `query` over `index`, as unordered records whose
+/// keys are not set yet.
 fn scan<'q, 'i>(
     index: &'i VolumeIndex,
     mount_prefix: &str,
@@ -913,7 +1072,7 @@ fn scan<'q, 'i>(
         if walk.next().is_none() {
             return scan;
         }
-        scan.candidates.clear();
+        scan.records.clear();
     }
 
     // Fast path: case-insensitive query with a usable literal → scan the
@@ -969,7 +1128,14 @@ fn scan<'q, 'i>(
         }
     } else {
         // Slow path: case-sensitive, or no name literal (only filters, path
-        // terms or all-wildcard patterns). Iterate every live entry.
+        // terms or all-wildcard patterns). Iterate every live entry. The
+        // empty search with no scope, as a full export runs, matches every
+        // entry, so its records are reserved once: a list that grows holds
+        // its old and new buffers together. Other scans grow the list, so a
+        // selective one does not commit a record for every entry.
+        if scope.is_none() && query.clauses.is_empty() {
+            scan.records.reserve_exact(index.len());
+        }
         for idx in index.live_entries() {
             if index.is_synthetic(idx) {
                 continue;
@@ -980,96 +1146,9 @@ fn scan<'q, 'i>(
     scan
 }
 
-/// `allow_defer` lets the executor drop the ordering when the page turns out to
-/// cover every match (see [`run_query_deferrable`]); the reported
-/// [`QueryOutcome::sorted`] says which happened.
-#[allow(clippy::too_many_arguments)]
-fn run_query_impl(
-    index: &VolumeIndex,
-    mount_prefix: &str,
-    query: &CompiledQuery,
-    scope: Option<EntryIdx>,
-    sort: SortSpec,
-    limit: Option<u32>,
-    allow_defer: bool,
-    sums: bool,
-) -> QueryOutcome {
-    let Scan {
-        mut candidates,
-        mut folders,
-        ..
-    } = scan(index, mount_prefix, query, scope);
-    let total = candidates.len() as u64;
-    let sums = sums.then(|| match_sums(index, &candidates));
-
-    let end = match limit {
-        Some(n) => (n as usize).min(candidates.len()),
-        None => candidates.len(),
-    };
-
-    // A page that covers every match is left unsorted for the caller, as
-    // [`run_query_deferrable`] explains; `end` is already clamped to the match
-    // count, so this is exactly "the page is the whole set". Everything below
-    // keys off the rebound `sort`, so a deferred query also skips the path-key
-    // precompute it would never consult.
-    let sort = (!(allow_defer && end == candidates.len())).then_some(sort);
-    let sorted = sort.is_some();
-
-    if sort.is_some_and(|s| matches!(s.key, SortKey::Path)) {
-        // The ranks order every copied folder at once, so every candidate's
-        // folder is copied first.
-        for c in &candidates {
-            folders.entry_folder(index, c.idx);
-        }
-        let ranks = folder_ranks(folders.names());
-        for c in &mut candidates {
-            // A candidate without a path ranks as an empty path; the page
-            // drops it.
-            c.folder = folders
-                .entry_folder(index, c.idx)
-                .map_or(0, |folder| ranks[folder.index()]);
-        }
-    }
-
-    // Order only enough to fill the page: quickselect the top `end` by the
-    // result order (O(M)), then sort just that prefix (O(end log end)). This
-    // avoids an O(M log M) sort of the entire match set on common queries.
-    if let Some(sort) = sort {
-        order_top(index, &mut candidates, sort, end);
-    }
-
-    // Copy names only for the requested page. A broad result set holds
-    // millions of files under far fewer distinct folders, and `folders`
-    // copies each folder once.
-    let mut hits = Vec::with_capacity(end);
-    for c in &candidates[..end] {
-        let Some(folder) = folders.entry_folder(index, c.idx) else {
-            continue; // no path; only possible when `has_orphans` was false
-        };
-        let entry = index.entry(c.idx);
-        hits.push(QueryHit {
-            folder,
-            name: folders.push_name(entry.name()),
-            frn: entry.frn(),
-            parent_frn: index.entry(entry.parent()).frn(),
-            is_dir: entry.is_dir(),
-            size: entry.size(),
-            mtime: entry.mtime(),
-            attributes: entry.attributes(),
-        });
-    }
-
-    QueryOutcome {
-        total,
-        hits,
-        sorted,
-        sums,
-        names: folders.finish(),
-    }
-}
-
 /// The state one scan shares across its candidates: memos and scratch
-/// buffers, built once per query instead of once per candidate.
+/// buffers, built once per query instead of once per candidate, and the
+/// matches found so far.
 struct Scan<'q, 'i> {
     index: &'i VolumeIndex,
     query: &'q CompiledQuery,
@@ -1077,12 +1156,12 @@ struct Scan<'q, 'i> {
     /// case; `None` when no clause tests the path.
     query_paths: Option<DirPaths>,
     path: Vec<u8>,
-    /// The hits' folders. ONE memo, shared by the presentability check, the
-    /// path sort and the page builder: all need exactly these folders.
+    /// The matches' folders. ONE memo, shared by the presentability check and
+    /// the path sort: both need exactly these folders.
     folders: FolderCopy,
     scope_memo: FxHashMap<EntryIdx, bool>,
     scratch: Scratch,
-    candidates: Vec<Candidate>,
+    records: Vec<SortRecord>,
 }
 
 impl<'q, 'i> Scan<'q, 'i> {
@@ -1101,18 +1180,18 @@ impl<'q, 'i> Scan<'q, 'i> {
             folders: FolderCopy::new(index, mount_prefix),
             scope_memo: FxHashMap::default(),
             scratch: Scratch::default(),
-            candidates: Vec::new(),
+            records: Vec::new(),
         }
     }
 
     /// Keeps entry `idx` as a candidate if it passes every clause.
     fn visit(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) {
-        if let Some(c) = self.evaluate(idx, scope) {
-            self.candidates.push(c);
+        if let Some(record) = self.evaluate(idx, scope) {
+            self.records.push(record);
         }
     }
 
-    fn evaluate(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> Option<Candidate> {
+    fn evaluate(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> Option<SortRecord> {
         let index = self.index;
         let query = self.query;
         let (entry_clauses, path_clauses) = query.clauses.split_at(query.path_clauses);
@@ -1168,7 +1247,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             }
         }
 
-        Some(Candidate { idx, folder: 0 })
+        Some(SortRecord::new(idx))
     }
 }
 
@@ -1224,78 +1303,129 @@ fn in_scope(
     verdict
 }
 
-/// A candidate as the result order reads it: straight from the index, so a
+/// Sets the keys of every record under `sort` ([`primary_key`]), and returns
+/// the folders of a path sort's records, whose ranks [`Matches::order`]
+/// computes without the index: until then, each record's primary key holds
+/// its folder's place in that table. A path sort copies the folder of every
+/// record, because [`folder_ranks`] ranks every copied folder at once.
+fn key_records(
+    index: &VolumeIndex,
+    records: &mut [SortRecord],
+    mut folders: FolderCopy,
+    sort: SortSpec,
+) -> Option<ResultNames> {
+    let extensions = match sort.key {
+        SortKey::Extension => extension_ranks(index, records),
+        _ => FxHashMap::default(),
+    };
+    for record in records.iter_mut() {
+        let idx = record.idx();
+        let entry = index.entry(idx);
+        let name_key = index.name_key(idx);
+        let value = match sort.key {
+            SortKey::Name => KeyValue::Name(name_key),
+            SortKey::Path => {
+                // A record without a path is left out of the page, so any
+                // rank serves it: the first folder's.
+                let folder = folders.entry_folder(index, idx);
+                let place = folder.map_or(0, |f| f.index() as u64);
+                *record = SortRecord::keyed(place, name_key, idx);
+                continue;
+            }
+            SortKey::Size => KeyValue::Size(entry.size()),
+            SortKey::DateModified => KeyValue::DateModified(entry.mtime()),
+            SortKey::Extension => KeyValue::Extension(extensions[&folded_extension(index, idx)]),
+        };
+        *record = SortRecord::keyed(primary_key(sort.dir, value), name_key, idx);
+    }
+    matches!(sort.key, SortKey::Path).then(|| folders.finish())
+}
+
+/// The place of each distinct folded extension of `records`' entries in the
+/// order [`compare`] gives them, `None` first.
+fn extension_ranks<'i>(
+    index: &'i VolumeIndex,
+    records: &[SortRecord],
+) -> FxHashMap<Option<&'i [u8]>, u32> {
+    let mut ranks: FxHashMap<Option<&[u8]>, u32> = FxHashMap::default();
+    for r in records {
+        ranks.entry(folded_extension(index, r.idx())).or_insert(0);
+    }
+    let mut distinct: Vec<Option<&[u8]>> = ranks.keys().copied().collect();
+    distinct.sort_unstable();
+    for (rank, extension) in distinct.into_iter().enumerate() {
+        ranks.insert(extension, rank as u32);
+    }
+    ranks
+}
+
+/// Folding keeps every `.` where it is, so the extension of the folded name
+/// is the folded extension.
+fn folded_extension(index: &VolumeIndex, idx: EntryIdx) -> Option<&[u8]> {
+    extension(index.folded_name(idx), index.entry(idx).is_dir())
+}
+
+/// Orders each run of records with equal keys in `records`, which are sorted
+/// by their keys, with [`compare`], which reads the names, the file IDs and
+/// the parents from the index.
+fn order_ties(index: &VolumeIndex, sort: SortSpec, records: &mut [SortRecord]) {
+    use rayon::iter::ParallelIterator;
+    use rayon::slice::ParallelSliceMut;
+    let ranked = |record| Ranked {
+        index,
+        sort,
+        record,
+    };
+    records
+        .par_chunk_by_mut(|a, b| a.keys() == b.keys())
+        .for_each(|run| {
+            if run.len() > 1 {
+                run.sort_unstable_by(|&a, &b| compare(sort, &ranked(a), &ranked(b)));
+            }
+        });
+}
+
+/// A record as the result order reads it: straight from the index, so a
 /// tie-break key is loaded only when a comparison reaches it.
 struct Ranked<'a> {
     index: &'a VolumeIndex,
-    candidate: &'a Candidate,
+    sort: SortSpec,
+    record: SortRecord,
+}
+
+impl Ranked<'_> {
+    fn entry(&self) -> EntryView<'_> {
+        self.index.entry(self.record.idx())
+    }
 }
 
 impl OrderFields for Ranked<'_> {
     fn is_dir(&self) -> bool {
-        self.index.entry(self.candidate.idx).is_dir()
+        self.entry().is_dir()
     }
     fn folder_rank(&self) -> u32 {
-        self.candidate.folder
+        packed_folder_rank(self.sort.dir, self.record.primary())
     }
     fn folded_name(&self) -> &[u8] {
-        self.index.folded_name(self.candidate.idx)
+        self.index.folded_name(self.record.idx())
     }
     fn size(&self) -> Option<u64> {
-        self.index.entry(self.candidate.idx).size()
+        self.entry().size()
     }
     fn mtime(&self) -> Option<i64> {
-        self.index.entry(self.candidate.idx).mtime()
+        self.entry().mtime()
     }
     fn volume(&self) -> &[u8] {
         b"" // one volume per query run
     }
     fn frn(&self) -> Frn {
-        self.index.entry(self.candidate.idx).frn()
+        self.entry().frn()
     }
     fn parent_frn(&self) -> Frn {
-        let parent = self.index.entry(self.candidate.idx).parent();
-        self.index.entry(parent).frn()
+        self.index.entry(self.entry().parent()).frn()
     }
     fn name(&self) -> &[u8] {
-        self.index.entry(self.candidate.idx).name()
-    }
-}
-
-/// Places the top `end` candidates (by `sort`) in `cands[..end]`, sorted. Uses
-/// quickselect to partition when `end` is a small slice of a large match set.
-fn order_top(index: &VolumeIndex, cands: &mut [Candidate], sort: SortSpec, end: usize) {
-    if end == 0 {
-        return;
-    }
-    let cmp = |a: &Candidate, b: &Candidate| {
-        let ranked = |candidate| Ranked { index, candidate };
-        compare(sort, &ranked(a), &ranked(b))
-    };
-    // The result order is total, so stability is irrelevant: unstable sort
-    // avoids driftsort's scratch buffer and uses the faster ipnsort.
-    //
-    // A broad query with no limit sorts the whole match set (millions of
-    // candidates); that is done in parallel across cores. Quickselect + small
-    // sorts stay serial: they touch far less data and the rayon fan-out is not
-    // worth it there.
-    use rayon::slice::ParallelSliceMut;
-    const PARALLEL_SORT_MIN: usize = 100_000;
-    if end < cands.len() {
-        cands.select_nth_unstable_by(end - 1, cmp);
-        // The selected prefix is not always small: a page asking for all but a
-        // handful of matches selects nearly everything, and ordering that on
-        // one core holds the index read lock, and so the volume's tail thread,
-        // much longer than the parallel branch does.
-        if end >= PARALLEL_SORT_MIN {
-            cands[..end].par_sort_unstable_by(cmp);
-        } else {
-            cands[..end].sort_unstable_by(cmp);
-        }
-    } else if cands.len() >= PARALLEL_SORT_MIN {
-        cands.par_sort_unstable_by(cmp);
-    } else {
-        cands.sort_unstable_by(cmp);
+        self.index.entry(self.record.idx()).name()
     }
 }
 
@@ -1660,43 +1790,6 @@ mod tests {
         );
         assert_eq!(out.total, 5);
         assert_eq!(out.hits.len(), 2);
-    }
-
-    /// [`run_query_deferrable`] hands the ordering back for a page that covers
-    /// every match, also when the limit is a number at or above the match
-    /// count, such as `-n 4294967295`, not only when there is no limit.
-    #[test]
-    fn a_page_covering_every_match_defers_the_sort() {
-        let idx = sample_index();
-        let parsed = compiled("");
-        let sort = SortSpec::default_for(SortKey::Name);
-        let total = run_query(&idx, "", &parsed, None, sort, None).total as u32;
-        assert!(total > 1, "fixture must have several matches to slice");
-
-        for limit in [None, Some(u32::MAX), Some(total), Some(total + 1)] {
-            let out = run_query_deferrable(&idx, "", &parsed, None, sort, limit, false);
-            assert!(
-                !out.sorted,
-                "limit {limit:?} covers all {total} matches; ordering must be deferred off-lock"
-            );
-            assert_eq!(
-                out.hits.len(),
-                total as usize,
-                "limit {limit:?}: a covering page still returns every match"
-            );
-        }
-
-        // A limit that genuinely slices still orders here, where the index is
-        // available to pick which matches survive.
-        let sliced = run_query_deferrable(&idx, "", &parsed, None, sort, Some(total - 1), false);
-        assert!(sliced.sorted, "a real slice must still order in-lock");
-        assert_eq!(sliced.hits.len(), total as usize - 1);
-
-        // `run_query` keeps its unconditional promise for direct callers.
-        assert!(
-            run_query(&idx, "", &parsed, None, sort, Some(u32::MAX)).sorted,
-            "run_query must always return sorted hits"
-        );
     }
 
     #[test]
@@ -2406,36 +2499,93 @@ mod tests {
     }
 
     /// A limited query is a prefix of the same query without a limit, under
-    /// every sort, whether the engine orders the page under the lock or
-    /// [`order_hits`] orders the deferred set after it.
+    /// every sort, and the name ranks change no order: without them every
+    /// name key is equal, so [`compare`] alone orders each run of equal
+    /// primary keys.
     #[test]
     fn a_limited_query_is_a_prefix_of_the_unlimited_one() {
-        let idx = order_index();
+        let unranked = order_index();
+        let mut ranked = order_index();
+        ranked.rank_names();
         for query in ["qx7zv", ""] {
             let parsed = compiled(query);
             for sort in all_sorts() {
-                let deferred = run_query_deferrable(&idx, r"C:\", &parsed, None, sort, None, false);
-                let ordered = order_hits(
-                    sort,
-                    vec![VolumeRun {
-                        mount_prefix: r"C:\",
-                        hits: deferred.hits,
-                        names: deferred.names,
-                        sorted: false,
-                    }],
-                );
-                let unlimited = paths_in(&ordered.hits, &ordered.names);
+                let unlimited = texts(&run_query(&ranked, r"C:\", &parsed, None, sort, None));
                 assert_eq!(
-                    texts(&run_query(&idx, r"C:\", &parsed, None, sort, None)),
+                    texts(&run_query(&unranked, r"C:\", &parsed, None, sort, None)),
                     unlimited,
-                    "{query:?} {sort:?}: the engine and order_hits disagree"
+                    "{query:?} {sort:?}: the ranks changed the order"
                 );
                 for k in 0..=unlimited.len() {
-                    let page = run_query(&idx, r"C:\", &parsed, None, sort, Some(k as u32));
+                    let page = run_query(&ranked, r"C:\", &parsed, None, sort, Some(k as u32));
                     assert_eq!(texts(&page), unlimited[..k], "{query:?} {sort:?} -n {k}");
                 }
             }
         }
+    }
+
+    /// A limited list stays the start of the full one when a run of equal
+    /// keys crosses its end: the files share one name, size and date, and
+    /// their file IDs fall as their entries rise, so only [`compare`] puts
+    /// them in order, and the quickselect leaves part of the run on each side
+    /// of the cut.
+    #[test]
+    fn a_tie_run_across_the_limit_keeps_a_limited_list_the_start_of_the_full_one() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        for (i, name) in ["d", "e", "f"].iter().enumerate() {
+            idx.insert_enum(&enum_rec(frn(100 + i as u64), NTFS_ROOT_FRN, name, true));
+        }
+        for i in 0..24u64 {
+            let file = frn(900 - i);
+            let name = if i % 3 == 0 { "SAME.txt" } else { "same.txt" };
+            idx.insert_enum(&enum_rec(file, frn(100 + i % 3), name, false));
+            idx.set_stat(file, 7, 70);
+        }
+        idx.insert_enum(&enum_rec(frn(950), frn(100), "other.txt", false));
+        idx.rank_names();
+        let parsed = compiled("txt");
+        for sort in all_sorts() {
+            let unlimited = texts(&run_query(&idx, r"C:\", &parsed, None, sort, None));
+            assert_eq!(unlimited.len(), 25);
+            for k in 0..=unlimited.len() {
+                let page = run_query(&idx, r"C:\", &parsed, None, sort, Some(k as u32));
+                assert_eq!(texts(&page), unlimited[..k], "{sort:?} -n {k}");
+            }
+        }
+    }
+
+    /// Matches whose index got new entry indexes between the two locks, as
+    /// `optimize_storage` gives them, read no hits, because their records
+    /// would name other entries.
+    #[test]
+    fn matches_from_an_index_that_changed_read_no_hits() {
+        let mut idx = sample_index();
+        let parsed = compiled("");
+        let ordered =
+            find_matches(&idx, "", &parsed, None, SortSpec::default(), None, false).order();
+        idx.optimize_storage();
+        assert_eq!(ordered.read_hits(&idx).err(), Some(IndexChanged));
+    }
+
+    /// An entry removed between the two locks is left out, and out of the
+    /// total, so `gozler` does not report the answer as cut short; the tie
+    /// runs never read its slot, which names no name. The page then holds
+    /// fewer hits than the limit.
+    #[test]
+    fn an_entry_removed_between_the_locks_is_left_out_of_the_hits_and_the_total() {
+        let mut idx = sample_index();
+        let parsed = compiled("");
+        let sort = SortSpec::default_for(SortKey::Size);
+        let ordered = find_matches(&idx, "", &parsed, None, sort, Some(3), false).order();
+        idx.apply_batch(&[ParsedUsnRecord {
+            reason: crate::usn::record::USN_REASON_FILE_DELETE,
+            ..enum_rec(frn(103), frn(100), "notes.txt", false)
+        }]);
+        let out = ordered
+            .read_hits(&idx)
+            .expect("the index kept its entry indexes");
+        assert_eq!(texts(&out), ["photo.JPG", "docs\\sub\\Report.PDF"]);
+        assert_eq!(out.total, 4);
     }
 
     /// The same holds across volumes. Each volume picks its own top `k`, and
@@ -2452,13 +2602,11 @@ mod tests {
                 let runs = volumes
                     .iter()
                     .map(|(prefix, idx)| {
-                        let out =
-                            run_query_deferrable(idx, prefix, &parsed, None, sort, limit, false);
+                        let out = run_query(idx, prefix, &parsed, None, sort, limit);
                         VolumeRun {
                             mount_prefix: prefix,
                             hits: out.hits,
                             names: out.names,
-                            sorted: out.sorted,
                         }
                     })
                     .collect();
@@ -2471,6 +2619,90 @@ mod tests {
             assert_eq!(unlimited.len(), 14);
             for k in 0..=unlimited.len() {
                 assert_eq!(merged(Some(k as u32)), unlimited[..k], "{sort:?} -n {k}");
+            }
+        }
+    }
+
+    /// A file of [`packed_keys_agree_with_the_result_order`]: its name, which
+    /// of three folders holds it, its size and its date.
+    type KeyFile = (String, u64, Option<u64>, Option<i64>);
+
+    fn key_file() -> impl Strategy<Value = KeyFile> {
+        (
+            "[aAb.~ ]{1,3}",
+            0u64..3,
+            prop_oneof![
+                Just(None),
+                Just(Some(0)),
+                Just(Some(u64::MAX - 1)),
+                (0u64..3).prop_map(Some),
+            ],
+            prop_oneof![
+                Just(None),
+                Just(Some(i64::MIN + 1)),
+                Just(Some(i64::MAX)),
+                (-1i64..2).prop_map(Some),
+            ],
+        )
+    }
+
+    proptest! {
+        /// When one match's packed keys are smaller than another's, the
+        /// result order puts it first, under every sort and in both
+        /// directions, or the sort prints rows out of that order. Names are
+        /// ranked, then more are added, some of them new spellings of ranked
+        /// names, and some are released; sizes and dates include 0, unknown
+        /// and their extremes. Names with a `.` give extensions, and the
+        /// folders give the path sort several folder ranks.
+        #[test]
+        fn packed_keys_agree_with_the_result_order(
+            ranked in prop::collection::vec(key_file(), 1..16),
+            added in prop::collection::vec(key_file(), 0..8),
+            removed in prop::collection::vec(any::<prop::sample::Index>(), 0..4),
+        ) {
+            let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+            for (i, name) in ["d", "D e", "~"].iter().enumerate() {
+                idx.insert_enum(&enum_rec(frn(100 + i as u64), NTFS_ROOT_FRN, name, true));
+            }
+            let mut files = Vec::new();
+            let mut add = |idx: &mut VolumeIndex, batch: &[KeyFile]| {
+                for (name, folder, size, mtime) in batch {
+                    let file = frn(1000 + files.len() as u64);
+                    idx.insert_enum(&enum_rec(file, frn(100 + folder), name, false));
+                    idx.set_stat(file, size.unwrap_or(u64::MAX), mtime.unwrap_or(i64::MIN));
+                    files.push(file);
+                }
+            };
+            add(&mut idx, &ranked);
+            idx.rank_names();
+            add(&mut idx, &added);
+            let deletes: Vec<ParsedUsnRecord> = removed
+                .iter()
+                .map(|at| ParsedUsnRecord {
+                    reason: crate::usn::record::USN_REASON_FILE_DELETE,
+                    ..enum_rec(files[at.index(files.len())], NTFS_ROOT_FRN, "", false)
+                })
+                .collect();
+            idx.apply_batch(&deletes);
+
+            let parsed = compiled("");
+            for sort in all_sorts() {
+                let ordered = find_matches(&idx, r"C:\", &parsed, None, sort, None, false).order();
+                let ranked = |record| Ranked { index: &idx, sort, record };
+                for &a in &ordered.records {
+                    for &b in &ordered.records {
+                        if a.keys() < b.keys() {
+                            prop_assert_eq!(
+                                compare(sort, &ranked(a), &ranked(b)),
+                                core::cmp::Ordering::Less,
+                                "{:?}: {:?} against {:?}",
+                                sort,
+                                idx.entry(a.idx()).name(),
+                                idx.entry(b.idx()).name(),
+                            );
+                        }
+                    }
+                }
             }
         }
     }

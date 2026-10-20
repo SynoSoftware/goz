@@ -1,9 +1,11 @@
 //! The result order: which of two hits prints first.
 //!
-//! One comparison serves every caller, so a limited query is always a prefix
-//! of the same query without a limit. The engine picks a page with it under
-//! one volume's index lock; [`order_hits`] sorts a deferred page and merges
-//! several volumes with it after the locks are released.
+//! One comparison, `compare`, decides the order for every caller, so a
+//! limited query is always a prefix of the same query without a limit. The
+//! engine sorts one volume's matches as `SortRecord`s, whose keys order
+//! them as `compare` does, and orders each run of equal keys with `compare`
+//! under the volume's index lock; [`order_hits`] merges several volumes with
+//! it after the locks are released.
 //!
 //! The sort key decides first. `Path` is es's `(parent folder, name)` order,
 //! folded, not a byte compare of the whole path; an unknown size or date
@@ -15,9 +17,108 @@
 
 use super::engine::{QueryHit, extension};
 use super::paths::ResultNames;
-use crate::types::{Frn, SortDir, SortKey, SortSpec};
+use crate::types::{EntryIdx, Frn, SortDir, SortKey, SortSpec};
 use core::cmp::Ordering;
 use core::ops::Range;
+
+/// One match as the engine sorts it: its primary key, its name key and its
+/// entry, packed into one number, so the sort compares numbers. A record
+/// with a smaller primary key, or an equal primary key and a smaller name
+/// key, comes first in [`compare`]'s order. Records whose two keys are equal
+/// form a tie run, which `compare` orders; the entry only makes the sort's
+/// order total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SortRecord(u128);
+
+const _: () = assert!(size_of::<SortRecord>() == 16);
+
+impl SortRecord {
+    /// A record of entry `idx` whose keys are not set yet.
+    pub(crate) fn new(idx: EntryIdx) -> Self {
+        Self(u128::from(idx))
+    }
+
+    pub(crate) fn keyed(primary: u64, name_key: u32, idx: EntryIdx) -> Self {
+        Self((u128::from(primary) << 64) | (u128::from(name_key) << 32) | u128::from(idx))
+    }
+
+    pub(crate) fn idx(self) -> EntryIdx {
+        self.0 as EntryIdx
+    }
+
+    pub(crate) fn primary(self) -> u64 {
+        (self.0 >> 64) as u64
+    }
+
+    pub(crate) fn name_key(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+
+    /// The primary key and the name key: equal for every record of a tie run.
+    pub(crate) fn keys(self) -> u128 {
+        self.0 >> 32
+    }
+}
+
+/// What the primary key of each sort key is made from.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum KeyValue {
+    /// The index's [name key](crate::index::VolumeIndex::name_key).
+    Name(u32),
+    /// The [`folder_ranks`] rank of the match's parent folder, then the name
+    /// key.
+    Path {
+        folder_rank: u32,
+        name_key: u32,
+    },
+    Size(Option<u64>),
+    DateModified(Option<i64>),
+    /// The place of the match's folded [`extension`] among the distinct
+    /// extensions of the matches, `None` first.
+    Extension(u32),
+}
+
+/// The primary key of a match from the value its sort key reads. A
+/// descending sort inverts it, the whole of it for a path sort, so the
+/// tie-breaks of [`compare`] stay ascending, and an unknown size or date
+/// stays last.
+pub(crate) fn primary_key(dir: SortDir, value: KeyValue) -> u64 {
+    let directed = |key: u64| match dir {
+        SortDir::Asc => key,
+        SortDir::Desc => !key,
+    };
+    // A known value lies in 0..=u64::MAX - 1, so u64::MAX, last in either
+    // direction, is left for an unknown one.
+    let unknown_last = |known: Option<u64>| match (known, dir) {
+        (None, _) => u64::MAX,
+        (Some(value), SortDir::Asc) => value,
+        (Some(value), SortDir::Desc) => u64::MAX - 1 - value,
+    };
+    match value {
+        KeyValue::Name(name_key) => directed(u64::from(name_key)),
+        KeyValue::Path {
+            folder_rank,
+            name_key,
+        } => directed((u64::from(folder_rank) << 32) | u64::from(name_key)),
+        // The index stores an unknown size as u64::MAX, so a known one is
+        // below it.
+        KeyValue::Size(size) => unknown_last(size),
+        // Flipping the sign bit orders an `i64` as a `u64`. The index stores
+        // an unknown date as i64::MIN, so a known one maps to 1 or more.
+        KeyValue::DateModified(mtime) => unknown_last(mtime.map(|t| ((t as u64) ^ (1 << 63)) - 1)),
+        KeyValue::Extension(rank) => directed(u64::from(rank)),
+    }
+}
+
+/// The folder rank that [`primary_key`] packed into the primary key of a
+/// path sort in direction `dir`.
+pub(crate) fn packed_folder_rank(dir: SortDir, primary: u64) -> u32 {
+    let key = match dir {
+        SortDir::Asc => primary,
+        SortDir::Desc => !primary,
+    };
+    (key >> 32) as u32
+}
 
 /// What the result order reads from one hit. The engine reads it from the
 /// index, [`order_hits`] from keys computed once per hit.
@@ -217,16 +318,13 @@ fn key_units(name: &[u8], part: Part) -> impl Iterator<Item = u16> + '_ {
         .chain(core::iter::once(last))
 }
 
-/// One volume's hits, as the engine returned them.
+/// One volume's hits, as the engine returned them, in the result order.
 pub struct VolumeRun<'a> {
     /// The volume's mount prefix; it tells volumes apart for the tie-break.
     pub mount_prefix: &'a str,
     pub hits: Vec<QueryHit>,
     /// The folders and names of `hits`.
     pub names: ResultNames,
-    /// [`super::QueryOutcome::sorted`]: whether `hits` is already in result
-    /// order.
-    pub sorted: bool,
 }
 
 /// The hits of every volume in the result order, with the folders and names
@@ -237,12 +335,12 @@ pub struct OrderedHits {
     pub names: ResultNames,
 }
 
-/// Puts the hits of one or more volumes into the result order.
+/// Merges the hits of one or more volumes into the result order.
 ///
 /// Runs no index code, so the caller calls it after releasing every index
-/// lock. Hits a run already holds in order cost a merge, not a full sort.
-/// The first run's hits become the reply's and are reordered in place, so
-/// the reply holds one list of hits: an export holds millions of them.
+/// lock. A single volume's hits are returned as they are. The first run's
+/// hits become the reply's and are reordered in place, so the reply holds one
+/// list of hits: an export holds millions of them.
 pub fn order_hits(sort: SortSpec, mut runs: Vec<VolumeRun<'_>>) -> OrderedHits {
     runs.retain(|run| !run.hits.is_empty());
     let volumes: Vec<&[u8]> = runs.iter().map(|r| r.mount_prefix.as_bytes()).collect();
@@ -252,7 +350,7 @@ pub fn order_hits(sort: SortSpec, mut runs: Vec<VolumeRun<'_>>) -> OrderedHits {
         return OrderedHits::default();
     };
     let (mut hits, mut names) = (first.hits, first.names);
-    if first.sorted && runs.as_slice().is_empty() {
+    if runs.as_slice().is_empty() {
         return OrderedHits { hits, names };
     }
     hits.reserve_exact(total - hits.len());

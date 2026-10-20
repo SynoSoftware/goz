@@ -228,10 +228,12 @@ impl VolumeState {
         self.phase.read().clone()
     }
 
-    /// Compacts the name arenas, blocking queries only for the install.
+    /// Compacts the name arenas or merges the name ranks, blocking queries
+    /// only for the install.
     ///
     /// The expensive half copies every live name into fresh arenas (hundreds
-    /// of MB on a large volume), so it runs while queries keep reading. The
+    /// of MB on a large volume), or sorts the unranked names and merges them
+    /// into the rank order, so it runs while queries keep reading. The
     /// plan is valid only while the index does not change, and the upgradable
     /// read keeps every writer out until it upgrades, so the plan cannot go
     /// stale whoever else writes. The upgrade to exclusive covers only the
@@ -255,7 +257,7 @@ impl VolumeState {
             volume = %self.mount_prefix(),
             planned_ms = planned.as_millis() as u64,
             blocked_ms = install_started.elapsed().as_millis() as u64,
-            "compacted name arenas"
+            "compacted the name store"
         );
     }
 

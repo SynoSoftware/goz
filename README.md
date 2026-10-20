@@ -15,7 +15,9 @@ gozler indexes every filename on your fixed NTFS and ReFS volumes, Dev Drives in
 
 - **Fast.** 1.8x to 6.1x quicker than Everything across every query in our [benchmarks](docs/BENCHMARKS.md), on the same machine with the same result sets.
 - **Light.** ~215 MB resident under heavy querying and ~12 MB idle, against a ~3.97M-entry index.
+- **Unfazed by deep folders.** A copy that copied into itself 190 levels deep makes every path 2 KB long. gozler sends each folder once instead of a full path for every result, so exporting 280,000 files from that tree takes 50 MB and a quarter of a second, not 2.2 GB and 10 seconds ([details](#deep-folders)).
 - **Live.** Tails the USN journal, so the index stays in sync as files change, including hard-link renames that Everything 1.4 misses. The journal is sized to the volume automatically (a 2 TB disk gets about four days of changes, not the 32 MB Windows default that Everything leaves you to raise by hand), and a tail thread that wedges on a sick disk or dies outright is cancelled or revived automatically.
+- **NTFS and ReFS.** Dev Drives and other ReFS volumes are searched and kept live just like NTFS. ReFS has no MFT to read, so gozler walks the volume's folders once, then follows its USN journal.
 - **Scriptable.** Native `--json` output and a subset of `es.exe`-compatible options with matching exit codes, so it drops into existing Everything workflows.
 - **Honest about state.** Every volume reports whether it is provably in sync, rescanning, or offline. It never serves stale results silently.
 
@@ -105,6 +107,20 @@ Memory, same box, each index warm at ~3.97M entries:
 | Committed memory, peak (same query)             | **1.2 GB** | 1.5 GB     |
 
 goz wins the resident-RAM rows that matter for a background daemon and edges out committed memory at rest. It loses two: a larger (statically linked) binary, and ~0.3 GB more peak committed memory during a full sorted export. Hardware and methodology are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+### Deep folders
+
+A search result used to carry its full path, so a deep folder tree multiplied the memory of every result. Now the daemon keeps each result as its folder and its own name, sends each folder once, and the client rebuilds the paths. A path sort orders folders by rank instead of by comparing their full paths.
+
+The test tree is a copy that copied into itself: a chain of 190 folders, then folders of 9 files each, so a path is about 2.1 KB. The figures are the daemon's peak heap above its index, for an export of every entry, measured on the same laptop before and after the change:
+
+| Export of 280,330 entries | Before | Now |
+| ------------------------- | -----: | --: |
+| Sorted by name            | 1,189 MB, 4.4 s | **50 MB, 0.25 s** |
+| Sorted by path            | 2,208 MB, 10.4 s | **50 MB, 0.22 s** |
+| Bytes through the pipe    | 571 MB | **7.3 MB** |
+
+At 5.6 million entries, the old daemon would need about 25 GB, which this laptop does not have. The daemon needed 1.0 GB. It now sorts numbers instead of names, so it needs 0.8 GB, and its part of the export takes 1.3 s by name and 1.7 s by path instead of 6.1 s and 5.2 s. A [plan](docs/plans/sorted-index.md) aims to bring that to about 0.1 GB. The method and every figure are in [deep folder rows](docs/research/deep-folder-rows.md).
 
 ## How it works
 

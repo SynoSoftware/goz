@@ -246,10 +246,11 @@ enum LayoutPass {
 }
 
 /// Builds a fresh [`VolumeIndex`] for an already-open volume handle, with its
-/// storage optimized for publishing. Shared by first-time bootstrap and the
-/// live tail's rescan (after a USN journal wrap/deletion), which rebuilds the
-/// index on the handle it already owns. Returns `None` when `stop` aborts the
-/// build. The journal is the caller's concern.
+/// storage optimized for publishing and its names ranked. Shared by
+/// first-time bootstrap and the live tail's rescan (after a USN journal
+/// wrap/deletion), which rebuilds the index on the handle it already owns.
+/// Returns `None` when `stop` aborts the build. The journal is the caller's
+/// concern.
 ///
 /// On NTFS, one FILE_LAYOUT pass gives every file its names, size and date,
 /// so the MFT is read once. When that pass stops part way, the MFT enumeration
@@ -294,6 +295,7 @@ pub(crate) fn build_index(
         index.apply_rules(rules.clone());
         index.compute_folder_sizes();
         index.optimize_storage();
+        index.rank_names();
         return Ok(Some(BuiltIndex {
             index,
             read_secs: read_start.elapsed().as_secs_f64(),
@@ -347,6 +349,7 @@ pub(crate) fn build_index(
     // Every record has been seen, so the FRN map can densify against its true
     // maximum, and the growth slack of the build goes back.
     index.optimize_storage();
+    index.rank_names();
 
     Ok(Some(BuiltIndex {
         index,

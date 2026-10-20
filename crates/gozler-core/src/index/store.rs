@@ -59,9 +59,9 @@ const _: () = assert!(size_of::<PackedAttributes>() == 2);
 const _: () = assert!(size_of::<EntryIdx>() == 4);
 const _: () = assert!(size_of::<NameId>() == 4);
 
-/// Freshly compacted name storage, with its intern table, plus the id remap
-/// for every kept name. Built by [`NameStore::plan_compact`], applied with
-/// [`NameStore::install_compacted`].
+/// Freshly compacted name storage, with its intern table and ranks, plus the
+/// id remap for every kept name. Built by [`NameStore::plan_compact`], applied
+/// with [`NameStore::install_compacted`].
 pub(crate) struct CompactedNames {
     raw: Vec<u8>,
     folded: Vec<u8>,
@@ -69,8 +69,24 @@ pub(crate) struct CompactedNames {
     refcount: Vec<u32>,
     head: Vec<EntryIdx>,
     by_bytes: hashbrown::HashTable<NameId>,
+    ranks: NameRanks,
+    unranked: usize,
     /// `remap[old_id]` = new id, or [`NIL`] for a dropped (refcount-0) name.
     remap: Vec<NameId>,
+}
+
+/// The place of each name's folded bytes among the folded bytes of every
+/// name, so a sort compares numbers instead of names. Names whose folded
+/// bytes are equal share a rank, because the result order compares folded
+/// names.
+#[derive(Debug, Default)]
+pub(crate) struct NameRanks {
+    /// The rank of each name id, from 1; 0 for a name added after the ranks
+    /// were made, which [`NameStore::name_key`] places by a binary search.
+    rank: Vec<u32>,
+    /// The ranked name ids in rank order. A ranked name that died stays here,
+    /// with its bytes zero-filled, until the next merge or compaction.
+    by_rank: Vec<NameId>,
 }
 
 /// The interned name store: every distinct name once, in two NUL-separated
@@ -102,6 +118,12 @@ pub(crate) struct NameStore {
     by_bytes: hashbrown::HashTable<NameId>,
     /// Dead bytes in `raw` + `folded`, the compaction cue.
     garbage: usize,
+    ranks: NameRanks,
+    /// Live names without a rank. With `dead_ranked`, the cue to merge the
+    /// ranks again ([`Self::ranks_stale`]).
+    unranked: usize,
+    /// Ranked names that died since the ranks were made.
+    dead_ranked: usize,
 }
 
 pub(crate) fn hash_bytes(b: &[u8]) -> u64 {
@@ -208,6 +230,8 @@ impl NameStore {
         push_eighth(&mut self.pairs, NamePair { raw, folded });
         push_eighth(&mut self.refcount, 1);
         push_eighth(&mut self.head, NIL);
+        push_eighth(&mut self.ranks.rank, 0);
+        self.unranked += 1;
         let Self {
             by_bytes,
             pairs,
@@ -287,6 +311,11 @@ impl NameStore {
         if let Ok(entry) = self.by_bytes.find_entry(hash, |&cand| cand == id) {
             entry.remove();
         }
+        if self.ranks.rank[i] == 0 {
+            self.unranked -= 1;
+        } else {
+            self.dead_ranked += 1;
+        }
         // Zero the folded bytes (the scan haystack) and, if separately
         // stored, the raw bytes. Garbage counts both plus separators.
         let f = pair.folded;
@@ -313,8 +342,11 @@ impl NameStore {
     /// Builds compacted storage keeping only live (refcount > 0) names, in id
     /// order, WITHOUT mutating `self`: the copy and the intern table are the
     /// whole cost of a compaction and must not run while queries are blocked.
-    /// The caller applies the result with [`Self::install_compacted`].
-    pub(crate) fn plan_compact(&self) -> CompactedNames {
+    /// `ranks` are this store's ranks or a merge of them from
+    /// [`Self::plan_ranks`]; the compaction moves them to the new ids and
+    /// drops the dead names from their order. The caller applies the result
+    /// with [`Self::install_compacted`].
+    pub(crate) fn plan_compact(&self, ranks: &NameRanks) -> CompactedNames {
         let live = self.refcount.iter().filter(|&&c| c > 0).count();
         let mut c = CompactedNames {
             raw: Vec::with_capacity(self.raw.len().saturating_sub(self.garbage)),
@@ -323,6 +355,11 @@ impl NameStore {
             refcount: Vec::with_capacity(live),
             head: Vec::with_capacity(live),
             by_bytes: hashbrown::HashTable::with_capacity(live),
+            ranks: NameRanks {
+                rank: Vec::with_capacity(live),
+                by_rank: Vec::new(),
+            },
+            unranked: 0,
             remap: vec![NIL; self.pairs.len()],
         };
         for (i, &rc) in self.refcount.iter().enumerate() {
@@ -344,12 +381,20 @@ impl NameStore {
             c.pairs.push(NamePair { raw, folded });
             c.refcount.push(rc);
             c.head.push(self.head[i]);
+            c.ranks.rank.push(ranks.rank[i]);
+            c.unranked += usize::from(ranks.rank[i] == 0);
             let hash = hash_bytes(self.raw_bytes(i as NameId));
             let (pairs, raw, folded) = (&c.pairs, &c.raw, &c.folded);
             c.by_bytes.insert_unique(hash, id, |&i| {
                 hash_bytes(raw_bytes_in(pairs, raw, folded, i))
             });
         }
+        c.ranks.by_rank = ranks
+            .by_rank
+            .iter()
+            .map(|&id| c.remap[id as usize])
+            .filter(|&id| id != NIL)
+            .collect();
         c
     }
 
@@ -366,7 +411,118 @@ impl NameStore {
         self.head = c.head;
         self.by_bytes = c.by_bytes;
         self.garbage = 0;
+        self.ranks = c.ranks;
+        self.unranked = c.unranked;
+        self.dead_ranked = 0;
         c.remap
+    }
+
+    /// Whether names added since the ranks were made, or ranked names that
+    /// died since, pass 0.1 % of the names. Each unranked name costs a search
+    /// a binary search, which steps over each dead name it meets.
+    pub(crate) fn ranks_stale(&self) -> bool {
+        let names = self.ranks.by_rank.len() - self.dead_ranked + self.unranked;
+        self.unranked.max(self.dead_ranked) * 1000 > names
+    }
+
+    /// Ranks every live name, WITHOUT mutating `self`, so searches keep
+    /// reading while it runs: sorts only the unranked names, and merges them
+    /// into the rank order without the dead names. The caller installs the
+    /// result with [`Self::install_ranks`], or through
+    /// [`Self::plan_compact`], while the store has not changed.
+    pub(crate) fn plan_ranks(&self) -> NameRanks {
+        use rayon::slice::ParallelSliceMut;
+        let live = |id: NameId| self.refcount[id as usize] > 0;
+        let folded = |id: NameId| self.folded_bytes_of(id);
+        let mut added: Vec<NameId> = (0..self.pairs.len() as NameId)
+            .filter(|&id| self.ranks.rank[id as usize] == 0 && live(id))
+            .collect();
+        added.par_sort_unstable_by(|&a, &b| folded(a).cmp(folded(b)));
+
+        let live_ranked = self.ranks.by_rank.len() - self.dead_ranked;
+        let mut by_rank = Vec::with_capacity(live_ranked + added.len());
+        let mut ranked = self
+            .ranks
+            .by_rank
+            .iter()
+            .copied()
+            .filter(|&id| live(id))
+            .peekable();
+        for id in added {
+            while let Some(below) = ranked.next_if(|&r| folded(r) <= folded(id)) {
+                by_rank.push(below);
+            }
+            by_rank.push(id);
+        }
+        by_rank.extend(ranked);
+
+        // With the headroom `shrink_vec` leaves, so the next intern does not
+        // copy the whole column under the write lock.
+        let names = self.pairs.len();
+        let mut rank = Vec::with_capacity(names + names / 64 + 64);
+        rank.resize(names, 0u32);
+        let mut current = 0u32;
+        let mut previous: Option<&[u8]> = None;
+        for &id in &by_rank {
+            if previous != Some(folded(id)) {
+                current += 1;
+                previous = Some(folded(id));
+            }
+            rank[id as usize] = current;
+        }
+        NameRanks { rank, by_rank }
+    }
+
+    /// Installs ranks built by [`Self::plan_ranks`]. Only buffer swaps. The
+    /// ranks are valid only if the store has not changed since they were
+    /// built.
+    pub(crate) fn install_ranks(&mut self, ranks: NameRanks) {
+        self.ranks = ranks;
+        self.unranked = 0;
+        self.dead_ranked = 0;
+    }
+
+    /// The ranks as they are, for a compaction that does not merge them.
+    pub(crate) fn ranks(&self) -> &NameRanks {
+        &self.ranks
+    }
+
+    /// Where the folded bytes of live name `id` sort among every name's, as
+    /// one number: 2 × its rank for a ranked name. An unranked name takes
+    /// 2 × r when its folded bytes equal those of the nearest live ranked name
+    /// not greater than them, whose rank is r, and 2 × r + 1 when they are
+    /// greater, with r = 0 when there is no such name. So a smaller key always
+    /// means smaller folded bytes, and unranked names between the same two
+    /// ranked names share a key.
+    ///
+    /// A key fits in a `u32`: every name takes at least its NUL in the folded
+    /// arena, which stays under 2 GiB, so a rank stays under 2^31.
+    pub(crate) fn name_key(&self, id: NameId) -> u32 {
+        let rank = self.ranks.rank[id as usize];
+        if rank != 0 {
+            return 2 * rank;
+        }
+        let folded = self.folded_bytes_of(id);
+        let order = &self.ranks.by_rank;
+        let live = |at: usize| self.refcount[order[at] as usize] > 0;
+        // Every live name before `lo` is not greater than `folded`, and every
+        // live name from `hi` on is greater. A dead name's bytes are zero, so
+        // the search steps over it to the next live name.
+        let (mut lo, mut hi) = (0, order.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match (mid..hi).find(|&at| live(at)) {
+                Some(at) if self.folded_bytes_of(order[at]) <= folded => lo = at + 1,
+                _ => hi = mid,
+            }
+        }
+        match (0..lo).rev().find(|&at| live(at)).map(|at| order[at]) {
+            Some(below) => {
+                let equal = self.folded_bytes_of(below) == folded;
+                2 * self.ranks.rank[below as usize] + u32::from(!equal)
+            }
+            None => 1,
+        }
     }
 
     pub(crate) fn raw_mem(&self) -> ComponentBytes {
@@ -377,13 +533,16 @@ impl NameStore {
         ComponentBytes::of_vec(&self.folded)
     }
 
-    /// Per-name table bytes (pairs + refcounts + chain heads + intern table).
+    /// Per-name table bytes (pairs + refcounts + chain heads + ranks + intern
+    /// table).
     pub(crate) fn tables_mem(&self) -> ComponentBytes {
         let intern_per = (size_of::<NameId>() + 1) as u64;
         let intern_buckets = ((self.by_bytes.capacity() as u64 * 8) / 7).next_power_of_two();
         ComponentBytes::of_vec(&self.pairs)
             + ComponentBytes::of_vec(&self.refcount)
             + ComponentBytes::of_vec(&self.head)
+            + ComponentBytes::of_vec(&self.ranks.rank)
+            + ComponentBytes::of_vec(&self.ranks.by_rank)
             + ComponentBytes {
                 used: self.by_bytes.len() as u64 * intern_per,
                 allocated: intern_buckets * intern_per,
@@ -410,6 +569,7 @@ impl NameStore {
         shrink_vec(&mut self.pairs);
         shrink_vec(&mut self.refcount);
         shrink_vec(&mut self.head);
+        shrink_vec(&mut self.ranks.rank);
         let Self {
             by_bytes,
             pairs,

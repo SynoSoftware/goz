@@ -1749,3 +1749,101 @@ proptest! {
         prop_assert!(idx.folder_sizes_match_rebuild());
     }
 }
+
+// -- name ranks -------------------------------------------------------------
+
+/// A rename that keeps an entry's name keeps its name id, and with it the
+/// name's rank. Releasing first would kill a unique name and intern an
+/// unranked copy of it, so moves alone would make the ranks go stale.
+#[test]
+fn a_move_keeps_the_name_id_of_a_uniquely_named_file() {
+    let mut idx = index_from_enum(&[
+        create(frn(100), root_frn(), "a", true),
+        create(frn(101), root_frn(), "b", true),
+        create(frn(102), frn(100), "unique.txt", false),
+    ]);
+    let id = idx.name_id(idx.head_of(frn(102)).unwrap());
+    idx.apply_batch(&[rename(frn(102), frn(101), "unique.txt", false)]);
+    assert_eq!(idx.name_id(idx.head_of(frn(102)).unwrap()), id);
+    assert_eq!(
+        path_of_frn(&idx, frn(102)).as_deref(),
+        Some(r"b\unique.txt")
+    );
+}
+
+/// One change to a name store in [`name_keys_follow_the_folded_byte_order`].
+#[derive(Clone, Debug)]
+enum NameChange {
+    Intern(String),
+    /// Drops one reference to a name.
+    Release(prop::sample::Index),
+    Merge,
+    Compact,
+}
+
+fn name_change_strategy() -> impl Strategy<Value = NameChange> {
+    prop_oneof![
+        3 => "[aAbB~ ]{0,3}".prop_map(NameChange::Intern),
+        2 => any::<prop::sample::Index>().prop_map(NameChange::Release),
+        1 => Just(NameChange::Merge),
+        1 => Just(NameChange::Compact),
+    ]
+}
+
+proptest! {
+    /// The name keys order names as their folded bytes compare, after names
+    /// are added and released, with merges and compactions between, or a
+    /// sort by name prints rows out of the result order. A name added since
+    /// the last merge may share its key with its neighbors, which the tie
+    /// runs then order; after a merge every name is ranked, and the keys
+    /// order the names exactly as their folded bytes do. `~` sorts after
+    /// every letter and the space before them, and `A` folds to `a`.
+    #[test]
+    fn name_keys_follow_the_folded_byte_order(
+        first in prop::collection::vec("[aAbB~ ]{0,3}", 0..30),
+        changes in prop::collection::vec(name_change_strategy(), 0..40),
+    ) {
+        let mut names = store::NameStore::new();
+        // One id for each reference held.
+        let mut held: Vec<store::NameId> =
+            first.iter().map(|n| names.intern(n.as_bytes())).collect();
+        names.install_ranks(names.plan_ranks());
+        for change in &changes {
+            let mut exact = false;
+            match change {
+                NameChange::Intern(name) => held.push(names.intern(name.as_bytes())),
+                NameChange::Release(at) if !held.is_empty() => {
+                    names.release(held.swap_remove(at.index(held.len())));
+                }
+                NameChange::Release(_) => {}
+                NameChange::Merge => {
+                    names.install_ranks(names.plan_ranks());
+                    exact = true;
+                }
+                NameChange::Compact => {
+                    let remap = names.install_compacted(names.plan_compact(names.ranks()));
+                    for id in &mut held {
+                        *id = remap[*id as usize];
+                    }
+                }
+            }
+            for &a in &held {
+                for &b in &held {
+                    let folded = names.folded_bytes_of(a).cmp(names.folded_bytes_of(b));
+                    let keys = names.name_key(a).cmp(&names.name_key(b));
+                    if exact {
+                        prop_assert_eq!(keys, folded);
+                    } else {
+                        prop_assert!(
+                            keys == folded || keys == core::cmp::Ordering::Equal,
+                            "{:?} against {:?}",
+                            names.raw_bytes(a),
+                            names.raw_bytes(b),
+                        );
+                        prop_assert!(folded != core::cmp::Ordering::Equal || keys == folded);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -101,6 +101,9 @@ fn dirty_index() -> VolumeIndex {
         }
     }
 
+    // As a build leaves it, so the churn makes the ranks stale too.
+    idx.rank_names();
+
     // Churn: renames leave the old name dead in the arena, deletes tombstone a
     // whole chain.
     let mut batch = Vec::new();

@@ -385,11 +385,6 @@ impl FolderCopy {
         self.names.push_name(name)
     }
 
-    /// The folders copied so far.
-    pub(crate) fn names(&self) -> &ResultNames {
-        &self.names
-    }
-
     pub(crate) fn finish(self) -> ResultNames {
         self.names
     }

@@ -18,8 +18,8 @@ use gozler_core::proto::{
     VolumeMemory, VolumeStatus, encode_response_frame,
 };
 use gozler_core::query::{
-    CompiledQuery, MatchSums, OrderedHits, SizeOverflow, Totals, VolumeRun, order_hits,
-    resolve_scope, run_query_deferrable, run_totals,
+    CompiledQuery, IndexChanged, MatchSums, OrderedHits, SizeOverflow, Totals, VolumeRun,
+    find_matches, order_hits, resolve_scope, run_totals,
 };
 use gozler_core::scope::Scope;
 use gozler_core::types::EntryIdx;
@@ -347,26 +347,8 @@ fn stream_rows(
 ) {
     let per_vol_limit = rows.limit.map(|l| rows.offset.saturating_add(l));
 
-    // A limited query orders INSIDE the lock only when the limit actually
-    // slices the match set: picking which `per_vol_limit` matches survive
-    // needs the index, and only that many paths are then reconstructed.
-    //
-    // When the page covers every match there is nothing to pick, so ordering
-    // is pure post-processing over owned rows and every sort key comes from
-    // the hit itself (`order_hits` touches no index). A large sort under the
-    // read lock blocks this volume's tail thread from applying any journal
-    // record for the whole sort; doing it after the guard drops blocks nobody.
-    //
-    // Which case applies depends on the match count, which is not known
-    // until the scan has run, so the executor decides and reports back via
-    // `outcome.sorted`. Testing `limit.is_none()` here instead would send a
-    // client asking for everything as a number (`-n 4294967295`, or any limit
-    // at or above the match count) down the in-lock path, bringing back the
-    // stall the deferral prevents.
-    let mut total: u64 = 0;
-    let mut sums = rows.want_sums.then(MatchSums::default);
-    let (runs, coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
-        let outcome = run_query_deferrable(
+    let (found, mut coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
+        let matches = find_matches(
             index,
             vol.mount_prefix(),
             query,
@@ -375,19 +357,33 @@ fn stream_rows(
             per_vol_limit,
             rows.want_sums,
         );
-        total += outcome.total;
-        if let (Some(sums), Some(volume)) = (sums.as_mut(), outcome.sums) {
-            sums.add(volume);
-        }
-        VolumeRun {
-            mount_prefix: vol.mount_prefix(),
-            hits: outcome.hits,
-            names: outcome.names,
-            sorted: outcome.sorted,
-        }
+        (vol, matches)
     });
+    let mut total: u64 = 0;
+    let mut sums = rows.want_sums.then(MatchSums::default);
+    let mut runs = Vec::with_capacity(found.len());
+    for (vol, matches) in found {
+        // Off the lock, so the journal does not wait for the sort.
+        let ordered = matches.order();
+        match ordered.read_hits(vol.read().index()) {
+            Ok(outcome) => {
+                total += outcome.total;
+                if let (Some(sums), Some(volume)) = (sums.as_mut(), outcome.sums) {
+                    sums.add(volume);
+                }
+                runs.push(VolumeRun {
+                    mount_prefix: vol.mount_prefix(),
+                    hits: outcome.hits,
+                    names: outcome.names,
+                });
+            }
+            // A rebuild replaced the index meanwhile, or new Include
+            // settings moved its entries, so this volume's rows are lost.
+            Err(IndexChanged) => coverage.volumes_incomplete = true,
+        }
+    }
 
-    // Off every lock: sort the deferred runs and merge the volumes.
+    // Off every lock: merge the volumes.
     let OrderedHits { hits, names } = order_hits(rows.sort, runs);
     let start = (rows.offset as usize).min(hits.len());
     let end = rows
@@ -1094,43 +1090,6 @@ mod tests {
             .collect()
     }
 
-    /// A limit at or above the match count means "everything", so it must return
-    /// exactly what no limit returns, in the same order, under every sort key
-    /// and direction.
-    ///
-    /// The deferral that makes the covering-limit case cheap changes WHERE the
-    /// ordering happens (off the index lock instead of under it). This pins that
-    /// it does not change WHAT comes back.
-    #[test]
-    fn a_covering_limit_returns_the_same_page_as_no_limit() {
-        use gozler_core::types::SortDir;
-        let vols = set(&[volume(r"C:\", merge_index(), VolumePhase::Live)]);
-        for key in [
-            SortKey::Name,
-            SortKey::Path,
-            SortKey::Size,
-            SortKey::DateModified,
-        ] {
-            for dir in [SortDir::Asc, SortDir::Desc] {
-                let page = |limit| {
-                    let mut q = query("log");
-                    q.sort = SortSpec { key, dir };
-                    q.limit = limit;
-                    paths(&encode_query_binary(&vols, q))
-                };
-                let unlimited = page(None);
-                assert!(!unlimited.is_empty(), "fixture must produce hits");
-                for limit in [u32::MAX, unlimited.len() as u32, unlimited.len() as u32 + 1] {
-                    assert_eq!(
-                        page(Some(limit)),
-                        unlimited,
-                        "{key:?}/{dir:?}: -n {limit} covers the set and must equal no limit"
-                    );
-                }
-            }
-        }
-    }
-
     fn hello_request(proto_min: u16, proto_max: u16) -> Request {
         Request::Hello {
             proto_min,
@@ -1236,9 +1195,7 @@ mod tests {
     }
 
     /// `-n K` prints the first K rows of the same query without `-n`, under
-    /// every sort, on one volume and across two. The limited query orders in
-    /// the engine under the lock; the unlimited one is deferred and ordered
-    /// after it, and with two volumes the runs are merged.
+    /// every sort, on one volume and across two, whose runs are merged.
     #[test]
     fn a_limited_query_is_a_prefix_of_the_unlimited_one() {
         use gozler_core::types::SortDir;

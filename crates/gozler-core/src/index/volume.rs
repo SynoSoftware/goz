@@ -21,8 +21,8 @@
 //!   folder's size costs no memory and no walk of its contents.
 
 use super::store::{
-    ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId, NamePair, NameStore,
-    SIZE_UNKNOWN, hash_bytes, moved,
+    CompactedNames, ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId,
+    NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved,
 };
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::include::VolumeRules;
@@ -33,6 +33,7 @@ use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod include;
 use include::Screen;
@@ -51,6 +52,13 @@ const PLACEHOLDER_NAME: &[u8] = b"$Placeholder";
 /// record; never appears in a USN record).
 const LOST_FOUND_FRN: Frn = Frn(u64::MAX as u128);
 
+/// The instance the next index takes ([`VolumeIndex::instance`]).
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_instance() -> u64 {
+    NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Maximum parent hops before [`VolumeIndex::path_of`] declares a cycle. Deep
 /// but bounded; real NTFS trees are far shallower.
 pub(crate) const MAX_PATH_HOPS: usize = 4096;
@@ -60,7 +68,14 @@ pub(crate) const MAX_PATH_HOPS: usize = 4096;
 /// Opaque: only [`VolumeIndex::plan_compaction`] makes one and only
 /// [`VolumeIndex::apply_compaction`] consumes it, so a plan can never be applied
 /// to an index it was not built from.
-pub struct CompactPlan(crate::index::store::CompactedNames);
+pub struct CompactPlan(Compaction);
+
+enum Compaction {
+    /// New name arenas, which carry the ranks, merged when they were stale.
+    Arenas(CompactedNames),
+    /// Merged ranks over the current arenas.
+    Ranks(NameRanks),
+}
 
 /// One resolved hard link: the containing directory's entry plus the link
 /// name. Passed to [`VolumeIndex::reconcile_links`] by the daemon after it
@@ -175,8 +190,9 @@ pub struct ApplyOutcome {
     pub needs_walk: Vec<Frn>,
     /// Irregularities worth logging.
     pub anomalies: Vec<Anomaly>,
-    /// The name arenas are dirty enough to be worth compacting. The caller
-    /// should [`VolumeIndex::plan_compaction`] off the write lock and then
+    /// The name arenas are dirty enough to be worth compacting, or the name
+    /// ranks stale enough to merge. The caller should
+    /// [`VolumeIndex::plan_compaction`] off the write lock and then
     /// [`VolumeIndex::apply_compaction`].
     pub wants_compact: bool,
 }
@@ -206,6 +222,9 @@ pub struct VolumeIndex {
     by_frn: FrnMap,
     root: EntryIdx,
     lost_found: EntryIdx,
+    /// Which index this is, among every index of the process; see
+    /// [`Self::instance`].
+    instance: u64,
     generation: u64,
     stats: IndexStats,
     /// Set by [`Self::compute_folder_sizes`].
@@ -279,6 +298,7 @@ impl VolumeIndex {
             by_frn,
             root,
             lost_found,
+            instance: next_instance(),
             generation: 0,
             stats: IndexStats::default(),
             folder_sizes: FolderSizes::Unknown,
@@ -305,6 +325,14 @@ impl VolumeIndex {
 
     pub fn root(&self) -> EntryIdx {
         self.root
+    }
+
+    /// A number that no other index of the process has had, and that changes
+    /// when the entries get new indexes. While it stays the same, an entry
+    /// index names the same slot, though the slot may have died or been
+    /// reused since.
+    pub(crate) fn instance(&self) -> u64 {
+        self.instance
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -423,7 +451,8 @@ impl VolumeIndex {
 
     /// Applies a batch of journal records, returning the side effects the
     /// daemon must service. Bumps the generation once and reports through
-    /// [`ApplyOutcome::wants_compact`] whether the arenas need compacting.
+    /// [`ApplyOutcome::wants_compact`] whether the arenas need compacting or
+    /// the name ranks need a merge.
     pub fn apply_batch(&mut self, records: &[ParsedUsnRecord]) -> ApplyOutcome {
         let mut outcome = ApplyOutcome::default();
         let mut screening = self.include.clone().map(include::Screening::new);
@@ -503,7 +532,7 @@ impl VolumeIndex {
         self.generation += 1;
         // Compaction is NOT performed here: it is reported so the caller can do
         // the expensive part off the write lock, where it would block queries.
-        outcome.wants_compact = self.names.should_compact();
+        outcome.wants_compact = self.names.should_compact() || self.names.ranks_stale();
         outcome
     }
 
@@ -679,6 +708,11 @@ impl VolumeIndex {
             .find(|&d| self.folded_name(d) == folded_name.as_slice())
     }
 
+    /// Whether slot `idx` holds an entry.
+    pub(crate) fn is_live(&self, idx: EntryIdx) -> bool {
+        !self.entries.is_tombstone(idx)
+    }
+
     /// Read access to a live entry's fields (for the query engine / tests).
     pub fn entry(&self, idx: EntryIdx) -> EntryView<'_> {
         EntryView { index: self, idx }
@@ -704,6 +738,11 @@ impl VolumeIndex {
     #[cfg(test)]
     pub fn force_parent(&mut self, idx: EntryIdx, parent: EntryIdx) {
         self.entries.set_parent(idx, parent);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn name_id(&self, idx: EntryIdx) -> NameId {
+        self.entries.name_id(idx)
     }
 
     /// The invariant every mutation must preserve: the incrementally-maintained
@@ -1078,8 +1117,11 @@ impl VolumeIndex {
         // placeholder being filled in, and dir↔file transitions uniformly.
         self.dir_index_remove(idx);
         self.unlink_same_name(idx);
-        self.names.release(self.entries.name_id(idx));
+        // Interned before the old name is released, so an entry that keeps
+        // its name keeps its name id, and with it its rank.
+        let old = self.entries.name_id(idx);
         let id = self.names.intern(name);
+        self.names.release(old);
         self.entries.set_name_id(idx, id);
         self.link_same_name(idx, id);
         self.move_entry(idx, parent_idx);
@@ -1288,8 +1330,9 @@ impl VolumeIndex {
         self.by_frn.set(frn, kept[0]);
     }
 
-    /// Builds a compaction WITHOUT mutating the index, or `None` if the arenas
-    /// are not dirty enough to be worth it.
+    /// Builds a compaction WITHOUT mutating the index, or `None` if neither
+    /// the arenas are dirty enough nor the name ranks stale enough to be
+    /// worth it.
     ///
     /// Takes `&self` on purpose. This is the expensive half (it copies every
     /// live name into fresh arenas), so callers plan here, off the exclusive
@@ -1299,23 +1342,34 @@ impl VolumeIndex {
     /// The plan is only valid while the index has not changed, so hold an
     /// upgradable read across both calls: it keeps every writer out until it
     /// upgrades, so the plan cannot go stale whoever else writes.
+    ///
+    /// The plan also merges the name ranks when they are stale, sorting only
+    /// the names added since the ranks were made ([`Self::rank_names`]).
     pub fn plan_compaction(&self) -> Option<CompactPlan> {
-        if !self.names.should_compact() {
-            return None;
+        let ranks = self.names.ranks_stale().then(|| self.names.plan_ranks());
+        if self.names.should_compact() {
+            let ranks = ranks.as_ref().unwrap_or(self.names.ranks());
+            return Some(CompactPlan(Compaction::Arenas(
+                self.names.plan_compact(ranks),
+            )));
         }
-        Some(CompactPlan(self.names.plan_compact()))
+        ranks.map(|ranks| CompactPlan(Compaction::Ranks(ranks)))
     }
 
     /// Installs a [`CompactPlan`]: swaps in the compacted name storage and
-    /// rewrites every live entry's name id through the remap. Dead ids cannot
-    /// be referenced by construction (an id only dies when its refcount hits
-    /// zero, and each live entry holds a reference), so the remap lookup
-    /// always yields a live new id.
+    /// rewrites every live entry's name id through the remap, or swaps in the
+    /// merged ranks. Dead ids cannot be referenced by construction (an id only
+    /// dies when its refcount hits zero, and each live entry holds a
+    /// reference), so the remap lookup always yields a live new id.
     ///
     /// This is the half that must hold the exclusive lock: buffer swaps and
     /// column writes, no copying or hashing of names.
     pub fn apply_compaction(&mut self, plan: CompactPlan) {
-        let remap = self.names.install_compacted(plan.0);
+        let compacted = match plan.0 {
+            Compaction::Arenas(compacted) => compacted,
+            Compaction::Ranks(ranks) => return self.names.install_ranks(ranks),
+        };
+        let remap = self.names.install_compacted(compacted);
         for idx in 0..self.entries.capacity() as EntryIdx {
             if self.entries.is_tombstone(idx) {
                 continue;
@@ -1372,11 +1426,24 @@ impl VolumeIndex {
     /// One-shot storage optimization for a freshly bootstrapped volume:
     /// swap the FRN map to its cheaper dense backing when the record space
     /// allows it, then return all growth slack. Runs under the write lock; call
-    /// it once per volume, not per batch.
+    /// it once per volume, not per batch. It can give the entries new indexes,
+    /// so the index takes a new instance, which tells a search that its
+    /// matches no longer name these entries.
     pub fn optimize_storage(&mut self) {
+        self.instance = next_instance();
         self.compact_entries();
         self.by_frn.densify_if_smaller();
         self.shrink_to_fit();
+    }
+
+    /// Ranks every name by its folded bytes, so a search sorts its matches by
+    /// numbers. A build calls it once, before it shares the index, because it
+    /// sorts every distinct name. A name added later stays unranked, which a
+    /// search places by a binary search, until [`Self::plan_compaction`]
+    /// merges it in.
+    pub fn rank_names(&mut self) {
+        let ranks = self.names.plan_ranks();
+        self.names.install_ranks(ranks);
     }
 
     /// Moves the live entries over the slots that removed entries left, so
@@ -1415,6 +1482,13 @@ impl VolumeIndex {
     #[inline]
     pub fn folded_name(&self, idx: EntryIdx) -> &[u8] {
         self.names.folded_bytes_of(self.entries.name_id(idx))
+    }
+
+    /// Where this entry's folded name sorts among every name of the index
+    /// ([`NameStore::name_key`]).
+    #[inline]
+    pub(crate) fn name_key(&self, idx: EntryIdx) -> u32 {
+        self.names.name_key(self.entries.name_id(idx))
     }
 
     /// The interned pairs, indexed by [`NameId`], `folded.off` ascending: the

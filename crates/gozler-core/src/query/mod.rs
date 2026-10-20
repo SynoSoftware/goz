@@ -17,8 +17,9 @@ pub(crate) mod wildcard;
 
 pub use dates::{DateRange, QueryStart};
 pub use engine::{
-    CompiledQuery, MatchSums, MatchedParts, QueryHit, QueryOutcome, SizeOverflow, Totals,
-    extension, resolve_scope, run_query, run_query_deferrable, run_totals,
+    CompiledQuery, IndexChanged, MatchSums, MatchedParts, Matches, OrderedMatches, QueryHit,
+    QueryOutcome, SizeOverflow, Totals, extension, find_matches, resolve_scope, run_query,
+    run_totals,
 };
 pub use order::{OrderedHits, VolumeRun, order_hits};
 pub use parse::{

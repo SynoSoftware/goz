@@ -148,6 +148,7 @@ fn main() {
 
     let before = idx.memory();
     idx.optimize_storage();
+    idx.rank_names();
     let after = idx.memory();
 
     // Live churn after the trim: 3% more entries with new names (one npm

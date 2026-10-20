@@ -14,7 +14,7 @@ mod measure;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::query::{CompiledQuery, parse_query, run_query, run_query_deferrable};
+use gozler_core::query::{CompiledQuery, parse_query, run_query};
 use gozler_core::types::{Frn, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::hint::black_box;
@@ -90,6 +90,7 @@ fn build_index() -> (VolumeIndex, usize) {
             }
         }
     }
+    idx.rank_names();
     (idx, count)
 }
 
@@ -190,46 +191,6 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
         });
     }
 
-    // The export lock-hold question: of the work above, how much has to happen
-    // while the volume's index READ lock is held?
-    //
-    // "sort inside" runs the whole thing, including the O(n log n) sort of ~2M
-    // rows, under the lock, so the tail thread could not apply a single journal
-    // record for its whole duration.
-    //
-    // "sort outside (locked part)" is what the daemon holds the lock for. The
-    // difference is the stall removed from live updates. The sort still
-    // happens, just after the guard drops.
-    {
-        let parsed = compiled("document");
-        broad.bench_function("common(document) LOCKED: sort inside (old)", |b| {
-            b.iter(|| {
-                let out = run_query(
-                    black_box(&idx),
-                    r"C:\",
-                    black_box(&parsed),
-                    None,
-                    SortSpec::default(),
-                    None,
-                );
-                black_box(out.hits.len())
-            })
-        });
-        broad.bench_function("common(document) LOCKED: sort outside (new)", |b| {
-            b.iter(|| {
-                let out = run_query_deferrable(
-                    black_box(&idx),
-                    r"C:\",
-                    black_box(&parsed),
-                    None,
-                    SortSpec::default(),
-                    None,
-                    false,
-                );
-                black_box(out.hits.len())
-            })
-        });
-    }
     broad.finish();
 }
 
