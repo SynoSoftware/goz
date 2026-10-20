@@ -896,14 +896,22 @@ impl MainWindow {
             .iter()
             .map(ListButton::needs_administrator)
             .collect();
-        controls.message.hwnd().set_text(text);
+        // Setting a control's text takes the window manager's lock also
+        // when the text is the same, and every resize comes through here.
+        let set_text = |control: Hwnd, text: &str| {
+            if control.text() != text {
+                control.set_text(text);
+            }
+        };
+        set_text(controls.message.hwnd(), text);
         for (index, button) in controls.message_buttons.iter().enumerate() {
-            button
-                .hwnd()
-                .set_text(buttons.get(index).map_or("", String::as_str));
+            set_text(button.hwnd(), buttons.get(index).map_or("", String::as_str));
             button.set_shield(shields.get(index).copied().unwrap_or(false));
         }
-        self.place_message(text, buttons, &shields);
+        // A hidden message is placed when it shows again.
+        if message.is_some() {
+            self.place_message(text, buttons, &shields);
+        }
         controls.message.hwnd().set_visible(message.is_some());
         for (index, button) in controls.message_buttons.iter().enumerate() {
             button.hwnd().set_visible(index < buttons.len());
@@ -935,10 +943,9 @@ impl MainWindow {
                 &widths,
             )
         };
-        controls.message.hwnd().set_rect(text);
-        for (button, rect) in controls.message_buttons.iter().zip(rects) {
-            button.hwnd().set_rect(rect);
-        }
+        let mut moves = vec![(controls.message.hwnd(), text)];
+        moves.extend(controls.message_buttons.iter().map(|b| b.hwnd()).zip(rects));
+        win::move_children(&moves);
     }
 
     /// Places every control where `Layout::compute` says (DESIGN.md:
@@ -957,37 +964,50 @@ impl MainWindow {
             &metrics.captions,
             &panes,
         );
-        controls.search.hwnd().set_rect(layout.search);
-        controls.clear_search.hwnd().set_rect(layout.clear_search);
-        controls.match_label.hwnd().set_rect(layout.match_label);
-        // A drop-down list's height includes its open list.
-        controls.match_mode.hwnd().set_rect(Rect {
-            height: Px(layout.match_mode.height.0 * 10),
-            ..layout.match_mode
-        });
-        controls.match_case.hwnd().set_rect(layout.match_case);
-        controls.match_path.hwnd().set_rect(layout.match_path);
+        let mut moves = vec![
+            (controls.search.hwnd(), layout.search),
+            (controls.clear_search.hwnd(), layout.clear_search),
+            (controls.match_label.hwnd(), layout.match_label),
+            // A drop-down list's height includes its open list.
+            (
+                controls.match_mode.hwnd(),
+                Rect {
+                    height: Px(layout.match_mode.height.0 * 10),
+                    ..layout.match_mode
+                },
+            ),
+            (controls.match_case.hwnd(), layout.match_case),
+            (controls.match_path.hwnd(), layout.match_path),
+            (controls.list.hwnd(), layout.list),
+        ];
+        if let Some(filters) = &layout.filters {
+            moves.push((controls.filters.pane, filters.pane));
+        }
+        let inspector = &controls.inspector;
+        if let Some(placed) = &layout.inspector {
+            moves.push((inspector.heading.hwnd(), placed.heading));
+            moves.extend(
+                inspector
+                    .buttons
+                    .iter()
+                    .map(|b| b.hwnd())
+                    .zip(placed.buttons),
+            );
+            for ((label, value), (label_rect, value_rect)) in
+                inspector.fields.iter().zip(&placed.fields)
+            {
+                moves.push((label.hwnd(), *label_rect));
+                moves.push((value.hwnd(), *value_rect));
+            }
+            if let Some(note) = placed.note {
+                moves.push((inspector.note.hwnd(), note));
+            }
+        }
+        win::move_children(&moves);
         if let Some(filters) = &layout.filters {
             self.place_filters(filters, self.filter_scroll.get());
         }
         controls.filters.pane.set_visible(layout.filters.is_some());
-        controls.list.hwnd().set_rect(layout.list);
-        let inspector = &controls.inspector;
-        if let Some(placed) = &layout.inspector {
-            inspector.heading.hwnd().set_rect(placed.heading);
-            for (button, rect) in inspector.buttons.iter().zip(placed.buttons) {
-                button.hwnd().set_rect(rect);
-            }
-            for ((label, value), (label_rect, value_rect)) in
-                inspector.fields.iter().zip(&placed.fields)
-            {
-                label.hwnd().set_rect(*label_rect);
-                value.hwnd().set_rect(*value_rect);
-            }
-            if let Some(note) = placed.note {
-                inspector.note.hwnd().set_rect(note);
-            }
-        }
         let shown = layout.inspector.is_some();
         inspector.heading.hwnd().set_visible(shown);
         for button in inspector.buttons {
@@ -1000,26 +1020,31 @@ impl MainWindow {
         hwnd.invalidate();
     }
 
-    /// Places the pane and its controls for the scroll position nearest
-    /// `position` that `filters` allows.
+    /// Places the pane's controls for the scroll position nearest
+    /// `position` that `filters` allows; [`Self::layout`] places the pane.
     fn place_filters(&self, filters: &FilterLayout, position: Px) {
         let pane = &self.created().controls.filters;
         let position = filters.scrolled(position, ScrollRequest::To(position));
         self.filter_scroll.set(position);
-        pane.pane.set_rect(filters.pane);
-        for (control, rect, drop_down) in pane.placed(filters) {
-            // A drop-down list's height includes its open list.
-            let height = if drop_down {
-                Px(rect.height.0 * 12)
-            } else {
-                rect.height
-            };
-            control.set_rect(Rect {
-                y: rect.y - position,
-                height,
-                ..rect
-            });
-        }
+        let moves: Vec<(Hwnd, Rect)> = pane
+            .placed(filters)
+            .into_iter()
+            .map(|(control, rect, drop_down)| {
+                // A drop-down list's height includes its open list.
+                let height = if drop_down {
+                    Px(rect.height.0 * 12)
+                } else {
+                    rect.height
+                };
+                let rect = Rect {
+                    y: rect.y - position,
+                    height,
+                    ..rect
+                };
+                (control, rect)
+            })
+            .collect();
+        win::move_children(&moves);
         pane.pane
             .set_vertical_scroll(filters.content_height, filters.pane.height, position);
     }
