@@ -7,6 +7,7 @@
 //! readable (never buffering the body) and stays poisoned afterwards.
 
 use super::types::{Request, Response};
+use crate::query::ResultNames;
 
 /// Length-prefix size in bytes.
 const PREFIX_LEN: usize = 4;
@@ -182,11 +183,17 @@ pub fn encode_response_frame(resp: &Response, out: &mut Vec<u8>) {
 
 /// Decodes one tagged response frame (as popped from [`FrameDecoder`]),
 /// dispatching on the leading tag byte to JSON or the binary results codec.
-pub fn decode_response_frame(frame: &[u8]) -> Result<Response, RespFrameError> {
+/// `names` holds the folders that the reply's earlier results pages sent, as
+/// [`decode_results_payload`](super::binary::decode_results_payload) reads
+/// them; a new reply starts with an empty one.
+pub fn decode_response_frame(
+    frame: &[u8],
+    names: &mut ResultNames,
+) -> Result<Response, RespFrameError> {
     match frame.split_first() {
         Some((&super::binary::RESP_TAG_JSON, body)) => Ok(serde_json::from_slice(body)?),
         Some((&super::binary::RESP_TAG_RESULTS, body)) => Ok(Response::Results(
-            super::binary::decode_results_payload(body)?,
+            super::binary::decode_results_payload(body, names)?,
         )),
         Some((&tag, _)) => Err(RespFrameError::UnknownTag(tag)),
         None => Err(RespFrameError::Empty),

@@ -12,6 +12,7 @@ use gozler_core::proto::{
     QueryTotals, Request, Response, SERVICE_NAME, SearchRequest, decode_response_frame,
     encode_request,
 };
+use gozler_core::query::ResultNames;
 use gozler_winfs::ServiceState;
 
 use crate::{CancelToken, ClientError, NotRunning};
@@ -59,6 +60,8 @@ pub struct Client {
     pipe: File,
     /// Bytes read past the last whole response.
     decoder: FrameDecoder,
+    /// The folders that the current reply's results pages have sent.
+    names: ResultNames,
     buf: Vec<u8>,
     cancel: CancelToken,
 }
@@ -139,6 +142,7 @@ impl Client {
         let mut client = Self {
             pipe,
             decoder: FrameDecoder::new(MAX_SERVER_FRAME),
+            names: ResultNames::default(),
             // Heap, and larger than one 64 KiB pipe read: a broad query
             // streams hundreds of MB, so fewer, bigger reads cut syscall
             // overhead, and the main thread's 1 MiB stack stays safe.
@@ -256,6 +260,8 @@ impl Client {
     /// Writes one request. It never waits for the daemon: a request is a few
     /// hundred bytes, and the pipe holds 64 KiB that the daemon has not read.
     fn send(&mut self, request: &Request) -> Result<(), ClientError> {
+        // Every reply names only the folders it sent itself.
+        self.names = ResultNames::default();
         let mut out = Vec::new();
         encode_request(request, &mut out);
         self.pipe
@@ -275,7 +281,7 @@ impl Client {
             }
             match self.decoder.next_frame() {
                 Ok(Some(frame)) => {
-                    return decode_response_frame(&frame)
+                    return decode_response_frame(&frame, &mut self.names)
                         .map_err(|e| ClientError::Communication(e.to_string()));
                 }
                 Ok(None) => {}

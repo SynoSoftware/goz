@@ -194,12 +194,14 @@ error, and finding them then takes a full run for each.
 - **Truthful volume state.** A client must always be able to tell whether its
   results are complete. Read the coherence section of `docs/DESIGN.md` before
   you change how the index tracks a volume.
-- **The wire protocol.** An installed daemon and a newer client must still
-  talk. Read `gozler_core::proto::types` and `gozler_core::proto::binary` before you
-  change a payload. Results pages are positional binary, so any change to the
-  item layout breaks older clients. A new JSON field gets `#[serde(default)]`,
-  so messages from older peers still parse, and its default means what an
-  older peer's silence means.
+- **The wire protocol.** **Owner ruling:** gozlerd serves only its own
+  protocol version, of gozler or of goz, and refuses any other at `Hello`,
+  because `gozler` and `gozlerd` install together from one build, and a
+  layout kept for an old client would bind every later change. So a payload
+  change raises `PROTO_VERSION` and keeps no old form. Read
+  `gozler_core::proto::types` and `gozler_core::proto::binary` before you
+  change a payload; no result carries its full path, because a path grows
+  with the folder depth.
 - **The pipe trust check.** Read `docs/SECURITY.md` before you change the pipe,
   elevation or the server-owner check.
 - **The installed goz.** The goz on this machine (service `goz`, pipe

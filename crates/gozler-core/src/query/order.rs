@@ -14,17 +14,19 @@
 //! rebuilt to break a tie.
 
 use super::engine::{QueryHit, extension};
+use super::paths::ResultNames;
 use crate::types::{Frn, SortDir, SortKey, SortSpec};
 use core::cmp::Ordering;
+use core::ops::Range;
 
 /// What the result order reads from one hit. The engine reads it from the
 /// index, [`order_hits`] from keys computed once per hit.
 pub(crate) trait OrderFields {
     /// Read only by [`SortKey::Extension`]: a folder has no extension.
     fn is_dir(&self) -> bool;
-    /// The folded full path of the hit's parent folder. Read only by
+    /// The [`folder_ranks`] rank of the hit's parent folder. Read only by
     /// [`SortKey::Path`].
-    fn folded_parent(&self) -> &[u8];
+    fn folder_rank(&self) -> u32;
     fn folded_name(&self) -> &[u8];
     fn size(&self) -> Option<u64>;
     fn mtime(&self) -> Option<i64>;
@@ -44,8 +46,8 @@ pub(crate) fn compare<T: OrderFields>(sort: SortSpec, a: &T, b: &T) -> Ordering 
         SortKey::Name => directed(sort.dir, a.folded_name().cmp(b.folded_name())),
         SortKey::Path => directed(
             sort.dir,
-            a.folded_parent()
-                .cmp(b.folded_parent())
+            a.folder_rank()
+                .cmp(&b.folder_rank())
                 .then_with(|| a.folded_name().cmp(b.folded_name())),
         ),
         SortKey::Size => unknown_last(sort.dir, a.size(), b.size()),
@@ -81,93 +83,237 @@ fn unknown_last<T: Ord>(dir: SortDir, a: Option<T>, b: Option<T>) -> Ordering {
     }
 }
 
+/// The rank of each folder of `names`, indexed by its
+/// [`FolderId`](super::FolderId), in the order of the folded full paths that
+/// [`SortKey::Path`] compares: two folders rank as their paths compare, and
+/// folders with equal paths, such as `A` and `a` in a case-sensitive folder,
+/// share a rank. Rank 0 is the empty path's: the root of a volume mounted
+/// nowhere has it, and every other folder ranks above it.
+///
+/// No path is built, so the cost grows with the folders, not with their
+/// depth. That order is not a walk of the tree in name order: `C:\a` sorts
+/// before `C:\a b`, which sorts before `C:\a\x`, because a space sorts before
+/// `\`. So among the folders in one folder, each sorts by two keys: its folded
+/// name followed by an end that sorts before every byte, for the folder
+/// itself, and its folded name followed by `\`, for the folders below it. A
+/// name holds no `\`, so no key is the start of another, and the keys order
+/// the folders exactly as their paths do. A volume's root is placed by each
+/// part of its mount prefix, so a volume mounted in a folder sorts among that
+/// folder's entries.
+pub(crate) fn folder_ranks(names: &ResultNames) -> Vec<u32> {
+    // The tree to rank: node 0 stands above the roots, then one node for each
+    // part of a root's name and one for each other folder. Folders with
+    // equal paths keep separate nodes; the walk merges them.
+    let mut folded = Vec::new();
+    let mut nodes = vec![RankNode {
+        parent: 0,
+        name: 0..0,
+    }];
+    let mut node_of: Vec<u32> = Vec::with_capacity(names.folder_count());
+    let mut push = |parent: u32, name: &[u8]| {
+        let start = folded.len();
+        crate::fold::fold_into(name, &mut folded);
+        nodes.push(RankNode {
+            parent,
+            name: start..folded.len(),
+        });
+        u32::try_from(nodes.len() - 1).expect("a rank node count fits in u32")
+    };
+    for position in 0..names.folder_count() {
+        let folder = names
+            .folder_at(position as u32)
+            .expect("position counts the table's folders");
+        let name = names.folder_name(folder);
+        let node = match names.parent(folder) {
+            Some(parent) => push(node_of[parent.index()], name),
+            // The root of a volume mounted nowhere has an empty name, and no
+            // separator comes before its entries' names, as under node 0.
+            None if name.is_empty() => 0,
+            None => name.split(|&b| b == b'\\').fold(0, &mut push),
+        };
+        node_of.push(node);
+    }
+
+    // Each node's children, listed together: those of node `n` are
+    // `children[first[n]..first[n + 1]]`.
+    let mut first = vec![0usize; nodes.len() + 1];
+    for node in &nodes[1..] {
+        first[node.parent as usize + 1] += 1;
+    }
+    for n in 1..first.len() {
+        first[n] += first[n - 1];
+    }
+    let mut children = vec![0u32; nodes.len() - 1];
+    let mut fill = first.clone();
+    for (id, node) in nodes.iter().enumerate().skip(1) {
+        let slot = &mut fill[node.parent as usize];
+        children[*slot] = id as u32;
+        *slot += 1;
+    }
+
+    // Walk the groups of nodes with equal paths in path order. A group lies
+    // in `members`; `tasks` holds the keys still to walk, the next on top.
+    let name = |node: u32| &folded[nodes[node as usize].name.clone()];
+    let mut ranks = vec![0u32; nodes.len()];
+    let mut next_rank = 1u32;
+    let mut members: Vec<u32> = vec![0];
+    let mut tasks = vec![(0..1, Part::Below)];
+    let mut keys = Vec::new();
+    while let Some((group, part)) = tasks.pop() {
+        if part == Part::Folder {
+            for &node in &members[group] {
+                ranks[node as usize] = next_rank;
+            }
+            next_rank += 1;
+            continue;
+        }
+        let start = members.len();
+        for at in group {
+            let node = members[at] as usize;
+            members.extend_from_slice(&children[first[node]..first[node + 1]]);
+        }
+        members[start..].sort_unstable_by(|&a, &b| name(a).cmp(name(b)));
+        let mut at = start;
+        while at < members.len() {
+            let run = name(members[at]);
+            let end = at + members[at..].partition_point(|&m| name(m) == run);
+            keys.push((at..end, Part::Folder));
+            keys.push((at..end, Part::Below));
+            at = end;
+        }
+        keys.sort_unstable_by(|(a, a_part), (b, b_part)| {
+            key_units(name(members[a.start]), *a_part)
+                .cmp(key_units(name(members[b.start]), *b_part))
+        });
+        tasks.extend(keys.drain(..).rev());
+    }
+    node_of.iter().map(|&node| ranks[node as usize]).collect()
+}
+
+struct RankNode {
+    parent: u32,
+    /// The folded name, in the walk's shared buffer.
+    name: Range<usize>,
+}
+
+/// Which of a folder's two keys in [`folder_ranks`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// The folder itself.
+    Folder,
+    /// The folders below it.
+    Below,
+}
+
+/// A [`folder_ranks`] key as units that compare as the key does: each byte
+/// of the folded name above 0, then the end of the folder or a `\`.
+fn key_units(name: &[u8], part: Part) -> impl Iterator<Item = u16> + '_ {
+    let last = match part {
+        Part::Folder => 0,
+        Part::Below => u16::from(b'\\') + 1,
+    };
+    name.iter()
+        .map(|&b| u16::from(b) + 1)
+        .chain(core::iter::once(last))
+}
+
 /// One volume's hits, as the engine returned them.
 pub struct VolumeRun<'a> {
     /// The volume's mount prefix; it tells volumes apart for the tie-break.
     pub mount_prefix: &'a str,
     pub hits: Vec<QueryHit>,
+    /// The folders and names of `hits`.
+    pub names: ResultNames,
     /// [`super::QueryOutcome::sorted`]: whether `hits` is already in result
     /// order.
     pub sorted: bool,
+}
+
+/// The hits of every volume in the result order, with the folders and names
+/// that all of them name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OrderedHits {
+    pub hits: Vec<QueryHit>,
+    pub names: ResultNames,
 }
 
 /// Puts the hits of one or more volumes into the result order.
 ///
 /// Runs no index code, so the caller calls it after releasing every index
 /// lock. Hits a run already holds in order cost a merge, not a full sort.
-pub fn order_hits(sort: SortSpec, mut runs: Vec<VolumeRun<'_>>) -> Vec<QueryHit> {
+pub fn order_hits(sort: SortSpec, mut runs: Vec<VolumeRun<'_>>) -> OrderedHits {
     runs.retain(|run| !run.hits.is_empty());
     if let [run] = runs.as_mut_slice()
         && run.sorted
     {
-        return std::mem::take(&mut run.hits);
+        return OrderedHits {
+            hits: std::mem::take(&mut run.hits),
+            names: std::mem::take(&mut run.names),
+        };
     }
     let volumes: Vec<&[u8]> = runs.iter().map(|r| r.mount_prefix.as_bytes()).collect();
-    let mut folded = Vec::new();
-    let mut keys = Vec::new();
+    let mut names = ResultNames::default();
     let mut hits = Vec::new();
+    let mut hit_volumes = Vec::new();
     for (volume, run) in runs.into_iter().enumerate() {
-        for hit in run.hits {
-            keys.push(HitKey::new(sort.key, volume, &hit, &mut folded));
-            hits.push(Some(hit));
-        }
+        let moved = names.append(run.names);
+        hits.extend(run.hits.into_iter().map(|hit| QueryHit {
+            folder: moved.folder(hit.folder),
+            name: moved.name(hit.name),
+            ..hit
+        }));
+        hit_volumes.resize(hits.len(), volume);
     }
+    let ranks = match sort.key {
+        SortKey::Path => folder_ranks(&names),
+        _ => Vec::new(),
+    };
+    let mut folded = Vec::new();
+    let keys: Vec<HitKey> = hits
+        .iter()
+        .zip(&hit_volumes)
+        .map(|(hit, &volume)| {
+            let start = folded.len();
+            crate::fold::fold_into(names.name(hit.name), &mut folded);
+            HitKey {
+                volume,
+                folded_name: (start, folded.len()),
+            }
+        })
+        .collect();
     // Sort positions, not the hits: an export moves millions of rows, and a
     // hit is far larger than its position. The stable sort detects the
     // ascending runs that sorted volumes contribute and merges them.
     let mut order: Vec<usize> = (0..hits.len()).collect();
     let fields = |i: usize| Keyed {
         key: &keys[i],
-        hit: hits[i]
-            .as_ref()
-            .expect("every hit is present until the sort ends"),
+        hit: &hits[i],
+        names: &names,
         folded: &folded,
+        ranks: &ranks,
         volumes: &volumes,
     };
     order.sort_by(|&a, &b| compare(sort, &fields(a), &fields(b)));
-    order
-        .into_iter()
-        .map(|i| hits[i].take().expect("the order holds each hit once"))
-        .collect()
+    let hits = order.into_iter().map(|i| hits[i]).collect();
+    OrderedHits { hits, names }
 }
 
 /// A hit's folded keys, computed once so the sort does not fold on every
-/// comparison. The folded bytes live in one buffer shared by every hit.
+/// comparison. The folded names live in one buffer shared by every hit.
 struct HitKey {
     volume: usize,
-    /// Empty unless the sort key is [`SortKey::Path`], the only reader.
-    folded_parent: (usize, usize),
     folded_name: (usize, usize),
-    name_start: usize,
-}
-
-impl HitKey {
-    fn new(key: SortKey, volume: usize, hit: &QueryHit, folded: &mut Vec<u8>) -> Self {
-        let separator = hit.path.iter().rposition(|&b| b == b'\\');
-        let name_start = separator.map_or(0, |i| i + 1);
-        let mut push = |bytes: &[u8]| {
-            let start = folded.len();
-            crate::fold::fold_into(bytes, folded);
-            (start, folded.len())
-        };
-        let folded_parent = match (key, separator) {
-            (SortKey::Path, Some(i)) => push(&hit.path[..i]),
-            _ => (0, 0),
-        };
-        Self {
-            volume,
-            folded_parent,
-            folded_name: push(&hit.path[name_start..]),
-            name_start,
-        }
-    }
 }
 
 /// A hit as the result order reads it in [`order_hits`].
 struct Keyed<'a> {
     key: &'a HitKey,
     hit: &'a QueryHit,
+    names: &'a ResultNames,
     folded: &'a [u8],
+    /// The [`folder_ranks`] of `names`; empty unless the sort key is
+    /// [`SortKey::Path`], the only reader.
+    ranks: &'a [u32],
     volumes: &'a [&'a [u8]],
 }
 
@@ -181,8 +327,8 @@ impl OrderFields for Keyed<'_> {
     fn is_dir(&self) -> bool {
         self.hit.is_dir
     }
-    fn folded_parent(&self) -> &[u8] {
-        self.bytes(self.key.folded_parent)
+    fn folder_rank(&self) -> u32 {
+        self.ranks[self.hit.folder.index()]
     }
     fn folded_name(&self) -> &[u8] {
         self.bytes(self.key.folded_name)
@@ -203,6 +349,63 @@ impl OrderFields for Keyed<'_> {
         self.hit.parent_frn
     }
     fn name(&self) -> &[u8] {
-        &self.hit.path[self.key.name_start..]
+        self.names.name(self.hit.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// The ranks must order folders exactly as their folded paths
+        /// compare, or a path sort prints rows out of es's order. The names
+        /// mix a space and `~`, which sort before and after `\`, and `A` with
+        /// `a`, which fold together; the roots include mounted volumes.
+        #[test]
+        fn ranks_order_folders_as_their_folded_paths(
+            roots in prop::collection::vec(
+                prop::sample::select(vec!["C:", r"C:\m", r"C:\m\a", "D:"]),
+                1..4,
+            ),
+            folders in prop::collection::vec(
+                (any::<prop::sample::Index>(), "[aAb ~]{1,3}"),
+                0..40,
+            ),
+        ) {
+            let mut names = ResultNames::default();
+            for root in &roots {
+                names.push_folder(None, root.as_bytes());
+            }
+            for (parent, name) in &folders {
+                let parent = names
+                    .folder_at(parent.index(names.folder_count()) as u32)
+                    .expect("the index is below the folder count");
+                names.push_folder(Some(parent), name.as_bytes());
+            }
+            let ranks = folder_ranks(&names);
+            let mut path = Vec::new();
+            let paths: Vec<Vec<u8>> = (0..names.folder_count())
+                .map(|position| {
+                    let folder = names.folder_at(position as u32).expect("in the table");
+                    names.folder_path_into(folder, &mut path);
+                    let mut key = Vec::new();
+                    crate::fold::fold_into(&path, &mut key);
+                    key
+                })
+                .collect();
+            for (a, a_path) in paths.iter().enumerate() {
+                for (b, b_path) in paths.iter().enumerate() {
+                    prop_assert_eq!(
+                        ranks[a].cmp(&ranks[b]),
+                        a_path.cmp(b_path),
+                        "{:?} against {:?}",
+                        String::from_utf8_lossy(a_path),
+                        String::from_utf8_lossy(b_path),
+                    );
+                }
+            }
+        }
     }
 }

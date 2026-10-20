@@ -109,13 +109,11 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
         None,
     );
 
-    let mut want: Vec<Vec<u8>> = unscoped
-        .hits
-        .iter()
-        .filter(|h| h.path.starts_with(b"downloads\\"))
-        .map(|h| h.path.clone())
+    let mut want: Vec<Vec<u8>> = full_paths(&unscoped)
+        .into_iter()
+        .filter(|path| path.starts_with(b"downloads\\"))
         .collect();
-    let mut got: Vec<Vec<u8>> = scoped.hits.iter().map(|h| h.path.clone()).collect();
+    let mut got = full_paths(&scoped);
     want.sort();
     got.sort();
     assert_eq!(
@@ -128,6 +126,18 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
         "scoped hits must equal prefix-filtered unscoped hits"
     );
     assert_eq!(got.len(), 50, "fixture sanity: 2 subdirs x 25 reports");
+}
+
+fn full_paths(out: &gozler_core::query::QueryOutcome) -> Vec<Vec<u8>> {
+    let mut path = Vec::new();
+    out.hits
+        .iter()
+        .map(|hit| {
+            out.names
+                .full_path_into(hit.folder, out.names.name(hit.name), &mut path);
+            path.clone()
+        })
+        .collect()
 }
 
 fn compiled(query: &str) -> gozler_core::query::CompiledQuery {

@@ -3,8 +3,7 @@
 //! through `parse_argv` and [`build_search`] into the request gozler sends, and
 //! that request through [`serve`](crate::server::serve), the daemon's request
 //! path; the rows printed, the warnings and the exit code then come from
-//! [`Answer`], as in gozler. One row also runs as protocol 1's text query,
-//! which the daemon parses itself.
+//! [`Answer`], as in gozler.
 //!
 //! A row records today's behavior, right or wrong. A row that a fix changed
 //! on purpose carries a comment with its bug number from the "Golden corpus"
@@ -17,7 +16,7 @@ use crate::volume_state::{Indexed, VolumeSet, VolumeState};
 use gozler_core::escompat::{Answer, Command, Count, EsPlan, build_search, parse_argv};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::layout::{LayoutFile, LayoutName};
-use gozler_core::proto::{ProtoError, QueryRequest, Request, Response, SearchRequest};
+use gozler_core::proto::{ProtoError, Request, Response, SearchRequest};
 use gozler_core::query::{QueryError, QueryStart};
 use gozler_core::types::{Frn, VolumePhase};
 use std::collections::HashMap;
@@ -862,16 +861,7 @@ fn search(plan: &EsPlan) -> Result<SearchRequest, QueryError> {
     build_search(plan, WORKING_DIR, &query_start())
 }
 
-/// The two ways a client sends a search.
-#[derive(Clone, Copy)]
-enum Protocol {
-    /// From protocol 2: the query parsed by gozler.
-    Parsed,
-    /// Protocol 1: the query text, which the daemon parses.
-    Text,
-}
-
-fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
+fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
     let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let plan = match parse_argv(&args) {
         Ok(Command::Run(plan)) => plan,
@@ -885,10 +875,7 @@ fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
         Err(e) => return Printed::QueryError(e.to_string()),
     };
     let mut answer = Answer::new(&plan, &search.query);
-    let request = match protocol {
-        Protocol::Parsed => Request::Search(search),
-        Protocol::Text => Request::Query(text_request(&plan, search.scope)),
-    };
+    let request = Request::Search(search);
     let mut paths = Vec::new();
     for frame in decode_frames(&reply_bytes(volumes, &request)) {
         match frame {
@@ -916,21 +903,6 @@ fn print(volumes: &VolumeSet, args: &[&str], protocol: Protocol) -> Printed {
     }
 }
 
-/// The request protocol 1's client sends for `plan`, with `scope` made
-/// absolute as gozler makes it.
-fn text_request(plan: &EsPlan, scope: Option<String>) -> QueryRequest {
-    QueryRequest {
-        query: plan.query.clone(),
-        scope,
-        sort: plan.sort,
-        offset: 0,
-        limit: plan.row_limit(),
-        want_size: true,
-        want_mtime: true,
-        match_case: plan.match_case,
-    }
-}
-
 fn fixture() -> VolumeSet {
     set(&[
         volume(r"C:\", index(r"C:\", C_DRIVE), VolumePhase::Live),
@@ -945,7 +917,7 @@ fn every_row_prints_what_it_recorded() {
     let volumes = fixture();
     let mut changed = Vec::new();
     for (args, recorded) in rows() {
-        let printed = print(&volumes, args, Protocol::Parsed);
+        let printed = print(&volumes, args);
         if printed != recorded {
             changed.push(format!(
                 "{args:?}\n  recorded: {recorded:?}\n  printed:  {printed:?}"
@@ -957,34 +929,6 @@ fn every_row_prints_what_it_recorded() {
         "{} row(s) changed:\n{}",
         changed.len(),
         changed.join("\n")
-    );
-}
-
-/// The daemon still parses the text of a protocol 1 query, with the parser
-/// gozler runs, so the row prints the same through either protocol.
-#[test]
-fn the_text_path_prints_what_its_row_recorded() {
-    let args: &[&str] = &["report", "-n", "1"];
-    let (_, recorded) = rows()
-        .into_iter()
-        .find(|(row, _)| *row == args)
-        .expect("the row exists");
-    assert_eq!(print(&fixture(), args, Protocol::Text), recorded);
-}
-
-/// The daemon resolves a `dm:` in a protocol 1 query with its own clock and
-/// time zone, instead of refusing it for want of the client's. Every date in
-/// the fixture is before 9999 in any time zone, so the row does not depend on
-/// the machine.
-#[test]
-fn the_text_path_resolves_dates_with_the_daemons_clock() {
-    assert_eq!(
-        print(&fixture(), &["report", "dm:<9999-01-01"], Protocol::Text),
-        prints(&[
-            r"C:\repo\Report 2026.txt",
-            r"C:\repo\report.txt",
-            r"D:\backup\report.txt",
-        ])
     );
 }
 
@@ -1078,7 +1022,7 @@ fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
     let warning = "results may be incomplete: gozler could not read the sizes and dates on a \
                    volume in scope, so size and date tests and size totals leave those files \
                    out";
-    let outcome = |args: &[&str]| match print(&volumes, args, Protocol::Parsed) {
+    let outcome = |args: &[&str]| match print(&volumes, args) {
         Printed::Paths { warnings, exit, .. } => (warnings, exit),
         other => panic!("{args:?}: {other:?}"),
     };

@@ -20,8 +20,9 @@ pub use engine::{
     CompiledQuery, MatchSums, MatchedParts, QueryHit, QueryOutcome, SizeOverflow, Totals,
     extension, resolve_scope, run_query, run_query_deferrable, run_totals,
 };
-pub use order::{VolumeRun, order_hits};
+pub use order::{OrderedHits, VolumeRun, order_hits};
 pub use parse::{
     Clause, Kind, Malformed, ParseOptions, ParsedQuery, QueryError, SIZE_WORDS, SizeRange,
     SizeWord, Term, TermMatch, Test, parse_query, parse_query_with, regex_test,
 };
+pub use paths::{FolderId, NameRef, ResultNames};

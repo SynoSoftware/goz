@@ -16,17 +16,17 @@ use crate::types::{SortSpec, VolumePhase};
 
 /// Protocol version spoken by this build.
 ///
-/// A daemon serves every version from [`OLDEST_PROTO_VERSION`] up to this
-/// one: it answers a [`Request::Hello`] with the highest version both sides
-/// speak, and refuses with [`ProtoError::Unsupported`] when the ranges do not
-/// meet, rather than agreeing on a version one side cannot actually speak.
-/// The client asks for this version alone, so a daemon older than the client
-/// refuses it.
-pub const PROTO_VERSION: u16 = 8;
+/// A daemon answers a [`Request::Hello`] whose range holds this version, and
+/// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
+/// a version one side cannot actually speak. The client asks for this version
+/// alone, so a daemon of another build refuses it.
+pub const PROTO_VERSION: u16 = 9;
 
-/// The oldest protocol version a daemon of this build serves: protocol 1's
-/// clients send [`Request::Query`] without a `Hello`.
-pub const OLDEST_PROTO_VERSION: u16 = 1;
+/// The oldest protocol version a daemon of this build serves. **Owner
+/// ruling:** gozler serves no older protocol, of gozler or of goz, because
+/// `gozler` and `gozlerd` install together from one build, and an old layout
+/// kept for an old client would bind every later change.
+pub const OLDEST_PROTO_VERSION: u16 = PROTO_VERSION;
 
 /// The daemon's named pipe.
 pub const PIPE_NAME: &str = r"\\.\pipe\gozler-v1";
@@ -51,8 +51,7 @@ pub const PAGE_ROWS: u32 = 4096;
 #[serde(tag = "t")]
 pub enum Request {
     /// Version negotiation. The client sends it first, so a daemon that
-    /// cannot serve its requests refuses here instead of misreading them. The
-    /// daemon serves requests without one, as protocol 1's client sends none.
+    /// cannot serve its requests refuses here instead of misreading them.
     Hello {
         /// Lowest protocol version the client can speak.
         proto_min: u16,
@@ -61,44 +60,21 @@ pub enum Request {
         /// Human-readable client identifier (name/version), for logs.
         client: String,
     },
-    /// Protocol 1's search: query text that the daemon parses.
-    Query(QueryRequest),
     /// Ask for per-volume index status.
     Status,
-    /// From protocol 2: a search whose query the client parsed.
+    /// A search whose query the client parsed.
     Search(SearchRequest),
-    /// From protocol 8: an administrator saved the Include settings, so the
+    /// An administrator saved the Include settings, so the
     /// daemon reads them again and applies them when they changed. It reads
     /// them from where only an administrator can write, so any client may
     /// send this.
     SettingsSaved,
-    /// From protocol 8: how many entries the index would keep under these
+    /// How many entries the index would keep under these
     /// Include settings. Changes nothing.
     CountIncluded(IncludeSettings),
 }
 
-/// Parameters of one protocol 1 search, which the daemon still serves.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct QueryRequest {
-    /// The search string, which the daemon parses with
-    /// [`parse_query_with`](crate::query::parse_query_with), its own clock
-    /// and time zone, and no working directory.
-    pub query: String,
-    /// Optional scope folder (es `-path`), already absolutized by the client.
-    pub scope: Option<String>,
-    pub sort: SortSpec,
-    /// Number of leading matches to skip (pagination).
-    pub offset: u32,
-    /// Maximum matches to return; `None` = all.
-    pub limit: Option<u32>,
-    /// Populate [`ResultItem::size`] (skip the lookup otherwise).
-    pub want_size: bool,
-    /// Populate [`ResultItem::mtime_ft`] (skip the lookup otherwise).
-    pub want_mtime: bool,
-    pub match_case: bool,
-}
-
-/// One search, from protocol 2 on.
+/// One search.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: ParsedQuery,
@@ -132,12 +108,10 @@ pub struct Rows {
     pub want_size: bool,
     /// Populate [`ResultItem::mtime_ft`] (skip the lookup otherwise).
     pub want_mtime: bool,
-    /// Populate [`ResultItem::attributes`]. From protocol 6; without it,
-    /// each item is laid out as an older client reads it.
+    /// Populate [`ResultItem::attributes`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_attributes: bool,
-    /// Fill [`QueryResults::sums`]. An older daemon ignores it and sends
-    /// none.
+    /// Fill [`QueryResults::sums`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_sums: bool,
 }
@@ -179,7 +153,7 @@ pub enum Response {
     },
 }
 
-/// One page of matches for a [`QueryRequest`].
+/// One page of matches for a [`SearchRequest`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QueryResults {
     /// Full match count regardless of paging (es `totitems` semantics).
@@ -254,7 +228,6 @@ pub struct ResultItem {
     pub mtime_ft: Option<i64>,
     pub is_dir: bool,
     /// The attributes, as `FILE_ATTRIBUTE_*` bits; `None` = not requested.
-    /// From protocol 6.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub attributes: Option<Attributes>,
 }
@@ -411,7 +384,6 @@ pub enum ProtoError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{SortDir, SortKey};
     use crate::wtf8;
 
     fn rt_request(req: &Request) {
@@ -424,22 +396,6 @@ mod tests {
         let json = serde_json::to_string(resp).expect("serialize");
         let back: Response = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(&back, resp, "json: {json}");
-    }
-
-    fn sample_query() -> QueryRequest {
-        QueryRequest {
-            query: "*.rs size:>1kb".into(),
-            scope: Some(r"C:\src".into()),
-            sort: SortSpec {
-                key: SortKey::Size,
-                dir: SortDir::Desc,
-            },
-            offset: 128,
-            limit: Some(50),
-            want_size: true,
-            want_mtime: false,
-            match_case: true,
-        }
     }
 
     fn sample_items() -> Vec<ResultItem> {
@@ -473,299 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn request_query_round_trips() {
-        rt_request(&Request::Query(sample_query()));
-        // Minimal form too: no scope, no limit.
-        rt_request(&Request::Query(QueryRequest {
-            query: String::new(),
-            scope: None,
-            sort: SortSpec::default(),
-            offset: 0,
-            limit: None,
-            want_size: false,
-            want_mtime: false,
-            match_case: false,
-        }));
-    }
-
-    #[test]
     fn request_status_round_trips() {
         rt_request(&Request::Status);
-    }
-
-    /// A daemon of a later protocol must still read the requests of this
-    /// one, and this client must read the daemon's totals, so the JSON of
-    /// every protocol 2 shape is pinned here as a peer writes it.
-    #[test]
-    fn protocol_2_payloads_keep_their_json() {
-        use crate::query::{Clause, Kind, SizeRange, Term, Test};
-        let term = |negated, test| Term { negated, test };
-        let search = Request::Search(SearchRequest {
-            query: ParsedQuery {
-                clauses: vec![
-                    Clause {
-                        terms: vec![
-                            term(false, Test::Name("a".into())),
-                            term(true, Test::Path("b/c".into())),
-                        ],
-                    },
-                    Clause {
-                        terms: vec![
-                            term(false, Test::NameWildcard("*.d".into())),
-                            term(false, Test::PathWildcard("*/e/*".into())),
-                            term(false, Test::Extension(vec!["f".into()])),
-                            term(false, Test::Size(SizeRange { min: 1, max: 2 })),
-                            term(false, Test::Kind(Kind::Folder)),
-                        ],
-                    },
-                ],
-                match_case: true,
-            },
-            scope: Some("C:/x".into()),
-            returns: Returns::Rows(Rows {
-                sort: SortSpec::default(),
-                offset: 0,
-                limit: Some(20),
-                want_size: true,
-                want_mtime: false,
-                want_attributes: false,
-                want_sums: false,
-            }),
-        });
-        let search_json = concat!(
-            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
-            r#"{"negated":false,"test":{"Name":"a"}},"#,
-            r#"{"negated":true,"test":{"Path":"b/c"}}]},{"terms":["#,
-            r#"{"negated":false,"test":{"NameWildcard":"*.d"}},"#,
-            r#"{"negated":false,"test":{"PathWildcard":"*/e/*"}},"#,
-            r#"{"negated":false,"test":{"Extension":["f"]}},"#,
-            r#"{"negated":false,"test":{"Size":{"min":1,"max":2}}},"#,
-            r#"{"negated":false,"test":{"Kind":"Folder"}}]}],"match_case":true},"#,
-            r#""scope":"C:/x","returns":{"Rows":{"sort":{"key":"Name","dir":"Asc"},"#,
-            r#""offset":0,"limit":20,"want_size":true,"want_mtime":false}}}"#,
-        );
-        assert_eq!(
-            serde_json::to_string(&search).expect("serialize"),
-            search_json
-        );
-        assert_eq!(
-            serde_json::from_str::<Request>(search_json).expect("deserialize"),
-            search
-        );
-
-        let totals = concat!(
-            r#"{"t":"Search","query":{"clauses":[],"match_case":false},"#,
-            r#""scope":null,"returns":"Totals"}"#,
-        );
-        assert!(matches!(
-            serde_json::from_str::<Request>(totals).expect("deserialize"),
-            Request::Search(SearchRequest {
-                returns: Returns::Totals,
-                ..
-            })
-        ));
-
-        let reply = Response::Totals(QueryTotals {
-            count: 3,
-            size: 4,
-            volumes_incomplete: true,
-            metadata_pending: false,
-        });
-        let reply_json = concat!(
-            r#"{"t":"Totals","count":3,"size":4,"#,
-            r#""volumes_incomplete":true,"metadata_pending":false}"#,
-        );
-        assert_eq!(
-            serde_json::to_string(&reply).expect("serialize"),
-            reply_json
-        );
-        assert_eq!(
-            serde_json::from_str::<Response>(reply_json).expect("deserialize"),
-            reply
-        );
-    }
-
-    /// Protocol 3 adds the `parent:` test; a later daemon must still read it
-    /// as this client writes it.
-    #[test]
-    fn protocol_3_parent_test_keeps_its_json() {
-        use crate::query::{Clause, Test};
-        let search = Request::Search(SearchRequest {
-            query: ParsedQuery {
-                clauses: vec![Clause::single(Test::Parent(r"C:\repo".into()))],
-                match_case: false,
-            },
-            scope: None,
-            returns: Returns::Totals,
-        });
-        let json = concat!(
-            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
-            r#"{"negated":false,"test":{"Parent":"C:\\repo"}}]}],"match_case":false},"#,
-            r#""scope":null,"returns":"Totals"}"#,
-        );
-        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
-        assert_eq!(
-            serde_json::from_str::<Request>(json).expect("deserialize"),
-            search
-        );
-    }
-
-    /// Protocol 4 adds the whole-word and regular expression tests; a later
-    /// daemon must still read them as this client writes them.
-    #[test]
-    fn protocol_4_word_and_regex_tests_keep_their_json() {
-        use crate::query::{Clause, Term, Test};
-        let term = |test| Term {
-            negated: false,
-            test,
-        };
-        let search = Request::Search(SearchRequest {
-            query: ParsedQuery {
-                clauses: vec![Clause {
-                    terms: vec![
-                        term(Test::NameWholeWord("a".into())),
-                        term(Test::PathWholeWord(r"b\c".into())),
-                        term(Test::NameRegex("^d|e$".into())),
-                        term(Test::PathRegex(r"f\\g".into())),
-                    ],
-                }],
-                match_case: false,
-            },
-            scope: None,
-            returns: Returns::Totals,
-        });
-        let json = concat!(
-            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
-            r#"{"negated":false,"test":{"NameWholeWord":"a"}},"#,
-            r#"{"negated":false,"test":{"PathWholeWord":"b\\c"}},"#,
-            r#"{"negated":false,"test":{"NameRegex":"^d|e$"}},"#,
-            r#"{"negated":false,"test":{"PathRegex":"f\\\\g"}}]}],"match_case":false},"#,
-            r#""scope":null,"returns":"Totals"}"#,
-        );
-        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
-        assert_eq!(
-            serde_json::from_str::<Request>(json).expect("deserialize"),
-            search
-        );
-    }
-
-    /// Protocol 5 adds the date test, whose bounds are UTC FILETIMEs, and
-    /// the extension sort key; a later daemon must still read them as this
-    /// client writes them.
-    #[test]
-    fn protocol_5_date_test_and_extension_sort_keep_their_json() {
-        use crate::query::{Clause, DateRange, Test};
-        let search = Request::Search(SearchRequest {
-            query: ParsedQuery {
-                clauses: vec![Clause::single(Test::DateModified(DateRange {
-                    min: 134_000_000_000_000_000,
-                    max: i64::MAX,
-                }))],
-                match_case: false,
-            },
-            scope: None,
-            returns: Returns::Rows(Rows {
-                sort: SortSpec {
-                    key: SortKey::Extension,
-                    dir: SortDir::Desc,
-                },
-                offset: 0,
-                limit: None,
-                want_size: false,
-                want_mtime: true,
-                want_attributes: false,
-                want_sums: false,
-            }),
-        });
-        let json = concat!(
-            r#"{"t":"Search","query":{"clauses":[{"terms":[{"negated":false,"test":"#,
-            r#"{"DateModified":{"min":134000000000000000,"max":9223372036854775807}}}]}],"#,
-            r#""match_case":false},"scope":null,"returns":{"Rows":{"#,
-            r#""sort":{"key":"Extension","dir":"Desc"},"offset":0,"limit":null,"#,
-            r#""want_size":false,"want_mtime":true}}}"#,
-        );
-        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
-        assert_eq!(
-            serde_json::from_str::<Request>(json).expect("deserialize"),
-            search
-        );
-    }
-
-    /// Protocol 6 adds the attribute test, whose value is `FILE_ATTRIBUTE_*`
-    /// bits, and the request for attributes; a later daemon must still read
-    /// them as this client writes them, and refuses bits it does not index.
-    #[test]
-    fn protocol_6_attribute_test_and_request_keep_their_json() {
-        use crate::query::{Clause, Test};
-        let hidden_system = Attributes::from_letters("hs").expect("attribute letters");
-        let search = Request::Search(SearchRequest {
-            query: ParsedQuery {
-                clauses: vec![Clause::single(Test::Attributes(hidden_system))],
-                match_case: false,
-            },
-            scope: None,
-            returns: Returns::Rows(Rows {
-                sort: SortSpec::default(),
-                offset: 0,
-                limit: None,
-                want_size: false,
-                want_mtime: false,
-                want_attributes: true,
-                want_sums: false,
-            }),
-        });
-        let json = concat!(
-            r#"{"t":"Search","query":{"clauses":[{"terms":[{"negated":false,"#,
-            r#""test":{"Attributes":6}}]}],"match_case":false},"scope":null,"#,
-            r#""returns":{"Rows":{"sort":{"key":"Name","dir":"Asc"},"offset":0,"#,
-            r#""limit":null,"want_size":false,"want_mtime":false,"want_attributes":true}}}"#,
-        );
-        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
-        assert_eq!(
-            serde_json::from_str::<Request>(json).expect("deserialize"),
-            search
-        );
-        let sparse = json.replace(r#"{"Attributes":6}"#, r#"{"Attributes":512}"#);
-        assert!(serde_json::from_str::<Request>(&sparse).is_err());
-    }
-
-    /// Protocol 7 adds the word-start and name-start tests; a later daemon
-    /// must still read them as this client writes them.
-    #[test]
-    fn protocol_7_word_start_and_name_start_tests_keep_their_json() {
-        use crate::query::{Clause, Term, Test};
-        let term = |test| Term {
-            negated: false,
-            test,
-        };
-        let search = Request::Search(SearchRequest {
-            query: ParsedQuery {
-                clauses: vec![Clause {
-                    terms: vec![
-                        term(Test::NameWordStart("a".into())),
-                        term(Test::PathWordStart(r"b\c".into())),
-                        term(Test::NameStart("d".into())),
-                        term(Test::PathStart(r"C:\e".into())),
-                    ],
-                }],
-                match_case: false,
-            },
-            scope: None,
-            returns: Returns::Totals,
-        });
-        let json = concat!(
-            r#"{"t":"Search","query":{"clauses":[{"terms":["#,
-            r#"{"negated":false,"test":{"NameWordStart":"a"}},"#,
-            r#"{"negated":false,"test":{"PathWordStart":"b\\c"}},"#,
-            r#"{"negated":false,"test":{"NameStart":"d"}},"#,
-            r#"{"negated":false,"test":{"PathStart":"C:\\e"}}]}],"match_case":false},"#,
-            r#""scope":null,"returns":"Totals"}"#,
-        );
-        assert_eq!(serde_json::to_string(&search).expect("serialize"), json);
-        assert_eq!(
-            serde_json::from_str::<Request>(json).expect("deserialize"),
-            search
-        );
     }
 
     #[test]
@@ -932,13 +597,5 @@ mod tests {
                 ready: true
             }
         );
-
-        let req: Request = serde_json::from_str(
-            r#"{"t":"Query","query":"a","scope":null,"sort":{"key":"Name","dir":"Asc"},
-                "offset":0,"limit":null,"want_size":false,"want_mtime":false,
-                "match_case":false,"future_flag":true}"#,
-        )
-        .expect("nested extra field");
-        assert!(matches!(req, Request::Query(q) if q.query == "a"));
     }
 }

@@ -8,12 +8,14 @@
 //! then regular expressions of the name, then (only for survivors) scope
 //! ancestry and the clauses that test the full path. Full paths come from the
 //! `paths` module, which builds each folder's path once per query, so a path
-//! term costs one copy per candidate instead of a walk to the root.
+//! term costs one copy per candidate instead of a walk to the root. A hit
+//! holds no full path: it names its folder and its own name in the outcome's
+//! [`ResultNames`].
 
 use super::dates::DateRange;
-use super::order::{OrderFields, compare};
+use super::order::{OrderFields, compare, folder_ranks};
 use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
-use super::paths::{DirPaths, NameForm};
+use super::paths::{DirPaths, FolderCopy, FolderId, NameForm, NameRef, ResultNames};
 use super::wildcard::{CodePointBuf, Wildcard};
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::fold::fold;
@@ -27,11 +29,13 @@ use smallvec::SmallVec;
 use std::ops::Range;
 
 /// One matched entry. The daemon formats `mtime` for display.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueryHit {
-    /// Full path: the volume's mount prefix, then every folder and the name
-    /// (WTF-8).
-    pub path: Vec<u8>,
+    /// The folder that holds this name, in the [`ResultNames`] that came with
+    /// the hit.
+    pub folder: FolderId,
+    /// The entry's own name, in the same [`ResultNames`].
+    pub name: NameRef,
     /// File ID, shared by every hard link of the file.
     pub frn: Frn,
     /// File ID of the folder that holds this name.
@@ -57,6 +61,8 @@ pub struct QueryOutcome {
     pub sorted: bool,
     /// Every match's [`MatchSums`], when the caller asked for them.
     pub sums: Option<MatchSums>,
+    /// The folders and names of [`Self::hits`].
+    pub names: ResultNames,
 }
 
 /// How many matches are files and how many are folders, and the space each
@@ -779,8 +785,8 @@ impl<'a> Compared<'a> {
 /// millions of candidates.
 struct Candidate {
     idx: EntryIdx,
-    /// The parent folder's position in the path sort's folder list; filled
-    /// only for a path sort.
+    /// The parent folder's [`folder_ranks`] rank; filled only for a path
+    /// sort.
     folder: u32,
 }
 
@@ -990,7 +996,7 @@ fn run_query_impl(
 ) -> QueryOutcome {
     let Scan {
         mut candidates,
-        mut dirs,
+        mut folders,
         ..
     } = scan(index, mount_prefix, query, scope);
     let total = candidates.len() as u64;
@@ -1009,25 +1015,19 @@ fn run_query_impl(
     let sort = (!(allow_defer && end == candidates.len())).then_some(sort);
     let sorted = sort.is_some();
 
-    // Sort-by-path compares each candidate's folded parent path. Siblings share
-    // it, so each parent folder's path is built and stored once.
-    let mut folders = FolderPaths::default();
     if sort.is_some_and(|s| matches!(s.key, SortKey::Path)) {
-        let mut folded_dirs = DirPaths::new(index, NameForm::Folded, mount_prefix);
-        let mut stored: FxHashMap<EntryIdx, u32> = FxHashMap::default();
-        let mut path = Vec::new();
+        // The ranks order every copied folder at once, so every candidate's
+        // folder is copied first.
+        for c in &candidates {
+            folders.entry_folder(index, c.idx);
+        }
+        let ranks = folder_ranks(folders.names());
         for c in &mut candidates {
-            let parent = index.entry(c.idx).parent();
-            c.folder = *stored.entry(parent).or_insert_with(|| {
-                // A parent with no path leaves the key empty; the page drops
-                // the candidate.
-                folded_dirs.folder_path_into(index, parent, &mut path);
-                let start = folders.bytes.len();
-                folders.bytes.extend_from_slice(&path);
-                folders.spans.push((start, folders.bytes.len()));
-                // Fewer folders than entries, and an `EntryIdx` is a u32.
-                (folders.spans.len() - 1) as u32
-            });
+            // A candidate without a path ranks as an empty path; the page
+            // drops it.
+            c.folder = folders
+                .entry_folder(index, c.idx)
+                .map_or(0, |folder| ranks[folder.index()]);
         }
     }
 
@@ -1035,21 +1035,21 @@ fn run_query_impl(
     // result order (O(M)), then sort just that prefix (O(end log end)). This
     // avoids an O(M log M) sort of the entire match set on common queries.
     if let Some(sort) = sort {
-        order_top(index, &folders, &mut candidates, sort, end);
+        order_top(index, &mut candidates, sort, end);
     }
 
-    // Build paths only for the requested page. A broad result set holds
-    // millions of files under far fewer distinct folders, and `dirs` builds
-    // each folder's path once.
+    // Copy names only for the requested page. A broad result set holds
+    // millions of files under far fewer distinct folders, and `folders`
+    // copies each folder once.
     let mut hits = Vec::with_capacity(end);
     for c in &candidates[..end] {
-        let mut path = Vec::new();
-        if !dirs.full_path_into(index, c.idx, &mut path) {
+        let Some(folder) = folders.entry_folder(index, c.idx) else {
             continue; // no path; only possible when `has_orphans` was false
-        }
+        };
         let entry = index.entry(c.idx);
         hits.push(QueryHit {
-            path,
+            folder,
+            name: folders.push_name(entry.name()),
             frn: entry.frn(),
             parent_frn: index.entry(entry.parent()).frn(),
             is_dir: entry.is_dir(),
@@ -1064,6 +1064,7 @@ fn run_query_impl(
         hits,
         sorted,
         sums,
+        names: folders.finish(),
     }
 }
 
@@ -1076,9 +1077,9 @@ struct Scan<'q, 'i> {
     /// case; `None` when no clause tests the path.
     query_paths: Option<DirPaths>,
     path: Vec<u8>,
-    /// Raw folder paths. ONE memo, shared by the presentability check and the
-    /// page builder: both need exactly these paths.
-    dirs: DirPaths,
+    /// The hits' folders. ONE memo, shared by the presentability check, the
+    /// path sort and the page builder: all need exactly these folders.
+    folders: FolderCopy,
     scope_memo: FxHashMap<EntryIdx, bool>,
     scratch: Scratch,
     candidates: Vec<Candidate>,
@@ -1097,7 +1098,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             query_paths: (query.path_clauses < query.clauses.len())
                 .then(|| DirPaths::new(index, form, mount_prefix)),
             path: Vec::new(),
-            dirs: DirPaths::new(index, NameForm::Raw, mount_prefix),
+            folders: FolderCopy::new(index, mount_prefix),
             scope_memo: FxHashMap::default(),
             scratch: Scratch::default(),
             candidates: Vec::new(),
@@ -1148,9 +1149,9 @@ impl<'q, 'i> Scan<'q, 'i> {
         // Asks the very memo the page loop uses rather than re-deriving its
         // rules, so the two cannot drift. Gated on `has_orphans` because an
         // index with nothing under lost+found cannot contain an unpresentable
-        // entry, and the walk it guards is one path build per distinct parent
-        // folder, which a broad limited query would mostly never need.
-        if index.has_orphans() && !self.dirs.entry_has_path(index, idx) {
+        // entry, and the walk it guards copies every distinct parent folder,
+        // which a broad limited query would mostly never need.
+        if index.has_orphans() && self.folders.entry_folder(index, idx).is_none() {
             return None;
         }
 
@@ -1223,19 +1224,10 @@ fn in_scope(
     verdict
 }
 
-/// The folded paths of the path sort's parent folders, each stored once.
-#[derive(Default)]
-struct FolderPaths {
-    bytes: Vec<u8>,
-    /// Where each folder's path lies in `bytes`, by [`Candidate::folder`].
-    spans: Vec<(usize, usize)>,
-}
-
 /// A candidate as the result order reads it: straight from the index, so a
 /// tie-break key is loaded only when a comparison reaches it.
 struct Ranked<'a> {
     index: &'a VolumeIndex,
-    folders: &'a FolderPaths,
     candidate: &'a Candidate,
 }
 
@@ -1243,9 +1235,8 @@ impl OrderFields for Ranked<'_> {
     fn is_dir(&self) -> bool {
         self.index.entry(self.candidate.idx).is_dir()
     }
-    fn folded_parent(&self) -> &[u8] {
-        let (start, end) = self.folders.spans[self.candidate.folder as usize];
-        &self.folders.bytes[start..end]
+    fn folder_rank(&self) -> u32 {
+        self.candidate.folder
     }
     fn folded_name(&self) -> &[u8] {
         self.index.folded_name(self.candidate.idx)
@@ -1273,22 +1264,12 @@ impl OrderFields for Ranked<'_> {
 
 /// Places the top `end` candidates (by `sort`) in `cands[..end]`, sorted. Uses
 /// quickselect to partition when `end` is a small slice of a large match set.
-fn order_top(
-    index: &VolumeIndex,
-    folders: &FolderPaths,
-    cands: &mut [Candidate],
-    sort: SortSpec,
-    end: usize,
-) {
+fn order_top(index: &VolumeIndex, cands: &mut [Candidate], sort: SortSpec, end: usize) {
     if end == 0 {
         return;
     }
     let cmp = |a: &Candidate, b: &Candidate| {
-        let ranked = |candidate| Ranked {
-            index,
-            folders,
-            candidate,
-        };
+        let ranked = |candidate| Ranked { index, candidate };
         compare(sort, &ranked(a), &ranked(b))
     };
     // The result order is total, so stability is irrelevant: unstable sort
@@ -1504,10 +1485,7 @@ mod tests {
     fn run(idx: &VolumeIndex, query: &str) -> Vec<String> {
         let parsed = compiled(query);
         let out = run_query(idx, "", &parsed, None, SortSpec::default(), None);
-        out.hits
-            .iter()
-            .map(|h| crate::wtf8::to_string_lossy(&h.path))
-            .collect()
+        texts(&out)
     }
 
     #[test]
@@ -1585,11 +1563,7 @@ mod tests {
             SortSpec::default_for(SortKey::Size),
             None,
         );
-        let order: Vec<String> = by_size
-            .hits
-            .iter()
-            .map(|h| crate::wtf8::to_string_lossy(&h.path))
-            .collect();
+        let order: Vec<String> = texts(&by_size);
         assert_eq!(
             order,
             [
@@ -1636,11 +1610,7 @@ mod tests {
         let parsed = compiled("");
         let scope = resolve_scope(&idx, b"docs\\sub", false).unwrap();
         let out = run_query(&idx, "", &parsed, Some(scope), SortSpec::default(), None);
-        let paths: Vec<String> = out
-            .hits
-            .iter()
-            .map(|h| crate::wtf8::to_string_lossy(&h.path))
-            .collect();
+        let paths: Vec<String> = texts(&out);
         assert_eq!(paths, vec!["docs\\sub\\Report.PDF"]); // descendants only, not "docs\sub" itself
     }
 
@@ -1659,11 +1629,7 @@ mod tests {
             },
             None,
         );
-        let paths: Vec<String> = out
-            .hits
-            .iter()
-            .map(|h| crate::wtf8::to_string_lossy(&h.path))
-            .collect();
+        let paths: Vec<String> = texts(&out);
         // Root-level entries (empty parent) sort first, then docs\, then docs\sub\.
         assert_eq!(
             paths,
@@ -1797,10 +1763,7 @@ mod tests {
             SortSpec::default_for(SortKey::Path),
             None,
         );
-        out.hits
-            .iter()
-            .map(|h| crate::wtf8::to_string_lossy(&h.path))
-            .collect()
+        texts(&out)
     }
 
     /// A wildcard with a separator matches the whole full path, on every scan
@@ -2071,7 +2034,7 @@ mod tests {
             SortSpec::default_for(SortKey::Path),
             None,
         );
-        texts(&out.hits)
+        texts(&out)
     }
 
     /// The evaluator reads what the parser writes for `!` and `|`: a clause
@@ -2384,9 +2347,18 @@ mod tests {
         sorts
     }
 
-    fn texts(hits: &[QueryHit]) -> Vec<String> {
+    /// The full path of every hit of `out`, in its order.
+    fn texts(out: &QueryOutcome) -> Vec<String> {
+        paths_in(&out.hits, &out.names)
+    }
+
+    fn paths_in(hits: &[QueryHit], names: &ResultNames) -> Vec<String> {
+        let mut path = Vec::new();
         hits.iter()
-            .map(|h| crate::wtf8::to_string_lossy(&h.path))
+            .map(|h| {
+                names.full_path_into(h.folder, names.name(h.name), &mut path);
+                crate::wtf8::to_string_lossy(&path)
+            })
             .collect()
     }
 
@@ -2407,7 +2379,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            texts(&out.hits),
+            texts(&out),
             [
                 r"C:\P\a~qx7zv",
                 r"C:\P\a\link.qx7zv",
@@ -2428,11 +2400,7 @@ mod tests {
         for sort in all_sorts() {
             if matches!(sort.key, SortKey::Size | SortKey::DateModified) {
                 let out = run_query(&idx, r"C:\", &parsed, None, sort, None);
-                assert_eq!(
-                    texts(&out.hits).last().unwrap(),
-                    r"C:\P\a\x\qx7zv",
-                    "{sort:?}"
-                );
+                assert_eq!(texts(&out).last().unwrap(), r"C:\P\a\x\qx7zv", "{sort:?}");
             }
         }
     }
@@ -2447,22 +2415,24 @@ mod tests {
             let parsed = compiled(query);
             for sort in all_sorts() {
                 let deferred = run_query_deferrable(&idx, r"C:\", &parsed, None, sort, None, false);
-                let unlimited = order_hits(
+                let ordered = order_hits(
                     sort,
                     vec![VolumeRun {
                         mount_prefix: r"C:\",
                         hits: deferred.hits,
+                        names: deferred.names,
                         sorted: false,
                     }],
                 );
+                let unlimited = paths_in(&ordered.hits, &ordered.names);
                 assert_eq!(
-                    run_query(&idx, r"C:\", &parsed, None, sort, None).hits,
+                    texts(&run_query(&idx, r"C:\", &parsed, None, sort, None)),
                     unlimited,
                     "{query:?} {sort:?}: the engine and order_hits disagree"
                 );
                 for k in 0..=unlimited.len() {
                     let page = run_query(&idx, r"C:\", &parsed, None, sort, Some(k as u32));
-                    assert_eq!(page.hits, unlimited[..k], "{query:?} {sort:?} -n {k}");
+                    assert_eq!(texts(&page), unlimited[..k], "{query:?} {sort:?} -n {k}");
                 }
             }
         }
@@ -2487,13 +2457,15 @@ mod tests {
                         VolumeRun {
                             mount_prefix: prefix,
                             hits: out.hits,
+                            names: out.names,
                             sorted: out.sorted,
                         }
                     })
                     .collect();
-                let mut hits = order_hits(sort, runs);
-                hits.truncate(limit.map_or(usize::MAX, |k| k as usize));
-                hits
+                let ordered = order_hits(sort, runs);
+                let mut paths = paths_in(&ordered.hits, &ordered.names);
+                paths.truncate(limit.map_or(usize::MAX, |k| k as usize));
+                paths
             };
             let unlimited = merged(None);
             assert_eq!(unlimited.len(), 14);
@@ -2553,11 +2525,7 @@ mod tests {
             let query = terms.join(" ");
             let parsed = compiled(&query);
             let out = run_query(&idx, "", &parsed, None, SortSpec::default(), None);
-            let engine: BTreeSet<String> = out
-                .hits
-                .iter()
-                .map(|h| crate::wtf8::to_string_lossy(&h.path))
-                .collect();
+            let engine: BTreeSet<String> = texts(&out).into_iter().collect();
             prop_assert_eq!(engine, oracle(&uniq, &terms));
         }
 
@@ -2583,11 +2551,7 @@ mod tests {
             let term = format!("{before}\\{after}");
             let parsed = compiled(&term);
             let out = run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), None);
-            let engine: BTreeSet<String> = out
-                .hits
-                .iter()
-                .map(|h| crate::wtf8::to_string_lossy(&h.path))
-                .collect();
+            let engine: BTreeSet<String> = texts(&out).into_iter().collect();
 
             let needle = crate::fold::fold(term.as_bytes());
             let mut naive = BTreeSet::new();

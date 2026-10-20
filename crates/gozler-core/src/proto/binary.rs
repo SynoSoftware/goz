@@ -1,12 +1,16 @@
 //! Compact binary encoding for `Results` pages.
 //!
 //! JSON stays fine for the tiny control messages (Hello / Status / Error /
-//! every request), but a large result set ships millions of Windows paths and
-//! JSON charges for each one three times: escaping every `\` on encode,
-//! re-scanning every byte on parse, and a `String` allocation per item. A page
-//! is instead encoded as length-prefixed raw path bytes plus a flag byte, so
-//! the daemon encodes with `memcpy`s straight from its stored path bytes and the
-//! client reconstructs (or streams) paths without any JSON work.
+//! every request), but a large result set ships millions of names, and JSON
+//! would escape, re-scan and allocate each one. A page is instead encoded as
+//! length-prefixed raw name bytes and flag bytes.
+//!
+//! No item carries its full path. A reply sends each folder its items are in
+//! once, as its parent and its name, before the first item that needs it,
+//! and an item names its folder and carries only its own name. So the bytes
+//! of a reply grow with the names, not with the folder depth: on a volume of
+//! 2.15 million entries the pipe carries 73 MB instead of 251 MB of full
+//! paths, and a tree 200 folders deep costs no more per item than a flat one.
 //!
 //! One frame payload is `[tag: u8][body]`. The tag lets the client dispatch a
 //! frame without guessing: [`RESP_TAG_JSON`] bodies are JSON `Response`s (all
@@ -17,10 +21,18 @@
 //! generation: u64 LE
 //! page_flags: u8        bit0 more, bit1 volumes_incomplete, bit2 metadata_pending,
 //!                       bit3 has_sums
+//! folder_count: u32 LE  folders this page adds to the reply's folders
+//! folder_count folders, each:
+//!   parent:   u32 LE    the reply's id of its parent folder; u32::MAX for a
+//!                       volume's root
+//!   name_len: u32 LE
+//!   name:     name_len bytes   WTF-8; a root's name is its mount prefix
+//!                              without the last separator
 //! count:      u32 LE    items in this page
 //! count items, each:
-//!   path_len: u32 LE    raw path byte length (WTF-8, mount prefix included)
-//!   path:     path_len bytes
+//!   folder:   u32 LE    the reply's id of the item's folder
+//!   name_len: u32 LE
+//!   name:     name_len bytes   WTF-8
 //!   iflags:   u8        bit0 is_dir, bit1 has_size, bit2 has_mtime,
 //!                       bit3 has_attributes
 //!   size:     u64 LE    iff has_size
@@ -34,24 +46,23 @@
 //!   folder_bytes: u64 LE  0 when unknown
 //! ```
 //!
-//! The sums follow the items because a decoder before them stops reading
-//! after the last item, so a page that holds them still reads. The daemon
-//! sends them only when the request asks, with `want_sums`.
+//! A folder's id is its place among the folders the reply has sent, from 0,
+//! across all its pages, so the id itself is not sent. The decoder refuses a
+//! parent or an item folder that the reply has not sent yet, so a malformed
+//! page is an error and can never make a loop of folders.
 //!
-//! Items are positional, so a client that does not know a field misreads
-//! every item after the first that holds it. The daemon therefore sets
-//! has_attributes only when the request asks for attributes, which no client
-//! before protocol 6 does.
-//!
-//! Paths travel as raw WTF-8, exactly the bytes the daemon stored. The decoder
-//! lossy-decodes them to `ResultItem::path` and, when they were not valid UTF-8,
-//! reconstructs the exact UTF-16 into `path_u16` from the same bytes, so a page
-//! round-trips to the identical [`ResultItem`]s the JSON path produced.
+//! Names travel as raw WTF-8, exactly the bytes the daemon stored. The decoder
+//! joins them into the full path, lossy-decodes it to `ResultItem::path` and,
+//! when it was not valid UTF-8, reconstructs the exact UTF-16 into `path_u16`
+//! from the same bytes. A separator always sits between two names, so the
+//! join never splits a surrogate pair.
+
+use smallvec::SmallVec;
 
 use super::frame::{begin_frame, end_frame};
 use super::types::{MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem};
 use crate::attributes::Attributes;
-use crate::query::MatchSums;
+use crate::query::{FolderId, MatchSums, ResultNames};
 use crate::wtf8;
 
 /// Response frame tag: the body is a JSON [`super::Response`].
@@ -74,23 +85,59 @@ const IFLAG_HAS_SIZE: u8 = 1 << 1;
 const IFLAG_HAS_MTIME: u8 = 1 << 2;
 const IFLAG_HAS_ATTRIBUTES: u8 = 1 << 3;
 
+/// A folder's parent field for a volume's root.
+const NO_PARENT: u32 = u32::MAX;
+
 /// A truncated or malformed binary results page.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("malformed binary results page: {0}")]
 pub struct BinError(&'static str);
 
-/// One results page, built in place as a complete frame: the daemon
-/// [`push`](Self::push)es matched hits straight from their path bytes until
-/// the page refuses one, then [`finish`](Self::finish)es it and writes it to
-/// the pipe.
+/// The folders of a reply's [`ResultNames`] that its pages have sent, with
+/// the id each was sent under, so each folder travels once per reply.
+pub struct SentFolders {
+    ids: Vec<Option<u32>>,
+    next: u32,
+}
+
+impl SentFolders {
+    /// Nothing sent yet, for a reply whose items name folders of `names`.
+    pub fn new(names: &ResultNames) -> Self {
+        Self {
+            ids: vec![None; names.folder_count()],
+            next: 0,
+        }
+    }
+}
+
+/// One item of a results page.
+#[derive(Clone, Copy, Debug)]
+pub struct PageItem<'a> {
+    /// The folder that holds the item, in the reply's [`ResultNames`].
+    pub folder: FolderId,
+    /// The item's own name (WTF-8).
+    pub name: &'a [u8],
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    pub mtime: Option<i64>,
+    pub attributes: Option<Attributes>,
+}
+
+/// One results page, built as a complete frame: the daemon
+/// [`push`](Self::push)es items until the page refuses one, then
+/// [`finish`](Self::finish)es it and writes it to the pipe.
 pub struct ResultsPage {
+    /// The frame up to and including the folders.
     frame: Vec<u8>,
+    /// The items, which follow the folders and their count.
+    items: Vec<u8>,
     /// Where the payload starts in `frame`, after the length prefix.
     payload_at: usize,
-    /// Where the header's flags byte and item count sit in `frame`;
+    /// Where the header's flags byte and folder count sit in `frame`;
     /// [`finish`](Self::finish) fills in both.
     flags_at: usize,
-    count_at: usize,
+    folder_count_at: usize,
+    folder_count: u32,
     count: u32,
     /// Written after the items by [`finish`](Self::finish).
     sums: Option<MatchSums>,
@@ -106,10 +153,10 @@ impl ResultsPage {
         metadata_pending: bool,
         rows_left: usize,
     ) -> Self {
-        // ~96 bytes per row covers a typical path and its fields without a
+        // ~48 bytes per item covers a typical name and its fields without a
         // regrow mid-page.
         let rows = rows_left.min(PAGE_ROWS as usize);
-        let mut frame = Vec::with_capacity(rows * 96 + 64);
+        let mut frame = Vec::with_capacity(4096);
         // The buffer is empty, so the frame starts at 0, where `finish` ends it.
         begin_frame(&mut frame);
         let payload_at = frame.len();
@@ -125,13 +172,15 @@ impl ResultsPage {
         }
         let flags_at = frame.len();
         frame.push(flags);
-        let count_at = frame.len();
+        let folder_count_at = frame.len();
         frame.extend_from_slice(&0u32.to_le_bytes());
         Self {
             frame,
+            items: Vec::with_capacity(rows * 48),
             payload_at,
             flags_at,
-            count_at,
+            folder_count_at,
+            folder_count: 0,
             count: 0,
             sums: None,
         }
@@ -147,55 +196,81 @@ impl ResultsPage {
         self
     }
 
-    /// Appends one item, whose `raw_path` is its WTF-8 path bytes with the
-    /// mount prefix, or returns `false` and leaves the page unchanged when the
-    /// page is full: it holds [`PAGE_ROWS`] items, or the item would take its
-    /// payload past [`MAX_SERVER_FRAME`], the cap a client decodes with. An
-    /// empty page takes any item, so every page holds at least one; NTFS
-    /// limits a full path to far less than the cap.
+    /// Appends `item`, after each folder above it that `sent` says the reply
+    /// has not sent yet, or returns `false` and leaves the page and `sent`
+    /// unchanged when the page is full: it holds [`PAGE_ROWS`] items, or the
+    /// item and its new folders would take the payload past
+    /// [`MAX_SERVER_FRAME`], the cap a client decodes with. An empty page
+    /// takes any item, so every page holds at least one; the hop limit keeps
+    /// an item's folders far below the cap.
     pub fn push(
         &mut self,
-        raw_path: &[u8],
-        is_dir: bool,
-        size: Option<u64>,
-        mtime: Option<i64>,
-        attributes: Option<Attributes>,
+        item: PageItem<'_>,
+        names: &ResultNames,
+        sent: &mut SentFolders,
     ) -> bool {
         if self.count == PAGE_ROWS {
             return false;
         }
-        let before = self.frame.len();
-        self.frame
-            .extend_from_slice(&(raw_path.len() as u32).to_le_bytes());
-        self.frame.extend_from_slice(raw_path);
+        let (frame_before, items_before) = (self.frame.len(), self.items.len());
+        let (folders_before, next_before) = (self.folder_count, sent.next);
+
+        // The folders this item needs that the reply has not sent, nearest
+        // first; they are sent from the root down.
+        let mut unsent: SmallVec<[FolderId; 32]> = SmallVec::new();
+        let mut cur = Some(item.folder);
+        while let Some(folder) = cur
+            && sent.ids[folder.index()].is_none()
+        {
+            unsent.push(folder);
+            cur = names.parent(folder);
+        }
+        for &folder in unsent.iter().rev() {
+            let parent = names.parent(folder).map_or(NO_PARENT, |parent| {
+                sent.ids[parent.index()].expect("a folder's parent is sent before it")
+            });
+            push_named(&mut self.frame, parent, names.folder_name(folder));
+            sent.ids[folder.index()] = Some(sent.next);
+            sent.next += 1;
+            self.folder_count += 1;
+        }
+
+        let folder = sent.ids[item.folder.index()].expect("the item's folder is sent");
+        push_named(&mut self.items, folder, item.name);
         let mut iflags = 0u8;
-        if is_dir {
+        if item.is_dir {
             iflags |= IFLAG_IS_DIR;
         }
-        if size.is_some() {
+        if item.size.is_some() {
             iflags |= IFLAG_HAS_SIZE;
         }
-        if mtime.is_some() {
+        if item.mtime.is_some() {
             iflags |= IFLAG_HAS_MTIME;
         }
-        if attributes.is_some() {
+        if item.attributes.is_some() {
             iflags |= IFLAG_HAS_ATTRIBUTES;
         }
-        self.frame.push(iflags);
-        if let Some(s) = size {
-            self.frame.extend_from_slice(&s.to_le_bytes());
+        self.items.push(iflags);
+        if let Some(s) = item.size {
+            self.items.extend_from_slice(&s.to_le_bytes());
         }
-        if let Some(m) = mtime {
-            self.frame.extend_from_slice(&m.to_le_bytes());
+        if let Some(m) = item.mtime {
+            self.items.extend_from_slice(&m.to_le_bytes());
         }
-        if let Some(a) = attributes {
-            self.frame.extend_from_slice(&a.bits().to_le_bytes());
+        if let Some(a) = item.attributes {
+            self.items.extend_from_slice(&a.bits().to_le_bytes());
         }
+
         let trailer = if self.sums.is_some() { SUMS_LEN } else { 0 };
-        if self.count > 0
-            && self.frame.len() - self.payload_at + trailer > MAX_SERVER_FRAME as usize
-        {
-            self.frame.truncate(before);
+        let payload = self.frame.len() - self.payload_at + 4 + self.items.len() + trailer;
+        if self.count > 0 && payload > MAX_SERVER_FRAME as usize {
+            self.frame.truncate(frame_before);
+            self.items.truncate(items_before);
+            self.folder_count = folders_before;
+            for &folder in &unsent {
+                sent.ids[folder.index()] = None;
+            }
+            sent.next = next_before;
             return false;
         }
         self.count += 1;
@@ -208,8 +283,10 @@ impl ResultsPage {
         if more {
             self.frame[self.flags_at] |= FLAG_MORE;
         }
-        self.frame[self.count_at..self.count_at + size_of::<u32>()]
-            .copy_from_slice(&self.count.to_le_bytes());
+        self.frame[self.folder_count_at..self.folder_count_at + size_of::<u32>()]
+            .copy_from_slice(&self.folder_count.to_le_bytes());
+        self.frame.extend_from_slice(&self.count.to_le_bytes());
+        self.frame.extend_from_slice(&self.items);
         if let Some(sums) = self.sums {
             let mut known = 0u8;
             if sums.file_bytes.is_some() {
@@ -229,6 +306,14 @@ impl ResultsPage {
         end_frame(&mut self.frame, 0);
         self.frame
     }
+}
+
+/// Appends a folder or an item as the page lays both out: an id, then a
+/// length-prefixed name.
+fn push_named(out: &mut Vec<u8>, id: u32, name: &[u8]) {
+    out.extend_from_slice(&id.to_le_bytes());
+    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    out.extend_from_slice(name);
 }
 
 struct Reader<'a> {
@@ -263,22 +348,50 @@ impl<'a> Reader<'a> {
         self.pos = end;
         Ok(slice)
     }
+    fn name(&mut self) -> Result<&'a [u8], BinError> {
+        let len = self.u32()? as usize;
+        self.bytes(len)
+    }
 }
 
 /// Decodes a results-page frame payload (the bytes AFTER the tag byte) into a
-/// [`QueryResults`]. Each path is lossy-decoded to `path`, with `path_u16`
-/// reconstructed from the same bytes when they were not valid UTF-8, matching
-/// the paths the daemon encoded via [`ResultsPage`]. Bounds-checked against truncation.
-pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
+/// [`QueryResults`], adding the page's folders to `names`, which holds the
+/// folders of the reply's earlier pages: one `names` serves every page of a
+/// reply, in order, and a new reply starts with an empty one. Bounds-checked
+/// against truncation.
+pub fn decode_results_payload(
+    body: &[u8],
+    names: &mut ResultNames,
+) -> Result<QueryResults, BinError> {
     let mut r = Reader { buf: body, pos: 0 };
     let total = r.u64()?;
     let generation = r.u64()?;
     let flags = r.u8()?;
+    let folder_count = r.u32()?;
+    for _ in 0..folder_count {
+        let parent = match r.u32()? {
+            NO_PARENT => None,
+            parent => Some(
+                names
+                    .folder_at(parent)
+                    .ok_or(BinError("a folder's parent was not sent before it"))?,
+            ),
+        };
+        let name = r.name()?;
+        // An id must stay below NO_PARENT, which names no folder.
+        if names.folder_count() >= NO_PARENT as usize {
+            return Err(BinError("too many folders"));
+        }
+        names.push_folder(parent, name);
+    }
     let count = r.u32()? as usize;
-    let mut items = Vec::with_capacity(count.min(1 << 20));
+    let mut items = Vec::with_capacity(count.min(PAGE_ROWS as usize));
+    let mut path = Vec::new();
     for _ in 0..count {
-        let plen = r.u32()? as usize;
-        let path = r.bytes(plen)?;
+        let folder = names
+            .folder_at(r.u32()?)
+            .ok_or(BinError("an item's folder was not sent before it"))?;
+        let name = r.name()?;
         let iflags = r.u8()?;
         let size = (iflags & IFLAG_HAS_SIZE != 0)
             .then(|| r.u64())
@@ -291,10 +404,11 @@ pub fn decode_results_payload(body: &[u8]) -> Result<QueryResults, BinError> {
                 Attributes::try_from(r.u32()?).map_err(|_| BinError("unindexed attribute bits"))
             })
             .transpose()?;
-        let lossy = core::str::from_utf8(path).is_err();
+        names.full_path_into(folder, name, &mut path);
+        let lossy = core::str::from_utf8(&path).is_err();
         items.push(ResultItem {
-            path: wtf8::to_string_lossy(path),
-            path_u16: lossy.then(|| wtf8::to_utf16(path)),
+            path: wtf8::to_string_lossy(&path),
+            path_u16: lossy.then(|| wtf8::to_utf16(&path)),
             size,
             mtime_ft: mtime,
             is_dir: iflags & IFLAG_IS_DIR != 0,
@@ -337,46 +451,105 @@ mod tests {
         Attributes::from_letters("ha").expect("H and A are attribute letters")
     }
 
-    /// Decodes a finished page as a client does: through the frame decoder,
-    /// which checks the length prefix, and the tagged response decoder.
-    fn decode(frame: &[u8]) -> QueryResults {
-        let mut decoder = FrameDecoder::new(MAX_SERVER_FRAME);
-        decoder.feed(frame);
-        let payload = decoder
-            .next_frame()
-            .expect("under the cap")
-            .expect("one whole frame");
-        assert_eq!(decoder.next_frame(), Ok(None), "nothing after the frame");
-        match decode_response_frame(&payload).expect("decodes") {
-            Response::Results(page) => page,
-            other => panic!("expected a results page, got {other:?}"),
+    /// `C:\Windows\System32` and `D:\` as the names a daemon sends from.
+    struct Tree {
+        names: ResultNames,
+        c: FolderId,
+        system32: FolderId,
+        d: FolderId,
+    }
+
+    fn tree() -> Tree {
+        let mut names = ResultNames::default();
+        let c = names.push_folder(None, b"C:");
+        let windows = names.push_folder(Some(c), b"Windows");
+        let system32 = names.push_folder(Some(windows), b"System32");
+        let d = names.push_folder(None, b"D:");
+        Tree {
+            names,
+            c,
+            system32,
+            d,
         }
     }
 
-    /// [`ResultsPage`] fills in the more flag, the item count and the frame
+    fn item(folder: FolderId, name: &[u8]) -> PageItem<'_> {
+        PageItem {
+            folder,
+            name,
+            is_dir: false,
+            size: None,
+            mtime: None,
+            attributes: None,
+        }
+    }
+
+    /// Decodes the pages of one reply as a client does: through the frame
+    /// decoder, which checks the length prefix, and the tagged response
+    /// decoder, with one table of folders for the whole reply.
+    fn decode(frames: &[Vec<u8>]) -> Vec<QueryResults> {
+        let mut names = ResultNames::default();
+        frames
+            .iter()
+            .map(|frame| {
+                let mut decoder = FrameDecoder::new(MAX_SERVER_FRAME);
+                decoder.feed(frame);
+                let payload = decoder
+                    .next_frame()
+                    .expect("under the cap")
+                    .expect("one whole frame");
+                assert_eq!(decoder.next_frame(), Ok(None), "nothing after the frame");
+                match decode_response_frame(&payload, &mut names).expect("decodes") {
+                    Response::Results(page) => page,
+                    other => panic!("expected a results page, got {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    fn paths(page: &QueryResults) -> Vec<&str> {
+        page.items.iter().map(|item| item.path.as_str()).collect()
+    }
+
+    /// [`ResultsPage`] fills in the more flag, the counts and the frame
     /// length after the items; a slip there makes every client misread the
-    /// page. Every item field and page flag must come back as pushed.
+    /// page. Every item field and page flag must come back as pushed, with
+    /// its full path.
     #[test]
     fn mixed_items_round_trip() {
+        let t = tree();
+        let mut sent = SentFolders::new(&t.names);
         let mut page = ResultsPage::new(987_654, 42, true, true, 3);
         assert!(page.push(
-            br"C:\Windows\System32\kernel32.dll",
-            false,
-            Some(1234),
-            Some(133_500_000_000_000_000),
-            Some(hidden_archive()),
+            PageItem {
+                size: Some(1234),
+                mtime: Some(133_500_000_000_000_000),
+                attributes: Some(hidden_archive()),
+                ..item(t.system32, b"kernel32.dll")
+            },
+            &t.names,
+            &mut sent,
         ));
-        assert!(page.push(br"D:\folder", true, None, None, None));
         assert!(page.push(
-            "E:\\ünïcode\\文件.txt".as_bytes(),
-            false,
-            Some(0),
-            Some(-1),
-            None,
+            PageItem {
+                is_dir: true,
+                ..item(t.d, b"folder")
+            },
+            &t.names,
+            &mut sent,
+        ));
+        assert!(page.push(
+            PageItem {
+                size: Some(0),
+                mtime: Some(-1),
+                ..item(t.c, "ünïcode 文件.txt".as_bytes())
+            },
+            &t.names,
+            &mut sent,
         ));
         assert_eq!(
-            decode(&page.finish(true)),
-            QueryResults {
+            decode(&[page.finish(true)]),
+            [QueryResults {
                 total: 987_654,
                 items: vec![
                     ResultItem {
@@ -396,7 +569,7 @@ mod tests {
                         attributes: None,
                     },
                     ResultItem {
-                        path: "E:\\ünïcode\\文件.txt".into(),
+                        path: "C:\\ünïcode 文件.txt".into(),
                         path_u16: None,
                         size: Some(0),
                         mtime_ft: Some(-1),
@@ -409,26 +582,110 @@ mod tests {
                 metadata_pending: true,
                 generation: 42,
                 sums: None,
-            }
+            }]
         );
+    }
+
+    /// A folder travels once per reply: a later page names the folders an
+    /// earlier page sent, and its items still decode to their full paths.
+    /// Without the shared table a client would read every later page wrong.
+    #[test]
+    fn a_later_page_names_the_folders_an_earlier_page_sent() {
+        let t = tree();
+        let mut sent = SentFolders::new(&t.names);
+        let mut first = ResultsPage::new(2, 0, false, false, 1);
+        assert!(first.push(item(t.system32, b"a.dll"), &t.names, &mut sent));
+        let mut second = ResultsPage::new(2, 0, false, false, 1);
+        assert!(second.push(item(t.system32, b"b.dll"), &t.names, &mut sent));
+        let (first, second) = (first.finish(true), second.finish(false));
+        assert!(
+            second.len() < first.len(),
+            "the second page sends no folder"
+        );
+        let pages = decode(&[first, second]);
+        assert_eq!(paths(&pages[0]), [r"C:\Windows\System32\a.dll"]);
+        assert_eq!(paths(&pages[1]), [r"C:\Windows\System32\b.dll"]);
+    }
+
+    /// The bytes of a page with one root folder and one item, as a client
+    /// reads them: a slip in the order of the fields misreads every page.
+    #[test]
+    fn a_page_lays_out_its_folders_then_its_items() {
+        let mut names = ResultNames::default();
+        let root = names.push_folder(None, b"C:");
+        let mut sent = SentFolders::new(&names);
+        let mut page = ResultsPage::new(1, 0, false, false, 1);
+        assert!(page.push(
+            PageItem {
+                size: Some(2),
+                mtime: Some(3),
+                ..item(root, b"a")
+            },
+            &names,
+            &mut sent,
+        ));
+        let frame = page.finish(false);
+        #[rustfmt::skip]
+        let payload: &[u8] = &[
+            RESP_TAG_RESULTS,
+            1, 0, 0, 0, 0, 0, 0, 0, // total
+            0, 0, 0, 0, 0, 0, 0, 0, // generation
+            0, // page flags
+            1, 0, 0, 0, // folder count
+            0xff, 0xff, 0xff, 0xff, 2, 0, 0, 0, b'C', b':', // the root
+            1, 0, 0, 0, // item count
+            0, 0, 0, 0, 1, 0, 0, 0, b'a', // folder 0, name
+            0b110, // iflags: has_size, has_mtime
+            2, 0, 0, 0, 0, 0, 0, 0, // size
+            3, 0, 0, 0, 0, 0, 0, 0, // mtime
+        ];
+        assert_eq!(frame[4..], *payload);
+    }
+
+    /// A page whose item or folder names a folder the reply has not sent is
+    /// an error: decoding it would read an unrelated path, or a parent that
+    /// points forward could make a loop that never reaches a root.
+    #[test]
+    fn a_folder_the_reply_has_not_sent_is_an_error() {
+        let header = |folder_count: u32| {
+            let mut body = vec![0; 17]; // total, generation, flags
+            body.extend_from_slice(&folder_count.to_le_bytes());
+            body
+        };
+        // A folder whose parent is itself.
+        let mut looped = header(1);
+        looped.extend_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0, b'x']);
+        looped.extend_from_slice(&0u32.to_le_bytes());
+        // An item in folder 0 of a reply that sent none.
+        let mut orphan = header(0);
+        orphan.extend_from_slice(&1u32.to_le_bytes());
+        orphan.extend_from_slice(&[0, 0, 0, 0, 1, 0, 0, 0, b'x', 0]);
+        for body in [looped, orphan] {
+            assert!(decode_results_payload(&body, &mut ResultNames::default()).is_err());
+        }
     }
 
     #[test]
     fn lossy_path_round_trips_with_exact_units() {
         // A name with an unpaired high surrogate: the encoder ships the raw
         // WTF-8 bytes, the decoder flags it lossy and rebuilds the exact units.
-        let units: Vec<u16> = vec![b'C' as u16, b':' as u16, b'\\' as u16, 0xD800, b'x' as u16];
-        let mut wtf8_bytes = Vec::new();
-        wtf8::from_utf16(&units, &mut wtf8_bytes);
-        assert!(core::str::from_utf8(&wtf8_bytes).is_err());
+        let units: Vec<u16> = vec![b'x' as u16, 0xD800];
+        let mut name = Vec::new();
+        wtf8::from_utf16(&units, &mut name);
+        assert!(core::str::from_utf8(&name).is_err());
+        let mut names = ResultNames::default();
+        let root = names.push_folder(None, b"C:");
+        let mut sent = SentFolders::new(&names);
         let mut page = ResultsPage::new(1, 0, false, false, 1);
-        assert!(page.push(&wtf8_bytes, false, Some(7), None, None));
+        assert!(page.push(item(root, &name), &names, &mut sent));
+        let mut full = b"C:\\".to_vec();
+        full.extend_from_slice(&name);
         assert_eq!(
-            decode(&page.finish(false)).items,
+            decode(&[page.finish(false)])[0].items,
             [ResultItem {
-                path: wtf8::to_string_lossy(&wtf8_bytes),
-                path_u16: Some(units),
-                size: Some(7),
+                path: wtf8::to_string_lossy(&full),
+                path_u16: Some([&[b'C' as u16, b':' as u16, b'\\' as u16][..], &units].concat()),
+                size: None,
                 mtime_ft: None,
                 is_dir: false,
                 attributes: None,
@@ -436,31 +693,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn truncated_body_errors_not_panics() {
-        let mut page = ResultsPage::new(1, 0, false, false, 1);
-        assert!(page.push(br"C:\a.txt", false, Some(9), None, None));
-        let frame = page.finish(false);
-        // The body follows the length prefix and the tag byte. Chop bytes off
-        // its end at every length; none should panic.
-        let body = &frame[5..];
-        for cut in 0..body.len() {
-            let _ = decode_results_payload(&body[..cut]);
-        }
-    }
-
     proptest! {
         /// A results page arrives from the pipe, so any bytes can arrive, and
         /// a panic would end the client instead of reporting a bad page.
         #[test]
         fn corrupted_pages_error_instead_of_panicking(
-            paths in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..16), 0..4),
+            names in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..16), 0..4),
             patches in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
             cut in any::<prop::sample::Index>(),
         ) {
-            let mut page = ResultsPage::new(1, 2, false, false, paths.len());
-            for path in &paths {
-                prop_assert!(page.push(path, false, Some(3), Some(4), Some(hidden_archive())));
+            let t = tree();
+            let mut sent = SentFolders::new(&t.names);
+            let mut page = ResultsPage::new(1, 2, false, false, names.len());
+            for name in &names {
+                let full = PageItem {
+                    size: Some(3),
+                    mtime: Some(4),
+                    attributes: Some(hidden_archive()),
+                    ..item(t.system32, name)
+                };
+                prop_assert!(page.push(full, &t.names, &mut sent));
             }
             // The body follows the length prefix and the tag byte.
             let mut body = page.finish(true).split_off(5);
@@ -469,60 +721,29 @@ mod tests {
                 body[at.index(len)] = *byte;
             }
             body.truncate(cut.index(len + 1));
-            let _ = decode_results_payload(&body);
+            let _ = decode_results_payload(&body, &mut ResultNames::default());
         }
     }
 
-    /// A client of protocol 5 or older reads an item as its path, flags, size
-    /// and date, and the next item right after them. An item without
-    /// attributes must keep exactly the bytes that client reads, or it
-    /// misreads every item after the first.
+    /// The sums follow the items, and a client reads them back, an unknown
+    /// size as `None`.
     #[test]
-    fn an_item_without_attributes_keeps_the_protocol_5_layout() {
-        let mut page = ResultsPage::new(1, 0, false, false, 1);
-        assert!(page.push(br"C:\a", false, Some(2), Some(3), None));
-        let frame = page.finish(false);
-        #[rustfmt::skip]
-        let payload: &[u8] = &[
-            RESP_TAG_RESULTS,
-            1, 0, 0, 0, 0, 0, 0, 0, // total
-            0, 0, 0, 0, 0, 0, 0, 0, // generation
-            0, // page flags
-            1, 0, 0, 0, // item count
-            4, 0, 0, 0, b'C', b':', b'\\', b'a', // path
-            0b110, // iflags: has_size, has_mtime
-            2, 0, 0, 0, 0, 0, 0, 0, // size
-            3, 0, 0, 0, 0, 0, 0, 0, // mtime
-        ];
-        assert_eq!(frame[4..], *payload);
-    }
-
-    /// A client from before the sums reads a page's items and stops, so the
-    /// sums must follow the items, with every byte before them as that client
-    /// reads it but the flag it ignores. A client that knows them reads them
-    /// back, an unknown size as `None`.
-    #[test]
-    fn sums_follow_the_items_of_an_unchanged_page() {
+    fn sums_follow_the_items() {
         let sums = MatchSums {
             files: 3,
             file_bytes: Some(7),
             folders: 1,
             folder_bytes: None,
         };
+        let t = tree();
         let page = |sums: Option<MatchSums>| {
+            let mut sent = SentFolders::new(&t.names);
             let mut page = ResultsPage::new(1, 0, false, false, 1).with_sums(sums);
-            assert!(page.push(br"C:", false, Some(2), None, None));
+            assert!(page.push(item(t.c, b"a"), &t.names, &mut sent));
             page.finish(false)
         };
-        let (plain, with) = (page(None), page(Some(sums)));
-        // After the length prefix: the tag, the total and the generation,
-        // then the flags.
-        let flags = 4 + 1 + 8 + 8;
-        assert_eq!(with[4..flags], plain[4..flags]);
-        assert_eq!(with[flags], plain[flags] | FLAG_SUMS);
-        assert_eq!(with[flags + 1..plain.len()], plain[flags + 1..]);
-        let read = decode(&with);
-        assert_eq!(read.sums, Some(sums));
-        assert_eq!(read.items, decode(&plain).items);
+        let (plain, with) = (decode(&[page(None)]), decode(&[page(Some(sums))]));
+        assert_eq!(with[0].sums, Some(sums));
+        assert_eq!(with[0].items, plain[0].items);
     }
 }

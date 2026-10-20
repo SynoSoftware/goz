@@ -7,6 +7,11 @@
 //! and an entry's path is its folder's path, a separator and its name. Its
 //! cache is bounded, because the folders a local user creates decide how large
 //! it would grow.
+//!
+//! A query's results hold no full paths at all: each hit names its folder in
+//! a [`ResultNames`] table, which holds each folder once, as its parent and its
+//! name. So the results grow with the names, not with the folder depth, and
+//! the pipe sends each folder once in the same way.
 
 use crate::index::VolumeIndex;
 use crate::index::volume::MAX_PATH_HOPS;
@@ -63,7 +68,6 @@ pub(crate) struct DirPaths {
     /// Cached folders, and `None` for folders known to have no path. A folder
     /// missing here is not built yet, or has a path too long to cache.
     memo: FxHashMap<EntryIdx, Option<Folder>>,
-    scratch: Vec<u8>,
 }
 
 impl DirPaths {
@@ -87,7 +91,6 @@ impl DirPaths {
             arena,
             root: (index.root(), root),
             memo,
-            scratch: Vec::new(),
         }
     }
 
@@ -113,15 +116,6 @@ impl DirPaths {
                 false
             }
         }
-    }
-
-    /// Whether entry `idx` has a full path: exactly when
-    /// [`Self::full_path_into`] would build one.
-    pub(crate) fn entry_has_path(&mut self, index: &VolumeIndex, idx: EntryIdx) -> bool {
-        let mut scratch = std::mem::take(&mut self.scratch);
-        let has = self.full_path_into(index, idx, &mut scratch);
-        self.scratch = scratch;
-        has
     }
 
     /// Writes the full path of folder `dir` into `out` (cleared first) and
@@ -199,6 +193,252 @@ impl DirPaths {
     }
 }
 
+/// A folder in a [`ResultNames`] table: its place in the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FolderId(u32);
+
+impl FolderId {
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// An entry's own name in a [`ResultNames`] table: where its bytes lie.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NameRef {
+    start: usize,
+    end: usize,
+}
+
+/// The names of a set of results, so that no result holds its full path:
+/// each folder the results are in, held once with every folder above it as
+/// its parent and its name, and each result's own name. All of them share one
+/// buffer, so a result costs no allocation of its own.
+///
+/// A volume's root has no parent, and its name is the mount prefix without
+/// the last separator. A folder always comes after its parent, so every walk
+/// up the table ends.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResultNames {
+    folders: Vec<TableFolder>,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TableFolder {
+    parent: Option<FolderId>,
+    name: NameRef,
+}
+
+/// What the ids of one [`ResultNames`] become after
+/// [`ResultNames::append`] moves them into another.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Moved {
+    folders: u32,
+    bytes: usize,
+}
+
+impl Moved {
+    pub(crate) fn folder(self, id: FolderId) -> FolderId {
+        FolderId(id.0 + self.folders)
+    }
+
+    pub(crate) fn name(self, name: NameRef) -> NameRef {
+        NameRef {
+            start: name.start + self.bytes,
+            end: name.end + self.bytes,
+        }
+    }
+}
+
+impl ResultNames {
+    /// How many folders the table holds.
+    pub fn folder_count(&self) -> usize {
+        self.folders.len()
+    }
+
+    /// The folder at `position`, when the table holds one there.
+    pub(crate) fn folder_at(&self, position: u32) -> Option<FolderId> {
+        ((position as usize) < self.folders.len()).then_some(FolderId(position))
+    }
+
+    /// The folder that holds `folder`; `None` for a volume's root.
+    pub fn parent(&self, folder: FolderId) -> Option<FolderId> {
+        self.folders[folder.index()].parent
+    }
+
+    /// The folder's own name (WTF-8); for a volume's root, its mount prefix
+    /// without the last separator.
+    pub fn folder_name(&self, folder: FolderId) -> &[u8] {
+        self.name(self.folders[folder.index()].name)
+    }
+
+    /// An entry's own name (WTF-8).
+    pub fn name(&self, name: NameRef) -> &[u8] {
+        &self.bytes[name.start..name.end]
+    }
+
+    /// Writes the full path of `folder` into `out` (cleared first).
+    pub fn folder_path_into(&self, folder: FolderId, out: &mut Vec<u8>) {
+        out.clear();
+        let mut chain: SmallVec<[FolderId; 32]> = SmallVec::new();
+        let mut cur = Some(folder);
+        while let Some(f) = cur {
+            chain.push(f);
+            cur = self.parent(f);
+        }
+        for &f in chain.iter().rev() {
+            join_name(out, self.folder_name(f));
+        }
+    }
+
+    /// Writes the full path of the entry `name` in `folder` into `out`
+    /// (cleared first).
+    pub fn full_path_into(&self, folder: FolderId, name: &[u8], out: &mut Vec<u8>) {
+        self.folder_path_into(folder, out);
+        join_name(out, name);
+    }
+
+    /// Adds a folder in `parent`, which must already be in the table.
+    pub(crate) fn push_folder(&mut self, parent: Option<FolderId>, name: &[u8]) -> FolderId {
+        assert!(
+            parent.is_none_or(|p| p.index() < self.folders.len()),
+            "a folder's parent comes before it"
+        );
+        let name = self.push_name(name);
+        self.folders.push(TableFolder { parent, name });
+        FolderId(
+            u32::try_from(self.folders.len() - 1)
+                .expect("fewer folders than entries, and an EntryIdx is a u32"),
+        )
+    }
+
+    /// Adds an entry's own name.
+    pub(crate) fn push_name(&mut self, name: &[u8]) -> NameRef {
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(name);
+        NameRef {
+            start,
+            end: self.bytes.len(),
+        }
+    }
+
+    /// Moves every folder and name of `other` to the end of this table.
+    pub(crate) fn append(&mut self, other: ResultNames) -> Moved {
+        let moved = Moved {
+            folders: u32::try_from(self.folders.len()).expect("a folder count fits in u32"),
+            bytes: self.bytes.len(),
+        };
+        self.bytes.extend_from_slice(&other.bytes);
+        self.folders
+            .extend(other.folders.into_iter().map(|f| TableFolder {
+                parent: f.parent.map(|p| moved.folder(p)),
+                name: moved.name(f.name),
+            }));
+        moved
+    }
+}
+
+/// Appends `name` to the path in `out`, after a separator unless the path is
+/// still empty: the root of a volume mounted nowhere has an empty name.
+fn join_name(out: &mut Vec<u8>, name: &[u8]) {
+    if !out.is_empty() {
+        out.push(b'\\');
+    }
+    out.extend_from_slice(name);
+}
+
+/// Copies the folders that a query's hits are in out of the index, into a
+/// [`ResultNames`] table, each once. It decides which entries have a full path
+/// by the rule that [`DirPaths`] applies, so a hit it keeps is a hit that
+/// has one.
+pub(crate) struct FolderCopy {
+    names: ResultNames,
+    /// Copied folders with their depth, counted as [`DirPaths`] counts it,
+    /// and `None` for folders known to have no path.
+    copied: FxHashMap<EntryIdx, Option<(FolderId, usize)>>,
+}
+
+impl FolderCopy {
+    /// A table for `index`, the volume mounted at `mount_prefix` (`C:\`; empty
+    /// for a path within the volume).
+    pub(crate) fn new(index: &VolumeIndex, mount_prefix: &str) -> Self {
+        let mut names = ResultNames::default();
+        let root = names.push_folder(None, mount_prefix.trim_end_matches(['\\', '/']).as_bytes());
+        let mut copied = FxHashMap::default();
+        copied.insert(index.root(), Some((root, 1)));
+        Self { names, copied }
+    }
+
+    /// The folder of entry `idx`, copied with every folder above it, or
+    /// `None` when the entry has no full path.
+    pub(crate) fn entry_folder(&mut self, index: &VolumeIndex, idx: EntryIdx) -> Option<FolderId> {
+        match self.folder(index, index.entry(idx).parent()) {
+            // The entry's own walk is one entry longer than its folder's.
+            Some((folder, depth)) if depth < MAX_PATH_HOPS => Some(folder),
+            _ => None,
+        }
+    }
+
+    /// Copies an entry's own name.
+    pub(crate) fn push_name(&mut self, name: &[u8]) -> NameRef {
+        self.names.push_name(name)
+    }
+
+    /// The folders copied so far.
+    pub(crate) fn names(&self) -> &ResultNames {
+        &self.names
+    }
+
+    pub(crate) fn finish(self) -> ResultNames {
+        self.names
+    }
+
+    /// Copies folder `dir` and returns it with its depth, or `None` when it
+    /// has no path. The walk is [`DirPaths::folder_path_into`]'s.
+    fn folder(&mut self, index: &VolumeIndex, dir: EntryIdx) -> Option<(FolderId, usize)> {
+        let mut chain: SmallVec<[EntryIdx; 32]> = SmallVec::new();
+        let mut cur = dir;
+        let base = loop {
+            if let Some(&known) = self.copied.get(&cur) {
+                break known;
+            }
+            let parent = index.entry(cur).parent();
+            if parent == NIL {
+                break None; // lost+found
+            }
+            if chain.len() == MAX_PATH_HOPS {
+                // Longer than any walk that has a path, or a cycle. Nothing
+                // is copied: the depths on this chain are unknown.
+                return None;
+            }
+            chain.push(cur);
+            cur = parent;
+        };
+        let Some((mut folder, mut depth)) = base else {
+            for &f in &chain {
+                self.copied.insert(f, None);
+            }
+            return None;
+        };
+        for (i, &dir) in chain.iter().rev().enumerate() {
+            depth += 1;
+            if depth > MAX_PATH_HOPS {
+                // This folder and every one below it walk too far.
+                for &deeper in chain.iter().rev().skip(i) {
+                    self.copied.insert(deeper, None);
+                }
+                return None;
+            }
+            folder = self
+                .names
+                .push_folder(Some(folder), index.entry(dir).name());
+            self.copied.insert(dir, Some((folder, depth)));
+        }
+        Some((folder, depth))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,7 +471,8 @@ mod tests {
         (index, entries)
     }
 
-    /// An entry has a full path exactly when `path_of` gives one, whatever
+    /// An entry has a full path exactly when `path_of` gives one, both as a
+    /// query builds it and as its results' copied folders spell it, whatever
     /// order the query visits entries in, and a deep chain does not fill the
     /// cache.
     #[test]
@@ -247,23 +488,27 @@ mod tests {
             let mut path = b"C:".to_vec(); // path_of adds the separator
             (index.path_of(idx, &mut path) == PathStatus::Ok).then_some(path)
         };
-        let mut shallow_first = DirPaths::new(&index, NameForm::Raw, r"C:\");
-        let mut deep_first = DirPaths::new(&index, NameForm::Raw, r"C:\");
         let mut out = Vec::new();
-        for (dirs, order) in [
-            (&mut shallow_first, entries.clone()),
-            (&mut deep_first, entries.iter().rev().copied().collect()),
-        ] {
+        let mut built_dirs = Vec::new();
+        for order in [entries.clone(), entries.iter().rev().copied().collect()] {
+            let mut dirs = DirPaths::new(&index, NameForm::Raw, r"C:\");
+            let mut copy = FolderCopy::new(&index, r"C:\");
             for idx in order {
                 let built = dirs
                     .full_path_into(&index, idx, &mut out)
                     .then(|| out.clone());
                 assert_eq!(built, expected(idx), "entry {idx}");
-                assert_eq!(dirs.entry_has_path(&index, idx), built.is_some());
+                let copied = copy.entry_folder(&index, idx).map(|folder| {
+                    copy.names
+                        .full_path_into(folder, index.entry(idx).name(), &mut out);
+                    out.clone()
+                });
+                assert_eq!(copied, expected(idx), "copied entry {idx}");
             }
+            built_dirs.push(dirs);
         }
         // Caching every folder of the chain would hold about 100 MB.
-        for dirs in [shallow_first, deep_first] {
+        for dirs in built_dirs {
             assert!(
                 dirs.arena.len() < 1 << 20,
                 "{} bytes cached",

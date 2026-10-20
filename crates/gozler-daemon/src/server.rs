@@ -14,12 +14,12 @@ use gozler_core::include::IncludeSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
     DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
-    ProtoError, QueryRequest, QueryTotals, Request, Response, ResultsPage, Returns, Rows,
-    SearchRequest, VolumeMemory, VolumeStatus, encode_response_frame,
+    PageItem, ProtoError, QueryTotals, Request, Response, ResultsPage, Returns, Rows, SentFolders,
+    VolumeMemory, VolumeStatus, encode_response_frame,
 };
 use gozler_core::query::{
-    CompiledQuery, MatchSums, ParseOptions, QueryError, QueryStart, SizeOverflow, Totals,
-    VolumeRun, order_hits, parse_query_with, resolve_scope, run_query_deferrable, run_totals,
+    CompiledQuery, MatchSums, OrderedHits, SizeOverflow, Totals, VolumeRun, order_hits,
+    resolve_scope, run_query_deferrable, run_totals,
 };
 use gozler_core::scope::Scope;
 use gozler_core::types::EntryIdx;
@@ -238,10 +238,6 @@ fn serve(
 ) {
     let search = match gozler_core::proto::decode_request(frame) {
         Ok(Request::Search(search)) => search,
-        Ok(Request::Query(query)) => match text_search(query) {
-            Ok(search) => search,
-            Err(e) => return reply(emit, refusal(e.to_string())),
-        },
         Ok(Request::Hello {
             proto_min,
             proto_max,
@@ -300,35 +296,6 @@ fn refusal(message: String) -> Response {
     }
 }
 
-/// The search a protocol 1 request asks for: its text parsed by the parser
-/// the client runs from protocol 2 on, so both protocols match alike. Its
-/// `dm:` values resolve against the daemon's clock and time zone, the only
-/// ones it has; it has no working directory, so a relative path is refused.
-fn text_search(query: QueryRequest) -> Result<SearchRequest, QueryError> {
-    let start = QueryStart {
-        now: jiff::Timestamp::now(),
-        time_zone: jiff::tz::TimeZone::system(),
-    };
-    let options = ParseOptions {
-        match_case: query.match_case,
-        query_start: Some(&start),
-        ..ParseOptions::default()
-    };
-    Ok(SearchRequest {
-        query: parse_query_with(&query.query, options)?,
-        scope: query.scope,
-        returns: Returns::Rows(Rows {
-            sort: query.sort,
-            offset: query.offset,
-            limit: query.limit,
-            want_size: query.want_size,
-            want_mtime: query.want_mtime,
-            want_attributes: false,
-            want_sums: false,
-        }),
-    })
-}
-
 /// Whether the answer from the volumes a search ran on may be short.
 #[derive(Default)]
 struct Coverage {
@@ -368,13 +335,9 @@ fn run_on_volumes<'t, T>(
 /// Streams the rows of a search as one or more binary results-page frames
 /// (paged by [`ResultsPage::push`], `more` set on all but the last). An empty
 /// result set still emits one `more: false` page so the client always sees a
-/// terminal frame. The matched hits are consumed as the pages are encoded, so
-/// a full export holds neither the whole response nor the already-emitted
-/// hits' path bytes.
-///
-/// Pages are encoded straight from each matched hit's full path bytes by
-/// [`ResultsPage`], so a match never allocates an intermediate
-/// `ResultItem`/`String`, and the set is never cloned for paging.
+/// terminal frame. No full path is built: each page sends the folders its
+/// rows need that no earlier page sent, and each row its folder and its name,
+/// straight from the hits' [`gozler_core::query::ResultNames`].
 fn stream_rows(
     targets: &[(Arc<VolumeState>, VolScope)],
     query: &CompiledQuery,
@@ -419,28 +382,25 @@ fn stream_rows(
         VolumeRun {
             mount_prefix: vol.mount_prefix(),
             hits: outcome.hits,
+            names: outcome.names,
             sorted: outcome.sorted,
         }
     });
 
     // Off every lock: sort the deferred runs and merge the volumes.
-    let collected = order_hits(rows.sort, runs);
-    let start = (rows.offset as usize).min(collected.len());
+    let OrderedHits { hits, names } = order_hits(rows.sort, runs);
+    let start = (rows.offset as usize).min(hits.len());
     let end = rows
         .limit
-        .map(|l| (start + l as usize).min(collected.len()))
-        .unwrap_or(collected.len());
-    let n_rows = end - start;
+        .map(|l| (start + l as usize).min(hits.len()))
+        .unwrap_or(hits.len());
     // A size pass that has not completed leaves sums short.
     if coverage.metadata_pending {
         sums = sums.map(MatchSums::without_sizes);
     }
 
-    // Consuming iteration: each emitted page's hits DROP right after
-    // encoding, so the held path bytes drain with export progress instead of
-    // peaking all together (skipped offset rows and beyond-limit rows drop
-    // with the iterator).
-    let mut hits = collected.into_iter().skip(start).take(n_rows).peekable();
+    let mut sent = SentFolders::new(&names);
+    let mut hits = hits[start..end].iter().peekable();
     loop {
         let mut page = ResultsPage::new(
             total,
@@ -451,10 +411,15 @@ fn stream_rows(
         )
         .with_sums(sums);
         while let Some(hit) = hits.peek() {
-            let size = rows.want_size.then_some(hit.size).flatten();
-            let mtime = rows.want_mtime.then_some(hit.mtime).flatten();
-            let attributes = rows.want_attributes.then_some(hit.attributes);
-            if !page.push(&hit.path, hit.is_dir, size, mtime, attributes) {
+            let item = PageItem {
+                folder: hit.folder,
+                name: names.name(hit.name),
+                is_dir: hit.is_dir,
+                size: rows.want_size.then_some(hit.size).flatten(),
+                mtime: rows.want_mtime.then_some(hit.mtime).flatten(),
+                attributes: rows.want_attributes.then_some(hit.attributes),
+            };
+            if !page.push(item, &names, &mut sent) {
                 break;
             }
             hits.next();
@@ -630,9 +595,10 @@ mod tests {
     use gozler_core::include::{DriveChoice, FolderChoice, IncludeSettings};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
-        FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, QueryRequest,
-        Request, Response, decode_response_frame, encode_request,
+        FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response,
+        Returns, Rows, SearchRequest, decode_response_frame, encode_request,
     };
+    use gozler_core::query::{ParseOptions, ResultNames, parse_query_with};
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
     use gozler_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
@@ -718,7 +684,9 @@ mod tests {
             !results(&encode_query_binary(&vols, query("System32")))[0].volumes_incomplete,
             "and no query page may flag it either"
         );
-        let Response::Hello { ready, .. } = answer(&vols, hello_request(1, 1)) else {
+        let Response::Hello { ready, .. } =
+            answer(&vols, hello_request(PROTO_VERSION, PROTO_VERSION))
+        else {
             panic!("must negotiate")
         };
         assert!(ready, "a snapshot volume is ready to serve");
@@ -802,9 +770,42 @@ mod tests {
         out
     }
 
-    /// The reply to a protocol 1 query, which the daemon parses itself.
-    fn encode_query_binary(volumes: &VolumeSet, q: QueryRequest) -> Vec<u8> {
-        reply_bytes(volumes, &Request::Query(q))
+    /// A search as a test writes it: query text, which [`search`] parses as
+    /// gozler does, and the rows it asks for.
+    struct TextQuery {
+        query: String,
+        scope: Option<String>,
+        sort: SortSpec,
+        offset: u32,
+        limit: Option<u32>,
+        want_size: bool,
+        want_mtime: bool,
+        match_case: bool,
+    }
+
+    fn search(q: TextQuery) -> Request {
+        let options = ParseOptions {
+            match_case: q.match_case,
+            ..ParseOptions::default()
+        };
+        Request::Search(SearchRequest {
+            query: parse_query_with(&q.query, options).expect("the test's query parses"),
+            scope: q.scope,
+            returns: Returns::Rows(Rows {
+                sort: q.sort,
+                offset: q.offset,
+                limit: q.limit,
+                want_size: q.want_size,
+                want_mtime: q.want_mtime,
+                want_attributes: false,
+                want_sums: false,
+            }),
+        })
+    }
+
+    /// The reply to the search `q`.
+    fn encode_query_binary(volumes: &VolumeSet, q: TextQuery) -> Vec<u8> {
+        reply_bytes(volumes, &search(q))
     }
 
     /// The one frame the daemon replies to `request` with.
@@ -814,8 +815,8 @@ mod tests {
         frames.remove(0)
     }
 
-    fn query(q: &str) -> QueryRequest {
-        QueryRequest {
+    fn query(q: &str) -> TextQuery {
+        TextQuery {
             query: q.to_string(),
             scope: None,
             sort: SortSpec::default_for(SortKey::Name),
@@ -827,18 +828,18 @@ mod tests {
         }
     }
 
-    /// Splits the daemon's own output back into responses. The wire is
-    /// `[len:u32-le][payload]` repeated, and every decoder used here is public
-    /// gozler-core API, so the test reads exactly what the CLI would.
+    /// Splits the daemon's own output for one request back into responses.
+    /// The wire is `[len:u32-le][payload]` repeated, and every decoder used
+    /// here is public gozler-core API, with one table of folders for the
+    /// reply, so the test reads exactly what the CLI would.
     fn decode_frames(bytes: &[u8]) -> Vec<gozler_core::proto::Response> {
         let mut out = Vec::new();
+        let mut names = ResultNames::default();
         let mut i = 0;
         while i < bytes.len() {
             let len = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
             i += 4;
-            out.push(
-                gozler_core::proto::decode_response_frame(&bytes[i..i + len]).expect("decodes"),
-            );
+            out.push(decode_response_frame(&bytes[i..i + len], &mut names).expect("decodes"));
             i += len;
         }
         out
@@ -867,31 +868,29 @@ mod tests {
         assert_eq!(pages[0].total, 0);
     }
 
-    /// A query that fails to parse must come back as a single tagged JSON error,
-    /// never as an empty results page (which would read as "no matches").
+    /// A request that fails to decode must come back as a single tagged JSON
+    /// error, never as an empty results page (which would read as "no
+    /// matches").
     #[test]
-    fn unparseable_query_returns_an_error_frame_not_an_empty_page() {
+    fn a_malformed_request_returns_an_error_frame_not_an_empty_page() {
         let vols = set(&[live_volume(r"C:\")]);
-        let frames = decode_frames(&encode_query_binary(&vols, query("size:>>bogus")));
+        let mut replies = Vec::new();
+        serve(
+            &vols,
+            &defaults(),
+            br#"{"t":"Search","query":"#,
+            &mut |reply| {
+                replies.extend_from_slice(&reply);
+                true
+            },
+        );
+        let frames = decode_frames(&replies);
         assert_eq!(frames.len(), 1);
         assert!(
             matches!(frames[0], gozler_core::proto::Response::Error { .. }),
             "got {:?}",
             frames[0]
         );
-    }
-
-    /// A text query carries no working directory, so a relative path in it is
-    /// refused as a bad query, never searched as text that matches nothing.
-    #[test]
-    fn a_relative_path_in_a_text_query_is_a_bad_query() {
-        let vols = set(&[live_volume(r"C:\")]);
-        for text in [r".\System32", "parent:Windows"] {
-            match answer(&vols, Request::Query(query(text))) {
-                Response::Error { code, .. } => assert_eq!(code, ProtoError::BadQuery, "{text}"),
-                other => panic!("{text}: {other:?}"),
-            }
-        }
     }
 
     /// Paging must set `more` on every frame but the last, and `total` must be
@@ -920,33 +919,39 @@ mod tests {
     }
 
     /// Every page must fit the 16 MiB frame cap the client decodes with, or
-    /// the client refuses it and the search fails with exit 7. [`PAGE_ROWS`]
-    /// paths of about 4 KB pass that cap, and any local user can create them.
+    /// the client refuses it and the search fails with exit 7. A page sends
+    /// the folders its rows need, and [`PAGE_ROWS`] rows that each sit in a
+    /// folder chain of their own pass that cap; any local user can create
+    /// them.
     #[test]
     fn pages_of_long_paths_fit_the_clients_frame_cap() {
         let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
-        // 17 nested folders with 250-character names make every full path
-        // below them 4,282 bytes, so PAGE_ROWS rows would need 17.6 MB.
-        let mut parent = NTFS_ROOT_FRN.0;
-        for level in 0..17 {
-            index.insert_enum(&dir_record(100 + level, parent, &"d".repeat(250)));
-            parent = 100 + level;
-        }
+        // Each row sits below 17 folders of its own with 250-character
+        // names, so PAGE_ROWS rows would need 18 MB of folders.
+        let mut frn = 100;
         for i in 0..PAGE_ROWS as u64 {
-            let mut rec = dir_record(1000 + u128::from(i), parent, &format!("hit{i:05}.log"));
+            let mut parent = NTFS_ROOT_FRN.0;
+            for _ in 0..17 {
+                index.insert_enum(&dir_record(frn, parent, &"d".repeat(250)));
+                parent = frn;
+                frn += 1;
+            }
+            let mut rec = dir_record(frn, parent, &format!("hit{i:05}.log"));
             rec.attributes = 0;
             index.insert_enum(&rec);
+            frn += 1;
         }
         let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
 
         let mut decoder = FrameDecoder::new(MAX_SERVER_FRAME);
         decoder.feed(&encode_query_binary(&vols, query("hit")));
+        let mut names = ResultNames::default();
         let mut pages = Vec::new();
         while let Some(frame) = decoder
             .next_frame()
             .expect("every frame fits the client's cap")
         {
-            match decode_response_frame(&frame).expect("decodes") {
+            match decode_response_frame(&frame, &mut names).expect("decodes") {
                 Response::Results(page) => pages.push(page),
                 other => panic!("expected Results, got {other:?}"),
             }
@@ -985,7 +990,7 @@ mod tests {
         serve(
             &vols,
             &defaults(),
-            &request_frame(&Request::Query(query("hit"))),
+            &request_frame(&search(query("hit"))),
             &mut |_page| {
                 emitted += 1;
                 false // consumer gone after the first page
@@ -1126,71 +1131,6 @@ mod tests {
         }
     }
 
-    /// Results items are positional, so the attributes travel only when the
-    /// search asks for them: a client of protocol 5, whose JSON has no
-    /// `want_attributes`, gets the items it reads, and a client that asks
-    /// gets them. The requests are the exact JSON each client writes.
-    #[test]
-    fn attributes_travel_only_when_the_search_asks_for_them() {
-        let vols = set(&[live_volume(r"C:\")]);
-        let protocol_5 = concat!(
-            r#"{"t":"Search","query":{"clauses":[{"terms":[{"negated":false,"#,
-            r#""test":{"Name":"system32"}}]}],"match_case":false},"scope":null,"#,
-            r#""returns":{"Rows":{"sort":{"key":"Name","dir":"Asc"},"offset":0,"#,
-            r#""limit":20,"want_size":true,"want_mtime":true}}}"#,
-        );
-        let asking = protocol_5.replace(
-            r#""want_mtime":true}"#,
-            r#""want_mtime":true,"want_attributes":true}"#,
-        );
-        let attributes = |request: &str| {
-            let mut replies = Vec::new();
-            serve(&vols, &defaults(), request.as_bytes(), &mut |reply| {
-                replies.extend_from_slice(&reply);
-                true
-            });
-            results(&replies)[0].items[0]
-                .attributes
-                .map(|a| a.letters())
-        };
-        assert_eq!(attributes(protocol_5), None);
-        assert_eq!(attributes(&asking), Some("D".to_string()));
-    }
-
-    /// A client of protocol 1 sends its text query without a `Hello`, and
-    /// reads the binary results page it always has; an installed client of
-    /// that protocol must keep working against this daemon. The request is the
-    /// exact JSON that client writes.
-    #[test]
-    fn a_protocol_1_text_query_without_hello_is_answered_as_before() {
-        let vols = set(&[live_volume(r"C:\")]);
-        let request = concat!(
-            r#"{"t":"Query","query":"system32","scope":null,"#,
-            r#""sort":{"key":"Name","dir":"Asc"},"offset":0,"limit":20,"#,
-            r#""want_size":true,"want_mtime":true,"match_case":false}"#,
-        );
-        let mut replies = Vec::new();
-        serve(&vols, &defaults(), request.as_bytes(), &mut |reply| {
-            replies.extend_from_slice(&reply);
-            true
-        });
-        let mut decoder = FrameDecoder::new(MAX_SERVER_FRAME);
-        decoder.feed(&replies);
-        let frame = decoder.next_frame().expect("fits").expect("one frame");
-        let Response::Results(page) = decode_response_frame(&frame).expect("decodes") else {
-            panic!("a results page");
-        };
-        assert_eq!(page.total, 1);
-        assert!(!page.more);
-        let paths: Vec<&str> = page.items.iter().map(|item| item.path.as_str()).collect();
-        assert_eq!(paths, [r"C:\Windows\System32"]);
-        assert_eq!(
-            decoder.next_frame(),
-            Ok(None),
-            "nothing after the last page"
-        );
-    }
-
     fn hello_request(proto_min: u16, proto_max: u16) -> Request {
         Request::Hello {
             proto_min,
@@ -1199,25 +1139,25 @@ mod tests {
         }
     }
 
-    /// Negotiation answers the highest version both sides speak, so a client
-    /// of every protocol from 1 on is served, and refuses a client it cannot
-    /// actually serve rather than answer a cheerful `ready: true` and let the
-    /// mismatch surface as garbled frames later.
+    /// Negotiation answers this build's version to a client whose range holds
+    /// it, and refuses a client of an older protocol rather than answer a
+    /// cheerful `ready: true` and let the mismatch surface as garbled frames
+    /// later: gozlerd serves no older protocol.
     #[test]
-    fn hello_answers_the_highest_shared_version_or_refuses() {
+    fn hello_answers_this_version_or_refuses() {
         let vols = set(&[live_volume(r"C:\")]);
 
-        for (range, agreed) in [
-            ((1, 1), 1),
-            ((1, PROTO_VERSION), PROTO_VERSION),
-            ((2, 2), 2),
-            ((3, 3), 3),
-            ((4, 4), 4),
-        ] {
+        for range in [(1, PROTO_VERSION), (PROTO_VERSION, PROTO_VERSION)] {
             match answer(&vols, hello_request(range.0, range.1)) {
-                Response::Hello { proto, .. } => assert_eq!(proto, agreed, "{range:?}"),
+                Response::Hello { proto, .. } => assert_eq!(proto, PROTO_VERSION, "{range:?}"),
                 other => panic!("{range:?} must negotiate, got {other:?}"),
             }
+        }
+
+        // An older client: its results pages lay out full paths.
+        match answer(&vols, hello_request(PROTO_VERSION - 1, PROTO_VERSION - 1)) {
+            Response::Error { code, .. } => assert_eq!(code, ProtoError::Unsupported),
+            other => panic!("an older protocol must be refused, got {other:?}"),
         }
 
         // Floor above us: the client needs a protocol this build cannot speak.
@@ -1245,8 +1185,10 @@ mod tests {
                 volume(r"D:\", windows_index(), VolumePhase::Bootstrapping),
             ]),
         ] {
-            let Response::Hello { ready, .. } = answer(&vols, hello_request(1, 1)) else {
-                panic!("a v1 client must negotiate")
+            let Response::Hello { ready, .. } =
+                answer(&vols, hello_request(PROTO_VERSION, PROTO_VERSION))
+            else {
+                panic!("a client of this protocol must negotiate")
             };
             assert_eq!(
                 ready,

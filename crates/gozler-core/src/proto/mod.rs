@@ -14,14 +14,15 @@ pub mod binary;
 pub mod frame;
 pub mod types;
 
-pub use binary::{RESP_TAG_JSON, RESP_TAG_RESULTS, ResultsPage, decode_results_payload};
+pub use binary::{
+    PageItem, RESP_TAG_JSON, RESP_TAG_RESULTS, ResultsPage, SentFolders, decode_results_payload,
+};
 pub use frame::{
     FrameDecoder, FrameError, RespFrameError, decode_request, decode_response_frame, encode_frame,
     encode_request, encode_response_frame,
 };
 pub use types::{
     DaemonStatus, LeftOutVolume, MAX_CLIENT_FRAME, MAX_SERVER_FRAME, MemPair, OLDEST_PROTO_VERSION,
-    PAGE_ROWS, PIPE_NAME, PROTO_VERSION, ProtoError, QueryRequest, QueryResults, QueryTotals,
-    Request, Response, ResultItem, Returns, Rows, SERVICE_NAME, SearchRequest, VolumeMemory,
-    VolumeStatus,
+    PAGE_ROWS, PIPE_NAME, PROTO_VERSION, ProtoError, QueryResults, QueryTotals, Request, Response,
+    ResultItem, Returns, Rows, SERVICE_NAME, SearchRequest, VolumeMemory, VolumeStatus,
 };

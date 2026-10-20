@@ -224,8 +224,11 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
             "  {mount}: {} match(es) in {:.1} ms (showing up to 20)",
             out.total, ms
         );
+        let mut path = Vec::new();
         for hit in &out.hits {
-            let path = gozler_core::wtf8::to_string_lossy(&hit.path);
+            out.names
+                .full_path_into(hit.folder, out.names.name(hit.name), &mut path);
+            let path = gozler_core::wtf8::to_string_lossy(&path);
             let size = match hit.size {
                 Some(b) => format!("{b} B"),
                 None => "?".to_string(),
