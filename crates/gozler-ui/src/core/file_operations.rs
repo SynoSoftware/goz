@@ -678,18 +678,30 @@ fn moves_bytes(running: &Running) -> bool {
     !running.renames && running.total.is_some_and(|total| total.bytes > 0)
 }
 
+/// What a running operation has done, and its total; `None` without a
+/// total. Each count done is at most its total, because gozlerd's total can
+/// miss entries, such as those a delete removed before gozlerd answered.
+fn done_of(running: &Running) -> Option<(Total, Total)> {
+    let total = running.total?;
+    let done = Total {
+        items: running.items.min(total.items),
+        bytes: (running.bytes + running.passed).min(total.bytes),
+    };
+    Some((done, total))
+}
+
 /// How much of a running operation is done: its bytes where it moves bytes,
 /// otherwise its entries, and nothing measured without a total.
 fn measure_of(running: &Running) -> Option<Measure> {
-    let total = running.total?;
+    let (done, total) = done_of(running)?;
     Some(if moves_bytes(running) {
         Measure {
-            done: running.bytes,
+            done: done.bytes,
             total: total.bytes,
         }
     } else {
         Measure {
-            done: running.items,
+            done: done.items,
             total: total.items,
         }
     })
@@ -717,7 +729,7 @@ fn taskbar(operations: &[Operation]) -> Taskbar {
     // one still moves the bar.
     let done: u64 = measured
         .iter()
-        .map(|m| u128::from(m.done.min(m.total)) * 1000 / u128::from(m.total.max(1)))
+        .map(|m| u128::from(m.done) * 1000 / u128::from(m.total.max(1)))
         .map(|done| done as u64)
         .sum();
     let total = Measure {
@@ -790,19 +802,19 @@ fn card(
             )
         }
     };
-    let (items, bytes_text) = match running.total {
-        Some(total) => (
+    let (items, bytes_text) = match done_of(running) {
+        Some((done, total)) => (
             strings.count(
                 "file_operations.items_of",
                 total.items,
                 numbers,
-                &[&numbers.integer(running.items)],
+                &[&numbers.integer(done.items)],
             ),
             if moves_bytes {
                 strings.format(
                     "file_operations.bytes_of",
                     &[
-                        &bytes(strings, numbers, running.bytes),
+                        &bytes(strings, numbers, done.bytes),
                         &bytes(strings, numbers, total.bytes),
                     ],
                 )
@@ -892,11 +904,11 @@ fn row(
     let (detail, phase) = match &operation.state {
         State::Running(running) => {
             let progress = match measure_of(running) {
-                Some(_) if moves_bytes(running) => strings.format(
+                Some(measure) if moves_bytes(running) => strings.format(
                     "file_operations.bytes_of",
                     &[
-                        &bytes(strings, numbers, running.bytes),
-                        &bytes(strings, numbers, running.total.map_or(0, |t| t.bytes)),
+                        &bytes(strings, numbers, measure.done),
+                        &bytes(strings, numbers, measure.total),
                     ],
                 ),
                 Some(measure) => strings.count(
@@ -1599,6 +1611,27 @@ mod tests {
         assert_eq!(left(90, 1.0).as_deref(), Some("2 min left"));
         assert_eq!(left(7_500, 1.0).as_deref(), Some("2 h 5 min left"));
         assert_eq!(left(100, 0.0), None);
+    }
+
+    /// The bytes done include the passed files' bytes, and neither count
+    /// shows more than gozlerd's total, which a delete can outrun.
+    #[test]
+    fn done_counts_passed_bytes_and_never_exceeds_the_total() {
+        let running = |items, bytes, passed| Running {
+            items,
+            bytes,
+            passed,
+            total: Some(Total {
+                items: 10_000,
+                bytes: 100,
+            }),
+            renames: false,
+            paused: false,
+            current: None,
+        };
+        let done = |running: Running| done_of(&running).map(|(of, _)| (of.items, of.bytes));
+        assert_eq!(done(running(10, 10, 80)), Some((10, 90)));
+        assert_eq!(done(running(10_050, 90, 30)), Some((10_000, 100)));
     }
 
     #[test]

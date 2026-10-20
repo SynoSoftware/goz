@@ -23,6 +23,7 @@ use crate::win;
 use main_window::{Instance, MainWindow};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Named for the session, so a second start finds the first process
 /// (DESIGN.md: Window lifetime); a window with `--data-dir` adds
@@ -31,6 +32,18 @@ const INSTANCE_MUTEX: &str = r"Local\gozler.ui";
 const WINDOW_CLASS: &str = "gozler.ui";
 /// Asks the first window to come forward with the search box focused.
 const SHOW_MESSAGE: &str = "gozler.ui.show";
+/// Asks the first window to exit as File > Exit does, for a start of
+/// another program. It answers [`EXIT_CLOSES`] or [`EXIT_STAYS`]; a build
+/// from before this message answers 0.
+const EXIT_MESSAGE: &str = "gozler.ui.exit";
+const EXIT_CLOSES: isize = 1;
+/// The person kept the running file operations, or a dialog is open.
+const EXIT_STAYS: isize = 2;
+/// How long a second start waits for a first process without a window,
+/// which shows one as it starts or lets go of the mutex as it ends, before
+/// it shows a window of its own.
+const FIRST_SETTLES: Duration = Duration::from_secs(10);
+const SETTLE_POLL: Duration = Duration::from_millis(50);
 
 pub(crate) fn run() {
     install_panic_hook();
@@ -54,15 +67,55 @@ pub(crate) fn run() {
     let show_message = win::instance::register_message(SHOW_MESSAGE);
     let settings_file = data_dir.join("ui.json");
     let settings = Settings::load(&settings_file);
-    let first = win::instance::claim(&format!("{INSTANCE_MUTEX}{suffix}"))
-        .expect("a named mutex can be created");
+    let exit_message = win::instance::register_message(EXIT_MESSAGE);
+    let mutex = format!("{INSTANCE_MUTEX}{suffix}");
+    let mut waiting_since = Instant::now();
+    let first = loop {
+        let first = win::instance::claim(&mutex).expect("a named mutex can be created");
+        // A start at sign-in never opens a second window.
+        if first.is_some() || !(settings.choices.one_window || arguments.sign_in) {
+            break first;
+        }
+        let Some(window) = win::instance::find(&window_class) else {
+            // A first process that shows no window for so long may never
+            // show one, so this start shows its own rather than nothing; at
+            // sign-in nobody waits for a window.
+            if waiting_since.elapsed() > FIRST_SETTLES {
+                if arguments.sign_in {
+                    return;
+                }
+                break None;
+            }
+            std::thread::sleep(SETTLE_POLL);
+            continue;
+        };
+        // Held before the question, because the window's process can end
+        // as soon as it answers.
+        let process = win::instance::Process::of(window);
+        // A start at sign-in never closes the running window either.
+        let Some(process) =
+            process.filter(|process| !arguments.sign_in && runs_another_program(process))
+        else {
+            win::instance::hand_over(window, show_message, arguments.location.as_deref());
+            return;
+        };
+        match win::instance::ask(window, exit_message) {
+            // This start becomes the first once that process has ended,
+            // which can take long after its window closed, because it
+            // first joins its threads.
+            Some(EXIT_CLOSES) => {
+                process.wait_for_end();
+                waiting_since = Instant::now();
+            }
+            Some(EXIT_STAYS) => return,
+            _ => {
+                win::instance::hand_over(window, show_message, arguments.location.as_deref());
+                return;
+            }
+        }
+    };
     let instance = match first {
         Some(_) => Instance::First,
-        // A start at sign-in never opens a second window.
-        None if settings.choices.one_window || arguments.sign_in => {
-            win::instance::hand_over(&window_class, show_message, arguments.location.as_deref());
-            return;
-        }
         None => Instance::Another,
     };
     if instance == Instance::First {
@@ -169,6 +222,40 @@ fn instance_suffix(folder: &Path) -> String {
     format!(".{hash:016x}")
 }
 
+/// Whether the first window runs another program than this start. A
+/// program that cannot be read counts as this one, so a start never closes
+/// a window it cannot name.
+fn runs_another_program(process: &win::instance::Process) -> bool {
+    let (Some(running), Ok(this)) = (process.program(), std::env::current_exe()) else {
+        return false;
+    };
+    let written = std::fs::metadata(&this)
+        .and_then(|file| file.modified())
+        .ok();
+    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    is_another_program(
+        &canonical(&running.path),
+        running.started,
+        &canonical(&this),
+        written,
+    )
+}
+
+/// Whether a process that started `started` from `running` runs another
+/// program than `this`, last written `written`: another file, such as
+/// another build's folder or a running copy a developer renamed so the
+/// build could replace it, or this file rebuilt since that process started.
+fn is_another_program(
+    running: &Path,
+    started: SystemTime,
+    this: &Path,
+    written: Option<SystemTime>,
+) -> bool {
+    // NTFS compares names without case.
+    !running.as_os_str().eq_ignore_ascii_case(this.as_os_str())
+        || written.is_some_and(|written| written > started)
+}
+
 /// What the panic hook needs to report a panic in the person's language.
 struct PanicReport {
     folder: Option<PathBuf>,
@@ -236,7 +323,25 @@ fn write_log(path: &Path, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::location;
+    use super::{is_another_program, location};
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    /// A second start closes the running window only for another program:
+    /// the same file in other letter case keeps the person's window, while
+    /// a renamed running copy and a rebuild of the same file are replaced.
+    #[test]
+    fn another_program_is_another_file_or_a_rebuild() {
+        let started = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let this = Path::new(r"C:\Gozler\gozler-ui.exe");
+        let before = Some(started - Duration::from_secs(1));
+        let lower = Path::new(r"c:\gozler\GOZLER-UI.EXE");
+        assert!(!is_another_program(lower, started, this, before));
+        let renamed = Path::new(r"C:\Gozler\gozler-ui.running-1.exe");
+        assert!(is_another_program(renamed, started, this, before));
+        let after = Some(started + Duration::from_secs(1));
+        assert!(is_another_program(this, started, this, after));
+    }
 
     /// A drive's "Search with Gozler" would otherwise set Location to
     /// `C:"`, which does not exist.

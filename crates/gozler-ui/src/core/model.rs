@@ -8,7 +8,7 @@
 //! necessary.
 
 use super::fetch::{
-    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, LocalService, Outcome,
+    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Local, Outcome, Programs,
     Purpose, WriteFailure, inside,
 };
 use super::fixer::{FixEvent, FixWork, Fixer};
@@ -55,9 +55,8 @@ pub(crate) struct Model {
     pub(super) results: Results,
     /// The latest status reply.
     pub(super) status: Option<DaemonStatus>,
-    /// The gozlerd.exe beside the window that the latest status reply
-    /// found to be a different build from the service's.
-    other_build: Option<LocalService>,
+    /// The gozlerd.exe files, as the latest status reply found them.
+    programs: Programs,
     pub(super) selection: Selection,
     pub(super) export: Export,
     fix: Fixer,
@@ -351,7 +350,7 @@ impl Model {
             open_on_answer: false,
             results: Results::new(),
             status: None,
-            other_build: None,
+            programs: Programs::UNKNOWN,
             selection: Selection::None,
             export: Export::Idle,
             fix: Fixer::Idle,
@@ -1127,9 +1126,21 @@ impl Model {
     /// failure's other fix, and alone while a service of a different build
     /// answers. The list's message shows it only for a failure.
     pub(crate) fn use_local_fix(&self) -> Option<Fix> {
+        match (&self.failure, &self.programs.local) {
+            (Some(failure), _) => Fix::use_local(failure),
+            (None, Local::Offered(local)) => Some(Fix::UseLocal(local.clone())),
+            (None, Local::NotOffered | Local::Mismatched) => None,
+        }
+    }
+
+    /// The gozlerd.exe files that the latest status reply, or the failure
+    /// of a service older than the window, found; `None` after any other
+    /// failure, which reads no files.
+    pub(crate) fn programs(&self) -> Option<&Programs> {
         match &self.failure {
-            Some(failure) => Fix::use_local(failure),
-            None => self.other_build.clone().map(Fix::UseLocal),
+            Some(DaemonFailure::TooOld { programs }) => Some(programs),
+            Some(_) => None,
+            None => Some(&self.programs),
         }
     }
 
@@ -1330,12 +1341,12 @@ impl Model {
     fn accept_status(&mut self, outcome: Outcome) -> Accepted {
         self.status_asked = None;
         match outcome {
-            Outcome::Status(status, other_build) => {
+            Outcome::Status(status, programs) => {
                 let answers_again = self.failure.as_ref().is_some_and(DaemonFailure::recovers);
                 let was_indexing = self.indexing_in_scope();
                 self.failure = None;
                 self.status = Some(status);
-                self.other_build = other_build;
+                self.programs = programs;
                 // The fix's end shows with this status.
                 self.fix.service_answered();
                 let completed = was_indexing && !self.indexing_in_scope();
@@ -1716,7 +1727,7 @@ pub(crate) mod tests {
                     include: None,
                     left_out: Vec::new(),
                 },
-                None,
+                Programs::UNKNOWN,
             ),
         }
     }

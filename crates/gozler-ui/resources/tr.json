@@ -339,6 +339,7 @@
     "install": "Yükle",
     "use_local_caption": "Yereli kullan",
     "use_local_question": "Yerel hizmete geçilsin mi?",
+    "use_local_not_paired": "Bu uygulamanın yanındaki gozlerd.exe bu uygulamayla birlikte derlenmediği için Yereli kullan kullanılamıyor.",
     "compatible_version": "Uyumlu sürüm: {0}",
     "found_in": "Bulunduğu yer: {0}",
     "switch": "Geçir"
@@ -545,7 +546,11 @@
     "service": "Hizmet",
     "asking": "Hizmet denetleniyor…",
     "running": "Hizmet çalışıyor.",
-    "other_build": "Hizmet, bu uygulamanın yanındakinden farklı bir gozlerd.exe derlemesi çalıştırıyor.",
+    "service_program": "Hizmet programı:",
+    "beside": "Bu uygulamanın yanında:",
+    "version_modified": "Sürüm {0}, değiştirilme tarihi {1}",
+    "modified": "Değiştirilme tarihi {0}",
+    "same_as_service": "Hizmet programıyla aynı derleme",
     "running_memory": "Hizmet çalışıyor ve {0} bellek kullanıyor.",
     "no_drives": "Hizmet yanıt vermediği sürece sürücüler gösterilemez.",
     "report": "&Rapor"

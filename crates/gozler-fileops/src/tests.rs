@@ -1170,6 +1170,42 @@ fn continue_copies_only_what_is_not_done() {
     assert!(!scratch.saved().exists() || saved::read(&scratch.saved()).is_empty());
 }
 
+/// Continue counts the bytes of a file it finds done apart from the bytes
+/// it copies, so a continued copy's progress reaches gozlerd's total, which
+/// holds every file of a merged folder, while its speed counts only the
+/// copy.
+#[test]
+fn continue_counts_the_bytes_of_done_files() {
+    let scratch = Scratch::new("passed");
+    let done = scratch.write(r"src\docs\done.txt", b"done");
+    scratch.write(r"src\docs\new.txt", b"new file");
+    let earlier = scratch.write(r"out\docs\done.txt", b"done");
+    set_modified(&earlier, modified(&done));
+    let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+    let automatic = SpeedSettings::automatic();
+    let copying = Copying {
+        plan: CopyPlan::new(VolumeClass::Ssd, &automatic, Layout::TwoDisks),
+        rule: Rule {
+            choice: None,
+            run: Run::Continue {
+                started: Some(system_time()),
+            },
+        },
+        moving: false,
+        target: NTFS,
+        cancel: &cancel,
+        closing: &AtomicBool::new(false),
+        pause: &Pause::default(),
+        progress: &progress,
+        io: &IoThreads::default(),
+    };
+    let copied = copy_with(&[scratch.path(r"src\docs")], &scratch.path("out"), &copying);
+    assert_eq!(copied.listed, []);
+    // The folder and both files, of which only new.txt is copied.
+    let counted = (progress.items(), progress.bytes(), progress.passed());
+    assert_eq!(counted, (3, 8, 4));
+}
+
 /// Automatic's ring block, which a resume between SSDs compares in.
 const BLOCK: usize = 8 * 1024 * 1024;
 

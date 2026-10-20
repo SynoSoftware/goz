@@ -674,7 +674,12 @@ counts a folder's items and bytes outside the queue, because it changes
 nothing; it can be cancelled.
 
 **Progress** is atomic counters of bytes or entries and the current file,
-which the window reads about twice a second.
+which the window reads about twice a second. A file the run counts without
+copying it, such as one that Continue finds done or one it skips, adds its
+bytes to a counter of their own, so the progress reaches the total and the
+speed counts only the bytes copied. The window never shows more done than
+the total, because gozlerd's total can miss entries, such as those a
+delete removed before gozlerd answered.
 
 **Threads.** The queue owns every engine thread: one for each preparing or
 running operation, and the workers of each run, which are scoped threads

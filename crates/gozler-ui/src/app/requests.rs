@@ -273,7 +273,7 @@ fn failure(error: ClientError) -> DaemonFailure {
         ClientError::NotReady => DaemonFailure::NotReady,
         ClientError::Untrusted => DaemonFailure::NotGozler,
         ClientError::TooOld => DaemonFailure::TooOld {
-            local: super::local_service::local_service(),
+            programs: super::local_service::local_service(),
         },
         ClientError::Refused { message, .. } => DaemonFailure::Refused { detail: message },
         ClientError::Communication(_) | ClientError::Lost | ClientError::Cancelled => {

@@ -15,7 +15,7 @@ use super::commands::{
     self, CommandButton, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
     INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, MenuNode, SHOW_DETAILS,
 };
-use super::fetch::{DaemonFailure, LocalService};
+use super::fetch::{Beside, DaemonFailure, Local, LocalService, ProgramFile, Programs};
 use super::fixer::{
     CommandFix, CommandResult, CommandStep, FixState, Fixer, SetupFix, SetupResult, SetupStep,
 };
@@ -414,9 +414,9 @@ pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 14] = [
 
 /// The icon of each push button's caption, by its catalogue key, so a
 /// caption shows the same icon on every button that has it (DESIGN.md:
-/// Look). A fix's button shows the administrator shield instead when the
-/// fix needs administrator permission.
-const BUTTON_GLYPHS: [(&str, Glyph); 27] = [
+/// Look). A fix that needs administrator permission shows the
+/// administrator shield instead, so its caption has no icon here.
+const BUTTON_GLYPHS: [(&str, Glyph); 23] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
     ("button.close", Glyph::ChromeClose),
@@ -436,11 +436,7 @@ const BUTTON_GLYPHS: [(&str, Glyph); 27] = [
     ("filter.choose_folder", Glyph::FolderOpen),
     ("command.clear_filters", Glyph::Clear),
     ("list.search_everywhere", Glyph::Search),
-    ("fix.start_service", Glyph::Play),
-    ("fix.turn_on_service", Glyph::PowerButton),
-    ("fix.install_service", Glyph::Download),
     ("fix.download", Glyph::Download),
-    ("fix.use_local", Glyph::Copy),
     ("fix.update", Glyph::Download),
     ("fix.downgrade", Glyph::Download),
     ("fix.open_services", Glyph::Processing),
@@ -681,6 +677,11 @@ impl CaptionTable {
                     (Control(C::IndexHoldsGroup), "settings_index.holds"),
                     (Control(C::IndexHolds), "settings_index.holds_text"),
                     (Control(C::IndexServiceGroup), "settings_index.service"),
+                    (
+                        Control(C::IndexServiceProgramLabel),
+                        "settings_index.service_program",
+                    ),
+                    (Control(C::IndexBesideLabel), "settings_index.beside"),
                 ],
             },
             DialogId::SettingsInclude => CaptionTable {
@@ -856,10 +857,10 @@ impl CaptionTable {
     }
 }
 
-/// What Settings > Index shows (DESIGN.md: The Index page): each drive by its
-/// mount prefix and label, its state and its entry count, the service's
-/// state and memory, the failure's fix, and whether the service has a
-/// report to show.
+/// What Settings > Index shows (DESIGN.md: The Drives and service page):
+/// each drive by its mount prefix and label, its state and its entry count,
+/// the service's state and memory, the gozlerd.exe files, the failure's fix,
+/// and whether the service has a report to show.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct IndexCaptions {
     /// Each drive's name, state and entry count, as the list's columns.
@@ -867,10 +868,60 @@ pub(crate) struct IndexCaptions {
     /// What the drive list's empty area says, or empty.
     pub(crate) no_drives: String,
     pub(crate) service: String,
+    pub(crate) service_program: ProgramLines,
+    /// The gozlerd.exe beside the window.
+    pub(crate) beside: ProgramLines,
+    /// Why Use local is not offered, or empty.
+    pub(crate) note: String,
     /// The Use local button, which shows before the fix's.
     pub(crate) use_local: Option<MessageButton>,
     pub(crate) fix: Option<MessageButton>,
     pub(crate) has_report: bool,
+}
+
+/// A gozlerd.exe file's path and build, each empty while unknown.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProgramLines {
+    pub(crate) path: String,
+    pub(crate) build: String,
+}
+
+impl ProgramLines {
+    fn of(strings: &Strings, numbers: &dyn Numbers, file: &ProgramFile) -> ProgramLines {
+        let modified = numbers.date_time_seconds(file.modified);
+        // Without the time in parentheses, which `ProgramFile::modified`
+        // replaces.
+        let number = file
+            .version
+            .as_deref()
+            .and_then(|version| version.split_whitespace().next());
+        let build = match number {
+            Some(number) => strings.format("settings_index.version_modified", &[number, &modified]),
+            None => strings.format("settings_index.modified", &[&modified]),
+        };
+        ProgramLines {
+            path: file.path.display().to_string(),
+            build,
+        }
+    }
+
+    /// The service's program and the gozlerd.exe beside the window.
+    fn both(strings: &Strings, numbers: &dyn Numbers, programs: &Programs) -> [ProgramLines; 2] {
+        let service = programs
+            .service
+            .as_ref()
+            .map(|file| ProgramLines::of(strings, numbers, file))
+            .unwrap_or_default();
+        let beside = match &programs.beside {
+            Beside::Unknown => ProgramLines::default(),
+            Beside::SameAsService(path) => ProgramLines {
+                path: path.display().to_string(),
+                build: strings.text("settings_index.same_as_service").to_owned(),
+            },
+            Beside::Other(file) => ProgramLines::of(strings, numbers, file),
+        };
+        [service, beside]
+    }
 }
 
 /// A button of the list's message or of the Service group.
@@ -910,21 +961,34 @@ impl IndexCaptions {
     ) -> IndexCaptions {
         let strings = model.strings();
         let (status, failure) = model.service();
+        let programs = model.programs();
+        let [service_program, beside] = programs
+            .map(|programs| ProgramLines::both(strings, numbers, programs))
+            .unwrap_or_default();
+        let note = match programs.map(|programs| &programs.local) {
+            Some(Local::Mismatched) => strings.text("fixing.use_local_not_paired").to_owned(),
+            Some(Local::NotOffered | Local::Offered(_)) | None => String::new(),
+        };
+        let files = IndexCaptions {
+            service_program,
+            beside,
+            note,
+            ..IndexCaptions::default()
+        };
         if let Some(failure) = failure {
             let fix_button = |fix: Fix| MessageButton::new(model, &ListButton::Fix(fix));
             return IndexCaptions {
-                drives: Vec::new(),
                 no_drives: strings.text("settings_index.no_drives").to_owned(),
                 service: failure_text(strings, failure),
                 use_local: model.use_local_fix().map(fix_button),
                 fix: model.service_fix().map(fix_button),
-                has_report: false,
+                ..files
             };
         }
         let Some(status) = status else {
             return IndexCaptions {
                 service: strings.text("settings_index.asking").to_owned(),
-                ..IndexCaptions::default()
+                ..files
             };
         };
         let name = |prefix: &str| match label(prefix).filter(|label| !label.is_empty()) {
@@ -956,26 +1020,21 @@ impl IndexCaptions {
         });
         let drives = indexed.chain(left_out).collect();
         // 0 is a service that could not read its own memory.
-        let mut service = match status.process_private_bytes {
+        let service = match status.process_private_bytes {
             0 => strings.text("settings_index.running").to_owned(),
             bytes => strings.format(
                 "settings_index.running_memory",
                 &[&text::bytes(strings, numbers, bytes)],
             ),
         };
-        let use_local = model
-            .use_local_fix()
-            .map(|fix| MessageButton::new(model, &ListButton::Fix(fix)));
-        if use_local.is_some() {
-            service.push(' ');
-            service.push_str(strings.text("settings_index.other_build"));
-        }
         IndexCaptions {
             drives,
             service,
-            use_local,
+            use_local: model
+                .use_local_fix()
+                .map(|fix| MessageButton::new(model, &ListButton::Fix(fix))),
             has_report: true,
-            ..IndexCaptions::default()
+            ..files
         }
     }
 }

@@ -1,12 +1,15 @@
 //! The gozlerd.exe beside the window, which Use local offers over a service
-//! older than the window or of a different build (DESIGN.md: Service fixes).
+//! older than the window or of a different build (DESIGN.md: Service fixes),
+//! and the service's program, which Settings > Index shows beside it.
 //! The check reads both programs and runs them, so it runs on a thread of
 //! its own and a status request never waits for it: closing the window
 //! joins the status request's thread, and a gozlerd.exe that does not end
 //! would otherwise hold the window open.
 
-use crate::core::fetch::LocalService;
+use crate::core::fetch::{Beside, Local, LocalService, ProgramFile, Programs};
+use crate::win;
 use gozler_core::proto::SERVICE_NAME;
+use std::fs::File;
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -27,19 +30,23 @@ const POLL: Duration = Duration::from_millis(20);
 /// A file's last write time and length, which change with each build.
 type Build = (SystemTime, u64);
 
-/// The files a check reads, with their builds: the gozlerd.exe beside the
-/// window and, when it can be read, the program the service's configuration
-/// names.
+/// The files a check reads, with their builds, each when it can be read:
+/// the gozlerd.exe beside the window and the program the service's
+/// configuration names.
 #[derive(Clone, PartialEq, Eq)]
 struct Files {
-    local: (PathBuf, Build),
+    local: Option<(PathBuf, Build)>,
     registered: Option<(PathBuf, Build)>,
 }
 
 /// The check of the latest [`Files`].
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value lives in `LATEST`, so boxing would save nothing"
+)]
 enum Check {
     Running,
-    Done(Option<LocalService>),
+    Done(Programs),
 }
 
 /// The latest files and their check. A check runs once for each build of
@@ -54,26 +61,32 @@ static LATEST: Mutex<Option<(Files, Check)>> = Mutex::new(None);
 /// whose window runs beside the service's own program, then never offers
 /// it. An older gozlerd.exe has no hidden `protocol` command and fails, so
 /// it is not offered; an older service's program still answers `--version`.
-/// Neither command starts a service.
+/// Neither command starts a service. In a paired window, a gozlerd.exe that
+/// is not its pair is [`Local::Mismatched`], and it never runs. The same
+/// check reads what Settings > Index shows of both files.
 ///
-/// Returns at once: `None` while the check of these builds runs, so the
-/// window learns its answer at a later status.
-pub(super) fn local_service() -> Option<LocalService> {
-    let program = std::env::current_exe().ok()?.with_file_name("gozlerd.exe");
-    let local_build = build(&program)?;
+/// Returns at once: [`Programs::UNKNOWN`] while the check of these builds
+/// runs, so the window learns its answer at a later status.
+pub(super) fn local_service() -> Programs {
+    let with_build = |path: PathBuf| {
+        let build = build(&path)?;
+        Some((path, build))
+    };
     let files = Files {
-        local: (program, local_build),
+        local: std::env::current_exe()
+            .ok()
+            .and_then(|exe| with_build(exe.with_file_name("gozlerd.exe"))),
         registered: gozler_winfs::service_program(SERVICE_NAME)
             .ok()
-            .and_then(|registered| {
-                let registered_build = build(&registered)?;
-                Some((registered, registered_build))
-            }),
+            .and_then(with_build),
     };
+    if files.local.is_none() && files.registered.is_none() {
+        return Programs::UNKNOWN;
+    }
     let mut latest = LATEST.lock().unwrap_or_else(PoisonError::into_inner);
     match latest.as_ref() {
         Some((checked, Check::Done(found))) if *checked == files => return found.clone(),
-        Some((checked, Check::Running)) if *checked == files => return None,
+        Some((checked, Check::Running)) if *checked == files => return Programs::UNKNOWN,
         _ => {}
     }
     *latest = Some((files.clone(), Check::Running));
@@ -89,12 +102,40 @@ pub(super) fn local_service() -> Option<LocalService> {
             *check = Check::Done(found);
         }
     });
-    None
+    Programs::UNKNOWN
+}
+
+/// Whether `program` is the gozlerd.exe that the setup's build paired with
+/// this window; any is, in a window that was never paired. Use local asks
+/// again when the person confirms it, because a gozlerd.exe rebuilt or
+/// replaced since the check would switch the service to a file nobody
+/// checked.
+pub(super) fn is_paired(program: &Path) -> bool {
+    let Some(paired) = win::pairing::paired_gozlerd() else {
+        return true;
+    };
+    File::open(program)
+        .and_then(|mut file| win::update::sha256(&mut file))
+        .is_ok_and(|sha256| sha256 == paired)
 }
 
 /// What [`local_service`] answers for `files`.
-fn check(files: &Files) -> Option<LocalService> {
-    let (program, local_build) = &files.local;
+fn check(files: &Files) -> Programs {
+    let service = files
+        .registered
+        .as_ref()
+        .map(|(registered, build)| ProgramFile {
+            path: registered.clone(),
+            version: version(registered),
+            modified: filetime(build.0),
+        });
+    let mut programs = Programs {
+        service,
+        ..Programs::UNKNOWN
+    };
+    let Some((program, local_build)) = &files.local else {
+        return programs;
+    };
     if let Some((registered, registered_build)) = &files.registered
         && local_build.1 == registered_build.1
         && matches!(
@@ -102,21 +143,51 @@ fn check(files: &Files) -> Option<LocalService> {
             (Ok(a), Ok(b)) if a == b
         )
     {
-        return None;
+        programs.beside = Beside::SameAsService(program.clone());
+        return programs;
     }
-    let protocol = printed(program, "protocol")?;
-    let installed = files
-        .registered
+    let paired = is_paired(program);
+    programs.beside = Beside::Other(ProgramFile {
+        path: program.clone(),
+        version: paired.then(|| version(program)).flatten(),
+        modified: filetime(local_build.0),
+    });
+    if !paired {
+        programs.local = Local::Mismatched;
+        return programs;
+    }
+    let installed = programs
+        .service
         .as_ref()
-        .and_then(|(registered, _)| printed(registered, "--version"))
-        .and_then(|version| version.trim().strip_prefix("gozlerd ").map(str::to_owned));
-    LocalService::from_protocol(program.clone(), &protocol, installed)
+        .and_then(|service| service.version.clone());
+    if let Some(local) = printed(program, "protocol")
+        .and_then(|protocol| LocalService::from_protocol(program.clone(), &protocol, installed))
+    {
+        programs.local = Local::Offered(local);
+    }
+    programs
+}
+
+/// What `gozlerd.exe --version` prints after the program's name, such as
+/// `0.3.0 (2026-10-20 09:14)`.
+fn version(program: &Path) -> Option<String> {
+    let printed = printed(program, "--version")?;
+    printed.trim().strip_prefix("gozlerd ").map(str::to_owned)
 }
 
 /// The build of the file at `path`.
 fn build(path: &Path) -> Option<Build> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// `time` as a FILETIME, which the window's date formats read.
+fn filetime(time: SystemTime) -> i64 {
+    let ms = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
+        Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
+    };
+    gozler_core::output::filetime::unix_ms_to_filetime(ms)
 }
 
 /// What `program argument` printed when it ended well within

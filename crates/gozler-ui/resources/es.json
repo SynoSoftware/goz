@@ -339,6 +339,7 @@
     "install": "Instalar",
     "use_local_caption": "Usar local",
     "use_local_question": "¿Cambiar al servicio local?",
+    "use_local_not_paired": "Usar local no está disponible porque el gozlerd.exe que está junto a esta aplicación no se compiló con ella.",
     "compatible_version": "Versión compatible: {0}",
     "found_in": "Ubicada en: {0}",
     "switch": "Cambiar"
@@ -545,7 +546,11 @@
     "service": "Servicio",
     "asking": "Comprobando el servicio…",
     "running": "El servicio se está ejecutando.",
-    "other_build": "Ejecuta una compilación de gozlerd.exe distinta de la que está junto a esta aplicación.",
+    "service_program": "Programa del servicio:",
+    "beside": "Junto a esta aplicación:",
+    "version_modified": "Versión {0}, modificado {1}",
+    "modified": "Modificado {0}",
+    "same_as_service": "La misma compilación que el programa del servicio",
     "running_memory": "El servicio se está ejecutando y usa {0} de memoria.",
     "no_drives": "No se pueden mostrar las unidades mientras el servicio no responda.",
     "report": "&Informe"

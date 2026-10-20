@@ -339,6 +339,7 @@
     "install": "Install",
     "use_local_caption": "Use local",
     "use_local_question": "Switch to the local service?",
+    "use_local_not_paired": "Use local isn't available because the gozlerd.exe beside this app wasn't built with it.",
     "compatible_version": "Compatible version: {0}",
     "found_in": "Found in: {0}",
     "switch": "Switch"
@@ -546,7 +547,11 @@
     "asking": "Checking the service…",
     "running": "The service is running.",
     "running_memory": "The service is running and uses {0} of memory.",
-    "other_build": "It runs a different build of gozlerd.exe from the one beside this app.",
+    "service_program": "Service program:",
+    "beside": "Beside this app:",
+    "version_modified": "Version {0}, modified {1}",
+    "modified": "Modified {0}",
+    "same_as_service": "Same build as the service's program",
     "no_drives": "Can't show the drives while the service isn't responding.",
     "report": "Re&port"
   },

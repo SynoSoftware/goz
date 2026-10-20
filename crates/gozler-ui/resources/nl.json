@@ -339,6 +339,7 @@
     "install": "Installeren",
     "use_local_caption": "Lokaal gebruiken",
     "use_local_question": "Overschakelen naar de lokale service?",
+    "use_local_not_paired": "Lokaal gebruiken is niet beschikbaar, omdat de gozlerd.exe naast deze app niet samen met deze app is gebouwd.",
     "compatible_version": "Compatibele versie: {0}",
     "found_in": "Gevonden in: {0}",
     "switch": "Overschakelen"
@@ -545,7 +546,11 @@
     "service": "Service",
     "asking": "De service controleren…",
     "running": "De service wordt uitgevoerd.",
-    "other_build": "De service voert een andere build van gozlerd.exe uit dan die naast deze app.",
+    "service_program": "Serviceprogramma:",
+    "beside": "Naast deze app:",
+    "version_modified": "Versie {0}, gewijzigd {1}",
+    "modified": "Gewijzigd {0}",
+    "same_as_service": "Dezelfde build als het serviceprogramma",
     "running_memory": "De service wordt uitgevoerd en gebruikt {0} geheugen.",
     "no_drives": "Kan de stations niet weergeven zolang de service niet reageert.",
     "report": "&Rapport"

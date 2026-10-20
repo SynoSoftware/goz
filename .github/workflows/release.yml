@@ -62,7 +62,8 @@ jobs:
           if ($setup.ExitCode -ne 0) { throw "Inno Setup did not install (exit $($setup.ExitCode))." }
           "INNO_COMPILER=$dir\ISCC.exe" >> $env:GITHUB_ENV
 
-      # Builds the release binaries and target/installer/gozler-<version>-x64-Setup.exe.
+      # Builds the release binaries, pairs gozler-ui.exe with gozlerd.exe
+      # (installer/Pair.ps1), and builds target/installer/gozler-<version>-x64-Setup.exe.
       # GOZLER_RELEASE keeps the build date out of the version (gozler-core's
       # build.rs).
       - name: Build binaries and installer

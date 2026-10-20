@@ -244,8 +244,7 @@ pub(super) struct SettingsDialog<'a> {
     shown: Cell<Option<SettingsPage>>,
     /// The commands the Keyboard page lists, after its filter.
     commands: RefCell<Vec<CommandRow>>,
-    /// What the Index page shows, so a refresh that changes nothing sets
-    /// no row.
+    /// What the Index page shows, so a refresh sets only what changed.
     index: RefCell<Option<IndexCaptions>>,
     /// The Include settings the service was last asked to count, and its
     /// answer once it arrived; the preview shows the answer only while the
@@ -1003,30 +1002,87 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Shows the service's latest state, and its failure's fix, on the
-    /// Index page.
+    /// Shows the service's latest state, its programs and its failure's
+    /// fix on the Index page. It sets only what changed since the last
+    /// refresh, because setting a control redraws it, and the memory and
+    /// the entry counts change at nearly every 2-second refresh.
     fn refresh_index(&self, dialog: Hwnd) {
         let captions = self.main.index_captions();
-        if self.index.borrow().as_ref() == Some(&captions) {
-            return;
-        }
         // Stored first, because the drive list asks for its empty text
         // while its rows change.
-        self.index.replace(Some(captions.clone()));
+        let shown = self.index.replace(Some(captions.clone()));
+        let shown = shown.as_ref();
+        if shown == Some(&captions) {
+            return;
+        }
+        let changed = |part: fn(&IndexCaptions) -> &str| {
+            shown.is_none_or(|shown| part(shown) != part(&captions))
+        };
         if let Some(list) = self
             .page(SettingsPage::Index)
             .and_then(|page| ReportList::of_dialog(page, ControlId::IndexDrives.id()))
         {
-            list.set_rows(&captions.drives, None);
+            // Replacing the rows makes the list ask for its empty text again.
+            match shown.filter(|shown| shown.no_drives == captions.no_drives) {
+                Some(shown) => list.update_rows(&shown.drives, &captions.drives),
+                None => list.set_rows(&captions.drives, None),
+            }
         }
-        if let Some(service) = self.control(SettingsPage::Index, ControlId::IndexService) {
-            service.set_text(&captions.service);
-        }
-        let fixes = [
-            (ControlId::IndexUseLocal, &captions.use_local),
-            (ControlId::IndexFix, &captions.fix),
+        // The paths end in an ellipsis, so their tooltips show them whole.
+        type Text = fn(&IndexCaptions) -> &str;
+        let texts: [(ControlId, Text, bool); 6] = [
+            (ControlId::IndexService, |c| c.service.as_str(), false),
+            (
+                ControlId::IndexServiceProgramPath,
+                |c| c.service_program.path.as_str(),
+                true,
+            ),
+            (
+                ControlId::IndexServiceProgramBuild,
+                |c| c.service_program.build.as_str(),
+                false,
+            ),
+            (ControlId::IndexBesidePath, |c| c.beside.path.as_str(), true),
+            (
+                ControlId::IndexBesideBuild,
+                |c| c.beside.build.as_str(),
+                false,
+            ),
+            (ControlId::IndexNote, |c| c.note.as_str(), false),
         ];
-        for (control, fix) in fixes {
+        for (control, text, tipped) in texts {
+            let Some(hwnd) = self
+                .control(SettingsPage::Index, control)
+                .filter(|_| changed(text))
+            else {
+                continue;
+            };
+            hwnd.set_text(text(&captions));
+            if tipped && let Some(tips) = self.index_tips.get() {
+                tips.set(hwnd, text(&captions));
+            }
+        }
+        // A button with nothing to offer stays in its place, disabled, with
+        // the caption paired with it here (DESIGN.md: The Drives and service
+        // page).
+        let fixes = [
+            (
+                ControlId::IndexUseLocal,
+                &captions.use_local,
+                shown.map(|shown| &shown.use_local),
+                "fix.use_local",
+            ),
+            (
+                ControlId::IndexFix,
+                &captions.fix,
+                shown.map(|shown| &shown.fix),
+                "fix.start_service",
+            ),
+        ];
+        for (control, fix, shown_fix, idle) in fixes {
+            if shown_fix == Some(fix) {
+                continue;
+            }
             let Some(button) = self
                 .page(SettingsPage::Index)
                 .and_then(|page| Button::of_dialog(page, control.id()))
@@ -1037,17 +1093,25 @@ impl<'a> SettingsDialog<'a> {
             if !fix.as_ref().is_some_and(|fix| fix.enabled) {
                 focus_off(dialog, hwnd);
             }
-            if let Some(fix) = fix {
-                hwnd.set_text(&fix.label);
-                button.set_icon(fix.icon);
-                hwnd.set_enabled(fix.enabled);
-                if let Some(tips) = self.index_tips.get() {
-                    tips.set(hwnd, fix.tooltip.as_deref().unwrap_or_default());
-                }
+            let (label, icon, enabled, tooltip) = match fix {
+                Some(fix) => (
+                    fix.label.as_str(),
+                    fix.icon,
+                    fix.enabled,
+                    fix.tooltip.as_deref().unwrap_or_default(),
+                ),
+                None => (self.strings.text(idle), None, false, ""),
+            };
+            hwnd.set_text(label);
+            button.set_icon(icon);
+            hwnd.set_enabled(enabled);
+            if let Some(tips) = self.index_tips.get() {
+                tips.set(hwnd, tooltip);
             }
-            hwnd.set_visible(fix.is_some());
         }
-        if let Some(report) = self.control(SettingsPage::Index, ControlId::IndexReport) {
+        if shown.is_none_or(|shown| shown.has_report != captions.has_report)
+            && let Some(report) = self.control(SettingsPage::Index, ControlId::IndexReport)
+        {
             if !captions.has_report {
                 focus_off(dialog, report);
             }
@@ -1638,7 +1702,12 @@ impl DialogProc for SettingsDialog<'_> {
                     text("settings_context_menu.total_commander_tooltip"),
                 )],
                 // `refresh_index` gives these their tips.
-                SettingsPage::Index => &[(ControlId::IndexUseLocal, ""), (ControlId::IndexFix, "")],
+                SettingsPage::Index => &[
+                    (ControlId::IndexUseLocal, ""),
+                    (ControlId::IndexFix, ""),
+                    (ControlId::IndexServiceProgramPath, ""),
+                    (ControlId::IndexBesidePath, ""),
+                ],
                 _ => &[],
             };
             let tipped: Vec<(Hwnd, &str)> = reset

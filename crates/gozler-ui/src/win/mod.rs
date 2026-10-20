@@ -16,6 +16,7 @@ pub(crate) mod keys;
 pub(crate) mod locale;
 pub(crate) mod menu;
 pub(crate) mod notify;
+pub(crate) mod pairing;
 pub(crate) mod pane;
 pub(crate) mod shell;
 pub(crate) mod shortcut;

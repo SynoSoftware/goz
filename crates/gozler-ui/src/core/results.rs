@@ -5,7 +5,7 @@
 //! names the rows the person sees even while the typed text has already
 //! changed.
 
-use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation, LocalService, SelectionAsk};
+use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation, Local, LocalService, SelectionAsk};
 use gozler_client::Repair;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{MatchSums, MatchedParts, QueryError};
@@ -128,7 +128,10 @@ impl Fix {
     /// window that serves the window's protocol.
     pub(crate) fn use_local(failure: &DaemonFailure) -> Option<Fix> {
         match failure {
-            DaemonFailure::TooOld { local: Some(local) } => Some(Fix::UseLocal(local.clone())),
+            DaemonFailure::TooOld { programs } => match &programs.local {
+                Local::Offered(local) => Some(Fix::UseLocal(local.clone())),
+                Local::NotOffered | Local::Mismatched => None,
+            },
             _ => None,
         }
     }

@@ -200,9 +200,8 @@ pub(crate) enum Outcome {
     IncludedCount(u64),
     /// The reply to [`Ask::SettingsSaved`].
     SettingsApplied,
-    /// The service's status, and the gozlerd.exe beside the window when it
-    /// is a different build from the service's, which Use local offers.
-    Status(DaemonStatus, Option<LocalService>),
+    /// The service's status, and the gozlerd.exe files around it.
+    Status(DaemonStatus, Programs),
     /// The rows an export has written so far.
     ExportProgress {
         rows: u64,
@@ -270,16 +269,71 @@ pub(crate) enum DaemonFailure {
     NotReady,
     /// The pipe's server is not the elevated gozler service.
     NotGozler,
-    /// The service is older than the window. `local` is the gozlerd.exe
-    /// beside the window, when it serves the window's protocol.
+    /// The service is older than the window.
     TooOld {
-        local: Option<LocalService>,
+        programs: Programs,
     },
     /// The service refused the request; `detail` is its English text.
     Refused {
         detail: String,
     },
     Lost,
+}
+
+/// The program the service's configuration names and the gozlerd.exe
+/// beside the window, which Settings > Index shows, and what Use local makes
+/// of them (DESIGN.md: The Drives and service page).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Programs {
+    pub(crate) local: Local,
+    /// `None` when the service's configuration or its program cannot be
+    /// read.
+    pub(crate) service: Option<ProgramFile>,
+    pub(crate) beside: Beside,
+}
+
+impl Programs {
+    /// While the files' check runs, or when neither file can be read.
+    pub(crate) const UNKNOWN: Programs = Programs {
+        local: Local::NotOffered,
+        service: None,
+        beside: Beside::Unknown,
+    };
+}
+
+/// The gozlerd.exe beside the window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Beside {
+    /// There is none that can be read, or the check has not answered.
+    Unknown,
+    /// It holds the bytes of the service's program, so it is that build.
+    SameAsService(PathBuf),
+    Other(ProgramFile),
+}
+
+/// A gozlerd.exe file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgramFile {
+    pub(crate) path: PathBuf,
+    /// As the program prints it, such as `0.3.0 (2026-10-20 09:14)`; `None`
+    /// when it was not run or did not answer.
+    pub(crate) version: Option<String>,
+    /// Its last write time, as a FILETIME. It tells two builds apart, which
+    /// the version's time does not: that is when gozler-core last changed.
+    pub(crate) modified: i64,
+}
+
+/// What Use local finds in the gozlerd.exe beside the window (DESIGN.md:
+/// Service fixes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Local {
+    /// Nothing to offer: there is none, it is the service's own program, it
+    /// does not serve the window's protocol, or its check has not ended.
+    NotOffered,
+    Offered(LocalService),
+    /// Not the gozlerd.exe that the setup's build paired with this window,
+    /// so Use local stays off.
+    Mismatched,
 }
 
 /// A gozlerd.exe that serves this window's protocol and is a different build

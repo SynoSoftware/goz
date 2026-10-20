@@ -231,13 +231,13 @@ impl Ring {
         let source = match opened {
             Ok(source) => source,
             Err(error @ (ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)) => {
-                walk.fail(&file.path, error, folder);
+                walk.list_entry(&file.path, Reason::Failed(error), file.size, folder);
                 release(walk, handed);
                 return None;
             }
             // A file the walk listed that is gone since.
             Err(error) if is_gone(error) && folder.is_some() => {
-                walk.copying.progress.add_items(1);
+                walk.copying.progress.pass(file.size);
                 release(walk, handed);
                 return None;
             }
@@ -323,7 +323,7 @@ impl Ring {
         let (destination, compare, to) = match created {
             Placed::Named(named) => named,
             Placed::Skipped => {
-                walk.list_entry(&file.path, Reason::Skipped, folder);
+                walk.list_entry(&file.path, Reason::Skipped, file.size, folder);
                 release(walk, handed);
                 return None;
             }

@@ -286,22 +286,25 @@ impl Walk<'_> {
         self.cancelled() || self.full.load(Ordering::Relaxed)
     }
 
-    /// Counts an entry that is not copied and lists it with `reason`. It
-    /// keeps its source folder, because a move must not delete it.
-    fn list_entry(&self, path: &[u16], reason: Reason, folder: Option<&Folder>) {
+    /// Counts an entry that is not copied, with the `bytes` of its file
+    /// ([`Progress::pass`]), and lists it with `reason`. It keeps its source
+    /// folder, because a move must not delete it.
+    fn list_entry(&self, path: &[u16], reason: Reason, bytes: u64, folder: Option<&Folder>) {
         if let Some(folder) = folder {
             folder.keep();
         }
         if matches!(reason, Reason::Failed(_)) && self.stopped() {
             return;
         }
-        self.copying.progress.add_items(1);
+        self.copying.progress.pass(bytes);
         let mut entries = self.listed.lock().expect("no worker panics");
         entries.push(listed(path, reason));
     }
 
+    /// Lists a folder that failed, or an entry the run could not read, with
+    /// no bytes.
     fn fail(&self, path: &[u16], error: u32, folder: Option<&Folder>) {
-        self.list_entry(path, Reason::Failed(error), folder);
+        self.list_entry(path, Reason::Failed(error), 0, folder);
     }
 
     /// Reads what a selected entry is on its own handle, as the delete does,
@@ -630,20 +633,21 @@ impl Walk<'_> {
             Decision::Done if self.copying.moving => {
                 // Equal size and time are a guess, and no hash checks it, so
                 // a continued move never deletes a source on it.
-                self.list_entry(path, Reason::SourceKept, folder);
+                self.list_entry(path, Reason::SourceKept, entry.size, folder);
                 return None;
             }
             Decision::Done => {
-                self.copying.progress.add_items(1);
+                self.copying.progress.pass(entry.size);
                 return None;
             }
             Decision::Skip => {
-                self.list_entry(path, Reason::Skipped, folder);
+                self.list_entry(path, Reason::Skipped, entry.size, folder);
                 return None;
             }
             // Only a folder merges.
             Decision::Mismatch | Decision::Merge => {
-                self.fail(path, ERROR_ALREADY_EXISTS, folder);
+                let failed = Reason::Failed(ERROR_ALREADY_EXISTS);
+                self.list_entry(path, failed, entry.size, folder);
                 return None;
             }
         };
@@ -685,7 +689,7 @@ impl Walk<'_> {
             Decision::Write { name, .. } => (join(&target.verbatim, &name), false),
             Decision::Merge => (join(&target.verbatim, name), true),
             Decision::Skip => {
-                self.list_entry(path, Reason::Skipped, folder);
+                self.list_entry(path, Reason::Skipped, 0, folder);
                 return None;
             }
             Decision::Mismatch | Decision::Done => {
@@ -846,7 +850,9 @@ impl Walk<'_> {
         }
         let error = match place(&file.target, placing, self.copying.rule.choice, copy_to) {
             Placed::Named(()) => return self.finish(file, folder, before),
-            Placed::Skipped => return self.list_entry(&file.path, Reason::Skipped, folder_ref),
+            Placed::Skipped => {
+                return self.list_entry(&file.path, Reason::Skipped, file.size, folder_ref);
+            }
             Placed::Failed(error) => error,
         };
         // `CopyFile2` deleted what it wrote.
@@ -860,8 +866,8 @@ impl Walk<'_> {
                 }
             }
             // A file the walk listed that is gone since.
-            error if is_gone(error) && folder.is_some() => self.copying.progress.add_items(1),
-            error => self.fail(&file.path, error, folder_ref),
+            error if is_gone(error) && folder.is_some() => progress.pass(file.size),
+            error => self.list_entry(&file.path, Reason::Failed(error), file.size, folder_ref),
         }
     }
 

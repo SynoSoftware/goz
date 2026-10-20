@@ -312,6 +312,7 @@ impl Queue {
                         let running = Running {
                             items: progress.items(),
                             bytes: progress.bytes(),
+                            passed: progress.passed(),
                             total: operation.total,
                             renames: operation.renames,
                             paused: operation.pause.is_paused(),

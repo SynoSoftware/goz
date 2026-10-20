@@ -1,6 +1,7 @@
 #Requires -Version 7
 # Raises the patch version unless the build is a release, then builds the
-# release binaries and packages them with Setup.iss into
+# release binaries, pairs the window with its gozlerd.exe (Pair.ps1), and
+# packages them with Setup.iss into
 # target\installer\gozler-<version>-x64-Setup.exe.
 param(
     # ISCC.exe from Inno Setup 7.1 or later. By default, the one on PATH or in
@@ -51,6 +52,7 @@ try {
     $env:RUSTFLAGS = $null
     cargo build --release --workspace
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & (Join-Path $PSScriptRoot 'Pair.ps1')
 
     # The first author, the company that develops gozler, is the publisher.
     & $Compiler /Qp "/DAppVersion=$($package.version)" "/DAppPublisher=$($package.authors[0])" `

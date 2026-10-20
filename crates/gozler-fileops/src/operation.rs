@@ -73,6 +73,11 @@ pub struct Running {
     pub items: u64,
     /// Bytes copied so far.
     pub bytes: u64,
+    /// The bytes of files counted in `items` but not copied: files that
+    /// Continue finds done, and skipped and failed files. They count toward
+    /// the total and not toward the speed, because a walk passes many at
+    /// once.
+    pub passed: u64,
     /// Prepare's total.
     pub total: Option<Total>,
     /// It moves no bytes: a move whose every entry is renamed on one
@@ -265,6 +270,7 @@ pub struct RingCounts {
 pub(crate) struct Progress {
     items: AtomicU64,
     bytes: AtomicU64,
+    passed: AtomicU64,
     current: Mutex<Option<Arc<CurrentFile>>>,
     /// Runs once, on the engine's thread, at the operation's first report
     /// that counts an item or a byte, while the engine waits for it, so a
@@ -352,6 +358,13 @@ impl Progress {
         self.reported();
     }
 
+    /// Counts an item that is not copied, with `bytes`, the size of its
+    /// file in the total, as [`Running::passed`].
+    pub(crate) fn pass(&self, bytes: u64) {
+        self.passed.fetch_add(bytes, Ordering::Relaxed);
+        self.add_items(1);
+    }
+
     pub(crate) fn add_bytes(&self, count: u64) {
         self.bytes.fetch_add(count, Ordering::Relaxed);
         if count > 0 {
@@ -412,5 +425,9 @@ impl Progress {
 
     pub(crate) fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn passed(&self) -> u64 {
+        self.passed.load(Ordering::Relaxed)
     }
 }

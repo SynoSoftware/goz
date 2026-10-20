@@ -690,6 +690,9 @@ pub(crate) struct MainWindow {
     tray: RefCell<Option<TrayIcon>>,
     /// `TaskbarCreated`, after which the tray icon is added again.
     taskbar_created: u32,
+    /// A start of another program asks this window to exit
+    /// ([`super::EXIT_MESSAGE`]).
+    exit_message: u32,
     /// The shortcut to show Gozler, while Windows lets Gozler use it.
     shortcut: RefCell<Option<Registration>>,
     /// Why the saved shortcut could not be used at start, which the window
@@ -755,6 +758,7 @@ impl MainWindow {
             accelerators: RefCell::new(Rc::new(accelerators)),
             tray: RefCell::new(None),
             taskbar_created: win::instance::register_message("TaskbarCreated"),
+            exit_message: win::instance::register_message(super::EXIT_MESSAGE),
             shortcut: RefCell::new(None),
             shortcut_failure: RefCell::new(None),
             unshown: Cell::new(false),
@@ -1281,6 +1285,20 @@ impl MainWindow {
             Fix::UseLocal(local) => {
                 let question = captions::use_local_question(self.model.borrow().strings(), local);
                 if !win::dialog::ask(self.fix_owner(hwnd), &question) {
+                    return;
+                }
+                if !super::local_service::is_paired(&local.program) {
+                    // Read before the message box, whose loop may change
+                    // the model.
+                    let (text, title) = {
+                        let model = self.model.borrow();
+                        let text = |key: &str| model.strings().text(key).to_owned();
+                        (
+                            text("fixing.use_local_not_paired"),
+                            text("fixing.use_local_caption"),
+                        )
+                    };
+                    win::dialog::error_box(Some(self.fix_owner(hwnd)), &text, &title);
                     return;
                 }
             }
@@ -1847,7 +1865,10 @@ impl MainWindow {
         let controls = &self.created().controls;
         let accepted = match item {
             MenuItem::Run(command) => match command {
-                CommandId::Exit => return self.exit(hwnd),
+                CommandId::Exit => {
+                    self.exit(hwnd);
+                    return;
+                }
                 CommandId::About => {
                     let about = About::new(self.model.borrow().strings());
                     self.open_dialog(hwnd, DialogId::About, &about);
@@ -3145,7 +3166,8 @@ impl MainWindow {
     /// and exits otherwise (DESIGN.md: Window lifetime).
     fn close(&self, hwnd: Hwnd) {
         if self.instance == Instance::Another || !self.model.borrow().choices().keep_running {
-            return self.exit(hwnd);
+            self.exit(hwnd);
+            return;
         }
         hwnd.hide();
         if !self.model.borrow_mut().first_hide() {
@@ -3170,8 +3192,11 @@ impl MainWindow {
 
     /// Saves the settings and ends Gozler (DESIGN.md: C7, T14). While file
     /// operations run or wait, it asks first, and stops them
-    /// (file-manager-spec.md: File operations, step 8).
-    fn exit(&self, hwnd: Hwnd) {
+    /// (file-manager-spec.md: File operations, step 8), over the window,
+    /// which comes forward from the notification area or another start's
+    /// request. Returns whether Gozler ends; `false` when the person kept
+    /// the operations.
+    fn exit(&self, hwnd: Hwnd) -> bool {
         let counts = self
             .file_operations
             .borrow()
@@ -3182,10 +3207,11 @@ impl MainWindow {
                 let model = self.model.borrow();
                 exit_question(model.strings(), &*self.numbers.borrow(), running, waiting)
             };
+            self.show_window(hwnd);
             // The question runs its own message loop, so nothing is
             // borrowed here.
             if !win::dialog::ask(hwnd, &question) {
-                return;
+                return false;
             }
             if let Some(operations) = self.file_operations.borrow().as_ref() {
                 operations.stop_all();
@@ -3195,6 +3221,7 @@ impl MainWindow {
             self.save_settings(hwnd, true);
         }
         hwnd.destroy();
+        true
     }
 
     /// Adds the tray icon while Gozler keeps running in the notification
@@ -4074,6 +4101,23 @@ impl WindowProc for MainWindow {
             Message::Other(msg) if msg == self.show_message => {
                 self.show_window(hwnd);
                 Some(LRESULT(0))
+            }
+            // A start of another program (DESIGN.md: Window lifetime).
+            // A window with a dialog open comes forward instead, because
+            // the dialog's loop runs on the window.
+            Message::Other(msg) if msg == self.exit_message => {
+                let closes = if hwnd.is_enabled() {
+                    self.exit(hwnd)
+                } else {
+                    self.show_window(hwnd);
+                    false
+                };
+                let answer = if closes {
+                    super::EXIT_CLOSES
+                } else {
+                    super::EXIT_STAYS
+                };
+                Some(LRESULT(answer))
             }
             Message::Other(clipboard::CLIPBOARD_CHANGED) => {
                 self.model

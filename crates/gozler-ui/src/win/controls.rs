@@ -1994,22 +1994,12 @@ impl ReportList {
         send(self.0, LVM_DELETEALLITEMS, 0, 0);
         for (index, row) in rows.iter().enumerate() {
             for (column, text) in row.as_ref().iter().enumerate() {
-                let mut text = wide(text);
-                let item = LVITEMW {
-                    mask: LVIF_TEXT,
-                    iItem: index as i32,
-                    iSubItem: column as i32,
-                    pszText: PWSTR(text.as_mut_ptr()),
-                    ..Default::default()
-                };
                 let message = if column == 0 {
                     LVM_INSERTITEMW
                 } else {
                     LVM_SETITEMTEXTW
                 };
-                // SAFETY: `item` and its text outlive the call, which copies
-                // them.
-                unsafe { send_pointer(self.0, message, index, &raw const item) };
+                self.put_cell(message, index, column, text);
             }
         }
         if let Some(index) = selected.filter(|i| *i < rows.len()) {
@@ -2023,6 +2013,39 @@ impl ReportList {
             unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
             send(self.0, LVM_ENSUREVISIBLE, index, 0);
         }
+    }
+
+    /// Changes the rows from `shown`, which the list holds, to `rows`. With
+    /// as many rows, it sets only the cells that differ, so the list redraws
+    /// only those and keeps its selection; otherwise it replaces the rows as
+    /// [`ReportList::set_rows`] does.
+    pub(crate) fn update_rows<R: AsRef<[String]>>(self, shown: &[R], rows: &[R]) {
+        if shown.len() != rows.len() {
+            self.set_rows(rows, None);
+            return;
+        }
+        for (index, (old, new)) in shown.iter().zip(rows).enumerate() {
+            for (column, (old, new)) in old.as_ref().iter().zip(new.as_ref()).enumerate() {
+                if old != new {
+                    self.put_cell(LVM_SETITEMTEXTW, index, column, new);
+                }
+            }
+        }
+    }
+
+    /// Sends `message`, which inserts an item or sets a cell's text, for
+    /// cell `column` of row `index`.
+    fn put_cell(self, message: u32, index: usize, column: usize, text: &str) {
+        let mut text = wide(text);
+        let item = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: index as i32,
+            iSubItem: column as i32,
+            pszText: PWSTR(text.as_mut_ptr()),
+            ..Default::default()
+        };
+        // SAFETY: `item` and its text outlive the call, which copies them.
+        unsafe { send_pointer(self.0, message, index, &raw const item) };
     }
 
     pub(crate) fn selected(self) -> Option<usize> {
