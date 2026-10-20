@@ -224,16 +224,13 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
             "  {mount}: {} match(es) in {:.1} ms (showing up to 20)",
             out.total, ms
         );
-        let mut path = Vec::new();
-        for hit in &out.hits {
-            out.names
-                .full_path_into(hit.folder, out.names.name(hit.name), &mut path);
-            let path = gozler_core::wtf8::to_string_lossy(&path);
-            let size = match hit.size {
+        for row in &out.rows {
+            let path = gozler_core::wtf8::to_string_lossy(&row.path);
+            let size = match row.size {
                 Some(b) => format!("{b} B"),
                 None => "?".to_string(),
             };
-            let date = match hit.mtime {
+            let date = match row.mtime {
                 Some(ft) => {
                     let ms = gozler_core::output::filetime_to_unix_ms(ft);
                     format!("{ms} ms")

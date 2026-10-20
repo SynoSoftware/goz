@@ -224,6 +224,6 @@ fn main() {
         "query 'index.js': {} matches in {:?} (first page {})",
         out.total,
         t2.elapsed(),
-        out.hits.len()
+        out.rows.len()
     );
 }

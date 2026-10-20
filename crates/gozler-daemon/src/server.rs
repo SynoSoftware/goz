@@ -14,12 +14,12 @@ use gozler_core::include::IncludeSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
     DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
-    PageItem, ProtoError, QueryTotals, Request, Response, ResultsPage, Returns, Rows, SentFolders,
-    VolumeMemory, VolumeStatus, encode_response_frame,
+    PageEnd, PageItem, ProtoError, QueryTotals, Request, Response, ResultsPage, Returns, Rows,
+    SentFolders, VolumeMemory, VolumeStatus, encode_response_frame,
 };
 use gozler_core::query::{
-    CompiledQuery, IndexChanged, MatchSums, OrderedHits, SizeOverflow, Totals, VolumeRun,
-    find_matches, order_hits, resolve_scope, run_totals,
+    CompiledQuery, IndexChanged, MatchSums, Reply, SizeOverflow, Totals, find_matches,
+    resolve_scope, run_totals,
 };
 use gozler_core::scope::Scope;
 use gozler_core::types::EntryIdx;
@@ -336,8 +336,13 @@ fn run_on_volumes<'t, T>(
 /// (paged by [`ResultsPage::push`], `more` set on all but the last). An empty
 /// result set still emits one `more: false` page so the client always sees a
 /// terminal frame. No full path is built: each page sends the folders its
-/// rows need that no earlier page sent, and each row its folder and its name,
-/// straight from the hits' [`gozler_core::query::ResultNames`].
+/// rows need that no earlier page sent, and each row its folder and its name.
+///
+/// Each volume finds and keys its matches under its index lock, sorts them
+/// without it, and makes its rows under it again. Each page then reads its
+/// rows from the indexes under every volume's read lock, taken in
+/// [`VolumeSet`] order, and releases them before the page is sent, so the
+/// pipe and a slow client never hold a lock.
 fn stream_rows(
     targets: &[(Arc<VolumeState>, VolScope)],
     query: &CompiledQuery,
@@ -359,69 +364,68 @@ fn stream_rows(
         );
         (vol, matches)
     });
-    let mut total: u64 = 0;
     let mut sums = rows.want_sums.then(MatchSums::default);
-    let mut runs = Vec::with_capacity(found.len());
+    let mut volumes = Vec::with_capacity(found.len());
+    let mut answers = Vec::with_capacity(found.len());
     for (vol, matches) in found {
         // Off the lock, so the journal does not wait for the sort.
         let ordered = matches.order();
-        match ordered.read_hits(vol.read().index()) {
-            Ok(outcome) => {
-                total += outcome.total;
-                if let (Some(sums), Some(volume)) = (sums.as_mut(), outcome.sums) {
+        match ordered.read_rows(vol.read().index()) {
+            Ok(answer) => {
+                if let (Some(sums), Some(volume)) = (sums.as_mut(), answer.sums()) {
                     sums.add(volume);
                 }
-                runs.push(VolumeRun {
-                    mount_prefix: vol.mount_prefix(),
-                    hits: outcome.hits,
-                    names: outcome.names,
-                });
+                volumes.push(vol);
+                answers.push(answer);
             }
             // A rebuild replaced the index meanwhile, or new Include
             // settings moved its entries, so this volume's rows are lost.
             Err(IndexChanged) => coverage.volumes_incomplete = true,
         }
     }
-
-    // Off every lock: merge the volumes.
-    let OrderedHits { hits, names } = order_hits(rows.sort, runs);
-    let start = (rows.offset as usize).min(hits.len());
-    let end = rows
-        .limit
-        .map(|l| (start + l as usize).min(hits.len()))
-        .unwrap_or(hits.len());
     // A size pass that has not completed leaves sums short.
     if coverage.metadata_pending {
         sums = sums.map(MatchSums::without_sizes);
     }
 
-    let mut sent = SentFolders::new(&names);
-    let mut hits = hits[start..end].iter().peekable();
+    let mut reply = Reply::new(rows.sort, answers, rows.offset, rows.limit);
+    let mut sent = SentFolders::default();
     loop {
         let mut page = ResultsPage::new(
-            total,
             0, // generation: unused by the CLI, matches the prior wire
-            coverage.volumes_incomplete,
             coverage.metadata_pending,
-            hits.len(),
+            reply.rows_left(),
         )
         .with_sums(sums);
-        while let Some(hit) = hits.peek() {
+        // `targets`, and so `volumes`, are in `VolumeSet` order.
+        let reads: Vec<_> = volumes
+            .iter()
+            .enumerate()
+            .map(|(v, vol)| reply.reads_volume(v).then(|| vol.read()))
+            .collect();
+        let indexes: Vec<_> = reads
+            .iter()
+            .map(|read| read.as_ref().map(|read| read.index()))
+            .collect();
+        let more = reply.fill(&indexes, |row, names| {
             let item = PageItem {
-                folder: hit.folder,
-                name: names.name(hit.name),
-                is_dir: hit.is_dir,
-                size: rows.want_size.then_some(hit.size).flatten(),
-                mtime: rows.want_mtime.then_some(hit.mtime).flatten(),
-                attributes: rows.want_attributes.then_some(hit.attributes),
+                folder: row.folder,
+                name: row.name,
+                is_dir: row.is_dir,
+                size: rows.want_size.then_some(row.size).flatten(),
+                mtime: rows.want_mtime.then_some(row.mtime).flatten(),
+                attributes: rows.want_attributes.then_some(row.attributes),
             };
-            if !page.push(item, &names, &mut sent) {
-                break;
-            }
-            hits.next();
-        }
-        let more = hits.peek().is_some();
-        if !emit(page.finish(more)) || !more {
+            page.push(item, names, &mut sent)
+        });
+        drop(indexes);
+        drop(reads);
+        let end = PageEnd {
+            total: reply.total(),
+            more,
+            volumes_incomplete: coverage.volumes_incomplete || reply.index_changed(),
+        };
+        if !emit(page.finish(end)) || !more {
             return;
         }
     }

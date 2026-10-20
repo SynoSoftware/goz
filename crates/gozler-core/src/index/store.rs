@@ -771,6 +771,27 @@ pub(crate) struct EntryTable {
     prev_child: Vec<EntryIdx>,
     free: Vec<EntryIdx>,
     live: usize,
+    reused: ReusedSlots,
+}
+
+/// How many of the latest reused slots [`ReusedSlots`] keeps. They cover the
+/// time between a search's two holds of the lock, in which the journal
+/// applies the changes queued during the first hold and those that arrive
+/// during the sort: 0.6 s at most for 5.6 million matches. Past them, the
+/// search loses the volume's answer, so the note keeps a burst of deletes
+/// and creates, such as `npm install` over an old `node_modules`, of up to
+/// about 100,000 reuses a second, for 256 KB on a volume that reuses that
+/// many slots.
+pub(crate) const REUSED_SLOTS_KEPT: usize = 65_536;
+
+/// The slots [`EntryTable::alloc`] gave to a new entry after another had
+/// died there, the latest last, so a search that released the index can
+/// tell which of its matches' slots hold another entry since.
+#[derive(Debug, Default)]
+struct ReusedSlots {
+    /// Every reuse since the table was made.
+    count: u64,
+    latest: std::collections::VecDeque<EntryIdx>,
 }
 
 impl EntryTable {
@@ -794,6 +815,11 @@ impl EntryTable {
     ) -> EntryIdx {
         self.live += 1;
         if let Some(idx) = self.free.pop() {
+            if self.reused.latest.len() == REUSED_SLOTS_KEPT {
+                self.reused.latest.pop_front();
+            }
+            self.reused.latest.push_back(idx);
+            self.reused.count += 1;
             let i = idx as usize;
             self.frn.set(i, frn);
             self.parent[i] = parent;
@@ -867,6 +893,24 @@ impl EntryTable {
     /// Total allocated slots (live + tombstoned-awaiting-reuse).
     pub(crate) fn capacity(&self) -> usize {
         self.frn.len()
+    }
+
+    /// Whether some file ID is wider than 64 bits, as every ReFS ID is.
+    pub(crate) fn has_wide_ids(&self) -> bool {
+        matches!(self.frn, FrnColumn::Wide(_))
+    }
+
+    /// Marks the slots reused so far, for [`Self::reused_since`].
+    pub(crate) fn reuse_mark(&self) -> u64 {
+        self.reused.count
+    }
+
+    /// The slots reused since `mark`, or `None` when they are too many to
+    /// have been kept.
+    pub(crate) fn reused_since(&self, mark: u64) -> Option<impl Iterator<Item = EntryIdx> + '_> {
+        let since = usize::try_from(self.reused.count - mark).ok()?;
+        (since <= self.reused.latest.len())
+            .then(|| self.reused.latest.iter().rev().take(since).copied())
     }
 
     #[inline]
@@ -1005,6 +1049,9 @@ impl EntryTable {
         compact_column(&mut self.next_child, &remap, live, link);
         compact_column(&mut self.prev_child, &remap, live, link);
         self.free.clear();
+        // The kept slots name slots that moved; no mark from before outlives
+        // the compaction, because it gives the index a new instance.
+        self.reused.latest.clear();
         remap
     }
 

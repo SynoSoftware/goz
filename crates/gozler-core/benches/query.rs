@@ -186,7 +186,7 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
                     SortSpec::default(),
                     None,
                 );
-                black_box(out.hits.len())
+                black_box(out.rows.len())
             })
         });
     }

@@ -129,15 +129,7 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
 }
 
 fn full_paths(out: &gozler_core::query::QueryOutcome) -> Vec<Vec<u8>> {
-    let mut path = Vec::new();
-    out.hits
-        .iter()
-        .map(|hit| {
-            out.names
-                .full_path_into(hit.folder, out.names.name(hit.name), &mut path);
-            path.clone()
-        })
-        .collect()
+    out.rows.iter().map(|row| row.path.clone()).collect()
 }
 
 fn compiled(query: &str) -> gozler_core::query::CompiledQuery {

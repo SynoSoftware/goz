@@ -713,6 +713,30 @@ impl VolumeIndex {
         !self.entries.is_tombstone(idx)
     }
 
+    /// Whether slot `idx` holds the entry of file `frn`.
+    pub(crate) fn holds(&self, idx: EntryIdx, frn: Frn) -> bool {
+        self.is_live(idx) && self.entries.frn(idx) == frn
+    }
+
+    /// Whether some file ID is wider than 64 bits, as every ReFS ID is.
+    pub(crate) fn has_wide_ids(&self) -> bool {
+        self.entries.has_wide_ids()
+    }
+
+    /// Marks the slots that new entries took over so far, for
+    /// [`Self::reused_since`].
+    pub(crate) fn reuse_mark(&self) -> u64 {
+        self.entries.reuse_mark()
+    }
+
+    /// The slots that new entries took over since `mark`, from
+    /// [`Self::reuse_mark`] on this instance, or `None` when they are too
+    /// many to have been kept. An entry that was live at the mark and whose
+    /// slot is listed has died since, whatever the slot holds now.
+    pub(crate) fn reused_since(&self, mark: u64) -> Option<impl Iterator<Item = EntryIdx> + '_> {
+        self.entries.reused_since(mark)
+    }
+
     /// Read access to a live entry's fields (for the query engine / tests).
     pub fn entry(&self, idx: EntryIdx) -> EntryView<'_> {
         EntryView { index: self, idx }

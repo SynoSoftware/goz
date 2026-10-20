@@ -1,21 +1,22 @@
-//! The result order: which of two hits prints first.
+//! The result order: which of two rows prints first.
 //!
 //! One comparison, `compare`, decides the order for every caller, so a
 //! limited query is always a prefix of the same query without a limit. The
 //! engine sorts one volume's matches as `SortRecord`s, whose keys order
 //! them as `compare` does, and orders each run of equal keys with `compare`
-//! under the volume's index lock; [`order_hits`] merges several volumes with
-//! it after the locks are released.
+//! under the volume's index lock. The page builder merges several volumes'
+//! rows with `compare`, or, for a path sort, with `compare_paths`, because
+//! folder ranks order only one volume's folders.
 //!
 //! The sort key decides first. `Path` is es's `(parent folder, name)` order,
 //! folded, not a byte compare of the whole path; an unknown size or date
 //! sorts last in either direction; `Extension` compares the folded extension,
 //! and an entry without one sorts first ascending. Ties then break, always
 //! ascending, on the folded name, the volume, the file ID, the parent folder's
-//! file ID and the raw name. Each key comes from the hit itself, so no path is
-//! rebuilt to break a tie.
+//! file ID and the raw name. Each key comes from the row's entry, so no path
+//! is rebuilt to break a tie.
 
-use super::engine::{QueryHit, extension};
+use super::engine::extension;
 use super::paths::ResultNames;
 use crate::types::{EntryIdx, Frn, SortDir, SortKey, SortSpec};
 use core::cmp::Ordering;
@@ -120,13 +121,12 @@ pub(crate) fn packed_folder_rank(dir: SortDir, primary: u64) -> u32 {
     (key >> 32) as u32
 }
 
-/// What the result order reads from one hit. The engine reads it from the
-/// index, [`order_hits`] from keys computed once per hit.
+/// What the result order reads from one row, from the index that holds it.
 pub(crate) trait OrderFields {
     /// Read only by [`SortKey::Extension`]: a folder has no extension.
     fn is_dir(&self) -> bool;
-    /// The [`folder_ranks`] rank of the hit's parent folder. Read only by
-    /// [`SortKey::Path`].
+    /// The [`folder_ranks`] rank of the row's parent folder. Read only by
+    /// [`compare`] for [`SortKey::Path`].
     fn folder_rank(&self) -> u32;
     fn folded_name(&self) -> &[u8];
     fn size(&self) -> Option<u64>;
@@ -160,8 +160,32 @@ pub(crate) fn compare<T: OrderFields>(sort: SortSpec, a: &T, b: &T) -> Ordering 
             extension(a.folded_name(), a.is_dir()).cmp(&extension(b.folded_name(), b.is_dir())),
         ),
     };
-    primary
-        .then_with(|| a.folded_name().cmp(b.folded_name()))
+    primary.then_with(|| tie_breaks(a, b))
+}
+
+/// The path-sort order of `a` and `b` on different volumes, whose folder
+/// ranks do not compare: `a_folder` and `b_folder` are the folded full paths
+/// of their folders, which order folders as [`folder_ranks`] does.
+pub(crate) fn compare_paths<T: OrderFields>(
+    dir: SortDir,
+    a: &T,
+    a_folder: &[u8],
+    b: &T,
+    b_folder: &[u8],
+) -> Ordering {
+    directed(
+        dir,
+        a_folder
+            .cmp(b_folder)
+            .then_with(|| a.folded_name().cmp(b.folded_name())),
+    )
+    .then_with(|| tie_breaks(a, b))
+}
+
+/// What orders two rows whose sort keys are equal, always ascending.
+fn tie_breaks<T: OrderFields>(a: &T, b: &T) -> Ordering {
+    a.folded_name()
+        .cmp(b.folded_name())
         .then_with(|| a.volume().cmp(b.volume()))
         .then_with(|| a.frn().cmp(&b.frn()))
         .then_with(|| a.parent_frn().cmp(&b.parent_frn()))
@@ -316,164 +340,6 @@ fn key_units(name: &[u8], part: Part) -> impl Iterator<Item = u16> + '_ {
     name.iter()
         .map(|&b| u16::from(b) + 1)
         .chain(core::iter::once(last))
-}
-
-/// One volume's hits, as the engine returned them, in the result order.
-pub struct VolumeRun<'a> {
-    /// The volume's mount prefix; it tells volumes apart for the tie-break.
-    pub mount_prefix: &'a str,
-    pub hits: Vec<QueryHit>,
-    /// The folders and names of `hits`.
-    pub names: ResultNames,
-}
-
-/// The hits of every volume in the result order, with the folders and names
-/// that all of them name.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OrderedHits {
-    pub hits: Vec<QueryHit>,
-    pub names: ResultNames,
-}
-
-/// Merges the hits of one or more volumes into the result order.
-///
-/// Runs no index code, so the caller calls it after releasing every index
-/// lock. A single volume's hits are returned as they are. The first run's
-/// hits become the reply's and are reordered in place, so the reply holds one
-/// list of hits: an export holds millions of them.
-pub fn order_hits(sort: SortSpec, mut runs: Vec<VolumeRun<'_>>) -> OrderedHits {
-    runs.retain(|run| !run.hits.is_empty());
-    let volumes: Vec<&[u8]> = runs.iter().map(|r| r.mount_prefix.as_bytes()).collect();
-    let total: usize = runs.iter().map(|run| run.hits.len()).sum();
-    let mut runs = runs.into_iter();
-    let Some(first) = runs.next() else {
-        return OrderedHits::default();
-    };
-    let (mut hits, mut names) = (first.hits, first.names);
-    if runs.as_slice().is_empty() {
-        return OrderedHits { hits, names };
-    }
-    hits.reserve_exact(total - hits.len());
-    // Where each volume's hits start in `hits`, and where the last ends.
-    let mut starts = vec![0, hits.len()];
-    for run in runs {
-        let moved = names.append(run.names);
-        hits.extend(run.hits.into_iter().map(|hit| QueryHit {
-            folder: moved.folder(hit.folder),
-            name: moved.name(hit.name),
-            ..hit
-        }));
-        starts.push(hits.len());
-    }
-    let ranks = match sort.key {
-        SortKey::Path => folder_ranks(&names),
-        _ => Vec::new(),
-    };
-    let mut folded = Vec::new();
-    let mut keys = Vec::with_capacity(total);
-    for (volume, bounds) in starts.windows(2).enumerate() {
-        for hit in &hits[bounds[0]..bounds[1]] {
-            let start = folded.len();
-            crate::fold::fold_into(names.name(hit.name), &mut folded);
-            keys.push(HitKey {
-                volume,
-                folded_name: (start, folded.len()),
-            });
-        }
-    }
-    // Sort positions, not the hits: an export moves millions of rows, and a
-    // hit is far larger than its position. The stable sort detects the
-    // ascending runs that sorted volumes contribute and merges them.
-    let mut order: Vec<usize> = (0..hits.len()).collect();
-    let fields = |i: usize| Keyed {
-        key: &keys[i],
-        hit: &hits[i],
-        names: &names,
-        folded: &folded,
-        ranks: &ranks,
-        volumes: &volumes,
-    };
-    order.sort_by(|&a, &b| compare(sort, &fields(a), &fields(b)));
-    move_into_order(&mut hits, &mut order);
-    OrderedHits { hits, names }
-}
-
-/// Moves the hit at `order[i]` to position `i` for every `i`, without a
-/// second list of hits, by following each cycle of the permutation. It
-/// marks each position it fills by setting `order[i]` to `i`.
-fn move_into_order(hits: &mut [QueryHit], order: &mut [usize]) {
-    for start in 0..hits.len() {
-        if order[start] == start {
-            continue;
-        }
-        let first = hits[start];
-        let mut at = start;
-        loop {
-            let from = order[at];
-            order[at] = at;
-            if from == start {
-                hits[at] = first;
-                break;
-            }
-            hits[at] = hits[from];
-            at = from;
-        }
-    }
-}
-
-/// A hit's folded keys, computed once so the sort does not fold on every
-/// comparison. The folded names live in one buffer shared by every hit.
-struct HitKey {
-    volume: usize,
-    folded_name: (usize, usize),
-}
-
-/// A hit as the result order reads it in [`order_hits`].
-struct Keyed<'a> {
-    key: &'a HitKey,
-    hit: &'a QueryHit,
-    names: &'a ResultNames,
-    folded: &'a [u8],
-    /// The [`folder_ranks`] of `names`; empty unless the sort key is
-    /// [`SortKey::Path`], the only reader.
-    ranks: &'a [u32],
-    volumes: &'a [&'a [u8]],
-}
-
-impl Keyed<'_> {
-    fn bytes(&self, (start, end): (usize, usize)) -> &[u8] {
-        &self.folded[start..end]
-    }
-}
-
-impl OrderFields for Keyed<'_> {
-    fn is_dir(&self) -> bool {
-        self.hit.is_dir
-    }
-    fn folder_rank(&self) -> u32 {
-        self.ranks[self.hit.folder.index()]
-    }
-    fn folded_name(&self) -> &[u8] {
-        self.bytes(self.key.folded_name)
-    }
-    fn size(&self) -> Option<u64> {
-        self.hit.size
-    }
-    fn mtime(&self) -> Option<i64> {
-        self.hit.mtime
-    }
-    fn volume(&self) -> &[u8] {
-        self.volumes[self.key.volume]
-    }
-    fn frn(&self) -> Frn {
-        self.hit.frn
-    }
-    fn parent_frn(&self) -> Frn {
-        self.hit.parent_frn
-    }
-    fn name(&self) -> &[u8] {
-        self.names.name(self.hit.name)
-    }
 }
 
 #[cfg(test)]

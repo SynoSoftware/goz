@@ -39,9 +39,10 @@ The reasons:
   refreshes the visible rows, so no row that the user can see changes its
   meaning.
 - **The cost is high.** It is the first daemon state that lives longer than a
-  request. It needs ids, caps, expiry and a sweep. It adds 26 to 52 MB to
+  request. It needs ids, caps, expiry and a sweep. It adds 32 to 64 MB to
   the daemon while a window holds a broad search. Each result snapshot sorts
-  every match under the volume's read lock. It needs a protocol version.
+  every match, though off the volume's read lock. It needs a protocol
+  version.
   The window gets two new states and a new limit on the selection ("What
   changes in gozler-ui").
 - **It must come after visibility.** A result snapshot must belong to the
@@ -56,12 +57,15 @@ The reasons:
 
 ## What the code does now
 
-- **Every request for rows scans every match.** `run_query_impl` collects
-  each match as an 8-byte `Candidate`, then `order_top` selects and sorts the
-  first `offset + limit` of them, and paths are built only for those. Then
-  `stream_rows` drops the first `offset` (`per_vol_limit`). The scan of the
-  empty search takes about 0.3 s on the owner's machine, under the volume's
-  read lock, for every chunk.
+- **Every request for rows scans every match.** `find_matches` keys each
+  match as a 16-byte `SortRecord` under the volume's read lock,
+  `Matches::order` selects and sorts the first `offset + limit` of them
+  without the lock, and `OrderedMatches::read_rows` makes those the reply's
+  rows under the lock again: each row is the entry index and the file ID.
+  `stream_rows` reads each page's rows from the index (`query::Reply`) and
+  skips the first `offset`. The scan of the empty search takes about 0.3 s on
+  the owner's machine, under the volume's read lock, for every chunk. The
+  reply drops its rows when its last page is sent.
 - **The daemon keeps nothing between requests.** A connection closes after 30
   s with no request (`IDLE_TIMEOUT`), the daemon serves at most 64 at once
   (`MAX_CONNECTIONS`), and the window opens a connection for each request
@@ -74,13 +78,14 @@ The reasons:
   `EntryTable::alloc` gives it to the next new entry. A rename rewrites the
   entry in its slot (`rewrite_entry`). The file ID tells a reused slot apart:
   on NTFS it holds the record's sequence number, and on ReFS it is the whole
-  128-bit ID.
-- **The generation cannot check a result snapshot.** `apply_batch` raises
-  it once for each journal batch, so it changes whenever a file on the
-  volume changes. A rebuild installs a new `VolumeIndex` (`Building::finish`), and its
-  generation starts at 0 again, so the generation cannot tell that the index
-  was replaced.
-- **The wire.** `PROTO_VERSION` is 7. A results page carries a `generation`
+  128-bit ID. A reply's pages already check each row this way.
+- **The index instance checks a result snapshot.** `VolumeIndex::instance`
+  is a number that no other index of the process has had: a rebuild's new
+  index takes one, and so does `optimize_storage`, because it gives the
+  entries new indexes. A reply's pages already stop a volume's rows when it
+  changes. The generation cannot serve: `apply_batch` raises it for each
+  journal batch, and a new index starts it at 0 again.
+- **The wire.** `PROTO_VERSION` is 9. A results page carries a `generation`
   that is always 0, and item flag bits 0 to 3.
 
 ## What a result snapshot gives
@@ -88,7 +93,7 @@ The reasons:
 | | Today | With a result snapshot |
 | --- | --- | --- |
 | Rows the list reaches | 100,000 | every match |
-| Wait for a chunk | the scan (0.3 s) and the sort and paths of every row up to the chunk's end (0.4 s near row 100,000) | the paths of the chunk only (not measured, see below) |
+| Wait for a chunk | the scan (0.3 s), the sort of every match up to the chunk's end, and the chunk's rows | the chunk's rows only (see "Not measured") |
 | Full scans for a search scrolled to its end | one for each chunk, up to 7 | two: the first chunk, then the result snapshot |
 | A selected row the user never saw | the file at that position when the selection is read | the file at that position when the search ran |
 | Rows of different chunks | each from its own moment | all from one moment |
@@ -97,14 +102,14 @@ The reasons:
 
 ### What a result snapshot holds
 
-- **One row for each match, in result order:** the volume (1 byte), the
-  `EntryIdx` (4 bytes) and the file ID at the index's own width (8 bytes on
-  NTFS, 16 on ReFS). The row has no path and no name, because the read builds
-  them from the index, as a page does today.
+- **The reply's rows**, which a reply now drops when its last page is
+  sent: for each volume, its `query::VolumeRows`, one row for each match in
+  result order, the `EntryIdx` and the file ID at the index's own width
+  (16 bytes a row on NTFS, 24 on ReFS), with the index instance that
+  answered. The row has no path and no name, because the read builds them
+  from the index, as a page does today.
 - The total and the two coverage flags (`volumes_incomplete`,
   `metadata_pending`) at the moment of the search.
-- For each volume, the build number of the index it read. `Indexed` gains
-  `build: u64`, from a daemon-wide counter that `Building::finish` raises.
 - The view that made it (after visibility), and when it was last read.
 
 It never changes after it is made, so readers share it through an `Arc`
@@ -119,33 +124,32 @@ as you type sends a search 150 ms after each keystroke, and a full sort for
 each keystroke would multiply the daemon's work on the owner's 15 W laptop.
 Most searches never scroll.
 
-Making it costs the scan, a full sort of every match on each volume under
-that volume's read lock, and, when the search covers several volumes, a merge
-under the read locks of all of them. The sort cannot move off the lock, as
-`run_query_deferrable` moves today's export sort, because its keys are the
-folded names in the index. Copying the keys out is why a full sorted export
-peaks 0.3 GB above Everything's committed memory (`docs/BENCHMARKS.md`). `order_top` already sorts in
-parallel from 100,000 rows. Holding several read locks cannot deadlock,
-because no thread that holds a volume's write lock waits for another
-volume's lock.
+Making it costs what a search without a limit costs ("Rows on demand" in
+`docs/DESIGN.md`): the scan and the keys under each volume's read lock, the
+sort of every match without it, and the rows under the lock again. A merge of
+several volumes reads under the read locks of all of them, taken in
+`VolumeSet` order (the lock rules in `volume_state.rs`).
 
-While the sort holds the read lock, the volume's journal tail waits. A
-`parking_lot` writer that waits also blocks new readers, so other clients'
-searches on that volume wait too. That is the main cost to measure.
+While a volume's read lock is held, its journal tail waits. A `parking_lot`
+writer that waits also blocks new readers, so other clients' searches on that
+volume wait too. That is the main cost to measure.
 
 ### Reading rows
 
 A read gives the rows at `offset..offset + limit`. Under each volume's read
 lock, each row is checked:
 
-1. When the volume's index has another build number, or the volume is gone,
+1. When the volume's index has another instance, or the volume is gone,
    the whole result snapshot is gone. A rebuilt index is better answered by
    a new search.
 2. When the slot is live and holds the row's file ID, the row is that file,
-   with its current name, path, size and date. A renamed or moved file keeps
-   its place in the order until `F5` sorts again. A hard link that was
-   removed and added again in the same slot shows that link: the same file.
-3. Otherwise the row is gone: the file was deleted.
+   with its current name, path, size and date, as a page reads it today. A
+   renamed or moved file keeps its place in the order until `F5` sorts
+   again. A hard link that was removed and added again in the same slot
+   shows that link: the same file.
+3. Otherwise the row is gone: the file was deleted. A page today leaves such
+   a row out; a result snapshot marks it gone instead, because the window
+   holds rows by their place.
 4. After visibility, a row the view can no longer see is gone too, so a
    result snapshot never shows a name its user has lost the right to see.
 
@@ -187,18 +191,16 @@ dropped result snapshot costs only a new search.
 
 ### Memory
 
-13 bytes for each NTFS row (21 on ReFS), in columns without padding.
+16 bytes for each NTFS row (24 on ReFS), the reply's rows.
 
 | Search | Rows | Result snapshot | Beside |
 | --- | --- | --- | --- |
-| The empty search on the owner's `C:` | 2,015,690 | 26 MB | an index of 194.6 MB |
-| The empty search over 3 million entries | 3,000,000 | 39 MB (36 MB without the volume byte) | |
-| The empty search on the benchmark machine | 3,970,000 | 52 MB | 525 MB committed |
-| The cap, on the owner's `C:` | 4,031,380 | 52 MB | |
+| The empty search on the owner's `C:` | 2,015,690 | 32 MB | an index of 194.6 MB |
+| The empty search over 3 million entries | 3,000,000 | 48 MB | |
+| The empty search on the benchmark machine | 3,970,000 | 64 MB | 525 MB committed |
+| The cap, on the owner's `C:` | 4,031,380 | 65 MB | |
 
-While it is made, the daemon also holds the scan's candidates, 8 bytes a
-match, as every request does today: 63 MB at the peak for 3 million rows,
-freed when the reply starts.
+The records become the rows in place, so making it holds no second list.
 
 ## What changes in gozler-ui
 
@@ -226,10 +228,12 @@ Export, the totals, a folder's size and status do not change.
 
 ## Not measured
 
-- **The scan and full sort of the empty search under the read lock.** This
-  decides recommendation item 3. Measure it with a case in the `query_2M`
-  bench group that orders every candidate and builds no path, run through
-  `pwsh ./check.ps1 -Bench query_2M`.
-- **A read of 16,384 rows from a result snapshot.** It builds the same paths
-  as a page does today, without the scan, so it is expected to take a small
-  part of today's 0.3 s.
+- **The scan and full sort of the empty search on the owner's `C:`.** This
+  decides recommendation item 3. On the 5.6 million entries of a tree 190
+  folders deep, the scan takes 0.12 s under the read lock, the sort 0.06 s
+  without it, and the rows 0.06 s under it again
+  (`crates/gozler-daemon/examples/deep_export.rs`); `C:` is not measured.
+- **A read of 16,384 rows from a result snapshot.** It reads its rows as a
+  page does today, without the scan. On the same tree, a page of 4,096 rows
+  holds the read lock for at most 0.04 s, so four of them take about 0.16 s;
+  on `C:` it is not measured.

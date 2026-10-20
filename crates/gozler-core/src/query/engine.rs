@@ -1,5 +1,5 @@
 //! The query executor: compile a [`ParsedQuery`] into a [`CompiledQuery`],
-//! scan the index, apply scope and sort, and return a page of hits or the
+//! scan the index, apply scope and sort, and return the matches' rows or the
 //! totals of every match.
 //!
 //! The scan matches each candidate against the index's precomputed folded name
@@ -8,18 +8,19 @@
 //! then regular expressions of the name, then (only for survivors) scope
 //! ancestry and the clauses that test the full path. Full paths come from the
 //! `paths` module, which builds each folder's path once per query, so a path
-//! term costs one copy per candidate instead of a walk to the root. A hit
-//! holds no full path: it names its folder and its own name in the outcome's
-//! [`ResultNames`].
+//! term costs one copy per candidate instead of a walk to the root. A match
+//! holds no full path: it becomes a row, its entry and its file ID, which
+//! [`super::Reply`] reads again when a page is built.
 
 use super::dates::DateRange;
 use super::order::{
     KeyValue, OrderFields, SortRecord, compare, folder_ranks, packed_folder_rank, primary_key,
 };
 use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
-use super::paths::{DirPaths, FolderCopy, FolderId, NameForm, NameRef, ResultNames};
+use super::paths::{DirPaths, FolderCopy, NameForm, ResultNames};
+use super::rows::VolumeRows;
 use super::wildcard::{CodePointBuf, Wildcard};
-use crate::attributes::{Attributes, PackedAttributes};
+use crate::attributes::PackedAttributes;
 use crate::fold::fold;
 use crate::index::{EntryView, VolumeIndex};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
@@ -29,37 +30,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::ops::Range;
-
-/// One matched entry. The daemon formats `mtime` for display.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QueryHit {
-    /// The folder that holds this name, in the [`ResultNames`] that came with
-    /// the hit.
-    pub folder: FolderId,
-    /// The entry's own name, in the same [`ResultNames`].
-    pub name: NameRef,
-    /// File ID, shared by every hard link of the file.
-    pub frn: Frn,
-    /// File ID of the folder that holds this name.
-    pub parent_frn: Frn,
-    pub is_dir: bool,
-    pub size: Option<u64>,
-    pub mtime: Option<i64>,
-    pub attributes: Attributes,
-}
-
-/// Result of a query: the requested page plus the full match count.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct QueryOutcome {
-    /// Total matches before the limit (es `totitems` semantics).
-    pub total: u64,
-    /// The requested page of hits, in the result order.
-    pub hits: Vec<QueryHit>,
-    /// Every match's [`MatchSums`], when the caller asked for them.
-    pub sums: Option<MatchSums>,
-    /// The folders and names of [`Self::hits`].
-    pub names: ResultNames,
-}
 
 /// How many matches are files and how many are folders, and the space each
 /// kind takes.
@@ -776,44 +746,27 @@ impl<'a> Compared<'a> {
     }
 }
 
-/// Runs a query over `index`, the volume mounted at `mount_prefix` (`C:\`):
-/// [`find_matches`], [`Matches::order`] and [`OrderedMatches::read_hits`] in one
-/// call, for a caller that holds the index for the whole query.
-pub fn run_query(
-    index: &VolumeIndex,
-    mount_prefix: &str,
-    query: &CompiledQuery,
-    scope: Option<EntryIdx>,
-    sort: SortSpec,
-    limit: Option<u32>,
-) -> QueryOutcome {
-    find_matches(index, mount_prefix, query, scope, sort, limit, false)
-        .order()
-        .read_hits(index)
-        .expect("the index is borrowed for the whole query, so it cannot change")
-}
-
 /// Finds the matches of a query over `index`, the volume mounted at
 /// `mount_prefix` (`C:\`), with the keys they sort by. The caller holds the
 /// index's read lock for this call, releases it for [`Matches::order`], and
-/// holds it again for [`OrderedMatches::read_hits`], so the folder ranks of a path
-/// sort and the sort of millions of matches never hold the journal back.
+/// holds it again for [`OrderedMatches::read_rows`], so the folder ranks of a
+/// path sort and the sort of millions of matches never hold the journal back.
 ///
 /// `scope` (if any) restricts results to descendants of that directory entry;
 /// the daemon resolves the `-path` folder via [`resolve_scope`]. The matches
-/// are ordered per `sort`, then the first `limit` form the page; `total`
-/// reports the full match count. There is no offset: the daemon applies a
+/// are ordered per `sort`, then the first `limit` become the rows; the rows'
+/// total counts every match. There is no offset: the daemon applies a
 /// request's offset after it merges the volumes, so an offset here would page
-/// each volume on its own. With `sums`, the outcome also holds every match's
+/// each volume on its own. With `sums`, the rows also carry every match's
 /// [`MatchSums`], from the same scan.
 ///
 /// The common case, a case-insensitive query with a name literal, scans the
 /// index's contiguous folded-name arena with a single prebuilt `memmem`
-/// finder (SIMD over the whole buffer), maps each hit back to its entry, and
-/// defers path reconstruction to the final page. That keeps the hot path off
-/// per-query folding and off per-match path building. The matches sort by
-/// numbers, from the index's name ranks, so the sort compares no names but
-/// within the runs of matches whose keys are equal.
+/// finder (SIMD over the whole buffer) and maps each hit back to its entry,
+/// which keeps the hot path off per-query folding and off per-match path
+/// building. The matches sort by numbers, from the index's name ranks, so the
+/// sort compares no names but within the runs of matches whose keys are
+/// equal.
 pub fn find_matches(
     index: &VolumeIndex,
     mount_prefix: &str,
@@ -826,6 +779,7 @@ pub fn find_matches(
     let Scan {
         mut records,
         folders,
+        folder_names,
         ..
     } = scan(index, mount_prefix, query, scope);
     let sums = sums.then(|| match_sums(index, &records));
@@ -834,16 +788,23 @@ pub fn find_matches(
         None => records.len(),
     };
     let path_folders = (end > 0)
-        .then(|| key_records(index, &mut records, folders, sort))
+        .then(|| key_records(index, &mut records, (folders, folder_names), sort))
         .flatten();
     Matches {
         records,
         path_folders,
         sort,
         end,
-        sums,
-        mount_prefix: mount_prefix.to_string(),
-        instance: index.instance(),
+        origin: Origin {
+            instance: index.instance(),
+            reuse_mark: index.reuse_mark(),
+            // The volume root holds the whole volume, so it is no scope.
+            scope: scope
+                .filter(|&s| s != index.root())
+                .map(|s| (s, index.entry(s).frn())),
+            sums,
+            mount_prefix: mount_prefix.to_string(),
+        },
     }
 }
 
@@ -855,48 +816,58 @@ pub struct Matches {
     /// primary key holds its folder's place in this table.
     path_folders: Option<ResultNames>,
     sort: SortSpec,
-    /// How many records the page holds.
+    /// How many records the rows take.
     end: usize,
-    sums: Option<MatchSums>,
-    mount_prefix: String,
-    /// [`VolumeIndex::instance`] of the index the records name.
-    instance: u64,
+    origin: Origin,
 }
 
 /// The matches of [`Matches::order`], for the second hold of the volume's
 /// index read lock.
 pub struct OrderedMatches {
     /// Sorted by their keys up to `end`. From `end` to `ties_end` lie the
-    /// other records with the keys of the page's last place, unsorted, which
-    /// [`Self::read_hits`] orders with the page; the rest are in no order.
+    /// other records with the keys of the last row, unsorted, which
+    /// [`Self::read_rows`] orders with the rows; the rest are in no order.
     records: Vec<SortRecord>,
     sort: SortSpec,
     end: usize,
     ties_end: usize,
-    sums: Option<MatchSums>,
-    mount_prefix: String,
-    instance: u64,
+    origin: Origin,
 }
 
-/// The index changed between [`find_matches`] and [`OrderedMatches::read_hits`]:
-/// a rebuild replaced it, or its entries got new indexes, so the records no
-/// longer name its entries.
+/// Where a search found its matches, read at the first hold of the lock:
+/// what the second hold checks the index against, and what the rows keep.
+struct Origin {
+    /// [`VolumeIndex::instance`] of the index the records name.
+    instance: u64,
+    /// [`VolumeIndex::reuse_mark`] at the scan: a record whose slot a new
+    /// entry took over after it names an entry that died.
+    reuse_mark: u64,
+    /// The scope folder and its file ID; `None` without a scope.
+    scope: Option<(EntryIdx, Frn)>,
+    sums: Option<MatchSums>,
+    mount_prefix: String,
+}
+
+/// The index changed between [`find_matches`] and
+/// [`OrderedMatches::read_rows`]: a rebuild replaced it, its entries got new
+/// indexes, or more of its slots got new entries than it keeps a note of, so
+/// the records no longer name its entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IndexChanged;
 
 impl Matches {
-    /// Puts the page's records in the order of their keys, without the
+    /// Puts the records of the rows in the order of their keys, without the
     /// index, after a path sort's folder ranks complete their keys. When the
-    /// page is a part of the matches, quickselect finds it in O(M) and only
-    /// it is sorted; the records with the keys of its last place can then lie
+    /// rows are a part of the matches, quickselect finds them in O(M) and only
+    /// they are sorted; the records with the keys of the last row can then lie
     /// on both sides of the cut, so they are all gathered at the cut, to be
-    /// ordered with the page.
+    /// ordered with the rows.
     pub fn order(self) -> OrderedMatches {
         use rayon::slice::ParallelSliceMut;
         // A broad query with no limit sorts millions of records, which is
         // done in parallel across cores; a small sort is not worth the rayon
-        // fan-out. A page asking for all but a handful of matches selects
-        // nearly everything, so the selected part is not always small.
+        // fan-out. A limit of all but a handful of matches selects nearly
+        // everything, so the selected part is not always small.
         const PARALLEL_SORT_MIN: usize = 100_000;
         let sort_by_keys = |records: &mut [SortRecord]| {
             if records.len() >= PARALLEL_SORT_MIN {
@@ -910,9 +881,7 @@ impl Matches {
             path_folders,
             sort,
             end,
-            sums,
-            mount_prefix,
-            instance,
+            origin,
         } = self;
         if let Some(folders) = path_folders {
             let ranks = folder_ranks(&folders);
@@ -944,74 +913,61 @@ impl Matches {
             sort,
             end,
             ties_end,
-            sums,
-            mount_prefix,
-            instance,
+            origin,
         }
     }
 }
 
 impl OrderedMatches {
-    /// Orders the runs of equal keys and reads the page's hits from `index`.
-    /// The caller holds the index's read lock again. A match whose entry was
-    /// removed since [`find_matches`], and a match of the page whose folder
-    /// has no full path now, are left out and counted out of the total, so
-    /// the page can hold fewer hits than the limit.
+    /// Orders the runs of equal keys and makes the rows, reading each one's
+    /// file ID from `index`, the index of [`find_matches`], held under its
+    /// read lock again. A match whose entry was removed since, and one whose
+    /// slot another entry took over since, is left out and counted out of
+    /// the total, so the rows can be fewer than the limit.
     ///
     /// # Errors
     ///
     /// [`IndexChanged`] when `index` is not the index the matches were found
-    /// in, or its entries got new indexes since.
-    pub fn read_hits(mut self, index: &VolumeIndex) -> Result<QueryOutcome, IndexChanged> {
-        if index.instance() != self.instance {
+    /// in, or its entries got new indexes since, or more of its slots got new
+    /// entries since than it keeps a note of.
+    pub fn read_rows(mut self, index: &VolumeIndex) -> Result<VolumeRows, IndexChanged> {
+        let origin = self.origin;
+        if index.instance() != origin.instance {
             return Err(IndexChanged);
         }
-        let total = self.records.len() as u64;
-        let removed = self
-            .records
-            .iter()
-            .filter(|r| !index.is_live(r.idx()))
-            .count();
+        let reused: FxHashSet<EntryIdx> = index
+            .reused_since(origin.reuse_mark)
+            .ok_or(IndexChanged)?
+            .collect();
+        // A removed entry's slot names no name, which the tie runs read, and
+        // a reused one names another file.
+        let kept = |r: &SortRecord| index.is_live(r.idx()) && !reused.contains(&r.idx());
+        let matches = self.records.len();
+        let removed = self.records.iter().filter(|r| !kept(r)).count();
         self.records.truncate(self.ties_end);
-        // A removed entry's slot names no name, which the tie runs read.
-        self.records.retain(|r| index.is_live(r.idx()));
+        self.records.retain(kept);
         order_ties(index, self.sort, &mut self.records);
-
-        // Copy names only for the requested page. A broad result set holds
-        // millions of files under far fewer distinct folders, and `folders`
-        // copies each folder once. The copy is made now, not at the scan,
-        // because a folder's slot may hold another folder since.
-        let mut folders = FolderCopy::new(index, &self.mount_prefix);
-        let end = self.end.min(self.records.len());
-        let mut hits = Vec::with_capacity(end);
-        for r in &self.records[..end] {
-            let Some(folder) = folders.entry_folder(index, r.idx()) else {
-                continue;
-            };
-            let entry = index.entry(r.idx());
-            hits.push(QueryHit {
-                folder,
-                name: folders.push_name(entry.name()),
-                frn: entry.frn(),
-                parent_frn: index.entry(entry.parent()).frn(),
-                is_dir: entry.is_dir(),
-                size: entry.size(),
-                mtime: entry.mtime(),
-                attributes: entry.attributes(),
-            });
+        self.records.truncate(self.end);
+        // Otherwise a limited search's few rows would keep the room of every
+        // match. Shrinking copies the rows, so it runs only where it frees
+        // more room than it copies; an export's long list keeps its room
+        // rather than be copied under the lock.
+        if self.records.len() < self.records.capacity() / 2 {
+            self.records.shrink_to_fit();
         }
-        let without_path = end - hits.len();
-        Ok(QueryOutcome {
-            total: total - (removed + without_path) as u64,
-            hits,
-            sums: self.sums,
-            names: folders.finish(),
-        })
+        Ok(VolumeRows::new(
+            self.records,
+            index,
+            origin.scope,
+            (matches - removed) as u64,
+            origin.sums,
+            origin.mount_prefix,
+        ))
     }
 }
 
 /// The [`Totals`] of every match of `query` over `index`, with `scope` as in
-/// [`run_query`]. No path is built and nothing is ordered.
+/// [`find_matches`]. No path is built and nothing is ordered.
 pub fn run_totals(
     index: &VolumeIndex,
     mount_prefix: &str,
@@ -1159,6 +1115,8 @@ struct Scan<'q, 'i> {
     /// The matches' folders. ONE memo, shared by the presentability check and
     /// the path sort: both need exactly these folders.
     folders: FolderCopy,
+    /// The table `folders` copies into.
+    folder_names: ResultNames,
     scope_memo: FxHashMap<EntryIdx, bool>,
     scratch: Scratch,
     records: Vec<SortRecord>,
@@ -1166,6 +1124,7 @@ struct Scan<'q, 'i> {
 
 impl<'q, 'i> Scan<'q, 'i> {
     fn new(index: &'i VolumeIndex, mount_prefix: &str, query: &'q CompiledQuery) -> Self {
+        let mut folder_names = ResultNames::default();
         let form = if query.match_case {
             NameForm::Raw
         } else {
@@ -1177,7 +1136,8 @@ impl<'q, 'i> Scan<'q, 'i> {
             query_paths: (query.path_clauses < query.clauses.len())
                 .then(|| DirPaths::new(index, form, mount_prefix)),
             path: Vec::new(),
-            folders: FolderCopy::new(index, mount_prefix),
+            folders: FolderCopy::new(index, mount_prefix, &mut folder_names),
+            folder_names,
             scope_memo: FxHashMap::default(),
             scratch: Scratch::default(),
             records: Vec::new(),
@@ -1230,7 +1190,12 @@ impl<'q, 'i> Scan<'q, 'i> {
         // index with nothing under lost+found cannot contain an unpresentable
         // entry, and the walk it guards copies every distinct parent folder,
         // which a broad limited query would mostly never need.
-        if index.has_orphans() && self.folders.entry_folder(index, idx).is_none() {
+        if index.has_orphans()
+            && self
+                .folders
+                .entry_folder(index, idx, &mut self.folder_names)
+                .is_none()
+        {
             return None;
         }
 
@@ -1264,7 +1229,7 @@ pub fn extension(name: &[u8], is_dir: bool) -> Option<&[u8]> {
 }
 
 /// Is `node` a descendant of `root`? Memoized parent walk.
-fn in_scope(
+pub(super) fn in_scope(
     index: &VolumeIndex,
     node: EntryIdx,
     root: EntryIdx,
@@ -1311,7 +1276,7 @@ fn in_scope(
 fn key_records(
     index: &VolumeIndex,
     records: &mut [SortRecord],
-    mut folders: FolderCopy,
+    (mut folders, mut names): (FolderCopy, ResultNames),
     sort: SortSpec,
 ) -> Option<ResultNames> {
     let extensions = match sort.key {
@@ -1327,7 +1292,7 @@ fn key_records(
             SortKey::Path => {
                 // A record without a path is left out of the page, so any
                 // rank serves it: the first folder's.
-                let folder = folders.entry_folder(index, idx);
+                let folder = folders.entry_folder(index, idx, &mut names);
                 let place = folder.map_or(0, |f| f.index() as u64);
                 *record = SortRecord::keyed(place, name_key, idx);
                 continue;
@@ -1338,7 +1303,7 @@ fn key_records(
         };
         *record = SortRecord::keyed(primary_key(sort.dir, value), name_key, idx);
     }
-    matches!(sort.key, SortKey::Path).then(|| folders.finish())
+    matches!(sort.key, SortKey::Path).then_some(names)
 }
 
 /// The place of each distinct folded extension of `records`' entries in the
@@ -1481,13 +1446,17 @@ pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attributes::Attributes;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
-    use crate::query::order::{VolumeRun, order_hits};
     use crate::query::parse::{
         Clause, ParseOptions, Term, TermMatch, parse_query, parse_query_with,
     };
+    use crate::query::rows::{QueryOutcome, Reply, VolumeRows, run_query};
     use crate::types::{Frn, SortDir};
-    use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
+    use crate::usn::record::{
+        FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
+        USN_REASON_RENAME_NEW_NAME,
+    };
 
     fn compiled(query: &str) -> CompiledQuery {
         CompiledQuery::new(&parse_query(query).unwrap()).unwrap()
@@ -1571,7 +1540,7 @@ mod tests {
             SortSpec::default_for(SortKey::Name),
             None,
         );
-        assert_eq!(all.hits.len(), 2, "only the presentable files are hits");
+        assert_eq!(all.rows.len(), 2, "only the presentable files are rows");
         assert_eq!(
             all.total, 2,
             "total must count what the page can actually return, not orphans"
@@ -1581,7 +1550,7 @@ mod tests {
         for key in [SortKey::Name, SortKey::Path] {
             let page = run_query(&idx, "", &parsed, None, SortSpec::default_for(key), Some(3));
             assert_eq!(
-                page.hits.len(),
+                page.rows.len(),
                 2,
                 "{key:?}: a limited query must still return the real hits"
             );
@@ -1789,7 +1758,7 @@ mod tests {
             Some(2),
         );
         assert_eq!(out.total, 5);
-        assert_eq!(out.hits.len(), 2);
+        assert_eq!(out.rows.len(), 2);
     }
 
     #[test]
@@ -2440,19 +2409,69 @@ mod tests {
         sorts
     }
 
-    /// The full path of every hit of `out`, in its order.
+    /// The full path of every row of `out`, in its order.
     fn texts(out: &QueryOutcome) -> Vec<String> {
-        paths_in(&out.hits, &out.names)
+        out.rows
+            .iter()
+            .map(|row| crate::wtf8::to_string_lossy(&row.path))
+            .collect()
     }
 
-    fn paths_in(hits: &[QueryHit], names: &ResultNames) -> Vec<String> {
-        let mut path = Vec::new();
-        hits.iter()
-            .map(|h| {
-                names.full_path_into(h.folder, names.name(h.name), &mut path);
-                crate::wtf8::to_string_lossy(&path)
-            })
-            .collect()
+    /// The rows of `answers` on the volumes of `indexes`, read as pages of
+    /// `page_rows`, with `between` run on the indexes before each page after
+    /// the first, and the total the last page reports.
+    fn read_pages(
+        reply: &mut Reply,
+        indexes: &mut [&mut VolumeIndex],
+        page_rows: usize,
+        mut between: impl FnMut(usize, &mut [&mut VolumeIndex]),
+    ) -> (Vec<String>, u64) {
+        let mut paths = Vec::new();
+        for page in 0.. {
+            if page > 0 {
+                between(page, indexes);
+            }
+            let held: Vec<Option<&VolumeIndex>> = indexes
+                .iter()
+                .enumerate()
+                .map(|(v, i)| reply.reads_volume(v).then_some(&**i))
+                .collect();
+            let mut taken = 0;
+            let more = reply.fill(&held, |row, names| {
+                if taken == page_rows {
+                    return false;
+                }
+                taken += 1;
+                let mut path = Vec::new();
+                names.full_path_into(row.folder, row.name, &mut path);
+                paths.push(crate::wtf8::to_string_lossy(&path));
+                true
+            });
+            if !more {
+                break;
+            }
+        }
+        (paths, reply.total())
+    }
+
+    /// The rows of one volume's `answer`, read as one page.
+    fn read_all(sort: SortSpec, answer: VolumeRows, index: &mut VolumeIndex) -> (Vec<String>, u64) {
+        let mut reply = Reply::new(sort, vec![answer], 0, None);
+        read_pages(&mut reply, &mut [index], usize::MAX, |_, _| {})
+    }
+
+    fn delete(f: Frn) -> ParsedUsnRecord {
+        ParsedUsnRecord {
+            reason: USN_REASON_FILE_DELETE,
+            ..enum_rec(f, frn(100), "", false)
+        }
+    }
+
+    fn rename(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
+        ParsedUsnRecord {
+            reason: USN_REASON_RENAME_NEW_NAME,
+            ..enum_rec(f, parent, name, is_dir)
+        }
     }
 
     /// `-sort path` orders by parent folder, then name, as
@@ -2555,71 +2574,315 @@ mod tests {
     }
 
     /// Matches whose index got new entry indexes between the two locks, as
-    /// `optimize_storage` gives them, read no hits, because their records
+    /// `optimize_storage` gives them, make no rows, because their records
     /// would name other entries.
     #[test]
-    fn matches_from_an_index_that_changed_read_no_hits() {
+    fn matches_from_an_index_that_changed_make_no_rows() {
         let mut idx = sample_index();
         let parsed = compiled("");
         let ordered =
             find_matches(&idx, "", &parsed, None, SortSpec::default(), None, false).order();
         idx.optimize_storage();
-        assert_eq!(ordered.read_hits(&idx).err(), Some(IndexChanged));
+        assert_eq!(ordered.read_rows(&idx).err(), Some(IndexChanged));
     }
 
     /// An entry removed between the two locks is left out, and out of the
     /// total, so `gozler` does not report the answer as cut short; the tie
-    /// runs never read its slot, which names no name. The page then holds
-    /// fewer hits than the limit.
+    /// runs never read its slot, which names no name. The rows are then fewer
+    /// than the limit.
     #[test]
-    fn an_entry_removed_between_the_locks_is_left_out_of_the_hits_and_the_total() {
+    fn an_entry_removed_between_the_locks_is_left_out_of_the_rows_and_the_total() {
         let mut idx = sample_index();
         let parsed = compiled("");
         let sort = SortSpec::default_for(SortKey::Size);
         let ordered = find_matches(&idx, "", &parsed, None, sort, Some(3), false).order();
-        idx.apply_batch(&[ParsedUsnRecord {
-            reason: crate::usn::record::USN_REASON_FILE_DELETE,
-            ..enum_rec(frn(103), frn(100), "notes.txt", false)
-        }]);
-        let out = ordered
-            .read_hits(&idx)
+        idx.apply_batch(&[delete(frn(103))]);
+        let answer = ordered
+            .read_rows(&idx)
             .expect("the index kept its entry indexes");
-        assert_eq!(texts(&out), ["photo.JPG", "docs\\sub\\Report.PDF"]);
-        assert_eq!(out.total, 4);
+        let (paths, total) = read_all(sort, answer, &mut idx);
+        assert_eq!(paths, ["photo.JPG", "docs\\sub\\Report.PDF"]);
+        assert_eq!(total, 4);
+    }
+
+    /// A slot that a new file took over between the two locks names a match
+    /// that died, so that row is left out and counted out of the total,
+    /// instead of showing the new file, which the search never matched.
+    #[test]
+    fn a_slot_reused_between_the_locks_is_left_out() {
+        let mut idx = sample_index();
+        let parsed = compiled("");
+        let sort = SortSpec::default();
+        let ordered = find_matches(&idx, "", &parsed, None, sort, None, false).order();
+        let notes = idx.head_of(frn(103));
+        idx.apply_batch(&[delete(frn(103))]);
+        idx.apply_batch(&[enum_rec(frn(300), NTFS_ROOT_FRN, "new.txt", false)]);
+        assert_eq!(idx.head_of(frn(300)), notes, "the new file took the slot");
+        let answer = ordered.read_rows(&idx).expect("one reuse is kept");
+        let (paths, total) = read_all(sort, answer, &mut idx);
+        assert_eq!(
+            paths,
+            ["docs", "photo.JPG", "docs\\sub\\Report.PDF", "docs\\sub"]
+        );
+        assert_eq!(total, 4);
+    }
+
+    /// Past the reused slots the index keeps a note of, the second lock
+    /// cannot tell which records name dead entries, so it makes no rows.
+    #[test]
+    fn more_reused_slots_than_the_index_keeps_make_no_rows() {
+        let mut idx = sample_index();
+        let parsed = compiled("");
+        let ordered =
+            find_matches(&idx, "", &parsed, None, SortSpec::default(), None, false).order();
+        let mut last = frn(103);
+        for i in 0..=crate::index::store::REUSED_SLOTS_KEPT as u64 {
+            let next = frn(1000 + i);
+            idx.apply_batch(&[delete(last)]);
+            idx.apply_batch(&[enum_rec(next, NTFS_ROOT_FRN, "churn.tmp", false)]);
+            last = next;
+        }
+        assert_eq!(ordered.read_rows(&idx).err(), Some(IndexChanged));
+    }
+
+    /// `docs` with `a.txt`, `b.txt`, `c.txt` and `sub\d.txt`.
+    fn docs_tree() -> VolumeIndex {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        for r in [
+            enum_rec(frn(100), NTFS_ROOT_FRN, "docs", true),
+            enum_rec(frn(101), frn(100), "a.txt", false),
+            enum_rec(frn(102), frn(100), "b.txt", false),
+            enum_rec(frn(103), frn(100), "c.txt", false),
+            enum_rec(frn(104), frn(100), "sub", true),
+            enum_rec(frn(105), frn(104), "d.txt", false),
+        ] {
+            idx.insert_enum(&r);
+        }
+        idx
+    }
+
+    /// A row is the file when its page is read: a row deleted, or moved into
+    /// a folder with no full path (one under lost+found, first copied when
+    /// the page is read), after the rows were made is left out, and the total
+    /// counts each out, so `gozler` does not report the answer as cut short.
+    #[test]
+    fn rows_deleted_or_without_a_path_at_their_page_are_left_out() {
+        let mut idx = docs_tree();
+        let parsed = compiled("");
+        let sort = SortSpec::default();
+        let answer = find_matches(&idx, "", &parsed, None, sort, None, false)
+            .order()
+            .read_rows(&idx)
+            .expect("nothing changed");
+        idx.apply_batch(&[
+            delete(frn(101)),
+            // A folder whose parent the index does not know sits under
+            // lost+found.
+            enum_rec(frn(500), frn(999), "orphan", true),
+            rename(frn(103), frn(500), "c.txt", false),
+        ]);
+        let (paths, total) = read_all(sort, answer, &mut idx);
+        assert_eq!(
+            paths,
+            [r"docs\b.txt", r"docs\sub\d.txt", "docs", r"docs\sub"]
+        );
+        assert_eq!(total, 4);
+    }
+
+    /// A row moved out of the search's scope after the rows were made is left
+    /// out, and the total counts it out.
+    #[test]
+    fn a_row_that_left_the_scope_before_its_page_is_left_out() {
+        let mut idx = docs_tree();
+        let parsed = compiled("");
+        let sort = SortSpec::default();
+        let docs = resolve_scope(&idx, b"docs", false).expect("docs exists");
+        let answer = find_matches(&idx, "", &parsed, Some(docs), sort, None, false)
+            .order()
+            .read_rows(&idx)
+            .expect("nothing changed");
+        idx.apply_batch(&[rename(frn(102), NTFS_ROOT_FRN, "b.txt", false)]);
+        let (paths, total) = read_all(sort, answer, &mut idx);
+        assert_eq!(
+            paths,
+            [r"docs\a.txt", r"docs\c.txt", r"docs\sub\d.txt", r"docs\sub"]
+        );
+        assert_eq!(total, 4);
+    }
+
+    /// A row shows the name its file has when the page is read, as
+    /// Everything's list shows a renamed file.
+    #[test]
+    fn a_row_renamed_before_its_page_shows_its_new_name() {
+        let mut idx = sample_index();
+        let parsed = compiled("photo");
+        let sort = SortSpec::default();
+        let answer = find_matches(&idx, "", &parsed, None, sort, None, false)
+            .order()
+            .read_rows(&idx)
+            .expect("nothing changed");
+        idx.apply_batch(&[rename(frn(104), NTFS_ROOT_FRN, "holiday.JPG", false)]);
+        let (paths, total) = read_all(sort, answer, &mut idx);
+        assert_eq!(paths, ["holiday.JPG"]);
+        assert_eq!(total, 1);
+    }
+
+    /// A folder whose slot another folder took over between two pages gives
+    /// a row of the new folder its own path, not the path the first page
+    /// copied for the slot.
+    #[test]
+    fn a_reused_folder_slot_gives_no_row_another_folders_path() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        for r in [
+            enum_rec(frn(100), NTFS_ROOT_FRN, "A", true),
+            enum_rec(frn(101), frn(100), "f1.txt", false),
+            enum_rec(frn(102), frn(100), "f2.txt", false),
+        ] {
+            idx.insert_enum(&r);
+        }
+        let parsed = compiled("txt");
+        let sort = SortSpec::default();
+        let answer = find_matches(&idx, r"C:\", &parsed, None, sort, None, false)
+            .order()
+            .read_rows(&idx)
+            .expect("nothing changed");
+        let a = idx.head_of(frn(100));
+        let mut reply = Reply::new(sort, vec![answer], 0, None);
+        let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
+            let idx = &mut *indexes[0];
+            idx.apply_batch(&[
+                rename(frn(102), NTFS_ROOT_FRN, "f2.txt", false),
+                delete(frn(101)),
+                delete(frn(100)),
+                enum_rec(frn(200), NTFS_ROOT_FRN, "B", true),
+                rename(frn(102), frn(200), "f2.txt", false),
+            ]);
+            assert_eq!(idx.head_of(frn(200)), a, "B took A's slot");
+        });
+        assert_eq!(paths, [r"C:\A\f1.txt", r"C:\B\f2.txt"]);
+        assert_eq!(total, 2);
+    }
+
+    /// A folder with no full path on one page sends its rows on a later page
+    /// once it has one, as when the journal names the parent of a folder
+    /// under lost+found: `sub` moves under a folder the index does not know
+    /// before the first page, so `a1.txt` is left out, and that folder is
+    /// created before the second page, so `d1.txt` is sent.
+    #[test]
+    fn a_folder_that_gets_a_path_again_sends_its_later_rows() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        for r in [
+            enum_rec(frn(100), NTFS_ROOT_FRN, "sub", true),
+            enum_rec(frn(101), frn(100), "a1.txt", false),
+            enum_rec(frn(102), NTFS_ROOT_FRN, "b.txt", false),
+            enum_rec(frn(103), NTFS_ROOT_FRN, "c.txt", false),
+            enum_rec(frn(104), frn(100), "d1.txt", false),
+        ] {
+            idx.insert_enum(&r);
+        }
+        let parsed = compiled("txt");
+        let sort = SortSpec::default();
+        let answer = find_matches(&idx, r"C:\", &parsed, None, sort, None, false)
+            .order()
+            .read_rows(&idx)
+            .expect("nothing changed");
+        idx.apply_batch(&[rename(frn(100), frn(999), "sub", true)]);
+        let mut reply = Reply::new(sort, vec![answer], 0, None);
+        let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
+            indexes[0].apply_batch(&[enum_rec(frn(999), NTFS_ROOT_FRN, "found", true)]);
+        });
+        assert_eq!(paths, [r"C:\b.txt", r"C:\c.txt", r"C:\found\sub\d1.txt"]);
+        assert_eq!(total, 3);
+    }
+
+    /// Rows whose index got new entry indexes after they were made are not
+    /// sent, the total counts them out, and the reply says its index
+    /// changed, which the daemon reports as an incomplete answer.
+    #[test]
+    fn rows_of_an_index_that_changed_after_they_were_made_are_not_sent() {
+        let mut idx = sample_index();
+        let parsed = compiled("");
+        let sort = SortSpec::default();
+        let answer = find_matches(&idx, "", &parsed, None, sort, None, false)
+            .order()
+            .read_rows(&idx)
+            .expect("nothing changed");
+        idx.optimize_storage();
+        let mut reply = Reply::new(sort, vec![answer], 0, None);
+        let (paths, total) = read_pages(&mut reply, &mut [&mut idx], usize::MAX, |_, _| {});
+        assert!(paths.is_empty());
+        assert_eq!(total, 0);
+        assert!(reply.index_changed());
     }
 
     /// The same holds across volumes. Each volume picks its own top `k`, and
-    /// [`order_hits`] merges them; the result equals the first `k` of every
+    /// the reply merges them; the result equals the first `k` of every
     /// match merged. The two prefixes interleave in path order (`C:\mnt\P`
     /// sorts between `C:` and `C:\P`), and the identical fixtures make every
     /// name tie across volumes.
     #[test]
     fn a_limited_query_is_a_prefix_across_volumes() {
-        let volumes = [(r"C:\", order_index()), (r"C:\mnt\", order_index())];
+        let mut volumes = [(r"C:\", order_index()), (r"C:\mnt\", order_index())];
         let parsed = compiled("qx7zv");
         for sort in all_sorts() {
-            let merged = |limit: Option<u32>| {
-                let runs = volumes
+            let mut merged = |limit: Option<u32>| {
+                let answers = volumes
                     .iter()
                     .map(|(prefix, idx)| {
-                        let out = run_query(idx, prefix, &parsed, None, sort, limit);
-                        VolumeRun {
-                            mount_prefix: prefix,
-                            hits: out.hits,
-                            names: out.names,
-                        }
+                        find_matches(idx, prefix, &parsed, None, sort, limit, false)
+                            .order()
+                            .read_rows(idx)
+                            .expect("nothing changed")
                     })
                     .collect();
-                let ordered = order_hits(sort, runs);
-                let mut paths = paths_in(&ordered.hits, &ordered.names);
-                paths.truncate(limit.map_or(usize::MAX, |k| k as usize));
-                paths
+                let mut reply = Reply::new(sort, answers, 0, limit);
+                let mut indexes: Vec<&mut VolumeIndex> =
+                    volumes.iter_mut().map(|(_, idx)| idx).collect();
+                read_pages(&mut reply, &mut indexes, usize::MAX, |_, _| {}).0
             };
             let unlimited = merged(None);
             assert_eq!(unlimited.len(), 14);
             for k in 0..=unlimited.len() {
                 assert_eq!(merged(Some(k as u32)), unlimited[..k], "{sort:?} -n {k}");
             }
+        }
+    }
+
+    /// A limited search over several volumes ends short, rather than send
+    /// another volume's later row first, when a volume whose limit cut off
+    /// matches runs out of rows because one was left out. With `-n 3`, `C:`
+    /// keeps `a c d` of `a c d e`, and `c` is deleted before the first page:
+    /// sending `D:\f.txt` next would skip `e`, and the window's next chunk
+    /// would show `f` again. Both a merge by comparison and volumes that
+    /// follow each other end there.
+    #[test]
+    fn a_volume_out_of_rows_before_its_limit_ends_the_reply() {
+        let files = |names: &[&str]| {
+            let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+            for (i, name) in names.iter().enumerate() {
+                idx.insert_enum(&enum_rec(frn(100 + i as u64), NTFS_ROOT_FRN, name, false));
+            }
+            idx
+        };
+        let parsed = compiled("txt");
+        for sort in [SortSpec::default(), SortSpec::default_for(SortKey::Path)] {
+            let mut c = files(&["a.txt", "c.txt", "d.txt", "e.txt"]);
+            let mut d = files(&["f.txt"]);
+            let answers: Vec<VolumeRows> = [(&c, r"C:\"), (&d, r"D:\")]
+                .into_iter()
+                .map(|(idx, prefix)| {
+                    find_matches(idx, prefix, &parsed, None, sort, Some(3), false)
+                        .order()
+                        .read_rows(idx)
+                        .expect("nothing changed")
+                })
+                .collect();
+            c.apply_batch(&[delete(frn(101))]);
+            let mut reply = Reply::new(sort, answers, 0, Some(3));
+            let (paths, total) =
+                read_pages(&mut reply, &mut [&mut c, &mut d], usize::MAX, |_, _| {});
+            assert_eq!(paths, [r"C:\a.txt", r"C:\d.txt"], "{sort:?}");
+            assert_eq!(total, 4, "{sort:?}");
         }
     }
 

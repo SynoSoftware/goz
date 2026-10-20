@@ -54,11 +54,14 @@ Each stage is one or more commits, each of which passes `check.ps1`
 - **Every query result passes one function.** `scan` in `query/engine.rs`
   calls `Scan::visit`, then `Scan::evaluate`, for every candidate, on all
   three paths: the scope subtree walk, the folded arena and the full scan.
-  `run_query`, `run_query_deferrable` and `run_totals` all use `scan`, and
-  `total` is counted after `evaluate`.
-- **A folder's size is read in three places**, all through `EntryView::size`:
-  `Check::Size` in `Check::test`, the `QueryHit` built in `run_query_impl`, and
-  `OrderFields::size` for `Ranked`. `run_totals` adds file sizes only, so
+  `find_matches` (which `run_query` calls) and `run_totals` use `scan`, and
+  `total` is counted after `evaluate`. A reply's pages then read each row
+  from the index again (`query::Reply::fill`), and leave out a row whose
+  file was deleted, moved out of the scope, or has no full path now.
+- **A folder's size is read in five places**, all through `EntryView::size`:
+  `Check::Size` in `Check::test`, the size key in `key_records`, the row a
+  page reads in `Reply::fill`, and `OrderFields::size` for `Ranked` and for
+  the merge's `Live`. `run_totals` adds file sizes only, so
   `-get-folder-size` and `-get-total-size` sum the files a scan passes.
   `EntryView::size` already returns `None` for a folder while a volume's
   folder sizes are unknown, and every one of those readers handles `None`.
@@ -663,8 +666,12 @@ the registry before it locks volumes. `MayList` closures take no lock.
 
 ### The filter
 
-- `run_query`, `run_query_deferrable` and `run_totals` gain a `seen_by:
+- `find_matches`, `run_query` and `run_totals` gain a `seen_by:
   SeenBy<'_>` parameter, and `Scan` stores it.
+- `Reply` gains it too: a page leaves out a row whose current folder the
+  view cannot list, because a file can move into such a folder after the
+  scan, and counts it out of the total like every row it leaves out. A
+  view's requests keep the `VolumeSet` order of the volume locks.
 - `Scan::evaluate` returns `None` when the view cannot list the candidate's
   parent folder: the parent's descriptor is `None`, or `listable` is `false`
   for it. The root has no parent and is visible. For `SeenBy::Everything` the
@@ -679,8 +686,8 @@ the registry before it locks volumes. `MayList` closures take no lock.
 - `VolumeIndex::entry(idx)` becomes `entry(idx, seen_by: SeenBy<'_>)`, and
   `EntryView` keeps it. `EntryView::size` returns `None` for a folder and a
   `SeenBy::View` (spec `V6`), the value it already gives while a volume's
-  folder sizes are unknown, so `Check::Size`, the `QueryHit` and the size
-  sort need no change. The compiler thus makes every caller of `entry`
+  folder sizes are unknown, so `Check::Size`, the rows a page reads and the
+  size sort need no change. The compiler thus makes every caller of `entry`
   choose, so no answer path reads a folder sum by mistake. The callers that are not answers pass
   `SeenBy::Everything`: `query/paths.rs`, `in_scope` and `resolve_scope` in
   `query/engine.rs`, `index/volume.rs` itself, `index/tests.rs`, and

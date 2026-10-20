@@ -314,7 +314,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gozler_core::proto::ResultsPage;
+    use gozler_core::proto::{PageEnd, ResultsPage};
     use tokio::net::windows::named_pipe::ServerOptions;
 
     /// A pipe name that no other test or program uses.
@@ -414,7 +414,11 @@ mod tests {
             };
             gozler_core::proto::encode_response_frame(&hello, &mut replies);
             for _ in 0..50 {
-                replies.extend(ResultsPage::new(50, 0, false, false, 0).finish(true));
+                replies.extend(ResultsPage::new(0, false, 0).finish(PageEnd {
+                    total: 50,
+                    more: true,
+                    volumes_incomplete: false,
+                }));
             }
             server
                 .write_all(&replies)

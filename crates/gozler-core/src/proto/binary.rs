@@ -94,20 +94,22 @@ const NO_PARENT: u32 = u32::MAX;
 pub struct BinError(&'static str);
 
 /// The folders of a reply's [`ResultNames`] that its pages have sent, with
-/// the id each was sent under, so each folder travels once per reply.
+/// the id each was sent under, so each folder travels once per reply. The
+/// table may grow between pages.
+#[derive(Default)]
 pub struct SentFolders {
     ids: Vec<Option<u32>>,
     next: u32,
 }
 
-impl SentFolders {
-    /// Nothing sent yet, for a reply whose items name folders of `names`.
-    pub fn new(names: &ResultNames) -> Self {
-        Self {
-            ids: vec![None; names.folder_count()],
-            next: 0,
-        }
-    }
+/// What a page's header says that is known only once its items are read.
+#[derive(Clone, Copy, Debug)]
+pub struct PageEnd {
+    /// The full match count, less the rows left out so far.
+    pub total: u64,
+    /// Another page of the same query follows.
+    pub more: bool,
+    pub volumes_incomplete: bool,
 }
 
 /// One item of a results page.
@@ -133,8 +135,9 @@ pub struct ResultsPage {
     items: Vec<u8>,
     /// Where the payload starts in `frame`, after the length prefix.
     payload_at: usize,
-    /// Where the header's flags byte and folder count sit in `frame`;
-    /// [`finish`](Self::finish) fills in both.
+    /// Where the header's total, flags byte and folder count sit in `frame`;
+    /// [`finish`](Self::finish) fills them in.
+    total_at: usize,
     flags_at: usize,
     folder_count_at: usize,
     folder_count: u32,
@@ -144,15 +147,9 @@ pub struct ResultsPage {
 }
 
 impl ResultsPage {
-    /// Starts a page whose header carries these fields. `rows_left`, the rows
-    /// still to send, sizes the buffer.
-    pub fn new(
-        total: u64,
-        generation: u64,
-        volumes_incomplete: bool,
-        metadata_pending: bool,
-        rows_left: usize,
-    ) -> Self {
+    /// Starts a page whose header carries these fields; [`Self::finish`]
+    /// writes the rest. `rows_left`, the rows still to send, sizes the buffer.
+    pub fn new(generation: u64, metadata_pending: bool, rows_left: usize) -> Self {
         // ~48 bytes per item covers a typical name and its fields without a
         // regrow mid-page.
         let rows = rows_left.min(PAGE_ROWS as usize);
@@ -161,12 +158,10 @@ impl ResultsPage {
         begin_frame(&mut frame);
         let payload_at = frame.len();
         frame.push(RESP_TAG_RESULTS);
-        frame.extend_from_slice(&total.to_le_bytes());
+        let total_at = frame.len();
+        frame.extend_from_slice(&0u64.to_le_bytes());
         frame.extend_from_slice(&generation.to_le_bytes());
         let mut flags = 0u8;
-        if volumes_incomplete {
-            flags |= FLAG_VOLUMES_INCOMPLETE;
-        }
         if metadata_pending {
             flags |= FLAG_METADATA_PENDING;
         }
@@ -178,6 +173,7 @@ impl ResultsPage {
             frame,
             items: Vec::with_capacity(rows * 48),
             payload_at,
+            total_at,
             flags_at,
             folder_count_at,
             folder_count: 0,
@@ -214,6 +210,9 @@ impl ResultsPage {
         }
         let (frame_before, items_before) = (self.frame.len(), self.items.len());
         let (folders_before, next_before) = (self.folder_count, sent.next);
+        if sent.ids.len() < names.folder_count() {
+            sent.ids.resize(names.folder_count(), None);
+        }
 
         // The folders this item needs that the reply has not sent, nearest
         // first; they are sent from the root down.
@@ -277,11 +276,15 @@ impl ResultsPage {
         true
     }
 
-    /// Completes the frame. `more` tells the client that another page of the
-    /// same query follows.
-    pub fn finish(mut self, more: bool) -> Vec<u8> {
-        if more {
+    /// Completes the frame with the header fields of `end`.
+    pub fn finish(mut self, end: PageEnd) -> Vec<u8> {
+        self.frame[self.total_at..self.total_at + size_of::<u64>()]
+            .copy_from_slice(&end.total.to_le_bytes());
+        if end.more {
             self.frame[self.flags_at] |= FLAG_MORE;
+        }
+        if end.volumes_incomplete {
+            self.frame[self.flags_at] |= FLAG_VOLUMES_INCOMPLETE;
         }
         self.frame[self.folder_count_at..self.folder_count_at + size_of::<u32>()]
             .copy_from_slice(&self.folder_count.to_le_bytes());
@@ -484,6 +487,14 @@ mod tests {
         }
     }
 
+    fn last_page(total: u64) -> PageEnd {
+        PageEnd {
+            total,
+            more: false,
+            volumes_incomplete: false,
+        }
+    }
+
     /// Decodes the pages of one reply as a client does: through the frame
     /// decoder, which checks the length prefix, and the tagged response
     /// decoder, with one table of folders for the whole reply.
@@ -518,8 +529,8 @@ mod tests {
     #[test]
     fn mixed_items_round_trip() {
         let t = tree();
-        let mut sent = SentFolders::new(&t.names);
-        let mut page = ResultsPage::new(987_654, 42, true, true, 3);
+        let mut sent = SentFolders::default();
+        let mut page = ResultsPage::new(42, true, 3);
         assert!(page.push(
             PageItem {
                 size: Some(1234),
@@ -548,7 +559,11 @@ mod tests {
             &mut sent,
         ));
         assert_eq!(
-            decode(&[page.finish(true)]),
+            decode(&[page.finish(PageEnd {
+                total: 987_654,
+                more: true,
+                volumes_incomplete: true,
+            })]),
             [QueryResults {
                 total: 987_654,
                 items: vec![
@@ -592,12 +607,17 @@ mod tests {
     #[test]
     fn a_later_page_names_the_folders_an_earlier_page_sent() {
         let t = tree();
-        let mut sent = SentFolders::new(&t.names);
-        let mut first = ResultsPage::new(2, 0, false, false, 1);
+        let mut sent = SentFolders::default();
+        let mut first = ResultsPage::new(0, false, 1);
         assert!(first.push(item(t.system32, b"a.dll"), &t.names, &mut sent));
-        let mut second = ResultsPage::new(2, 0, false, false, 1);
+        let mut second = ResultsPage::new(0, false, 1);
         assert!(second.push(item(t.system32, b"b.dll"), &t.names, &mut sent));
-        let (first, second) = (first.finish(true), second.finish(false));
+        let end = |more| PageEnd {
+            total: 2,
+            more,
+            volumes_incomplete: false,
+        };
+        let (first, second) = (first.finish(end(true)), second.finish(end(false)));
         assert!(
             second.len() < first.len(),
             "the second page sends no folder"
@@ -613,8 +633,8 @@ mod tests {
     fn a_page_lays_out_its_folders_then_its_items() {
         let mut names = ResultNames::default();
         let root = names.push_folder(None, b"C:");
-        let mut sent = SentFolders::new(&names);
-        let mut page = ResultsPage::new(1, 0, false, false, 1);
+        let mut sent = SentFolders::default();
+        let mut page = ResultsPage::new(0, false, 1);
         assert!(page.push(
             PageItem {
                 size: Some(2),
@@ -624,7 +644,7 @@ mod tests {
             &names,
             &mut sent,
         ));
-        let frame = page.finish(false);
+        let frame = page.finish(last_page(1));
         #[rustfmt::skip]
         let payload: &[u8] = &[
             RESP_TAG_RESULTS,
@@ -675,13 +695,13 @@ mod tests {
         assert!(core::str::from_utf8(&name).is_err());
         let mut names = ResultNames::default();
         let root = names.push_folder(None, b"C:");
-        let mut sent = SentFolders::new(&names);
-        let mut page = ResultsPage::new(1, 0, false, false, 1);
+        let mut sent = SentFolders::default();
+        let mut page = ResultsPage::new(0, false, 1);
         assert!(page.push(item(root, &name), &names, &mut sent));
         let mut full = b"C:\\".to_vec();
         full.extend_from_slice(&name);
         assert_eq!(
-            decode(&[page.finish(false)])[0].items,
+            decode(&[page.finish(last_page(1))])[0].items,
             [ResultItem {
                 path: wtf8::to_string_lossy(&full),
                 path_u16: Some([&[b'C' as u16, b':' as u16, b'\\' as u16][..], &units].concat()),
@@ -703,8 +723,8 @@ mod tests {
             cut in any::<prop::sample::Index>(),
         ) {
             let t = tree();
-            let mut sent = SentFolders::new(&t.names);
-            let mut page = ResultsPage::new(1, 2, false, false, names.len());
+            let mut sent = SentFolders::default();
+            let mut page = ResultsPage::new(2, false, names.len());
             for name in &names {
                 let full = PageItem {
                     size: Some(3),
@@ -715,7 +735,13 @@ mod tests {
                 prop_assert!(page.push(full, &t.names, &mut sent));
             }
             // The body follows the length prefix and the tag byte.
-            let mut body = page.finish(true).split_off(5);
+            let mut body = page
+                .finish(PageEnd {
+                    total: 1,
+                    more: true,
+                    volumes_incomplete: false,
+                })
+                .split_off(5);
             let len = body.len();
             for (at, byte) in &patches {
                 body[at.index(len)] = *byte;
@@ -737,10 +763,10 @@ mod tests {
         };
         let t = tree();
         let page = |sums: Option<MatchSums>| {
-            let mut sent = SentFolders::new(&t.names);
-            let mut page = ResultsPage::new(1, 0, false, false, 1).with_sums(sums);
+            let mut sent = SentFolders::default();
+            let mut page = ResultsPage::new(0, false, 1).with_sums(sums);
             assert!(page.push(item(t.c, b"a"), &t.names, &mut sent));
-            page.finish(false)
+            page.finish(last_page(1))
         };
         let (plain, with) = (decode(&[page(None)]), decode(&[page(Some(sums))]));
         assert_eq!(with[0].sums, Some(sums));

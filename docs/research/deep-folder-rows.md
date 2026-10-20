@@ -10,7 +10,10 @@ for the deep tree are computed, not run.
 **Status.** Stages 1 and 2 are built: protocol 9, and the path sort by
 folder rank (`query::order::folder_ranks`). The wire rules are in
 `docs/DESIGN.md` ("Wire protocol"). "Where the cost is today" describes the
-code before them.
+code before them. Since then, a sorted index has replaced the copied hits
+that this study measured: a reply holds a 16-byte row for each match and
+reads each page's names from the index ("Result order" and "Rows on demand"
+in `docs/DESIGN.md`); "The deep tree, measured" gives its figures.
 
 ## Answer
 
@@ -101,8 +104,8 @@ three times the memory computed here.
 
 Measured on 2026-10-20 on the owner's laptop, on `acc5696` (before) and
 `fe10004` (after stages 1 and 2). A probe ran gozlerd's own steps for one
-volume: `run_query_deferrable`, `order_hits`, and the page loop of each
-version's `stream_rows`. It counted the peak heap above the built index with
+volume, as each version's `stream_rows` ran them: the search, the merge of
+the volumes, and the page loop. It counted the peak heap above the built index with
 a counting allocator. The tree is a copy that copied into itself: a chain of
 190 folders, then branches of 200 folders with 9 files each, so a file's
 path is about 2.1 KB. The empty search matched every entry. The old code
@@ -128,6 +131,20 @@ At the full size of #84, after only: 5,602,990 entries, an index of 794 MB.
 
 The old code grows by row at the same rate, so at the full size it would
 need about 25 GB for the export by name and 46 GB by path.
+
+With the sorted index, measured with the same steps in
+`crates/gozler-daemon/examples/deep_export.rs`, on an index of 667 MB: the
+time is the daemon's part, from the scan to the last page.
+
+| Search | Before the sorted index | With it |
+| --- | --- | --- |
+| Full export by name | 1,017 MB, 6.1 s | 183 MB (34 bytes per row), 1.2 s |
+| Full export by path | 1,020 MB, 5.2 s | 183 MB, 1.5 s |
+| First 16,384 rows by path | 182 MB, 0.75 s | 179 MB, 0.84 s, of which 0.53 s under the index lock |
+| Full export at 1/20, by name and by path | 50 MB | 8 MB, 0.04 s and 0.06 s |
+
+The first page by path still copies every match's folder to rank the
+folders, so its peak stays near the full export's.
 
 After stages 1 and 2, `order_hits` copied every `QueryHit`, about 96 bytes,
 into a merged list, then again into the result order, so two lists of hits

@@ -1,7 +1,7 @@
 //! Peak heap and time of one search over a deep folder tree, through the
 //! steps gozlerd runs for it: the scan under the volume's index lock, the
-//! sort without it, the hits under the lock again, the merge of the volumes
-//! and the page loop of `stream_rows`. Or, with
+//! sort without it, the rows under the lock again, and the pages of
+//! `stream_rows`, each read under the lock. Or, with
 //! `merge`, the time of the name rank merge that the tail runs once the names
 //! added since the build pass 0.1 % of the names.
 //!
@@ -15,10 +15,8 @@
 //! <branches> <name|path|merge> [limit]`
 
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::proto::{PageItem, ResultsPage, SentFolders};
-use gozler_core::query::{
-    CompiledQuery, OrderedHits, VolumeRun, find_matches, order_hits, parse_query,
-};
+use gozler_core::proto::{PageEnd, PageItem, ResultsPage, SentFolders};
+use gozler_core::query::{CompiledQuery, Reply, find_matches, parse_query};
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -196,53 +194,49 @@ fn main() {
     let ordered = matches.order();
     let order_s = ordering.elapsed().as_secs_f64();
     let reading = Instant::now();
-    let outcome = ordered.read_hits(&index).expect("the index did not change");
+    let answer = ordered.read_rows(&index).expect("the index did not change");
     let read_s = reading.elapsed().as_secs_f64();
     let lock_peak = peak_since(base);
-    let total = outcome.total;
 
-    // What it runs after the locks: the merge and the pages.
+    // The pages, each read under the lock and sent after it.
     let sending = Instant::now();
-    let runs = vec![VolumeRun {
-        mount_prefix: r"C:\",
-        hits: outcome.hits,
-        names: outcome.names,
-    }];
-    let OrderedHits { hits, names } = order_hits(sort, runs);
-    let mut sent = SentFolders::new(&names);
-    let mut rows = hits.iter().peekable();
-    let (mut pipe, mut pages) = (0usize, 0usize);
+    let mut reply = Reply::new(sort, vec![answer], 0, None);
+    let mut sent = SentFolders::default();
+    let (mut pipe, mut pages, mut page_lock_s) = (0usize, 0usize, 0f64);
     loop {
-        let mut page = ResultsPage::new(total, 0, false, false, rows.len());
-        while let Some(hit) = rows.peek() {
+        let mut page = ResultsPage::new(0, false, reply.rows_left());
+        let filling = Instant::now();
+        let more = reply.fill(&[Some(&index)], |row, names| {
             let item = PageItem {
-                folder: hit.folder,
-                name: names.name(hit.name),
-                is_dir: hit.is_dir,
+                folder: row.folder,
+                name: row.name,
+                is_dir: row.is_dir,
                 size: None,
                 mtime: None,
                 attributes: None,
             };
-            if !page.push(item, &names, &mut sent) {
-                break;
-            }
-            rows.next();
-        }
-        let more = rows.peek().is_some();
-        pipe += page.finish(more).len();
+            page.push(item, names, &mut sent)
+        });
+        page_lock_s = page_lock_s.max(filling.elapsed().as_secs_f64());
+        let end = PageEnd {
+            total: reply.total(),
+            more,
+            volumes_incomplete: reply.index_changed(),
+        };
+        pipe += page.finish(end).len();
         pages += 1;
         if !more {
             break;
         }
     }
     let send_s = sending.elapsed().as_secs_f64();
+    let total = reply.total();
     let peak = lock_peak.max(peak_since(base));
 
     println!(
-        "{total} matches, sort {key:?}, limit {limit:?}\n\
-         scan under the lock {scan_s:.3} s, order without it {order_s:.3} s, \
-         hits under the lock again {read_s:.3} s; peak {:.1} MB\n\
-         merge and pages: {send_s:.2} s, peak overall {:.1} MB ({:.0} bytes a match)\n\
+        "{total} matches, sort {key:?}, limit {limit:?}
+         scan under the lock {scan_s:.3} s, order without it {order_s:.3} s,          rows under the lock again {read_s:.3} s; peak {:.1} MB
+         pages: {send_s:.2} s, longest page under the lock {page_lock_s:.3} s,          peak overall {:.1} MB ({:.0} bytes a match)
          pipe {:.1} MB in {pages} pages",
         mb(lock_peak),
         mb(peak),

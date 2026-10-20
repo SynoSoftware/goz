@@ -11,6 +11,10 @@
 //!
 //! - The index lock is taken before the phase lock, and nothing holds the
 //!   phase lock while it takes the index lock.
+//! - A request that holds several volumes' index locks at once, as each page
+//!   of a reply does, takes them in [`VolumeSet`] order. A `parking_lot`
+//!   reader waits behind a waiting writer, so two requests that took them in
+//!   different orders could each wait for the other's volume.
 //! - A phase change never takes the index lock, because a `parking_lot` writer
 //!   that waits behind a long export blocks every new reader. A build installs
 //!   its index and releases the lock before it sets the phase, and
