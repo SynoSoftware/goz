@@ -241,46 +241,48 @@ pub struct OrderedHits {
 ///
 /// Runs no index code, so the caller calls it after releasing every index
 /// lock. Hits a run already holds in order cost a merge, not a full sort.
+/// The first run's hits become the reply's and are reordered in place, so
+/// the reply holds one list of hits: an export holds millions of them.
 pub fn order_hits(sort: SortSpec, mut runs: Vec<VolumeRun<'_>>) -> OrderedHits {
     runs.retain(|run| !run.hits.is_empty());
-    if let [run] = runs.as_mut_slice()
-        && run.sorted
-    {
-        return OrderedHits {
-            hits: std::mem::take(&mut run.hits),
-            names: std::mem::take(&mut run.names),
-        };
-    }
     let volumes: Vec<&[u8]> = runs.iter().map(|r| r.mount_prefix.as_bytes()).collect();
-    let mut names = ResultNames::default();
-    let mut hits = Vec::new();
-    let mut hit_volumes = Vec::new();
-    for (volume, run) in runs.into_iter().enumerate() {
+    let total: usize = runs.iter().map(|run| run.hits.len()).sum();
+    let mut runs = runs.into_iter();
+    let Some(first) = runs.next() else {
+        return OrderedHits::default();
+    };
+    let (mut hits, mut names) = (first.hits, first.names);
+    if first.sorted && runs.as_slice().is_empty() {
+        return OrderedHits { hits, names };
+    }
+    hits.reserve_exact(total - hits.len());
+    // Where each volume's hits start in `hits`, and where the last ends.
+    let mut starts = vec![0, hits.len()];
+    for run in runs {
         let moved = names.append(run.names);
         hits.extend(run.hits.into_iter().map(|hit| QueryHit {
             folder: moved.folder(hit.folder),
             name: moved.name(hit.name),
             ..hit
         }));
-        hit_volumes.resize(hits.len(), volume);
+        starts.push(hits.len());
     }
     let ranks = match sort.key {
         SortKey::Path => folder_ranks(&names),
         _ => Vec::new(),
     };
     let mut folded = Vec::new();
-    let keys: Vec<HitKey> = hits
-        .iter()
-        .zip(&hit_volumes)
-        .map(|(hit, &volume)| {
+    let mut keys = Vec::with_capacity(total);
+    for (volume, bounds) in starts.windows(2).enumerate() {
+        for hit in &hits[bounds[0]..bounds[1]] {
             let start = folded.len();
             crate::fold::fold_into(names.name(hit.name), &mut folded);
-            HitKey {
+            keys.push(HitKey {
                 volume,
                 folded_name: (start, folded.len()),
-            }
-        })
-        .collect();
+            });
+        }
+    }
     // Sort positions, not the hits: an export moves millions of rows, and a
     // hit is far larger than its position. The stable sort detects the
     // ascending runs that sorted volumes contribute and merges them.
@@ -294,8 +296,31 @@ pub fn order_hits(sort: SortSpec, mut runs: Vec<VolumeRun<'_>>) -> OrderedHits {
         volumes: &volumes,
     };
     order.sort_by(|&a, &b| compare(sort, &fields(a), &fields(b)));
-    let hits = order.into_iter().map(|i| hits[i]).collect();
+    move_into_order(&mut hits, &mut order);
     OrderedHits { hits, names }
+}
+
+/// Moves the hit at `order[i]` to position `i` for every `i`, without a
+/// second list of hits, by following each cycle of the permutation. It
+/// marks each position it fills by setting `order[i]` to `i`.
+fn move_into_order(hits: &mut [QueryHit], order: &mut [usize]) {
+    for start in 0..hits.len() {
+        if order[start] == start {
+            continue;
+        }
+        let first = hits[start];
+        let mut at = start;
+        loop {
+            let from = order[at];
+            order[at] = at;
+            if from == start {
+                hits[at] = first;
+                break;
+            }
+            hits[at] = hits[from];
+            at = from;
+        }
+    }
 }
 
 /// A hit's folded keys, computed once so the sort does not fold on every

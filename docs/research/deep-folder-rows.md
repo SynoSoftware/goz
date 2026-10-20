@@ -94,6 +94,49 @@ every figure that grows with depth 2 or 3 times larger.
 | First row of a full export | after every full path is built and sorted | after the matches are copied and sorted |
 | The window, 32,768 cached rows | 72 MB of paths, against a budget of 16 MB for the whole process | unchanged by stages 1 and 2; see stage 4 |
 
+The next section measures these figures, and the full export takes about
+three times the memory computed here.
+
+## The deep tree, measured
+
+Measured on 2026-10-20 on the owner's laptop, on `acc5696` (before) and
+`fe10004` (after stages 1 and 2). A probe ran gozlerd's own steps for one
+volume: `run_query_deferrable`, `order_hits`, and the page loop of each
+version's `stream_rows`. It counted the peak heap above the built index with
+a counting allocator. The tree is a copy that copied into itself: a chain of
+190 folders, then branches of 200 folders with 9 files each, so a file's
+path is about 2.1 KB. The empty search matched every entry. The old code
+could run only at 1/20 of the size of #84, because the machine has less free
+memory than it needs.
+
+At 1/20: 280,330 entries, an index of 39 MB.
+
+| Search | Before | After |
+| --- | --- | --- |
+| Full export by name | 1,189 MB (4.4 KB per row), 4.4 s, 571 MB on the pipe | 72 MB (271 bytes per row), 0.56 s, 7.3 MB on the pipe |
+| Full export by path | 2,208 MB (8.3 KB per row), 10.4 s | 73 MB (271 bytes per row), 0.43 s |
+| First 16,384 rows by name, as the window asks | 69 MB, 0.28 s | 6 MB, 0.04 s |
+| First 16,384 rows by path | 147 MB, 0.74 s | 9 MB, 0.08 s |
+
+At the full size of #84, after only: 5,602,990 entries, an index of 794 MB.
+
+| Search | After stages 1 and 2 | After `order_hits` keeps one list of hits |
+| --- | --- | --- |
+| Full export by name | 1,506 MB (282 bytes per row), 10 s, 146 MB on the pipe | 1,017 MB (190 bytes per row), 7.8 s |
+| Full export by path | 1,508 MB, 10.3 s | 1,020 MB, 5.5 s |
+| First 16,384 rows by path | 182 MB, 1.2 s, all under the index lock | unchanged: `order_hits` only merges a sorted page |
+
+The old code grows by row at the same rate, so at the full size it would
+need about 25 GB for the export by name and 46 GB by path.
+
+After stages 1 and 2, `order_hits` copied every `QueryHit`, about 96 bytes,
+into a merged list, then again into the result order, so two lists of hits
+were alive at each copy. It now takes the first volume's list as the merged
+one and moves each hit into its place in that list. What remains is about
+190 bytes per row: the `QueryHit`, its copied name, the sort keys and the
+positions. A full export still holds every row, because each search sorts
+its matches and keeps them until they are sent.
+
 ## Options
 
 | Option | Pipe bytes | gozlerd memory | Cost | Verdict |
@@ -232,10 +275,6 @@ and output, not the pipe.
 
 ## Not measured
 
-- **The deep tree.** Every figure in its table is computed. A bench over a
-  deep fixture in stage 1 measures it.
-- **How long the folder copy and the ranks take,** against today's path
-  building, on `C:\` and on the deep fixture.
 - **The time today to build paths for folders deeper than 1,024 bytes,**
   which `DirPaths` rebuilds for every row from the nearest cached ancestor.
   The code shows the cost grows with the depth past that point; it was not
