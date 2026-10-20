@@ -1,8 +1,9 @@
-//! A volume's class and disks, and the Windows engine's method for a pair
-//! of volumes ("The Windows engine" in the spec). The choices build and are
-//! tested on every OS; reading a volume is Windows only.
+//! A volume's class and disks, and the method for a pair of volumes ("The
+//! Windows engine" and "The ring engine" in the spec). The choices build and
+//! are tested on every OS; reading a volume is Windows only.
 
-use crate::settings::{Count, SpeedSettings};
+use crate::ring_plan::{Layout, RingPlan};
+use crate::settings::{Count, Engine, SpeedSettings};
 
 /// The four classes that the worker counts and the disk waits read. Ordered
 /// from fastest to slowest, so the slower end of a pair decides.
@@ -53,7 +54,7 @@ pub(crate) struct Volume {
     pub(crate) disks: Vec<Disk>,
 }
 
-/// How the Windows engine copies between a pair of volumes.
+/// How a copy runs between a pair of volumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CopyPlan {
     /// Workers for files that are not large.
@@ -66,34 +67,43 @@ pub(crate) struct CopyPlan {
     /// do. When a volume seeks they join the workers' queue instead, so one
     /// file moves at a time, because a second stream makes a hard disk seek.
     pub(crate) lane_beside: bool,
+    /// The files the ring copies, when the settings choose it for this
+    /// pair. A share is never the ring's: buffered reads from a share read
+    /// ahead, and AngelCOPY measured its ring 30 times slower between
+    /// shares.
+    pub(crate) ring: Option<RingPlan>,
 }
 
 impl CopyPlan {
-    /// `pair` is the slower class of the two ends.
-    pub(crate) fn new(pair: VolumeClass, settings: &SpeedSettings) -> CopyPlan {
+    /// `pair` is the slower class of the two ends, and `layout` says whether
+    /// they share a physical disk.
+    pub(crate) fn new(pair: VolumeClass, settings: &SpeedSettings, layout: Layout) -> CopyPlan {
         let workers = |count: Count| count.get();
-        let limit = Some(settings.large_file_limit.bytes());
+        let limit = settings.large_file_limit.bytes();
         let w = &settings.workers;
         match pair {
             VolumeClass::Share => CopyPlan {
                 workers: workers(w.share),
                 large_from: None,
                 lane_beside: false,
+                ring: None,
             },
             VolumeClass::HardDisk => CopyPlan {
                 workers: workers(w.hard_disk),
-                large_from: limit,
+                large_from: Some(limit),
                 lane_beside: false,
+                ring: (settings.hard_disk == Engine::Ring)
+                    .then(|| RingPlan::hard_disk(settings.ring_hard_disk, layout)),
             },
-            VolumeClass::Usb => CopyPlan {
-                workers: workers(w.usb),
-                large_from: limit,
+            VolumeClass::Usb | VolumeClass::Ssd => CopyPlan {
+                workers: workers(match pair {
+                    VolumeClass::Usb => w.usb,
+                    _ => w.ssd,
+                }),
+                large_from: Some(limit),
                 lane_beside: true,
-            },
-            VolumeClass::Ssd => CopyPlan {
-                workers: workers(w.ssd),
-                large_from: limit,
-                lane_beside: true,
+                ring: (settings.large_between_ssds == Engine::Ring)
+                    .then(|| RingPlan::ssd(settings.ring_ssd, limit)),
             },
         }
     }
@@ -144,47 +154,68 @@ mod read {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Preset;
 
     /// The plan for each class: a share buffered on its workers, a hard
     /// disk one file at a time, and USB and SSD with large files beside
-    /// their workers. A wrong plan makes a hard disk seek between files or
-    /// copies a share's large files one at a time unbuffered.
+    /// their workers; with the ring chosen, a hard disk's every file in
+    /// FastCopy's profile, an SSD's large files in AngelCOPY's, and a
+    /// share's none. A wrong plan makes a hard disk seek between files,
+    /// copies a share's large files one at a time unbuffered, or reads a
+    /// share unbuffered through the ring.
     #[test]
     fn each_volume_class_gets_its_method() {
         let settings = SpeedSettings::automatic();
-        let plan = |class| CopyPlan::new(class, &settings);
-        let limit = Some(32 * 1024 * 1024);
+        let plan = |class| CopyPlan::new(class, &settings, Layout::TwoDisks);
+        let limit = 32 * 1024 * 1024;
         assert_eq!(
             plan(VolumeClass::Share),
             CopyPlan {
                 workers: 2,
                 large_from: None,
-                lane_beside: false
+                lane_beside: false,
+                ring: None,
             }
         );
         assert_eq!(
             plan(VolumeClass::HardDisk),
             CopyPlan {
                 workers: 1,
-                large_from: limit,
-                lane_beside: false
+                large_from: Some(limit),
+                lane_beside: false,
+                ring: None,
             }
         );
         assert_eq!(
             plan(VolumeClass::Usb),
             CopyPlan {
                 workers: 2,
-                large_from: limit,
-                lane_beside: true
+                large_from: Some(limit),
+                lane_beside: true,
+                ring: None,
             }
         );
         assert_eq!(
             plan(VolumeClass::Ssd),
             CopyPlan {
                 workers: 16,
-                large_from: limit,
-                lane_beside: true
+                large_from: Some(limit),
+                lane_beside: true,
+                ring: None,
             }
+        );
+        let ring = Preset::RingCopy.settings();
+        let ring_plan = |class, layout| CopyPlan::new(class, &ring, layout).ring;
+        assert_eq!(ring_plan(VolumeClass::Share, Layout::OneDisk), None);
+        let hard_disk = ring_plan(VolumeClass::HardDisk, Layout::OneDisk).expect("the ring");
+        assert_eq!(
+            (hard_disk.from, hard_disk.one_disk, hard_disk.buffer),
+            (0, true, 256 * 1024 * 1024)
+        );
+        let ssd = ring_plan(VolumeClass::Ssd, Layout::OneDisk).expect("the ring");
+        assert_eq!(
+            (ssd.from, ssd.one_disk, ssd.buffer, ssd.open_files),
+            (limit, false, 64 * 1024 * 1024, 1)
         );
         assert_eq!(VolumeClass::of_local(None, false), VolumeClass::HardDisk);
         assert_eq!(VolumeClass::of_local(Some(false), true), VolumeClass::Usb);

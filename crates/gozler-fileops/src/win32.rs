@@ -6,8 +6,10 @@ pub(crate) const ERROR_FILE_NOT_FOUND: u32 = 2;
 pub(crate) const ERROR_PATH_NOT_FOUND: u32 = 3;
 pub(crate) const ERROR_ACCESS_DENIED: u32 = 5;
 pub(crate) const ERROR_INVALID_DATA: u32 = 13;
+pub(crate) const ERROR_WRITE_FAULT: u32 = 29;
 pub(crate) const ERROR_SHARING_VIOLATION: u32 = 32;
 pub(crate) const ERROR_LOCK_VIOLATION: u32 = 33;
+pub(crate) const ERROR_HANDLE_EOF: u32 = 38;
 pub(crate) const ERROR_HANDLE_DISK_FULL: u32 = 39;
 pub(crate) const ERROR_NOT_SUPPORTED: u32 = 50;
 pub(crate) const ERROR_FILE_EXISTS: u32 = 80;
@@ -28,6 +30,7 @@ pub(crate) const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
 pub(crate) const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub(crate) const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 pub(crate) const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x200;
+pub(crate) const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
 
 pub(crate) const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
 

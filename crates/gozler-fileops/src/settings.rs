@@ -198,28 +198,51 @@ pub enum Preset {
     /// TinyTorrent2's `Payload::Move`, with BetterCopy's share workers and
     /// rmbrr's delete workers.
     ParallelCopy,
+    /// AngelCOPY's ring for large files between SSDs and FastCopy v5's
+    /// hard-disk mode for every file when a hard disk is at either end.
+    RingCopy,
+    /// AngelCOPY 1.6.0: its ring for large files between SSDs, and 16
+    /// workers for the other files whatever the disks.
+    RingForLargeFiles,
     /// BetterCopy's: the Windows copy function, unbuffered from 256 MiB.
     WindowsUnbufferedFrom256MiB,
 }
 
 impl Preset {
     pub fn settings(self) -> SpeedSettings {
+        let parallel = CopyWorkers {
+            ssd: Count(16),
+            usb: Count(2),
+            hard_disk: Count(1),
+            share: Count(2),
+        };
         let windows = |limit_mib| SpeedSettings {
             large_file_limit: LargeFileLimit(limit_mib),
             large_between_ssds: Engine::Windows,
             hard_disk: Engine::Windows,
-            workers: CopyWorkers {
-                ssd: Count(16),
-                usb: Count(2),
-                hard_disk: Count(1),
-                share: Count(2),
-            },
+            workers: parallel,
             delete_workers: DeleteWorkers::PerProcessor,
             ..SpeedSettings::automatic()
         };
         match self {
             Preset::Automatic => SpeedSettings::automatic(),
             Preset::ParallelCopy => windows(32),
+            Preset::RingCopy => SpeedSettings {
+                large_between_ssds: Engine::Ring,
+                hard_disk: Engine::Ring,
+                ..windows(32)
+            },
+            Preset::RingForLargeFiles => SpeedSettings {
+                large_between_ssds: Engine::Ring,
+                workers: CopyWorkers {
+                    ssd: Count(16),
+                    usb: Count(16),
+                    hard_disk: Count(16),
+                    share: Count(16),
+                },
+                delete_workers: DeleteWorkers::Fixed(Count(8)),
+                ..windows(32)
+            },
             Preset::WindowsUnbufferedFrom256MiB => windows(256),
         }
     }

@@ -146,6 +146,7 @@ pub struct Outcome {
     pub bytes: u64,
     /// In the order they happened.
     pub listed: Vec<Listed>,
+    pub ring: RingCounts,
 }
 
 impl Outcome {
@@ -155,8 +156,20 @@ impl Outcome {
             items: 0,
             bytes: 0,
             listed: Vec::new(),
+            ring: RingCounts::default(),
         }
     }
+}
+
+/// What the ring did not do itself, so a ring or a clone that never runs
+/// shows in the result.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RingCounts {
+    /// Files that the ring could not copy, which the Windows copy function
+    /// copied again.
+    pub to_windows: u64,
+    /// Clones that the volume refused, which the ring copied instead.
+    pub clones_refused: u64,
 }
 
 /// A running operation's counters, which the window reads about twice a

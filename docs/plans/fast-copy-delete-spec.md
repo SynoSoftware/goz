@@ -334,12 +334,17 @@ Both profiles:
   This is FastCopy's method. AngelCOPY's ring copies only times and
   attributes and so loses `Zone.Identifier`, the mark that makes Windows
   warn before it runs a downloaded file.
-- **The clone (D20):** within one volume that can clone blocks the ring sets the
-  destination's end of file to the source's size, marks it sparse when the
-  source is, and clones the data in ranges under 4 GB, the largest range
-  Windows accepts. The data stream is then complete, and the metadata
-  follows as for a copied file. A refused clone falls back to the ring's
-  copy and is counted in the result, so a clone that never runs shows.
+- **The clone (D20):** within one volume that can clone blocks the ring marks
+  the destination sparse, sets its end of file to the source's size, and
+  clones the data in ranges under 4 GB, the largest range Windows accepts.
+  It then clears the sparse mark when the source is not sparse. This is
+  what `CopyFileExW` does: ReFS reserves the whole size of a file that is
+  not sparse, so a clone into such a file needs free space for all of it.
+  When the volume cannot hold the whole size, ReFS refuses to clear the
+  mark and the copy stays sparse, as `CopyFileExW` leaves it. The data
+  stream is then complete, and the metadata follows as for a copied file. A
+  refused clone falls back to the ring's copy and is counted in the result,
+  so a clone that never runs shows.
 - **Handed to the Windows engine:** a network end, an unbuffered open that a
   file system filter refuses, any entry with a reparse tag, and an EFS file.
   The walk opens entries without following reparse points, so a ring read
@@ -616,9 +621,11 @@ program and the engine's tests on real folders need a library.
 A stage runs each Win32 case once and writes the result here, or the case
 is in the plan's "After install".
 
-- Whether the ring can set the true end of file on its unbuffered handle.
-  AngelCOPY reopens the file without `FILE_FLAG_NO_BUFFERING` to do it.
-  Stage C runs it once.
+- The ring can set the true end of file on its unbuffered handle (stage C,
+  run once on 2026-10-19 on the owner's Dev Drive, to 12288 and to 10000
+  bytes). The ring still sets it on the handle that copies the streams, as
+  AngelCOPY sets it on a reopened handle, because that handle is opened
+  for the streams anyway.
 - What one rename per copied file (D10) and one listing per destination
   folder cost on a share. After install times a small-file copy to a share.
 
@@ -670,9 +677,23 @@ is in the plan's "After install".
 - Whether `COPY_FILE_NO_BUFFERING` stops `CopyFile2`'s own clone within one
   volume that can clone blocks. Stage D's Dev Drive row shows it: if it
   does, the Windows engine leaves the flag off within such a volume.
-- How `FSCTL_DUPLICATE_EXTENTS_TO_FILE` takes a file whose size is not a
-  whole number of clusters, and a file larger than 4 GB in several ranges
-  (D20). Stage C runs it once on the Dev Drive.
+- `FSCTL_DUPLICATE_EXTENTS_TO_FILE` (D20), run once in stage C on
+  2026-10-19 on the owner's Dev Drive (ReFS, 4 KB clusters), through the
+  ring:
+  - It takes a range rounded up to a whole cluster past the true end of
+    file: a file of 33 MiB + 333 bytes and one of 6 GiB + 12345 bytes, the
+    second in two ranges, cloned in 20 ms to 1 s and matched byte for byte.
+  - A sparse 64 MiB file stays sparse, with 139264 bytes allocated.
+  - The end of file set before the clone on a destination that is not
+    sparse takes the whole size from the free space; `CopyFileExW` and a
+    clone into a destination marked sparse whose mark is then cleared take
+    the same 6.2 GB for the 6 GB file. A destination marked sparse takes
+    4 KB.
+  - With 5.2 GB free, the end of file of a 6 GB destination that is not
+    sparse fails with `ERROR_DISK_FULL`. `CopyFileExW` then still clones
+    and leaves its copy sparse; clearing the ring's sparse mark fails with
+    `ERROR_DISK_FULL`, and the ring keeps the mark, as "The clone" says.
+  - ReFS reports space freed by a delete up to about a minute late.
 - Whether the parallel walk is slower than one walker on a hard disk.
 - Every speed claim of D2 and D7 to D10 on the owner's machine. Stage D
   measures them.

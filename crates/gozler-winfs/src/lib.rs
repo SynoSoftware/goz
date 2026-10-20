@@ -44,6 +44,8 @@ mod pipe_sd;
 #[cfg(windows)]
 mod pipe_trust;
 #[cfg(windows)]
+mod ring;
+#[cfg(windows)]
 mod service;
 #[cfg(windows)]
 mod storage;
@@ -84,6 +86,12 @@ pub use journal::{
 pub use copy::{
     CopyOptions, CopySource, Existing, allocated_size, copy_file, create_folder, free_space,
     path_attributes, rename, set_path_attributes,
+};
+
+#[cfg(windows)]
+pub use ring::{
+    BackupReader, BackupWriter, BasicInfo, Completion, IoRing, RingOpen, RingWaker, cluster_size,
+    create_ring_destination, open_ring_source,
 };
 
 #[cfg(windows)]

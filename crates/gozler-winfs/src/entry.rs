@@ -127,7 +127,7 @@ pub struct EntryStat {
 }
 
 /// An open file, folder or link.
-pub struct Entry(FileHandle);
+pub struct Entry(pub(crate) FileHandle);
 
 // SAFETY: a file handle is a kernel object reference that any thread of the
 // process may use, and no method of `Entry` is tied to the thread that
@@ -436,7 +436,12 @@ impl Entry {
         self.set_info(FileDispositionInfo, &info, "FileDispositionInfo")
     }
 
-    fn set_info<T>(&self, class: i32, info: &T, context: &'static str) -> Result<(), WinError> {
+    pub(crate) fn set_info<T>(
+        &self,
+        class: i32,
+        info: &T,
+        context: &'static str,
+    ) -> Result<(), WinError> {
         // SAFETY: `info` is the plain struct that `class` names, and its size
         // is passed.
         let ok = unsafe {

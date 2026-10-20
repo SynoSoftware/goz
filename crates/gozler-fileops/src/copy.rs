@@ -10,8 +10,11 @@
 //! under its temporary name (D10) and renamed when complete, so a file at
 //! its final name is always complete.
 
+mod ring;
+mod streams;
+
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gozler_core::layout::FolderEntry;
@@ -25,7 +28,7 @@ use crate::delete::{Disposition, remove};
 use crate::io_threads::IoThreads;
 use crate::listing::{FILES_PER_ITEM, LISTING_WORDS, is_folder, join, kind, list, read_names};
 use crate::names::{Holder, Kind, Names, partial_name};
-use crate::operation::{Listed, Progress, Reason};
+use crate::operation::{Listed, Progress, Reason, RingCounts};
 use crate::place::{Placed, Placing, Target, place};
 use crate::pool::{Lane, Pool};
 use crate::receive::{Selected, listed};
@@ -34,8 +37,10 @@ use crate::volumes::CopyPlan;
 use crate::win32::{
     ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL, ERROR_OPERATION_ABORTED,
     ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_SPARSE_FILE, IO_REPARSE_TAG_SYMLINK, is_gone, is_name_surrogate,
+    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_SPARSE_FILE, IO_REPARSE_TAG_SYMLINK, is_gone,
+    is_name_surrogate,
 };
+use ring::Ring;
 
 /// How one copy runs.
 pub(crate) struct Copying<'a> {
@@ -44,12 +49,26 @@ pub(crate) struct Copying<'a> {
     /// A move across volumes: each source is deleted when its copy has its
     /// final name, and each source folder when it is empty.
     pub(crate) moving: bool,
-    /// Sparse files stay sparse: Windows build 22621 or later, and a
-    /// destination that supports sparse files.
-    pub(crate) sparse: bool,
+    pub(crate) target: TargetVolume,
     pub(crate) cancel: &'a AtomicBool,
     pub(crate) progress: &'a Progress,
     pub(crate) io: &'a IoThreads,
+}
+
+/// What the destination volume can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TargetVolume {
+    /// `CopyFile2` keeps sparse files sparse: Windows build 22621 or later,
+    /// and a destination that supports sparse files.
+    pub(crate) sparse_copy: bool,
+    /// The destination supports sparse files, which the ring keeps sparse
+    /// on any Windows.
+    pub(crate) sparse_files: bool,
+    /// A FAT or exFAT file system.
+    pub(crate) fat: bool,
+    /// The volume's cluster size, within one volume that can clone blocks,
+    /// where the ring clones (D20).
+    pub(crate) clone_cluster: Option<u32>,
 }
 
 pub(crate) struct Copied {
@@ -57,6 +76,7 @@ pub(crate) struct Copied {
     pub(crate) listed: Vec<Listed>,
     /// The destination disk filled, which stopped the copy.
     pub(crate) disk_full: bool,
+    pub(crate) ring: RingCounts,
 }
 
 /// A selected entry, and whether it is copied into its own folder.
@@ -84,24 +104,46 @@ pub(crate) fn copy(
         .collect();
     let full = AtomicBool::new(false);
     let stopped = || copying.cancel.load(Ordering::Relaxed) || full.load(Ordering::Relaxed);
+    // The buffer exists only while the copy runs.
+    let ring = copying.plan.ring.and_then(Ring::new);
+    let (ring, io) = match ring {
+        Some((ring, io)) => (Some(ring), Some(io)),
+        None => (None, None),
+    };
     let walk = Walk {
         copying,
         full: &full,
         listed: Mutex::default(),
         pool: Pool::new(items, &stopped),
         destination: Disposition::default(),
+        ring,
+        to_windows: AtomicU64::new(0),
+        clones_refused: AtomicU64::new(0),
     };
     std::thread::scope(|scope| {
-        for _ in 0..copying.plan.workers.max(1) {
-            scope.spawn(|| walk.work(Lane::Workers));
-        }
-        if copying.plan.lane_beside {
-            scope.spawn(|| walk.work(Lane::Large));
+        let walking: Vec<_> = (0..copying.plan.workers.max(1))
+            .map(|_| scope.spawn(|| walk.work(Lane::Workers)))
+            .chain((copying.plan.lane_beside).then(|| scope.spawn(|| walk.work(Lane::Large))))
+            .collect();
+        if let (Some(ring), Some(io)) = (&walk.ring, io) {
+            scope.spawn(|| ring.run(&walk, io));
+            for _ in 0..ring.plan.openers {
+                scope.spawn(|| ring.open_and_close(&walk));
+            }
+            for walker in walking {
+                walker.join().expect("no worker panics");
+            }
+            // The walk hands the ring nothing more.
+            ring.close_input();
         }
     });
     Copied {
         listed: walk.listed.into_inner().expect("no worker panics"),
         disk_full: full.load(Ordering::Relaxed),
+        ring: RingCounts {
+            to_windows: walk.to_windows.into_inner(),
+            clones_refused: walk.clones_refused.into_inner(),
+        },
     }
 }
 
@@ -139,6 +181,24 @@ struct File {
     disposition: Arc<Disposition>,
 }
 
+impl File {
+    /// Its temporary name (D10).
+    fn partial(&self) -> Vec<u16> {
+        partial_name(&self.final_name)
+    }
+
+    fn partial_path(&self) -> Vec<u16> {
+        join(&self.target.verbatim, &self.partial())
+    }
+}
+
+/// A file the walk handed to the ring, with its source folder, which it
+/// holds until the file is done.
+struct Handed {
+    file: File,
+    folder: Option<Arc<Folder>>,
+}
+
 struct Walk<'a> {
     copying: &'a Copying<'a>,
     full: &'a AtomicBool,
@@ -146,6 +206,11 @@ struct Walk<'a> {
     pool: Pool<'a, Work>,
     /// How the destination volume deletes, for the temporary files.
     destination: Disposition,
+    /// `None` without the ring, or when its buffer could not be allocated.
+    ring: Option<Ring>,
+    /// The result's [`RingCounts`].
+    to_windows: AtomicU64,
+    clones_refused: AtomicU64,
 }
 
 impl Walk<'_> {
@@ -253,7 +318,7 @@ impl Walk<'_> {
                 &disposition,
                 None,
             );
-            let Some(file) = decided else {
+            let Some(file) = decided.and_then(|file| self.hand_to_ring(file, None)) else {
                 return;
             };
             if self.is_large(&file) && self.copying.plan.lane_beside {
@@ -360,7 +425,7 @@ impl Walk<'_> {
                 disposition,
                 Some(&folder),
             );
-            let Some(file) = decided else {
+            let Some(file) = decided.and_then(|file| self.hand_to_ring(file, Some(&folder))) else {
                 continue;
             };
             if self.is_large(&file) {
@@ -429,7 +494,7 @@ impl Walk<'_> {
                 disposition,
                 Some(parent),
             );
-            if let Some(file) = decided {
+            if let Some(file) = decided.and_then(|file| self.hand_to_ring(file, Some(parent))) {
                 self.copy_file(&file, Some(parent));
             }
             return;
@@ -613,27 +678,67 @@ impl Walk<'_> {
         (self.copying.plan.large_from).is_some_and(|limit| file.size >= limit)
     }
 
-    /// Copies one file under its temporary name, renames it to its final
-    /// name, and for a move deletes its source. `folder` is its source
-    /// folder; `None` for a selected file.
-    fn copy_file(&self, file: &File, folder: Option<&Arc<Folder>>) {
-        let folder_ref = folder.map(|folder| &**folder);
-        let partial = partial_name(&file.final_name);
-        let partial_path = join(&file.target.verbatim, &partial);
-        let delete_partial = || {
-            // Our own temporary file, which nobody else has a reason to keep.
-            let open = || open_entry(&partial_path, Access::DeleteReadOnly, Reparse::Open);
-            remove(&AtomicBool::new(false), &self.destination, open)
+    /// Hands a decided file to the ring when the ring copies it, and
+    /// otherwise gives it back. A link and an EFS file go to the Windows
+    /// engine, because the ring reads a file's data unfiltered and could not
+    /// keep it encrypted.
+    fn hand_to_ring(&self, file: File, folder: Option<&Arc<Folder>>) -> Option<File> {
+        let Some(plan) = self.copying.plan.ring else {
+            return Some(file);
         };
-        // Only an interrupted run of Gozler makes that name, so only Continue
-        // finds it, in the listing.
+        let takes = file.size >= plan.from
+            && file.reparse_tag == 0
+            && file.attributes & FILE_ATTRIBUTE_ENCRYPTED == 0;
+        if !takes {
+            return Some(file);
+        }
+        let Some(ring) = &self.ring else {
+            // The ring's buffer could not be allocated.
+            self.to_windows.fetch_add(1, Ordering::Relaxed);
+            return Some(file);
+        };
+        if let Some(folder) = folder {
+            folder.hold();
+        }
+        ring.hand(Handed {
+            file,
+            folder: folder.cloned(),
+        });
+        None
+    }
+
+    /// Deletes an interrupted run's temporary file of `file`. Only an
+    /// interrupted run of Gozler makes that name, so only Continue finds it,
+    /// in the listing. `false` when it is listed as failed.
+    fn clear_partial(&self, file: &File, folder: Option<&Folder>) -> bool {
         let stale = {
             let names = file.target.names.lock().expect("no worker panics");
-            matches!(names.get(&partial), Some(Holder::Found(_)))
+            matches!(names.get(&file.partial()), Some(Holder::Found(_)))
         };
-        if stale && let Err(error) = delete_partial() {
-            return self.fail(&file.path, error, folder_ref);
+        if stale && let Err(error) = self.delete_partial(file) {
+            self.fail(&file.path, error, folder);
+            return false;
         }
+        true
+    }
+
+    /// Deletes `file`'s temporary file, our own, which nobody else has a
+    /// reason to keep.
+    fn delete_partial(&self, file: &File) -> Result<(), u32> {
+        let path = file.partial_path();
+        let open = || open_entry(&path, Access::DeleteReadOnly, Reparse::Open);
+        remove(&AtomicBool::new(false), &self.destination, open)
+    }
+
+    /// Copies one file with the Windows engine under its temporary name,
+    /// then [`Walk::finish`]es it. `folder` is its source folder; `None` for
+    /// a selected file.
+    fn copy_file(&self, file: &File, folder: Option<&Arc<Folder>>) {
+        let folder_ref = folder.map(|folder| &**folder);
+        if !self.clear_partial(file, folder_ref) {
+            return;
+        }
+        let partial_path = file.partial_path();
         let folder_link = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
         let source = if !is_name_surrogate(file.reparse_tag) {
             CopySource::File
@@ -649,7 +754,8 @@ impl Walk<'_> {
         let options = CopyOptions {
             source,
             unbuffered: self.is_large(file),
-            sparse: self.copying.sparse && file.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
+            sparse: self.copying.target.sparse_copy
+                && file.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
         };
         let progress = self.copying.progress;
         let mut reported = 0u64;
@@ -687,12 +793,28 @@ impl Walk<'_> {
             }
             return;
         }
+        self.finish(file, folder, reported, before);
+    }
+
+    /// Renames a copied file from its temporary name to its final name and,
+    /// for a move, deletes its source when `before` still describes it.
+    /// `reported` is the progress its bytes added.
+    fn finish(
+        &self,
+        file: &File,
+        folder: Option<&Arc<Folder>>,
+        reported: u64,
+        before: Option<Snapshot>,
+    ) {
+        let folder_ref = folder.map(|folder| &**folder);
+        let progress = self.copying.progress;
+        let partial_path = file.partial_path();
         let placing = Placing {
             from: &partial_path,
             base: &file.name,
             name: file.final_name.clone(),
             replace: file.replace,
-            is_folder: folder_link,
+            is_folder: file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
         };
         let reason = match place(&file.target, placing, self.copying.rule.choice) {
             Placed::Named => None,
@@ -701,7 +823,7 @@ impl Walk<'_> {
         };
         if let Some(reason) = reason {
             progress.remove_bytes(reported);
-            let _ = delete_partial();
+            let _ = self.delete_partial(file);
             return self.list_entry(&file.path, reason, folder_ref);
         }
         if let Some(before) = before {

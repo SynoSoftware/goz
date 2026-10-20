@@ -8,14 +8,15 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use gozler_winfs::{Access, Reparse, free_space, open_entry, windows_build};
+use gozler_winfs::{Access, Reparse, cluster_size, free_space, open_entry, windows_build};
 
 use crate::conflicts::{Choice, Rule};
-use crate::copy::Source;
+use crate::copy::{Source, TargetVolume};
 use crate::identity::Identity;
 use crate::listing::BACKSLASH;
 use crate::operation::{Listed, Prepared, Refusal, Request};
 use crate::receive::{Destination, Selected, receive, verbatim};
+use crate::ring_plan::Layout;
 use crate::settings::SpeedSettings;
 use crate::survey::{Surveying, survey};
 use crate::volumes::{CopyPlan, VolumeClass, read_volume};
@@ -64,7 +65,7 @@ pub(crate) struct Transfer {
     pub(crate) copied: Vec<Source>,
     pub(crate) moving: bool,
     pub(crate) plan: CopyPlan,
-    pub(crate) sparse: bool,
+    pub(crate) target: TargetVolume,
     /// The bytes the destination needs; `None` within one volume that can
     /// clone blocks, where both engines clone (D20).
     pub(crate) needed: Option<u64>,
@@ -223,11 +224,37 @@ fn transfer(
             plan.disks.push((disk.clone(), volume.class.seeks()));
         }
     }
+    let target_volume = destination.identity.volume();
+    let target_disks = volumes.get(target_volume).map(|volume| &volume.disks);
+    let one_disk = (copied.iter())
+        .filter_map(|source| volumes.get(source.selected.identity.volume()))
+        .any(|volume| {
+            (volume.disks.iter()).any(|disk| target_disks.is_some_and(|disks| disks.contains(disk)))
+        });
+    let layout = if one_disk {
+        Layout::OneDisk
+    } else {
+        Layout::TwoDisks
+    };
     let flags = destination.entry.volume_flags().unwrap_or(0);
-    let one_volume = (copied.iter())
-        .all(|source| source.selected.identity.volume() == destination.identity.volume());
+    let one_volume =
+        (copied.iter()).all(|source| source.selected.identity.volume() == target_volume);
     let clones = one_volume && flags & FILE_SUPPORTS_BLOCK_REFCOUNTING != 0;
-    let sparse = flags & FILE_SUPPORTS_SPARSE_FILES != 0 && windows_build() >= SPARSE_COPY_BUILD;
+    let sparse_files = flags & FILE_SUPPORTS_SPARSE_FILES != 0;
+    let sparse = sparse_files && windows_build() >= SPARSE_COPY_BUILD;
+    let file_system = destination.entry.file_system_name().unwrap_or_default();
+    let root: Vec<u16> = target_volume
+        .iter()
+        .copied()
+        .chain(Some(BACKSLASH))
+        .collect();
+    let target = TargetVolume {
+        sparse_copy: sparse,
+        sparse_files,
+        fat: file_system.to_ascii_uppercase().contains("FAT"),
+        // A cluster size that cannot be read leaves the ring's copy.
+        clone_cluster: clones.then(|| cluster_size(&root).ok()).flatten(),
+    };
 
     let rule = Rule {
         choice: continuing.flatten(),
@@ -260,8 +287,8 @@ fn transfer(
             renamed,
             copied,
             moving,
-            plan: CopyPlan::new(pair, settings),
-            sparse,
+            plan: CopyPlan::new(pair, settings, layout),
+            target,
             needed,
         }),
     })

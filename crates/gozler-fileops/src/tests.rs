@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,20 +12,24 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime};
 
-use gozler_winfs::{Access, Reparse, open_entry};
+use gozler_winfs::{
+    Access, Reparse, RingOpen, allocated_size, create_ring_destination, open_entry,
+};
 
 use crate::conflicts::Rule;
-use crate::copy::{Copying, Source, copy};
+use crate::copy::{Copied, Copying, Source, TargetVolume, copy};
 use crate::io_threads::IoThreads;
 use crate::listing::LISTING_WORDS;
 use crate::names::PARTIAL_SUFFIX;
 use crate::operation::Progress;
 use crate::place::{Placed, Placing, Target, place};
 use crate::receive::{receive, verbatim};
+use crate::ring_plan::Layout;
 use crate::saved::{self, Saved};
 use crate::volumes::{CopyPlan, VolumeClass};
 use crate::{
-    Choice, End, Listed, OperationId, Outcome, Queue, Reason, Refusal, Request, SpeedSettings,
+    Choice, Count, End, LargeFileLimit, Listed, OperationId, Outcome, Preset, Queue, Reason,
+    Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk, RingSsd, SpeedSettings,
     State,
 };
 
@@ -188,6 +192,29 @@ fn copy_directly(
     rule: Rule,
     moving: bool,
 ) -> Vec<Listed> {
+    let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+    let copying = Copying {
+        plan,
+        rule,
+        moving,
+        target: NTFS,
+        cancel: &cancel,
+        progress: &progress,
+        io: &IoThreads::default(),
+    };
+    copy_with(sources, destination, &copying).listed
+}
+
+/// The destination volume of these tests, the system's temporary folder,
+/// as prepare reads it.
+const NTFS: TargetVolume = TargetVolume {
+    sparse_copy: false,
+    sparse_files: true,
+    fat: false,
+    clone_cluster: None,
+};
+
+fn copy_with(sources: &[PathBuf], destination: &Path, copying: &Copying<'_>) -> Copied {
     let cancel = AtomicBool::new(false);
     let (received, destination) = receive(sources, Some(destination), &cancel).expect("received");
     let destination = destination.expect("a destination");
@@ -206,18 +233,7 @@ fn copy_directly(
             own_folder: false,
         })
         .collect();
-    let progress = Progress::default();
-    let io = IoThreads::default();
-    let copying = Copying {
-        plan,
-        rule,
-        moving,
-        sparse: false,
-        cancel: &cancel,
-        progress: &progress,
-        io: &io,
-    };
-    copy(sources, target, &copying).listed
+    copy(sources, target, copying)
 }
 
 fn first_run(choice: Option<Choice>) -> Rule {
@@ -417,7 +433,7 @@ fn every_method_copies_a_whole_tree() {
     ] {
         let mut settings = SpeedSettings::automatic();
         settings.large_file_limit = crate::LargeFileLimit::from_mib(1).expect("in range");
-        let mut plan = CopyPlan::new(class, &settings);
+        let mut plan = CopyPlan::new(class, &settings, Layout::TwoDisks);
         plan.large_from = plan.large_from.map(|_| 32 * 1024);
         let out = scratch.path(format!("out-{class:?}"));
         fs::create_dir(&out).expect("a destination");
@@ -666,7 +682,11 @@ fn a_continued_move_keeps_a_source_it_guesses_is_done() {
     let out = scratch.path("out");
     let copy = scratch.write(r"out\a.txt", b"SOURCE");
     set_modified(&copy, modified(&source));
-    let plan = CopyPlan::new(VolumeClass::Ssd, &SpeedSettings::automatic());
+    let plan = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::TwoDisks,
+    );
     let rule = Rule {
         choice: None,
         continuing: true,
@@ -689,7 +709,11 @@ fn a_move_keeps_a_source_that_changes_during_its_copy() {
     let out = scratch.path("out");
     fs::create_dir(&out).expect("a destination");
     let partial = out.join(format!("big.bin{PARTIAL_SUFFIX}"));
-    let plan = CopyPlan::new(VolumeClass::Ssd, &SpeedSettings::automatic());
+    let plan = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::TwoDisks,
+    );
     let listed = std::thread::scope(|scope| {
         let moved = scope.spawn(|| {
             copy_directly(
@@ -857,4 +881,223 @@ fn an_unfinished_operation_is_offered_again() {
         let _ = fs::remove_file(scratch.saved());
     }
     drop(handle);
+}
+
+/// Ring settings small enough that a test's files are larger than the
+/// buffer and cross its end: blocks of 1 MiB, 4 in flight, and a 16 MiB
+/// buffer; between SSDs, the ring from 1 MiB.
+fn ring_settings() -> SpeedSettings {
+    let block = RingBlock::from_bytes(1024 * 1024).expect("in range");
+    let in_flight = Count::new(4).expect("in range");
+    SpeedSettings {
+        large_file_limit: LargeFileLimit::from_mib(1).expect("in range"),
+        ring_ssd: RingSsd { block, in_flight },
+        ring_hard_disk: RingHardDisk {
+            block,
+            in_flight,
+            buffer: RingBuffer::from_mib(16).expect("in range"),
+        },
+        ..Preset::RingCopy.settings()
+    }
+}
+
+fn copy_ring(sources: &[PathBuf], destination: &Path, plan: CopyPlan) -> Copied {
+    let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+    let copying = Copying {
+        plan,
+        rule: first_run(None),
+        moving: false,
+        target: NTFS,
+        cancel: &cancel,
+        progress: &progress,
+        io: &IoThreads::default(),
+    };
+    copy_with(sources, destination, &copying)
+}
+
+/// Bytes that differ at every offset and between files, so a block written
+/// to the wrong place or from a reused buffer shows.
+fn pattern(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+/// Writes a sparse file of `size` bytes that holds `data` at each offset
+/// and holes elsewhere.
+fn write_sparse(path: &Path, size: u64, data: &[(u64, Vec<u8>)]) {
+    use std::io::{Seek, SeekFrom, Write};
+    let open = RingOpen {
+        unbuffered: false,
+        overlapped: false,
+    };
+    let entry = create_ring_destination(&units(path), open).expect("create");
+    entry.set_sparse(true).expect("mark it sparse");
+    entry.set_end_of_file(size).expect("set its size");
+    drop(entry);
+    let mut file = fs::OpenOptions::new().write(true).open(path).expect("open");
+    for (offset, bytes) in data {
+        file.seek(SeekFrom::Start(*offset)).expect("seek");
+        file.write_all(bytes).expect("write");
+    }
+}
+
+fn zone(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}:Zone.Identifier", path.display()))
+}
+
+/// The files below `root`, relative to it.
+fn files_below(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut folders = vec![PathBuf::new()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(root.join(&folder)).expect("list") {
+            let entry = entry.expect("an entry");
+            let relative = folder.join(entry.file_name());
+            if entry.file_type().expect("a type").is_dir() {
+                folders.push(relative);
+            } else {
+                files.push(relative);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// The ring, in each profile and disk layout, copies a sparse file with
+/// its holes, a file whose size is no whole number of sectors, a file
+/// larger than the buffer, an empty file, a file with a `Zone.Identifier`
+/// stream, a read-only file, and 2,000 small files that cross the buffer's
+/// end, each byte for byte. A defect here writes a wrong byte, reuses a
+/// buffer still being written, pads a file, or loses a stream, a hole or an
+/// attribute. The test's buffer is 16 MiB rather than 256 MB, which crosses
+/// the same end with less disk. The small files go through the hard-disk
+/// profile only, because between SSDs the Windows engine copies them.
+#[test]
+fn the_ring_copies_every_kind_of_file() {
+    const MIB: usize = 1024 * 1024;
+    const ZONE: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+    let scratch = Scratch::new("ring");
+    let tree = scratch.path("tree");
+    let many = scratch.path("many");
+    fs::create_dir_all(&tree).expect("a folder");
+    let sparse = tree.join("sparse.bin");
+    let data = [
+        (MIB as u64, pattern(1, 65536)),
+        (5 * MIB as u64, pattern(2, 70000)),
+    ];
+    write_sparse(&sparse, 8 * MIB as u64, &data);
+    let allocated = allocated_size(&units(&sparse)).expect("its allocated size");
+    assert!(
+        allocated < 8 * MIB as u64,
+        "the fixture is sparse: {allocated}"
+    );
+    let odd = scratch.write(r"tree\odd.bin", &pattern(3, MIB + 333));
+    fs::write(zone(&odd), ZONE).expect("a stream");
+    scratch.write(r"tree\big.bin", &pattern(4, 20 * MIB + 4097));
+    scratch.write(r"tree\empty.bin", &[]);
+    make_read_only(&scratch.write(r"tree\read-only.bin", &pattern(5, 2 * MIB)));
+    for i in 0..2000 {
+        let size = 1 + i * 6 % 12000;
+        scratch.write(format!(r"many\{i}.bin"), &pattern(100 + i as u64, size));
+    }
+
+    let settings = ring_settings();
+    for (class, layout) in [
+        (VolumeClass::Ssd, Layout::TwoDisks),
+        (VolumeClass::HardDisk, Layout::OneDisk),
+        (VolumeClass::HardDisk, Layout::TwoDisks),
+    ] {
+        let case = format!("{class:?} {layout:?}");
+        let plan = CopyPlan::new(class, &settings, layout);
+        assert!(plan.ring.is_some(), "{case}");
+        let out = scratch.path(format!("out-{class:?}-{layout:?}"));
+        fs::create_dir(&out).expect("a destination");
+        let sources = match class {
+            VolumeClass::HardDisk => vec![tree.clone(), many.clone()],
+            _ => vec![tree.clone()],
+        };
+        let copied = copy_ring(&sources, &out, plan);
+        assert_eq!(copied.listed, [], "{case}");
+        assert_eq!(copied.ring, RingCounts::default(), "{case}");
+        for source in &sources {
+            let copy = out.join(source.file_name().expect("a name"));
+            let files = files_below(source);
+            assert_eq!(files_below(&copy), files, "{case}");
+            for file in &files {
+                let (from, to) = (fs::read(source.join(file)), fs::read(copy.join(file)));
+                let same = from.expect("source") == to.expect("copy");
+                assert!(same, "{case}: {file:?}");
+            }
+        }
+        let copy = out.join("tree");
+        let to = copy.join("sparse.bin");
+        let attributes = fs::metadata(&to).expect("metadata").file_attributes();
+        assert!(attributes & 0x200 != 0, "{case}: sparse");
+        let kept = allocated_size(&units(&to)).expect("its allocated size");
+        assert!(kept < 8 * MIB as u64, "{case}: holes kept, {kept}");
+        let stream = fs::read(zone(&copy.join("odd.bin"))).expect("the stream");
+        assert_eq!(stream, ZONE, "{case}");
+        let read_only = fs::metadata(copy.join("read-only.bin")).expect("copied");
+        assert!(read_only.permissions().readonly(), "{case}");
+    }
+}
+
+/// The ring opens a source without sharing writes, so a file that another
+/// program writes is listed with the sharing violation instead of being
+/// copied as a mix of old and new bytes.
+#[test]
+fn the_ring_refuses_a_file_being_written() {
+    let scratch = Scratch::new("ring-held");
+    let log = scratch.write(r"src\log.txt", b"line");
+    let writer = fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .expect("held");
+    let out = scratch.path("out");
+    fs::create_dir(&out).expect("a destination");
+    let plan = CopyPlan::new(VolumeClass::HardDisk, &ring_settings(), Layout::TwoDisks);
+    let copied = copy_ring(std::slice::from_ref(&log), &out, plan);
+    assert_eq!(copied.listed, [failed(&log, ERROR_SHARING_VIOLATION)]);
+    assert_eq!(copied.ring, RingCounts::default());
+    assert!(fs::read_dir(&out).expect("list").next().is_none());
+    drop(writer);
+}
+
+/// A ring copy cancelled after its first block leaves nothing at the
+/// destination: no temporary file, and nothing at the final name.
+#[test]
+fn a_cancelled_ring_copy_leaves_no_partial_file() {
+    let scratch = Scratch::new("ring-cancel");
+    let source = scratch.write(r"src\big.bin", &vec![1u8; 64 * 1024 * 1024]);
+    let out = scratch.path("out");
+    fs::create_dir(&out).expect("a destination");
+    let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+    let copying = Copying {
+        plan: CopyPlan::new(VolumeClass::Ssd, &ring_settings(), Layout::TwoDisks),
+        rule: first_run(None),
+        moving: false,
+        target: NTFS,
+        cancel: &cancel,
+        progress: &progress,
+        io: &IoThreads::default(),
+    };
+    let copied = std::thread::scope(|scope| {
+        let copy = scope.spawn(|| copy_with(std::slice::from_ref(&source), &out, &copying));
+        while progress.bytes() == 0 && !copy.is_finished() {
+            std::thread::yield_now();
+        }
+        cancel.store(true, Ordering::Relaxed);
+        copy.join().expect("the copy")
+    });
+    assert_eq!(copied.listed, []);
+    let left: Vec<_> = fs::read_dir(&out).expect("list").collect();
+    assert!(left.is_empty(), "{left:?}");
 }

@@ -24,9 +24,10 @@
 //! person's choice.
 //!
 //! The decisions (names, conflicts, identities, the waits between
-//! operations, taken entries, retries, the saved file and the speed
-//! settings) build and are tested on every OS. The disk work is Windows only, and every
-//! Win32 call goes through `gozler-winfs`, so this crate holds no `unsafe`.
+//! operations, taken entries, retries, the saved file, the speed settings
+//! and the ring's plan) build and are tested on every OS. The disk work is
+//! Windows only, and every Win32 call goes through `gozler-winfs`, so this
+//! crate holds no `unsafe`.
 //!
 //! The design and its evidence are in `docs/plans/fast-copy-delete-spec.md`
 //! and `docs/research/fast-copy-delete.md`.
@@ -58,6 +59,7 @@ mod queue;
 #[cfg(windows)]
 mod receive;
 mod retry;
+mod ring_plan;
 mod saved;
 mod settings;
 #[cfg(windows)]
@@ -71,7 +73,8 @@ mod win32;
 
 pub use conflicts::Choice;
 pub use operation::{
-    End, Listed, OperationId, Outcome, Prepared, Reason, Refusal, Request, State, Survey, Wait,
+    End, Listed, OperationId, Outcome, Prepared, Reason, Refusal, Request, RingCounts, State,
+    Survey, Wait,
 };
 #[cfg(windows)]
 pub use queue::{NotInterrupted, NotPrepared, Queue};

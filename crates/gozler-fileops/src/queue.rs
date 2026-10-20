@@ -11,12 +11,14 @@ use std::thread::JoinHandle;
 use gozler_winfs::{Existing, create_folder, rename};
 
 use crate::conflicts::{Choice, Rule};
-use crate::copy::{Copying, copy};
+use crate::copy::{Copied, Copying, copy};
 use crate::delete::walk;
 use crate::io_threads::IoThreads;
 use crate::listing::{BACKSLASH, LISTING_WORDS};
 use crate::moves::{Moving, move_by_rename};
-use crate::operation::{End, Listed, OperationId, Outcome, Progress, Request, State, Wait};
+use crate::operation::{
+    End, Listed, OperationId, Outcome, Progress, Request, RingCounts, State, Wait,
+};
 use crate::place::Target;
 use crate::prepare::{Ready, Transfer, Work, check_space, prepare};
 use crate::receive::failure;
@@ -553,6 +555,7 @@ fn run(
     } = start;
     let rule = Rule { choice, continuing };
     let mut disk_full = false;
+    let mut ring = RingCounts::default();
     match work {
         Work::Delete { entries, missing } => {
             // A selected entry that no longer exists counts as deleted.
@@ -561,9 +564,10 @@ fn run(
             failures.extend(walk::delete(entries, workers, cancel, progress, io));
         }
         Work::Transfer(transfer) => match run_transfer(transfer, rule, cancel, progress, io) {
-            Ok((listed, full)) => {
-                failures.extend(listed);
-                disk_full = full;
+            Ok(copied) => {
+                failures.extend(copied.listed);
+                disk_full = copied.disk_full;
+                ring = copied.ring;
             }
             Err(end) => {
                 return Outcome {
@@ -571,6 +575,7 @@ fn run(
                     items: progress.items(),
                     bytes: progress.bytes(),
                     listed: failures,
+                    ring,
                 };
             }
         },
@@ -609,18 +614,19 @@ fn run(
         items: progress.items(),
         bytes: progress.bytes(),
         listed: failures,
+        ring,
     }
 }
 
-/// Runs a copy or a move. Returns what it lists and whether the disk
-/// filled, or how it ended before it changed anything.
+/// Runs a copy or a move. Returns what it did, or how it ended before it
+/// changed anything.
 fn run_transfer(
     transfer: Transfer,
     rule: Rule,
     cancel: &AtomicBool,
     progress: &Progress,
     io: &IoThreads,
-) -> Result<(Vec<Listed>, bool), End> {
+) -> Result<Copied, End> {
     let Transfer {
         destination,
         missing,
@@ -628,7 +634,7 @@ fn run_transfer(
         copied,
         moving,
         plan,
-        sparse,
+        target: target_volume,
         needed,
     } = transfer;
     // The run compares prepare's byte count with the free space again, and
@@ -673,20 +679,25 @@ fn run_transfer(
         };
         listed.extend(move_by_rename(renamed, &target, &moves));
     }
-    let mut disk_full = false;
+    let mut done = Copied {
+        listed,
+        disk_full: false,
+        ring: RingCounts::default(),
+    };
     if !copied.is_empty() && !cancel.load(Ordering::Relaxed) {
         let copying = Copying {
             plan,
             rule,
             moving,
-            sparse,
+            target: target_volume,
             cancel,
             progress,
             io,
         };
         let copied = copy(copied, target, &copying);
-        listed.extend(copied.listed);
-        disk_full = copied.disk_full;
+        done.listed.extend(copied.listed);
+        done.disk_full = copied.disk_full;
+        done.ring = copied.ring;
     }
-    Ok((listed, disk_full))
+    Ok(done)
 }
