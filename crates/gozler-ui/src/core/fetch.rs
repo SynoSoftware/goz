@@ -200,7 +200,9 @@ pub(crate) enum Outcome {
     IncludedCount(u64),
     /// The reply to [`Ask::SettingsSaved`].
     SettingsApplied,
-    Status(DaemonStatus),
+    /// The service's status, and the gozlerd.exe beside the window when it
+    /// is a different build from the service's, which Use local offers.
+    Status(DaemonStatus, Option<LocalService>),
     /// The rows an export has written so far.
     ExportProgress {
         rows: u64,
@@ -280,8 +282,9 @@ pub(crate) enum DaemonFailure {
     Lost,
 }
 
-/// A gozlerd.exe that serves this window's protocol, which Use local puts
-/// in place of an older service (DESIGN.md: Service fixes).
+/// A gozlerd.exe that serves this window's protocol and is a different build
+/// from the service's, which Use local points the service at (DESIGN.md:
+/// Service fixes).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalService {
     pub(crate) program: PathBuf,

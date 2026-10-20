@@ -6,13 +6,13 @@
 //! The engine's queue owns the operations, their order and which ones wait;
 //! this module only words what the queue reports.
 
-use super::captions::{Question, QuestionBody};
+use super::captions::{Guard, Question, QuestionBody};
 use super::commands::{Mark, MenuNode};
 use super::glyph::Glyph;
-use super::layout::{Dpi, Px, Rect, Size};
+use super::layout::{Dpi, Px, Rect};
 use super::text::{Numbers, Strings, bytes, name_of, without_access_key};
 use gozler_fileops::{
-    Choice, End, OperationId, Outcome, Reason, Refusal, Request, Running, State, Survey,
+    Choice, End, OperationId, Outcome, Prepared, Reason, Refusal, Request, Running, State, Total,
 };
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -118,7 +118,7 @@ pub(crate) struct View {
     /// `None` while no operation runs.
     pub(crate) card: Option<Card>,
     pub(crate) rows: Vec<Row>,
-    /// The header over the list, such as "Queue · 3 operations".
+    /// The header over the list, such as "Queue · 3 waiting".
     pub(crate) queue: String,
     /// What the taskbar button shows for every running operation together.
     pub(crate) taskbar: Taskbar,
@@ -131,7 +131,8 @@ pub(crate) struct Card {
     pub(crate) glyph: Glyph,
     /// "Copy", or "Copy · paused".
     pub(crate) title: String,
-    /// The time left and the speeds, or "Paused".
+    /// The time left and the speeds, "Calculating…" before the first
+    /// speed, or "Paused".
     pub(crate) status: String,
     pub(crate) paused: bool,
     /// "Copying" before the current file.
@@ -650,10 +651,21 @@ pub(crate) fn view(
         }
         None => strings.text("file_operations.title").to_owned(),
     };
+    // A row that runs beside the card's operation or was interrupted does
+    // not wait, and its own line says what it does.
+    let waiting = rows
+        .iter()
+        .filter(|row| matches!(row.phase, RowPhase::Waiting | RowPhase::Starting))
+        .count() as u64;
+    let queue = if waiting == 0 {
+        strings.text("file_operations.queue_none").to_owned()
+    } else {
+        strings.count("file_operations.queue", waiting, numbers, &[])
+    };
     View {
         title,
         card,
-        queue: strings.count("file_operations.queue", rows.len() as u64, numbers, &[]),
+        queue,
         rows,
         taskbar: taskbar(operations),
     }
@@ -667,7 +679,7 @@ fn moves_bytes(running: &Running) -> bool {
 }
 
 /// How much of a running operation is done: its bytes where it moves bytes,
-/// otherwise its entries, and nothing measured for a delete.
+/// otherwise its entries, and nothing measured without a total.
 fn measure_of(running: &Running) -> Option<Measure> {
     let total = running.total?;
     Some(if moves_bytes(running) {
@@ -685,7 +697,7 @@ fn measure_of(running: &Running) -> Option<Measure> {
 
 /// Every running operation's progress together, as File Explorer shows its
 /// copies on the taskbar button: measured while any running operation
-/// knows its total, moving while only deletes run.
+/// knows its total, moving while none does.
 fn taskbar(operations: &[Operation]) -> Taskbar {
     let running: Vec<&Running> = operations
         .iter()
@@ -734,12 +746,15 @@ fn card(
     if running.paused {
         title = strings.format("file_operations.paused_title", &[&title]);
     }
+    // The line always holds a text, as File Explorer's does, so the card
+    // never changes its shape when the first speed arrives.
     let status = if running.paused {
         strings.text("file_operations.paused").to_owned()
     } else {
         speed
             .map(|speed| status(strings, numbers, running, measure, moves_bytes, speed))
-            .unwrap_or_default()
+            .filter(|status| !status.is_empty())
+            .unwrap_or_else(|| strings.text("file_operations.calculating").to_owned())
     };
     let (file, file_tip, file_bar) = match &running.current {
         Some(current) => {
@@ -795,12 +810,10 @@ fn card(
                 String::new()
             },
         ),
-        _ if matches!(operation.request, Request::Delete { .. }) => (
-            strings.count("file_operations.deleted", running.items, numbers, &[]),
+        None => (
+            items_done(strings, numbers, operation.request, running.items),
             String::new(),
         ),
-        // A rename or a new folder, which is one step.
-        _ => (String::new(), String::new()),
     };
     Card {
         id: operation.id,
@@ -892,10 +905,7 @@ fn row(
                     numbers,
                     &[&numbers.integer(measure.done)],
                 ),
-                None if matches!(operation.request, Request::Delete { .. }) => {
-                    strings.count("file_operations.deleted", running.items, numbers, &[])
-                }
-                None => String::new(),
+                None => items_done(strings, numbers, operation.request, running.items),
             };
             let detail = if running.paused {
                 joined_parts(
@@ -947,8 +957,8 @@ fn row(
             RowPhase::Starting,
         ),
         State::Prepared(prepared) => {
-            let size = match prepared.survey {
-                Some(survey) => size_of_total(strings, numbers, operation.request, Some(survey)),
+            let size = match prepared.total {
+                Some(total) => size_of_total(strings, numbers, operation.request, Some(total)),
                 None => strings.count(
                     "file_operations.selected",
                     prepared.entries as u64,
@@ -996,14 +1006,14 @@ fn row(
     })
 }
 
-/// A waiting operation's size, as prepare counted it: "4,210 items,
+/// A waiting operation's size, as gozlerd gave its total: "4,210 items,
 /// 18.4 GB" for a copy, "4,210 items" for a move by rename, or the
-/// selected entries of a delete, which counts nothing first.
+/// selected entries when gozlerd had no total.
 fn size_of_total(
     strings: &Strings,
     numbers: &dyn Numbers,
     request: &Request,
-    total: Option<Survey>,
+    total: Option<Total>,
 ) -> String {
     match (total, request) {
         (Some(total), _) if total.bytes > 0 => strings.count(
@@ -1013,14 +1023,32 @@ fn size_of_total(
             &[&bytes(strings, numbers, total.bytes)],
         ),
         (Some(total), _) => strings.count("file_operations.size_items", total.items, numbers, &[]),
-        (None, Request::Delete { sources }) => strings.count(
+        (
+            None,
+            Request::Copy { sources, .. }
+            | Request::Move { sources, .. }
+            | Request::Delete { sources },
+        ) => strings.count(
             "file_operations.selected",
             sources.len() as u64,
             numbers,
             &[],
         ),
-        (None, _) => String::new(),
+        (None, Request::Rename { .. } | Request::NewFolder { .. }) => String::new(),
     }
+}
+
+/// The items a running operation without a total has done: "6,240
+/// deleted", "6,240 copied"; nothing for a rename or a new folder, which is
+/// one step.
+fn items_done(strings: &Strings, numbers: &dyn Numbers, request: &Request, items: u64) -> String {
+    let key = match request {
+        Request::Copy { .. } => "file_operations.copied",
+        Request::Move { .. } => "file_operations.moved",
+        Request::Delete { .. } => "file_operations.deleted",
+        Request::Rename { .. } | Request::NewFolder { .. } => return String::new(),
+    };
+    strings.count(key, items, numbers, &[])
 }
 
 /// The parent folder of a Windows path, without its last `\`; a drive's
@@ -1030,6 +1058,14 @@ fn parent_of(path: &str) -> &str {
         Some(cut) if path[..cut].ends_with(':') => &path[..=cut],
         Some(cut) => &path[..cut],
         None => path,
+    }
+}
+
+/// A folder's own name, or a drive's root whole, such as `C:\`.
+fn folder_name(path: &str) -> &str {
+    match name_of(path) {
+        "" => path,
+        name => name,
     }
 }
 
@@ -1095,30 +1131,52 @@ pub(crate) fn conflict_choice(index: usize) -> Option<Choice> {
 }
 
 /// The conflict question of a copy or a move whose prepare found files at
-/// the destination with the names it writes, or selected entries that share
-/// a name; `None` when it found neither, so nobody is asked.
+/// the destination with the names it writes, selected folders that merge
+/// into folders of their names, or selected entries that share a name;
+/// `None` when it found none, so nobody is asked. As File Explorer's
+/// question does, it names the folders by their own names, so a long path
+/// never widens the dialog. Without a total from gozlerd it counts the
+/// selected entries, as File Explorer does before it has counted.
 pub(crate) fn conflict_question(
     strings: &Strings,
     numbers: &dyn Numbers,
     request: &Request,
-    survey: Survey,
+    prepared: &Prepared,
 ) -> Option<Choices> {
-    let (key, destination) = match request {
-        Request::Copy { destination, .. } => ("file_operations.conflicts_copy", destination),
-        Request::Move { destination, .. } => ("file_operations.conflicts_move", destination),
+    let found = prepared.conflicts?;
+    let (key, sources, destination) = match request {
+        Request::Copy {
+            sources,
+            destination,
+        } => ("file_operations.conflict_copying", sources, destination),
+        Request::Move {
+            sources,
+            destination,
+        } => ("file_operations.conflict_moving", sources, destination),
         Request::Delete { .. } | Request::Rename { .. } | Request::NewFolder { .. } => {
             return None;
         }
     };
-    let conflicts = (survey.conflicts > 0)
-        .then(|| strings.count(key, survey.conflicts, numbers, &[&text_of(destination)]));
-    let same_name = (survey.same_name > 0)
-        .then(|| strings.count("file_operations.same_name", survey.same_name, numbers, &[]));
-    let (instruction, body) = match (conflicts, same_name) {
-        (Some(first), Some(second)) => (first, second),
-        (Some(only), None) | (None, Some(only)) => (only, String::new()),
-        (None, None) => return None,
-    };
+    let from = folder_of(strings, sources, "file_operations.several_folders_inline");
+    let to = text_of(destination);
+    let items = prepared
+        .total
+        .map_or(prepared.entries as u64, |total| total.items);
+    let doing = strings.count(key, items, numbers, &[folder_name(&from), folder_name(&to)]);
+    let mut found = [
+        ("file_operations.conflicts", found.files),
+        ("file_operations.merges", found.merges),
+        ("file_operations.same_name", found.same_name),
+    ]
+    .into_iter()
+    .filter(|&(_, count)| count > 0)
+    .map(|(key, count)| strings.count(key, count, numbers, &[]));
+    let instruction = found.next()?;
+    let body = [doing]
+        .into_iter()
+        .chain(found)
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(Choices {
         title: strings.text(kind_of(request).name).to_owned(),
         instruction,
@@ -1154,7 +1212,7 @@ pub(crate) fn delete_question(
         footer: None,
         confirm: strings.text("file_operations.delete_button").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
-        risky: false,
+        guard: Guard::CancelFirst,
     }
 }
 
@@ -1168,7 +1226,7 @@ pub(crate) fn exit_question(
     waiting: u64,
 ) -> Question {
     let (instruction, body) = if running > 0 {
-        let mut body = strings.text("file_operations.exit_body").to_owned();
+        let mut body = strings.count("file_operations.exit_body", running, numbers, &[]);
         if waiting > 0 {
             body.push(' ');
             body.push_str(&strings.count("file_operations.exit_waiting", waiting, numbers, &[]));
@@ -1190,7 +1248,7 @@ pub(crate) fn exit_question(
         footer: None,
         confirm: strings.text("file_operations.exit_button").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
-        risky: false,
+        guard: Guard::CancelFirst,
     }
 }
 
@@ -1301,10 +1359,11 @@ const ICON_BUTTON: i32 = 28;
 pub(crate) const CARD_ICON: i32 = 20;
 /// The card's rounded corners, as Windows 11 rounds a card.
 pub(crate) const CARD_CORNER: i32 = 8;
-const FILE_BAR: i32 = 6;
+const FILE_BAR: i32 = 8;
 const TOTAL_BAR: i32 = 15;
-/// The queue list's icons, as large as a tile's two lines.
-pub(crate) const ROW_ICON: i32 = 32;
+/// The queue list's icons, about as large as the card's, so they do not
+/// outweigh a tile's two lines of text.
+pub(crate) const ROW_ICON: i32 = 22;
 /// The queue list is this many rows tall and scrolls the rest, so nothing
 /// moves when operations come and go (DESIGN.md: Nothing moves by itself).
 const LIST_ROWS: i32 = 4;
@@ -1328,7 +1387,7 @@ pub(crate) struct Metrics {
     pub(crate) label_width: Px,
     /// The widest percentage, "100 %".
     pub(crate) percent_width: Px,
-    /// Hide's width, which fits its caption.
+    /// Hide's width, which fits its icon and caption.
     pub(crate) hide_width: Px,
 }
 
@@ -1365,14 +1424,23 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// Places the controls in a client area of `client`; the list takes
-    /// what the rest leaves while `queue_open`.
-    pub(crate) fn compute(client: Size, m: Metrics, queue_open: bool) -> Layout {
+    /// Places the controls from the top of a client area `client_width`
+    /// wide: the list [`LIST_ROWS`] rows tall while `queue_open`, the hint's
+    /// line only while `hint_shown`, and Hide under them.
+    pub(crate) fn compute(
+        client_width: Px,
+        m: Metrics,
+        queue_open: bool,
+        hint_shown: bool,
+    ) -> Layout {
         let d = |dip| px(dip, m.dpi);
         let margin = d(MARGIN);
-        let width = client.width - margin - margin;
+        let width = client_width - margin - margin;
         let button = d(ICON_BUTTON);
         let line = m.line + d(2);
+        // Between the card's three lines, and between the file line and its
+        // bar.
+        let tight = Px(d(RELATED).0 / 2);
         let rect = |x: Px, y: Px, width: Px, height: Px| Rect {
             x,
             y,
@@ -1381,46 +1449,56 @@ impl Layout {
         };
         let mut l = Layout::default();
 
-        // The card: its title row, the three lines, the bar and the counts.
+        // The card: its title row, the three lines, the bar and the counts,
+        // with a group's gap between them.
         let inner_x = margin + margin;
         let inner_width = width - margin - margin;
         let mut y = margin + margin;
-        l.icon = rect(inner_x, y, button, button);
-        l.cancel = rect(inner_x + inner_width - button, y, button, button);
-        l.pause = rect(l.cancel.x - button, y, button, button);
+        let heading = m.title_line + m.line;
+        let row = button.max(heading);
+        let centred = |height: Px| y + Px((row - height).0 / 2);
+        // The icon's left edge lines up with the labels under it.
+        l.icon = rect(inner_x, centred(d(CARD_ICON)), d(CARD_ICON), d(CARD_ICON));
+        l.cancel = rect(
+            inner_x + inner_width - button,
+            centred(button),
+            button,
+            button,
+        );
+        l.pause = rect(l.cancel.x - button, l.cancel.y, button, button);
         let text_x = l.icon.right() + d(RELATED) + d(RELATED);
         let text_width = l.pause.x - d(RELATED) - text_x;
-        let heading = m.title_line + line;
-        let heading_top = y + Px((button - heading).0.max(0) / 2);
-        l.title = rect(text_x, heading_top, text_width, m.title_line);
-        l.status = rect(text_x, heading_top + m.title_line, text_width, line);
-        y = y + button.max(heading) + d(GROUP);
+        l.title = rect(text_x, centred(heading), text_width, m.title_line);
+        l.status = rect(text_x, l.title.bottom(), text_width, m.line);
+        y = y + row + d(GROUP);
         let value_x = inner_x + m.label_width + d(GROUP);
         let value_width = inner_x + inner_width - value_x;
-        l.doing = rect(inner_x, y, m.label_width, line);
-        l.file = rect(value_x, y, value_width, line);
-        y = y + line + Px(d(RELATED).0 / 2);
+        l.doing = rect(inner_x, y, m.label_width, m.line);
+        l.file = rect(value_x, y, value_width, m.line);
+        y = y + m.line + tight;
         l.file_bar = rect(value_x, y, value_width, d(FILE_BAR));
-        y = y + d(FILE_BAR) + d(RELATED);
-        l.from_label = rect(inner_x, y, m.label_width, line);
-        l.from = rect(value_x, y, value_width, line);
-        y = y + line + d(RELATED);
-        l.to_label = rect(inner_x, y, m.label_width, line);
-        l.to = rect(value_x, y, value_width, line);
-        y = y + line + d(GROUP);
+        y = y + d(FILE_BAR) + tight;
+        l.from_label = rect(inner_x, y, m.label_width, m.line);
+        l.from = rect(value_x, y, value_width, m.line);
+        y = y + m.line + tight;
+        l.to_label = rect(inner_x, y, m.label_width, m.line);
+        l.to = rect(value_x, y, value_width, m.line);
+        y = y + m.line + d(GROUP);
         let percent_x = inner_x + inner_width - m.percent_width;
         l.total_bar = rect(inner_x, y, percent_x - d(RELATED) - inner_x, d(TOTAL_BAR));
         l.percent = rect(
             percent_x,
-            y + Px((d(TOTAL_BAR) - line).0 / 2),
+            y + Px((d(TOTAL_BAR) - m.line).0 / 2),
             m.percent_width,
-            line,
+            m.line,
         );
         y = y + d(TOTAL_BAR) + d(RELATED);
-        let half = Px(inner_width.0 / 2);
-        l.items = rect(inner_x, y, half, line);
-        l.bytes = rect(inner_x + half, y, inner_width - half, line);
-        y = y + line + margin;
+        // The items under the bar's start, and the bytes ending under its
+        // end.
+        let half = Px(l.total_bar.width.0 / 2);
+        l.items = rect(inner_x, y, half, m.line);
+        l.bytes = rect(inner_x + half, y, l.total_bar.width - half, m.line);
+        y = y + m.line + margin;
         l.card = rect(margin, margin, width, y - margin);
 
         // The queue's header: the toggle, the count, then its buttons.
@@ -1437,46 +1515,39 @@ impl Layout {
             l.resume.x - d(RELATED) - queue_x,
             line,
         );
-        y = y + button + d(RELATED);
+        y = y + button;
 
-        // Hide at the bottom right; the list and its hint take the rest.
-        let hide_height = m.line + d(8);
-        let hide_y = client.height - margin - hide_height;
-        l.hide = rect(
-            margin + width - m.hide_width,
-            hide_y,
-            m.hide_width,
-            hide_height,
-        );
+        // The list and its hint, which the hint's width also measures while
+        // it shows nothing, then Hide at the right.
         if queue_open {
-            let hint_height = line;
-            let list_bottom = hide_y - d(GROUP) - hint_height - d(RELATED);
-            l.list = rect(margin, y, width, list_bottom - y);
-            l.hint = rect(margin, list_bottom + d(RELATED), width, hint_height);
+            y = y + d(RELATED);
+            let list_height = Px(Layout::row_height(m).0 * LIST_ROWS) + d(4);
+            l.list = rect(margin, y, width, list_height);
+            y = l.list.bottom();
         }
-        l
-    }
-
-    /// The window's client height: the list [`LIST_ROWS`] rows tall, or,
-    /// while the queue is collapsed, no list.
-    pub(crate) fn height(m: Metrics, queue_open: bool) -> Px {
-        let probe = Layout::compute(
-            Size {
-                width: px(OPEN_WIDTH, m.dpi),
-                height: Px(0),
-            },
-            m,
-            false,
-        );
-        let d = |dip| px(dip, m.dpi);
-        let below_header = probe.toggle.bottom() + d(RELATED);
-        let footer = d(GROUP) + m.line + d(8) + d(MARGIN);
-        let list = if queue_open {
-            Px(Layout::row_height(m).0 * LIST_ROWS) + d(4) + d(RELATED) + m.line + d(2)
+        let hint_height = if queue_open && hint_shown {
+            line
         } else {
             Px(0)
         };
-        below_header + list + footer
+        l.hint = rect(margin, y + d(RELATED), width, hint_height);
+        if hint_height > Px(0) {
+            y = l.hint.bottom();
+        }
+        y = y + d(GROUP);
+        l.hide = rect(
+            margin + width - m.hide_width,
+            y,
+            m.hide_width,
+            m.line + d(8),
+        );
+        l
+    }
+
+    /// The window's client height, which ends a margin under Hide.
+    pub(crate) fn height(m: Metrics, queue_open: bool, hint_shown: bool) -> Px {
+        let layout = Layout::compute(px(OPEN_WIDTH, m.dpi), m, queue_open, hint_shown);
+        layout.hide.bottom() + px(MARGIN, m.dpi)
     }
 
     /// The narrowest client width.
@@ -1493,7 +1564,8 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::text::tests::english;
+    use crate::core::text::tests::{English, english};
+    use gozler_fileops::Conflicts;
 
     #[test]
     fn the_speed_counts_the_last_seconds_once_a_second_has_run() {
@@ -1550,6 +1622,62 @@ mod tests {
         );
         assert_eq!(relative_to(r"C:\a.txt", r"C:\"), "a.txt");
         assert_eq!(relative_to(r"D:\a.txt", r"C:\Photos"), r"D:\a.txt");
+    }
+
+    /// A full path in the conflict question once widened the dialog to
+    /// 1,400 px, so the question names each folder by its own name, as
+    /// File Explorer's does.
+    #[test]
+    fn the_conflict_question_names_the_folders_only() {
+        let strings = english();
+        let request = Request::Copy {
+            sources: vec![
+                PathBuf::from(r"C:\Users\user\Photos\2026\a.jpg"),
+                PathBuf::from(r"C:\Users\user\Photos\2026\b.jpg"),
+            ],
+            destination: PathBuf::from(r"V:\Backup\Photos"),
+        };
+        let prepared = Prepared {
+            entries: 2,
+            total: Some(Total {
+                items: 4_210,
+                bytes: 1,
+            }),
+            conflicts: Some(Conflicts {
+                files: 12,
+                ..Conflicts::default()
+            }),
+        };
+        let question =
+            conflict_question(&strings, &English, &request, &prepared).expect("12 conflicts ask");
+        assert_eq!(
+            question.instruction,
+            "The destination already has 12 files with the same names."
+        );
+        assert_eq!(question.body, "Copying 4,210 items from 2026 to Photos");
+    }
+
+    /// Prepare reads no file inside a folder that merges, so a merge alone
+    /// asks: without the question, nobody chose, and the run would skip
+    /// every file of the same name inside it.
+    #[test]
+    fn a_merge_alone_asks() {
+        let strings = english();
+        let request = Request::Copy {
+            sources: vec![PathBuf::from(r"C:\Users\user\Photos")],
+            destination: PathBuf::from(r"V:\Backup"),
+        };
+        let prepared = Prepared {
+            entries: 1,
+            total: None,
+            conflicts: Some(Conflicts {
+                merges: 1,
+                ..Conflicts::default()
+            }),
+        };
+        let question =
+            conflict_question(&strings, &English, &request, &prepared).expect("a merge asks");
+        assert_eq!(question.body, "Copying 1 item from user to Backup");
     }
 
     /// A title wider than its tile wraps and hides the row's state on the

@@ -14,8 +14,9 @@ use super::requests::Requests;
 use super::settings::SettingsDialog;
 use super::status_bar::StatusBar;
 use crate::core::captions::{
-    self, ATTRIBUTES_ROW, DialogCaptions, FilterCaptions, IndexCaptions, InspectorCaptions,
-    ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart, WindowCaptions,
+    self, ATTRIBUTES_ROW, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions,
+    InspectorCaptions, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart,
+    WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
 use crate::core::commands::{
@@ -61,8 +62,7 @@ use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Accelerators;
 use crate::win::notify::{
-    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, FlatFace, FlatGround,
-    ListNotify,
+    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, FlatGround, ListNotify,
 };
 use crate::win::shell::{self, FileType, PromptOwner};
 use crate::win::shortcut::{self, RegisterError, Registration};
@@ -212,16 +212,23 @@ impl Controls {
         self.filters.location.set_item_height(height);
     }
 
-    /// Gives the inspector's buttons their icons and the Kind list its row
-    /// height, at creation, on a monitor with another DPI, when the system
-    /// colours change and when icons are shown or hidden.
+    /// Gives the buttons their icons and the Kind list its row height, at
+    /// creation, on a monitor with another DPI, when the system colours
+    /// change and when icons are shown or hidden. The list message's
+    /// buttons get theirs with their captions.
     fn apply_glyphs(&self) {
         self.filters.kind.fit_glyph_rows();
         for (button, control) in self.inspector.text_buttons() {
-            if let Some(glyph) = button.command.glyph() {
-                control.set_glyph(glyph);
-            }
+            control.set_icon(button.command.glyph().map(ButtonIcon::Glyph));
         }
+        for (control, key) in [
+            (self.clear_search, "button.clear"),
+            (self.filters.clear, "filter.clear"),
+            (self.filters.choose_folder, "filter.choose_folder"),
+        ] {
+            control.set_icon(ButtonIcon::of(key, false));
+        }
+        self.status.show_cancel_icon();
     }
 }
 
@@ -1385,7 +1392,7 @@ impl MainWindow {
                 button.hwnd(),
                 shown.map_or("", |shown| shown.label.as_str()),
             );
-            button.set_shield(shown.is_some_and(|shown| shown.shield));
+            button.set_icon(shown.and_then(|shown| shown.icon));
             button
                 .hwnd()
                 .set_enabled(shown.is_none_or(|shown| shown.enabled));
@@ -1731,6 +1738,7 @@ impl MainWindow {
                 .set_column_width(index, width.rescale(old, dpi));
         }
         let captions = self.captions();
+        let _ = win::menu::replace_menu_bar(hwnd, &captions.menu_bar);
         created
             .metrics
             .set(Metrics::measure(&created.fonts.borrow(), &captions, dpi));
@@ -3426,6 +3434,9 @@ impl MainWindow {
         if edited.choices.show_icons != last.choices.show_icons {
             win::gdi::show_icons(edited.choices.show_icons);
             self.created().controls.apply_glyphs();
+            if let Some(operations) = self.file_operations.borrow().as_ref() {
+                operations.apply_glyphs();
+            }
             // The menus, the button widths and the Kind list follow.
             self.refresh_text(hwnd);
         }
@@ -3742,7 +3753,7 @@ impl WindowProc for MainWindow {
                 self.focus_on_activate.set(Hwnd::focused());
                 None
             }
-            // "Select the search text when Gozler is activated" is about
+            // "Select the search text when the window is activated" is about
             // switching from another program; closing one of Gozler's own
             // dialogs gives the focus back to the control that opened it.
             Message::Activate {
@@ -3778,25 +3789,25 @@ impl WindowProc for MainWindow {
             Message::Notify(notification) => {
                 let controls = &self.created().controls;
                 {
-                    let fonts = self.created().fonts.borrow();
                     let filters = &controls.filters;
                     let inspector = &controls.inspector;
-                    let window = |button, face| (button, face, FlatGround::Window);
-                    let flat =
-                        [
-                            window(inspector.copy_name, FlatFace::Glyph(Glyph::Copy)),
-                            window(inspector.copy_folder, FlatFace::Glyph(Glyph::Copy)),
-                            window(inspector.hide, FlatFace::Glyph(Glyph::ChevronDown)),
-                            window(filters.clear, FlatFace::Caption(&fonts.ui)),
-                            window(filters.hide, FlatFace::Glyph(Glyph::OpenPane)),
-                            window(filters.show, FlatFace::Glyph(Glyph::ClosePane)),
-                        ]
-                        .into_iter()
-                        .chain(controls.status.show_details().map(|show| {
-                            (show, FlatFace::Glyph(Glyph::ChevronUp), FlatGround::Face)
-                        }));
-                    for (button, face, ground) in flat {
-                        if let Some(answer) = button.draw_flat(&notification, face, ground) {
+                    let window = |button, glyph| (button, glyph, FlatGround::Window);
+                    let flat = [
+                        window(inspector.copy_name, Glyph::Copy),
+                        window(inspector.copy_folder, Glyph::Copy),
+                        window(inspector.hide, Glyph::ChevronDown),
+                        window(filters.hide, Glyph::OpenPane),
+                        window(filters.show, Glyph::ClosePane),
+                    ]
+                    .into_iter()
+                    .chain(
+                        controls
+                            .status
+                            .show_details()
+                            .map(|show| (show, Glyph::ChevronUp, FlatGround::Face)),
+                    );
+                    for (button, glyph, ground) in flat {
+                        if let Some(answer) = button.draw_flat(&notification, glyph, ground) {
                             return Some(answer);
                         }
                     }

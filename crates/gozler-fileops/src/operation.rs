@@ -53,8 +53,8 @@ pub enum State {
     Waiting {
         on: OperationId,
         reason: Wait,
-        /// Prepare's counts; `None` for a delete.
-        total: Option<Survey>,
+        /// Prepare's total.
+        total: Option<Total>,
     },
     /// Running, or paused.
     Running(Running),
@@ -73,8 +73,8 @@ pub struct Running {
     pub items: u64,
     /// Bytes copied so far.
     pub bytes: u64,
-    /// Prepare's counts; `None` for a delete.
-    pub total: Option<Survey>,
+    /// Prepare's total.
+    pub total: Option<Total>,
     /// It moves no bytes: a move whose every entry is renamed on one
     /// volume, or a rename.
     pub renames: bool,
@@ -122,22 +122,51 @@ pub enum Side {
 pub struct Prepared {
     /// The selected entries the operation acts on.
     pub entries: usize,
-    /// For a copy or a move; a delete starts without a walk, and its
-    /// progress has no total.
-    pub survey: Option<Survey>,
+    /// For a copy, a move or a delete, from gozlerd's index; `None` when
+    /// gozlerd cannot answer exactly, and then the progress has no total.
+    pub total: Option<Total>,
+    /// For a copy or a move.
+    pub conflicts: Option<Conflicts>,
 }
 
-/// The counts of a copy's or a move's prepare.
+/// What an operation covers: the selected entries and everything below
+/// them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Survey {
-    /// Files and folders to copy or move.
+pub struct Total {
+    /// Files and folders.
     pub items: u64,
-    /// Bytes to copy; none for a move by rename.
+    /// The bytes it copies; none for a delete and a move by rename.
     pub bytes: u64,
+}
+
+impl std::ops::Add for Total {
+    type Output = Total;
+
+    fn add(self, other: Total) -> Total {
+        Total {
+            items: self.items + other.items,
+            bytes: self.bytes + other.bytes,
+        }
+    }
+}
+
+impl std::iter::Sum for Total {
+    fn sum<I: Iterator<Item = Total>>(totals: I) -> Total {
+        totals.fold(Total::default(), |sum, total| sum + total)
+    }
+}
+
+/// The names that a copy or a move finds taken in its destination folder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Conflicts {
     /// Files at the destination that a source would replace.
-    pub conflicts: u64,
+    pub files: u64,
     /// Selected entries that share a name with another selected entry.
     pub same_name: u64,
+    /// Selected folders that merge into a folder of their name. Prepare does
+    /// not read the files inside them, so the window asks the person as for
+    /// a conflict, and the run applies the answer to each file it meets.
+    pub merges: u64,
 }
 
 /// Why a submitted operation waits (D14).

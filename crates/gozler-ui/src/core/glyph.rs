@@ -10,15 +10,19 @@
 /// One icon of the Windows icon fonts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Glyph {
+    /// A check mark: OK.
+    Accept,
+    /// A plus: Add….
+    Add,
     /// A window coming back to the front: Show window, and the Keyboard
     /// page's group of the shortcut that shows Gozler.
     BackToWindow,
     /// A bulleted list: the Context menu page and its item group.
     BulletedList,
-    /// A list with check marks: the Include page.
-    CheckList,
     /// A thin cross: cancels a file operation.
     Cancel,
+    /// A list with check marks: the Include page.
+    CheckList,
     /// An arrow head pointing down: hides the inspector, which sits at the
     /// bottom.
     ChevronDown,
@@ -29,6 +33,10 @@ pub(crate) enum Glyph {
     ChevronUp,
     /// A window's close cross: Exit.
     ChromeClose,
+    /// A window's minimize bar: Hide in the File operations window.
+    ChromeMinimize,
+    /// A cross: Clear, and Clear filters.
+    Clear,
     /// An arrow pointing right, out of a bar at the left: shows the filter
     /// pane, which opens from the left.
     ClosePane,
@@ -45,6 +53,10 @@ pub(crate) enum Glyph {
     Delete,
     /// A page with lines of text: the Documents kind.
     Document,
+    /// An arrow down onto a line: Update, Downgrade and Download.
+    Download,
+    /// A pencil: Edit… and Modify….
+    Edit,
     /// An arrow leaving a box: Export results.
     Export,
     /// A folder in a window: Explore.
@@ -84,6 +96,8 @@ pub(crate) enum Glyph {
     /// A blank page: the Files kind and the files of the status bar's
     /// totals.
     Page,
+    /// A clipboard: Paste.
+    Paste,
     /// Two bars: pauses a file operation.
     Pause,
     /// A framed picture: the Pictures kind.
@@ -93,15 +107,17 @@ pub(crate) enum Glyph {
     Play,
     /// A power symbol: the General page's Starting group.
     PowerButton,
-    /// A clipboard: Paste.
-    Paste,
     /// Gears: the group of the service.
     Processing,
     /// A circular arrow: Refresh.
     Refresh,
+    /// A minus: Remove.
+    Remove,
     /// A text cursor in a box: Copy name, and the Include page's name
     /// group.
     Rename,
+    /// A diskette: Apply.
+    Save,
     /// A magnifying glass: Find, Search in this folder, and the Search page
     /// and its search box group.
     Search,
@@ -113,6 +129,8 @@ pub(crate) enum Glyph {
     SpeedHigh,
     /// Two arrows in a circle: the File operations page's ring copy group.
     Sync,
+    /// An arrow turning back: Reset and Reset all.
+    Undo,
     /// A film camera: the Videos kind.
     Video,
     /// Four squares: the All kind.
@@ -120,15 +138,19 @@ pub(crate) enum Glyph {
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 47] = [
+    pub(crate) const ALL: [Glyph; 56] = [
+        Glyph::Accept,
+        Glyph::Add,
         Glyph::BackToWindow,
         Glyph::BulletedList,
-        Glyph::CheckList,
         Glyph::Cancel,
+        Glyph::CheckList,
         Glyph::ChevronDown,
         Glyph::ChevronRight,
         Glyph::ChevronUp,
         Glyph::ChromeClose,
+        Glyph::ChromeMinimize,
+        Glyph::Clear,
         Glyph::ClosePane,
         Glyph::CommandPrompt,
         Glyph::Copy,
@@ -136,6 +158,8 @@ impl Glyph {
         Glyph::Cut,
         Glyph::Delete,
         Glyph::Document,
+        Glyph::Download,
+        Glyph::Edit,
         Glyph::Export,
         Glyph::FileExplorer,
         Glyph::Folder,
@@ -153,19 +177,22 @@ impl Glyph {
         Glyph::OpenPane,
         Glyph::Package,
         Glyph::Page,
+        Glyph::Paste,
         Glyph::Pause,
         Glyph::Picture,
         Glyph::Play,
         Glyph::PowerButton,
-        Glyph::Paste,
         Glyph::Processing,
         Glyph::Refresh,
+        Glyph::Remove,
         Glyph::Rename,
+        Glyph::Save,
         Glyph::Search,
         Glyph::SelectAll,
         Glyph::Settings,
         Glyph::SpeedHigh,
         Glyph::Sync,
+        Glyph::Undo,
         Glyph::Video,
         Glyph::ViewAll,
     ];
@@ -173,14 +200,18 @@ impl Glyph {
     /// Its character in the icon fonts.
     pub(crate) fn code_point(self) -> char {
         match self {
+            Glyph::Accept => '\u{E8FB}',
+            Glyph::Add => '\u{E710}',
             Glyph::BackToWindow => '\u{E73F}',
             Glyph::BulletedList => '\u{E8FD}',
-            Glyph::CheckList => '\u{E9D5}',
             Glyph::Cancel => '\u{E711}',
+            Glyph::CheckList => '\u{E9D5}',
             Glyph::ChevronDown => '\u{E70D}',
             Glyph::ChevronRight => '\u{E76C}',
             Glyph::ChevronUp => '\u{E70E}',
             Glyph::ChromeClose => '\u{E8BB}',
+            Glyph::ChromeMinimize => '\u{E921}',
+            Glyph::Clear => '\u{E894}',
             Glyph::ClosePane => '\u{E89F}',
             Glyph::CommandPrompt => '\u{E756}',
             Glyph::Copy => '\u{E8C8}',
@@ -188,6 +219,8 @@ impl Glyph {
             Glyph::Cut => '\u{E8C6}',
             Glyph::Delete => '\u{E74D}',
             Glyph::Document => '\u{E8A5}',
+            Glyph::Download => '\u{E896}',
+            Glyph::Edit => '\u{E70F}',
             Glyph::Export => '\u{EDE1}',
             Glyph::FileExplorer => '\u{EC50}',
             Glyph::Folder => '\u{E8B7}',
@@ -205,19 +238,22 @@ impl Glyph {
             Glyph::OpenPane => '\u{E8A0}',
             Glyph::Package => '\u{E7B8}',
             Glyph::Page => '\u{E7C3}',
+            Glyph::Paste => '\u{E77F}',
             Glyph::Pause => '\u{E769}',
             Glyph::Picture => '\u{E8B9}',
             Glyph::Play => '\u{E768}',
             Glyph::PowerButton => '\u{E7E8}',
-            Glyph::Paste => '\u{E77F}',
             Glyph::Processing => '\u{E9F5}',
             Glyph::Refresh => '\u{E72C}',
+            Glyph::Remove => '\u{E738}',
             Glyph::Rename => '\u{E8AC}',
+            Glyph::Save => '\u{E74E}',
             Glyph::Search => '\u{E721}',
             Glyph::SelectAll => '\u{E8B3}',
             Glyph::Settings => '\u{E713}',
             Glyph::SpeedHigh => '\u{EC4A}',
             Glyph::Sync => '\u{E895}',
+            Glyph::Undo => '\u{E7A7}',
             Glyph::Video => '\u{E714}',
             Glyph::ViewAll => '\u{E8A9}',
         }

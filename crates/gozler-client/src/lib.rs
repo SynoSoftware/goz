@@ -171,6 +171,13 @@ impl CancelToken {
     }
 }
 
+/// A token set by whoever holds `flag`, such as a file operation's cancel.
+impl From<Arc<AtomicBool>> for CancelToken {
+    fn from(flag: Arc<AtomicBool>) -> Self {
+        CancelToken(flag)
+    }
+}
+
 /// Whether the scope folder `folder` does not exist, so a search scoped to
 /// it is invalid input: an empty answer would read as "no such file"
 /// instead of "wrong folder". Only a folder that the operating system

@@ -1,39 +1,44 @@
 //! The menu bar and the accelerator table, built from what
 //! `core::commands` says (DESIGN.md: window rule 9).
 
-use super::gdi::{draw_glyph, high_contrast, icons_shown, system_color};
+use super::gdi::{menu_bitmap, system_color};
 use super::keys::virtual_key;
 use super::{Hwnd, wide};
 use crate::core::commands::{Keystroke, Mark, MenuNode};
 use crate::core::glyph::Glyph;
-use crate::core::layout::icon_glyph_height;
-use windows::Win32::Foundation::{LPARAM, LRESULT};
-use windows::Win32::Graphics::Gdi::{COLOR_GRAYTEXT, COLOR_HIGHLIGHTTEXT, COLOR_MENUTEXT, HBITMAP};
-use windows::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_DISABLED, ODS_FLAGS, ODS_GRAYED, ODS_SELECTED, ODT_MENU,
-};
+use crate::core::layout::{Px, icon_glyph_height};
+use windows::Win32::Graphics::Gdi::{COLOR_GRAYTEXT, COLOR_MENUTEXT, HBITMAP};
 use windows::Win32::UI::WindowsAndMessaging::{
     ACCEL, ACCEL_VIRT_FLAGS, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu,
     DestroyAcceleratorTable, DestroyMenu, DrawMenuBar, EnableMenuItem, FALT, FCONTROL, FSHIFT,
-    FVIRTKEY, GetMenu, HACCEL, HBMMENU_CALLBACK, HMENU, InsertMenuItemW, MENU_ITEM_TYPE, MENUINFO,
+    FVIRTKEY, GetMenu, GetMenuItemInfoW, HACCEL, HMENU, InsertMenuItemW, MENU_ITEM_TYPE, MENUINFO,
     MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_UNCHECKED, MFT_RADIOCHECK,
     MFT_RIGHTJUSTIFY, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_DATA, MIIM_FTYPE, MIIM_ID,
     MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_CHECKORBMP, MSG, SetMenu, SetMenuDefaultItem,
     SetMenuInfo, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
-    TranslateAcceleratorW, WM_DRAWITEM, WM_MEASUREITEM,
+    TranslateAcceleratorW,
 };
 use windows::core::PWSTR;
 
-/// A menu handle. A menu bar that a window shows is destroyed with the
-/// window or by [`replace_menu_bar`].
+/// A menu handle, and the side of its items' icons in its window's pixels.
+/// A menu bar that a window shows is destroyed with the window or by
+/// [`replace_menu_bar`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Menu(HMENU);
+pub(crate) struct Menu {
+    handle: HMENU,
+    icon_side: Px,
+}
 
 /// Gives `window` a menu bar of `menus`, each a [`MenuNode::Submenu`], and
-/// destroys the bar it had, which no window shows any more.
+/// destroys the bar it had, which no window shows any more. The window
+/// calls it again when its DPI changes, because the icons are bitmaps of
+/// one size.
 pub(crate) fn replace_menu_bar(window: Hwnd, menus: &[MenuNode]) -> windows::core::Result<()> {
-    // SAFETY: no parameters.
-    let bar = Menu(unsafe { CreateMenu() }?);
+    let bar = Menu {
+        // SAFETY: no parameters.
+        handle: unsafe { CreateMenu() }?,
+        icon_side: icon_glyph_height(window.dpi()),
+    };
     if let Err(error) = bar.append(menus) {
         bar.destroy();
         return Err(error);
@@ -41,7 +46,7 @@ pub(crate) fn replace_menu_bar(window: Hwnd, menus: &[MenuNode]) -> windows::cor
     let old = Menu::of(window);
     // SAFETY: the window then owns the new bar, and shows the old one no
     // more, so destroying it leaves no window with a destroyed menu.
-    if let Err(error) = unsafe { SetMenu(window.0, Some(bar.0)) } {
+    if let Err(error) = unsafe { SetMenu(window.0, Some(bar.handle)) } {
         bar.destroy();
         return Err(error);
     }
@@ -57,8 +62,11 @@ impl Menu {
     /// The menu bar of `window`, if it has one.
     pub(crate) fn of(window: Hwnd) -> Option<Menu> {
         // SAFETY: plain values; a window without a menu gives null.
-        let menu = unsafe { GetMenu(window.0) };
-        (!menu.is_invalid()).then_some(Menu(menu))
+        let handle = unsafe { GetMenu(window.0) };
+        (!handle.is_invalid()).then(|| Menu {
+            handle,
+            icon_side: icon_glyph_height(window.dpi()),
+        })
     }
 
     fn append(self, nodes: &[MenuNode]) -> windows::core::Result<()> {
@@ -85,7 +93,7 @@ impl Menu {
                         MFT_STRING
                     };
                     item.wID = u32::from(*id);
-                    (item.hbmpItem, item.dwItemData) = icon(*glyph);
+                    (item.hbmpItem, item.dwItemData) = self.icon(*glyph);
                 }
                 MenuNode::Submenu {
                     text: label,
@@ -93,7 +101,7 @@ impl Menu {
                     aligned_right,
                 } => {
                     text = wide(label);
-                    let submenu = Menu::popup()?;
+                    let submenu = Menu::popup(self.icon_side)?;
                     submenu.append(children)?;
                     item.fMask |= MIIM_STRING | MIIM_SUBMENU;
                     item.fType = if *aligned_right {
@@ -101,33 +109,63 @@ impl Menu {
                     } else {
                         MENU_ITEM_TYPE(0)
                     };
-                    item.hSubMenu = submenu.0;
+                    item.hSubMenu = submenu.handle;
                 }
             }
             item.dwTypeData = PWSTR(text.as_mut_ptr());
             // SAFETY: `item` and its text outlive the call, which copies
             // them; a submenu then belongs to this menu.
-            unsafe { InsertMenuItemW(self.0, position as u32, true, &item) }?;
+            unsafe { InsertMenuItemW(self.handle, position as u32, true, &item) }?;
         }
         Ok(())
     }
 
-    /// Enables or greys the item `id` and sets its check or radio mark,
-    /// wherever it is in the menu's submenus.
+    /// Enables or greys the item `id`, its icon included, and sets its
+    /// check or radio mark, wherever it is in the menu's submenus.
     pub(crate) fn set_state(self, id: u16, enabled: bool, checked: bool) {
         // SAFETY: plain values; an ID the menu lacks changes nothing.
         unsafe {
             let _ = EnableMenuItem(
-                self.0,
+                self.handle,
                 u32::from(id),
                 MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED },
             );
             CheckMenuItem(
-                self.0,
+                self.handle,
                 u32::from(id),
                 (MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED }).0,
             );
         }
+        // Windows draws an item's bitmap as it is, so the icon of an
+        // unavailable item is a gray one.
+        let mut item = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_DATA,
+            ..Default::default()
+        };
+        // SAFETY: `item` is a local that the call fills in; an ID the menu
+        // lacks fails.
+        if unsafe { GetMenuItemInfoW(self.handle, u32::from(id), false, &mut item) }.is_err() {
+            return;
+        }
+        let color = system_color(if enabled {
+            COLOR_MENUTEXT
+        } else {
+            COLOR_GRAYTEXT
+        });
+        let Some(bitmap) = Glyph::from_data(item.dwItemData)
+            .and_then(|glyph| menu_bitmap(glyph, self.icon_side, color))
+        else {
+            return;
+        };
+        let item = MENUITEMINFOW {
+            cbSize: size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_BITMAP,
+            hbmpItem: bitmap,
+            ..Default::default()
+        };
+        // SAFETY: plain values; the bitmap lives as long as the thread.
+        let _ = unsafe { SetMenuItemInfoW(self.handle, u32::from(id), false, &item) };
     }
 
     /// Replaces the item whose ID is one of `ids`, wherever it is in the
@@ -141,7 +179,7 @@ impl Menu {
             return;
         };
         let mut text = wide(text);
-        let (bitmap, data) = icon(*glyph);
+        let (bitmap, data) = self.icon(*glyph);
         let info = MENUITEMINFOW {
             cbSize: size_of::<MENUITEMINFOW>() as u32,
             fMask: MIIM_ID | MIIM_STRING | MIIM_BITMAP | MIIM_DATA,
@@ -154,7 +192,7 @@ impl Menu {
         for old in ids {
             // SAFETY: `info` and its text outlive the call, which copies
             // them; an ID the menu lacks fails and changes nothing.
-            if unsafe { SetMenuItemInfoW(self.0, u32::from(*old), false, &info) }.is_ok() {
+            if unsafe { SetMenuItemInfoW(self.handle, u32::from(*old), false, &info) }.is_ok() {
                 return;
             }
         }
@@ -172,20 +210,20 @@ impl Menu {
         states: &[(u16, bool, bool)],
         default: Option<u16>,
     ) -> Option<u16> {
-        let menu = Menu::popup().ok()?;
+        let menu = Menu::popup(icon_glyph_height(owner.dpi())).ok()?;
         let chosen = menu.append(items).ok().map(|()| {
             for &(id, enabled, checked) in states {
                 menu.set_state(id, enabled, checked);
             }
             if let Some(id) = default {
                 // SAFETY: plain values; an ID the menu lacks fails.
-                let _ = unsafe { SetMenuDefaultItem(menu.0, u32::from(id), 0) };
+                let _ = unsafe { SetMenuDefaultItem(menu.handle, u32::from(id), 0) };
             }
             // SAFETY: the menu is this function's own; with TPM_RETURNCMD
             // the call returns the chosen ID instead of sending WM_COMMAND.
             unsafe {
                 TrackPopupMenuEx(
-                    menu.0,
+                    menu.handle,
                     (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
                     point.0,
                     point.1,
@@ -203,9 +241,12 @@ impl Menu {
 
     /// A popup menu whose items show their check mark or their icon in one
     /// column, because no item has both (DESIGN.md: Look).
-    fn popup() -> windows::core::Result<Menu> {
-        // SAFETY: no parameters.
-        let menu = Menu(unsafe { CreatePopupMenu() }?);
+    fn popup(icon_side: Px) -> windows::core::Result<Menu> {
+        let menu = Menu {
+            // SAFETY: no parameters.
+            handle: unsafe { CreatePopupMenu() }?,
+            icon_side,
+        };
         let info = MENUINFO {
             cbSize: size_of::<MENUINFO>() as u32,
             fMask: MIM_STYLE,
@@ -214,7 +255,7 @@ impl Menu {
         };
         // SAFETY: `info` outlives the call. Without the style the menu
         // still works, with a wider margin.
-        let _ = unsafe { SetMenuInfo(menu.0, &info) };
+        let _ = unsafe { SetMenuInfo(menu.handle, &info) };
         Ok(menu)
     }
 
@@ -222,65 +263,20 @@ impl Menu {
     fn destroy(self) {
         // SAFETY: the callers' menus are their own, or replaced on their
         // window.
-        let _ = unsafe { DestroyMenu(self.0) };
+        let _ = unsafe { DestroyMenu(self.handle) };
     }
-}
 
-/// An item's bitmap and data for `glyph`, while icons show: the menu asks
-/// its owner to draw the icon, and the data names the glyph. Windows draws
-/// a bitmap of its own as it is, not gray when the item is unavailable, so
-/// the owner draws the icon in the item's state.
-fn icon(glyph: Option<Glyph>) -> (HBITMAP, usize) {
-    glyph
-        .filter(|_| icons_shown())
-        .map_or((HBITMAP::default(), 0), |glyph| {
-            (HBMMENU_CALLBACK, glyph.data())
-        })
-}
-
-/// Answers the `WM_MEASUREITEM` and `WM_DRAWITEM` of a menu item's icon,
-/// which Windows sends to `window`, the menu's owner, and gives `None` for
-/// any other message. The icon is drawn in the menu's text colour, gray
-/// when the item is unavailable, and in the selection's text colour in high
-/// contrast, where the selection is a solid colour.
-///
-/// # Safety
-/// `lparam` is the one Windows sent with `msg`.
-pub(super) unsafe fn icon_message(window: Hwnd, msg: u32, lparam: LPARAM) -> Option<LRESULT> {
-    match msg {
-        WM_MEASUREITEM => {
-            // SAFETY: WM_MEASUREITEM's lparam points to a MEASUREITEMSTRUCT
-            // that the sender reads after the answer.
-            let item = unsafe { &mut *(lparam.0 as *mut MEASUREITEMSTRUCT) };
-            if item.CtlType != ODT_MENU {
-                return None;
-            }
-            let side = icon_glyph_height(window.dpi()).0 as u32;
-            item.itemWidth = side;
-            item.itemHeight = side;
-        }
-        WM_DRAWITEM => {
-            // SAFETY: WM_DRAWITEM's lparam points to a DRAWITEMSTRUCT that
-            // is valid for the length of the message.
-            let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
-            if item.CtlType != ODT_MENU {
-                return None;
-            }
-            let glyph = Glyph::from_data(item.itemData)?;
-            let state = |flag: ODS_FLAGS| item.itemState.0 & flag.0 != 0;
-            let color = if state(ODS_GRAYED) || state(ODS_DISABLED) {
-                COLOR_GRAYTEXT
-            } else if state(ODS_SELECTED) && high_contrast() {
-                COLOR_HIGHLIGHTTEXT
-            } else {
-                COLOR_MENUTEXT
-            };
-            let side = icon_glyph_height(window.dpi());
-            draw_glyph(item.hDC, glyph, item.rcItem, side, system_color(color));
-        }
-        _ => return None,
+    /// An item's bitmap and data for `glyph`, while icons show: the icon in
+    /// the menu's text colour, and the glyph, which [`Self::set_state`]
+    /// reads to gray the icon of an unavailable item.
+    fn icon(self, glyph: Option<Glyph>) -> (HBITMAP, usize) {
+        glyph
+            .and_then(|glyph| {
+                let bitmap = menu_bitmap(glyph, self.icon_side, system_color(COLOR_MENUTEXT))?;
+                Some((bitmap, glyph.data()))
+            })
+            .unwrap_or_default()
     }
-    Some(LRESULT(1))
 }
 
 /// The accelerator table, destroyed on drop.

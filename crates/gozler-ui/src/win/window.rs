@@ -554,10 +554,6 @@ unsafe extern "system" fn procedure<W: WindowProc>(
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
     }
-    // SAFETY: the parameters are the ones Windows passed.
-    if let Some(answer) = unsafe { super::menu::icon_message(Hwnd(hwnd), msg, lparam) } {
-        return answer;
-    }
     // SAFETY: the window's reference keeps the state alive until
     // WM_NCDESTROY; this clone keeps it alive for the length of this call.
     let state = unsafe {

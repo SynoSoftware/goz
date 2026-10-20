@@ -20,7 +20,7 @@ use crate::listing::{BACKSLASH, LISTING_WORDS};
 use crate::moves::{Moving, move_by_rename};
 use crate::operation::{
     Current, CurrentFile, End, Listed, Operation, OperationId, OrderRefused, Outcome, Pause,
-    Progress, Request, RingCounts, Running, State, Survey, Wait,
+    Progress, Request, RingCounts, Running, State, Total, Wait,
 };
 use crate::place::Target;
 use crate::prepare::{Ready, Transfer, Work, check_space, prepare};
@@ -28,6 +28,7 @@ use crate::receive::{failure, plain};
 use crate::saved::{self, Restored, Saved};
 use crate::settings::SpeedSettings;
 use crate::taken::Taken;
+use crate::totals::{Counting, Gozlerd, Index};
 use crate::waits::{Plan, reorder, waits};
 use crate::win32::ERROR_FILE_NOT_FOUND;
 
@@ -46,6 +47,8 @@ struct Shared {
     /// Called after each change of an operation's state, never under the
     /// queue's lock, so it may read the states at once.
     wake: Box<dyn Fn() + Send + Sync>,
+    /// Where prepare reads the totals.
+    index: Box<dyn Index>,
     saved_path: PathBuf,
     /// The operations in the saved file. Its lock also orders the file's
     /// writes.
@@ -79,8 +82,8 @@ struct Tracked {
     continuing: Option<Rule>,
     /// It was submitted, so its sources are taken while it lives.
     submitted: bool,
-    /// Prepare's counts, from submit on; `None` for a delete.
-    total: Option<Survey>,
+    /// Prepare's total, from submit on.
+    total: Option<Total>,
     /// [`Running::renames`], from submit on.
     renames: bool,
 }
@@ -129,8 +132,18 @@ pub struct NotInterrupted;
 impl Queue {
     /// `saved` is the file where operations are saved; each operation saved
     /// there becomes an interrupted one. `wake` is called on an engine
-    /// thread after each change of an operation's state.
+    /// thread after each change of an operation's state. Prepare reads its
+    /// totals from the installed gozlerd.
     pub fn new(saved: impl Into<PathBuf>, wake: impl Fn() + Send + Sync + 'static) -> Queue {
+        Queue::with_index(saved, Box::new(Gozlerd), wake)
+    }
+
+    /// A queue whose prepare reads its totals from `index`.
+    pub(crate) fn with_index(
+        saved: impl Into<PathBuf>,
+        index: Box<dyn Index>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Queue {
         let saved_path = saved.into();
         let mut operations = Operations::default();
         let mut saved_operations = BTreeMap::new();
@@ -149,6 +162,7 @@ impl Queue {
             shared: Arc::new(Shared {
                 operations: Mutex::new(operations),
                 wake: Box::new(wake),
+                index,
                 saved_path,
                 saved: Mutex::new(saved_operations),
                 closing: AtomicBool::new(false),
@@ -500,7 +514,8 @@ impl Shared {
                 choice: None,
                 run: Run::First { started: None },
             };
-            let prepared = prepare(&request, &settings, continuing.unwrap_or(first), &cancel);
+            let rule = continuing.unwrap_or(first);
+            let prepared = prepare(&request, &settings, rule, &*thread.index, &cancel);
             drop(entered);
             let starts = {
                 let mut operations = thread.lock();
@@ -546,7 +561,7 @@ impl Shared {
         operations.next_order += 1;
         let operation = operations.by_id.get_mut(&id).expect("the caller found it");
         operation.submitted = true;
-        operation.total = ready.prepared.survey;
+        operation.total = ready.prepared.total;
         operation.renames = match &ready.work {
             Work::Transfer(transfer) => transfer.moving && transfer.copied.is_empty(),
             Work::Rename { .. } => true,
@@ -644,6 +659,9 @@ impl Shared {
             if let Some(saved) = Saved::new(&request, start.choice, started, &settings) {
                 self.save(id, saved);
             }
+            if let Work::Delete { entries, missing } = &start.work {
+                self.count(id, Counting::of(entries, *missing), Arc::clone(&cancel));
+            }
             let shared = Arc::clone(self);
             self.spawn(move || {
                 let _entered = io.enter();
@@ -672,6 +690,27 @@ impl Shared {
                 (shared.wake)();
             });
         }
+    }
+
+    /// Asks gozlerd for a running delete's total on a thread of its own, and
+    /// shows it when gozlerd answers before the delete ends.
+    fn count(self: &Arc<Self>, id: OperationId, counting: Counting, cancel: Arc<AtomicBool>) {
+        let shared = Arc::clone(self);
+        self.spawn(move || {
+            let Some(total) = counting.total(&*shared.index, &cancel) else {
+                return;
+            };
+            {
+                let mut operations = shared.lock();
+                match operations.by_id.get_mut(&id) {
+                    Some(operation) if matches!(operation.phase, Phase::Running { .. }) => {
+                        operation.total = Some(total);
+                    }
+                    _ => return,
+                }
+            }
+            (shared.wake)();
+        });
     }
 
     fn save(&self, id: OperationId, saved: Saved) {

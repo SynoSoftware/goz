@@ -395,7 +395,7 @@ impl DialogItem {
 
 /// The group boxes of the Settings pages, each with the icon before its
 /// caption.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 13] = [
+pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 14] = [
     (ControlId::GeneralStarting, Glyph::PowerButton),
     (ControlId::SearchBoxGroup, Glyph::Search),
     (ControlId::ContextMenuItemGroup, Glyph::BulletedList),
@@ -409,7 +409,72 @@ pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 13] = [
     (ControlId::IncludeNamesGroup, Glyph::Rename),
     (ControlId::SpeedCopyingGroup, Glyph::Copy),
     (ControlId::SpeedRingGroup, Glyph::Sync),
+    (ControlId::SpeedDeleteGroup, Glyph::Delete),
 ];
+
+/// The icon of each push button's caption, by its catalogue key, so a
+/// caption shows the same icon on every button that has it (DESIGN.md:
+/// Look). A fix's button shows the administrator shield instead when the
+/// fix needs administrator permission.
+const BUTTON_GLYPHS: [(&str, Glyph); 27] = [
+    ("button.ok", Glyph::Accept),
+    ("button.cancel", Glyph::Cancel),
+    ("button.close", Glyph::ChromeClose),
+    ("button.clear", Glyph::Clear),
+    ("settings.apply", Glyph::Save),
+    ("settings.reset", Glyph::Undo),
+    ("settings.reset_all", Glyph::Undo),
+    ("settings_context_menu.browse", Glyph::FolderOpen),
+    ("settings_include.modify", Glyph::Edit),
+    ("settings_index.report", Glyph::Document),
+    ("settings_keyboard.add", Glyph::Add),
+    ("settings_keyboard.edit", Glyph::Edit),
+    ("settings_keyboard.remove", Glyph::Remove),
+    ("service_report.copy", Glyph::Copy),
+    ("file_operations.hide", Glyph::ChromeMinimize),
+    ("filter.clear", Glyph::Clear),
+    ("filter.choose_folder", Glyph::FolderOpen),
+    ("command.clear_filters", Glyph::Clear),
+    ("list.search_everywhere", Glyph::Search),
+    ("fix.start_service", Glyph::Play),
+    ("fix.turn_on_service", Glyph::PowerButton),
+    ("fix.install_service", Glyph::Download),
+    ("fix.download", Glyph::Download),
+    ("fix.use_local", Glyph::Copy),
+    ("fix.update", Glyph::Download),
+    ("fix.downgrade", Glyph::Download),
+    ("fix.open_services", Glyph::Processing),
+];
+
+/// The icon of a push button whose caption is the catalogue text `key`.
+pub(crate) fn button_glyph(key: &str) -> Option<Glyph> {
+    BUTTON_GLYPHS
+        .iter()
+        .find(|(caption, _)| *caption == key)
+        .map(|(_, glyph)| *glyph)
+}
+
+/// What a push button shows before its caption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ButtonIcon {
+    /// Shown only while icons show (DESIGN.md: Look).
+    Glyph(Glyph),
+    /// The administrator shield, of a button that asks for administrator
+    /// permission, also while icons are hidden.
+    Shield,
+}
+
+impl ButtonIcon {
+    /// The icon of a button captioned with the catalogue text `key`, which
+    /// asks for administrator permission when `shield`.
+    pub(crate) fn of(key: &str, shield: bool) -> Option<ButtonIcon> {
+        if shield {
+            Some(ButtonIcon::Shield)
+        } else {
+            button_glyph(key).map(ButtonIcon::Glyph)
+        }
+    }
+}
 
 /// The catalogue keys of a dialog's title and fixed captions. A text that
 /// depends on a fact, such as About's version, is the dialog's own.
@@ -712,6 +777,10 @@ impl CaptionTable {
                     ),
                     (Control(C::SpeedRingGroup), "settings_file_operations.ring"),
                     (
+                        Control(C::SpeedDeleteGroup),
+                        "settings_file_operations.deleting",
+                    ),
+                    (
                         Control(C::SpeedBlockSizeLabel),
                         "settings_file_operations.block_size",
                     ),
@@ -808,8 +877,7 @@ pub(crate) struct IndexCaptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MessageButton {
     pub(crate) label: String,
-    /// Whether the button shows the administrator shield.
-    pub(crate) shield: bool,
+    pub(crate) icon: Option<ButtonIcon>,
     pub(crate) enabled: bool,
     pub(crate) tooltip: Option<String>,
 }
@@ -817,9 +885,10 @@ pub(crate) struct MessageButton {
 impl MessageButton {
     fn new(model: &Model, button: &ListButton) -> MessageButton {
         let strings = model.strings();
+        let key = model.button_label(button);
         MessageButton {
-            label: strings.text(model.button_label(button)).to_owned(),
-            shield: button.needs_administrator(),
+            label: strings.text(key).to_owned(),
+            icon: ButtonIcon::of(key, button.needs_administrator()),
             enabled: model.list_button_enabled(button),
             tooltip: match button {
                 ListButton::Fix(fix) => fix_tooltip(strings, fix),
@@ -887,16 +956,24 @@ impl IndexCaptions {
         });
         let drives = indexed.chain(left_out).collect();
         // 0 is a service that could not read its own memory.
-        let service = match status.process_private_bytes {
+        let mut service = match status.process_private_bytes {
             0 => strings.text("settings_index.running").to_owned(),
             bytes => strings.format(
                 "settings_index.running_memory",
                 &[&text::bytes(strings, numbers, bytes)],
             ),
         };
+        let use_local = model
+            .use_local_fix()
+            .map(|fix| MessageButton::new(model, &ListButton::Fix(fix)));
+        if use_local.is_some() {
+            service.push(' ');
+            service.push_str(strings.text("settings_index.other_build"));
+        }
         IndexCaptions {
             drives,
             service,
+            use_local,
             has_report: true,
             ..IndexCaptions::default()
         }
@@ -920,6 +997,8 @@ pub(crate) struct DialogCaptions {
     pub(crate) title: String,
     /// Each control's ID and caption.
     pub(crate) items: Vec<(u16, String)>,
+    /// Each push button's ID and the icon before its caption.
+    pub(crate) glyphs: Vec<(u16, Glyph)>,
 }
 
 /// The Settings pages, in their order, whose name and captions hold every
@@ -987,13 +1066,14 @@ fn words(text: &str) -> Vec<String> {
 impl DialogCaptions {
     pub(crate) fn new(dialog: DialogId, strings: &Strings) -> DialogCaptions {
         let table = CaptionTable::of(dialog);
+        let captions = || table.keyed.iter().chain(table.plain);
         DialogCaptions {
             title: strings.text(table.title).to_owned(),
-            items: table
-                .keyed
-                .iter()
-                .chain(table.plain)
+            items: captions()
                 .map(|(item, key)| (item.id(), strings.text(key).to_owned()))
+                .collect(),
+            glyphs: captions()
+                .filter_map(|(item, key)| Some((item.id(), button_glyph(key)?)))
                 .collect(),
         }
     }
@@ -1763,9 +1843,22 @@ pub(crate) struct Question {
     pub(crate) footer: Option<String>,
     pub(crate) confirm: String,
     pub(crate) cancel: String,
-    /// The confirm button may be regretted, such as a downgrade, so the
-    /// dialog warns and Cancel is its default.
-    pub(crate) risky: bool,
+    pub(crate) guard: Guard,
+}
+
+/// How a question guards its confirm button against an `Enter` pressed
+/// without reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Guard {
+    /// The confirm button is the default.
+    None,
+    /// Cancel is the default, because the confirm button cannot be undone,
+    /// such as a permanent delete. The words carry the weight, as Fluent 2
+    /// asks, so the dialog shows no icon.
+    CancelFirst,
+    /// Cancel is the default and a warning icon shows, because the confirm
+    /// button may be regretted, such as a downgrade.
+    Warning,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1789,7 +1882,7 @@ pub(crate) fn setup_question(model: &Model, numbers: &dyn Numbers) -> Option<Que
             footer: None,
             confirm: strings.text("fixing.install").to_owned(),
             cancel,
-            risky: false,
+            guard: Guard::None,
         });
     }
     let [title, question, confirm] = if setup.older {
@@ -1816,7 +1909,11 @@ pub(crate) fn setup_question(model: &Model, numbers: &dyn Numbers) -> Option<Que
         footer: Some(strings.format("fixing.download_size", &[&size])),
         confirm: strings.text(confirm).to_owned(),
         cancel,
-        risky: setup.older,
+        guard: if setup.older {
+            Guard::Warning
+        } else {
+            Guard::None
+        },
     })
 }
 
@@ -1836,7 +1933,7 @@ pub(crate) fn use_local_question(strings: &Strings, local: &LocalService) -> Que
         footer: Some(strings.format("fixing.found_in", &[&folder.display().to_string()])),
         confirm: strings.text("fixing.switch").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
-        risky: false,
+        guard: Guard::None,
     }
 }
 

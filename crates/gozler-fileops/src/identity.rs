@@ -57,6 +57,13 @@ impl Identity {
             .map_or(self.0.len(), |(i, _)| i);
         &self.0[..end]
     }
+
+    /// The path below the volume part, without a leading backslash; empty
+    /// for a volume root.
+    pub(crate) fn below_volume(&self) -> &[u16] {
+        let rest = &self.0[self.volume().len()..];
+        rest.strip_prefix(&[BACKSLASH]).unwrap_or(rest)
+    }
 }
 
 /// A set of paths, by component, that answers whether a path equals or is

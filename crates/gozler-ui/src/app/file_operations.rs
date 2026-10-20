@@ -9,14 +9,14 @@
 //! operation's counts change without a wake, so the window polls them
 //! twice a second while one runs.
 
-use crate::core::captions::{DialogCaptions, DialogItem};
+use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
     self, Bar, CARD_CORNER, CARD_ICON, Failure, Layout, Meter, Metrics, OPEN_WIDTH, QueueAction,
     ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
-use crate::core::layout::{Px, Rect, Size};
+use crate::core::layout::{Px, Rect, Size, button_content, button_room};
 use crate::core::text::Strings;
 use crate::win::clipboard::ClipboardFiles;
 use crate::win::controls::{Button, Label, ProgressBar, ReportList, Tooltip};
@@ -28,7 +28,7 @@ use crate::win::file_operations::{
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Menu;
-use crate::win::notify::{Command, FlatFace, FlatGround};
+use crate::win::notify::{Command, FlatGround};
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
@@ -235,7 +235,7 @@ impl FileOperations {
             hwnd,
             Size {
                 width: px(OPEN_WIDTH, hwnd),
-                height: Layout::height(metrics, true),
+                height: Layout::height(metrics, true, false),
             },
         );
         window.refresh(hwnd);
@@ -325,6 +325,11 @@ impl FileOperations {
         self.refresh();
     }
 
+    /// Shows or hides Hide's icon, after icons were shown or hidden.
+    pub(super) fn apply_glyphs(&self) {
+        self.window.apply_glyphs();
+    }
+
     /// Destroys the window.
     pub(super) fn close(&self) {
         if let Some(hwnd) = self.window.hwnd.take() {
@@ -396,9 +401,9 @@ impl Window {
             to_label: label(ControlId::FileOperationsToLabel)?,
             to,
             total_bar: bar(ControlId::FileOperationsTotalBar)?,
-            percent: label(ControlId::FileOperationsPercent)?,
+            percent: Label::create_right_line(hwnd, id(ControlId::FileOperationsPercent))?,
             items: label(ControlId::FileOperationsItems)?,
-            bytes: label(ControlId::FileOperationsBytes)?,
+            bytes: Label::create_right_line(hwnd, id(ControlId::FileOperationsBytes))?,
             toggle,
             queue: label(ControlId::FileOperationsQueue)?,
             run,
@@ -429,8 +434,17 @@ impl Window {
         }
         controls.title.hwnd().set_font(&title);
         controls.list.set_icons(&ROW_GLYPHS, px(ROW_ICON, hwnd));
+        self.apply_glyphs();
         // The controls hold the old fonts until they get the new ones.
         self.fonts.replace(Some(Fonts { ui, title }));
+    }
+
+    /// Gives Hide its icon, at the window's DPI, in the system colours of
+    /// now and only while icons show.
+    fn apply_glyphs(&self) {
+        self.controls()
+            .hide
+            .set_icon(ButtonIcon::of("file_operations.hide", false));
     }
 
     /// The texts that do not change with the operations.
@@ -506,8 +520,11 @@ impl Window {
         .max()
         .unwrap_or_default();
         let percent_width = ui.width(&strings.format("file_operations.percent", &["100"]));
+        // Room for the icon also while icons are hidden, so Hide keeps its
+        // width when they show.
+        let hide_caption = ui.width(strings.text("file_operations.hide"));
         let hide_width =
-            (ui.width(strings.text("file_operations.hide")) + px(24, hwnd)).max(px(75, hwnd));
+            button_room(button_content(hide_caption, true, dpi), dpi).max(px(75, hwnd));
         Metrics {
             dpi,
             line: ui.height(),
@@ -520,7 +537,12 @@ impl Window {
 
     fn layout(&self, hwnd: Hwnd) {
         let metrics = self.metrics(hwnd);
-        let layout = Layout::compute(hwnd.client_size(), metrics, self.queue_open.get());
+        let layout = Layout::compute(
+            hwnd.client_size().width,
+            metrics,
+            self.queue_open.get(),
+            self.hint_shown(),
+        );
         self.layout.set(layout);
         let c = self.controls();
         let open = self.queue_open.get();
@@ -680,14 +702,12 @@ impl Window {
     /// Asks the conflict question when prepare found conflicts, then
     /// submits the operation with the answer, or cancels it.
     fn answer(&self, id: OperationId, request: &Request, prepared: Prepared) {
-        let question = prepared.survey.and_then(|survey| {
-            file_operations::conflict_question(
-                &self.strings.borrow(),
-                &*self.numbers.borrow(),
-                request,
-                survey,
-            )
-        });
+        let question = file_operations::conflict_question(
+            &self.strings.borrow(),
+            &*self.numbers.borrow(),
+            request,
+            &prepared,
+        );
         let choice = match question {
             None => None,
             // The question runs its own message loop, so nothing is
@@ -1103,7 +1123,13 @@ impl Window {
                 }
             })
             .unwrap_or_default();
+        let shown = self.hint_shown();
         self.controls().hint.hwnd().set_text(&text);
+        if shown != !text.is_empty()
+            && let Some(hwnd) = self.hwnd.get()
+        {
+            self.fit_height(hwnd);
+        }
     }
 
     /// Does `action` to the operation `id`.
@@ -1192,7 +1218,12 @@ impl Window {
     /// The client height of [`Layout::height`], which the window keeps, so
     /// the person sets only its width.
     fn fitted_height(&self, hwnd: Hwnd) -> Px {
-        Layout::height(self.metrics(hwnd), self.queue_open.get())
+        Layout::height(self.metrics(hwnd), self.queue_open.get(), self.hint_shown())
+    }
+
+    /// Whether the hint shows a refusal, which gives it a line.
+    fn hint_shown(&self) -> bool {
+        !self.controls().hint.hwnd().text().is_empty()
     }
 
     /// Gives the window its [`Self::fitted_height`] and places the
@@ -1499,9 +1530,7 @@ impl WindowProc for Window {
                     (c.queue_cancel, Glyph::Cancel, FlatGround::Face),
                 ];
                 for (button, glyph, ground) in flat {
-                    if let Some(answer) =
-                        button.draw_flat(&notification, FlatFace::Glyph(glyph), ground)
-                    {
+                    if let Some(answer) = button.draw_flat(&notification, glyph, ground) {
                         return Some(answer);
                     }
                 }
@@ -1548,10 +1577,9 @@ impl WindowProc for Window {
                         });
                         Some(tip.set(&text))
                     }
-                    QueueNotify::CustomDraw(draw) => Some(
-                        c.list
-                            .draw_gap(&draw, self.drag.get().and_then(|drag| drag.gap)),
-                    ),
+                    QueueNotify::CustomDraw(draw) => {
+                        Some(c.list.draw(draw, self.drag.get().and_then(|drag| drag.gap)))
+                    }
                     QueueNotify::Other => None,
                 }
             }

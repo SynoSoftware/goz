@@ -8,11 +8,11 @@
 //! dialog of its own template inside the dialog ([`create_page`]), whose
 //! controls the dialog's procedure handles.
 
-use super::controls::TreeItem;
+use super::controls::{Button, TreeItem, has_image};
 use super::gdi::{Font, TextMeter};
 use super::notify::{CustomDraw, DrawAnswer, DrawStage, Notification};
 use super::{Hwnd, wide};
-use crate::core::captions::{DialogCaptions, Question, QuestionBody};
+use crate::core::captions::{ButtonIcon, DialogCaptions, Guard, Question, QuestionBody};
 use crate::core::file_operations::Choices;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Px, Rect};
@@ -362,6 +362,7 @@ fn open<D: DialogProc>(dialog: Hwnd, running: &Running<D>) {
             control.set_text(text);
         }
     }
+    show_glyphs(dialog, running.captions);
     let opened = running.state.init(dialog);
     let width = size_buttons(dialog, &running.state.later_captions());
     running.state.buttons_sized(dialog, width);
@@ -398,7 +399,18 @@ pub(crate) fn create_page(
             control.set_text(text);
         }
     }
+    show_glyphs(page, captions);
     Ok(page)
+}
+
+/// Gives the push buttons of `dialog`, a dialog or a page, the icons of
+/// their captions, again when icons are shown or hidden.
+pub(crate) fn show_glyphs(dialog: Hwnd, captions: &DialogCaptions) {
+    for (id, glyph) in &captions.glyphs {
+        if let Some(button) = Button::of_dialog(dialog, *id) {
+            button.set_icon(Some(ButtonIcon::Glyph(*glyph)));
+        }
+    }
 }
 
 unsafe extern "system" fn page_procedure(
@@ -492,7 +504,7 @@ pub(crate) fn widen(dialog: Hwnd, at: Px, extra: Px) {
 /// [`layout::sized_buttons`] says, and returns that width. A button inside
 /// another control, such as the status bar's Cancel, keeps its own place,
 /// because the control that holds it places it.
-fn size_buttons(dialog: Hwnd, later: &[(String, bool)]) -> Px {
+pub(crate) fn size_buttons(dialog: Hwnd, later: &[(String, bool)]) -> Px {
     let minimum = horizontal_units(dialog, 50);
     let Ok(font) = Font::of(dialog) else {
         return minimum;
@@ -520,7 +532,7 @@ fn size_buttons(dialog: Hwnd, later: &[(String, bool)]) -> Px {
         .partition(|child| is_push_button(*child));
     let width = buttons
         .iter()
-        .map(|button| room(&button.text(), false))
+        .map(|&button| room(&button.text(), has_image(button)))
         .chain(
             later
                 .iter()
@@ -615,10 +627,9 @@ fn horizontal_units(dialog: Hwnd, units: i32) -> Px {
 }
 
 /// Asks `question` in a Windows task dialog owned by `owner`, with two
-/// buttons. The confirm button is the default; a risky question shows a
-/// warning icon and makes Cancel the default, as Windows marks a choice the
-/// person may regret. Returns whether the person chose the confirm button;
-/// `Esc` and the close button choose Cancel.
+/// buttons, the default and the icon as its [`Guard`] says. Returns whether
+/// the person chose the confirm button; `Esc` and the close button choose
+/// Cancel.
 pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
     const CONFIRM: i32 = 100;
     let body = match &question.body {
@@ -634,6 +645,7 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
         &question.cancel,
     ]
     .map(wide);
+    let warning = question.guard == Guard::Warning;
     let buttons = [
         TASKDIALOG_BUTTON {
             nButtonID: CONFIRM,
@@ -650,7 +662,7 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
         dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW,
         pszWindowTitle: PCWSTR(title.as_ptr()),
         Anonymous1: TASKDIALOGCONFIG_0 {
-            pszMainIcon: if question.risky {
+            pszMainIcon: if warning {
                 TD_WARNING_ICON
             } else {
                 PCWSTR::null()
@@ -658,16 +670,25 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
         },
         pszMainInstruction: PCWSTR(instruction.as_ptr()),
         pszContent: PCWSTR(details.as_ptr()),
-        cxWidth: unwrapped_width(
-            owner,
-            [question.instruction.as_str()],
-            body.lines(),
-            question.risky,
-            question.footer.as_deref(),
-        ),
+        // Lines of labels and values, and a footer, which name versions and
+        // folders, stay unwrapped; Windows wraps plain sentences, so a long
+        // name in them never widens the dialog.
+        cxWidth: match (&question.body, &question.footer) {
+            (QuestionBody::Text(_), None) => 0,
+            _ => unwrapped_width(
+                owner,
+                [question.instruction.as_str()],
+                body.lines(),
+                warning,
+                question.footer.as_deref(),
+            ),
+        },
         cButtons: buttons.len() as u32,
         pButtons: buttons.as_ptr(),
-        nDefaultButton: if question.risky { IDCANCEL.0 } else { CONFIRM },
+        nDefaultButton: match question.guard {
+            Guard::None => CONFIRM,
+            Guard::CancelFirst | Guard::Warning => IDCANCEL.0,
+        },
         Anonymous2: TASKDIALOGCONFIG_1 {
             pszFooterIcon: match &question.footer {
                 Some(_) => TD_INFORMATION_ICON,
@@ -719,19 +740,6 @@ pub(crate) fn choose(owner: Hwnd, choices: &Choices) -> Option<usize> {
         } else {
             PCWSTR(body.as_ptr())
         },
-        // Each word fits on a line, so a path is never shortened with "…"
-        // and the sentence wraps around it, and each answer fits on its
-        // line beside its arrow.
-        cxWidth: unwrapped_width(
-            owner,
-            choices
-                .instruction
-                .split_whitespace()
-                .chain(choices.answers.iter().map(String::as_str)),
-            choices.body.split_whitespace(),
-            true,
-            None,
-        ),
         cButtons: buttons.len() as u32,
         pButtons: buttons.as_ptr(),
         // Enter must not replace files at the destination.

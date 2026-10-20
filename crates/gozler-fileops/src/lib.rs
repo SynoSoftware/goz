@@ -1,8 +1,9 @@
 //! gozler-fileops: the copy, move and delete engine of gozler's window.
 //!
 //! The window talks to one object, the [`Queue`]. It prepares an operation,
-//! which reads the selected entries from the disk on a queue thread and
-//! ends prepared; the window asks the person, then submits it, and the
+//! which reads the selected entries from the disk on a queue thread, asks
+//! gozlerd for their totals instead of walking to count them, and ends
+//! prepared; the window asks the person, then submits it, and the
 //! operation runs on its own thread with its workers. The window never
 //! waits for the disk: every call returns at once, and the queue calls the
 //! window's wake function after each change of an operation's state.
@@ -65,6 +66,7 @@ mod settings;
 #[cfg(windows)]
 mod survey;
 mod taken;
+mod totals;
 #[cfg(windows)]
 mod tree;
 mod volumes;
@@ -73,8 +75,8 @@ mod win32;
 
 pub use conflicts::Choice;
 pub use operation::{
-    Current, End, Listed, Operation, OperationId, OrderRefused, Outcome, Prepared, Reason, Refusal,
-    Request, RingCounts, Running, Side, State, Survey, Wait,
+    Conflicts, Current, End, Listed, Operation, OperationId, OrderRefused, Outcome, Prepared,
+    Reason, Refusal, Request, RingCounts, Running, Side, State, Total, Wait,
 };
 #[cfg(windows)]
 pub use queue::{NotInterrupted, NotPrepared, Queue};

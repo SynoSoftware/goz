@@ -5,14 +5,11 @@
 //! [`FixEvent`] on a channel, as the requests do (DESIGN.md: window rule
 //! 5); `core::fixer` decides what each event means.
 
-use crate::core::fixer::{
-    self, CommandEvent, CommandResult, FixEvent, FixWork, SetupEvent, SetupResult,
-};
+use crate::core::fixer::{CommandEvent, CommandResult, FixEvent, FixWork, SetupEvent, SetupResult};
 use crate::core::update::{self, Setup};
 use crate::win;
 use crate::win::shell::PromptOwner;
 use crate::win::wake::OpenWaker;
-use gozler_core::proto::SERVICE_NAME;
 use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -95,7 +92,7 @@ impl FixThread {
         ));
         let stop = Arc::new(AtomicBool::new(false));
         let (sender, events) = channel();
-        let runs_commands = matches!(work, FixWork::Commands(_) | FixWork::UseLocal(_));
+        let runs_commands = matches!(work, FixWork::Commands(_));
         let thread = {
             let (stop, waker) = (Arc::clone(&stop), self.waker.clone());
             std::thread::spawn(move || {
@@ -106,7 +103,6 @@ impl FixThread {
                 let setup = |event| report(FixEvent::Setup(event));
                 match work {
                     FixWork::Commands(lines) => run_commands(owner, &lines, &stop, &commands),
-                    FixWork::UseLocal(local) => use_local(owner, &local, &stop, &commands),
                     FixWork::FindSetup => find(&stop, &setup),
                     FixWork::Download(found) => download(&found, &folder, &stop, &setup),
                 }
@@ -181,27 +177,6 @@ fn run_commands(
         .join(" && ");
     run_watched(owner, &format!("/c {parameters}"), &said, stop, report);
     let _ = std::fs::remove_file(&said);
-}
-
-/// Copies the gozlerd.exe at `local` over the program the service runs,
-/// with the service stopped, so the service keeps its path.
-fn use_local(owner: PromptOwner, local: &Path, stop: &AtomicBool, report: &dyn Fn(CommandEvent)) {
-    let registered = match gozler_winfs::service_program(SERVICE_NAME) {
-        Ok(registered) => registered,
-        Err(error) => {
-            let error = io::Error::from_raw_os_error(error.code as i32);
-            return report(failed(&error));
-        }
-    };
-    let same = match (
-        std::fs::canonicalize(local),
-        std::fs::canonicalize(&registered),
-    ) {
-        (Ok(local), Ok(registered)) => local == registered,
-        _ => false,
-    };
-    let commands = fixer::use_local_commands(local, (!same).then_some(registered.as_path()));
-    run_commands(owner, &commands, stop, report);
 }
 
 /// The end of a commands fix that Windows could not run or watch.

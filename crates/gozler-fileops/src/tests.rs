@@ -19,6 +19,7 @@ use gozler_winfs::{
 
 use crate::conflicts::{Rule, Run};
 use crate::copy::{Copied, Copying, Source, TargetVolume, copy};
+use crate::identity::Identity;
 use crate::io_threads::IoThreads;
 use crate::listing::LISTING_WORDS;
 use crate::names::Names;
@@ -27,11 +28,12 @@ use crate::place::Target;
 use crate::receive::{receive, verbatim};
 use crate::ring_plan::Layout;
 use crate::saved::{self, Saved};
+use crate::totals::Index;
 use crate::volumes::{CopyPlan, VolumeClass};
 use crate::{
-    Choice, Count, End, LargeFileLimit, Listed, OperationId, Outcome, Preset, Queue, Reason,
-    Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk, RingSsd, SpeedSettings,
-    State,
+    Choice, Conflicts, Count, End, LargeFileLimit, Listed, OperationId, Outcome, Preset, Queue,
+    Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk, RingSsd,
+    SpeedSettings, State, Total,
 };
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -100,6 +102,38 @@ fn units(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().collect()
 }
 
+/// gozlerd as the tests see it: it never answers, so no prepare has a
+/// total, and no test depends on the gozlerd of the machine.
+struct NoIndex;
+
+impl Index for NoIndex {
+    fn below(&self, _: &[&Identity], _: &Arc<AtomicBool>) -> Option<Vec<Total>> {
+        None
+    }
+}
+
+/// gozlerd answering one total for every folder.
+struct Answers(Total);
+
+impl Index for Answers {
+    fn below(&self, folders: &[&Identity], _: &Arc<AtomicBool>) -> Option<Vec<Total>> {
+        Some(vec![self.0; folders.len()])
+    }
+}
+
+/// gozlerd that answers only when the test drops the sender, or after 60 s:
+/// longer than [`Watched::wait`] waits, so an operation that waits for it
+/// fails the test, and short enough that the queue's threads still end.
+struct Held(Mutex<mpsc::Receiver<()>>);
+
+impl Index for Held {
+    fn below(&self, folders: &[&Identity], _: &Arc<AtomicBool>) -> Option<Vec<Total>> {
+        let held = self.0.lock().expect("no test thread panics");
+        let _ = held.recv_timeout(Duration::from_secs(60));
+        Some(vec![Total { items: 1, bytes: 0 }; folders.len()])
+    }
+}
+
 /// A queue whose wakes the test waits on.
 struct Watched {
     queue: Queue,
@@ -108,8 +142,12 @@ struct Watched {
 
 impl Watched {
     fn new(saved: &Path) -> Watched {
+        Watched::with_index(saved, Box::new(NoIndex))
+    }
+
+    fn with_index(saved: &Path, index: Box<dyn Index>) -> Watched {
         let (woken, wakes) = mpsc::channel();
-        let queue = Queue::new(saved, move || {
+        let queue = Queue::with_index(saved, index, move || {
             let _ = woken.send(());
         });
         Watched { queue, wakes }
@@ -349,6 +387,28 @@ fn delete_removes_a_whole_tree() {
     assert_eq!(outcome.items, 2 + 1000 + 8 + 3 + 2 + 1);
 }
 
+/// A delete starts at once and never waits for gozlerd's total (D5): it
+/// deletes the whole tree while gozlerd has not answered.
+#[test]
+fn a_delete_does_not_wait_for_its_total() {
+    let scratch = Scratch::new("held");
+    let tree = scratch.path("tree");
+    scratch.file(r"tree\folder\file.txt");
+    let (release, held) = mpsc::channel();
+    let watched = Watched::with_index(&scratch.saved(), Box::new(Held(Mutex::new(held))));
+
+    let outcome = watched.run(
+        Request::Delete {
+            sources: vec![tree.clone()],
+        },
+        None,
+    );
+    assert_eq!(outcome.listed, []);
+    assert_eq!(outcome.end, End::Complete);
+    assert!(!tree.exists());
+    drop(release);
+}
+
 /// FAT refuses POSIX semantics, so its read-only files take the classic
 /// delete, which must clear the attribute itself.
 #[test]
@@ -521,7 +581,7 @@ fn each_choice_applies_to_its_conflicts() {
             sources: vec![same.clone(), clash.clone()],
             destination: out.clone(),
         });
-        assert_eq!(prepared.survey.expect("counted").conflicts, 1);
+        assert_eq!(prepared.conflicts.expect("counted").files, 1);
         watched.queue.submit(id, Some(choice)).expect("prepared");
         let outcome = watched.ended(id);
 
@@ -560,12 +620,74 @@ fn a_conflict_after_prepare_is_skipped() {
         sources: vec![source.clone()],
         destination: out.clone(),
     });
-    assert_eq!(prepared.survey.expect("counted").conflicts, 0);
+    assert_eq!(prepared.conflicts.expect("counted").files, 0);
     scratch.write(r"out\a.txt", b"someone's");
     watched.queue.submit(id, None).expect("prepared");
     let outcome = watched.ended(id);
     assert_eq!(outcome.listed, [skipped(&source)]);
     assert_eq!(fs::read(out.join("a.txt")).expect("kept"), b"someone's");
+}
+
+/// Prepare's total is a selected folder with what gozlerd holds below it,
+/// plus each selected file, and the free-space refusal reads those bytes,
+/// so a copy too large for its destination still never starts.
+#[test]
+fn gozlerds_totals_count_and_refuse_too_little_space() {
+    let scratch = Scratch::new("totals");
+    let folder = scratch.path(r"src\folder");
+    scratch.file(r"src\folder\a.txt");
+    let file = scratch.write(r"src\b.txt", b"12345");
+    let out = scratch.path("out");
+    fs::create_dir(&out).expect("a destination");
+    let copy = |sources: Vec<PathBuf>| Request::Copy {
+        sources,
+        destination: out.clone(),
+    };
+    {
+        let below = Total {
+            items: 3,
+            bytes: 10,
+        };
+        let watched = Watched::with_index(&scratch.saved(), Box::new(Answers(below)));
+        let (_, prepared) = watched.prepared(copy(vec![folder.clone(), file]));
+        let expected = Total {
+            items: 5,
+            bytes: 15,
+        };
+        assert_eq!(prepared.total, Some(expected));
+    }
+    let huge = Total {
+        items: 1,
+        bytes: u64::MAX / 2,
+    };
+    let watched = Watched::with_index(&scratch.saved(), Box::new(Answers(huge)));
+    let id = (watched.queue).prepare(copy(vec![folder]), SpeedSettings::automatic());
+    match watched.ended(id).end {
+        End::Refused(Refusal::TooLittleSpace { .. }) => {}
+        end => panic!("not refused: {end:?}"),
+    }
+}
+
+/// A selected folder that merges into a folder of its name counts as a
+/// merge, so the window asks the person, because prepare reads no file
+/// inside it and the run applies the answer to each file it meets there.
+#[test]
+fn a_merge_is_counted() {
+    let scratch = Scratch::new("merge");
+    let docs = scratch.path(r"src\docs");
+    scratch.write(r"src\docs\a.txt", b"new");
+    scratch.write(r"out\docs\a.txt", b"old");
+    let watched = Watched::new(&scratch.saved());
+    let (_, prepared) = watched.prepared(Request::Copy {
+        sources: vec![docs],
+        destination: scratch.path("out"),
+    });
+    let merge = Conflicts {
+        files: 0,
+        same_name: 0,
+        merges: 1,
+    };
+    assert_eq!(prepared.conflicts, Some(merge));
 }
 
 /// A hidden, read-only file that takes the final name after the folder was

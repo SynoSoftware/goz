@@ -5,7 +5,7 @@
 //! middle group, and the main window's Show details at its right end;
 //! `core::captions` gives it the texts and `core::layout` the places.
 
-use crate::core::captions::{ButtonCaption, JobCaption, JobProgress, StatusCaptions};
+use crate::core::captions::{ButtonCaption, ButtonIcon, JobCaption, JobProgress, StatusCaptions};
 use crate::core::ids::ControlId;
 use crate::core::layout::{Px, StatusLayout};
 use crate::win::controls::{self, Button, ProgressBar, Tooltip};
@@ -77,6 +77,12 @@ impl StatusBar {
 
     pub(super) fn set_cancel_caption(&self, caption: &str) {
         self.cancel.hwnd().set_text(caption);
+        self.show_cancel_icon();
+    }
+
+    /// Gives Cancel its icon, again when icons are shown or hidden.
+    pub(super) fn show_cancel_icon(&self) {
+        self.cancel.set_icon(ButtonIcon::of("button.cancel", false));
     }
 
     /// Fits the status bar to its parent's new size, with a drawing area

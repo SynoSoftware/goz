@@ -14,23 +14,26 @@ use crate::core::layout::{Dpi, Px, Rect, Size};
 use windows::Win32::Foundation::{LRESULT, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_HIGHLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT,
-    CreatePen, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetSysColorBrush, HGDIOBJ,
+    CreatePen, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetSysColorBrush, HDC, HGDIOBJ,
     MapWindowPoints, PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Controls::{
-    CDDS_POSTPAINT, CDDS_PREPAINT, CDRF_DODEFAULT, CDRF_NOTIFYPOSTPAINT, EMF_CENTERED, HIMAGELIST,
-    ILC_COLOR32, ImageList_Create, ImageList_Destroy, ImageList_ReplaceIcon,
-    LIST_VIEW_ITEM_STATE_FLAGS, LV_VIEW_TILE, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO, LVIF_COLUMNS,
-    LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED,
-    LVITEMW, LVM_DELETEITEM, LVM_ENSUREVISIBLE, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM,
-    LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SCROLL, LVM_SETEXTENDEDLISTVIEWSTYLE,
-    LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMW, LVM_SETTILEVIEWINFO, LVM_SETVIEW,
-    LVN_BEGINDRAG, LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_KEYDOWN,
-    LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
-    LVSIL_NORMAL, LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE,
-    NM_CUSTOMDRAW, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMLVKEYDOWN,
-    PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED, SetWindowTheme, WC_LISTVIEWW,
+    CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT,
+    CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT, CloseThemeData, DrawThemeBackground, EMF_CENTERED,
+    HIMAGELIST, ILC_COLOR32, ImageList_Create, ImageList_Destroy, ImageList_ReplaceIcon,
+    LISS_HOTSELECTED, LISS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS, LV_VIEW_TILE, LVCF_WIDTH,
+    LVCOLUMNW, LVHITTESTINFO, LVIF_COLUMNS, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON,
+    LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
+    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_HITTEST,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SCROLL, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMSTATE, LVM_SETITEMW, LVM_SETTILEVIEWINFO, LVM_SETVIEW, LVN_BEGINDRAG,
+    LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED, LVP_LISTITEM,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSIL_NORMAL,
+    LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE, NM_CUSTOMDRAW,
+    NMCUSTOMDRAW_DRAW_STATE_FLAGS, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVEMPTYMARKUP, NMLVGETINFOTIPW,
+    NMLVKEYDOWN, OpenThemeData, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED, SetWindowTheme,
+    WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
@@ -211,13 +214,13 @@ pub(crate) enum QueueNotify<'a> {
     EmptyText(EmptyText<'a>),
     /// The pointer rests on a row, and the list asks for its tooltip.
     InfoTip(InfoTip<'a>),
-    /// The list paints, and [`QueueList::draw_gap`] answers.
-    CustomDraw(GapDraw<'a>),
+    /// The list paints, and [`QueueList::draw`] answers.
+    CustomDraw(ListDraw<'a>),
     Other,
 }
 
 /// `NM_CUSTOMDRAW` from the queue list.
-pub(crate) struct GapDraw<'a>(&'a NMLVCUSTOMDRAW);
+pub(crate) struct ListDraw<'a>(&'a mut NMLVCUSTOMDRAW);
 
 /// `LVN_GETINFOTIPW`: the tooltip of the row under the pointer.
 pub(crate) struct InfoTip<'a>(&'a mut NMLVGETINFOTIPW);
@@ -435,6 +438,10 @@ impl QueueList {
         unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
     }
 
+    fn is_selected(self, index: usize) -> bool {
+        send(self.0, LVM_GETITEMSTATE, index, LVIS_SELECTED.0 as isize) != 0
+    }
+
     /// The selected row, if any.
     pub(crate) fn selected(self) -> Option<usize> {
         usize::try_from(send(
@@ -496,14 +503,31 @@ impl QueueList {
         })
     }
 
-    /// Answers the list's custom draw by drawing a line across the gap
-    /// `gap`, as [`QueueList::gap_at`] numbers them, over the rows.
-    pub(crate) fn draw_gap(self, draw: &GapDraw, gap: Option<usize>) -> LRESULT {
-        let draw = &draw.0.nmcd;
+    /// Answers the list's custom draw: the selected row in File Explorer's
+    /// light blue across its whole tile, also while the list lacks the
+    /// focus, where the list itself would draw it gray; and a line across
+    /// the gap `gap`, as [`QueueList::gap_at`] numbers them, over the rows.
+    pub(crate) fn draw(self, draw: ListDraw, gap: Option<usize>) -> LRESULT {
+        let draw = &mut draw.0.nmcd;
         let stage = draw.dwDrawStage;
-        let answer = match gap {
-            Some(_) if stage == CDDS_PREPAINT => CDRF_NOTIFYPOSTPAINT,
-            Some(gap) if stage == CDDS_POSTPAINT => {
+        let answer = match (stage, gap) {
+            (CDDS_PREPAINT, None) => CDRF_NOTIFYITEMDRAW,
+            (CDDS_PREPAINT, Some(_)) => CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT,
+            (CDDS_ITEMPREPAINT, _) => {
+                let state = draw.uItemState;
+                // The item state the list gives here can call an unselected
+                // tile selected, so the list is asked.
+                if self.is_selected(draw.dwItemSpec)
+                    && let Some(rect) = self.item_rect(draw.dwItemSpec, LVIR_BOUNDS)
+                    && self.draw_selected(draw.hdc, &rect, state.contains(CDIS_HOT))
+                {
+                    // Drawn as not selected, the row keeps the fill.
+                    draw.uItemState =
+                        NMCUSTOMDRAW_DRAW_STATE_FLAGS(state.0 & !(CDIS_SELECTED.0 | CDIS_HOT.0));
+                }
+                CDRF_DODEFAULT
+            }
+            (CDDS_POSTPAINT, Some(gap)) => {
                 let count = self.count();
                 let edge = if gap < count {
                     self.item_rect(gap, LVIR_BOUNDS)
@@ -535,6 +559,25 @@ impl QueueList {
             _ => CDRF_DODEFAULT,
         };
         LRESULT(answer as isize)
+    }
+
+    /// Fills `rect` on `dc` as File Explorer's list fills a selected row,
+    /// or a selected row under the pointer when `hot`. Returns `false`
+    /// without the theme, as in high contrast, where the list's own
+    /// selection colours serve.
+    fn draw_selected(self, dc: HDC, rect: &RECT, hot: bool) -> bool {
+        let state = if hot { LISS_HOTSELECTED } else { LISS_SELECTED };
+        // SAFETY: the DC is the paint's, which the list holds for the
+        // notification; the theme is closed before the answer.
+        unsafe {
+            let theme = OpenThemeData(Some(self.0.0), w!("ListView"));
+            if theme.is_invalid() {
+                return false;
+            }
+            let drawn = DrawThemeBackground(theme, dc, LVP_LISTITEM.0, state.0, rect, None);
+            let _ = CloseThemeData(theme);
+            drawn.is_ok()
+        }
     }
 
     /// Scrolls the list one row toward `point`, in the client coordinates
@@ -602,7 +645,7 @@ impl QueueList {
                 }
                 LVN_GETEMPTYMARKUP => QueueNotify::EmptyText(EmptyText(&mut *pointer.cast())),
                 LVN_GETINFOTIPW => QueueNotify::InfoTip(InfoTip(&mut *pointer.cast())),
-                NM_CUSTOMDRAW => QueueNotify::CustomDraw(GapDraw(&*pointer.cast())),
+                NM_CUSTOMDRAW => QueueNotify::CustomDraw(ListDraw(&mut *pointer.cast())),
                 _ => QueueNotify::Other,
             }
         };

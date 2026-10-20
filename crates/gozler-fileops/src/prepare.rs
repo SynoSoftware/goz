@@ -1,11 +1,13 @@
 //! Prepare: what an operation reads before the person answers. It applies
-//! "What an operation receives", counts a copy or a move, checks the free
-//! space, and records the paths and disks that the waits compare (D14). It
-//! keeps no list of files (D11): the run walks the disk again.
+//! "What an operation receives", takes a copy's or a move's totals from
+//! gozlerd and never walks to count (D5), counts its conflicts, checks the
+//! free space, and records the paths and disks that the waits compare
+//! (D14). It keeps no list of files (D11): the run walks the disk.
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use gozler_winfs::{Access, Reparse, cluster_size, free_space, open_entry, windows_build};
@@ -15,11 +17,12 @@ use crate::copy::{Source, TargetVolume};
 use crate::identity::Identity;
 use crate::listing::BACKSLASH;
 use crate::names::fold;
-use crate::operation::{Listed, Prepared, Refusal, Request};
+use crate::operation::{Listed, Prepared, Refusal, Request, Total};
 use crate::receive::{Destination, Selected, receive, verbatim};
 use crate::ring_plan::Layout;
 use crate::settings::SpeedSettings;
 use crate::survey::{Surveying, survey};
+use crate::totals::Index;
 use crate::volumes::{CopyPlan, VolumeClass, read_volume};
 use crate::waits::Plan;
 use crate::win32::{
@@ -67,18 +70,20 @@ pub(crate) struct Transfer {
     pub(crate) moving: bool,
     pub(crate) plan: CopyPlan,
     pub(crate) target: TargetVolume,
-    /// The bytes the destination needs; `None` within one volume that can
-    /// clone blocks, where both engines clone (D20).
+    /// The bytes the destination needs; `None` when prepare cannot know
+    /// them, and within one volume that can clone blocks, where both
+    /// engines clone (D20).
     pub(crate) needed: Option<u64>,
 }
 
 /// Prepares `request` for a run under `rule`: for Continue, the choice and
-/// the start of the interrupted run.
+/// the start of the interrupted run. `index` gives the totals.
 pub(crate) fn prepare(
     request: &Request,
     settings: &SpeedSettings,
     rule: Rule,
-    cancel: &AtomicBool,
+    index: &dyn Index,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<Ready, Refusal> {
     match request {
         Request::Delete { sources } => {
@@ -90,7 +95,9 @@ pub(crate) fn prepare(
             Ok(Ready {
                 prepared: Prepared {
                     entries: received.entries.len(),
-                    survey: None,
+                    // The queue asks gozlerd once the delete runs (`Counting`).
+                    total: None,
+                    conflicts: None,
                 },
                 plan,
                 failures: received.failures,
@@ -103,11 +110,11 @@ pub(crate) fn prepare(
         Request::Copy {
             sources,
             destination,
-        } => transfer(sources, destination, false, settings, rule, cancel),
+        } => transfer(sources, destination, false, settings, rule, index, cancel),
         Request::Move {
             sources,
             destination,
-        } => transfer(sources, destination, true, settings, rule, cancel),
+        } => transfer(sources, destination, true, settings, rule, index, cancel),
         Request::Rename { path, name } => {
             let path: Vec<u16> = path.as_os_str().encode_wide().collect();
             let name: Vec<u16> = name.encode_wide().collect();
@@ -160,7 +167,8 @@ fn one(plan: Plan, work: Work) -> Ready {
     Ready {
         prepared: Prepared {
             entries: 1,
-            survey: None,
+            total: None,
+            conflicts: None,
         },
         plan,
         work,
@@ -174,7 +182,8 @@ fn transfer(
     moving: bool,
     settings: &SpeedSettings,
     rule: Rule,
-    cancel: &AtomicBool,
+    index: &dyn Index,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<Ready, Refusal> {
     let (received, destination) = receive(sources, Some(destination), cancel)?;
     let destination = destination.expect("a destination was given");
@@ -188,7 +197,7 @@ fn transfer(
     for selected in received.entries {
         let name = selected.identity.name().to_vec();
         plan.writes
-            .insert_named(&destination.identity, &name, selected.folder);
+            .insert_named(&destination.identity, &name, selected.folder());
         if moving {
             plan.writes.insert(&selected.identity);
         } else {
@@ -265,13 +274,15 @@ fn transfer(
     let surveying = Surveying {
         rule,
         sparse_stays: sparse,
+        index,
         cancel,
     };
-    let sources = (renamed.iter().map(|source| (source, false)))
-        .chain(copied.iter().map(|source| (source, true)));
+    let sources: Vec<(&Source, bool)> = (renamed.iter().map(|source| (source, false)))
+        .chain(copied.iter().map(|source| (source, true)))
+        .collect();
     let surveyed =
-        survey(sources, &destination, &surveying).map_err(Refusal::DestinationUnreadable)?;
-    let needed = (!clones).then_some(surveyed.needed);
+        survey(&sources, &destination, &surveying).map_err(Refusal::DestinationUnreadable)?;
+    let needed = surveyed.needed.filter(|_| !clones);
     if let Some(needed) = needed {
         check_space(&destination, needed)?;
     }
@@ -279,7 +290,13 @@ fn transfer(
     Ok(Ready {
         prepared: Prepared {
             entries: renamed.len() + copied.len(),
-            survey: Some(surveyed.survey),
+            // The run counts each selected entry that no longer exists as
+            // an item done.
+            total: surveyed.total.map(|total| Total {
+                items: total.items + received.missing.len() as u64,
+                ..total
+            }),
+            conflicts: Some(surveyed.conflicts),
         },
         plan,
         failures: received.failures,

@@ -12,10 +12,9 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
-    DT_HIDEPREFIX, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawFocusRect,
-    FillRect, GetSysColor, GetSysColorBrush, HGDIOBJ, InflateRect, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX,
+    DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawFocusRect, FillRect, GetSysColor,
+    GetSysColorBrush, HGDIOBJ, InflateRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT,
@@ -187,15 +186,6 @@ impl ListView {
     }
 }
 
-/// What a flat button shows.
-#[derive(Clone, Copy)]
-pub(crate) enum FlatFace<'a> {
-    /// Its caption and access key, in this font.
-    Caption(&'a Font),
-    /// An icon.
-    Glyph(Glyph),
-}
-
 /// The background a flat button stands on, which it fills.
 #[derive(Clone, Copy)]
 pub(crate) enum FlatGround {
@@ -207,16 +197,15 @@ pub(crate) enum FlatGround {
 
 impl Button {
     /// Draws this button, if `notification` is its `NM_CUSTOMDRAW`, as a
-    /// flat button, as a toolbar's: `face` centred on `ground`, on the
-    /// toolbar's hot or pressed background while the
-    /// mouse is on it or it is pressed. The access key's line and a focus
-    /// rectangle show while the window shows keyboard cues. An icon's
-    /// caption stays the name that screen readers say. Returns the answer to
-    /// the notification.
+    /// flat icon button, as a toolbar's: `glyph` centred on `ground`, on the
+    /// toolbar's hot or pressed background while the mouse is on it or it
+    /// is pressed. A focus rectangle shows while the window shows keyboard
+    /// cues. The button's caption stays the name that screen readers say.
+    /// Returns the answer to the notification.
     pub(crate) fn draw_flat(
         self,
         notification: &Notification,
-        face: FlatFace,
+        glyph: Glyph,
         ground: FlatGround,
     ) -> Option<LRESULT> {
         let header = notification.header();
@@ -249,8 +238,7 @@ impl Button {
             system_color(COLOR_WINDOWTEXT)
         };
         // SAFETY: the DC is the notification's, which the button holds for
-        // it; the theme is closed and the DC's font restored before the
-        // answer.
+        // it; the theme is closed before the answer.
         unsafe {
             FillRect(dc, &rect, GetSysColorBrush(ground));
             if let Some(hot) = hot {
@@ -264,27 +252,9 @@ impl Button {
                     let _ = CloseThemeData(theme);
                 }
             }
-            let cues = state.contains(CDIS_SHOWKEYBOARDCUES);
-            match face {
-                FlatFace::Glyph(glyph) => {
-                    let size = icon_glyph_height(self.hwnd().dpi());
-                    draw_lone_glyph(dc, glyph, rect, size, color);
-                }
-                FlatFace::Caption(font) => {
-                    let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
-                    SetBkMode(dc, TRANSPARENT);
-                    SetTextColor(dc, color);
-                    let flags = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
-                    draw_text(
-                        dc,
-                        &self.hwnd().text(),
-                        &mut rect,
-                        if cues { flags } else { flags | DT_HIDEPREFIX },
-                    );
-                    SelectObject(dc, previous);
-                }
-            }
-            if state.contains(CDIS_FOCUS) && cues {
+            let size = icon_glyph_height(self.hwnd().dpi());
+            draw_lone_glyph(dc, glyph, rect, size, color);
+            if state.contains(CDIS_FOCUS) && state.contains(CDIS_SHOWKEYBOARDCUES) {
                 let _ = InflateRect(&mut rect, -2, -2);
                 let _ = DrawFocusRect(dc, &rect);
             }

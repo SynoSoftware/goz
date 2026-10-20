@@ -464,24 +464,24 @@ mod tests {
             (
                 "Alt+F",
                 Refusal::Typing,
-                "Alt+F is for typing or for the menus. Choose a shortcut with Ctrl, such as \
+                "Alt+F is used for typing or the menus. Choose a shortcut with Ctrl, such as \
                  Ctrl+K, or a function key, such as F3.",
             ),
             (
                 "K",
                 Refusal::Typing,
-                "K is for typing or for the menus. Choose a shortcut with Ctrl, such as Ctrl+K, \
+                "K is used for typing or the menus. Choose a shortcut with Ctrl, such as Ctrl+K, \
                  or a function key, such as F3.",
             ),
             (
                 "Ctrl+V",
                 Refusal::Control,
-                "Ctrl+V belongs to the search box or the list.",
+                "Ctrl+V is used by the search box or the results list.",
             ),
             (
                 "Ctrl+Home",
                 Refusal::Control,
-                "Ctrl+Home belongs to the search box or the list.",
+                "Ctrl+Home is used by the search box or the results list.",
             ),
         ] {
             assert_eq!(

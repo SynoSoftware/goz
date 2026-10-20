@@ -459,21 +459,25 @@ impl CaptionWidths {
     ) -> CaptionWidths {
         let widest = |texts: &[String]| texts.iter().map(|t| measure(t)).max().unwrap_or_default();
         let filters = &captions.filters;
-        // The inspector's text buttons show an icon while icons show.
-        let inspector = captions
-            .inspector_buttons
-            .iter()
-            .chain([&captions.copy_path])
-            .map(|button| (&button.caption, captions.icons));
+        // Every button shows an icon while icons show, and a button that
+        // needs administrator permission shows the shield also while they
+        // are hidden.
+        let glyph_buttons = [&captions.clear_search, &captions.status_cancel]
+            .into_iter()
+            .chain(
+                captions
+                    .inspector_buttons
+                    .iter()
+                    .map(|button| &button.caption),
+            )
+            .chain([&captions.copy_path.caption])
+            .map(|caption| (caption, captions.icons));
         let list = captions
             .list_buttons
             .iter()
-            .map(|(caption, shielded)| (caption, *shielded));
-        let mut buttons = ButtonWidths {
-            plain: measure(&captions.clear_search).max(measure(&captions.status_cancel)),
-            with_image: Px(0),
-        };
-        for (caption, with_image) in inspector.chain(list) {
+            .map(|(caption, shielded)| (caption, *shielded || captions.icons));
+        let mut buttons = ButtonWidths::default();
+        for (caption, with_image) in glyph_buttons.chain(list) {
             let widest = if with_image {
                 &mut buttons.with_image
             } else {
@@ -752,7 +756,7 @@ impl FilterLayout {
             width: side,
             height: side,
         };
-        let clear_width = button_room(widths.clear, dpi);
+        let clear_width = button_room(button_content(widths.clear, widths.icons, dpi), dpi);
         let clear = Rect {
             x: hide.x - related - clear_width,
             width: clear_width,
@@ -874,13 +878,13 @@ impl FilterLayout {
         let px = |dip: Dip| dip.to_px(dpi);
         let header = widths.title
             + px(RELATED)
-            + button_room(widths.clear, dpi)
+            + button_room(button_content(widths.clear, widths.icons, dpi), dpi)
             + px(RELATED)
             + font_height
             + px(CONTROL_PADDING);
         let content = [
             header,
-            button_width(widths.choose_folder, dpi),
+            button_width(button_content(widths.choose_folder, widths.icons, dpi), dpi),
             widths.only_directly + px(CHECK_BOX_CHROME),
             widths.labels,
             widths.kinds + glyph_room(dpi, widths.icons) + px(LIST_BOX_CHROME),

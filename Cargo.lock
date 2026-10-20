@@ -483,6 +483,7 @@ dependencies = [
 name = "gozler-fileops"
 version = "0.3.0"
 dependencies = [
+ "gozler-client",
  "gozler-core",
  "gozler-winfs",
  "serde",

@@ -53,8 +53,7 @@ pub(crate) enum ListMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Fix {
     Repair(Repair),
-    /// Copies the gozlerd.exe beside the window over the program of a
-    /// service older than the window, which keeps its path.
+    /// Points the service at the gozlerd.exe beside the window.
     UseLocal(LocalService),
     /// Downloads the latest release's setup over a service older than the
     /// window. A newer release's status text runs it too.

@@ -612,7 +612,7 @@ menu.file
   -
   command.settings|Ctrl+,|on|
   -
-  command.exit||on|
+  command.exit|Ctrl+Q|on|
 menu.edit
   command.copy|Ctrl+C|off|
   command.copy_as_path|Ctrl+Shift+C|off|
@@ -2998,7 +2998,7 @@ try {
                 ended = $ended; note = $noteText
             })
 
-        # Select the search text when Gozler is activated: on, activation
+        # Select the search text when the window is activated: on, activation
         # from another program selects the search text, and activation from
         # one of Gozler's own windows, as when its dialog closes, leaves the
         # focus on the list; off, the focus stays on the list (C6).
@@ -3190,7 +3190,7 @@ try {
         [void](Close-Window $window)
         Check 'the Index page lists the volumes' (($drives -join "`n") -eq ($expectedDrives -join "`n")) ([ordered]@{ page = $drives; gozler = $expectedDrives })
 
-        # Show every file and folder when the search is empty, off: the empty
+        # Show every file and folder when the search box is empty, off: the empty
         # search shows "Type to search." (S6).
         Write-Settings '{ "settings": { "show_all_when_empty": false } }'
         $window = Start-Window

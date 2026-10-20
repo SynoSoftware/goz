@@ -121,7 +121,12 @@ impl CommandId {
                     always,
                     None,
                 ),
-                C::Exit => ("command.exit", &[], always, None),
+                C::Exit => (
+                    "command.exit",
+                    const { &[Keystroke::ctrl(Key::Letter(b'Q'))] },
+                    always,
+                    None,
+                ),
                 C::Copy => (
                     "command.copy",
                     const { &[Keystroke::ctrl(Key::Letter(b'C'))] },

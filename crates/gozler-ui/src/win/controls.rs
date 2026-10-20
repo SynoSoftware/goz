@@ -7,6 +7,7 @@ use super::gdi::{
 use super::keys::{is_extended, key_of, virtual_key};
 use super::notify::ControlEvent;
 use super::{Hwnd, wide};
+use crate::core::captions::ButtonIcon;
 use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
 use crate::core::layout::{
@@ -28,7 +29,7 @@ use windows::Win32::Graphics::Gdi::{
     SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BCM_SETIMAGELIST, BCM_SETSHIELD, BP_GROUPBOX, BST_CHECKED, BUTTON_IMAGELIST,
+    BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BP_GROUPBOX, BST_CHECKED, BUTTON_IMAGELIST,
     BUTTON_IMAGELIST_ALIGN_LEFT, CloseThemeData, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME,
     DTM_SETSYSTEMTIME, DrawThemeBackground, EM_GETMARGINS, EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL,
     GBS_DISABLED, GBS_NORMAL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO,
@@ -318,6 +319,20 @@ impl Label {
         .map(Label)
     }
 
+    /// A line as [`Label::create_line`] makes, against its right edge, such
+    /// as a count that ends under the end of a bar.
+    pub(crate) fn create_right_line(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        const SS_RIGHT: u32 = 0x2;
+        child(
+            parent,
+            w!("STATIC"),
+            SS_RIGHT | SS_NOPREFIX | SS_ENDELLIPSIS,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Label)
+    }
+
     /// A text that its parent draws on `WM_DRAWITEM`; its own text is what
     /// screen readers say.
     pub(crate) fn create_owner_drawn(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
@@ -363,17 +378,33 @@ impl Button {
         super::dialog::item(dialog, id).map(Button)
     }
 
-    /// Shows or hides the administrator shield before the caption.
-    pub(crate) fn set_shield(self, shown: bool) {
-        send(self.0, BCM_SETSHIELD, 0, isize::from(shown));
+    /// Shows `icon` before the caption: a glyph at the button's DPI, in the
+    /// system colours of now, and only while icons show, so the owner calls
+    /// this again when any of them changes; or the administrator shield.
+    pub(crate) fn set_icon(self, icon: Option<ButtonIcon>) {
+        let glyph = match icon {
+            Some(ButtonIcon::Glyph(glyph)) => Some(glyph),
+            Some(ButtonIcon::Shield) | None => None,
+        };
+        // The shield is the button's image too, so each is cleared before
+        // the other is set.
+        let shield = icon == Some(ButtonIcon::Shield);
+        if !shield {
+            send(self.0, BCM_SETSHIELD, 0, 0);
+        }
+        self.set_glyph(glyph);
+        if shield {
+            send(self.0, BCM_SETSHIELD, 0, 1);
+        }
     }
 
-    /// Shows `glyph` before the caption at the button's DPI, in the system
-    /// colours of now, or no icon while icons are hidden, so the owner calls
-    /// this again when any of them changes.
-    pub(crate) fn set_glyph(self, glyph: Glyph) {
+    /// Shows `glyph` before the caption, or no image for `None` and while
+    /// icons are hidden.
+    fn set_glyph(self, glyph: Option<Glyph>) {
         let dpi = self.0.dpi();
-        let images = button_images(glyph, icon_glyph_height(dpi)).unwrap_or_default();
+        let images = glyph
+            .and_then(|glyph| button_images(glyph, icon_glyph_height(dpi)))
+            .unwrap_or_default();
         let gap = glyph_gap(dpi).0;
         let list = BUTTON_IMAGELIST {
             himl: images,
@@ -400,6 +431,15 @@ impl Button {
         )
         .map(Button)
     }
+}
+
+/// Whether the push button `button` shows an image list's icon before its
+/// caption.
+pub(super) fn has_image(button: Hwnd) -> bool {
+    let mut list = BUTTON_IMAGELIST::default();
+    // SAFETY: `list` is a local the call fills in.
+    unsafe { send_pointer(button, BCM_GETIMAGELIST, 0, &raw mut list) };
+    !list.himl.is_invalid()
 }
 
 /// A drop-down list, such as the Match list.

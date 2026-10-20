@@ -8,8 +8,8 @@
 //! necessary.
 
 use super::fetch::{
-    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Outcome, Purpose,
-    WriteFailure, inside,
+    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, LocalService, Outcome,
+    Purpose, WriteFailure, inside,
 };
 use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
@@ -55,6 +55,9 @@ pub(crate) struct Model {
     pub(super) results: Results,
     /// The latest status reply.
     pub(super) status: Option<DaemonStatus>,
+    /// The gozlerd.exe beside the window that the latest status reply
+    /// found to be a different build from the service's.
+    other_build: Option<LocalService>,
     pub(super) selection: Selection,
     pub(super) export: Export,
     fix: Fixer,
@@ -348,6 +351,7 @@ impl Model {
             open_on_answer: false,
             results: Results::new(),
             status: None,
+            other_build: None,
             selection: Selection::None,
             export: Export::Idle,
             fix: Fixer::Idle,
@@ -1119,10 +1123,14 @@ impl Model {
         self.failure.as_ref().and_then(Fix::of)
     }
 
-    /// The Use local fix the service's failure offers before its other
-    /// fix, in the list's message and the Service group.
+    /// The Use local fix, which the Service group shows before the
+    /// failure's other fix, and alone while a service of a different build
+    /// answers. The list's message shows it only for a failure.
     pub(crate) fn use_local_fix(&self) -> Option<Fix> {
-        self.failure.as_ref().and_then(Fix::use_local)
+        match &self.failure {
+            Some(failure) => Fix::use_local(failure),
+            None => self.other_build.clone().map(Fix::UseLocal),
+        }
     }
 
     /// Starts `fix`, unless a fix runs (DESIGN.md: Service fixes). Open
@@ -1322,11 +1330,12 @@ impl Model {
     fn accept_status(&mut self, outcome: Outcome) -> Accepted {
         self.status_asked = None;
         match outcome {
-            Outcome::Status(status) => {
+            Outcome::Status(status, other_build) => {
                 let answers_again = self.failure.as_ref().is_some_and(DaemonFailure::recovers);
                 let was_indexing = self.indexing_in_scope();
                 self.failure = None;
                 self.status = Some(status);
+                self.other_build = other_build;
                 // The fix's end shows with this status.
                 self.fix.service_answered();
                 let completed = was_indexing && !self.indexing_in_scope();
@@ -1689,27 +1698,30 @@ pub(crate) mod tests {
         Fetched {
             purpose: Purpose::Status,
             generation: fetch.generation,
-            outcome: Outcome::Status(DaemonStatus {
-                volumes: vec![VolumeStatus {
-                    guid: r"\\?\Volume{c}\".into(),
-                    mounts: vec![r"C:\".into()],
-                    phase,
-                    entries: 0,
-                    generation: 0,
-                    metadata_pending: false,
-                    journal_max_bytes: None,
-                    placeholders_created: 0,
-                    delete_of_unknown: 0,
-                    stale_slots: 0,
-                    link_reconciles_dropped: 0,
-                    memory: None,
-                }],
-                volumes_incomplete: false,
-                process_working_set: 0,
-                process_private_bytes: 0,
-                include: None,
-                left_out: Vec::new(),
-            }),
+            outcome: Outcome::Status(
+                DaemonStatus {
+                    volumes: vec![VolumeStatus {
+                        guid: r"\\?\Volume{c}\".into(),
+                        mounts: vec![r"C:\".into()],
+                        phase,
+                        entries: 0,
+                        generation: 0,
+                        metadata_pending: false,
+                        journal_max_bytes: None,
+                        placeholders_created: 0,
+                        delete_of_unknown: 0,
+                        stale_slots: 0,
+                        link_reconciles_dropped: 0,
+                        memory: None,
+                    }],
+                    volumes_incomplete: false,
+                    process_working_set: 0,
+                    process_private_bytes: 0,
+                    include: None,
+                    left_out: Vec::new(),
+                },
+                None,
+            ),
         }
     }
 
@@ -1817,7 +1829,7 @@ pub(crate) mod tests {
         // S13.
         assert_eq!(
             captions::index_status(&model),
-            r"C:\ is indexing — results may be incomplete."
+            r"C:\ is being indexed. Results might be incomplete."
         );
         assert!(model.polls_status());
     }

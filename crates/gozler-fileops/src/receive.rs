@@ -5,7 +5,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gozler_winfs::{Access, Entry, Reparse, open_entry};
+use gozler_winfs::{Access, AttributeTag, Entry, EntryStat, Reparse, open_entry};
 
 use crate::identity::{Identity, PathTrie, outermost};
 use crate::listing::read_names;
@@ -21,9 +21,16 @@ pub(crate) struct Selected {
     /// The path to open: with the `\\?\` or `\\?\UNC\` prefix.
     pub(crate) verbatim: Vec<u16>,
     pub(crate) identity: Identity,
-    /// It had the folder attribute when it was received; the walks read
-    /// what it is again when they reach it.
-    pub(crate) folder: bool,
+    /// What it was when it was received, for prepare; the walks read what
+    /// it is again when they reach it.
+    pub(crate) tag: AttributeTag,
+    pub(crate) stat: EntryStat,
+}
+
+impl Selected {
+    pub(crate) fn folder(&self) -> bool {
+        self.tag.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
 }
 
 /// The folder a copy or a move writes into, opened following links.
@@ -76,13 +83,14 @@ pub(crate) fn receive(
         let path: Vec<u16> = source.as_os_str().encode_wide().collect();
         let verbatim = verbatim(&path);
         let read = open_entry(&verbatim, Access::Inspect, Reparse::Open)
-            .and_then(|entry| Ok((entry.final_path()?, entry.attribute_tag()?)));
+            .and_then(|entry| Ok((entry.final_path()?, entry.attribute_tag()?, entry.stat()?)));
         match read {
-            Ok((identity, tag)) => selected.push(Selected {
+            Ok((identity, tag, stat)) => selected.push(Selected {
                 path,
                 verbatim,
                 identity: Identity::new(identity),
-                folder: tag.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                tag,
+                stat,
             }),
             Err(error) if is_gone(error.code) => received.missing.push(path),
             Err(error) => received.failures.push(failure(&path, error.code)),

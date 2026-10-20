@@ -147,9 +147,9 @@ row when nothing is selected, as in Norton Commander.
 1. **Copy and Move ask first,** as Norton Commander does: "Copy 3 items to
    D:\Backup\" with the destination in an edit box that the person can
    change, and OK and Cancel. `Enter` starts the copy at once.
-2. **Delete asks:** "Delete these 12 items? Gozler deletes them permanently;
-   they do not go to the Recycle Bin." Delete and Cancel. Gozler never uses
-   the Recycle Bin (owner ruling).
+2. **Delete asks:** "Permanently delete 12 items?" and below it "They won't
+   go to the Recycle Bin, and you can't undo this." Delete and Cancel, with
+   Cancel as the default. Gozler never uses the Recycle Bin (owner ruling).
 3. **Conflicts are asked once for the whole operation,** before any file is
    written: Replace the files in the destination, Skip these files, Keep
    both files, and Cancel. The engine spec's "Conflicts" says what each does,

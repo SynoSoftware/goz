@@ -166,6 +166,9 @@ pub(super) struct IconFont {
     /// button holds its image list without owning it, so each list lives as
     /// long as the thread.
     images: HashMap<(Glyph, i32, u32, u32), HIMAGELIST>,
+    /// By glyph, side and colour. A menu holds an item's bitmap without
+    /// owning it, so each bitmap lives as long as the thread.
+    menu_bitmaps: HashMap<(Glyph, i32, u32), Bitmap>,
 }
 
 const FLUENT_ICONS: &str = "Segoe Fluent Icons";
@@ -203,6 +206,7 @@ impl IconFont {
                 fonts: HashMap::new(),
                 present: HashMap::new(),
                 images: HashMap::new(),
+                menu_bitmaps: HashMap::new(),
             }))
         })
     }
@@ -339,6 +343,37 @@ pub(super) fn button_images(glyph: Glyph, side: Px) -> Option<HIMAGELIST> {
         }
         icons.images.insert(key, images);
         Some(images)
+    })
+}
+
+/// The bitmap of a menu item that shows `glyph` before its text, `side`
+/// pixels square, in `color`. It is a 32-bit bitmap with premultiplied
+/// alpha, because Windows draws a menu without its visual style when an
+/// item's bitmap is `HBMMENU_CALLBACK` or owner-drawn, and then hides the
+/// text of unavailable items. `None` while icons are hidden (see
+/// [`show_icons`]), or when the icon font lacks the glyph or GDI fails.
+pub(super) fn menu_bitmap(glyph: Glyph, side: Px, color: COLORREF) -> Option<HBITMAP> {
+    if !icons_shown() {
+        return None;
+    }
+    IconFont::with(|icons| {
+        let key = (glyph, side.0, color.0);
+        if let Some(bitmap) = icons.menu_bitmaps.get(&key) {
+            return Some(bitmap.handle);
+        }
+        let coverage = glyph_coverage(icons, glyph, side)?;
+        let mut bitmap = Bitmap::new(side)?;
+        let [red, green, blue, _] = color.0.to_le_bytes();
+        let premultiplied = |channel: u8, alpha: u8| u32::from(channel) * u32::from(alpha) / 255;
+        for (pixel, alpha) in bitmap.pixels_mut().iter_mut().zip(coverage) {
+            *pixel = (u32::from(alpha) << 24)
+                | (premultiplied(red, alpha) << 16)
+                | (premultiplied(green, alpha) << 8)
+                | premultiplied(blue, alpha);
+        }
+        let handle = bitmap.handle;
+        icons.menu_bitmaps.insert(key, bitmap);
+        Some(handle)
     })
 }
 
@@ -860,17 +895,22 @@ impl OwnerDraw<'_> {
             let mut left = line.left;
             for part in parts {
                 let color = system_color(if part.muted { muted } else { normal });
+                let mut size = RECT::default();
+                draw_text(dc, &part.text, &mut size, flags | DT_CALCRECT);
                 if let Some(glyph) = part.glyph.filter(|_| icons_shown()) {
+                    // The icon's own height, centred on the text's line: in
+                    // the line's height, an icon taller than the line, such
+                    // as 16 px beside 15 at 96 DPI, loses its bottom row.
+                    let top = line.top + (size.bottom - icon.0) / 2;
                     let area = RECT {
                         left,
+                        top,
                         right: left + icon.0,
-                        ..line
+                        bottom: top + icon.0,
                     };
                     draw_glyph(dc, glyph, area, icon, color);
                     left += icon.0 + gap.0;
                 }
-                let mut size = RECT::default();
-                draw_text(dc, &part.text, &mut size, flags | DT_CALCRECT);
                 let fits = left + size.right <= line.right;
                 SetTextColor(dc, color);
                 let mut rect = RECT { left, ..line };

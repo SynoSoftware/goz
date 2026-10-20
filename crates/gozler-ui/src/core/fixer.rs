@@ -19,7 +19,7 @@ pub(crate) enum CommandFix {
     /// Starts the service, after turning it on when it is disabled.
     Start,
     Install,
-    /// Copies the gozlerd.exe beside the window over the service's program.
+    /// Points the service at the gozlerd.exe beside the window.
     UseLocal,
 }
 
@@ -34,34 +34,29 @@ pub(crate) enum SetupFix {
     Download,
 }
 
-/// What a fix's thread does: run a repair's commands, put the gozlerd.exe
-/// at the path in place of the service's program, ask GitHub for the
-/// latest release's setup, or download the setup the person accepted.
+/// What a fix's thread does: run a repair's or Use local's commands, ask
+/// GitHub for the latest release's setup, or download the setup the person
+/// accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FixWork {
     Commands(Vec<String>),
-    UseLocal(PathBuf),
     FindSetup,
     Download(Setup),
 }
 
-/// The commands that stop the service, copy `local` over `registered`, the
-/// program the service runs, and start the service again. `registered` is
-/// `None` when it is `local` itself, which Windows refuses to copy onto.
-pub(crate) fn use_local_commands(local: &Path, registered: Option<&Path>) -> Vec<String> {
-    let mut commands = vec![format!("net stop {SERVICE_NAME}")];
-    if let Some(registered) = registered {
-        // `>nul` leaves only Windows' reason in the output, because copy
-        // also writes "0 file(s) copied." after a failure.
-        let copy = format!(
-            "copy /y \"{}\" \"{}\" >nul",
-            local.display(),
-            registered.display()
-        );
-        // The service's process can hold its program for a moment after
-        // `net stop` returns, so the copy tries again after two seconds.
-        commands.push(format!("({copy} || (ping -n 3 127.0.0.1 >nul & {copy}))"));
-    }
+/// The commands that point the service at the gozlerd.exe at `program`
+/// and restart it. `install` comes first and only changes the service's
+/// configuration while it runs, so a failed `install` leaves the service
+/// running its old program; the restart then starts `program`.
+fn use_local_commands(program: &Path) -> Vec<String> {
+    let folder = program
+        .parent()
+        .expect("the local gozlerd.exe is a file in the window's folder")
+        .to_owned();
+    let mut commands = Repair::InstallService { folder }
+        .commands()
+        .expect("an install has commands");
+    commands.push(format!("net stop {SERVICE_NAME}"));
     commands.push(format!("net start {SERVICE_NAME}"));
     commands
 }
@@ -324,7 +319,7 @@ impl Fixer {
             },
             Fix::UseLocal(local) => (
                 commands(CommandFix::UseLocal),
-                FixWork::UseLocal(local.program.clone()),
+                FixWork::Commands(use_local_commands(&local.program)),
             ),
             Fix::Update => (setup(SetupFix::Update), FixWork::FindSetup),
             Fix::OpenServices => return None,
@@ -507,23 +502,19 @@ mod tests {
         assert!(fix.start(&Fix::Update).is_some());
     }
 
-    /// cmd runs these lines, and no other test runs them: a path with
-    /// spaces must stay quoted, and a copy onto the program itself fails.
+    /// cmd runs these lines, and no other test runs them: `install` must
+    /// come before the stop, so that a failed `install` leaves the service
+    /// running.
     #[test]
-    fn use_local_copies_only_over_another_program() {
-        let local = Path::new(r"C:\Gozler\gozlerd.exe");
-        let registered = Path::new(r"C:\Program Files\Gozler\gozlerd.exe");
+    fn use_local_installs_then_restarts_the_service() {
         assert_eq!(
-            use_local_commands(local, Some(registered)),
+            use_local_commands(Path::new(r"C:\Source\goz\target\debug\gozlerd.exe")),
             [
+                r#"pushd "C:\Source\goz\target\debug""#,
+                r".\gozlerd.exe install",
                 "net stop gozler",
-                r#"(copy /y "C:\Gozler\gozlerd.exe" "C:\Program Files\Gozler\gozlerd.exe" >nul || (ping -n 3 127.0.0.1 >nul & copy /y "C:\Gozler\gozlerd.exe" "C:\Program Files\Gozler\gozlerd.exe" >nul))"#,
                 "net start gozler",
             ]
-        );
-        assert_eq!(
-            use_local_commands(local, None),
-            ["net stop gozler", "net start gozler"]
         );
     }
 

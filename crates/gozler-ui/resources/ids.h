@@ -277,6 +277,7 @@
 #define IDC_SPEED_DELETE_WORKERS 3234
 #define IDC_SPEED_PER_PROCESSOR 3235
 #define IDC_SPEED_RESTORE 3236
+#define IDC_SPEED_DELETE_GROUP 3237
 
 // The File operations window, a window of its own beside the main one:
 // the card of the running operation, then the queue and Hide.

@@ -11,7 +11,7 @@ use super::indexed_folders::IndexedFolders;
 use super::main_window::MainWindow;
 use super::status_bar::StatusBar;
 use crate::core::captions::{
-    self, DialogCaptions, DialogItem, IndexCaptions, SETTINGS_GROUPS, failure_text,
+    self, ButtonIcon, DialogCaptions, DialogItem, IndexCaptions, SETTINGS_GROUPS, failure_text,
 };
 use crate::core::commands::{CommandId, Keystroke};
 use crate::core::glyph::Glyph;
@@ -900,9 +900,12 @@ impl<'a> SettingsDialog<'a> {
         if let Some(apply) = dialog::item(dialog, ControlId::SettingsApply.id()) {
             apply.set_enabled(changed);
         }
-        for button in [DialogItem::Ok.id(), ControlId::SettingsApply.id()] {
+        for (button, key) in [
+            (DialogItem::Ok.id(), "button.ok"),
+            (ControlId::SettingsApply.id(), "settings.apply"),
+        ] {
             if let Some(button) = Button::of_dialog(dialog, button) {
-                button.set_shield(include_changed);
+                button.set_icon(ButtonIcon::of(key, include_changed));
             }
         }
     }
@@ -1036,7 +1039,7 @@ impl<'a> SettingsDialog<'a> {
             }
             if let Some(fix) = fix {
                 hwnd.set_text(&fix.label);
-                button.set_shield(fix.shield);
+                button.set_icon(fix.icon);
                 hwnd.set_enabled(fix.enabled);
                 if let Some(tips) = self.index_tips.get() {
                     tips.set(hwnd, fix.tooltip.as_deref().unwrap_or_default());
@@ -1150,16 +1153,38 @@ impl<'a> SettingsDialog<'a> {
                 for failure in &applied.failures {
                     win::dialog::error_box(Some(dialog), failure, title);
                 }
-                if edited.choices.show_icons != last.choices.show_icons {
-                    // The page list's rows and the group captions follow.
+                let icons_changed = edited.choices.show_icons != last.choices.show_icons;
+                if icons_changed {
+                    // The page list's rows, the group captions and the
+                    // buttons follow.
                     if let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) {
                         list.fit_glyph_rows();
                     }
+                    self.show_button_glyphs(dialog);
+                    self.refresh_index(dialog);
                     dialog.draw_once_after(|| {});
                 }
                 self.show_preview();
                 self.update_apply(dialog);
+                if icons_changed {
+                    let width = dialog::size_buttons(dialog, &self.later_captions());
+                    self.buttons_sized(dialog, width);
+                }
                 saved
+            }
+        }
+    }
+
+    /// Gives the push buttons of the dialog and its pages their icons, as
+    /// they show while icons show or are hidden.
+    fn show_button_glyphs(&self, dialog: Hwnd) {
+        dialog::show_glyphs(
+            dialog,
+            &DialogCaptions::new(DialogId::Settings, &self.strings),
+        );
+        for page in SettingsPage::ALL {
+            if let Some(hwnd) = self.page(page) {
+                dialog::show_glyphs(hwnd, &DialogCaptions::new(page.dialog(), &self.strings));
             }
         }
     }
@@ -1767,12 +1792,14 @@ impl DialogProc for SettingsDialog<'_> {
 
     /// Every caption the Service group's fix buttons can show, and OK and
     /// Apply with the shield, which they show while Include has changes.
+    /// Each of them shows an icon also without the shield while icons show.
     fn later_captions(&self) -> Vec<(String, bool)> {
+        let icons = self.draft.borrow().last_applied().choices.show_icons;
         Fix::label_groups()
             .into_iter()
             .flatten()
             .chain([("button.ok", true), ("settings.apply", true)])
-            .map(|(key, shielded)| (self.strings.text(key).to_owned(), shielded))
+            .map(|(key, shielded)| (self.strings.text(key).to_owned(), shielded || icons))
             .collect()
     }
 
