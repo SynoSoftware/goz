@@ -5,6 +5,7 @@
 //! (DESIGN.md: Copy).
 
 use gozler_core::proto::ResultItem;
+use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardFormat {
@@ -70,7 +71,10 @@ impl<'a> ClipboardData<'a> {
     /// Writes the format into `block`, which is [`len`](Self::len) bytes
     /// long. The text formats end in a NUL, and the file list in two.
     pub(crate) fn write_into(&self, block: &mut [u8]) {
-        assert_eq!(block.len(), self.len(), "the block is len() bytes long");
+        // Only in debug builds, because it walks every file once more. In
+        // release, a shorter block panics at the write past its end, and a
+        // longer one at the assert after the last write.
+        debug_assert_eq!(block.len(), self.len(), "the block is len() bytes long");
         let mut at = 0;
         if self.format.is_files() {
             let pfiles = DROPFILES_SIZE as u32;
@@ -124,29 +128,35 @@ impl<'a> ClipboardData<'a> {
 /// Calls `unit` with each UTF-16 unit of `part` of `file`'s path, from its
 /// exact units when its UTF-8 path lost an unpaired surrogate.
 fn path_units(file: &ResultItem, part: Part, unit: &mut impl FnMut(u16)) {
-    let encoded: Vec<u16>;
-    let path = match &file.path_u16 {
-        Some(units) => units,
+    match &file.path_u16 {
+        Some(units) => units[part_of(units, part)].iter().copied().for_each(unit),
         None => {
-            encoded = file.path.encode_utf16().collect();
-            &encoded
+            let path = file.path.as_str();
+            path[part_of(path.as_bytes(), part)]
+                .encode_utf16()
+                .for_each(unit);
         }
-    };
-    let last = path.iter().rposition(|&u| u == BACKSLASH);
-    let part = match (part, last) {
-        (Part::Full, _) | (Part::Name, None) => path,
-        (Part::Name, Some(i)) => &path[i + 1..],
-        (Part::Folder, _) => folder_of(path),
-    };
-    part.iter().copied().for_each(unit);
+    }
+}
+
+/// Where `part` lies in `path`, whose units are UTF-16 or UTF-8: a
+/// backslash and a colon are one unit in both, and in UTF-8 no other
+/// character holds their byte, so the range ends between characters.
+fn part_of<T: Copy + Into<u32>>(path: &[T], part: Part) -> Range<usize> {
+    let last = path.iter().rposition(|&u| u.into() == u32::from(BACKSLASH));
+    match (part, last) {
+        (Part::Full, _) | (Part::Name, None) => 0..path.len(),
+        (Part::Name, Some(i)) => i + 1..path.len(),
+        (Part::Folder, _) => 0..folder_of(path).len(),
+    }
 }
 
 /// The folder that holds `path`, a drive's root with its backslash, as
 /// `C:\`; empty when `path` has no backslash.
-pub(crate) fn folder_of(path: &[u16]) -> &[u16] {
-    match path.iter().rposition(|&u| u == BACKSLASH) {
+pub(crate) fn folder_of<T: Copy + Into<u32>>(path: &[T]) -> &[T] {
+    match path.iter().rposition(|&u| u.into() == u32::from(BACKSLASH)) {
         None => &[],
-        Some(i) if i > 0 && path[i - 1] == COLON => &path[..=i],
+        Some(i) if i > 0 && path[i - 1].into() == u32::from(COLON) => &path[..=i],
         Some(i) => &path[..i],
     }
 }
@@ -202,6 +212,18 @@ mod tests {
         assert_eq!(
             text(&written(ClipboardFormat::Names, &three())),
             "report.txt\r\ndocs\r\na b.pdf\0"
+        );
+    }
+
+    /// Copy folder slices each path where its last backslash is, also in
+    /// UTF-8, and a drive's root keeps its backslash, because `D:` alone
+    /// names the current folder of drive D.
+    #[test]
+    fn copy_folder_gives_the_folder_of_each_entry() {
+        let files = [file(r"C:\Ünï\é.txt"), file(r"D:\a b.pdf")];
+        assert_eq!(
+            text(&written(ClipboardFormat::Folders, &files)),
+            "C:\\Ünï\r\nD:\\\0"
         );
     }
 

@@ -12,9 +12,9 @@ use std::ops::Range;
 /// (DESIGN.md: Commands).
 pub(crate) const OPEN_LIMIT: usize = 15;
 
-/// A drag holds at most this many entries, because the shell reads each
-/// one's entry from the disk before the drag starts, about 1.5 ms each on a
-/// slow laptop, and the window waits for it (DESIGN.md: Dragging).
+/// A drag holds at most this many entries, because the window names each
+/// one and builds the shell's data object on its thread before the drag
+/// starts, and Edit > Copy has no limit (DESIGN.md: Dragging).
 pub(crate) const DRAG_LIMIT: usize = 1_000;
 
 #[derive(Debug, PartialEq)]

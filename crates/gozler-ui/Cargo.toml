@@ -30,6 +30,7 @@ serde_json.workspace = true
 [target.'cfg(windows)'.dependencies]
 gozler-winfs = { path = "../gozler-winfs" }
 windows.workspace = true
+windows-core.workspace = true
 
 [build-dependencies]
 embed-resource.workspace = true

@@ -96,6 +96,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# ui: `#[windows::core::implement]` expands to `::windows_core` paths, so the
+# window, which implements a COM interface for the shell, names it itself.
+windows-core = "0.62"
 # Compiles the window's .rc file with the Windows SDK's rc.exe.
 embed-resource = "3"
 parking_lot = "0.12"

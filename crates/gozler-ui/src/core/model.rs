@@ -1628,9 +1628,11 @@ impl Column {
 }
 
 /// Whether a delete or a move has taken `row`'s entry, by its exact name
-/// when its UTF-8 path lost an unpaired surrogate.
+/// when its UTF-8 path lost an unpaired surrogate. The window asks for every
+/// cell it paints and every selected file, so an empty set answers before
+/// the path is encoded.
 fn is_taken(taken: &Taken, row: &ResultItem) -> bool {
-    taken.contains(&wide_path(row))
+    !taken.is_empty() && taken.contains(&wide_path(row))
 }
 
 #[cfg(test)]

@@ -4,16 +4,21 @@
 //! keeps in the registry.
 
 use super::Hwnd;
+use crate::core::selection::wide_path;
+use gozler_core::proto::ResultItem;
+use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, HANDLE, HWND, WAIT_OBJECT_0,
-    WAIT_TIMEOUT, WIN32_ERROR,
+    CloseHandle, E_POINTER, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FILETIME, HANDLE,
+    HWND, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
 };
-use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, GetVolumeInformationW, WIN32_FIND_DATAW,
+};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-    CoInitializeEx, CoTaskMemFree, IBindCtx, IDataObject,
+    CoInitializeEx, CoTaskMemFree, CreateBindCtx, IBindCtx, IDataObject,
 };
 use windows::Win32::System::Ole::{
     DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource, OleInitialize,
@@ -27,16 +32,15 @@ use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOTESTFILECREATE,
     FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileOpenDialog,
-    IFileSaveDialog, ILClone, ILCreateFromPathW, ILFindLastID, ILFree, ILIsParent, ILRemoveLastID,
-    IShellItem, KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject,
-    SHCreateItemFromParsingName, SHDoDragDrop, SHELLEXECUTEINFOW, SHGetKnownFolderPath,
-    SHOP_FILEPATH, SHObjectProperties, SHOpenFolderAndSelectItems, SHParseDisplayName,
-    SIGDN_FILESYSPATH, ShellExecuteExW, ShellExecuteW,
+    IFileSaveDialog, IFileSystemBindData, IFileSystemBindData_Impl, ILClone, ILCreateFromPathW,
+    ILFindLastID, ILFree, ILIsParent, ILRemoveLastID, IShellItem, KF_FLAG_DEFAULT,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject, SHCreateItemFromParsingName,
+    SHDoDragDrop, SHELLEXECUTEINFOW, SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties,
+    SHOpenFolderAndSelectItems, SHParseDisplayName, SIGDN_FILESYSPATH, STR_FILE_SYS_BIND_DATA,
+    ShellExecuteExW, ShellExecuteW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    IDC_WAIT, LoadCursorW, SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL, SetCursor,
-};
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL};
+use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
 
 /// Starts COM on this thread in the apartment model, which the shell's
 /// dialogs and `ShellExecuteW` need.
@@ -53,37 +57,105 @@ pub(crate) fn initialize_ole() {
     let _ = unsafe { OleInitialize(None) };
 }
 
-/// Drags `paths`, each UTF-16 without a NUL, as File Explorer drags its
-/// selection: the shell's own data object, so a drop target gets the files
-/// and the shell's item list, with Explorer's drag image, and the target
-/// copies, moves or links them. Returns when the drop ends, with the first
-/// path that the shell could not name, such as one that no longer exists;
-/// the others are dragged.
-pub(crate) fn drag(paths: &[Vec<u16>]) -> Option<Vec<u16>> {
-    // Naming each path reads the file system, which takes a moment for many.
-    // SAFETY: a system cursor, which is never freed.
-    if let Ok(wait) = unsafe { LoadCursorW(None, IDC_WAIT) } {
-        // SAFETY: as above.
-        unsafe { SetCursor(Some(wait)) };
+/// One entry as the index holds it, which the shell reads through
+/// `STR_FILE_SYS_BIND_DATA` instead of reading the entry from the disk.
+#[windows::core::implement(IFileSystemBindData)]
+struct FindData(Cell<WIN32_FIND_DATAW>);
+
+impl IFileSystemBindData_Impl for FindData_Impl {
+    fn SetFindData(&self, data: *const WIN32_FIND_DATAW) -> windows::core::Result<()> {
+        if data.is_null() {
+            return Err(E_POINTER.into());
+        }
+        // SAFETY: the caller passes one find data, checked not to be null.
+        self.0.set(unsafe { *data });
+        Ok(())
     }
+
+    fn GetFindData(&self, data: *mut WIN32_FIND_DATAW) -> windows::core::Result<()> {
+        if data.is_null() {
+            return Err(E_POINTER.into());
+        }
+        // SAFETY: the caller passes a buffer for one find data, checked not
+        // to be null.
+        unsafe { *data = self.0.get() };
+        Ok(())
+    }
+}
+
+/// What `FindFirstFileW` would report for `file`, from what its row holds;
+/// a size or a date the row lacks is 0.
+fn find_data(file: &ResultItem, path: &[u16]) -> WIN32_FIND_DATAW {
+    let mut attributes = file.attributes.map_or(0, |a| a.bits());
+    if file.is_dir {
+        attributes |= FILE_ATTRIBUTE_DIRECTORY.0;
+    }
+    if attributes == 0 {
+        attributes = FILE_ATTRIBUTE_NORMAL.0;
+    }
+    // A folder's size in the row is the sum of its files; Windows gives 0.
+    let size = if file.is_dir {
+        0
+    } else {
+        file.size.unwrap_or(0)
+    };
+    let modified = file.mtime_ft.unwrap_or(0) as u64;
+    let mut data = WIN32_FIND_DATAW {
+        dwFileAttributes: attributes,
+        ftLastWriteTime: FILETIME {
+            dwLowDateTime: modified as u32,
+            dwHighDateTime: (modified >> 32) as u32,
+        },
+        nFileSizeHigh: (size >> 32) as u32,
+        nFileSizeLow: size as u32,
+        ..Default::default()
+    };
+    let last = path.iter().rposition(|&u| u == u16::from(b'\\'));
+    let name = &path[last.map_or(0, |i| i + 1)..];
+    // The last unit stays the NUL; an NTFS or ReFS name always fits.
+    let length = name.len().min(data.cFileName.len() - 1);
+    data.cFileName[..length].copy_from_slice(&name[..length]);
+    data
+}
+
+/// Drags `files` as File Explorer drags its selection: the shell's own data
+/// object, so a drop target gets the files and the shell's item list, with
+/// Explorer's drag image, and the target copies, moves or links them.
+/// Returns when the drop ends, with the first path that the shell could not
+/// name, such as one on a drive that is gone; the others are dragged.
+///
+/// Each path is named from what its row holds, without reading the disk, so
+/// an entry deleted since the search is dragged too, and the drop target
+/// reports it, as it does for any stale item.
+pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
+    let found: IFileSystemBindData = FindData(Cell::new(WIN32_FIND_DATAW::default())).into();
+    // SAFETY: plain COM calls on the window's thread, whose apartment
+    // `initialize_com` started; the context holds its own reference.
+    let context = unsafe {
+        CreateBindCtx(0).and_then(|context| {
+            context.RegisterObjectParam(STR_FILE_SYS_BIND_DATA, &found.cast::<IUnknown>()?)?;
+            Ok(context)
+        })
+    };
+    let Ok(context) = context else {
+        return None;
+    };
     let mut missing = None;
-    let mut lists = Vec::with_capacity(paths.len());
-    for path in paths {
+    let mut lists = Vec::with_capacity(files.len());
+    for file in files {
+        let path = wide_path(file);
         let mut list = std::ptr::null_mut();
-        // SAFETY: the path outlives the call, which writes `list`.
+        // SAFETY: the find data and the path outlive the calls; the second
+        // writes `list`.
         let named = unsafe {
-            SHParseDisplayName(
-                &HSTRING::from_wide(path),
-                None::<&IBindCtx>,
-                &mut list,
-                0,
-                None,
-            )
+            found.SetFindData(&find_data(file, &path)).and_then(|()| {
+                SHParseDisplayName(&HSTRING::from_wide(&path), &context, &mut list, 0, None)
+            })
         };
         if named.is_ok() && !list.is_null() {
             lists.push(list);
         } else {
-            missing.get_or_insert_with(|| path.clone());
+            missing.get_or_insert(path);
         }
     }
     let Some(&first) = lists.first() else {
@@ -713,4 +785,40 @@ pub(crate) fn run_as_administrator_and_wait(
     start_as_administrator(PromptOwner::new(owner), program, parameters)?
         .wait(ELEVATED_WAIT_MS)?
         .ok_or_else(|| io::ErrorKind::TimedOut.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The drop target copies what the find data says: a folder without
+    /// the folder attribute would be copied as a file, and a folder's
+    /// summed size would be taken for its own.
+    #[test]
+    fn find_data_names_a_folder_as_a_folder_and_a_file_with_its_row() {
+        let row = |path: &str, is_dir| ResultItem {
+            path: path.to_owned(),
+            path_u16: None,
+            size: Some(0x1_0000_0002),
+            mtime_ft: Some(0x0123_4567_89AB_CDEF),
+            is_dir,
+            attributes: None,
+        };
+        let data = |file: &ResultItem| find_data(file, &wide_path(file));
+        let folder = data(&row(r"C:\docs", true));
+        assert_eq!(folder.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY.0);
+        assert_eq!((folder.nFileSizeHigh, folder.nFileSizeLow), (0, 0));
+        let file = data(&row(r"C:\docs\Ünï.txt", false));
+        assert_eq!(file.dwFileAttributes, FILE_ATTRIBUTE_NORMAL.0);
+        assert_eq!((file.nFileSizeHigh, file.nFileSizeLow), (1, 2));
+        assert_eq!(
+            (
+                file.ftLastWriteTime.dwHighDateTime,
+                file.ftLastWriteTime.dwLowDateTime
+            ),
+            (0x0123_4567, 0x89AB_CDEF)
+        );
+        let name: Vec<u16> = "Ünï.txt\0".encode_utf16().collect();
+        assert_eq!(file.cFileName[..name.len()], name[..]);
+    }
 }

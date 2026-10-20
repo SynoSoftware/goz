@@ -695,10 +695,22 @@ impl MatchedParts {
 struct Compared<'a> {
     raw: &'a str,
     text: std::borrow::Cow<'a, [u8]>,
-    /// Each character boundary of the raw text, with the length of the
-    /// compared text before it; `None` when every byte keeps its place: a
-    /// query that matches case, or ASCII text, which folds byte for byte.
-    boundaries: Option<Vec<(usize, usize)>>,
+    /// Each character boundary of the raw text, its end included; `None`
+    /// when every byte keeps its place: a query that matches case, or ASCII
+    /// text, which folds byte for byte.
+    boundaries: Option<Vec<Boundary>>,
+}
+
+/// A character boundary of the raw text, placed by the folded length of the
+/// whole text before it, because folding changes lengths and composes a
+/// letter with the marks after it. That length can shrink as the text
+/// grows, when a mark reorders and composes, so a boundary also holds the
+/// running maximum up to it and the minimum from it on, which never shrink
+/// and let a binary search find what a scan of every boundary finds.
+struct Boundary {
+    raw: usize,
+    most_up_to_here: usize,
+    least_from_here: usize,
 }
 
 impl<'a> Compared<'a> {
@@ -710,14 +722,28 @@ impl<'a> Compared<'a> {
                 boundaries: None,
             };
         }
-        // Folding can change a character's length, and composes a
-        // decomposed letter with its accent, so a boundary is mapped through
-        // the folded length of the whole text before it.
         let boundaries = (!raw.is_ascii()).then(|| {
-            raw.char_indices()
-                .map(|(i, _)| i)
-                .chain(std::iter::once(raw.len()))
-                .map(|i| (i, fold(&raw.as_bytes()[..i]).len()))
+            let lengths = crate::fold::folded_lengths(raw);
+            let mut least = usize::MAX;
+            let mut least_from: Vec<usize> = (lengths.iter().rev())
+                .map(|&(_, length)| {
+                    least = least.min(length);
+                    least
+                })
+                .collect();
+            least_from.reverse();
+            let mut most = 0;
+            lengths
+                .iter()
+                .zip(least_from)
+                .map(|(&(raw, length), least_from_here)| {
+                    most = most.max(length);
+                    Boundary {
+                        raw,
+                        most_up_to_here: most,
+                        least_from_here,
+                    }
+                })
                 .collect()
         });
         Self {
@@ -728,20 +754,19 @@ impl<'a> Compared<'a> {
     }
 
     /// The range of the raw text that `range` of the compared text came
-    /// from, widened to whole characters.
+    /// from, widened to whole characters: from the last boundary whose
+    /// folded length is at most `range.start` to the first whose folded
+    /// length is at least `range.end`.
     fn raw_range(&self, range: Range<usize>) -> Range<usize> {
         let Some(boundaries) = &self.boundaries else {
             return range;
         };
-        let start = boundaries
-            .iter()
-            .rev()
-            .find(|&&(_, at)| at <= range.start)
-            .map_or(0, |&(raw_at, _)| raw_at);
-        let end = boundaries
-            .iter()
-            .find(|&&(_, at)| at >= range.end)
-            .map_or(self.raw.len(), |&(raw_at, _)| raw_at);
+        // Past the last boundary at most `range.start`, every one is above it.
+        let start = boundaries.partition_point(|b| b.least_from_here <= range.start);
+        // Before the first boundary at least `range.end`, every one is below.
+        let end = boundaries.partition_point(|b| b.most_up_to_here < range.end);
+        let start = start.checked_sub(1).map_or(0, |i| boundaries[i].raw);
+        let end = boundaries.get(end).map_or(self.raw.len(), |b| b.raw);
         start..end.max(start)
     }
 }
@@ -2047,6 +2072,83 @@ mod tests {
             [r"docs\Para"]
         );
         assert_eq!(parts("*.pdf", TermMatch::Anywhere, pills), [".pdf"]);
+    }
+
+    /// Each character boundary of `raw` with the folded length of the whole
+    /// text before it, folded the slow way that assumes nothing about how
+    /// folded lengths grow.
+    fn every_boundary(raw: &str) -> Vec<(usize, usize)> {
+        raw.char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(raw.len()))
+            .map(|i| (i, crate::fold::fold(&raw.as_bytes()[..i]).len()))
+            .collect()
+    }
+
+    /// Maps a compared range back by a scan of `every_boundary`.
+    fn raw_range_by_scan(
+        raw: &str,
+        boundaries: &[(usize, usize)],
+        range: std::ops::Range<usize>,
+    ) -> std::ops::Range<usize> {
+        let start = boundaries
+            .iter()
+            .rev()
+            .find(|&&(_, at)| at <= range.start)
+            .map_or(0, |&(raw_at, _)| raw_at);
+        let end = boundaries
+            .iter()
+            .find(|&&(_, at)| at >= range.end)
+            .map_or(raw.len(), |&(raw_at, _)| raw_at);
+        start..end.max(start)
+    }
+
+    /// Checks [`Compared::raw_range`] against the slow mapping for every
+    /// start and every end a range of `raw`'s folded text can have; a range
+    /// maps each end on its own.
+    fn assert_raw_range_agrees(raw: &str) {
+        let compared = Compared::new(raw, false);
+        let boundaries = every_boundary(raw);
+        let len = compared.text.len();
+        for range in (0..=len).map(|at| at..len).chain((0..=len).map(|at| 0..at)) {
+            assert_eq!(
+                compared.raw_range(range.clone()),
+                raw_range_by_scan(raw, &boundaries, range.clone()),
+                "{raw:?} {range:?}"
+            );
+        }
+    }
+
+    /// The folded length of a prefix can shrink as the prefix grows: `o`
+    /// with U+0304 and U+0323 folds to `ọ` and U+0304, and U+0328 after them
+    /// reorders the marks and composes `ǭ`, which is shorter. A mapping that
+    /// assumed otherwise bolded two marks before ` report`.
+    #[test]
+    fn raw_range_agrees_where_a_mark_reorders_and_composes() {
+        for letter in ["o\u{0304}\u{0323}", "\u{014D}\u{0323}", "\u{1ECD}\u{0304}"] {
+            assert_raw_range_agrees(&format!("M{letter}\u{0328} report.txt"));
+        }
+    }
+
+    /// Letters that fold to another length, letters and marks that compose
+    /// or reorder, `o` and its marks among them, Hangul jamo that compose
+    /// into one syllable, and a backslash and ASCII between them.
+    const FOLDED_CHARACTERS: &str = "aoE\\ éÉİßẞΣΩЙἀK\u{212A}\u{014D}\u{1ECD}\u{01ED}\u{0301}\
+        \u{0304}\u{0306}\u{0308}\u{0323}\u{0328}\u{0345}\u{1100}\u{1161}\u{11A8}\u{AC00}\
+        \u{0B47}\u{0B3E}\u{1D15E}😀";
+
+    proptest! {
+        /// A mapping that differs from folding every prefix bolds the wrong
+        /// characters of a name.
+        #[test]
+        fn raw_range_agrees_with_mapping_every_boundary(
+            characters in prop::collection::vec(
+                prop::sample::select(FOLDED_CHARACTERS.chars().collect::<Vec<_>>()),
+                1..40,
+            ),
+        ) {
+            assert_raw_range_agrees(&characters.into_iter().collect::<String>());
+        }
     }
 
     /// A regular expression matches anywhere in the name unless it anchors,

@@ -25,10 +25,16 @@ impl Taken {
         self.0.insert(folded(&units(path)));
     }
 
+    /// Whether no path is taken, which a caller checks before it encodes a
+    /// path for [`contains`](Self::contains).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Whether `path`, as UTF-16, equals or is below a taken path, compared
     /// as Windows compares names, ignoring case.
     pub fn contains(&self, path: &[u16]) -> bool {
-        if self.0.is_empty() {
+        if self.is_empty() {
             return false;
         }
         let mut path = folded(path);

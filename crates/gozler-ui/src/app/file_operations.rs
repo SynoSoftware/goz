@@ -151,6 +151,8 @@ struct Window {
     fonts: RefCell<Option<Fonts>>,
     layout: Cell<Layout>,
     meters: RefCell<HashMap<OperationId, Meter>>,
+    /// Each operation's [`file_operations::Operation::folder`].
+    folders: RefCell<HashMap<OperationId, Option<String>>>,
     /// The operations the window has shown, so a new one shows the window.
     known: RefCell<HashSet<OperationId>>,
     /// What the window shows now.
@@ -209,6 +211,7 @@ impl FileOperations {
             fonts: RefCell::new(None),
             layout: Cell::new(Layout::default()),
             meters: RefCell::new(HashMap::new()),
+            folders: RefCell::new(HashMap::new()),
             known: RefCell::new(HashSet::new()),
             view: RefCell::new(None),
             selected: Cell::new(None),
@@ -612,20 +615,30 @@ impl Window {
                 }
             }
         }
-        let operations: Vec<file_operations::Operation> = entries
-            .iter()
-            .map(|entry| file_operations::Operation {
-                id: entry.id,
-                request: &entry.request,
-                state: &entry.state,
-            })
-            .collect();
-        let view = file_operations::view(
-            &self.strings.borrow(),
-            &*self.numbers.borrow(),
-            &operations,
-            &self.meters.borrow(),
-        );
+        let view = {
+            let mut folders = self.folders.borrow_mut();
+            folders.retain(|id, _| entries.iter().any(|entry| entry.id == *id));
+            for entry in &entries {
+                folders
+                    .entry(entry.id)
+                    .or_insert_with(|| file_operations::sources_folder(&entry.request));
+            }
+            let operations: Vec<file_operations::Operation> = entries
+                .iter()
+                .map(|entry| file_operations::Operation {
+                    id: entry.id,
+                    request: &entry.request,
+                    state: &entry.state,
+                    folder: folders[&entry.id].as_deref(),
+                })
+                .collect();
+            file_operations::view(
+                &self.strings.borrow(),
+                &*self.numbers.borrow(),
+                &operations,
+                &self.meters.borrow(),
+            )
+        };
         let appeared = {
             let mut known = self.known.borrow_mut();
             let ids: HashSet<OperationId> = entries.iter().map(|entry| entry.id).collect();

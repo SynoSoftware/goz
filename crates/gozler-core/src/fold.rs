@@ -21,8 +21,8 @@
 
 use crate::wtf8::{CodePoints, encode_code_point};
 use smallvec::SmallVec;
-use unicode_normalization::UnicodeNormalization;
-use unicode_normalization::char::decompose_canonical;
+use unicode_normalization::char::{canonical_combining_class, decompose_canonical};
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// Folds `bytes` (WTF-8) into `out` (WTF-8), case-insensitively.
 pub fn fold_into(bytes: &[u8], out: &mut Vec<u8>) {
@@ -89,6 +89,53 @@ pub fn fold(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     fold_into(bytes, &mut out);
     out
+}
+
+/// Each character boundary of `text`, its end included, with the length of
+/// [`fold`] of the text before it.
+///
+/// Composition and the reordering of marks make that length differ from the
+/// sum of each character's folded length, and it can even shrink as the text
+/// grows. It is additive across a character that starts a segment, see
+/// [`starts_segment`], so each prefix is folded only from its segment's
+/// start, which keeps the work linear in the text for any real name.
+pub(crate) fn folded_lengths(text: &str) -> Vec<(usize, usize)> {
+    let mut scratch = Vec::new();
+    let mut folded = |part: &str| {
+        scratch.clear();
+        fold_into(part.as_bytes(), &mut scratch);
+        scratch.len()
+    };
+    let mut lengths = Vec::with_capacity(text.len() + 1);
+    // Where the current segment starts, and the folded length before it.
+    let (mut segment, mut before) = (0, 0);
+    for (at, c) in text.char_indices() {
+        if at > segment && starts_segment(c) {
+            before += folded(&text[segment..at]);
+            segment = at;
+        }
+        lengths.push((at, before + folded(&text[segment..at])));
+    }
+    lengths.push((text.len(), before + folded(&text[segment..])));
+    lengths
+}
+
+/// Whether `c` folds apart from the text before it: its decomposition,
+/// lowercased, starts with a starter that composes with nothing before it
+/// (combining class 0 and NFC quick check Yes). Neither composition nor the
+/// reordering of marks crosses such a starter.
+fn starts_segment(c: char) -> bool {
+    let first = |c: char| {
+        let mut first = None;
+        decompose_canonical(c, |d| {
+            first.get_or_insert(d);
+        });
+        first.unwrap_or(c)
+    };
+    // The lowercase can decompose again, as `compose_into` decomposes it.
+    let starter = first(lower_char(first(c)));
+    canonical_combining_class(starter) == 0
+        && is_nfc_quick(std::iter::once(starter)) == IsNormalized::Yes
 }
 
 /// Simple 1:1 lowercase of one scalar: the first scalar of the full lowercase

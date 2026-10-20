@@ -336,11 +336,24 @@ impl Results {
 
     /// The rows at `positions`, if the cache holds every one of them.
     pub(crate) fn cached_rows(&self, positions: &[Range<u64>]) -> Option<Vec<ResultItem>> {
-        positions
-            .iter()
-            .flat_map(Range::clone)
-            .map(|position| self.row(position).cloned())
-            .collect()
+        // Checked before any row is cloned, so Select all over more rows
+        // than the cache holds clones none of them.
+        let positions = positions.iter().flat_map(Range::clone);
+        if !positions
+            .clone()
+            .all(|position| self.row(position).is_some())
+        {
+            return None;
+        }
+        Some(
+            positions
+                .map(|position| {
+                    self.row(position)
+                        .cloned()
+                        .expect("the check above found every row")
+                })
+                .collect(),
+        )
     }
 
     /// The request for the rows at `positions`, from the first to the last,

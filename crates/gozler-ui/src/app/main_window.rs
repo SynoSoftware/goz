@@ -2780,29 +2780,31 @@ impl MainWindow {
     /// its own, once they are read (DESIGN.md: Dragging).
     fn drag_selected(&self, hwnd: Hwnd) {
         self.read_list_selection(hwnd);
-        let paths: Vec<Vec<u16>> = self
-            .selected_entries()
-            .into_iter()
-            .map(|entry| entry.path)
-            .collect();
-        if paths.len() > DRAG_LIMIT {
+        let selected = self.model.borrow().selected_files().map_or(0, <[_]>::len);
+        if selected > DRAG_LIMIT {
             let text = {
                 let numbers = self.numbers.borrow();
                 let count = |n: usize| numbers.integer(n as u64);
                 self.model.borrow().strings().format(
                     "message.drag_limit",
-                    &[&count(DRAG_LIMIT), &count(paths.len())],
+                    &[&count(DRAG_LIMIT), &count(selected)],
                 )
             };
             self.error_box(hwnd, &text);
             return;
         }
-        if paths.is_empty() {
+        if selected == 0 {
             return;
         }
-        // The drag runs its own message loop, so no borrow is held
-        // (DESIGN.md: window rule 1).
-        let missing = shell::drag(&paths);
+        // The drag runs its own message loop, so it gets its own copy of the
+        // files and no borrow is held (DESIGN.md: window rule 1).
+        let files = self
+            .model
+            .borrow()
+            .selected_files()
+            .unwrap_or_default()
+            .to_vec();
+        let missing = shell::drag(&files);
         self.report_missing(hwnd, missing);
     }
 

@@ -532,12 +532,16 @@ fn joined(folder: &str, name: &str) -> String {
     }
 }
 
-fn ends_of(strings: &Strings, request: &Request) -> Ends {
+fn ends_of(strings: &Strings, operation: &Operation) -> Ends {
     let entries = |sources: &[PathBuf]| match sources {
         [one] => text_of(one),
-        many => folder_of(strings, many, "file_operations.several_folders_inline"),
+        _ => folder_or(
+            strings,
+            operation.folder,
+            "file_operations.several_folders_inline",
+        ),
     };
-    match request {
+    match operation.request {
         Request::Copy {
             sources,
             destination,
@@ -568,37 +572,44 @@ fn ends_of(strings: &Strings, request: &Request) -> Ends {
     }
 }
 
-/// The folder that holds every one of `sources`, also of one, or the text
-/// `several` when they are on different drives or servers: "Several
-/// folders" on its own, or "several folders" inside a sentence.
-fn folder_of(strings: &Strings, sources: &[PathBuf], several: &str) -> String {
-    let paths: Vec<String> = sources.iter().map(|path| text_of(path)).collect();
-    common_folder(paths.iter().map(String::as_str))
-        .unwrap_or_else(|| strings.text(several).to_owned())
+/// The folder that holds every source of a copy, a move or a delete, also
+/// of one; `None` when they are on different drives or servers, and for a
+/// rename and a new folder.
+pub(crate) fn sources_folder(request: &Request) -> Option<String> {
+    match request {
+        Request::Copy { sources, .. }
+        | Request::Move { sources, .. }
+        | Request::Delete { sources } => {
+            let paths: Vec<String> = sources.iter().map(|path| text_of(path)).collect();
+            common_folder(paths.iter().map(String::as_str))
+        }
+        Request::Rename { .. } | Request::NewFolder { .. } => None,
+    }
+}
+
+/// `folder`, or the text `several` when the sources are on different drives
+/// or servers: "Several folders" on its own, or "several folders" inside a
+/// sentence.
+fn folder_or(strings: &Strings, folder: Option<&str>, several: &str) -> String {
+    folder.unwrap_or_else(|| strings.text(several)).to_owned()
 }
 
 /// Where the card says an operation reads and writes, which stays the same
 /// for the whole operation while the file line names each file: as
 /// [`ends_of`] says, except that a copy, a move and a delete read from the
 /// folder that holds their entries, also for one.
-fn card_ends(strings: &Strings, request: &Request) -> Ends {
-    match request {
-        Request::Copy {
-            sources,
-            destination,
-        }
-        | Request::Move {
-            sources,
-            destination,
-        } => Ends {
-            from: folder_of(strings, sources, "file_operations.several_folders"),
+fn card_ends(strings: &Strings, operation: &Operation) -> Ends {
+    let from = || folder_or(strings, operation.folder, "file_operations.several_folders");
+    match operation.request {
+        Request::Copy { destination, .. } | Request::Move { destination, .. } => Ends {
+            from: from(),
             to: Some(text_of(destination)),
         },
-        Request::Delete { sources } => Ends {
-            from: folder_of(strings, sources, "file_operations.several_folders"),
+        Request::Delete { .. } => Ends {
+            from: from(),
             to: None,
         },
-        _ => ends_of(strings, request),
+        _ => ends_of(strings, operation),
     }
 }
 
@@ -607,6 +618,10 @@ pub(crate) struct Operation<'a> {
     pub(crate) id: OperationId,
     pub(crate) request: &'a Request,
     pub(crate) state: &'a State,
+    /// [`sources_folder`] of `request`, which the window works out once per
+    /// operation, because the sources never change, and reading every one
+    /// of a large operation's on each refresh stalls the window.
+    pub(crate) folder: Option<&'a str>,
 }
 
 /// The window's view of `operations`, in the queue's order, with the speeds
@@ -751,7 +766,7 @@ fn card(
     speed: Option<Speed>,
 ) -> Card {
     let kind = kind_of(operation.request);
-    let ends = card_ends(strings, operation.request);
+    let ends = card_ends(strings, operation);
     let measure = measure_of(running);
     let moves_bytes = moves_bytes(running);
     let mut title = strings.text(kind.name).to_owned();
@@ -899,7 +914,7 @@ fn row(
     operations: &[Operation],
     speed: Option<Speed>,
 ) -> Option<Row> {
-    let ends = ends_of(strings, operation.request);
+    let ends = ends_of(strings, operation);
     let kind = kind_of(operation.request);
     let (detail, phase) = match &operation.state {
         State::Running(running) => {
@@ -945,7 +960,7 @@ fn row(
             let size = size_of_total(strings, numbers, operation.request, *total);
             let detail = match operations.iter().find(|other| other.id == *on) {
                 Some(other) => {
-                    let ends = ends_of(strings, other.request);
+                    let ends = ends_of(strings, other);
                     let place = match (other.request, ends.to) {
                         (Request::Copy { .. } | Request::Move { .. }, Some(to)) => to,
                         _ => ends.from,
@@ -1156,20 +1171,18 @@ pub(crate) fn conflict_question(
     prepared: &Prepared,
 ) -> Option<Choices> {
     let found = prepared.conflicts?;
-    let (key, sources, destination) = match request {
-        Request::Copy {
-            sources,
-            destination,
-        } => ("file_operations.conflict_copying", sources, destination),
-        Request::Move {
-            sources,
-            destination,
-        } => ("file_operations.conflict_moving", sources, destination),
+    let (key, destination) = match request {
+        Request::Copy { destination, .. } => ("file_operations.conflict_copying", destination),
+        Request::Move { destination, .. } => ("file_operations.conflict_moving", destination),
         Request::Delete { .. } | Request::Rename { .. } | Request::NewFolder { .. } => {
             return None;
         }
     };
-    let from = folder_of(strings, sources, "file_operations.several_folders_inline");
+    let from = folder_or(
+        strings,
+        sources_folder(request).as_deref(),
+        "file_operations.several_folders_inline",
+    );
     let to = text_of(destination);
     let items = prepared
         .total
