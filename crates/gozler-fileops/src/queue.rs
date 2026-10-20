@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use gozler_winfs::{Existing, create_folder, rename};
+use gozler_winfs::{Existing, create_folder, rename, system_time};
 
-use crate::conflicts::{Choice, Rule};
+use crate::conflicts::{Choice, Rule, Run};
 use crate::copy::{Copied, Copying, copy};
 use crate::delete::walk;
 use crate::io_threads::IoThreads;
@@ -47,9 +47,9 @@ struct Shared {
     /// The operations in the saved file. Its lock also orders the file's
     /// writes.
     saved: Mutex<BTreeMap<OperationId, Saved>>,
-    /// Set while the queue is dropped: a run that it cancels stays saved,
-    /// so it is offered as interrupted at the next start, which is the
-    /// truth.
+    /// Set when the queue closes or is dropped: a run that it cancels stays
+    /// saved, so it is offered as interrupted at the next start, which is
+    /// the truth, and keeps the files it was writing for Continue to resume.
     closing: AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -69,9 +69,9 @@ struct Operation {
     cancel: Arc<AtomicBool>,
     progress: Arc<Progress>,
     io: Arc<IoThreads>,
-    /// Continue's prepare: it submits with the interrupted run's choice as
-    /// soon as it is prepared.
-    continuing: Option<Option<Choice>>,
+    /// Continue's prepare: it submits with the interrupted run's choice and
+    /// start as soon as it is prepared.
+    continuing: Option<Rule>,
     /// It was submitted, so its sources are taken while it lives.
     submitted: bool,
 }
@@ -101,7 +101,7 @@ struct Start {
     work: Work,
     failures: Vec<Listed>,
     choice: Option<Choice>,
-    continuing: bool,
+    run: Run,
 }
 
 /// A submit for an operation that is not prepared: it does not exist, or
@@ -225,7 +225,8 @@ impl Queue {
     /// Continue: prepares and submits an interrupted operation again, with
     /// the settings and the choice it ran with. A file already at its final
     /// name, or for Keep both at one of its numbered names, with the
-    /// source's size and last write time is done.
+    /// source's size and last write time is done; one there that is not
+    /// done and was created since the operation first ran is resumed.
     pub fn resume(&self, id: OperationId) -> Result<(), NotInterrupted> {
         {
             let mut operations = self.shared.lock();
@@ -233,7 +234,12 @@ impl Queue {
             let Phase::Interrupted(restored) = &operation.phase else {
                 return Err(NotInterrupted);
             };
-            operation.continuing = Some(restored.choice);
+            operation.continuing = Some(Rule {
+                choice: restored.choice,
+                run: Run::Continue {
+                    started: restored.started,
+                },
+            });
             operation.phase = Phase::Preparing;
         }
         Shared::prepare(&self.shared, id);
@@ -290,13 +296,28 @@ impl Queue {
     pub fn taken(&self) -> Arc<Taken> {
         Arc::clone(&self.shared.lock().taken)
     }
-}
 
-impl Drop for Queue {
-    fn drop(&mut self) {
+    /// Exit: stops every operation so that Continue can finish it at the
+    /// next start, and returns at once; the window then ends the process
+    /// without dropping the queue. `CopyFile2` deletes what it wrote when
+    /// it is stopped, so a file the Windows engine is copying goes on until
+    /// the process ends, which leaves it at its final name. Every operation
+    /// that runs is already in the saved file.
+    pub fn close(&self) {
         self.shared.closing.store(true, Ordering::Relaxed);
         for operation in self.shared.lock().by_id.values() {
             operation.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Stops every operation as [`Queue::close`] does, cancels the Windows calls
+/// its threads wait in, and waits for each to end. A file the Windows engine
+/// is copying is then finished, or lost where that cancel stops it.
+impl Drop for Queue {
+    fn drop(&mut self) {
+        self.close();
+        for operation in self.shared.lock().by_id.values() {
             operation.io.cancel();
         }
         loop {
@@ -358,7 +379,11 @@ impl Shared {
         let thread = Arc::clone(shared);
         shared.spawn(move || {
             let entered = io.enter();
-            let prepared = prepare(&request, &settings, continuing, &cancel);
+            let first = Rule {
+                choice: None,
+                run: Run::First { started: None },
+            };
+            let prepared = prepare(&request, &settings, continuing.unwrap_or(first), &cancel);
             drop(entered);
             let starts = {
                 let mut operations = thread.lock();
@@ -379,7 +404,7 @@ impl Shared {
                         return;
                     }
                     Ok(ready) => match continuing {
-                        Some(choice) => thread.enqueue(&mut operations, id, ready, choice),
+                        Some(rule) => thread.enqueue(&mut operations, id, ready, rule.choice),
                         None => {
                             operation.phase = Phase::Prepared(Box::new(ready));
                             Vec::new()
@@ -410,7 +435,7 @@ impl Shared {
                 work: ready.work,
                 failures: ready.failures,
                 choice,
-                continuing: operation.continuing.is_some(),
+                run: (operation.continuing).map_or(Run::First { started: None }, |rule| rule.run),
             }),
             order,
             on: None,
@@ -468,7 +493,7 @@ impl Shared {
 
     /// Runs each started operation on its own thread.
     fn start(self: &Arc<Self>, starts: Vec<(OperationId, Box<Start>)>) {
-        for (id, start) in starts {
+        for (id, mut start) in starts {
             let (request, settings, cancel, progress, io) = {
                 let operations = self.lock();
                 let operation = &operations.by_id[&id];
@@ -480,14 +505,29 @@ impl Shared {
                     Arc::clone(&operation.io),
                 )
             };
+            // Before the run writes its first file, and before its thread
+            // starts, so a queue that Exit closes has saved every operation
+            // that runs.
+            let started = match start.run {
+                Run::Continue {
+                    started: Some(started),
+                } => started,
+                Run::First { .. } => {
+                    let started = system_time();
+                    start.run = Run::First {
+                        started: Some(started),
+                    };
+                    started
+                }
+                Run::Continue { started: None } => system_time(),
+            };
+            if let Some(saved) = Saved::new(&request, start.choice, started, &settings) {
+                self.save(id, saved);
+            }
             let shared = Arc::clone(self);
             self.spawn(move || {
                 let _entered = io.enter();
-                // Before the run changes its first file.
-                if let Some(saved) = Saved::new(&request, start.choice, &settings) {
-                    shared.save(id, saved);
-                }
-                let outcome = run(*start, &settings, &cancel, &progress, &io);
+                let outcome = run(*start, &settings, &cancel, &shared.closing, &progress, &io);
                 if !shared.closing.load(Ordering::Relaxed) {
                     shared.unsave(id);
                 }
@@ -544,6 +584,7 @@ fn run(
     start: Start,
     settings: &SpeedSettings,
     cancel: &AtomicBool,
+    closing: &AtomicBool,
     progress: &Progress,
     io: &IoThreads,
 ) -> Outcome {
@@ -551,9 +592,9 @@ fn run(
         work,
         mut failures,
         choice,
-        continuing,
+        run,
     } = start;
-    let rule = Rule { choice, continuing };
+    let rule = Rule { choice, run };
     let mut disk_full = false;
     let mut ring = RingCounts::default();
     match work {
@@ -563,22 +604,24 @@ fn run(
             let workers = settings.delete_workers.get();
             failures.extend(walk::delete(entries, workers, cancel, progress, io));
         }
-        Work::Transfer(transfer) => match run_transfer(transfer, rule, cancel, progress, io) {
-            Ok(copied) => {
-                failures.extend(copied.listed);
-                disk_full = copied.disk_full;
-                ring = copied.ring;
+        Work::Transfer(transfer) => {
+            match run_transfer(transfer, rule, cancel, closing, progress, io) {
+                Ok(copied) => {
+                    failures.extend(copied.listed);
+                    disk_full = copied.disk_full;
+                    ring = copied.ring;
+                }
+                Err(end) => {
+                    return Outcome {
+                        end,
+                        items: progress.items(),
+                        bytes: progress.bytes(),
+                        listed: failures,
+                        ring,
+                    };
+                }
             }
-            Err(end) => {
-                return Outcome {
-                    end,
-                    items: progress.items(),
-                    bytes: progress.bytes(),
-                    listed: failures,
-                    ring,
-                };
-            }
-        },
+        }
         Work::Rename {
             path,
             from,
@@ -624,6 +667,7 @@ fn run_transfer(
     transfer: Transfer,
     rule: Rule,
     cancel: &AtomicBool,
+    closing: &AtomicBool,
     progress: &Progress,
     io: &IoThreads,
 ) -> Result<Copied, End> {
@@ -665,7 +709,7 @@ fn run_transfer(
         let arrived =
             names.get(name).is_some() || (keep_both && (numbered(false) || numbered(true)));
         drop(names);
-        if moving && rule.continuing && arrived {
+        if moving && !matches!(rule.run, Run::First { .. }) && arrived {
             progress.add_items(1);
         } else {
             listed.push(failure(&path, ERROR_FILE_NOT_FOUND));
@@ -691,6 +735,7 @@ fn run_transfer(
             moving,
             target: target_volume,
             cancel,
+            closing,
             progress,
             io,
         };

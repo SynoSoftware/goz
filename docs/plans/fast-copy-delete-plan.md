@@ -1,13 +1,15 @@
 # Plan: the copy, move and delete engine
 
-Builds [the engine spec](fast-copy-delete-spec.md) in four stages, A to D,
-before any stage of [the file manager](file-manager-spec.md). The panels then
-build on the engine's real interface and measured numbers.
+Builds [the engine spec](fast-copy-delete-spec.md) in stages A to F, before
+any stage of [the file manager](file-manager-spec.md). The panels then build
+on the engine's real interface and measured numbers.
 
 ## Schedule
 
-**Not started.** The owner reviews this plan, the spec and the research
-record first (2026-10-19).
+Stages A to D are committed (3155fbc, 913eab6, 06ef84b, 155ab06). Stage E
+is reviewed and commits next; stage F follows it, for the File operations
+window that gozler-ui builds beside it. "After install" waits for the
+owner.
 
 ## How every stage runs
 
@@ -15,7 +17,7 @@ These follow `AGENTS.md` ("Writing a plan"), which records why the window's
 stages took about 2 hours each and the es superset's features about 25
 minutes each.
 
-- **One implementer** keeps its context through stages A to D and fixes the
+- **One implementer** keeps its context through stages A to F and fixes the
   review's findings. The reviewer reads the diff against the spec and
   reports; the implementer fixes and builds once; the reviewer rechecks the
   fixes by reading.
@@ -75,7 +77,7 @@ Build:
   cancel; create a folder from a template; free space; seek penalty and bus
   type.
 - `gozler-fileops`: "Copy" with "The Windows engine", "Move", "Conflicts",
-  temporary names (D10), links (D21), and the rest of "The interface": the
+  the final names (D10), links (D21), and the rest of "The interface": the
   queue's waits (D14) and taken entries, saved operations with Continue and
   Dismiss (D19), rename, new folder and measure; the presets that use only
   the Windows engine.
@@ -162,6 +164,53 @@ Done when:
   with has its cause found and fixed in stage A, B or C, or is written into
   the spec with the reason it stays.
 
+## Stage E: final names and resume
+
+Build D10 as the spec now has it (owner ruling, 2026-10-19): both engines
+write straight to the final name, Replace on the ring writes over the file
+with the compare, and Continue resumes an unfinished file on the ring from
+the first block that differs. Which file is unfinished follows "Saved
+operations". Remove the temporary name and everything only it used. A
+normal copy gains no work.
+
+Run once: end a process during a large `CopyFile2` copy and read what the
+destination keeps; answer `CopyFile2`'s progress callback with STOP, CANCEL
+and PAUSE. Measure with stage D's program, its fixtures divided by 5 (owner):
+the small-file copy and the large file in both engines, against stage D per
+file and per MB, and the compare's speed against a copy.
+
+Done when: the stage E rows of "Tests" pass, each failing on the code
+before its fix; the run-once results and the numbers are in the spec and
+`docs/BENCHMARKS.md`; `check.ps1` is green outside crates other sessions
+are editing.
+
+## Stage F: progress and order for the File operations window
+
+The window in gozler-ui shows the running operation's current file and
+two bars, Pause and Resume, and the waiting operations in the order they
+will run, which the person can change. The engine gives it, as agreed with
+the window's session on 2026-10-20:
+
+- `Queue::operations()`: every operation with its request and state, the
+  running ones first, then the waiting ones in run order, then the rest; a
+  running operation carries its counts and totals, whether it only renames,
+  whether it is paused, and its current file with that file's bytes done
+  and size (the file most recently started; for a delete, the entry being
+  deleted).
+- `Queue::set_paused`: the ring stops between blocks, delete workers
+  between items, `CopyFile2` inside its progress callback. Cancel and
+  `close()` work while paused, and a paused operation still makes others
+  wait.
+- `Queue::move_waiting` and `Queue::check_move`, one check: a waiting
+  operation moves before another or last, refused with the operation it
+  overlaps (D14) and the side it must stay on. Only the disk rule's order
+  really changes; after a move every wait is decided again.
+- The window's Exit calls `Queue::close()` and ends the process without
+  dropping the queue, so `CopyFile2` keeps its file (What a stopped
+  operation leaves).
+
+Done when: the stage F rows of "Tests" pass and `check.ps1` is green.
+
 ## Tests
 
 Each test watches a failure that the compiler and the other tests miss.
@@ -177,12 +226,12 @@ Each test watches a failure that the compiler and the other tests miss.
 | A | Choose the retry for each refusal: sharing violation, lock violation, folder not empty, access denied (any OS) | a permission refusal waits through 200 ms of retries for every file |
 | A | Compare a folder with itself by other case, and by its short name; prepare a copy of a folder to a destination that is a junction into that folder; the short-name case is skipped when the volume makes no short names | two spellings of one folder compare as two folders, so stage B's waits would not hold them apart, or a folder is copied or moved into itself |
 | A | Build speed settings with each value just outside its range, and a block size that is not a power of two (any OS) | a bad value from `ui.json` reaches an operation |
-| A | Nested selection, destination inside a source, the numbers for Keep both, the temporary name of a 250-character name (any OS) | an entry is handled twice, copied into itself, or a long name cannot be copied |
+| A | Nested selection, destination inside a source, the numbers for Keep both of a 250-character name (any OS) | an entry is handled twice, copied into itself, or a long name cannot be numbered |
 | B | Copy with each conflict choice onto existing files, and with Replace a file onto a folder of its name | Skip or Keep both replaces a file at the destination, or Replace deletes a folder |
 | B | Create a file at the destination between prepare and run, when prepare found no conflict | the run replaces a file that nobody chose to replace |
-| B | Create a hidden, read-only file at a final name after the walk, before the rename | the rename's refusal is taken for our own failure, and the person's file is replaced or deleted |
+| B | Create a hidden, read-only file at a final name after the walk, before its create, in both engines and with each choice | the create's refusal is taken for our own failure, and the person's file is replaced or deleted against the choice |
 | B | Cancel a copy from its first progress report | a partial file stays at the final name and looks complete |
-| B | Continue onto a destination that holds a `.gozler-partial` file, a complete copy, and a Keep both copy `report (2).pdf` | the complete copies are copied again, or the partial file is kept or taken as complete |
+| B | Continue onto a destination that holds an unfinished file, a complete copy, and a Keep both copy `report (2).pdf` | the complete copies are copied again, or the unfinished file is taken as complete |
 | B | Continue a move with the copy-and-delete method whose destination already holds a complete copy | the source is deleted on a size-and-time guess |
 | B | Continue a move with the rename method after half its entries were renamed; Continue a delete after half its entries were deleted; a first-run move whose source is deleted while it waits, onto a destination that holds a file of that name | entries that already moved or were deleted are reported as failures, or a source deleted by another program is reported as moved |
 | B | Move with the rename method, and compare the file ID before and after; move into a folder of the same name that holds one conflicting file | a move on one volume copies instead of renaming, or a merge replaces a file without a choice |
@@ -193,6 +242,15 @@ Each test watches a failure that the compiler and the other tests miss.
 | C | Copy with the ring, in each profile and disk layout, then compare a hash of each source and destination: a sparse file with holes, a file whose size is not a multiple of the sector size, a file larger than the 256 MB buffer, a file of 0 bytes, a file with a `Zone.Identifier` stream, a read-only file, and 2,000 small files that cross the buffer's end | the ring writes a wrong byte, reuses a buffer still being written, loses a stream, a hole or an attribute, or pads a file |
 | C | Copy with the ring a file that the test holds open for writing | a file another program writes is copied as a mix of bytes |
 | C | Cancel a ring copy between two blocks | a partial file stays at the final name |
+| E | Resume against a destination that holds: the source; a prefix then other bytes; a prefix then zeros; a zero block inside the prefix; and a source that changed inside the prefix, grew, or shrank mid-block | a byte that differs from the source is kept, or a block that equals it is written again |
+| E | Continue onto unfinished files with each choice, also Skip and no choice; a file not done that the person created before the operation started and edited after | an unfinished file is skipped or numbered, or the person's file is written over |
+| E | Continue two selected files with one name, one copy complete and one unfinished; two selected folders with one name that merge, with Replace | one source's complete copy is written over by the other source |
+| E | Continue and Replace onto a file symbolic link whose target is outside the destination, in both engines | the link's target is written |
+| E | Replace on the ring over a plain file and over a file with an extra stream; an interrupted Replace whose file looks older than the start | Replace leaves an old stream, or an interrupted Replace copies from 0 |
+| E | A continued move whose resumed copy fails, and one that completes | the source is deleted before its copy is complete |
+| E | Save an operation with its start time and load one saved without it (any OS) | Continue forgets the start, or an older saved operation no longer loads |
+| F | Move a waiting operation past one it overlaps, and past one that waits only for the same hard disk (any OS) | a refused move changes the order or names the wrong operation, or an allowed move does not change which runs next |
+| F | Pause a ring copy, a `CopyFile2` copy and a delete, then resume; cancel one while paused | a paused operation still writes or deletes, or a cancel while paused leaves more than a cancel leaves |
 
 No test checks what `CopyFile2` keeps (streams, attributes, dates), because
 that tests Windows.

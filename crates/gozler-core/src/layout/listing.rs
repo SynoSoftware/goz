@@ -127,7 +127,6 @@ struct RawFullDirEntry {
     // Layout-bearing only; never read individually.
     #[allow(dead_code)]
     file_index: U32,
-    #[allow(dead_code)]
     creation_time: I64,
     #[allow(dead_code)]
     last_access_time: I64,
@@ -151,6 +150,8 @@ pub struct FolderEntry {
     pub attributes: u32,
     /// The data stream's size in bytes; 0 for a folder.
     pub size: u64,
+    /// The creation time as a `FILETIME` value.
+    pub created: i64,
     /// The last write time as a `FILETIME` value.
     pub last_write: i64,
     /// The reparse tag of a reparse point. MS-FSCC puts it in `EaSize` when
@@ -202,6 +203,7 @@ pub fn walk_full_listing_buffer(buf: &[u8]) -> Result<Vec<FolderEntry>, LayoutWa
                 } else {
                     0
                 },
+                created: raw.creation_time.get(),
                 last_write: raw.last_write_time.get(),
                 reparse_tag: (attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
                     .then_some(raw.ea_size.get()),
@@ -294,7 +296,7 @@ mod tests {
             };
             buf.extend_from_slice(&next.to_le_bytes());
             buf.extend_from_slice(&0u32.to_le_bytes());
-            for time in [0, 0, e.mtime, 0] {
+            for time in [e.mtime - 1, 0, e.mtime, 0] {
                 buf.extend_from_slice(&time.to_le_bytes());
             }
             buf.extend_from_slice(&e.size.to_le_bytes());
@@ -342,6 +344,7 @@ mod tests {
                     name: "link".encode_utf16().collect(),
                     attributes: 0x410,
                     size: 0,
+                    created: 133_799_999_999_999_999,
                     last_write: 133_800_000_000_000_000,
                     reparse_tag: Some(0xA000_0003),
                 },
@@ -349,6 +352,7 @@ mod tests {
                     name: "a.txt".encode_utf16().collect(),
                     attributes: 0x20,
                     size: 4096,
+                    created: 133_799_999_999_999_999,
                     last_write: 133_800_000_000_000_000,
                     reparse_tag: None,
                 },

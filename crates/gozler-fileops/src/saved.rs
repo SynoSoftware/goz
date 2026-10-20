@@ -29,6 +29,11 @@ pub(crate) struct Saved {
     /// No key: the person was not asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     choice: Option<SavedChoice>,
+    /// When the operation first ran, as a `FILETIME`, kept across Continue.
+    /// No key: saved before it was recorded, so Continue finds no file
+    /// unfinished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started: Option<i64>,
     settings: SavedSettings,
 }
 
@@ -37,6 +42,7 @@ pub(crate) struct Saved {
 pub(crate) struct Restored {
     pub(crate) request: Request,
     pub(crate) choice: Option<Choice>,
+    pub(crate) started: Option<i64>,
     pub(crate) settings: SpeedSettings,
 }
 
@@ -46,6 +52,7 @@ impl Saved {
     pub(crate) fn new(
         request: &Request,
         choice: Option<Choice>,
+        started: i64,
         settings: &SpeedSettings,
     ) -> Option<Saved> {
         let paths = |paths: &[PathBuf]| paths.iter().map(|path| SavedPath::new(path)).collect();
@@ -74,6 +81,7 @@ impl Saved {
             sources,
             destination,
             choice: choice.map(SavedChoice::from),
+            started: Some(started),
             settings: SavedSettings::from(settings),
         })
     }
@@ -99,6 +107,7 @@ impl Saved {
         Some(Restored {
             request,
             choice: self.choice.map(Choice::from),
+            started: self.started,
             settings,
         })
     }
@@ -326,8 +335,10 @@ pub(crate) fn write<'a>(
 mod tests {
     use super::*;
 
-    /// A saved operation reads back with the settings it ran with, so
-    /// Continue runs with the same ones; a value out of range is refused.
+    /// A saved operation reads back with the settings and the start it ran
+    /// with, so Continue runs with the same ones; a value out of range is
+    /// refused, and an entry saved before the start was recorded still
+    /// loads.
     #[test]
     fn a_saved_operation_keeps_its_settings() {
         let mut settings = SpeedSettings::automatic();
@@ -339,16 +350,24 @@ mod tests {
             sources: vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\b c")],
             destination: PathBuf::from(r"D:\out"),
         };
-        let saved = Saved::new(&request, Some(Choice::KeepBoth), &settings).expect("saved");
+        const STARTED: i64 = 134_000_000_000_000_000;
+        let saved =
+            Saved::new(&request, Some(Choice::KeepBoth), STARTED, &settings).expect("saved");
         let text = serde_json::to_string(&saved).expect("serialize");
         let read: Saved = serde_json::from_str(&text).expect("parse");
         let restored = read.restore().expect("restore");
         assert_eq!(restored.settings, settings);
         assert_eq!(restored.request, request);
         assert_eq!(restored.choice, Some(Choice::KeepBoth));
+        assert_eq!(restored.started, Some(STARTED));
 
         let mut damaged = read.clone();
         damaged.settings.workers_ssd = 0;
         assert_eq!(damaged.restore(), None);
+
+        let older = text.replace(&format!(r#""started":{STARTED},"#), "");
+        assert_ne!(older, text);
+        let older: Saved = serde_json::from_str(&older).expect("parse the older entry");
+        assert_eq!(older.restore().expect("restore").started, None);
     }
 }

@@ -6,7 +6,9 @@
 //! `Zone.Identifier`, the mark that makes Windows warn before it runs a
 //! downloaded file.
 
-use gozler_core::layout::{BACKUP_HEADER_LEN, BackupStream, parse_backup_header};
+use gozler_core::layout::{
+    BACKUP_HEADER_LEN, BackupStream, BackupStreamHeader, parse_backup_header,
+};
 use gozler_winfs::{BackupReader, BackupWriter, BasicInfo, Entry};
 
 use crate::win32::{ERROR_INVALID_DATA, FILE_ATTRIBUTE_NORMAL};
@@ -45,49 +47,93 @@ pub(super) fn finish_streams(
     .map_err(code)
 }
 
+/// Whether `file`, one of the ring's handles, has an alternate data stream
+/// or extended attributes, which a file the ring resumes would keep whether
+/// or not the source has them.
+pub(super) fn has_other_streams(file: &Entry) -> Result<bool, u32> {
+    let file = file.reopen_for_streams(false).map_err(|error| error.code)?;
+    let mut reader = BackupReader::new(&file);
+    let mut header = [0u8; BACKUP_HEADER_LEN];
+    let mut buffer = vec![0u8; 64 * 1024];
+    while let Some(stream) = next_stream(&mut reader, &mut header, &mut buffer)? {
+        if is_copied(stream.stream) {
+            return Ok(true);
+        }
+        skip_data(&mut reader, stream.size, &mut buffer)?;
+    }
+    Ok(false)
+}
+
 fn copy_streams(from: &Entry, to: &Entry) -> Result<(), u32> {
     let code = |error: gozler_winfs::WinError| error.code;
     let mut reader = BackupReader::new(from);
     let mut writer = BackupWriter::new(to);
     let mut header = [0u8; BACKUP_HEADER_LEN];
     let mut buffer = vec![0u8; 64 * 1024];
-    loop {
-        let read = read_full(&mut reader, &mut header)?;
-        if read == 0 {
-            return Ok(());
+    while let Some(stream) = next_stream(&mut reader, &mut header, &mut buffer)? {
+        if !is_copied(stream.stream) {
+            skip_data(&mut reader, stream.size, &mut buffer)?;
+            continue;
         }
-        if read < BACKUP_HEADER_LEN {
-            return Err(ERROR_INVALID_DATA);
-        }
-        let stream = parse_backup_header(&header).map_err(|_| ERROR_INVALID_DATA)?;
-        let name = &mut buffer[..stream.name_bytes];
-        if read_full(&mut reader, name)? < name.len() {
-            return Err(ERROR_INVALID_DATA);
-        }
-        let copied = matches!(
-            stream.stream,
-            BackupStream::AlternateData | BackupStream::ExtendedAttributes
-        );
-        if copied {
-            writer.write(&header).map_err(code)?;
-            writer.write(&buffer[..stream.name_bytes]).map_err(code)?;
-        }
+        writer.write(&header).map_err(code)?;
+        writer.write(&buffer[..stream.name_bytes]).map_err(code)?;
         let mut left = stream.size;
-        if !copied {
-            left -= reader.skip(left).min(left);
-        }
         while left > 0 {
             let chunk = left.min(buffer.len() as u64) as usize;
             let read = reader.read(&mut buffer[..chunk]).map_err(code)?;
             if read == 0 {
                 return Err(ERROR_INVALID_DATA);
             }
-            if copied {
-                writer.write(&buffer[..read]).map_err(code)?;
-            }
+            writer.write(&buffer[..read]).map_err(code)?;
             left -= read as u64;
         }
     }
+    Ok(())
+}
+
+fn is_copied(stream: BackupStream) -> bool {
+    matches!(
+        stream,
+        BackupStream::AlternateData | BackupStream::ExtendedAttributes
+    )
+}
+
+/// Reads the next stream's header into `header` and its name into the start
+/// of `buffer`; `None` after the last stream.
+fn next_stream(
+    reader: &mut BackupReader<'_>,
+    header: &mut [u8; BACKUP_HEADER_LEN],
+    buffer: &mut [u8],
+) -> Result<Option<BackupStreamHeader>, u32> {
+    let read = read_full(reader, header)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if read < BACKUP_HEADER_LEN {
+        return Err(ERROR_INVALID_DATA);
+    }
+    let stream = parse_backup_header(header).map_err(|_| ERROR_INVALID_DATA)?;
+    let name = &mut buffer[..stream.name_bytes];
+    if read_full(reader, name)? < name.len() {
+        return Err(ERROR_INVALID_DATA);
+    }
+    Ok(Some(stream))
+}
+
+/// Passes over a stream's `size` bytes of data.
+fn skip_data(reader: &mut BackupReader<'_>, size: u64, buffer: &mut [u8]) -> Result<(), u32> {
+    let mut left = size - reader.skip(size).min(size);
+    while left > 0 {
+        let chunk = left.min(buffer.len() as u64) as usize;
+        let read = reader
+            .read(&mut buffer[..chunk])
+            .map_err(|error| error.code)?;
+        if read == 0 {
+            return Err(ERROR_INVALID_DATA);
+        }
+        left -= read as u64;
+    }
+    Ok(())
 }
 
 /// Reads until `buf` is full or the streams end; returns the bytes read.

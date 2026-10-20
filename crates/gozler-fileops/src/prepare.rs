@@ -3,17 +3,18 @@
 //! space, and records the paths and disks that the waits compare (D14). It
 //! keeps no list of files (D11): the run walks the disk again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use gozler_winfs::{Access, Reparse, cluster_size, free_space, open_entry, windows_build};
 
-use crate::conflicts::{Choice, Rule};
+use crate::conflicts::Rule;
 use crate::copy::{Source, TargetVolume};
 use crate::identity::Identity;
 use crate::listing::BACKSLASH;
+use crate::names::fold;
 use crate::operation::{Listed, Prepared, Refusal, Request};
 use crate::receive::{Destination, Selected, receive, verbatim};
 use crate::ring_plan::Layout;
@@ -71,12 +72,12 @@ pub(crate) struct Transfer {
     pub(crate) needed: Option<u64>,
 }
 
-/// Prepares `request`. `continuing` is Continue's, with the choice the
-/// interrupted run had.
+/// Prepares `request` for a run under `rule`: for Continue, the choice and
+/// the start of the interrupted run.
 pub(crate) fn prepare(
     request: &Request,
     settings: &SpeedSettings,
-    continuing: Option<Option<Choice>>,
+    rule: Rule,
     cancel: &AtomicBool,
 ) -> Result<Ready, Refusal> {
     match request {
@@ -102,11 +103,11 @@ pub(crate) fn prepare(
         Request::Copy {
             sources,
             destination,
-        } => transfer(sources, destination, false, settings, continuing, cancel),
+        } => transfer(sources, destination, false, settings, rule, cancel),
         Request::Move {
             sources,
             destination,
-        } => transfer(sources, destination, true, settings, continuing, cancel),
+        } => transfer(sources, destination, true, settings, rule, cancel),
         Request::Rename { path, name } => {
             let path: Vec<u16> = path.as_os_str().encode_wide().collect();
             let name: Vec<u16> = name.encode_wide().collect();
@@ -172,7 +173,7 @@ fn transfer(
     destination: &Path,
     moving: bool,
     settings: &SpeedSettings,
-    continuing: Option<Option<Choice>>,
+    rule: Rule,
     cancel: &AtomicBool,
 ) -> Result<Ready, Refusal> {
     let (received, destination) = receive(sources, Some(destination), cancel)?;
@@ -180,6 +181,10 @@ fn transfer(
     let mut plan = Plan::default();
     let mut renamed = Vec::new();
     let mut copied = Vec::new();
+    let mut named: HashMap<Vec<u16>, usize> = HashMap::new();
+    for selected in &received.entries {
+        *named.entry(fold(selected.identity.name())).or_default() += 1;
+    }
     for selected in received.entries {
         let name = selected.identity.name().to_vec();
         plan.writes
@@ -194,6 +199,7 @@ fn transfer(
         let source = Source {
             selected,
             own_folder,
+            shared: named[&fold(&name)] > 1,
         };
         if moving && same_volume {
             renamed.push(source);
@@ -256,10 +262,6 @@ fn transfer(
         clone_cluster: clones.then(|| cluster_size(&root).ok()).flatten(),
     };
 
-    let rule = Rule {
-        choice: continuing.flatten(),
-        continuing: continuing.is_some(),
-    };
     let surveying = Surveying {
         rule,
         sparse_stays: sparse,

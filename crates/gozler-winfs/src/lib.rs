@@ -64,7 +64,7 @@ pub use cache::empty_standby_list;
 #[cfg(windows)]
 pub use cancel_io::{ThreadIoHandle, cancel_synchronous_io, current_thread_io_handle};
 #[cfg(windows)]
-pub use clock::{awake_time, own_process_cycles, process_cycles, thread_cycles};
+pub use clock::{awake_time, own_process_cycles, process_cycles, system_time, thread_cycles};
 #[cfg(windows)]
 pub use console::enable_console_color;
 #[cfg(windows)]
@@ -94,8 +94,8 @@ pub use copy::{
 
 #[cfg(windows)]
 pub use ring::{
-    BackupReader, BackupWriter, BasicInfo, Completion, IoRing, RingOpen, RingWaker, cluster_size,
-    create_ring_destination, open_ring_source,
+    AlignedBuffer, BackupReader, BackupWriter, BasicInfo, Completion, IoRing, RingOpen, RingWaker,
+    cluster_size, create_ring_destination, open_ring_destination, open_ring_source,
 };
 
 #[cfg(windows)]

@@ -122,7 +122,8 @@ pub struct FileIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryStat {
     pub size: u64,
-    /// As a `FILETIME`, in 100 ns units.
+    /// As `FILETIME`s, in 100 ns units.
+    pub created: i64,
     pub last_write: i64,
 }
 
@@ -326,6 +327,7 @@ impl Entry {
             }
             Ok(EntryStat {
                 size: standard.EndOfFile.max(0).unsigned_abs(),
+                created: basic.CreationTime,
                 last_write: basic.LastWriteTime,
             })
         }

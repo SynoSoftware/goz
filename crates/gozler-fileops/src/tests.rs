@@ -2,9 +2,9 @@
 //! temporary folder. None reads or writes any other folder, and none needs
 //! a running gozlerd.
 
-use std::fs;
+use std::fs::{self, FileTimes};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::fs::{FileTimesExt, MetadataExt, OpenOptionsExt};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,16 +13,17 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime};
 
 use gozler_winfs::{
-    Access, Reparse, RingOpen, allocated_size, create_ring_destination, open_entry,
+    Access, FileIdentity, Reparse, RingOpen, allocated_size, create_ring_destination, open_entry,
+    system_time,
 };
 
-use crate::conflicts::Rule;
+use crate::conflicts::{Rule, Run};
 use crate::copy::{Copied, Copying, Source, TargetVolume, copy};
 use crate::io_threads::IoThreads;
 use crate::listing::LISTING_WORDS;
-use crate::names::PARTIAL_SUFFIX;
+use crate::names::Names;
 use crate::operation::Progress;
-use crate::place::{Placed, Placing, Target, place};
+use crate::place::Target;
 use crate::receive::{receive, verbatim};
 use crate::ring_plan::Layout;
 use crate::saved::{self, Saved};
@@ -199,6 +200,7 @@ fn copy_directly(
         moving,
         target: NTFS,
         cancel: &cancel,
+        closing: &AtomicBool::new(false),
         progress: &progress,
         io: &IoThreads::default(),
     };
@@ -215,13 +217,50 @@ const NTFS: TargetVolume = TargetVolume {
 };
 
 fn copy_with(sources: &[PathBuf], destination: &Path, copying: &Copying<'_>) -> Copied {
+    copy_listed(sources, destination, copying, true)
+}
+
+/// [`copy_directly`] with a first run's `rule`, as if the destination held
+/// nothing when it was listed, so each file there took its name after the
+/// listing.
+fn copy_unlisted(
+    sources: &[PathBuf],
+    destination: &Path,
+    plan: CopyPlan,
+    rule: Rule,
+) -> Vec<Listed> {
+    let (cancel, progress) = (AtomicBool::new(false), Progress::default());
+    let copying = Copying {
+        plan,
+        rule,
+        moving: false,
+        target: NTFS,
+        cancel: &cancel,
+        closing: &AtomicBool::new(false),
+        progress: &progress,
+        io: &IoThreads::default(),
+    };
+    copy_listed(sources, destination, &copying, false).listed
+}
+
+/// `listed`: the destination's names as it holds them now; otherwise none.
+fn copy_listed(
+    sources: &[PathBuf],
+    destination: &Path,
+    copying: &Copying<'_>,
+    listed: bool,
+) -> Copied {
     let cancel = AtomicBool::new(false);
     let (received, destination) = receive(sources, Some(destination), &cancel).expect("received");
     let destination = destination.expect("a destination");
     let mut page = vec![0u64; LISTING_WORDS];
-    let names = destination
-        .names(&mut page)
-        .expect("the destination's names");
+    let names = if listed {
+        destination
+            .names(&mut page)
+            .expect("the destination's names")
+    } else {
+        Names::default()
+    };
     let target = Arc::new(Target {
         verbatim: destination.verbatim,
         names: Mutex::new(names),
@@ -231,6 +270,7 @@ fn copy_with(sources: &[PathBuf], destination: &Path, copying: &Copying<'_>) -> 
         .map(|selected| Source {
             selected,
             own_folder: false,
+            shared: false,
         })
         .collect();
     copy(sources, target, copying)
@@ -239,7 +279,7 @@ fn copy_with(sources: &[PathBuf], destination: &Path, copying: &Copying<'_>) -> 
 fn first_run(choice: Option<Choice>) -> Rule {
     Rule {
         choice,
-        continuing: false,
+        run: Run::First { started: None },
     }
 }
 
@@ -459,14 +499,6 @@ fn every_method_copies_a_whole_tree() {
         assert!(read_only.permissions().readonly());
         let link = fs::read_link(copied.join("link")).expect("a junction");
         assert!(link.ends_with("outside"), "{link:?}");
-        let partial = fs::read_dir(&copied).expect("list").any(|entry| {
-            entry
-                .expect("an entry")
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".gozler-partial")
-        });
-        assert!(!partial);
     }
 }
 
@@ -535,51 +567,252 @@ fn a_conflict_after_prepare_is_skipped() {
 }
 
 /// A hidden, read-only file that takes the final name after the folder was
-/// listed refuses the final rename with access denied; that refusal is a
-/// conflict with someone else's file, which stays, never our own failure.
+/// listed refuses the copy's create; that refusal is a conflict with
+/// someone else's file, never our own failure. So the choice applies and the
+/// file is never deleted: without a choice and with Skip the copy is
+/// skipped, Keep both numbers it, and Replace writes over the file, whose
+/// protection it clears, as each engine would otherwise refuse it.
 #[test]
-fn a_file_that_takes_the_final_name_stays() {
-    for choice in [None, Some(Choice::KeepBoth)] {
-        let scratch = Scratch::new("final");
-        let partial = scratch.write(r"out\a.txt.gozler-partial", b"ours");
-        let theirs = scratch.write(r"out\a.txt", b"theirs");
-        make_read_only(&theirs);
-        let status = Command::new("attrib")
-            .arg("+h")
-            .arg(&theirs)
-            .status()
-            .expect("attrib");
-        assert!(status.success());
-        let target = Target {
-            verbatim: verbatim(&units(&scratch.path("out"))),
-            names: Mutex::default(),
-            made: false,
-        };
-        let name: Vec<u16> = "a.txt".encode_utf16().collect();
-        let placing = Placing {
-            from: &verbatim(&units(&partial)),
-            base: &name,
-            name: name.clone(),
-            replace: false,
-            is_folder: false,
-        };
-        let placed = place(&target, placing, choice);
-        assert_eq!(fs::read(&theirs).expect("theirs stays"), b"theirs");
-        match choice {
-            None => assert_eq!(placed, Placed::Skipped),
-            _ => {
-                assert_eq!(placed, Placed::Named);
-                assert_eq!(
-                    fs::read(scratch.path(r"out\a (2).txt")).expect("ours"),
-                    b"ours"
-                );
+fn a_file_that_takes_the_final_name_gets_the_choice() {
+    let windows = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::TwoDisks,
+    );
+    let ring = CopyPlan::new(VolumeClass::HardDisk, &ring_settings(), Layout::TwoDisks);
+    for (engine, plan) in [("windows", windows), ("ring", ring)] {
+        for choice in [
+            None,
+            Some(Choice::Skip),
+            Some(Choice::KeepBoth),
+            Some(Choice::Replace),
+        ] {
+            let case = format!("{engine} {choice:?}");
+            let scratch = Scratch::new("final");
+            let source = scratch.write(r"src\a.txt", b"ours");
+            let out = scratch.path("out");
+            let theirs = scratch.write(r"out\a.txt", b"theirs");
+            make_read_only(&theirs);
+            let status = Command::new("attrib")
+                .arg("+h")
+                .arg(&theirs)
+                .status()
+                .expect("attrib");
+            assert!(status.success());
+            let listed =
+                copy_unlisted(std::slice::from_ref(&source), &out, plan, first_run(choice));
+            let read = |name: &str| fs::read(out.join(name)).ok();
+            match choice {
+                None | Some(Choice::Skip) => {
+                    assert_eq!(listed, [skipped(&source)], "{case}");
+                    assert_eq!(read("a.txt").as_deref(), Some(&b"theirs"[..]), "{case}");
+                }
+                Some(Choice::KeepBoth) => {
+                    assert_eq!(listed, [], "{case}");
+                    assert_eq!(read("a.txt").as_deref(), Some(&b"theirs"[..]), "{case}");
+                    assert_eq!(read("a (2).txt").as_deref(), Some(&b"ours"[..]), "{case}");
+                }
+                Some(Choice::Replace) => {
+                    assert_eq!(listed, [], "{case}");
+                    assert_eq!(read("a.txt").as_deref(), Some(&b"ours"[..]), "{case}");
+                }
             }
         }
     }
 }
 
+/// A file symbolic link at the destination is never written through, also
+/// when its target is outside the destination: each engine's Replace
+/// replaces the link itself, and Continue never takes a link written since
+/// the start for its unfinished copy, so without a choice it is skipped.
+#[test]
+fn a_link_at_the_destination_is_never_written_through() {
+    let windows = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::TwoDisks,
+    );
+    let ring = CopyPlan::new(VolumeClass::HardDisk, &ring_settings(), Layout::TwoDisks);
+    let continued = Rule {
+        choice: None,
+        run: Run::Continue {
+            started: Some(system_time() - 10_000_000),
+        },
+    };
+    for (case, plan, rule) in [
+        ("Continue", windows, continued),
+        ("windows Replace", windows, first_run(Some(Choice::Replace))),
+        ("ring Replace", ring, first_run(Some(Choice::Replace))),
+    ] {
+        let scratch = Scratch::new("through");
+        let source = scratch.write(r"src\a.bin", &pattern(7, 2 * BLOCK + 10));
+        let target = scratch.write(r"outside\target.bin", b"the link's target");
+        let link = scratch.path(r"out\a.bin");
+        fs::create_dir(scratch.path("out")).expect("a destination");
+        if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+            eprintln!("skipped: this account cannot create a file symbolic link");
+            return;
+        }
+        let listed = copy_directly(
+            std::slice::from_ref(&source),
+            &scratch.path("out"),
+            plan,
+            rule,
+            false,
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target stays"),
+            b"the link's target",
+            "{case}"
+        );
+        if rule.choice == Some(Choice::Replace) {
+            assert_eq!(listed, [], "{case}");
+            assert!(!fs::symlink_metadata(&link).expect("a copy").is_symlink());
+            assert!(fs::read(&link).expect("the copy") == fs::read(&source).expect("source"));
+        } else {
+            assert_eq!(listed, [skipped(&source)], "{case}");
+            assert!(fs::symlink_metadata(&link).expect("the link").is_symlink());
+        }
+    }
+}
+
+/// The ring's Replace writes over a plain file in place, so an interrupted
+/// Replace keeps the file's older creation time and goes to Continue's
+/// choice, whose Replace then resumes it. A file with an alternate data
+/// stream is created again instead, because writing over it would keep a
+/// stream the source lacks. Either copy ends equal to its source.
+#[test]
+fn the_rings_replace_writes_over_a_plain_file_in_place() {
+    let ring = CopyPlan::new(VolumeClass::HardDisk, &ring_settings(), Layout::TwoDisks);
+    for stream in [false, true] {
+        let scratch = Scratch::new("replace");
+        let bytes = pattern(11, 2 * BLOCK + 10);
+        let source = scratch.write(r"src\a.bin", &bytes);
+        let mut old = bytes[..BLOCK].to_vec();
+        old.extend(pattern(12, BLOCK));
+        let copy = scratch.write(r"out\a.bin", &old);
+        let extra = format!("{}:extra", copy.display());
+        if stream {
+            fs::write(&extra, b"not the source's").expect("write a stream");
+        }
+        let before = identity(&copy);
+        let listed = copy_directly(
+            std::slice::from_ref(&source),
+            &scratch.path("out"),
+            ring,
+            first_run(Some(Choice::Replace)),
+            false,
+        );
+        assert_eq!(listed, [], "{stream}");
+        assert!(fs::read(&copy).expect("the copy") == bytes, "{stream}");
+        assert_eq!(identity(&copy) == before, !stream, "{stream}");
+        assert!(fs::metadata(&extra).is_err(), "{stream}");
+    }
+}
+
+/// The file at `path`, which a write in place keeps and a new file changes.
+fn identity(path: &Path) -> FileIdentity {
+    let entry = open_entry(&units(path), Access::Inspect, Reparse::Open).expect("open");
+    entry.identity().expect("an identity")
+}
+
+/// An interrupted Replace leaves a file created before the operation
+/// started, as the person's file was, or as tunneling dates a file created
+/// again at its name, and last written since. At Continue it gets the
+/// choice, and the saved Replace writes over it in place in the ring,
+/// keeping the start that equals the source, also for a large file that
+/// Automatic gives the Windows engine between SSDs. Any other Replace
+/// follows the normal engine choice, so the Windows engine deletes the file
+/// and creates it again: at Continue a file last written before the start,
+/// and in a first run a file below the ring's size, so many small files
+/// are replaced on the Windows engine's workers.
+#[test]
+fn continue_replaces_an_interrupted_replace_in_place() {
+    let automatic = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::TwoDisks,
+    );
+    // The ring takes an SSD's files from 1 MiB, so it runs in a first run
+    // too.
+    let ring = CopyPlan::new(VolumeClass::Ssd, &ring_settings(), Layout::TwoDisks);
+    let hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    for (case, plan, size, continuing, written_since, in_place) in [
+        ("interrupted", automatic, 2 * BLOCK + 10, true, true, true),
+        ("older", automatic, 2 * BLOCK + 10, true, false, false),
+        ("first run", ring, 4096, false, true, false),
+    ] {
+        let scratch = Scratch::new("replace-resume");
+        let bytes = pattern(13, size);
+        let source = scratch.write(r"src\a.bin", &bytes);
+        set_modified(&source, SystemTime::now() - Duration::from_secs(24 * 3600));
+        let started = system_time();
+        let mut old = bytes[..size / 2].to_vec();
+        old.extend(pattern(14, size / 2));
+        let copy = scratch.write(r"out\a.bin", &old);
+        set_created(&copy, hour_ago);
+        if !written_since {
+            set_modified(&copy, hour_ago);
+        }
+        let before = identity(&copy);
+        let rule = Rule {
+            choice: Some(Choice::Replace),
+            run: if continuing {
+                Run::Continue {
+                    started: Some(started),
+                }
+            } else {
+                Run::First {
+                    started: Some(started),
+                }
+            },
+        };
+        let listed = copy_directly(
+            std::slice::from_ref(&source),
+            &scratch.path("out"),
+            plan,
+            rule,
+            false,
+        );
+        assert_eq!(listed, [], "{case}");
+        assert!(fs::read(&copy).expect("the copy") == bytes, "{case}");
+        assert_eq!(identity(&copy) == before, in_place, "{case}");
+    }
+}
+
+/// Two selected folders with one name merge into the person's folder of
+/// that name, and files with one name inside them never replace each other:
+/// with Replace, the second to take the name gets a number, whether its
+/// folder was listed before or after the first one's copy arrived. The
+/// person's own file there still gets the choice.
+#[test]
+fn files_of_two_merged_folders_never_replace_each_other() {
+    let scratch = Scratch::new("merge");
+    scratch.write(r"one\a\x.bin", b"first");
+    scratch.write(r"one\a\y.bin", b"ours");
+    scratch.write(r"two\a\x.bin", b"second");
+    let theirs = scratch.write(r"out\a\y.bin", b"theirs");
+    set_created(&theirs, SystemTime::now() - Duration::from_secs(3600));
+    let out = scratch.path("out");
+    let watched = Watched::new(&scratch.saved());
+    let (id, _) = watched.prepared(Request::Copy {
+        sources: vec![scratch.path(r"one\a"), scratch.path(r"two\a")],
+        destination: out.clone(),
+    });
+    watched
+        .queue
+        .submit(id, Some(Choice::Replace))
+        .expect("prepared");
+    let outcome = watched.ended(id);
+    assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+    let mut copies = ["x.bin", "x (2).bin"].map(|name| fs::read(out.join("a").join(name)).ok());
+    copies.sort();
+    assert_eq!(copies, [Some(b"first".to_vec()), Some(b"second".to_vec())]);
+    assert_eq!(fs::read(&theirs).expect("replaced"), b"ours");
+}
+
 /// A copy cancelled at its first progress report leaves nothing at the
-/// final name, and no temporary file either.
+/// final name (D13).
 #[test]
 fn a_cancelled_copy_leaves_no_partial_file() {
     let scratch = Scratch::new("cancel");
@@ -614,6 +847,14 @@ fn set_modified(path: &Path, time: SystemTime) {
     file.set_modified(time).expect("set the time");
 }
 
+/// Sets a file's creation time, so Continue takes it for a file that was
+/// there before the operation started.
+fn set_created(path: &Path, time: SystemTime) {
+    let file = fs::OpenOptions::new().write(true).open(path).expect("open");
+    let times = FileTimes::new().set_created(time);
+    file.set_times(times).expect("set the time");
+}
+
 fn modified(path: &Path) -> SystemTime {
     fs::metadata(path)
         .expect("metadata")
@@ -621,9 +862,10 @@ fn modified(path: &Path) -> SystemTime {
         .expect("a time")
 }
 
-/// Writes `request` to the saved file as a crash leaves it.
-fn save(scratch: &Scratch, request: &Request, choice: Option<Choice>) {
-    let saved = Saved::new(request, choice, &SpeedSettings::automatic()).expect("saved");
+/// Writes `request` to the saved file as a crash leaves it, with the time
+/// its first run started.
+fn save(scratch: &Scratch, request: &Request, choice: Option<Choice>, started: i64) {
+    let saved = Saved::new(request, choice, started, &SpeedSettings::automatic()).expect("saved");
     saved::write(&scratch.saved(), std::iter::once(&saved)).expect("write the saved file");
 }
 
@@ -638,17 +880,17 @@ fn resume(scratch: &Scratch) -> Outcome {
     watched.ended(id)
 }
 
-/// Continue deletes an earlier run's temporary file and copies that file
-/// again, and leaves a complete copy, and Keep both's numbered copy, as
-/// they are.
+/// Continue resumes the file an earlier run left unfinished, and leaves a
+/// complete copy, and Keep both's numbered copy, as they are.
 #[test]
 fn continue_copies_only_what_is_not_done() {
     let scratch = Scratch::new("continue");
-    let partial_source = scratch.write(r"src\a.txt", b"source a");
+    let started = system_time();
+    let unfinished = scratch.write(r"src\a.txt", b"source a");
     let done = scratch.write(r"src\b.txt", b"source b");
     let kept = scratch.write(r"src\report.pdf", b"report");
     let out = scratch.path("out");
-    scratch.write(r"out\a.txt.gozler-partial", b"half");
+    scratch.write(r"out\a.txt", b"half");
     // Same size and time as the source, other bytes: copying it again
     // would change them.
     let complete = scratch.write(r"out\b.txt", b"ZZZZZZZZ");
@@ -657,20 +899,224 @@ fn continue_copies_only_what_is_not_done() {
     let numbered = scratch.write(r"out\report (2).pdf", b"REPORT");
     set_modified(&numbered, modified(&kept));
     let request = Request::Copy {
-        sources: vec![partial_source, done, kept],
+        sources: vec![unfinished, done, kept],
         destination: out.clone(),
     };
-    save(&scratch, &request, Some(Choice::KeepBoth));
+    save(&scratch, &request, Some(Choice::KeepBoth), started);
 
     let outcome = resume(&scratch);
     assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
     let read = |name: &str| fs::read(out.join(name)).ok();
     assert_eq!(read("a.txt").as_deref(), Some(&b"source a"[..]));
-    assert_eq!(read("a.txt.gozler-partial"), None);
+    assert_eq!(read("a (2).txt"), None);
     assert_eq!(read("b.txt").as_deref(), Some(&b"ZZZZZZZZ"[..]));
     assert_eq!(read("report (2).pdf").as_deref(), Some(&b"REPORT"[..]));
     assert_eq!(read("report (3).pdf"), None);
     assert!(!scratch.saved().exists() || saved::read(&scratch.saved()).is_empty());
+}
+
+/// Automatic's ring block, which a resume between SSDs compares in.
+const BLOCK: usize = 8 * 1024 * 1024;
+
+/// Continue resumes each file an interrupted run left at its final name,
+/// whatever the file holds now, and each ends byte for byte equal to its
+/// source: a correct start followed by other bytes, or by the zeros that
+/// the ring's preset end of file leaves, a block of zeros inside a correct
+/// start, as writes that end out of order leave it, and a source that
+/// changed inside the start, grew or shrank since the crash. Each source's
+/// last write time is a day old, so no copy looks done. The settings are
+/// Automatic's, which give large files between SSDs to the Windows engine,
+/// so the ring runs only for the resume.
+#[test]
+fn continue_resumes_every_unfinished_file() {
+    let scratch = Scratch::new("resume");
+    let size = 3 * BLOCK + 4097;
+    let old = pattern(1, size);
+    let mut changed = old.clone();
+    changed[BLOCK + 5] ^= 0xFF;
+    let mut grown = old.clone();
+    grown.extend(pattern(2, BLOCK + 3));
+    let mut prefix_and_other = old[..2 * BLOCK].to_vec();
+    prefix_and_other.extend(pattern(3, size - 2 * BLOCK));
+    let mut prefix_and_zeros = old[..2 * BLOCK].to_vec();
+    prefix_and_zeros.resize(size.next_multiple_of(4096), 0);
+    let mut hole = old.clone();
+    hole[BLOCK..2 * BLOCK].fill(0);
+    let cases: [(&str, &[u8], &[u8]); 6] = [
+        ("other.bin", &old, &prefix_and_other),
+        ("zeros.bin", &old, &prefix_and_zeros),
+        ("hole.bin", &old, &hole),
+        ("changed.bin", &changed, &old),
+        ("grew.bin", &grown, &old),
+        ("shrank.bin", &old[..2 * BLOCK + 100], &old),
+    ];
+    let day_ago = SystemTime::now() - Duration::from_secs(24 * 3600);
+    let mut sources = Vec::new();
+    for (name, source, _) in &cases {
+        let source = scratch.write(Path::new("src").join(name), source);
+        set_modified(&source, day_ago);
+        sources.push(source);
+    }
+    let started = system_time();
+    for (name, _, destination) in &cases {
+        scratch.write(Path::new("out").join(name), destination);
+    }
+    let out = scratch.path("out");
+    let request = Request::Copy {
+        sources,
+        destination: out.clone(),
+    };
+    save(&scratch, &request, None, started);
+
+    let outcome = resume(&scratch);
+    assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+    // The ring resumed each file itself: none was written over from its
+    // start by the Windows engine.
+    assert_eq!(outcome.ring, RingCounts::default());
+    for (name, source, _) in &cases {
+        let copy = fs::read(out.join(name)).expect("the copy");
+        assert!(copy == *source, "{name}: {} bytes", copy.len());
+    }
+}
+
+/// Two selected files with one name: the interrupted run gave one the
+/// plain name and the other a number, in an order its workers chose. At
+/// Continue neither takes a file at its names for its own unfinished copy,
+/// because it may be the other's: the complete copy stays as it is, and the
+/// interrupted one is copied again under a free number. Each source was
+/// last written after the start, as a file saved just before a copy is.
+#[test]
+fn continue_never_writes_over_a_copy_of_another_source_of_its_name() {
+    let scratch = Scratch::new("same-name");
+    let started = system_time() - 10_000_000;
+    let first = pattern(8, 2 * BLOCK + 10);
+    let second = pattern(9, 3 * BLOCK);
+    let first_source = scratch.write(r"one\x.bin", &first);
+    let second_source = scratch.write(r"two\x.bin", &second);
+    let complete = scratch.write(r"out\x.bin", &first);
+    set_modified(&complete, modified(&first_source));
+    scratch.write(r"out\x (2).bin", &second[..BLOCK]);
+    let out = scratch.path("out");
+    let request = Request::Copy {
+        sources: vec![first_source, second_source],
+        destination: out.clone(),
+    };
+    save(&scratch, &request, Some(Choice::KeepBoth), started);
+
+    let outcome = resume(&scratch);
+    assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+    let read = |name: &str| fs::read(out.join(name)).expect("a copy");
+    assert!(read("x.bin") == first, "the complete copy stays");
+    assert!(read("x (3).bin") == second);
+}
+
+/// A resumed file with an alternate data stream is created again and
+/// copied from its start, because keeping its bytes would keep a stream the
+/// source lacks.
+#[test]
+fn a_resumed_file_with_another_stream_is_copied_again() {
+    let scratch = Scratch::new("resume-stream");
+    let bytes = pattern(10, 2 * BLOCK + 10);
+    let source = scratch.write(r"src\a.bin", &bytes);
+    set_modified(&source, SystemTime::now() - Duration::from_secs(24 * 3600));
+    let started = system_time();
+    let copy = scratch.write(r"out\a.bin", &bytes[..BLOCK]);
+    let extra = format!("{}:extra", copy.display());
+    fs::write(&extra, b"not the source's").expect("write a stream");
+    let request = Request::Copy {
+        sources: vec![source],
+        destination: scratch.path("out"),
+    };
+    save(&scratch, &request, None, started);
+
+    let outcome = resume(&scratch);
+    assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+    assert_eq!(outcome.ring, RingCounts::default());
+    assert!(fs::read(&copy).expect("the copy") == bytes);
+    assert!(fs::metadata(&extra).is_err());
+}
+
+/// An unfinished file is resumed whatever the choice, because it is the
+/// operation's own file, while a file of its name created before the
+/// operation started gets the choice, also when the person edited it during
+/// the interruption: without a choice, and with Skip, it stays and the
+/// source is skipped.
+#[test]
+fn an_unfinished_file_is_resumed_whatever_the_choice() {
+    for choice in [None, Some(Choice::Skip)] {
+        let scratch = Scratch::new("choice");
+        let old = scratch.write(r"src\old.txt", b"old source");
+        let new = scratch.write(r"src\new.txt", b"new source");
+        let theirs = scratch.write(r"out\old.txt", b"the person's");
+        set_created(&theirs, SystemTime::now() - Duration::from_secs(3600));
+        let started = system_time();
+        set_modified(&theirs, SystemTime::now() + Duration::from_secs(1));
+        scratch.write(r"out\new.txt", b"new");
+        let request = Request::Copy {
+            sources: vec![old.clone(), new],
+            destination: scratch.path("out"),
+        };
+        save(&scratch, &request, choice, started);
+
+        let outcome = resume(&scratch);
+        assert_eq!(outcome.listed, [skipped(&old)], "{choice:?}");
+        let read = |name: &str| fs::read(scratch.path("out").join(name)).expect("a file");
+        assert_eq!(read("new.txt"), b"new source", "{choice:?}");
+        assert_eq!(fs::read(&theirs).expect("theirs stays"), b"the person's");
+    }
+}
+
+/// A continued move across volumes resumes an unfinished file and then
+/// deletes its source; when the resumed copy fails after its compare, the
+/// source stays.
+#[test]
+fn a_continued_move_resumes_then_deletes_its_source() {
+    let plan = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::TwoDisks,
+    );
+    for locked in [false, true] {
+        let scratch = Scratch::new("move-resume");
+        let bytes = pattern(4, 2 * BLOCK + 10);
+        let source = scratch.write(r"src\big.bin", &bytes);
+        set_modified(&source, SystemTime::now() - Duration::from_secs(24 * 3600));
+        let started = system_time();
+        let copy = scratch.write(r"out\big.bin", &bytes[..BLOCK]);
+        // A lock on the source lets both engines open it and refuses their
+        // reads, so the resumed copy fails at its compare, and the Windows
+        // engine's copy from the start fails too.
+        let holder = locked.then(|| {
+            let holder = fs::File::open(&source).expect("open the source");
+            holder.lock().expect("lock the source");
+            holder
+        });
+        let rule = Rule {
+            choice: None,
+            run: Run::Continue {
+                started: Some(started),
+            },
+        };
+        let listed = copy_directly(
+            std::slice::from_ref(&source),
+            &scratch.path("out"),
+            plan,
+            rule,
+            true,
+        );
+        drop(holder);
+        if locked {
+            assert!(
+                matches!(&listed[..], [Listed { path, reason: Reason::Failed(_) }] if *path == source),
+                "{listed:?}"
+            );
+            assert!(fs::read(&source).expect("the source stays") == bytes);
+        } else {
+            assert_eq!(listed, []);
+            assert!(!source.exists());
+            assert!(fs::read(&copy).expect("the copy") == bytes);
+        }
+    }
 }
 
 /// A continued move that copies and deletes keeps the source of a file it
@@ -689,7 +1135,9 @@ fn a_continued_move_keeps_a_source_it_guesses_is_done() {
     );
     let rule = Rule {
         choice: None,
-        continuing: true,
+        run: Run::Continue {
+            started: Some(system_time()),
+        },
     };
     let listed = copy_directly(std::slice::from_ref(&source), &out, plan, rule, true);
     let kept = Listed {
@@ -701,45 +1149,47 @@ fn a_continued_move_keeps_a_source_it_guesses_is_done() {
 }
 
 /// A move across volumes keeps a source that changes while it is copied,
-/// because the copy may not hold what the source holds now.
+/// because the copy may not hold what the source holds now. The source
+/// changes at the copy's first progress report, which the copy waits for.
 #[test]
 fn a_move_keeps_a_source_that_changes_during_its_copy() {
     let scratch = Scratch::new("changed");
-    let source = scratch.write(r"src\big.bin", &vec![1u8; 64 * 1024 * 1024]);
+    let source = scratch.write(r"src\big.bin", &vec![1u8; 4 * 1024 * 1024]);
     let out = scratch.path("out");
     fs::create_dir(&out).expect("a destination");
-    let partial = out.join(format!("big.bin{PARTIAL_SUFFIX}"));
     let plan = CopyPlan::new(
         VolumeClass::Ssd,
         &SpeedSettings::automatic(),
         Layout::TwoDisks,
     );
-    let listed = std::thread::scope(|scope| {
-        let moved = scope.spawn(|| {
-            copy_directly(
-                std::slice::from_ref(&source),
-                &out,
-                plan,
-                first_run(None),
-                true,
-            )
-        });
-        while !partial.exists() && !moved.is_finished() {
-            std::thread::yield_now();
-        }
+    let progress = Progress::default();
+    let changed = source.clone();
+    *progress.at_first_bytes.lock().expect("no hook") = Some(Box::new(move || {
         // Sharing does not limit attribute access, so this opens while the
         // copy holds the source.
         const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
         let writer = fs::OpenOptions::new()
             .access_mode(FILE_WRITE_ATTRIBUTES)
-            .open(&source)
+            .open(&changed)
             .expect("open the source");
         writer
             .set_modified(SystemTime::now() + Duration::from_secs(60))
             .expect("change the source");
-        assert!(partial.exists(), "the copy ended before its source changed");
-        moved.join().expect("the move")
-    });
+    }));
+    let cancel = AtomicBool::new(false);
+    let copying = Copying {
+        plan,
+        rule: first_run(None),
+        moving: true,
+        target: NTFS,
+        cancel: &cancel,
+        closing: &AtomicBool::new(false),
+        progress: &progress,
+        io: &IoThreads::default(),
+    };
+    let listed = copy_with(std::slice::from_ref(&source), &out, &copying).listed;
+    let ran = progress.at_first_bytes.lock().expect("no hook").is_none();
+    assert!(ran, "the copy reported no bytes");
     let kept = Listed {
         path: source.clone(),
         reason: Reason::SourceChanged,
@@ -763,7 +1213,7 @@ fn continue_counts_what_already_moved() {
         sources: vec![first, second.clone()],
         destination: out.clone(),
     };
-    save(&scratch, &request, None);
+    save(&scratch, &request, None, system_time());
     let outcome = resume(&scratch);
     assert_eq!(
         (outcome.end, outcome.listed, outcome.items),
@@ -780,6 +1230,7 @@ fn continue_counts_what_already_moved() {
             sources: vec![gone, left.clone()],
         },
         None,
+        system_time(),
     );
     let outcome = resume(&scratch);
     assert_eq!((outcome.listed, outcome.items), (Vec::new(), 2));
@@ -844,7 +1295,7 @@ fn an_unfinished_operation_is_offered_again() {
     let request = Request::Delete {
         sources: vec![scratch.path("nothing")],
     };
-    save(&scratch, &request, None);
+    save(&scratch, &request, None, system_time());
     let watched = Watched::new(&scratch.saved());
     let operations = watched.queue.operations();
     assert!(matches!(&operations[..], [(_, State::Interrupted(r))] if **r == request));
@@ -909,6 +1360,7 @@ fn copy_ring(sources: &[PathBuf], destination: &Path, plan: CopyPlan) -> Copied 
         moving: false,
         target: NTFS,
         cancel: &cancel,
+        closing: &AtomicBool::new(false),
         progress: &progress,
         io: &IoThreads::default(),
     };
@@ -1072,7 +1524,7 @@ fn the_ring_refuses_a_file_being_written() {
 }
 
 /// A ring copy cancelled after its first block leaves nothing at the
-/// destination: no temporary file, and nothing at the final name.
+/// destination (D13).
 #[test]
 fn a_cancelled_ring_copy_leaves_no_partial_file() {
     let scratch = Scratch::new("ring-cancel");
@@ -1086,6 +1538,7 @@ fn a_cancelled_ring_copy_leaves_no_partial_file() {
         moving: false,
         target: NTFS,
         cancel: &cancel,
+        closing: &AtomicBool::new(false),
         progress: &progress,
         io: &IoThreads::default(),
     };

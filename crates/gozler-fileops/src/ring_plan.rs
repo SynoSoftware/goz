@@ -31,8 +31,10 @@ pub(crate) enum Layout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RingPlan {
     /// Files of this size and more go to the ring; smaller ones to the
-    /// Windows engine's workers.
-    pub(crate) from: u64,
+    /// Windows engine's workers. `None` when the settings choose the Windows
+    /// engine for the pair: the ring then copies only the files that
+    /// Continue resumes, because only it resumes inside a file.
+    pub(crate) from: Option<u64>,
     pub(crate) block: usize,
     pub(crate) reads: usize,
     pub(crate) writes: usize,
@@ -48,7 +50,7 @@ pub(crate) struct RingPlan {
 impl RingPlan {
     /// AngelCOPY's profile, for files of `from` bytes and more: its blocks in
     /// flight are its whole buffer, so each block is reading or writing.
-    pub(crate) fn ssd(settings: RingSsd, from: u64) -> RingPlan {
+    pub(crate) fn ssd(settings: RingSsd, from: Option<u64>) -> RingPlan {
         let block = settings.block.bytes() as usize;
         let in_flight = settings.in_flight.get();
         RingPlan {
@@ -63,11 +65,11 @@ impl RingPlan {
         }
     }
 
-    /// FastCopy's hard-disk profile, for every file.
-    pub(crate) fn hard_disk(settings: RingHardDisk, layout: Layout) -> RingPlan {
+    /// FastCopy's hard-disk profile, for every file when `chosen`.
+    pub(crate) fn hard_disk(settings: RingHardDisk, layout: Layout, chosen: bool) -> RingPlan {
         let buffer = settings.buffer.bytes() as usize;
         RingPlan {
-            from: 0,
+            from: chosen.then_some(0),
             // A block never exceeds the buffer it is read into.
             block: (settings.block.bytes() as usize).min(buffer),
             reads: settings.in_flight.get(),

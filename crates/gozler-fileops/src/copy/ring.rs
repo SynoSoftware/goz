@@ -12,16 +12,19 @@
 //! that another program writes.
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 use gozler_winfs::{
-    BasicInfo, Completion, Entry, IoRing, RingOpen, RingWaker, WinError, create_ring_destination,
-    open_ring_source,
+    AlignedBuffer, BasicInfo, Completion, Entry, Existing, IoRing, RingOpen, RingWaker, WinError,
+    create_ring_destination, open_ring_destination, open_ring_source,
 };
 
-use super::streams::finish_streams;
-use super::{Handed, Snapshot, Walk};
+use super::streams::{finish_streams, has_other_streams};
+use super::{Handed, Snapshot, Walk, Write};
+use crate::listing::join;
+use crate::operation::Reason;
+use crate::place::{Placed, place};
 use crate::retry::retry;
 use crate::ring_plan::{
     OVERLAPPED_FROM, RingPlan, Space, blocks, clone_ranges, destination_unbuffered, round_up,
@@ -101,7 +104,7 @@ struct Chunk {
 }
 
 enum Task {
-    Close(Job),
+    Close(Box<Job>),
     Windows(Handed),
     Open(Handed),
     Discard(Vec<Handed>),
@@ -146,7 +149,7 @@ impl Ring {
                 let mut shared = self.shared();
                 loop {
                     if let Some(job) = shared.written.pop_front() {
-                        break Task::Close(job);
+                        break Task::Close(Box::new(job));
                     }
                     if let Some(handed) = shared.to_windows.pop_front() {
                         break Task::Windows(handed);
@@ -170,7 +173,7 @@ impl Ring {
             };
             match task {
                 Task::Close(job) => {
-                    self.close(walk, job);
+                    self.close(walk, *job);
                     self.shared().open -= 1;
                     self.changed.notify_all();
                 }
@@ -204,7 +207,7 @@ impl Ring {
     fn open(&self, walk: &Walk, handed: Handed) -> Option<Job> {
         let file = &handed.file;
         let folder = handed.folder.as_deref();
-        if walk.stopped() || !walk.clear_partial(file, folder) {
+        if walk.stopped() {
             release(walk, handed);
             return None;
         }
@@ -257,17 +260,64 @@ impl Ring {
         };
         let target = walk.copying.target;
         let unbuffered = destination_unbuffered(size, target.fat);
-        let partial = file.partial_path();
-        let created = retry(cancel, || {
-            let open = RingOpen {
-                unbuffered,
-                overlapped,
-            };
-            create_ring_destination(&partial, open).map_err(|error| error.code)
-        });
-        let destination = match created {
-            Ok(destination) => destination,
-            Err(ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL) => {
+        let open = RingOpen {
+            unbuffered,
+            overlapped,
+        };
+        let code = |error: WinError| error.code;
+        let mut placing = file.placing();
+        // Resume and Replace write over the file there in place, keeping its
+        // bytes as far as the compare below finds the source's.
+        let mut resumed = None;
+        if file.write == Write::Resume {
+            let path = join(&file.target.verbatim, &file.final_name);
+            match open_in_place(cancel, &path, open) {
+                Ok(InPlace::File(destination)) => resumed = Some(destination),
+                // A link put at the name since the listing is not this
+                // operation's file, so the choice applies to it.
+                Ok(InPlace::Link(_)) => placing.replace = false,
+                // The operation's own file is deleted, so whatever holds the
+                // name when the copy creates it is another program's.
+                Ok(InPlace::Streams(destination)) => {
+                    if walk.destination.delete_entry(&destination).is_err() {
+                        return self.windows(walk, handed);
+                    }
+                    placing.replace = false;
+                }
+                Err(_) => return self.windows(walk, handed),
+            }
+        }
+        let created = match resumed {
+            Some(destination) => Placed::Named((destination, true)),
+            None => {
+                let create = |to: &[u16], existing| {
+                    if existing == Existing::Replace {
+                        match open_in_place(cancel, to, open) {
+                            Ok(InPlace::File(destination)) => return Ok((destination, true)),
+                            // Deleted through the handle, which closes at the
+                            // end of the arm, so the name is free for the
+                            // create below.
+                            Ok(InPlace::Link(other) | InPlace::Streams(other)) => {
+                                walk.destination.delete_entry(&other)?;
+                            }
+                            Err(error) if is_gone(error) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    retry(cancel, || create_ring_destination(to, open).map_err(code))
+                        .map(|created| (created, false))
+                };
+                place(&file.target, placing, walk.copying.rule.choice, create)
+            }
+        };
+        let (destination, compare) = match created {
+            Placed::Named(named) => named,
+            Placed::Skipped => {
+                walk.list_entry(&file.path, Reason::Skipped, folder);
+                release(walk, handed);
+                return None;
+            }
+            Placed::Failed(ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL) => {
                 walk.full.store(true, Ordering::Relaxed);
                 if let Some(folder) = folder {
                     folder.keep();
@@ -275,7 +325,7 @@ impl Ring {
                 release(walk, handed);
                 return None;
             }
-            Err(_) => return self.windows(walk, handed),
+            Placed::Failed(_) => return self.windows(walk, handed),
         };
         let sparse = basic.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0;
         let mut job = Job {
@@ -293,25 +343,44 @@ impl Ring {
             failed: None,
             written: 0,
         };
+        // The bytes of a file written in place that the copy keeps.
+        let mut kept = 0;
         let mut prepared = || -> Result<bool, WinError> {
             job.align = PAGE
                 .max(u64::from(sector))
                 .max(u64::from(job.destination.sector_size()?));
-            if let Some(cluster) = target.clone_cluster
-                && Ring::cloned(walk, &job, u64::from(cluster), sparse)?
-            {
-                return Ok(true);
+            if let Some(cluster) = target.clone_cluster {
+                // A clone takes no time, so a file written in place is cloned
+                // again.
+                if compare {
+                    job.destination.set_end_of_file(0)?;
+                }
+                if Ring::cloned(walk, &job, u64::from(cluster), sparse)? {
+                    return Ok(true);
+                }
+            } else if compare {
+                kept = Ring::kept(&job.source, &job.destination, size, self.plan.block)?;
+                // Nothing the compare did not confirm stays, so a hole of the
+                // source cannot keep the earlier file's bytes.
+                job.destination.set_end_of_file(kept)?;
             }
-            if sparse && target.sparse_files {
-                job.destination.set_sparse(true)?;
+            // A file written in place may carry a mark that the source lacks.
+            if target.sparse_files && (sparse || compare) {
+                job.destination.set_sparse(sparse)?;
             }
             // The reader reads only the ranges that hold data.
             let ranges = if size == 0 {
                 Vec::new()
             } else if sparse {
-                job.source.allocated_ranges(size)?
+                let ranges = job.source.allocated_ranges(size)?;
+                (ranges.into_iter())
+                    .filter_map(|(offset, len)| {
+                        let start = offset.max(kept);
+                        (offset + len > start).then(|| (start, offset + len - start))
+                    })
+                    .collect()
             } else {
-                vec![(0, size)]
+                vec![(kept, size - kept)]
             };
             job.blocks = blocks(&ranges, self.plan.block);
             // A write that extends a file runs synchronously, so the whole
@@ -325,7 +394,11 @@ impl Ring {
             Ok(false)
         };
         match prepared() {
-            Ok(false) => Some(job),
+            Ok(false) => {
+                walk.copying.progress.add_bytes(kept);
+                job.written = kept;
+                Some(job)
+            }
             Ok(true) => {
                 walk.copying.progress.add_bytes(size);
                 job.written = size;
@@ -343,6 +416,64 @@ impl Ring {
                 given_up.and_then(|handed| self.windows(walk, handed))
             }
         }
+    }
+
+    /// Resume and Replace: how many bytes from the start of the destination
+    /// hold the source's, compared block by block. A block is kept only when
+    /// it is whole and equal, and the source's last block when the
+    /// destination holds all of it; the copy writes the rest. The source is
+    /// open without write sharing from before this compare to the end of the
+    /// copy, so every byte kept still equals the source when the copy ends.
+    /// Each file is read on a thread of its own, a block ahead.
+    fn kept(source: &Entry, destination: &Entry, size: u64, block: usize) -> Result<u64, WinError> {
+        let (source_size, destination_size) = (size, destination.stat()?.size);
+        let end = source_size.min(destination_size);
+        let mut buffers = Vec::new();
+        for _ in 0..2 {
+            let (free, taken) = mpsc::channel();
+            for _ in 0..2 {
+                free.send(AlignedBuffer::new(block)?)
+                    .expect("the receiver is here");
+            }
+            buffers.push((free, taken));
+        }
+        std::thread::scope(|scope| {
+            let mut readers = Vec::new();
+            for ((free, taken), file) in buffers.into_iter().zip([source, destination]) {
+                let (sender, filled) = mpsc::channel();
+                scope.spawn(move || read_blocks(file, end, block, &taken, &sender));
+                readers.push((free, filled));
+            }
+            let [(source_free, source), (destination_free, destination)] = &readers[..] else {
+                unreachable!("two readers");
+            };
+            let next = |filled: &mpsc::Receiver<Filled>| {
+                filled
+                    .recv()
+                    .expect("a reader sends every block below the end")
+            };
+            let mut kept = 0u64;
+            while kept < end {
+                let want = (source_size - kept).min(block as u64);
+                if kept + want > destination_size {
+                    break;
+                }
+                let (from, from_read) = next(source)?;
+                let (to, to_read) = next(destination)?;
+                let len = want as usize;
+                let same = from_read >= len && to_read >= len && from[..len] == to[..len];
+                // A reader that ended no longer takes buffers back.
+                let _ = (source_free.send(from), destination_free.send(to));
+                if !same {
+                    break;
+                }
+                kept += want;
+            }
+            // Dropping the channels here ends both readers before the
+            // scope joins them.
+            drop(readers);
+            Ok(kept)
+        })
     }
 
     /// Clones the whole file within its volume (D20); `false` when the
@@ -389,9 +520,10 @@ impl Ring {
     }
 
     /// Ends a file the ring could not copy: takes back its progress and
-    /// deletes its temporary file through its own handle, then closes both
-    /// handles. Returns the file when the Windows engine is to copy it;
-    /// after a cancel or a full disk it is done here.
+    /// deletes the file it wrote through its own handle, then closes both
+    /// handles. When the queue closes, the file stays for Continue to
+    /// resume. Returns the file when the Windows engine is to copy it; after
+    /// a cancel or a full disk it is done here.
     fn give_up(
         &self,
         walk: &Walk,
@@ -402,7 +534,9 @@ impl Ring {
         error: u32,
     ) -> Option<Handed> {
         walk.copying.progress.remove_bytes(written);
-        let _ = walk.destination.delete_entry(&destination);
+        if !walk.copying.closing.load(Ordering::Relaxed) {
+            let _ = walk.destination.delete_entry(&destination);
+        }
         // The name leaves when the handles close, before the Windows engine
         // writes it again.
         drop((source, destination));
@@ -420,7 +554,7 @@ impl Ring {
     }
 
     /// Closes a file the loop wrote whole: its true end of file, streams,
-    /// attributes and times, then its final name.
+    /// attributes and times, then [`Walk::finish`].
     fn close(&self, walk: &Walk, job: Job) {
         let Job {
             handed,
@@ -440,7 +574,7 @@ impl Ring {
             return;
         }
         drop((source, destination));
-        walk.finish(&handed.file, handed.folder.as_ref(), written, before);
+        walk.finish(&handed.file, handed.folder.as_ref(), before);
         release(walk, handed);
     }
 
@@ -464,6 +598,58 @@ impl Ring {
             stopped: false,
         };
         run.run();
+    }
+}
+
+/// The entry at a destination name, opened itself, never what a reparse
+/// point there points to.
+enum InPlace {
+    /// A file whose bytes the copy can keep.
+    File(Entry),
+    /// A reparse point, such as a link, which writing would write through.
+    Link(Entry),
+    /// A file with an alternate data stream or extended attributes, or
+    /// whose streams cannot be read. Only a new file sheds a stream that
+    /// the source may not have, so it is copied again from its start.
+    Streams(Entry),
+}
+
+fn open_in_place(cancel: &AtomicBool, path: &[u16], open: RingOpen) -> Result<InPlace, u32> {
+    let code = |error: WinError| error.code;
+    let entry = retry(cancel, || open_ring_destination(path, open).map_err(code))?;
+    Ok(if entry.attribute_tag().map_err(code)?.reparse_tag != 0 {
+        InPlace::Link(entry)
+    } else if has_other_streams(&entry) != Ok(false) {
+        InPlace::Streams(entry)
+    } else {
+        InPlace::File(entry)
+    })
+}
+
+/// One block of a compared file, with the bytes read into it.
+type Filled = Result<(AlignedBuffer, usize), WinError>;
+
+/// Reads `file` from its start in blocks below `end`, each into a buffer
+/// from `free`, and sends it to `filled`, until the end, an error, or the
+/// compare stops taking them.
+fn read_blocks(
+    file: &Entry,
+    end: u64,
+    block: usize,
+    free: &mpsc::Receiver<AlignedBuffer>,
+    filled: &mpsc::Sender<Filled>,
+) {
+    let mut offset = 0;
+    while offset < end {
+        let Ok(mut buffer) = free.recv() else {
+            return;
+        };
+        let read = file.read_at(offset, &mut buffer);
+        let failed = read.is_err();
+        if filled.send(read.map(|read| (buffer, read))).is_err() || failed {
+            return;
+        }
+        offset += block as u64;
     }
 }
 
@@ -804,5 +990,75 @@ impl Loop<'_, '_> {
         }
         drop(shared);
         self.ring.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A resume keeps exactly the start of the destination that equals the
+    /// source, in whole blocks, and the source's last block only when the
+    /// destination holds all of it, and writes the rest again. A byte kept
+    /// that differs from the source would stay wrong in the copy, and a
+    /// block not kept is a block written again. The files are large enough
+    /// that both are read overlapped, as the ring opens them.
+    #[test]
+    fn a_resume_keeps_only_the_start_that_equals_the_source() {
+        const BLOCK: usize = 256 * 1024;
+        let folder =
+            std::env::temp_dir().join(format!("gozler-fileops-{}-kept", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("create the test folder");
+        let size = 3 * BLOCK + 100;
+        let old: Vec<u8> = (0..size as u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let with = |edit: &dyn Fn(&mut Vec<u8>)| {
+            let mut bytes = old.clone();
+            edit(&mut bytes);
+            bytes
+        };
+        let other_after_two = with(&|bytes| bytes[2 * BLOCK..].fill(0x5A));
+        let zeros_after_two = with(&|bytes| {
+            bytes[2 * BLOCK..].fill(0);
+            bytes.resize(size.next_multiple_of(4096), 0);
+        });
+        let zero_block = with(&|bytes| bytes[BLOCK..2 * BLOCK].fill(0));
+        let changed = with(&|bytes| bytes[BLOCK + 7] ^= 1);
+        let grown = with(&|bytes| bytes.extend_from_slice(&[9; BLOCK]));
+        let cut = with(&|bytes| bytes.truncate(2 * BLOCK + 10));
+        let cases: [(&str, &[u8], &[u8], u64); 8] = [
+            ("equal", &old, &old, size as u64),
+            ("other bytes", &old, &other_after_two, 2 * BLOCK as u64),
+            ("preset zeros", &old, &zeros_after_two, 2 * BLOCK as u64),
+            ("a zero block", &old, &zero_block, BLOCK as u64),
+            ("source changed", &changed, &old, BLOCK as u64),
+            ("source grew", &grown, &old, 3 * BLOCK as u64),
+            (
+                "source shrank",
+                &old[..2 * BLOCK + 100],
+                &old,
+                2 * BLOCK as u64 + 100,
+            ),
+            ("cut mid-block", &old, &cut, 2 * BLOCK as u64),
+        ];
+        let open = RingOpen {
+            unbuffered: true,
+            overlapped: true,
+        };
+        let units = |path: &std::path::Path| -> Vec<u16> {
+            use std::os::windows::ffi::OsStrExt;
+            path.as_os_str().encode_wide().collect()
+        };
+        for (case, source, destination, kept) in cases {
+            let (from, to) = (folder.join("source"), folder.join("destination"));
+            std::fs::write(&from, source).expect("write the source");
+            std::fs::write(&to, destination).expect("write the destination");
+            let from_entry = open_ring_source(&units(&from), open).expect("open the source");
+            let to_entry = open_ring_destination(&units(&to), open).expect("open the copy");
+            let found = Ring::kept(&from_entry, &to_entry, source.len() as u64, BLOCK);
+            assert_eq!(found.expect("compared"), kept, "{case}");
+        }
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

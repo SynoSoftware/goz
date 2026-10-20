@@ -82,3 +82,21 @@ What the rows decide, in the spec's terms:
 - **D20, the clone:** `CopyFile2` with `COPY_FILE_NO_BUFFERING` still clones within the Dev Drive: it copied 1.28 GB in 0.14 s. Its clone costs fewer cycles than the ring's (0.22 G against 0.36 G for 20 files, about 7 M cycles more per file in the ring); both take under 0.4 s.
 
 Not measured here, and in the plan's "After install": two disks, a hard disk, a USB drive and a share, whose winners replace Automatic's hard-disk, USB and share values.
+
+### Stage E: final names and resume
+
+Run on 2026-10-20 by the same program, elevated, on the same laptop and SSD, with stage D's fixtures divided by 5 at the owner's request: 6,000 files of 1 to 64 KB in 1,000 folders (201 MB), and one 1,600 MiB file. Counted and run as in stage D. The totals do not compare with stage D's, so the comparison is per file and per MB.
+
+| Fixture | Case | CPU cycles (G) | Cycles | Runs | Wall time (s) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 6,000 files of 1 to 64 KB in 1,000 folders | Gozler copy, Windows engine, 16 workers, to the final name | 19.20 | 3.20 M per file, 95.5 M per MB | 3 | 13.38 |
+| | `CopyFile2` on 16 threads, to the final name | 19.95 | 3.33 M per file, 99.2 M per MB | 3 | 12.53 |
+| one 1,600 MiB file | Gozler, Windows engine unbuffered, `ioDesiredSize` 32 MiB (Automatic) | 0.60 | 0.36 M per MB | 1 | 4.65 |
+| | Gozler ring, 8 MiB x 8 | 0.39 | 0.23 M per MB | 1 | 4.25 |
+| the 1,600 MiB file and a copy that holds all its bytes | Continue: the ring compares the whole file and writes nothing | 1.10 | 0.66 M per MB | 1 | 1.51 |
+
+What the rows decide:
+
+- **D10, the final name:** Gozler's small-file copy now costs what `CopyFile2` costs straight to the final name, 95.5 M cycles per MB against 139.7 M in stage D, when it wrote under a temporary name and renamed. Writing to the final name removed the rename's cost and added none.
+- **D10, resume:** the compare read the two files at 1.11 GB/s (2.22 GB/s in total), against 0.41 GB/s for a copy by the Windows engine and 0.39 GB/s by the ring (medians of 4 runs). So a 50 GB file stopped at 49 GB resumes in about 47 s (49 GB compared, then 1 GB copied) against about 120 s to copy it again, and writes 1 GB instead of 49 GB. Computed from these rates; nothing near 50 GB was copied.
+- **D7:** the Windows engine had the shorter wall time in 3 of 4 runs of the large file (median 4.09 s against 4.29 s), so Automatic keeps it for large files between SSDs. A file a fifth of stage D's size carries each copy's fixed cost over fewer MB, so both engines cost more per MB than in stage D.

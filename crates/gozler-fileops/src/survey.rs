@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gozler_winfs::{Access, Entry, Reparse, allocated_size, open_entry};
 
-use crate::conflicts::{Clash, Rule, Wanted, classify};
+use crate::conflicts::{Clash, Rule, Run, Wanted, classify};
 use crate::copy::Source;
 use crate::listing::{LISTING_WORDS, is_folder, join, kind, list, read_names};
 use crate::names::{Holder, Names};
@@ -81,6 +81,7 @@ pub(crate) fn survey<'s>(
             &item,
             source.own_folder,
             copies,
+            source.shared,
         );
     }
     Ok(walk.counted)
@@ -104,7 +105,7 @@ pub fn measure(path: &Path, cancel: &AtomicBool) -> Result<Measured, u32> {
     let surveying = Surveying {
         rule: Rule {
             choice: None,
-            continuing: false,
+            run: Run::First { started: None },
         },
         sparse_stays: false,
         cancel,
@@ -157,21 +158,36 @@ impl Walk<'_> {
         item: &Item<'_>,
         own_folder: bool,
         copies: bool,
+        shared: bool,
     ) {
         let wanted = Wanted {
             kind: kind(item.attributes, item.reparse_tag),
             size: item.size,
             last_write: item.last_write,
             own_folder,
+            copied: copies,
+            shared,
         };
         let entered = is_folder(item.attributes, item.reparse_tag);
         let survey = &mut self.counted.survey;
         let clash = classify(names, item.name, wanted, self.surveying.rule);
         match clash {
-            Clash::Done | Clash::Mismatch => return,
+            Clash::Done { name } => {
+                names.insert(&name, Holder::Ours);
+                return;
+            }
+            Clash::Mismatch => return,
             Clash::Merge => {
                 survey.items += 1;
-                return self.merge(&join(folder, item.name), item, copies);
+                return self.merge(&join(folder, item.name), item, copies, shared);
+            }
+            // Its bytes at the destination already take their space.
+            Clash::Unfinished { name, size } => {
+                names.insert(&name, Holder::Ours);
+                survey.items += 1;
+                survey.bytes += item.size;
+                self.counted.needed += item.size.saturating_sub(size);
+                return;
             }
             Clash::Conflict => survey.conflicts += 1,
             Clash::SameName => survey.same_name += 1,
@@ -204,7 +220,7 @@ impl Walk<'_> {
 
     /// Counts the children of a folder whose names the destination folder
     /// `into` already holds.
-    fn merge(&mut self, into: &[u16], item: &Item<'_>, copies: bool) {
+    fn merge(&mut self, into: &[u16], item: &Item<'_>, copies: bool, shared: bool) {
         let names = open_entry(into, Access::List, Reparse::Open)
             .map_err(|error| error.code)
             .and_then(|folder| read_names(&folder, &mut self.page));
@@ -233,7 +249,7 @@ impl Walk<'_> {
                 size: stat.size,
                 last_write: stat.last_write,
             };
-            self.item(&mut names, into, &child, false, copies);
+            self.item(&mut names, into, &child, false, copies, shared);
         }
     }
 

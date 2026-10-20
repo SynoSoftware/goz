@@ -27,9 +27,12 @@ pub(crate) fn is_gone(code: u32) -> bool {
 }
 
 pub(crate) const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
+pub(crate) const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+pub(crate) const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 pub(crate) const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub(crate) const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 pub(crate) const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x200;
+pub(crate) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 pub(crate) const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
 
 pub(crate) const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;

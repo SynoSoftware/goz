@@ -1,11 +1,14 @@
 //! Stage D's measurement of the engine (`docs/plans/fast-copy-delete-plan.md`,
-//! "Stage D: measure").
+//! "Stage D: measure"), and with `--resume` stage E's: the copies that
+//! writing to the final name changes, and Continue's compare.
 //!
 //! ```text
 //! cargo run --release -p gozler-fileops --example measure -- <folder on an NTFS volume>
 //!     <folder on the Dev Drive> [--windows-tools] [--fastcopy <FastCopy.exe>]
-//!     [--rmbrr <rmbrr.exe>]
+//!     [--rmbrr <rmbrr.exe>] [--resume]
 //! ```
+//!
+//! With `--resume` the Dev Drive folder is not used.
 //!
 //! It runs elevated and counts CPU cycles, not time, as `timed` says. Before
 //! each case it empties the standby list, so the case reads from the disk
@@ -36,7 +39,7 @@ mod measure {
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, mpsc};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use gozler_fileops::{
         Count, DeleteWorkers, End, LargeFileLimit, Outcome, Preset, Queue, Request, RingBlock,
@@ -52,10 +55,11 @@ mod measure {
     const GIB: u64 = 1024 * MIB;
     const GB: f64 = 1e9;
 
-    const SMALL_FOLDERS_TOP: usize = 50;
+    const SMALL_FOLDERS_TOP: usize = 10;
     const SMALL_FOLDERS_EACH: usize = 99;
     const SMALL_FILES_EACH: usize = 6;
-    const BIG: u64 = 8 * GIB;
+    const SMALL_FOLDER_COUNT: usize = SMALL_FOLDERS_TOP * (SMALL_FOLDERS_EACH + 1);
+    const BIG: u64 = 1600 * MIB;
     const SIZED: [u64; 3] = [32 * MIB, 64 * MIB, 128 * MIB];
     const SIZED_COUNT: u64 = 20;
     const DEV_FILE: u64 = 64 * MIB;
@@ -67,12 +71,15 @@ mod measure {
         windows_tools: bool,
         fastcopy: Option<PathBuf>,
         rmbrr: Option<PathBuf>,
+        /// Stage E's cases only.
+        resume: bool,
     }
 
     fn args() -> Args {
         let mut args = std::env::args_os().skip(1);
         let usage = "usage: measure <folder on an NTFS volume> <folder on the Dev Drive> \
-                     [--windows-tools] [--fastcopy <FastCopy.exe>] [--rmbrr <rmbrr.exe>]";
+                     [--windows-tools] [--fastcopy <FastCopy.exe>] [--rmbrr <rmbrr.exe>] \
+                     [--resume]";
         let work = PathBuf::from(args.next().expect(usage));
         let dev = PathBuf::from(args.next().expect(usage));
         let mut parsed = Args {
@@ -81,12 +88,14 @@ mod measure {
             windows_tools: false,
             fastcopy: None,
             rmbrr: None,
+            resume: false,
         };
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--windows-tools") => parsed.windows_tools = true,
                 Some("--fastcopy") => parsed.fastcopy = Some(args.next().expect(usage).into()),
                 Some("--rmbrr") => parsed.rmbrr = Some(args.next().expect(usage).into()),
+                Some("--resume") => parsed.resume = true,
                 _ => panic!("{usage}"),
             }
         }
@@ -162,7 +171,7 @@ mod measure {
     }
 
     fn small_sizes() -> Vec<u64> {
-        let count = SMALL_FOLDERS_TOP * (SMALL_FOLDERS_EACH + 1) * SMALL_FILES_EACH;
+        let count = SMALL_FOLDER_COUNT * SMALL_FILES_EACH;
         let mut state = 0x5EED_u64;
         (0..count)
             .map(|_| {
@@ -174,7 +183,7 @@ mod measure {
             .collect()
     }
 
-    fn fixtures(work: &Path, dev: &Path) -> Fixtures {
+    fn fixtures(work: &Path, dev: &Path, resume: bool) -> Fixtures {
         let root = work.join("fixtures");
         let mut fixtures = Fixtures {
             small: root.join("small"),
@@ -202,7 +211,8 @@ mod measure {
                 }
             }
         }
-        let done = root.join("done");
+        // Stage E's cases use only the small tree and the large file.
+        let done = root.join(if resume { "done-resume" } else { "done" });
         if !done.exists() {
             let started = Instant::now();
             let _ = fs::remove_dir_all(&root);
@@ -215,7 +225,7 @@ mod measure {
             }
             fs::create_dir_all(fixtures.big.parent().expect("a folder")).expect("create");
             write_file(&fixtures.big, BIG, 1 << 40);
-            for (folder, size) in fixtures.sized.iter().zip(SIZED) {
+            for (folder, size) in fixtures.sized.iter().zip(SIZED).filter(|_| !resume) {
                 fs::create_dir_all(folder).expect("create a fixture folder");
                 for n in 0..SIZED_COUNT {
                     write_file(&folder.join(format!("f{n:02}.bin")), size, size + n);
@@ -224,7 +234,7 @@ mod measure {
             fs::File::create(&done).expect("mark the fixtures done");
             println!("fixtures made in {:.0} s", started.elapsed().as_secs_f64());
         }
-        if !fixtures.dev.join("done").exists() {
+        if !resume && !fixtures.dev.join("done").exists() {
             let _ = fs::remove_dir_all(&fixtures.dev);
             fs::create_dir_all(&fixtures.dev).expect("create the Dev Drive fixtures");
             for n in 0..DEV_COUNT {
@@ -443,6 +453,46 @@ mod measure {
             }
         }
 
+        /// A case that continues an interrupted copy of `source` whose copy
+        /// at the final name holds every byte but not the source's time, so
+        /// Continue compares the whole file and writes nothing: the cost of
+        /// the compare alone.
+        fn resume_case(&'a self, name: impl Into<String>, source: PathBuf) -> Case<'a> {
+            Case {
+                name: name.into(),
+                measure: Box::new(move || {
+                    let out = &self.out;
+                    self.engine.clear(out);
+                    fs::create_dir_all(out).expect("create the destination");
+                    let saved = out.with_file_name("resume.json");
+                    let _ = fs::remove_file(&saved);
+                    interrupt(&saved, &source, out);
+                    let copy = out.join(source.file_name().expect("a name"));
+                    let _ = fs::remove_file(&copy);
+                    windows_copy(&source, &copy, true, Some(32 * MIB as u32));
+                    // A last write after the operation started, as an
+                    // interrupted copy has, so it is unfinished, not done.
+                    let file = fs::OpenOptions::new()
+                        .write(true)
+                        .open(&copy)
+                        .expect("open the copy");
+                    file.set_modified(SystemTime::now())
+                        .expect("set the copy's time");
+                    file.sync_all().expect("flush the copy");
+                    drop(file);
+                    let measured = timed(|| {
+                        continue_saved(&saved);
+                        Ran::default()
+                    });
+                    let len = |path: &Path| fs::metadata(path).expect("a file").len();
+                    assert_eq!(len(&copy), len(&source), "the copy keeps its size");
+                    self.engine.clear(out);
+                    let _ = fs::remove_file(&saved);
+                    measured
+                }),
+            }
+        }
+
         /// A case that deletes a copy of the small tree with `run`.
         fn delete_case(
             &'a self,
@@ -563,7 +613,7 @@ mod measure {
         let processors = std::thread::available_parallelism().map_or(1, usize::from);
 
         let mut delete = Row {
-            fixture: format!("{small_files} files of 1 to 64 KB in 5,000 folders"),
+            fixture: format!("{small_files} files of 1 to 64 KB in {SMALL_FOLDER_COUNT} folders"),
             amount: Amount::Files(small_files),
             cases: Vec::new(),
         };
@@ -647,7 +697,7 @@ mod measure {
 
         let big = vec![fixtures.big.clone()];
         let mut copy_big = Row {
-            fixture: "one 8 GiB file".to_owned(),
+            fixture: format!("one {} MiB file", BIG / MIB),
             amount: Amount::Bytes(BIG),
             cases: Vec::new(),
         };
@@ -764,6 +814,107 @@ mod measure {
         rows
     }
 
+    /// Stage E's rows: the copies that writing straight to the final name
+    /// changes, against stage D's numbers, the two engines that Automatic
+    /// could give a large file between SSDs, and Continue's compare.
+    fn resume_rows<'a>(context: &'a Context<'a>) -> Vec<Row<'a>> {
+        let fixtures = context.fixtures;
+        let engine = context.engine;
+        let small = vec![fixtures.small.clone()];
+        let (small_files, small_bytes) = totals(&fixtures.small);
+        let copy_small = Row {
+            fixture: format!("{small_files} files of 1 to 64 KB in {SMALL_FOLDER_COUNT} folders"),
+            amount: Amount::Bytes(small_bytes),
+            cases: vec![
+                context.copy_case(
+                    "Gozler copy, Windows engine, 16 workers",
+                    small.clone(),
+                    false,
+                    move |sources, out| engine.copy(sources, out, SpeedSettings::automatic()),
+                ),
+                context.copy_case(
+                    "CopyFile2 on 16 threads, to the final name",
+                    small,
+                    false,
+                    move |_, out| copy_small_directly(fixtures, out, false),
+                ),
+            ],
+        };
+        let big = vec![fixtures.big.clone()];
+        let copy_big = Row {
+            fixture: format!("one {} MiB file", BIG / MIB),
+            amount: Amount::Bytes(BIG),
+            cases: vec![
+                context.copy_case(
+                    "Gozler copy, Windows engine unbuffered, ioDesiredSize 32 MiB (Automatic)",
+                    big.clone(),
+                    false,
+                    move |sources, out| engine.copy(sources, out, SpeedSettings::automatic()),
+                ),
+                context.copy_case(
+                    "Gozler ring, 8 MiB × 8",
+                    big,
+                    false,
+                    move |sources, out| engine.copy(sources, out, Preset::RingCopy.settings()),
+                ),
+            ],
+        };
+        let compare = Row {
+            fixture: format!(
+                "one {} MiB file and a copy that holds all its bytes",
+                BIG / MIB
+            ),
+            amount: Amount::Bytes(BIG),
+            cases: vec![context.resume_case(
+                "Continue: the ring compares the whole file and writes nothing",
+                fixtures.big.clone(),
+            )],
+        };
+        vec![copy_small, copy_big, compare]
+    }
+
+    /// Starts copying `source` into `out` with Automatic's settings and
+    /// ends the queue while the copy runs, as Exit does, which leaves the
+    /// operation in `saved` with the time it started.
+    fn interrupt(saved: &Path, source: &Path, out: &Path) {
+        let engine = Engine::new(saved);
+        let request = Request::Copy {
+            sources: vec![source.to_owned()],
+            destination: out.to_owned(),
+        };
+        let id = engine.queue.prepare(request, SpeedSettings::automatic());
+        engine.wait(id, |state| !matches!(state, State::Preparing));
+        engine.queue.submit(id, None).expect("the copy is prepared");
+        let seen = engine.wait(id, |state| {
+            matches!(state, State::Running { .. } | State::Ended(_))
+        });
+        drop(engine);
+        assert!(
+            saved.exists(),
+            "Exit saved no operation; the copy was {seen:?}"
+        );
+    }
+
+    /// Continues the one interrupted operation in `saved`, to its end.
+    fn continue_saved(saved: &Path) {
+        let engine = Engine::new(saved);
+        let (id, state) = (engine.queue.operations().into_iter())
+            .next()
+            .expect("the interrupted copy");
+        assert!(matches!(state, State::Interrupted(_)), "{state:?}");
+        engine.queue.resume(id).expect("the copy is interrupted");
+        let State::Ended(outcome) = engine.wait(id, |state| matches!(state, State::Ended(_)))
+        else {
+            unreachable!("waited for the end");
+        };
+        assert!(
+            outcome.end == End::Complete
+                && outcome.listed.is_empty()
+                && outcome.ring.to_windows == 0,
+            "Continue did not resume the copy in the ring: {outcome:?}"
+        );
+    }
+
     fn count(n: u32) -> Count {
         Count::new(n).expect("in range")
     }
@@ -850,37 +1001,46 @@ mod measure {
         // Every call the cases need, once, before the fixtures take minutes.
         empty_standby_list().expect("empty the standby list");
         let small_bytes: u64 = small_sizes().iter().sum();
-        let fixture_bytes = small_bytes + BIG + SIZED.iter().sum::<u64>() * SIZED_COUNT;
+        let sized_bytes = if args.resume {
+            0
+        } else {
+            SIZED.iter().sum::<u64>() * SIZED_COUNT
+        };
+        let fixture_bytes = small_bytes + BIG + sized_bytes;
         let dev_bytes = DEV_COUNT * DEV_FILE;
         let need = fixture_bytes + BIG + small_bytes + GIB;
-        let need_dev = 2 * dev_bytes + GIB;
+        let need_dev = if args.resume { 0 } else { 2 * dev_bytes + GIB };
         let free = free_space(&long(work.parent().unwrap_or(work))).expect("free space");
-        let free_dev = free_space(&long(dev.parent().unwrap_or(dev))).expect("free space");
         println!(
             "{}: needs {:.1} GB free at once, has {:.1} GB",
             drive(work),
             need as f64 / GB,
             free as f64 / GB
         );
-        println!(
-            "{}: needs {:.1} GB free at once, has {:.1} GB",
-            drive(dev),
-            need_dev as f64 / GB,
-            free_dev as f64 / GB
-        );
-        assert!(
-            free >= need && free_dev >= need_dev,
-            "not enough free space"
-        );
-        for volume in [drive(work), drive(dev)] {
+        let mut volumes = vec![drive(work)];
+        if !args.resume {
+            let free_dev = free_space(&long(dev.parent().unwrap_or(dev))).expect("free space");
+            println!(
+                "{}: needs {:.1} GB free at once, has {:.1} GB",
+                drive(dev),
+                need_dev as f64 / GB,
+                free_dev as f64 / GB
+            );
+            assert!(free_dev >= need_dev, "not enough free space");
+            volumes.push(drive(dev));
+        }
+        assert!(free >= need, "not enough free space");
+        for volume in volumes {
             let storage =
                 volume_storage(&format!(r"\\.\{volume}").encode_utf16().collect::<Vec<_>>());
             println!("{volume}: {storage:?}");
         }
 
         fs::create_dir_all(work).expect("create the work folder");
-        fs::create_dir_all(dev).expect("create the Dev Drive folder");
-        let fixtures = fixtures(work, dev);
+        if !args.resume {
+            fs::create_dir_all(dev).expect("create the Dev Drive folder");
+        }
+        let fixtures = fixtures(work, dev, args.resume);
         let engine = Engine::new(&work.join("queue.json"));
         let context = Context {
             engine: &engine,
@@ -889,7 +1049,13 @@ mod measure {
             dev_out: dev.join("out"),
         };
         let started = Instant::now();
-        let results: Vec<Counted> = rows(&context, &args).iter().flat_map(measure_row).collect();
+        let rows = if args.resume {
+            resume_rows(&context)
+        } else {
+            rows(&context, &args)
+        };
+        let results: Vec<Counted> = rows.iter().flat_map(measure_row).collect();
+        drop(rows);
 
         let mut table = String::from(
             "| Fixture | Case | CPU cycles (G) | Cycles | Runs | Wall time (s) | Note |\n\
@@ -914,7 +1080,9 @@ mod measure {
         drop(engine);
         let _ = fs::remove_file(work.join("queue.json"));
         fs::remove_dir_all(work.join("fixtures")).expect("delete the fixtures");
-        fs::remove_dir_all(dev).expect("delete the Dev Drive fixtures");
+        if !args.resume {
+            fs::remove_dir_all(dev).expect("delete the Dev Drive fixtures");
+        }
         println!(
             "fixtures deleted; the table is in {}",
             work.join("measure-results.md").display()

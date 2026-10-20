@@ -1,8 +1,11 @@
-//! Clocks that ignore what a wall clock counts: sleep, and other threads.
+//! The system time, and clocks that ignore what a wall clock counts: sleep,
+//! and other threads.
 
 use std::os::windows::io::{AsRawHandle, BorrowedHandle};
 use std::time::Duration;
 
+use windows_sys::Win32::Foundation::FILETIME;
+use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
 use windows_sys::Win32::System::WindowsProgramming::{
     QueryProcessCycleTime, QueryThreadCycleTime, QueryUnbiasedInterruptTime,
@@ -21,6 +24,22 @@ pub fn awake_time() -> Duration {
     unsafe { QueryUnbiasedInterruptTime(&mut ticks) };
     // The count is in 100 ns units.
     Duration::from_nanos(ticks.saturating_mul(100))
+}
+
+/// The system time as a `FILETIME`, in 100 ns units, from the clock tick
+/// (`GetSystemTimeAsFileTime`). It never runs ahead of the precise clock,
+/// so a file created or written after this call never has an earlier
+/// creation or last write time, whichever of the two clocks its file system
+/// stamps it with.
+pub fn system_time() -> i64 {
+    let mut time = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    // SAFETY: plain FFI writing one FILETIME through a valid pointer; it
+    // cannot fail.
+    unsafe { GetSystemTimeAsFileTime(&mut time) };
+    (i64::from(time.dwHighDateTime) << 32) | i64::from(time.dwLowDateTime)
 }
 
 /// CPU cycles the calling thread has run (`QueryThreadCycleTime`). Unlike a

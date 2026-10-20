@@ -7,7 +7,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gozler_winfs::{Access, Entry, Reparse, open_entry};
+use gozler_winfs::{Access, Entry, Reparse, open_entry, rename};
 
 use crate::conflicts::{Decision, Rule, Wanted, decide};
 use crate::copy::Source;
@@ -65,6 +65,7 @@ pub(crate) fn move_by_rename(
             entry: &entry,
             attributes: tag.attributes,
             reparse_tag: tag.reparse_tag,
+            shared: source.shared,
         };
         run.place_entry(destination, &moved);
     }
@@ -81,6 +82,8 @@ struct Moved<'a> {
     entry: &'a Entry,
     attributes: u32,
     reparse_tag: u32,
+    /// [`Wanted::shared`].
+    shared: bool,
 }
 
 struct Run<'a> {
@@ -119,6 +122,8 @@ impl Run<'_> {
             size: stat.size,
             last_write: stat.last_write,
             own_folder: false,
+            copied: false,
+            shared: moved.shared,
         };
         let decision = {
             let mut names = target.names.lock().expect("one thread");
@@ -127,14 +132,17 @@ impl Run<'_> {
         match decision {
             Decision::Write { name, replace } => {
                 let placing = Placing {
-                    from: moved.from,
                     base: moved.name,
                     name,
                     replace,
                     is_folder: moved.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    shared: moved.shared,
                 };
-                match place(target, placing, self.moving.rule.choice) {
-                    Placed::Named => {
+                let renamed = |to: &[u16], existing| {
+                    rename(moved.from, to, existing).map_err(|error| error.code)
+                };
+                match place(target, placing, self.moving.rule.choice, renamed) {
+                    Placed::Named(()) => {
                         self.moving.progress.add_items(1);
                         true
                     }
@@ -153,6 +161,7 @@ impl Run<'_> {
                 self.fail(moved.path, ERROR_ALREADY_EXISTS);
                 false
             }
+            Decision::Resume { .. } => unreachable!("only a copied entry is unfinished"),
             Decision::Done => {
                 // Equal size and time are a guess, and no hash checks it, so
                 // a continued move never deletes a source on it.
@@ -255,6 +264,7 @@ impl Run<'_> {
                 entry: &entry,
                 attributes: tag.attributes,
                 reparse_tag: tag.reparse_tag,
+                shared: moved.shared,
             };
             emptied &= self.place_entry(&into, &child);
         }

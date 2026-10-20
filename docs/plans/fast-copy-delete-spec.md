@@ -19,6 +19,7 @@ evidence.
 | 2026-10-19 | The UI never waits for disk work: a command replies when the person's choice is recorded, and the progress shows on the operation. |
 | 2026-10-19 | Where the research does not show which method is faster, Gozler implements both and the person chooses. |
 | 2026-10-19 | The person chooses the speed settings: Automatic, which stage D's measurements fill, or a preset taken from the copiers that were read, shown without the copier's name, and can change each value. |
+| 2026-10-19 | **Owner ruling: resume inside a file.** A copy writes straight to the final name, with no temporary name and no rename. A file in progress when the operation is interrupted stays, and Continue resumes it at its last confirmed byte, never discarding bytes it can confirm. No file-size limit decides this. Recovery adds no work to a copy that is not interrupted, because maximum copy speed comes first. A reliable resume comes before a fast one: where a case is in doubt, the file is copied from the start or goes to the conflict choice. Which unfinished file is the operation's own is decided by the date, as FastCopy and AngelCOPY decide by dates, not by a record that would slow the copy. A move deletes a source only after its copy is complete. |
 | 2026-10-19 | **Owner ruling: no Recycle Bin.** Every delete is permanent, with the fast method of D1. Gozler is the tool a person picks for speed; a person who wants the Recycle Bin uses File Explorer. |
 
 ## Decisions
@@ -34,13 +35,13 @@ the research record that holds the evidence.
 | D4 | How to list a folder | `GetFileInformationByHandleEx` with `FileFullDirectoryInfo` on a folder handle, parsed in `gozler_core::layout` | `FileIdExtdDirectoryInfo`, which gozlerd's ReFS walk parses; `FindFirstFileExW` (rmbrr, FastCopy); `NtQueryDirectoryFile` | The engine needs the name, attributes, size, date and reparse tag, not file IDs. `FileFullDirectoryInfo` gives all of them, the tag in `EaSize` for a reparse point (MS-FSCC), and every Windows file system answers it, FAT included. `FileIdExtdDirectoryInfo` is not handled by the FAT driver sample, so it would need this class as a fallback anyway | Listing APIs |
 | D5 | Use gozlerd's index as the list of files to copy or delete | No. The disk is listed when the work starts | The index | The index lags the disk, hides names a person may not list, and holds no removable, network or FAT drive. A wrong list deletes or skips files. The index gives the panels their folder sizes only | — |
 | D6 | The Recycle Bin | Not used (owner ruling) | `IFileOperation` with `FOFX_RECYCLEONDELETE`, as TinyTorrent2's `RecycleBin.cs` does | Recycling runs at File Explorer's speed and only through File Explorer's engine, which would also need its own thread, its own wait rules and its own questions | Delete APIs |
-| D7 | Which copy engine | **Both, and the person chooses** (owner decisions 4 and 5): the Windows copy engine (`CopyFile2`) and Gozler's ring, combined for each case by the speed settings. The default preset, Automatic, holds Parallel copy's values, which stage D confirmed on an SSD: for one 8 GiB file the Windows engine with D9's `ioDesiredSize` cost 9 % fewer CPU cycles than the ring's SSD profile, and 8 MiB ring blocks 40 % fewer than 2 MiB blocks (`docs/BENCHMARKS.md`). The After install checks replace the hard-disk, USB and share values they measure; the other presets are the configurations of the copiers that were read ("Speed settings") | One engine; a choice between whole engines only | The research does not settle it: no source compares a ring with `CopyFile2` and `COPY_FILE_NO_BUFFERING`, and no source measured a hard disk. The ring wins in theory on one hard disk with two partitions and measured +32 % on one large NVMe file; it also writes every byte itself, so a defect damages files with nothing to detect it | Copiers; What the research leaves open |
+| D7 | Which copy engine | **Both, and the person chooses** (owner decisions 4 and 5): the Windows copy engine (`CopyFile2`) and Gozler's ring, combined for each case by the speed settings. The default preset, Automatic, holds Parallel copy's values, which stage D confirmed on an SSD: for one 8 GiB file the Windows engine with D9's `ioDesiredSize` cost 9 % fewer CPU cycles than the ring's SSD profile, and 8 MiB ring blocks 40 % fewer than 2 MiB blocks; stage E's 1,600 MiB file gave the Windows engine the shorter wall time in 3 of 4 runs (`docs/BENCHMARKS.md`). The After install checks replace the hard-disk, USB and share values they measure; the other presets are the configurations of the copiers that were read ("Speed settings") | One engine; a choice between whole engines only | The research does not settle it: no source compares a ring with `CopyFile2` and `COPY_FILE_NO_BUFFERING`, and no source measured a hard disk. The ring wins in theory on one hard disk with two partitions and measured +32 % on one large NVMe file; it also writes every byte itself, so a defect damages files with nothing to detect it | Copiers; What the research leaves open |
 | D8 | The Windows engine's rules | Rename on one volume; `CopyFile2` across volumes; `COPY_FILE_NO_BUFFERING` from 32 MiB between local volumes; files under 32 MiB on 16 workers between volumes without a seek penalty, 2 on a USB volume or a share; one file at a time otherwise | Explorer's defaults; robocopy `/MT` | Copied from AngelCOPY's `NativeCopy.cpp`, through TinyTorrent2's `Payload::Move`: the rename, the 16 workers with 256-file items, and `CopyFile2` for shares, each measured by AngelCOPY. Not copied: for files of 32 MiB and more AngelCOPY uses its ring, and TinyTorrent2 put unbuffered `CopyFile2` there instead, with AngelCOPY's size limit, when it decided not to build a ring. Stage D measured it: for files of 32, 64 and 128 MiB the unbuffered copy one at a time cost 32 % to 45 % fewer CPU cycles than the buffered copy on 16 workers, so the limit stays at AngelCOPY's 32 MiB rather than BetterCopy's 256 MiB (`docs/BENCHMARKS.md`). BetterCopy's 2 workers for a USB bulk-only device and for a share | Copiers |
 | D9 | `COPYFILE2_EXTENDED_PARAMETERS_V2::ioDesiredSize` | 32 MiB for an unbuffered copy, from Windows build 22621, where the sparse flag also starts; not set for a buffered copy | Leave it to `CopyFile2`; 8 MiB | Microsoft says it "may be reduced" and "may be ignored". Stage D measured one 8 GiB file: 32 MiB cost 25 % fewer CPU cycles than leaving it unset and ran 22 % faster; 8 MiB gave nothing. Unset, the engine's large-file copy cost more cycles than `robocopy /j` (`docs/BENCHMARKS.md`) | Copy APIs |
-| D10 | Where a copy is written | Under a temporary name, `<name>.gozler-partial`, renamed when complete. A name that would pass 255 characters keeps a shorter start of its name and adds 8 lowercase hexadecimal digits of a hash of the full name: 32-bit FNV-1a over its UTF-16 units, each as its two little-endian bytes. The kept start is 232 units, one fewer when that would split a surrogate pair. Continue finds an earlier run's partial file by this name, so the hash is a saved format | The final name (File Explorer, robocopy) | A crash then never leaves a partial file that looks complete, and a move never deletes a source before its copy has its final name. The hash keeps two long names that start alike apart. Stage D measured the cost on 30,000 small files: 43 % more CPU cycles than writing to the final name, and more than twice the wall time, which is all of the engine's extra cost there; the engine still costs the same cycles as `robocopy /e /mt:16` and runs 24 % faster (`docs/BENCHMARKS.md`). The cost stays, because it buys the two guarantees above | Lessons from TinyTorrent2 |
+| D10 | Where a copy is written, and where an interrupted file resumes | At its final name (owner ruling), created only when the name is free. An interrupted file stays (What a stopped operation leaves), and Continue resumes it on the ring: it compares the file with the source block by block from the start, and writes from the first block that differs (Saved operations). Replace on the ring writes over the existing file the same way. A normal copy does no extra work for this: no checkpoint, no flush, no record | A temporary name renamed when complete (rsync's default, browsers); `COPY_FILE_RESTARTABLE`, as robocopy `/z`; a checkpoint flushed as the copy runs; a check of the last block only; rsync `--append-verify`, which resumes at the destination's size, useless for a file preallocated to its full size, and verifies the whole file afterwards | No copier that the research read gives both full speed and crash recovery, so this is Gozler's own design, proven by stage E's tests rather than by another tool's use; SynoSoftware/goz#80 tracks what to revisit. FastCopy opens every file with `CREATE_ALWAYS` and AngelCOPY deletes a partial file; robocopy `/z` slows every copy, Microsoft says "significantly", and recovery must not (owner ruling); Ultracopier resumes only within one running process. The compare is correct whatever happened before it: a block is kept only when it equals the source, and the source stays open without write sharing from the compare to the end of the copy. So a gap from out-of-order writes, the zero tail of a preallocated file, a power loss, an interrupted Replace and a source changed since the crash all end at the first block that differs. A last block that matches would prove nothing about the blocks before it. The compare read 1.11 GB/s against 0.41 GB/s for a copy, so a 50 GB file stopped at 49 GB resumes in about 47 s instead of 120 s. Stage D measured the temporary name at 43 % more CPU cycles on 30,000 small files, which stage E removed (`docs/BENCHMARKS.md`) | Resuming inside a file |
 | D11 | When the file list is made | When the work starts, by walking the disk | When the person asks | An operation can wait in the queue for minutes. TinyTorrent2 rejected a design that took the names at the request, because renames still running changed them | Lessons from TinyTorrent2 |
 | D12 | How paths are compared | By identity: the final path (`GetFinalPathNameByHandleW`), component by component, with `VOLUME_NAME_GUID` on a local volume and `VOLUME_NAME_DOS` on a share, which has no volume GUID path | The path text | Two strings name one folder through case, short names, mount points and junctions; a text compare would miss an overlap or move a folder into itself | Lessons from TinyTorrent2 |
-| D13 | What may be deleted | The entries of a delete; a moved source after its copy has its final name; an emptied source folder; a `.gozler-partial` file; the file that Replace replaces | Anything else, such as a folder a copy merged into | A path that an operation protects is never also a path it deletes | Lessons from TinyTorrent2 |
+| D13 | What may be deleted | The entries of a delete; a moved source after its copy is complete; an emptied source folder; a file this operation was writing when the person cancelled it; the file that Replace replaces; a link at a name that Replace replaces, never its target; the operation's own unfinished file when its streams cannot be kept | Anything else, such as a folder a copy merged into | A path that an operation protects is never also a path it deletes | Lessons from TinyTorrent2 |
 | D14 | Which operations wait, and who decides | The engine's queue: an operation waits for an earlier one that has not ended when one of them writes or deletes a path that the other reads or writes, a path counting as the entry and everything below it; copies that move bytes on one disk with a seek penalty wait for each other; nothing else waits | One queue for everything; one queue per disk; a queue in the window | Overlap protects files: with parallel workers nothing else orders work on one path, as TinyTorrent2's single payload worker did. The disk rule protects speed, so it applies only to a disk with a seek penalty: copies between SSDs run at once, as in File Explorer and robocopy. An ended operation makes nothing wait. A copy writes only `<destination>\<source name>` and its numbered names, not its whole destination folder, so a delete inside a backup folder does not wait for a copy into it. The wait is a file-safety rule, so it lives in the engine, where no caller can skip it, and never with the person | Lessons from TinyTorrent2 |
 | D15 | Where the engine runs | In the window's process, with the person's token | In gozlerd | A pipe request to an elevated service would let any local user delete files as SYSTEM | — |
 | D16 | Rename on one volume | Yes, for a move | Copy and delete, as FastCopy does | A rename changes only the folder entry, so 100 GB moves in milliseconds; AngelCOPY, BetterCopy and Ultracopier rename too | Copiers |
@@ -166,7 +167,7 @@ failure, never a copy that nothing waited for or counted.
    and Keep both's first free number, are lookups in that set, not one
    probe per name: a folder that holds `index (2).html` to
    `index (500).html` costs no 500 probes. A name taken after the listing is
-   caught at the final rename (step 6). Two selected entries with one name
+   caught when the file is created (step 5). Two selected entries with one name
    are also a conflict. Folders with one name merge, as in File Explorer,
    but never into a junction or folder link at the destination: that is a
    listed failure, because writing through it would write outside the
@@ -186,21 +187,39 @@ failure, never a copy that nothing waited for or counted.
    operation made its parent: AngelCOPY added that after about 30 folders
    on a file server returned it and their subtrees were lost.
 5. **Files** are copied by the engine that the speed settings choose for
-   their case (D7). Each is written under its temporary name (D10), after any
-   `.gozler-partial` file of that name is deleted, because only an
-   interrupted run of Gozler makes that name.
-6. **The final rename** is `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`,
-   except for Replace. When another file took the final name after the walk,
-   the rename fails with `ERROR_FILE_EXISTS` or `ERROR_ALREADY_EXISTS`. It
-   fails with `ERROR_ACCESS_DENIED` both for a hidden or read-only file and
-   for a folder whose permissions refuse the rename, so on that code the
-   engine asks whether the final name exists (`GetFileAttributesExW`). A
-   final name that exists is a conflict with someone else's file, never
-   deleted (D13): the operation's choice applies, and with no choice the
-   copy is deleted and the file is listed as skipped. Otherwise the error is
-   a failure.
-7. **Replace** clears the read-only attribute of the file it replaces, then
-   renames over it.
+   their case (D7), straight to their final name (D10). The file is created
+   only when the name is free: the ring creates it with `CREATE_NEW`, and the
+   Windows engine passes `COPY_FILE_FAIL_IF_EXISTS`. When another file took
+   the name after the walk, the create fails with `ERROR_FILE_EXISTS` or
+   `ERROR_ALREADY_EXISTS`. It fails with `ERROR_ACCESS_DENIED` both for a
+   hidden or read-only file and for a folder whose permissions refuse the
+   create, so on that code the engine asks whether the name exists
+   (`GetFileAttributesExW`). A name that exists is a conflict with someone
+   else's file, never deleted (D13): the operation's choice applies (Keep
+   both takes the next free number, Replace writes over it), and with Skip
+   or no choice the file is listed as skipped. Otherwise the error is a
+   failure. A file of one of two selected entries with one name never
+   replaces the other's copy (Conflicts).
+6. **Replace** clears the read-only, hidden and system attributes of the
+   file it replaces and copies with the engine the speed settings choose
+   for the file. The ring opens it in place without following a reparse
+   point and writes over it as Continue resumes a file (D10). The Windows
+   engine deletes the entry at the name without following it (D13) and
+   copies with `COPY_FILE_FAIL_IF_EXISTS`, which is always set; an entry
+   that takes the name between the delete and the copy makes the copy fail
+   and be listed. At Continue the ring also takes a Replace whose file was
+   last written at or after the operation's start, which is the Replace
+   this operation was writing, so it resumes; the person chose Replace for
+   that file, so a wrong guess costs time, never a file. Giving every
+   Replace to the ring would copy many small files one at a time. The old
+   content is gone from the moment Replace starts, as with File Explorer,
+   robocopy and FastCopy.
+7. **A link at a destination name is never written through.** Every open
+   of an existing destination file uses `FILE_FLAG_OPEN_REPARSE_POINT`. A
+   reparse point found there is never the operation's unfinished file
+   (Saved operations); Replace deletes the link itself through its handle
+   and creates the file with `CREATE_NEW`. Writing through a link would
+   write outside the destination, wherever the link points.
 8. **A file and a folder with one name** are a listed failure whatever the
    choice, never replaced, as File Explorer refuses them.
 9. **Failures.** A file that fails is recorded with Windows' error, and the
@@ -317,8 +336,28 @@ Both profiles:
   the last block. A write that extends a file runs synchronously (Microsoft
   KB 156932), so growing the file with each write would serialize the
   writes in flight. Ultracopier reserves space with `FileAllocationInfo`
-  instead, so that a partial file stays short; the temporary name (D10)
-  already makes a partial file harmless.
+  instead, so that a partial file stays short and a check of the size alone
+  cannot take it for complete. Gozler's check compares the last write time
+  too, which both engines set last, and Continue finds where a file stopped
+  by comparing it, not from its size.
+- **Resume and Replace (D10)** open the existing destination in place,
+  without following a reparse point, and the source. Two reader threads
+  compare them with the profile's blocks from the start, up to the smaller
+  of the two sizes. A block is kept only when it is whole and equal; the
+  source's last, shorter block is kept when the destination holds all of
+  it. The ring then sets the end of file to the kept length, sets or
+  clears the sparse mark to the source's, and copies from there as for a
+  new file, so the reads and writes stay aligned. A destination with an
+  alternate data stream or extended attributes, or whose streams cannot be
+  read, is deleted and copied from the start, because writing over it in
+  place would keep a stream the source may lack, such as an old
+  `Zone.Identifier`. A compare that fails gives the file to the Windows
+  engine. Every unfinished file resumes on the ring, also one the Windows
+  engine wrote, except the files the ring hands to the Windows engine
+  (below), which `CopyFile2` copies again from the start, because it
+  cannot start inside a file; for a network end that costs no time, as the
+  compare would read the written part across the network. A clone (D20)
+  starts again, because it writes no data and takes milliseconds.
 - **Sources share read and delete, not write.** A file that another program
   has open for writing then fails with a sharing violation and is listed,
   instead of being copied as a mix of old and new bytes under its final
@@ -383,7 +422,7 @@ code and a copier's name would promise that copier's exact behavior.
 
 | Preset, as shown | Large-file limit | Large files between SSDs | Hard disk | Workers SSD / USB / hard disk / share | Ring SSD | Ring hard disk | Delete workers | From |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Automatic (default) | 32 MiB | Windows | Windows | 16 / 2 / 1 / 2 | 8 MiB × 8 | 2 MB × 8, 256 MB | one per processor | Parallel copy's values, which stage D confirmed on an SSD (D2, D7, D8); the After install checks replace the hard-disk, USB and share values |
+| Automatic (default) | 32 MiB | Windows | Windows | 16 / 2 / 1 / 2 | 8 MiB × 8 | 2 MB × 8, 256 MB | one per processor | Parallel copy's values, which stages D and E confirmed on an SSD (D2, D7, D8); the After install checks replace the hard-disk, USB and share values |
 | Parallel copy | 32 MiB | Windows | Windows | 16 / 2 / 1 / 2 | — | — | one per processor | TinyTorrent2's `Payload::Move`; share workers from BetterCopy; delete from rmbrr |
 | Ring copy | 32 MiB | ring | ring | 16 / 2 / 1 / 2 | 8 MiB × 8 | 2 MB × 8, 256 MB | one per processor | AngelCOPY's ring and FastCopy v5's hard-disk mode |
 | Ring for large files, many small files at once | 32 MiB | ring | Windows | 16 / 16 / 16 / 16 | 8 MiB × 8 | — | 8 | AngelCOPY 1.6.0 |
@@ -406,13 +445,13 @@ hard-disk mode is in Ring copy.
   Prepare counts the conflicts of those merged folders as it does for a
   copy.
 - **Across volumes** it is a copy as the speed settings choose, and each source
-  file is deleted when its copy has its final name, and only when it is
+  file is deleted when its copy is complete, and only when it is
   still the file that was copied: the same file ID, size and last write
   time as before the copy. Otherwise it stays and is listed, because the
   Windows engine copies a file another program has open for writing, and
   a program can replace a file by renaming a new one over it. A source folder is
   deleted when it is empty (D3). A cancel takes effect before a file's
-  final rename or after its source's delete, never between them, so a
+  copy is complete or after its source's delete, never between them, so a
   cancel or a failure leaves each file in one place.
 
 ## Conflicts
@@ -431,7 +470,11 @@ The person gives one answer for all conflicts that prepare found:
   result, because nobody chose to replace that file.
 - Two selected entries never replace each other: on a move that would delete
   one of the person's files, and on a copy the result would depend on the
-  order.
+  order. This holds inside two selected folders with one name, which merge
+  when the destination already has a folder of that name: a file there
+  created at or after the operation's start is the other entry's copy and
+  is treated as the second entry of one name; an older file is the
+  person's and gets the choice.
 - A copy into the entry's own folder gets a number without a question, as
   in File Explorer, because Replace would replace the source with its own
   copy.
@@ -441,13 +484,16 @@ The person gives one answer for all conflicts that prepare found:
 | Operation | Stopped by | Leaves |
 | --- | --- | --- |
 | Copy | Cancel or a failure | the files copied so far and the folders made; the files in progress are deleted |
-| Copy | power loss or a crash | the files copied so far and the folders made, and the file in progress under its temporary name until Continue deletes it; Dismiss leaves it, and the Interrupted row says so |
+| Copy | Exit, power loss or a crash | the files copied so far and the folders made, and the files in progress, unfinished at their final names, until Continue resumes them; Dismiss leaves them, and the Interrupted row says so. At Exit the queue's `close()` cancels the run without stopping `CopyFile2`, which deletes its file when stopped, so a Windows-engine file keeps growing until the process ends |
 | Move on one volume | anything | each entry in one place: a rename is complete or did not happen |
 | Move across volumes | Cancel or a failure | each file in one place: moved, or still at its source |
-| Move across volumes | power loss or a crash | each file in one place, except the file in progress, which is whole at its source and under its temporary name at the destination, and a file whose source delete had not run, which is at both |
+| Move across volumes | Exit, power loss or a crash | each file in one place, except the file in progress, which is whole at its source and unfinished at the destination, and a file whose source delete had not run, which is at both |
 | Delete | anything | the entries not yet deleted |
 
-A file at its final name is always complete.
+An unfinished file has the time it was last written, not its source's,
+because both engines set the times last, so a copy that compares size and
+date, Gozler's or robocopy's, never takes it for complete. A Replace that
+stops has already overwritten the file it replaces (Copy, step 6).
 
 ## The interface
 
@@ -533,21 +579,45 @@ then be missing at the next start.
 
 **Saved operations (D19).** Before a running operation changes its first
 file, the queue writes its kind, its speed settings, its sources, its
-destination and its conflict choice to the saved file: to a temporary file,
-then renamed over the old one, as `ui.json` is written. It removes the
-operation when it ends, cancelled included. A waiting operation is not
-saved, because it has changed no file. When the queue is created, each
-saved operation becomes an interrupted one.
+destination, its conflict choice and the time it first started to the saved
+file: to a temporary file, then renamed over the old one, as `ui.json` is
+written. The start time comes from `GetSystemTimeAsFileTime`, which never
+runs ahead of the clock that stamps files, and Continue keeps the first
+run's. It removes the operation when it ends, cancelled included.
+A waiting operation is not saved, because it has changed no file. When the
+queue is created, each saved operation becomes an interrupted one.
 
-- **Continue** prepares and submits it again with one more rule: a file at
-  the destination's final name, or for Keep both at one of its numbered
-  names, with the source's size and last write time is done. The times
-  compare within 2 seconds, or within one hour and 2 seconds after a
-  daylight saving change, because FAT keeps them to 2 seconds in local time,
-  as TinyTorrent2's `Payload::IsCopy` does. Its prepare applies this rule
-  while it counts, from the destination listing it reads for conflicts, so
-  a file found done counts no bytes: otherwise a 100 GB copy that crashed
-  at 90 GB on a drive with 120 GB free could not continue.
+- **Continue** prepares and submits it again with two more rules, which its
+  prepare applies while it counts, from the destination listing it reads
+  for conflicts, so that a file found done counts no bytes and an unfinished
+  file counts only what it lacks: otherwise a 100 GB copy that crashed at
+  90 GB on a drive with 120 GB free could not continue.
+  - **Done:** a file at the destination's final name, or for Keep both at
+    one of its numbered names, with the source's size and last write time.
+    The times compare within 2 seconds, or within one hour and 2 seconds
+    after a daylight saving change, because FAT keeps them to 2 seconds in
+    local time, as TinyTorrent2's `Payload::IsCopy` does.
+  - **Unfinished:** a file there that this operation made and did not
+    finish: it is not done, it is not a reparse point (Copy, step 7), no
+    other selected entry has its name, and the listing's creation time is
+    at or after the time the operation first started, less FAT's 2
+    seconds. It is resumed on the ring (D10), never put to the conflict
+    choice. The creation time decides, not the last write time, because
+    the person's own file that the first run skipped and that they edited
+    during the interruption has a new last write time but its old creation
+    time. Where another selected entry has the name, either copy could be
+    the other's, so the file goes to the conflict choice, and Replace and
+    Keep both number the copy. Windows can give a new file the creation
+    time of a file of that name deleted a few seconds before (file name
+    tunnelling); such a file goes to the conflict choice too, which costs a
+    question, never a file, and an interrupted Replace still resumes
+    (Copy, step 6).
+  - A file that another program creates at the name after the operation
+    started is taken for the operation's own and resumed over; it ends
+    equal to the source. The date cannot tell them apart without a record
+    of each file, which would slow every copy (SynoSoftware/goz#80).
+  - An operation saved before the start time was recorded finds no file
+    unfinished; every file that is not done goes to the conflict choice.
 - **A move that continues keeps the source of a file found done** and lists
   it in the result. Equal size and time are a guess, and TinyTorrent2 trusts
   that guess only because a hash check of the torrent follows; Gozler checks
@@ -605,7 +675,7 @@ never make a delete fail. TinyTorrent2's mark writer opens without
   nothing. `deny.toml`'s list of `gozler-core`'s dependents gains
   `gozler-fileops`.
 - **`gozler-fileops`:** everything in this spec. No `unsafe`, no window code.
-  Its decisions (the numbers for Keep both, the temporary name, nested
+  Its decisions (the numbers for Keep both, which file is unfinished, nested
   selections, a destination inside a source, the overlap test, taken paths,
   the method for a pair of volumes, the ring's block plan) build and test on
   every OS; the disk work is Windows only.
@@ -626,8 +696,24 @@ is in the plan's "After install".
   bytes). The ring still sets it on the handle that copies the streams, as
   AngelCOPY sets it on a reopened handle, because that handle is opened
   for the streams anyway.
-- What one rename per copied file (D10) and one listing per destination
-  folder cost on a share. After install times a small-file copy to a share.
+- What one listing per destination folder costs on a share. After install
+  times a small-file copy to a share.
+- `CopyFile2` and an interrupted copy (D10), run once in stage E on
+  2026-10-20, 4 GiB, unbuffered, `ioDesiredSize` 32 MiB:
+  - A process that ends during the copy leaves the destination at its full
+    size, because `CopyFile2` sets the size first, with a creation time
+    when the copy started and a last write time when the process ended. So
+    the done rule never matches it, and Continue finds it unfinished.
+  - The progress callback's STOP and CANCEL both return
+    `ERROR_REQUEST_ABORTED` and delete the file; PAUSE returns `S_OK` and
+    copies the whole file. So Exit does not stop `CopyFile2` (What a
+    stopped operation leaves).
+- The compare's speed against a copy, stage E on the owner's SSD with a
+  1,600 MiB file: 1.11 GB/s against 0.41 GB/s (`docs/BENCHMARKS.md`). Not
+  measured on a hard disk, where the compare reads two files on one disk.
+- No test cuts the power. Stage E's tests build each interrupted state
+  directly: a prefix, a zero tail, a zero block inside, a changed, grown
+  and shrunk source, a link at the name, and two entries with one name.
 
 - ReFS accepts `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS` (stage A, run once on
   2026-10-19, Windows 11 25H2 build 26200, the owner's Dev Drive): with
@@ -698,7 +784,7 @@ is in the plan's "After install".
     `ERROR_DISK_FULL`, and the ring keeps the mark, as "The clone" says.
   - ReFS reports space freed by a delete up to about a minute late.
 - Whether the parallel walk is slower than one walker on a hard disk.
-- Every speed claim of D2 and D7 to D10 between two disks, on a hard disk,
+- Every speed claim of D2 and D7 to D9 between two disks, on a hard disk,
   a USB drive or a share. Stage D measured them on one SSD
   (`docs/BENCHMARKS.md`); the rest is in the plan's "After install".
 

@@ -174,10 +174,15 @@ pub struct RingCounts {
 
 /// A running operation's counters, which the window reads about twice a
 /// second.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Progress {
     items: AtomicU64,
     bytes: AtomicU64,
+    /// Runs once, on the copy's thread, at the copy's first progress
+    /// report, while the copy waits for it, so a test acts at a point the
+    /// copy cannot have passed.
+    #[cfg(test)]
+    pub(crate) at_first_bytes: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Progress {
@@ -187,6 +192,10 @@ impl Progress {
 
     pub(crate) fn add_bytes(&self, count: u64) {
         self.bytes.fetch_add(count, Ordering::Relaxed);
+        #[cfg(test)]
+        if let Some(hook) = self.at_first_bytes.lock().expect("no hook panics").take() {
+            hook();
+        }
     }
 
     /// Takes back the bytes of a file that was not copied after all.

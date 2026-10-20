@@ -34,6 +34,7 @@ No code from these tools is copied into gozler.
 | 2026-10-19 | gozler | The owner asked for copy, move and delete "as fast as possible", then for a Norton Commander style mode, operations in the background with a queue, and a UI that never waits for disk work. Where the research does not show which method is faster, Gozler builds both and the person chooses. |
 | 2026-10-19 | gozler | The window's coordinator session reported why the window's plan took about 18.5 hours against about 5.6 hours for the es superset; `AGENTS.md` ("Writing a plan") and [the file manager spec](../plans/file-manager-spec.md) hold the lessons. |
 | 2026-10-19 | gozler | This record. Then an adversarial review of the specs by the window's session, and the code-review skill's `plan2` review. |
+| 2026-10-19 | gozler | Owner ruling: a copy writes straight to the final name and resumes an interrupted file inside it, with no cost to a copy that is not interrupted. "Resuming inside a file" below holds what the tools do. |
 | 2026-10-19 | gozler | Owner ruling: no Recycle Bin. Gozler is the tool for speed, every delete is permanent, and a person who wants the Recycle Bin uses File Explorer. The `IFileOperation` rows below stay as evidence of what was not used. |
 
 ## Copiers
@@ -266,6 +267,27 @@ or Apache-2.0. Its Windows deletion is in <https://github.com/rbtcollins/fs_at>
   nothing has measured it.
 - **All authors' numbers** are their own, mostly without hardware. Stage D
   of the plan measures on the owner's machine.
+
+## Resuming inside a file
+
+Read on 2026-10-19 and 2026-10-20 from the repositories at the heads given,
+for the owner's ruling that an interrupted copy resumes inside a file. No
+tool read here resumes a file after a crash without slowing every copy, so
+the engine's resume (spec D10) is Gozler's own, proven by its tests;
+SynoSoftware/goz#80 tracks what to revisit.
+
+| Tool | Resumes inside a file | Evidence |
+| --- | --- | --- |
+| FastCopy v3.63, head `7265544` | No. Every file's data is opened with `CREATE_ALWAYS` (`fastcopyw.cpp`, `WriteFileProcCore`) and written from byte 0. `FastCopy::Resume` only resumes paused threads (`fastcopy.cpp`). The v5 help describes a 1980-01-02 date on files not yet verified; v5's code is not published | Confirmed |
+| AngelCOPY, head `b5c63a7` | No. A failed copy calls `DeleteFileW(xd); // no partial leftovers` (`NativeCopy.cpp`). A destination with the source's size and a write time within 2 s is "Same"; any other is copied again whole (`Robocopy.cpp`, `ClassifyFile`) | Confirmed |
+| robocopy `/z`, `CopyFileEx` `COPY_FILE_RESTARTABLE` | Yes, with a restart header kept in the destination. Microsoft: "This can significantly slow down the copy operation as the new file may be flushed multiple times." The header's format and how often it is written are not documented | Confirmed; the cost Not found as a number |
+| rsync `--append-verify`, head `9dc0ff6` | Yes: it appends from the destination's size, then checks one checksum of the whole file and transfers the file again on a mismatch (`receiver.c`, `match.c`). It does not search for the first byte that differs, and the destination's size says nothing for a file preallocated to its full size | Confirmed |
+| Ultracopier, head `6f80b90` | Only inside one running process, after a source read error: it keeps `contiguousWrittenOffset`, the end of the part written without a gap, in memory (`TransferThreadPipelined.cpp`). Its comment in `TransferThreadWin.cpp` says out-of-order writes leave "a zero-filled gap, NOT a faithful prefix" | Confirmed |
+| BetterCopy, head `a3e239bb` | No; its `seed.md` calls `COPY_FILE_RESTARTABLE` "notoriously slow", unmeasured | Confirmed that it says so |
+
+`CopyFile2` itself, run once in stage E: a process that ends during the copy
+leaves the file at its full size with a fresh last write time; the progress
+callback's STOP and CANCEL delete the file, and PAUSE finishes it.
 
 ## Lessons from TinyTorrent2
 

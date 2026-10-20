@@ -20,11 +20,12 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BackupRead, BackupSeek, BackupWrite, CREATE_NEW, CreateFileW, DELETE, FILE_END_OF_FILE_INFO,
-    FILE_FLAG_NO_BUFFERING, FILE_FLAG_OVERLAPPED, FILE_FLAG_SEQUENTIAL_SCAN, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_STORAGE_INFO, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileEndOfFileInfo,
-    FileStorageInfo, GetDiskFreeSpaceW, GetFileInformationByHandleEx,
-    GetVolumeInformationByHandleW, OPEN_EXISTING, ReOpenFile, ReadFile, SYNCHRONIZE, WriteFile,
+    FILE_FLAG_NO_BUFFERING, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_OVERLAPPED,
+    FILE_FLAG_SEQUENTIAL_SCAN, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
+    FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STORAGE_INFO,
+    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileEndOfFileInfo, FileStorageInfo,
+    GetDiskFreeSpaceW, GetFileInformationByHandleEx, GetVolumeInformationByHandleW, OPEN_EXISTING,
+    ReOpenFile, ReadFile, SYNCHRONIZE, WriteFile,
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo};
 use windows_sys::Win32::System::IO::{
@@ -103,20 +104,93 @@ pub fn open_ring_source(path: &[u16], open: RingOpen) -> Result<Entry, WinError>
     create(path, FILE_GENERIC_READ, share, OPEN_EXISTING, flags)
 }
 
+/// Not `FILE_GENERIC_WRITE`: it holds `FILE_APPEND_DATA`, which an
+/// unbuffered open refuses with `ERROR_INVALID_PARAMETER`.
+const DESTINATION_ACCESS: u32 = FILE_READ_ATTRIBUTES
+    | FILE_WRITE_DATA
+    | FILE_WRITE_ATTRIBUTES
+    | FILE_WRITE_EA
+    | DELETE
+    | SYNCHRONIZE;
+
+/// Shares everything, so the ring's own second handle for the backup
+/// streams can open the destination.
+const DESTINATION_SHARE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
 /// Creates the file `path`, which must not exist, to write it. The handle
-/// can also delete it. It shares everything, so the ring's own second handle
-/// for the backup streams can open it.
+/// can also delete it.
 pub fn create_ring_destination(path: &[u16], open: RingOpen) -> Result<Entry, WinError> {
-    // Not `FILE_GENERIC_WRITE`: it holds `FILE_APPEND_DATA`, which an
-    // unbuffered open refuses with `ERROR_INVALID_PARAMETER`.
-    let access = FILE_READ_ATTRIBUTES
-        | FILE_WRITE_DATA
-        | FILE_WRITE_ATTRIBUTES
-        | FILE_WRITE_EA
-        | DELETE
-        | SYNCHRONIZE;
-    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    create(path, access, share, CREATE_NEW, open.flags())
+    create(
+        path,
+        DESTINATION_ACCESS,
+        DESTINATION_SHARE,
+        CREATE_NEW,
+        open.flags(),
+    )
+}
+
+/// Opens the entry at `path` with its bytes, to read and write it, with the
+/// rights of [`create_ring_destination`]'s handle and read access. A reparse
+/// point at `path` opens itself, not its target, so a caller that checks
+/// the handle's reparse tag never writes through a link.
+pub fn open_ring_destination(path: &[u16], open: RingOpen) -> Result<Entry, WinError> {
+    let access = DESTINATION_ACCESS | FILE_READ_DATA;
+    let flags = open.flags() | FILE_FLAG_OPEN_REPARSE_POINT;
+    create(path, access, DESTINATION_SHARE, OPEN_EXISTING, flags)
+}
+
+/// Page-aligned memory, for unbuffered reads outside an [`IoRing`].
+pub struct AlignedBuffer {
+    memory: *mut u8,
+    len: usize,
+}
+
+// SAFETY: the memory belongs to this value alone.
+unsafe impl Send for AlignedBuffer {}
+
+impl AlignedBuffer {
+    pub fn new(len: usize) -> Result<AlignedBuffer, WinError> {
+        // SAFETY: a fresh committed region; null means failure.
+        let memory = unsafe {
+            VirtualAlloc(
+                ptr::null(),
+                len.max(1),
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            )
+        };
+        if memory.is_null() {
+            return Err(last_error("VirtualAlloc"));
+        }
+        Ok(AlignedBuffer {
+            memory: memory.cast(),
+            len,
+        })
+    }
+}
+
+impl core::ops::Deref for AlignedBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        // SAFETY: `len` committed bytes, which VirtualAlloc zeroed, live
+        // until drop.
+        unsafe { core::slice::from_raw_parts(self.memory, self.len) }
+    }
+}
+
+impl core::ops::DerefMut for AlignedBuffer {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as in `deref`, borrowed mutably through `self`.
+        unsafe { core::slice::from_raw_parts_mut(self.memory, self.len) }
+    }
+}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        // SAFETY: the region VirtualAlloc returned, released once.
+        unsafe { VirtualFree(self.memory.cast(), 0, MEM_RELEASE) };
+    }
 }
 
 /// The bytes in a cluster of the volume whose root is `root`, such as
@@ -280,6 +354,54 @@ impl Entry {
             FileAttributes: info.attributes,
         };
         self.set_info(FileBasicInfo, &info, "FileBasicInfo")
+    }
+
+    /// Reads up to `buf.len()` bytes at `offset` and waits for them, whether
+    /// the handle is overlapped or not; returns the bytes read, fewer at the
+    /// end of the file. On an unbuffered handle the offset, the buffer and
+    /// its length are aligned to the sector size. The event's low bit keeps
+    /// the completion out of any completion port that the handle is tied to.
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, WinError> {
+        // SAFETY: a manual-reset event with no name or security attributes.
+        let event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+        if event.is_null() {
+            return Err(last_error("CreateEventW"));
+        }
+        let event = FileHandle(event);
+        let handle = self.0.as_handle();
+        // SAFETY: `buf` and `overlapped` outlive the read, which
+        // `GetOverlappedResult` waits for before they go out of scope.
+        unsafe {
+            let mut overlapped: OVERLAPPED = zeroed();
+            overlapped.Anonymous.Anonymous.Offset = offset as u32;
+            overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
+            overlapped.hEvent = (event.as_handle() as usize | 1) as HANDLE;
+            let len = buf.len().min(u32::MAX as usize) as u32;
+            let ok = ReadFile(
+                handle,
+                buf.as_mut_ptr(),
+                len,
+                ptr::null_mut(),
+                &mut overlapped,
+            );
+            if ok == 0 {
+                match GetLastError() {
+                    ERROR_HANDLE_EOF => return Ok(0),
+                    ERROR_IO_PENDING => {}
+                    _ => return Err(last_error("ReadFile")),
+                }
+            }
+            let mut read = 0u32;
+            if GetOverlappedResult(handle, &overlapped, &mut read, 1) == 0 {
+                let error = last_error("ReadFile");
+                return if error.code == ERROR_HANDLE_EOF {
+                    Ok(0)
+                } else {
+                    Err(error)
+                };
+            }
+            Ok(read as usize)
+        }
     }
 
     pub fn set_end_of_file(&self, size: u64) -> Result<(), WinError> {

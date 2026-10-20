@@ -7,8 +7,8 @@
 //! under that folder's lock, and hands its files on, up to 256 under the
 //! large-file limit as one item and each large file to the one-at-a-time
 //! lane. Copying starts while the walk still runs. Each file is written
-//! under its temporary name (D10) and renamed when complete, so a file at
-//! its final name is always complete.
+//! straight to its final name (D10); an interrupted run leaves its file
+//! there, and Continue resumes it in the ring.
 
 mod ring;
 mod streams;
@@ -19,17 +19,17 @@ use std::sync::{Arc, Mutex};
 
 use gozler_core::layout::FolderEntry;
 use gozler_winfs::{
-    Access, CopyOptions, CopySource, Entry, EntryStat, FileIdentity, Reparse, copy_file,
+    Access, CopyOptions, CopySource, Entry, EntryStat, Existing, FileIdentity, Reparse, copy_file,
     create_folder, open_entry, path_attributes, windows_build,
 };
 
-use crate::conflicts::{Decision, Rule, Wanted, decide};
+use crate::conflicts::{Decision, Rule, Run, Wanted, decide, interrupted_replace};
 use crate::delete::{Disposition, remove};
 use crate::io_threads::IoThreads;
 use crate::listing::{FILES_PER_ITEM, LISTING_WORDS, is_folder, join, kind, list, read_names};
-use crate::names::{Holder, Kind, Names, partial_name};
+use crate::names::{Kind, Names};
 use crate::operation::{Listed, Progress, Reason, RingCounts};
-use crate::place::{Placed, Placing, Target, place};
+use crate::place::{Placed, Placing, Target, place, remove_replaced};
 use crate::pool::{Lane, Pool};
 use crate::receive::{Selected, listed};
 use crate::retry::{retry, retry_also};
@@ -37,8 +37,8 @@ use crate::volumes::CopyPlan;
 use crate::win32::{
     COPY_FILE_22H2_BUILD, ERROR_ALREADY_EXISTS, ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL,
     ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_SPARSE_FILE, IO_DESIRED_SIZE, IO_REPARSE_TAG_SYMLINK,
-    is_gone, is_name_surrogate,
+    FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE,
+    IO_DESIRED_SIZE, IO_REPARSE_TAG_SYMLINK, is_gone, is_name_surrogate,
 };
 use ring::Ring;
 
@@ -51,6 +51,10 @@ pub(crate) struct Copying<'a> {
     pub(crate) moving: bool,
     pub(crate) target: TargetVolume,
     pub(crate) cancel: &'a AtomicBool,
+    /// The queue closes, which also sets `cancel`: a file in progress then
+    /// stays for Continue to resume, where the person's cancel deletes it
+    /// (D13).
+    pub(crate) closing: &'a AtomicBool,
     pub(crate) progress: &'a Progress,
     pub(crate) io: &'a IoThreads,
 }
@@ -83,6 +87,8 @@ pub(crate) struct Copied {
 pub(crate) struct Source {
     pub(crate) selected: Selected,
     pub(crate) own_folder: bool,
+    /// Another selected entry has its name ([`Wanted::shared`]).
+    pub(crate) shared: bool,
 }
 
 /// Copies `sources` into `destination`, whose names it holds.
@@ -104,8 +110,12 @@ pub(crate) fn copy(
         .collect();
     let full = AtomicBool::new(false);
     let stopped = || copying.cancel.load(Ordering::Relaxed) || full.load(Ordering::Relaxed);
-    // The buffer exists only while the copy runs.
-    let ring = copying.plan.ring.and_then(Ring::new);
+    // The buffer exists only while the copy runs, and only when the ring has
+    // files to copy, so a first run that the settings give the Windows
+    // engine allocates nothing.
+    let ring = (copying.plan.ring)
+        .filter(|plan| plan.from.is_some() || !matches!(copying.rule.run, Run::First { .. }))
+        .and_then(Ring::new);
     let (ring, io) = match ring {
         Some((ring, io)) => (Some(ring), Some(io)),
         None => (None, None),
@@ -152,6 +162,8 @@ pub(crate) fn copy(
 struct Walking {
     verbatim: Vec<u16>,
     target: Arc<Target>,
+    /// The selected folder it is in shares its name ([`Wanted::shared`]).
+    shared: bool,
 }
 
 type Folder = crate::tree::Folder<Walking>;
@@ -174,22 +186,38 @@ struct File {
     from: Vec<u16>,
     target: Arc<Target>,
     final_name: Vec<u16>,
-    replace: bool,
+    write: Write,
     size: u64,
     attributes: u32,
     reparse_tag: u32,
+    /// [`Wanted::shared`].
+    shared: bool,
     /// How its source volume deletes, for a move.
     disposition: Arc<Disposition>,
 }
 
-impl File {
-    /// Its temporary name (D10).
-    fn partial(&self) -> Vec<u16> {
-        partial_name(&self.final_name)
-    }
+/// What a copy finds at a file's final name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Write {
+    /// Nothing: the copy creates the file.
+    New,
+    /// The person's file, which Replace writes over; `interrupted` when it
+    /// is the interrupted run's Replace ([`interrupted_replace`]).
+    Replace { interrupted: bool },
+    /// The file an interrupted run was writing, which the copy resumes.
+    Resume,
+}
 
-    fn partial_path(&self) -> Vec<u16> {
-        join(&self.target.verbatim, &self.partial())
+impl File {
+    /// Its final name, written over the file there for Replace and Resume.
+    fn placing(&self) -> Placing<'_> {
+        Placing {
+            base: &self.name,
+            name: self.final_name.clone(),
+            replace: self.write != Write::New,
+            is_folder: self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            shared: self.shared,
+        }
     }
 }
 
@@ -205,7 +233,7 @@ struct Walk<'a> {
     full: &'a AtomicBool,
     listed: Mutex<Vec<Listed>>,
     pool: Pool<'a, Work>,
-    /// How the destination volume deletes, for the temporary files.
+    /// How the destination volume deletes, for the files the ring gives up.
     destination: Disposition,
     /// `ioDesiredSize` for an unbuffered `CopyFile2`; `None` before
     /// [`COPY_FILE_22H2_BUILD`].
@@ -285,6 +313,7 @@ impl Walk<'_> {
         let Source {
             selected,
             own_folder,
+            shared,
         } = source;
         let opened = open_entry(&selected.verbatim, Access::Inspect, Reparse::Open)
             .and_then(|entry| Ok((entry.attribute_tag()?, entry)));
@@ -304,11 +333,14 @@ impl Walk<'_> {
                 size: stat.size,
                 last_write: stat.last_write,
                 own_folder,
+                copied: true,
+                shared,
             };
             let entry = FolderEntry {
                 name,
                 attributes: tag.attributes,
                 size: stat.size,
+                created: stat.created,
                 last_write: stat.last_write,
                 reparse_tag: Some(tag.reparse_tag),
             };
@@ -337,6 +369,8 @@ impl Walk<'_> {
             size: 0,
             last_write: 0,
             own_folder,
+            copied: true,
+            shared,
         };
         let path = &selected.path;
         let into = self.folder_target(target, &name, &selected.verbatim, wanted, path, None, page);
@@ -362,6 +396,7 @@ impl Walk<'_> {
         let walking = Walking {
             verbatim: selected.verbatim.clone(),
             target: into,
+            shared,
         };
         match Folder::new(
             entry,
@@ -417,6 +452,8 @@ impl Walk<'_> {
                 size: entry.size,
                 last_write: entry.last_write,
                 own_folder: false,
+                copied: true,
+                shared: folder.walk.shared,
             };
             let target = &folder.walk.target;
             let disposition = &folder.disposition;
@@ -487,6 +524,8 @@ impl Walk<'_> {
                 size: entry.size,
                 last_write: entry.last_write,
                 own_folder: false,
+                copied: true,
+                shared: parent.walk.shared,
             };
             let disposition = &parent.disposition;
             let decided = self.decide_file(
@@ -508,6 +547,8 @@ impl Walk<'_> {
             size: 0,
             last_write: 0,
             own_folder: false,
+            copied: true,
+            shared: parent.walk.shared,
         };
         let into = self.folder_target(
             target,
@@ -535,6 +576,7 @@ impl Walk<'_> {
         let walking = Walking {
             verbatim: from,
             target: into,
+            shared: parent.walk.shared,
         };
         let above = Some(Arc::clone(parent));
         let disposition = Arc::clone(&parent.disposition);
@@ -565,43 +607,56 @@ impl Walk<'_> {
         disposition: &Arc<Disposition>,
         folder: Option<&Folder>,
     ) -> Option<File> {
-        let decision = {
+        let (decision, interrupted) = {
             let mut names = target.names.lock().expect("no worker panics");
-            decide(&mut names, &entry.name, wanted, self.copying.rule)
+            // Read before `decide` takes the name.
+            let holder = names.get(&entry.name);
+            let decision = decide(&mut names, &entry.name, wanted, self.copying.rule);
+            (decision, interrupted_replace(holder, self.copying.rule))
         };
-        match decision {
-            Decision::Write { name, replace } => Some(File {
-                path: path.to_vec(),
-                from: from.to_vec(),
-                target: Arc::clone(target),
-                final_name: name,
-                replace,
-                size: entry.size,
-                attributes: entry.attributes,
-                reparse_tag: entry.reparse_tag.unwrap_or(0),
-                disposition: Arc::clone(disposition),
-                name: entry.name,
-            }),
+        let (final_name, write) = match decision {
+            Decision::Write {
+                name,
+                replace: false,
+            } => (name, Write::New),
+            Decision::Write {
+                name,
+                replace: true,
+            } => (name, Write::Replace { interrupted }),
+            Decision::Resume { name } => (name, Write::Resume),
             Decision::Done if self.copying.moving => {
                 // Equal size and time are a guess, and no hash checks it, so
                 // a continued move never deletes a source on it.
                 self.list_entry(path, Reason::SourceKept, folder);
-                None
+                return None;
             }
             Decision::Done => {
                 self.copying.progress.add_items(1);
-                None
+                return None;
             }
             Decision::Skip => {
                 self.list_entry(path, Reason::Skipped, folder);
-                None
+                return None;
             }
             // Only a folder merges.
             Decision::Mismatch | Decision::Merge => {
                 self.fail(path, ERROR_ALREADY_EXISTS, folder);
-                None
+                return None;
             }
-        }
+        };
+        Some(File {
+            path: path.to_vec(),
+            from: from.to_vec(),
+            target: Arc::clone(target),
+            final_name,
+            write,
+            size: entry.size,
+            attributes: entry.attributes,
+            reparse_tag: entry.reparse_tag.unwrap_or(0),
+            shared: wanted.shared,
+            disposition: Arc::clone(disposition),
+            name: entry.name,
+        })
     }
 
     /// The destination folder for the source folder `name`: created with
@@ -634,6 +689,7 @@ impl Walk<'_> {
                 self.fail(path, ERROR_ALREADY_EXISTS, folder);
                 return None;
             }
+            Decision::Resume { .. } => unreachable!("only a file is unfinished"),
         };
         let made = !merge && {
             // A folder this operation made can briefly answer that it does
@@ -683,14 +739,22 @@ impl Walk<'_> {
     }
 
     /// Hands a decided file to the ring when the ring copies it, and
-    /// otherwise gives it back. A link and an EFS file go to the Windows
-    /// engine, because the ring reads a file's data unfiltered and could not
-    /// keep it encrypted.
+    /// otherwise gives it back: a file at the ring's size, and every file
+    /// that Continue resumes, the interrupted run's Replace included,
+    /// because only the ring keeps the start that already equals the
+    /// source. Any other Replace follows the size, so many small files
+    /// still go to the Windows engine's workers. A link
+    /// and an EFS file go to the Windows engine, because the ring reads a
+    /// file's data unfiltered and could not keep it encrypted.
     fn hand_to_ring(&self, file: File, folder: Option<&Arc<Folder>>) -> Option<File> {
         let Some(plan) = self.copying.plan.ring else {
             return Some(file);
         };
-        let takes = file.size >= plan.from
+        let resumes = matches!(
+            file.write,
+            Write::Resume | Write::Replace { interrupted: true }
+        );
+        let takes = (resumes || plan.from.is_some_and(|from| file.size >= from))
             && file.reparse_tag == 0
             && file.attributes & FILE_ATTRIBUTE_ENCRYPTED == 0;
         if !takes {
@@ -711,38 +775,12 @@ impl Walk<'_> {
         None
     }
 
-    /// Deletes an interrupted run's temporary file of `file`. Only an
-    /// interrupted run of Gozler makes that name, so only Continue finds it,
-    /// in the listing. `false` when it is listed as failed.
-    fn clear_partial(&self, file: &File, folder: Option<&Folder>) -> bool {
-        let stale = {
-            let names = file.target.names.lock().expect("no worker panics");
-            matches!(names.get(&file.partial()), Some(Holder::Found(_)))
-        };
-        if stale && let Err(error) = self.delete_partial(file) {
-            self.fail(&file.path, error, folder);
-            return false;
-        }
-        true
-    }
-
-    /// Deletes `file`'s temporary file, our own, which nobody else has a
-    /// reason to keep.
-    fn delete_partial(&self, file: &File) -> Result<(), u32> {
-        let path = file.partial_path();
-        let open = || open_entry(&path, Access::DeleteReadOnly, Reparse::Open);
-        remove(&AtomicBool::new(false), &self.destination, open)
-    }
-
-    /// Copies one file with the Windows engine under its temporary name,
-    /// then [`Walk::finish`]es it. `folder` is its source folder; `None` for
-    /// a selected file.
+    /// Copies one file with the Windows engine to its final name, then
+    /// [`Walk::finish`]es it. A file Continue resumes is removed and copied
+    /// again from its start. `folder` is its source folder; `None` for a
+    /// selected file.
     fn copy_file(&self, file: &File, folder: Option<&Arc<Folder>>) {
         let folder_ref = folder.map(|folder| &**folder);
-        if !self.clear_partial(file, folder_ref) {
-            return;
-        }
-        let partial_path = file.partial_path();
         let folder_link = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
         let source = if !is_name_surrogate(file.reparse_tag) {
             CopySource::File
@@ -756,85 +794,78 @@ impl Walk<'_> {
             }
         };
         let unbuffered = self.is_large(file);
-        let options = CopyOptions {
-            source,
-            unbuffered,
-            sparse: self.copying.target.sparse_copy
-                && file.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
-            io_desired_size: self.io_desired_size.filter(|_| unbuffered),
-        };
         let progress = self.copying.progress;
         let mut reported = 0u64;
         // For a move, the source as the copy found it, read by the path the
         // copy reads.
         let mut before = None;
-        let copied = retry(self.copying.cancel, || {
-            if self.copying.moving {
-                let source = open_entry(&file.from, Access::Inspect, Reparse::Open);
-                before = Some(Snapshot::of(&source.map_err(|error| error.code)?)?);
+        let copy_to = |to: &[u16], existing| {
+            if existing == Existing::Replace {
+                remove_replaced(self.copying.cancel, &self.destination, to)?;
             }
-            let mut on_chunk = |copied: u64| {
-                // The total also counts the alternate data streams.
-                let copied = copied.min(file.size);
-                progress.add_bytes(copied.saturating_sub(reported));
-                reported = reported.max(copied);
-                !self.cancelled()
+            let options = CopyOptions {
+                source,
+                unbuffered,
+                sparse: self.copying.target.sparse_copy
+                    && file.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
+                io_desired_size: self.io_desired_size.filter(|_| unbuffered),
             };
-            copy_file(&file.from, &partial_path, options, &mut on_chunk).map_err(|error| error.code)
-        });
-        if let Err(error) = copied {
-            // `CopyFile2` deleted what it wrote.
-            progress.remove_bytes(reported);
-            match error {
-                ERROR_REQUEST_ABORTED if self.cancelled() => {}
-                ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL => {
-                    self.full.store(true, Ordering::Relaxed);
-                    if let Some(folder) = folder_ref {
-                        folder.keep();
-                    }
+            retry(self.copying.cancel, || {
+                if self.copying.moving {
+                    let source = open_entry(&file.from, Access::Inspect, Reparse::Open);
+                    before = Some(Snapshot::of(&source.map_err(|error| error.code)?)?);
                 }
-                // A file the walk listed that is gone since.
-                error if is_gone(error) && folder.is_some() => self.copying.progress.add_items(1),
-                error => self.fail(&file.path, error, folder_ref),
-            }
-            return;
+                let mut on_chunk = |copied: u64| {
+                    // The total also counts the alternate data streams.
+                    let copied = copied.min(file.size);
+                    progress.add_bytes(copied.saturating_sub(reported));
+                    reported = reported.max(copied);
+                    // A stopped `CopyFile2` deletes what it wrote, so at Exit
+                    // the copy goes on until the process ends (`Queue::close`).
+                    !self.cancelled() || self.copying.closing.load(Ordering::Relaxed)
+                };
+                copy_file(&file.from, to, options, &mut on_chunk).map_err(|error| error.code)
+            })
+        };
+        let mut placing = file.placing();
+        // A link put at a resumed file's name since the listing is not this
+        // operation's file, so the choice applies to it.
+        if file.write == Write::Resume
+            && let Ok(Some(attributes)) =
+                path_attributes(&join(&file.target.verbatim, &file.final_name))
+            && attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            placing.replace = false;
         }
-        self.finish(file, folder, reported, before);
+        let error = match place(&file.target, placing, self.copying.rule.choice, copy_to) {
+            Placed::Named(()) => return self.finish(file, folder, before),
+            Placed::Skipped => return self.list_entry(&file.path, Reason::Skipped, folder_ref),
+            Placed::Failed(error) => error,
+        };
+        // `CopyFile2` deleted what it wrote.
+        progress.remove_bytes(reported);
+        match error {
+            ERROR_REQUEST_ABORTED if self.cancelled() => {}
+            ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL => {
+                self.full.store(true, Ordering::Relaxed);
+                if let Some(folder) = folder_ref {
+                    folder.keep();
+                }
+            }
+            // A file the walk listed that is gone since.
+            error if is_gone(error) && folder.is_some() => self.copying.progress.add_items(1),
+            error => self.fail(&file.path, error, folder_ref),
+        }
     }
 
-    /// Renames a copied file from its temporary name to its final name and,
-    /// for a move, deletes its source when `before` still describes it.
-    /// `reported` is the progress its bytes added.
-    fn finish(
-        &self,
-        file: &File,
-        folder: Option<&Arc<Folder>>,
-        reported: u64,
-        before: Option<Snapshot>,
-    ) {
+    /// Counts a file copied whole at its final name and, for a move, deletes
+    /// its source when `before` still describes it.
+    fn finish(&self, file: &File, folder: Option<&Arc<Folder>>, before: Option<Snapshot>) {
         let folder_ref = folder.map(|folder| &**folder);
         let progress = self.copying.progress;
-        let partial_path = file.partial_path();
-        let placing = Placing {
-            from: &partial_path,
-            base: &file.name,
-            name: file.final_name.clone(),
-            replace: file.replace,
-            is_folder: file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
-        };
-        let reason = match place(&file.target, placing, self.copying.rule.choice) {
-            Placed::Named => None,
-            Placed::Skipped => Some(Reason::Skipped),
-            Placed::Failed(error) => Some(Reason::Failed(error)),
-        };
-        if let Some(reason) = reason {
-            progress.remove_bytes(reported);
-            let _ = self.delete_partial(file);
-            return self.list_entry(&file.path, reason, folder_ref);
-        }
         if let Some(before) = before {
-            // No cancel between the final rename and the source's delete, so
-            // a cancel leaves each file in one place: the cancel's
+            // No cancel between the end of the copy and the source's delete,
+            // so a cancel leaves each file in one place: the cancel's
             // `CancelSynchronousIo` may abort the delete once, so it is tried
             // again, and a failure is listed even after the cancel, because
             // the file is then at both places.

@@ -25,9 +25,27 @@ pub(crate) struct Rule {
     /// then every conflict the run meets is skipped and listed, because
     /// nobody chose to replace that file.
     pub(crate) choice: Option<Choice>,
+    pub(crate) run: Run,
+}
+
+/// Which run of an operation the rule is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Run {
+    First {
+        /// When the run started, as a `FILETIME`; `None` while prepare
+        /// counts the conflicts, before anything is written.
+        started: Option<i64>,
+    },
     /// Continue after an interruption: a file already at the destination
-    /// with the source's size and last write time is done.
-    pub(crate) continuing: bool,
+    /// with the source's size and last write time is done, and a file there
+    /// that is not done and was created at or after `started`, less
+    /// [`FAT_TOLERANCE`], is unfinished.
+    Continue {
+        /// When the operation first ran, as a `FILETIME`; `None` for an
+        /// operation saved before it was recorded, which finds no file
+        /// unfinished.
+        started: Option<i64>,
+    },
 }
 
 /// The source entry that wants a name.
@@ -40,10 +58,19 @@ pub(crate) struct Wanted {
     /// as in File Explorer, because Replace would replace the source with
     /// its own copy.
     pub(crate) own_folder: bool,
+    /// Its bytes are copied, so an interrupted run may have left it
+    /// unfinished at the destination; a move by rename leaves nothing
+    /// unfinished.
+    pub(crate) copied: bool,
+    /// Another selected entry has its name, or the name of the selected
+    /// folder it is in. The run gives the plain and the numbered names in
+    /// the order its workers meet the entries, so a file at its name that
+    /// the run may have written may be the other entry's copy.
+    pub(crate) shared: bool,
 }
 
 /// What prepare sees for one name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Clash {
     Free,
     /// A copy into the entry's own folder, which always gets a number.
@@ -54,8 +81,16 @@ pub(crate) enum Clash {
     SameName,
     /// A folder into a folder of its name: they merge, as in File Explorer.
     Merge,
-    /// Continue: the file is already at the destination.
-    Done,
+    /// Continue: the file is already at the destination, at `name`.
+    Done {
+        name: Vec<u16>,
+    },
+    /// Continue: the interrupted run was writing the file at `name`, which
+    /// holds `size` bytes now.
+    Unfinished {
+        name: Vec<u16>,
+        size: u64,
+    },
     /// A file and a folder with one name, refused whatever the choice, as
     /// File Explorer refuses them.
     Mismatch,
@@ -63,23 +98,71 @@ pub(crate) enum Clash {
 
 pub(crate) fn classify(names: &Names, name: &[u16], wanted: Wanted, rule: Rule) -> Clash {
     let is_folder = wanted.kind != Kind::File;
-    if rule.continuing && wanted.kind == Kind::File {
-        let done = |holder| matches!(holder, Holder::Found(found) if is_done(found, wanted));
+    if let Run::Continue { started } = rule.run
+        && wanted.kind == Kind::File
+    {
         // Keep both, and a copy into its own folder, wrote a numbered name.
         let numbered = wanted.own_folder || rule.choice == Some(Choice::KeepBoth);
-        let plain = !wanted.own_folder && names.get(name).is_some_and(done);
-        if plain || (numbered && names.numbered(name, is_folder).any(done)) {
-            return Clash::Done;
+        let mut written = Vec::new();
+        if !wanted.own_folder
+            && let Some(holder) = names.get(name)
+        {
+            written.push((name.to_vec(), holder));
+        }
+        if numbered {
+            written.extend(names.numbered(name, is_folder));
+        }
+        let files: Vec<(Vec<u16>, Found)> = (written.into_iter())
+            .filter_map(|(name, holder)| match holder {
+                Holder::Found(found) if found.kind == Kind::File => Some((name, found)),
+                _ => None,
+            })
+            .collect();
+        if let Some((name, _)) = files.iter().find(|&&(_, found)| is_done(found, wanted)) {
+            return Clash::Done { name: name.clone() };
+        }
+        // Both engines set the source's times last, so the interrupted run's
+        // file keeps the time it was created. A file the person had there
+        // keeps its older creation time even when they edit it during the
+        // interruption, which its last write time would not show. Neither
+        // engine writes a reparse point for a file it copies, and writing
+        // into one would write wherever it points.
+        if let Some(started) = started
+            && wanted.copied
+            && !wanted.shared
+            && let Some((name, found)) = (files.into_iter())
+                .find(|(_, found)| !found.reparse_point && found.created >= started - FAT_TOLERANCE)
+        {
+            return Clash::Unfinished {
+                name,
+                size: found.size,
+            };
         }
     }
     if wanted.own_folder {
         return Clash::OwnFolder;
     }
+    // Whether this operation may have written `found`: at Continue any file,
+    // and in a first run one created since it started, which a folder that
+    // two selected folders merge into lists when the other one's walk has
+    // already copied there.
+    let maybe_ours = |found: Found| match rule.run {
+        Run::Continue { .. } => true,
+        Run::First { started } => {
+            started.is_some_and(|started| found.created >= started - FAT_TOLERANCE)
+        }
+    };
     match names.get(name) {
         None => Clash::Free,
         Some(Holder::Ours) => Clash::SameName,
         Some(Holder::Found(found)) => match (wanted.kind, found.kind) {
             (Kind::Folder, Kind::Folder) => Clash::Merge,
+            // The other selected entry's copy is never replaced.
+            (wanted_kind, found_kind)
+                if wanted_kind == found_kind && wanted.shared && maybe_ours(found) =>
+            {
+                Clash::SameName
+            }
             (wanted, found) if wanted == found => Clash::Conflict,
             _ => Clash::Mismatch,
         },
@@ -90,7 +173,7 @@ pub(crate) fn classify(names: &Names, name: &[u16], wanted: Wanted, rule: Rule) 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Decision {
     /// Write the entry under `name`, which this operation now holds;
-    /// `replace` renames it over the file found there.
+    /// `replace` writes it over the file found there.
     Write {
         name: Vec<u16>,
         replace: bool,
@@ -98,6 +181,11 @@ pub(crate) enum Decision {
     /// Merge the folder into the folder of its name.
     Merge,
     Done,
+    /// Resume the unfinished file at `name`, which this operation now
+    /// holds.
+    Resume {
+        name: Vec<u16>,
+    },
     /// Listed in the result as skipped.
     Skip,
     /// Listed as a failure with `ERROR_ALREADY_EXISTS`.
@@ -140,19 +228,50 @@ pub(crate) fn decide(names: &mut Names, name: &[u16], wanted: Wanted, rule: Rule
             Some(Choice::Skip) | None => Decision::Skip,
         },
         Clash::Merge => Decision::Merge,
-        Clash::Done => Decision::Done,
+        // So no later entry of this name takes the copy for its own.
+        Clash::Done { name } => {
+            names.insert(&name, Holder::Ours);
+            Decision::Done
+        }
+        Clash::Unfinished { name, .. } => {
+            names.insert(&name, Holder::Ours);
+            Decision::Resume { name }
+        }
         Clash::Mismatch => Decision::Mismatch,
     }
 }
+
+/// Continue: whether the file that `holder` holds, which the saved Replace
+/// writes over, was last written since the run started, to FAT's 2 seconds:
+/// then it is the interrupted run's Replace, which the ring resumes in
+/// place. The last write time serves here, unlike for an unfinished file,
+/// because the person chose Replace for this file anyway, so a wrong guess
+/// costs speed, never a file.
+pub(crate) fn interrupted_replace(holder: Option<Holder>, rule: Rule) -> bool {
+    match (holder, rule.run) {
+        (
+            Some(Holder::Found(found)),
+            Run::Continue {
+                started: Some(started),
+            },
+        ) => found.last_write >= started - FAT_TOLERANCE,
+        _ => false,
+    }
+}
+
+/// One second as a `FILETIME` difference.
+const SECOND: i64 = 10_000_000;
+
+/// FAT keeps times to 2 seconds.
+const FAT_TOLERANCE: i64 = 2 * SECOND;
 
 /// Continue's rule: the same size and a last write time within 2 seconds,
 /// or within one hour and 2 seconds after a daylight saving change, because
 /// FAT keeps times to 2 seconds in local time, as TinyTorrent2's
 /// `Payload::IsCopy` compares them.
 fn is_done(found: Found, wanted: Wanted) -> bool {
-    const SECOND: i64 = 10_000_000;
     let apart = found.last_write.abs_diff(wanted.last_write);
-    let close = |to: u64| apart.abs_diff(to) <= (2 * SECOND).unsigned_abs();
+    let close = |to: u64| apart.abs_diff(to) <= FAT_TOLERANCE.unsigned_abs();
     found.kind == Kind::File
         && found.size == wanted.size
         && (close(0) || close((3600 * SECOND).unsigned_abs()))
@@ -171,13 +290,21 @@ mod tests {
         size: 10,
         last_write: 1_000_000_000,
         own_folder: false,
+        copied: true,
+        shared: false,
     };
 
-    fn found(kind: Kind, size: u64, last_write: i64) -> Holder {
+    /// When the interrupted run of `continue_finds_what_is_done` started.
+    const STARTED: i64 = 2_000_000_000;
+
+    /// A file created and last written at `time`.
+    fn found(kind: Kind, size: u64, time: i64) -> Holder {
         Holder::Found(Found {
             kind,
             size,
-            last_write,
+            created: time,
+            last_write: time,
+            reparse_point: false,
         })
     }
 
@@ -198,7 +325,7 @@ mod tests {
         ] {
             let rule = Rule {
                 choice,
-                continuing: false,
+                run: Run::First { started: None },
             };
             let mut names = Names::default();
             assert_eq!(
@@ -213,7 +340,7 @@ mod tests {
         };
         let rule = Rule {
             choice: None,
-            continuing: false,
+            run: Run::First { started: None },
         };
         let mut names = Names::default();
         names.insert(&utf16("d.txt"), found(Kind::File, 10, 0));
@@ -225,7 +352,13 @@ mod tests {
 
     /// Continue takes a file of the source's size and time as done, at the
     /// name or, for Keep both, at a numbered name, and never takes a file
-    /// that differs, nor the source itself in its own folder.
+    /// that differs, nor the source itself in its own folder. A file that is
+    /// not done and was created since the run started, to FAT's 2 seconds,
+    /// is unfinished at the same names. An older file last written since is
+    /// not, and neither is a reparse point, a file for a move by rename, or
+    /// one for an operation saved without its start. An entry that shares
+    /// its name with another selected entry takes no file for its own and
+    /// never replaces one.
     #[test]
     fn continue_finds_what_is_done() {
         const HOUR: i64 = 3600 * 10_000_000;
@@ -248,23 +381,104 @@ mod tests {
             &utf16("kept (2).txt"),
             found(Kind::File, 10, FILE.last_write),
         );
+        let tolerance = 2 * 10_000_000;
+        names.insert(
+            &utf16("half.txt"),
+            found(Kind::File, 4, STARTED - tolerance),
+        );
+        names.insert(
+            &utf16("theirs.txt"),
+            found(Kind::File, 4, STARTED - tolerance - 1),
+        );
+        names.insert(&utf16("theirs (2).txt"), found(Kind::File, 4, STARTED + 1));
+        names.insert(
+            &utf16("edited.txt"),
+            Holder::Found(Found {
+                kind: Kind::File,
+                size: 4,
+                created: STARTED - tolerance - 1,
+                last_write: STARTED + 1,
+                reparse_point: false,
+            }),
+        );
+        names.insert(
+            &utf16("link.txt"),
+            Holder::Found(Found {
+                kind: Kind::File,
+                size: 0,
+                created: STARTED,
+                last_write: STARTED,
+                reparse_point: true,
+            }),
+        );
         let rule = |choice| Rule {
             choice,
-            continuing: true,
+            run: Run::Continue {
+                started: Some(STARTED),
+            },
         };
         let clash =
             |name: &str, wanted, choice| classify(&names, &utf16(name), wanted, rule(choice));
-        assert_eq!(clash("same.txt", FILE, None), Clash::Done);
-        assert_eq!(clash("dst.txt", FILE, None), Clash::Done);
+        let done = |name: &str| Clash::Done { name: utf16(name) };
+        assert_eq!(clash("same.txt", FILE, None), done("same.txt"));
+        assert_eq!(clash("dst.txt", FILE, None), done("dst.txt"));
         assert_eq!(clash("other.txt", FILE, None), Clash::Conflict);
         assert_eq!(clash("late.txt", FILE, None), Clash::Conflict);
-        assert_eq!(clash("kept.txt", FILE, Some(Choice::KeepBoth)), Clash::Done);
+        assert_eq!(
+            clash("kept.txt", FILE, Some(Choice::KeepBoth)),
+            done("kept (2).txt")
+        );
         assert_eq!(clash("kept.txt", FILE, Some(Choice::Skip)), Clash::Conflict);
         let own = Wanted {
             own_folder: true,
             ..FILE
         };
         assert_eq!(clash("same.txt", own, None), Clash::OwnFolder);
-        assert_eq!(clash("kept.txt", own, None), Clash::Done);
+        assert_eq!(clash("kept.txt", own, None), done("kept (2).txt"));
+
+        let unfinished = |name: &str| Clash::Unfinished {
+            name: utf16(name),
+            size: 4,
+        };
+        assert_eq!(clash("half.txt", FILE, None), unfinished("half.txt"));
+        assert_eq!(clash("theirs.txt", FILE, None), Clash::Conflict);
+        assert_eq!(clash("edited.txt", FILE, None), Clash::Conflict);
+        assert_eq!(
+            clash("theirs.txt", FILE, Some(Choice::KeepBoth)),
+            unfinished("theirs (2).txt")
+        );
+        let renamed = Wanted {
+            copied: false,
+            ..FILE
+        };
+        assert_eq!(clash("half.txt", renamed, None), Clash::Conflict);
+        assert_eq!(clash("link.txt", FILE, None), Clash::Conflict);
+        let shared = Wanted {
+            shared: true,
+            ..FILE
+        };
+        assert_eq!(
+            clash("half.txt", shared, Some(Choice::Replace)),
+            Clash::SameName
+        );
+        // In a first run, only a file created since the run started may be
+        // the other entry's copy.
+        let first = Rule {
+            choice: Some(Choice::Replace),
+            run: Run::First {
+                started: Some(STARTED),
+            },
+        };
+        let first_clash = |name: &str| classify(&names, &utf16(name), shared, first);
+        assert_eq!(first_clash("half.txt"), Clash::SameName);
+        assert_eq!(first_clash("theirs.txt"), Clash::Conflict);
+        let unsaved = Rule {
+            choice: None,
+            run: Run::Continue { started: None },
+        };
+        assert_eq!(
+            classify(&names, &utf16("half.txt"), FILE, unsaved),
+            Clash::Conflict
+        );
     }
 }
