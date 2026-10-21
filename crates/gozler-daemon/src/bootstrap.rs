@@ -60,6 +60,24 @@ impl Filesystem {
         }
     }
 
+    /// Whether the first build lists one folder at a time, which is no
+    /// snapshot, so the tail replays the changes made during it (DESIGN.md:
+    /// Index coherence).
+    pub(crate) fn builds_by_walk(self) -> bool {
+        match self {
+            Self::Ntfs => false,
+            Self::Refs => true,
+        }
+    }
+
+    /// The build's first pass, as `gozlerd scan` names it.
+    pub(crate) fn first_pass(self) -> &'static str {
+        match self {
+            Self::Ntfs => "file_layout",
+            Self::Refs => "folder_walk",
+        }
+    }
+
     /// The journal records that hold this filesystem's file IDs whole.
     pub(crate) fn journal_records(self) -> JournalRecords {
         match self {
@@ -240,10 +258,15 @@ pub(crate) struct BuiltIndex {
     /// How long the enumeration took, or `None` when it did not run because
     /// the first pass completed.
     pub enum_secs: Option<f64>,
+}
+
+impl BuiltIndex {
     /// The FILE_LAYOUT pass stopped, so some files' sizes and dates are
-    /// unknown. The volume stores it as
+    /// unknown: exactly when the enumeration ran. The volume stores it as
     /// [`Indexed::metadata_pending`](crate::volume_state::Indexed::metadata_pending).
-    pub metadata_pending: bool,
+    pub(crate) fn metadata_pending(&self) -> bool {
+        self.enum_secs.is_some()
+    }
 }
 
 /// How the FILE_LAYOUT pass ended.
@@ -287,76 +310,85 @@ pub(crate) fn build_index(
     let mut index = VolumeIndex::with_ids(root, filesystem.ids());
 
     let read_start = Instant::now();
-    if filesystem == Filesystem::Refs {
-        let walked = settle::walk_folders(
-            &mut Disk::new(handle, guid_path),
-            &[root],
-            cancelled,
-            |files| {
-                for f in &files {
-                    index.insert_listed(f);
-                }
-            },
-        )?;
-        if walked == settle::Walk::Cancelled {
-            return Ok(None);
-        }
-        finish_index(&mut index, rules);
-        return Ok(Some(BuiltIndex {
-            index,
-            read_secs: read_start.elapsed().as_secs_f64(),
-            enum_secs: None,
-            metadata_pending: false,
-        }));
-    }
-
-    let mut buf = vec![0u8; IO_BUFFER_BYTES];
-    let pass = layout_pass(&mut index, &mut buf, cancelled, |restart, buf| {
-        query_file_layout(handle, RECOMMENDED_LAYOUT_FLAGS, restart, buf)
-    })?;
-    let read_secs = read_start.elapsed().as_secs_f64();
-
-    let enum_secs = match pass {
-        LayoutPass::Complete => None,
-        LayoutPass::Cancelled => return Ok(None),
-        LayoutPass::Stopped => {
-            let enum_start = Instant::now();
-            let mut next_frn: u64 = 0;
-            loop {
-                if cancelled() {
-                    return Ok(None);
-                }
-                let Some(bytes) =
-                    enum_usn_data(handle, next_frn, &mut buf).context("FSCTL_ENUM_USN_DATA")?
-                else {
-                    break; // ERROR_HANDLE_EOF: enumeration complete
-                };
-                let walk = walk_enum_buffer(&buf[..bytes]).context("parsing ENUM buffer")?;
-                for rec in &walk.records {
-                    index.insert_enum(rec);
-                }
-                // The kernel guarantees forward progress; guard against a stuck
-                // cursor anyway so a driver quirk can never spin forever.
-                if walk.next_start_frn == next_frn && walk.records.is_empty() {
-                    break;
-                }
-                next_frn = walk.next_start_frn;
+    let (read_secs, enum_secs) = match filesystem {
+        Filesystem::Refs => {
+            let walked = settle::walk_folders(
+                &mut Disk::new(handle, guid_path),
+                &[root],
+                cancelled,
+                |files| {
+                    for f in &files {
+                        index.insert_listed(f);
+                    }
+                },
+            )?;
+            if walked == settle::Walk::Cancelled {
+                return Ok(None);
             }
-            Some(enum_start.elapsed().as_secs_f64())
+            (read_start.elapsed().as_secs_f64(), None)
+        }
+        Filesystem::Ntfs => {
+            let mut buf = vec![0u8; IO_BUFFER_BYTES];
+            let pass = layout_pass(&mut index, &mut buf, cancelled, |restart, buf| {
+                query_file_layout(handle, RECOMMENDED_LAYOUT_FLAGS, restart, buf)
+            })?;
+            let read_secs = read_start.elapsed().as_secs_f64();
+            let enum_secs = match pass {
+                LayoutPass::Complete => None,
+                LayoutPass::Cancelled => return Ok(None),
+                LayoutPass::Stopped => {
+                    let Some(secs) = enumerate_mft(handle, &mut index, &mut buf, cancelled)? else {
+                        return Ok(None);
+                    };
+                    Some(secs)
+                }
+            };
+            (read_secs, enum_secs)
         }
     };
 
     finish_index(&mut index, rules);
-    if pass == LayoutPass::Stopped {
+    if enum_secs.is_some() {
         index.record_size_pass_stopped();
     }
-
     Ok(Some(BuiltIndex {
         index,
         read_secs,
         enum_secs,
-        metadata_pending: pass == LayoutPass::Stopped,
     }))
+}
+
+/// Names every file of the MFT into `index` with `FSCTL_ENUM_USN_DATA`, after a
+/// FILE_LAYOUT pass that stopped, and returns how long it took; `None` when
+/// `cancelled` stopped it.
+fn enumerate_mft(
+    handle: &VolumeHandle,
+    index: &mut VolumeIndex,
+    buf: &mut [u8],
+    cancelled: impl Fn() -> bool,
+) -> Result<Option<f64>> {
+    let started = Instant::now();
+    let mut next_frn: u64 = 0;
+    loop {
+        if cancelled() {
+            return Ok(None);
+        }
+        let Some(bytes) = enum_usn_data(handle, next_frn, buf).context("FSCTL_ENUM_USN_DATA")?
+        else {
+            break; // ERROR_HANDLE_EOF: enumeration complete
+        };
+        let walk = walk_enum_buffer(&buf[..bytes]).context("parsing ENUM buffer")?;
+        for rec in &walk.records {
+            index.insert_enum(rec);
+        }
+        // The kernel guarantees forward progress; guard against a stuck
+        // cursor anyway so a driver quirk can never spin forever.
+        if walk.next_start_frn == next_frn && walk.records.is_empty() {
+            break;
+        }
+        next_frn = walk.next_start_frn;
+    }
+    Ok(Some(started.elapsed().as_secs_f64()))
 }
 
 /// A volume's reads for [`settle`], on the handle the caller owns. Each error

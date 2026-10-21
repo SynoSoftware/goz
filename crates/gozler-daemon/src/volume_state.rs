@@ -131,9 +131,10 @@ impl Building<'_> {
     /// Installs `built` with its build facts, then sets the phase that
     /// `journal` leads to.
     pub(crate) fn finish(self, built: BuiltIndex, journal: &JournalSetup) {
+        let metadata_pending = built.metadata_pending();
         *self.state.indexed.write() = Indexed {
             index: built.index,
-            metadata_pending: built.metadata_pending,
+            metadata_pending,
             journal_max_bytes: match journal {
                 JournalSetup::Active(c) => Some(c.maximum_size),
                 JournalSetup::Refused | JournalSetup::Unavailable => None,
@@ -541,8 +542,7 @@ mod tests {
         BuiltIndex {
             index,
             read_secs: 0.0,
-            enum_secs: None,
-            metadata_pending,
+            enum_secs: metadata_pending.then_some(0.0),
         }
     }
 

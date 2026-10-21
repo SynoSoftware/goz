@@ -165,11 +165,7 @@ fn run_scan(query: Option<String>) -> anyhow::Result<()> {
         println!("volume {}", s.mounted().display_prefix());
         println!("  guid          {}", s.guid_path);
         println!("  entries       {}", s.entries());
-        let pass = match s.filesystem {
-            bootstrap::Filesystem::Ntfs => "file_layout",
-            bootstrap::Filesystem::Refs => "folder_walk",
-        };
-        println!("  {pass:<13} {:.2}s", s.read_secs);
+        println!("  {:<13} {:.2}s", s.filesystem.first_pass(), s.read_secs);
         if let Some(enum_secs) = s.enum_secs {
             println!("  enum          {enum_secs:.2}s (the file-layout pass stopped)");
         }

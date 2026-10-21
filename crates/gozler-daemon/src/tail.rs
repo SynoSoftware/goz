@@ -208,7 +208,7 @@ impl ReadPosition {
             start_usn: cursor.next_usn,
             journal_id: cursor.journal_id,
             failures: None,
-            replay_until: (filesystem == Filesystem::Refs).then(|| walk_end(handle)),
+            replay_until: filesystem.builds_by_walk().then(|| walk_end(handle)),
         }
     }
 
