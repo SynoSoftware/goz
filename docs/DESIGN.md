@@ -314,7 +314,7 @@ While the filter pane is hidden, Show filters stands at the row's left margin an
 ### Searching
 
 - Search as you type starts a search 150 ms after the last keystroke. `Enter` in the search box then opens the selected row, or the first row when none is selected, with Open, as `Enter` in the list does, so a person types a name and presses `Enter` to open it. When the search for the current text has not answered yet, because `Enter` came within the 150 ms or while the search runs, the search runs at once and its first row opens when it answers; a search that finds nothing opens nothing, and typing again before the answer cancels the open (`Model::enter_in_search_box`). With search as you type off, `Enter` runs the search.
-- While a search runs, the list keeps the previous results and the status bar says "Searching…". The new results replace them at once, scrolled to the first row (`T1`, `T2`).
+- While a search runs, the list keeps the previous results, and the status bar keeps their counts and totals until the new ones arrive. Only a search that has run 300 ms without an answer makes the status bar say "Searching…" and drop the totals, so a search that answers at once, as most do while the person types, changes the status bar once instead of blinking on every keystroke (**Owner ruling**). The search itself starts at once. The new results replace the previous ones at once, scrolled to the first row (`T1`, `T2`).
 - When the Location folder does not exist, the window does not search, as `gozler` refuses the same search (`S8`).
 - `F5` runs the search again. Results do not update by themselves when files change, because the protocol has no change notification.
 
@@ -480,8 +480,8 @@ What the list area and the results in the status bar's left group show. Each fai
 
 | ID | State | List area | Results in the status bar |
 | --- | --- | --- | --- |
-| S1 | Starting, before the first reply | empty, no message | Searching… |
-| S2 | A new search runs | the previous rows | Searching… |
+| S1 | Starting, before the first reply | empty, no message | empty, then Searching… after 300 ms |
+| S2 | A new search runs | the previous rows | the previous counts, then Searching… after 300 ms |
 | S3 | Results | the rows | "1,204 results" |
 | S4 | More than 100,000 rows are selected | unchanged | unchanged; the selection after them says "3,000,000 selected · Select up to 100,000 to use a command" |
 | S5 | No results | "No files match.", with Clear filters when a filter is set and Search everywhere when Location is set | "0 results" |
@@ -501,14 +501,14 @@ What changes, and what does not, when an event arrives. The `Model` test for a r
 
 | ID | Event | What the person sees | Work in progress |
 | --- | --- | --- | --- |
-| T1 | The search text, a match control, a filter or the sort changes | the previous rows and selection stay; the status bar says Searching… | the running search is cancelled; an export and a selection read go on |
+| T1 | The search text, a match control, a filter or the sort changes | the previous rows and selection stay; the status bar says Searching… once the search has run 300 ms | the running search is cancelled; an export and a selection read go on |
 | T2 | A new search's first rows arrive | the new rows replace the old ones, scrolled to the top; the selection is cleared, and its commands are disabled | a selection read for the old search is cancelled |
 | T3 | A search fails while rows are shown | the rows are removed and the failure's message shows | a selection read is cancelled; an export goes on and ends by itself |
 | T4 | Status shows that the daemon answers again, or that every volume in scope is complete | the search runs again | the status poll stops when nothing needs it |
 | T5 | A volume in scope starts or ends indexing | the status bar's right group changes; the rows stay | the status poll starts or stops |
 | T6 | The selection changes while it is read | the status bar says Reading the selection…; its commands stay disabled | the old read is cancelled; one new read starts 150 ms after the last change |
 | T7 | The selection changes while a folder's size is counted | the inspector shows the new selection | the old size request is cancelled |
-| T8 | An export ends while a search runs | the middle group shows the export's result; the left group still says Searching… | none |
+| T8 | An export ends while a search runs | the middle group shows the export's result; the left group still shows the search's state (S2) | none |
 | T9 | An export fails | a message box names the file and Windows' reason; the middle group is cleared | the partial file is deleted |
 | T10 | The service stops while the Settings dialog is open | the dialog stays usable; its Drives and service page shows the failure; the main window shows it behind | the status poll runs |
 | T11 | New results arrive while the context menu is open | the menu stays open; a command chosen from it acts on the selection when it is chosen, and does nothing when the selection was cleared meanwhile | none |

@@ -1268,6 +1268,17 @@ impl Model {
         self.show_message(List::Search, message)
     }
 
+    /// Names `list`'s search as running in the status bar, once it has run
+    /// long enough ([`super::results::Results::name_search`]).
+    pub(crate) fn name_search(&mut self, list: List) -> Accepted {
+        let named = (self.list_mut(list)).is_some_and(|shown| shown.results.name_search());
+        Accepted::only(if named {
+            Change::Searching(list)
+        } else {
+            Change::Nothing
+        })
+    }
+
     /// A search panel's search (DESIGN.md: Search in a panel): its typed text
     /// in Start of words, without Search's match controls, filters or sort, in
     /// the panel's folder and its subfolders or on all drives, in the panel's
@@ -2750,6 +2761,15 @@ pub(crate) mod tests {
             10,
             "the previous rows stay"
         );
+        assert_eq!(
+            captions::results_status(&model, &English),
+            "10 results",
+            "a search that answers at once changes the status bar once"
+        );
+        assert_eq!(
+            model.name_search(List::Search),
+            Accepted::only(Change::Searching(List::Search))
+        );
         assert_eq!(captions::results_status(&model, &English), "Searching…");
         let _newest = search(&mut model, "report f");
         assert_eq!(model.accept(rows(&older, 3)).change, Change::Nothing);
@@ -3436,7 +3456,7 @@ pub(crate) mod tests {
             captions::export_status(&model, &English),
             "Exported 10 rows to results.csv"
         );
-        assert_eq!(captions::results_status(&model, &English), "Searching…");
+        assert_eq!(captions::results_status(&model, &English), "10 results");
         assert!(model.can_export());
     }
 

@@ -136,12 +136,25 @@ mod timer {
     /// Opens the File operations window once an operation has run for a
     /// while (`core::operations`).
     pub(super) const OPERATIONS_OPEN: usize = 17;
+    /// Names Search's search as running in the status bar once it has run
+    /// this long.
+    pub(super) const SEARCHING: usize = 18;
+    /// The same for each search panel's search, by side.
+    pub(super) const PANEL_SEARCHING: [usize; 2] = [19, 20];
 
     /// The timer of `list`'s search.
     pub(super) fn search(list: List) -> usize {
         match list {
             List::Search => SEARCH,
             List::Panel(side) => PANEL_SEARCH[side.index()],
+        }
+    }
+
+    /// The timer that names `list`'s search as running.
+    pub(super) fn searching(list: List) -> usize {
+        match list {
+            List::Search => SEARCHING,
+            List::Panel(side) => PANEL_SEARCHING[side.index()],
         }
     }
 
@@ -155,6 +168,9 @@ mod timer {
 }
 
 const SEARCH_DELAY_MS: u32 = 150;
+/// A search that answers within this time keeps the previous counts until
+/// its own arrive, so the status bar changes once (DESIGN.md: Searching).
+const SEARCHING_NAMED_MS: u32 = 300;
 const STATUS_POLL_MS: u32 = 2_000;
 const SELECTION_DELAY_MS: u32 = 150;
 const AGE_REFRESH_MS: u32 = 60_000;
@@ -2575,6 +2591,17 @@ impl MainWindow {
             Some(_) | None => ScopeCheck::Exists,
         };
         let accepted = self.model.borrow_mut().start_search(list, &start, scope);
+        if accepted.change == Change::Searching(list) {
+            hwnd.set_timer(timer::searching(list), SEARCHING_NAMED_MS);
+        }
+        self.apply(hwnd, accepted);
+    }
+
+    /// Names `list`'s search as running, once it has run
+    /// [`SEARCHING_NAMED_MS`] without an answer.
+    fn name_search(&self, hwnd: Hwnd, list: List) {
+        hwnd.kill_timer(timer::searching(list));
+        let accepted = self.model.borrow_mut().name_search(list);
         self.apply(hwnd, accepted);
     }
 
@@ -5455,6 +5482,15 @@ impl WindowProc for MainWindow {
             }
             Message::Timer(timer::SEARCH) => {
                 self.search(hwnd, List::Search);
+                Some(LRESULT(0))
+            }
+            Message::Timer(timer::SEARCHING) => {
+                self.name_search(hwnd, List::Search);
+                Some(LRESULT(0))
+            }
+            Message::Timer(id) if timer::PANEL_SEARCHING.contains(&id) => {
+                let side = Side::BOTH[usize::from(id == timer::PANEL_SEARCHING[1])];
+                self.name_search(hwnd, List::Panel(side));
                 Some(LRESULT(0))
             }
             Message::Timer(timer::STATUS) => {

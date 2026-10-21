@@ -1949,14 +1949,15 @@ fn status_list(model: &Model) -> Option<List> {
 }
 
 /// `list`'s files and folders, each kind after its icon and with the space
-/// it takes, and a kind no match is left out; none while a search runs, or
-/// when the service sent no sums (DESIGN.md: Status bar).
+/// it takes, and a kind no match is left out; none while the status bar
+/// names a search as running, or when the service sent no sums (DESIGN.md:
+/// Status bar).
 fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValuePart> {
     let strings = model.strings();
     let Some(results) = model.list(list).map(SearchList::results) else {
         return Vec::new();
     };
-    let Some(sums) = results.sums().filter(|_| !results.searching()) else {
+    let Some(sums) = results.sums().filter(|_| !results.search_named()) else {
         return Vec::new();
     };
     let file_bytes = size_with_unknown(
@@ -2014,12 +2015,13 @@ fn size_with_unknown(
     }
 }
 
-/// How many results, or that a search runs. A filter that the hidden pane
-/// cannot show adds "· Filtered" (DESIGN.md: S10).
+/// How many results, or that a search runs once the status bar names it
+/// (DESIGN.md: Searching). A filter that the hidden pane cannot show adds
+/// "· Filtered" (DESIGN.md: S10).
 pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     let results = model.search_list().results();
-    if results.searching() {
+    if results.search_named() {
         return strings.text("status.searching").to_owned();
     }
     match results.shown() {
@@ -2466,8 +2468,9 @@ impl PanelCaptions {
     }
 }
 
-/// A search panel's status line: "Searching…" until its first answer,
-/// then its total and where it searched, also "0 results in …" beside the
+/// A search panel's status line: "Searching…" once its search has run long
+/// enough to be named (DESIGN.md: Searching) until its first answer, then
+/// its total and where it searched, also "0 results in …" beside the
 /// list's no-results message, or how many of them are selected and their
 /// size once read; nothing while the list shows another message
 /// (DESIGN.md: Search in a panel). The count is gozlerd's total, as Search's
@@ -2479,7 +2482,7 @@ fn search_counts(
     search: &PanelSearch,
 ) -> String {
     let results = search.list.results();
-    if results.searching() {
+    if results.search_named() {
         return strings.text("status.searching").to_owned();
     }
     let total = results.total();

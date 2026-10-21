@@ -239,8 +239,10 @@ struct CachedChunk {
 /// generation is stale.
 #[derive(Debug)]
 enum InFlight {
-    /// A new search, whose first chunk's ask its rows will be shown with.
-    Search(Generation, ChunkAsk),
+    /// A new search, whose first chunk's ask its rows will be shown with,
+    /// and whether it has run long enough to be named
+    /// ([`Results::search_named`]).
+    Search(Generation, ChunkAsk, bool),
     /// The chunk that starts at the position.
     Chunk(Generation, u64),
 }
@@ -292,6 +294,25 @@ impl Results {
     /// Whether a new search waits for its first rows.
     pub(crate) fn searching(&self) -> bool {
         matches!(self.in_flight, Some(InFlight::Search(..)))
+    }
+
+    /// Whether the status bar names the search in flight as running, which
+    /// it does only after [`Self::name_search`], so a search that answers
+    /// at once changes the counts once (DESIGN.md: Searching).
+    pub(crate) fn search_named(&self) -> bool {
+        matches!(self.in_flight, Some(InFlight::Search(_, _, true)))
+    }
+
+    /// Names the search in flight, which has run long enough; returns
+    /// whether one was in flight and not yet named.
+    pub(crate) fn name_search(&mut self) -> bool {
+        match &mut self.in_flight {
+            Some(InFlight::Search(_, _, named)) if !*named => {
+                *named = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Every match of the shown search.
@@ -504,7 +525,7 @@ impl Results {
             len: CHUNK_ROWS,
             snapshot,
         };
-        self.in_flight = Some(InFlight::Search(generation, ask.clone()));
+        self.in_flight = Some(InFlight::Search(generation, ask.clone(), false));
         ask
     }
 
@@ -517,7 +538,7 @@ impl Results {
 
     /// Whether `generation` is the request the results wait for.
     pub(crate) fn awaits(&self, generation: Generation) -> bool {
-        matches!(&self.in_flight, Some(InFlight::Search(g, _) | InFlight::Chunk(g, _)) if *g == generation)
+        matches!(&self.in_flight, Some(InFlight::Search(g, ..) | InFlight::Chunk(g, _)) if *g == generation)
     }
 
     /// The ask for the first chunk that the rows `visible` need and the
@@ -622,7 +643,7 @@ impl Results {
             self.in_flight = Some(InFlight::Chunk(generation, chunk.start));
         }
         match in_flight {
-            Some(InFlight::Search(_, ask)) => {
+            Some(InFlight::Search(_, ask, _)) => {
                 // A sorted result snapshot holds the matches the shown sums
                 // count, and holds no sums when scrolling made it.
                 let sums = match (&self.shown, ask.snapshot) {
