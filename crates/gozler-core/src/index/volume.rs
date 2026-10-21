@@ -450,10 +450,12 @@ impl VolumeIndex {
     /// Ingests one name a folder walk listed: `file` has that single name.
     ///
     /// A walk is not a snapshot, so it can meet an entry again. A file met in
-    /// a second folder is a hard link, so its name is added beside the
-    /// others; a folder met again moved during the walk, and the journal's
-    /// rename record for it, replayed after the build, moves it. So a known
-    /// entry is only enriched, never renamed. An entry the index holds as a
+    /// a second folder is a hard link or moved during the walk, so its name
+    /// is added beside the others, and the link reconcile of its replayed
+    /// rename record leaves only its real names (see
+    /// [`Batch::replaying_walk`](crate::index::settle::Batch::replaying_walk)).
+    /// A folder met again moved during the walk, and its replayed rename
+    /// record moves it. So a known entry is only enriched, never renamed. An entry the index holds as a
     /// placeholder takes the listed name and folder, because its own record
     /// never reached the index.
     pub fn insert_listed(&mut self, file: &LayoutFile) {
