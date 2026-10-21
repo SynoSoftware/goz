@@ -13,8 +13,8 @@ use windows::Win32::UI::Controls::SetScrollInfo;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetParent, HMENU, IDC_ARROW, LoadCursorW, RegisterClassExW,
     SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SendMessageW, WM_COMMAND, WM_CTLCOLORSTATIC,
-    WM_NOTIFY, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_VISIBLE,
-    WS_VSCROLL,
+    WM_NOTIFY, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_CONTROLPARENT, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -44,7 +44,8 @@ pub(crate) fn register() -> windows::core::Result<()> {
 
 /// Creates the pane in `parent`. The access keys reach the pane's
 /// controls, as `WS_EX_CONTROLPARENT` lets `IsDialogMessageW` look inside
-/// it.
+/// it. It clips its siblings, as every control does
+/// ([`super::controls::child`]).
 pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Hwnd> {
     // SAFETY: a child window with an ID in place of a menu, as Windows
     // documents it.
@@ -53,7 +54,7 @@ pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Hwnd> {
             WS_EX_CONTROLPARENT,
             CLASS,
             PCWSTR::null(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             0,
             0,
             0,

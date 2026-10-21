@@ -43,16 +43,16 @@ use windows::Win32::UI::Controls::{
     LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR,
     PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETICON,
-    SB_GETPARTS, SB_SETICON, SB_SETMINHEIGHT, SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW,
-    SBARS_SIZEGRIP, SBARS_TOOLTIPS, STATUSCLASSNAMEW, SetWindowTheme, TOOLTIPS_CLASSW,
-    TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW,
-    TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW,
-    TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT,
-    TVGN_ROOT, TVI_LAST, TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT,
-    TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVIS_STATEIMAGEMASK, TVITEMEXW_CHILDREN, TVITEMW,
-    TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW, TVM_GETNEXTITEM, TVM_INSERTITEMW, TVM_SELECTITEM,
-    TVM_SETEXTENDEDSTYLE, TVM_SETITEMW, TVS_CHECKBOXES, TVS_EX_DOUBLEBUFFER,
-    TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
+    SB_GETPARTS, SB_GETTEXTLENGTHW, SB_GETTEXTW, SB_SETICON, SB_SETMINHEIGHT, SB_SETPARTS,
+    SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, STATUSCLASSNAMEW, SetWindowTheme,
+    TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS,
+    TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
+    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND,
+    TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVGN_ROOT, TVI_LAST, TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM,
+    TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVIS_STATEIMAGEMASK,
+    TVITEMEXW_CHILDREN, TVITEMW, TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW, TVM_GETNEXTITEM,
+    TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETEXTENDEDSTYLE, TVM_SETITEMW, TVS_CHECKBOXES,
+    TVS_EX_DOUBLEBUFFER, TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
@@ -88,7 +88,8 @@ pub(crate) fn initialize() {
 }
 
 /// Creates a visible child of `parent`; its place comes later from the
-/// layout.
+/// layout. It clips its siblings (DESIGN.md: Painting), so where children
+/// overlap, the one created first lies above.
 pub(super) fn child(
     parent: Hwnd,
     class: PCWSTR,
@@ -103,7 +104,7 @@ pub(super) fn child(
             ex_style,
             class,
             PCWSTR::null(),
-            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | style),
+            WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | style),
             0,
             0,
             0,
@@ -1341,19 +1342,14 @@ pub(crate) struct ListColumn<'a> {
 }
 
 impl ListView {
-    /// The list clips the controls created before it, which lie above it,
-    /// such as the message in its empty area. It shares the system image
-    /// list, which it must not destroy.
+    /// The controls created before the list lie above it, such as the
+    /// message in its empty area. It shares the system image list, which it
+    /// must not destroy.
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<ListView> {
         let list = child(
             parent,
             WC_LISTVIEWW,
-            WS_TABSTOP.0
-                | WS_CLIPSIBLINGS.0
-                | LVS_REPORT
-                | LVS_OWNERDATA
-                | LVS_SHOWSELALWAYS
-                | LVS_SHAREIMAGELISTS,
+            WS_TABSTOP.0 | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
             WINDOW_EX_STYLE(0),
             id,
         )?;
@@ -1974,11 +1970,27 @@ impl StatusBar {
         unsafe { send_pointer(self.0, SB_SETPARTS, edges.len(), edges.as_ptr()) };
     }
 
+    /// Sets the text of `part`. A text it shows already is not set again,
+    /// because the bar erases and draws the part for every text it is
+    /// given, also an unchanged one (DESIGN.md: Painting).
     pub(crate) fn set_text(self, part: usize, text: &str) {
+        if self.text(part) == text {
+            return;
+        }
         let text = wide(text);
         // SAFETY: `text` is NUL-terminated and outlives the call, which
         // copies it.
         unsafe { send_pointer(self.0, SB_SETTEXTW, part, text.as_ptr()) };
+    }
+
+    fn text(self, part: usize) -> String {
+        // The low word is the length; the high word says how it is drawn.
+        let length = (send(self.0, SB_GETTEXTLENGTHW, part, 0) & 0xFFFF) as usize;
+        let mut text = vec![0u16; length + 1];
+        // SAFETY: `text` has room for the part's text and its NUL, and
+        // outlives the call, which fills it in.
+        unsafe { send_pointer(self.0, SB_GETTEXTW, part, text.as_mut_ptr()) };
+        String::from_utf16_lossy(&text[..length])
     }
 
     /// Shows `glyph` before the text of `part`, at the bar's DPI, in the

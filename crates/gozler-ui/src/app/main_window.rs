@@ -749,6 +749,15 @@ impl Metrics {
     }
 }
 
+/// The inspector's texts fitted to their lines and the places of the
+/// controls that show them ([`MainWindow::inspector_fit`]).
+struct InspectorFit {
+    moves: Vec<(Hwnd, Rect)>,
+    texts: Vec<(Edit, String)>,
+    one_entry: bool,
+    folder_shown: bool,
+}
+
 /// What `WM_CREATE` makes, which every later handler uses: the window
 /// procedure calls no other handler before it exists.
 struct Created {
@@ -757,6 +766,11 @@ struct Created {
     /// `WM_SETFONT` does not take ownership.
     fonts: RefCell<Fonts>,
     metrics: Cell<Metrics>,
+    /// The client size the status bar last fitted itself to and the height
+    /// it took, because each fit erases and draws the whole bar again
+    /// (DESIGN.md: Painting). `None` after measuring, which may change its
+    /// font or its minimum height.
+    status_fit: Cell<Option<(Size, Px)>>,
     /// `None` while the window moves to a monitor with another DPI.
     layout: RefCell<Option<Layout>>,
     requests: Requests,
@@ -1112,6 +1126,7 @@ impl MainWindow {
             controls,
             fonts: RefCell::new(fonts),
             metrics: Cell::new(metrics),
+            status_fit: Cell::new(None),
             layout: RefCell::new(None),
             requests: Requests::new(Waker::new(hwnd)),
             fixer: FixThread::new(waker.clone()),
@@ -1143,6 +1158,7 @@ impl MainWindow {
         let created = self.created();
         let metrics = Metrics::measure(&created.fonts.borrow(), captions, &created.controls, dpi);
         created.metrics.set(metrics);
+        created.status_fit.set(None);
     }
 
     /// Every caption, from the model's facts and the current strings
@@ -1438,9 +1454,14 @@ impl MainWindow {
         inspector.age.hwnd().set_text(age.as_deref().unwrap_or(""));
     }
 
+    fn show_fields(&self) {
+        self.show_field_rows();
+        self.fit_inspector();
+    }
+
     /// Shows each field row that has a field and room in the pane, and
     /// hides the others; the note and the age likewise.
-    fn show_fields(&self) {
+    fn show_field_rows(&self) {
         let (rows, note, age) = {
             let layout = self.created().layout.borrow();
             let placed = layout.as_ref().and_then(Layout::inspector);
@@ -1460,26 +1481,27 @@ impl MainWindow {
         }
         inspector.note.hwnd().set_visible(note);
         inspector.age.hwnd().set_visible(age);
-        self.fit_inspector();
     }
 
-    /// Fits the inspector's texts to their lines: a copy icon stands 8 px
-    /// after the text it copies, for one entry only, whose name and folder
-    /// it copies, the age a space after the modification time, and a value
-    /// too long for its line ends in "…", a path losing its middle as
-    /// Windows shortens one (DESIGN.md: Inspector pane). The name and the
-    /// age end in an ellipsis themselves, and a value that has the focus
-    /// keeps its whole text, so the person selects what is there.
+    /// Fits the inspector's texts to their lines in the shown layout
+    /// ([`Self::inspector_fit`]), when they change apart from a layout.
     fn fit_inspector(&self) {
+        let fit = (self.created().layout.borrow().as_ref())
+            .and_then(Layout::inspector)
+            .map(|placed| self.inspector_fit(placed));
+        self.show_inspector_fit(fit);
+    }
+
+    /// Fits the inspector's texts to their lines in `placed`: a copy icon
+    /// stands 8 px after the text it copies, for one entry only, whose name
+    /// and folder it copies, the age a space after the modification time,
+    /// and a value too long for its line ends in "…", a path losing its
+    /// middle as Windows shortens one (DESIGN.md: Inspector pane). The name
+    /// and the age end in an ellipsis themselves, and a value that has the
+    /// focus keeps its whole text, so the person selects what is there.
+    fn inspector_fit(&self, placed: &InspectorLayout) -> InspectorFit {
         let created = self.created();
         let inspector = &created.controls.inspector;
-        let layout = created.layout.borrow();
-        let Some(placed) = layout.as_ref().and_then(Layout::inspector) else {
-            for copy in [inspector.copy_name, inspector.copy_folder] {
-                copy.hwnd().set_visible(false);
-            }
-            return;
-        };
         let shown = self.inspector_shown.borrow();
         // The copy icons copy one entry's name and folder.
         let one_entry = matches!(shown.0.inspected, Inspected::One { .. });
@@ -1527,16 +1549,35 @@ impl MainWindow {
             };
             texts.push((value, fitting));
         }
-        // A new text notifies the window, whose handlers may borrow these.
-        drop((meter, shown, fonts, layout));
-        for (value, text) in texts {
+        InspectorFit {
+            moves,
+            texts,
+            one_entry,
+            folder_shown,
+        }
+    }
+
+    /// Shows `fit`: sets its texts, moves the controls it still moves and
+    /// shows the copy icons it places, or hides them for `None`, while the
+    /// inspector is hidden.
+    fn show_inspector_fit(&self, fit: Option<InspectorFit>) {
+        let inspector = &self.created().controls.inspector;
+        let Some(fit) = fit else {
+            for copy in [inspector.copy_name, inspector.copy_folder] {
+                copy.hwnd().set_visible(false);
+            }
+            return;
+        };
+        // A new text notifies the window, whose handlers may borrow what
+        // `inspector_fit` borrowed, so no borrow is held here.
+        for (value, text) in fit.texts {
             if value.text() != text {
                 value.hwnd().set_text(&text);
             }
         }
-        win::move_children(&moves);
-        inspector.copy_name.hwnd().set_visible(one_entry);
-        inspector.copy_folder.hwnd().set_visible(folder_shown);
+        win::move_children(&fit.moves);
+        inspector.copy_name.hwnd().set_visible(fit.one_entry);
+        inspector.copy_folder.hwnd().set_visible(fit.folder_shown);
     }
 
     fn show_status(&self, status: &StatusCaptions) {
@@ -1827,15 +1868,22 @@ impl MainWindow {
         let created = self.created();
         let controls = &created.controls;
         let metrics = created.metrics.get();
-        let status_height = controls
-            .status
-            .fit(StatusLayout::min_height(metrics.dpi, metrics.font_height));
+        let client = hwnd.client_size();
+        let status_height = match created.status_fit.get() {
+            Some((fitted, height)) if fitted == client => height,
+            _ => {
+                let height = (controls.status)
+                    .fit(StatusLayout::min_height(metrics.dpi, metrics.font_height));
+                created.status_fit.set(Some((client, height)));
+                height
+            }
+        };
         let (mode, panes) = {
             let model = self.model.borrow();
             (model.mode(), model.panes())
         };
         let layout = Layout::compute(
-            hwnd.client_size(),
+            client,
             metrics.dpi,
             metrics.font_height,
             status_height,
@@ -1890,8 +1938,20 @@ impl MainWindow {
             moves.push((pane.show.hwnd(), show));
         }
         let inspector = &controls.inspector;
-        // The heading, the values and the copy icons are placed where
-        // `fit_inspector` fits their texts.
+        let inspector_moved = created
+            .layout
+            .borrow()
+            .as_ref()
+            .is_none_or(|previous| previous.inspector() != placed_inspector);
+        // The inspector's texts are fitted again only when it moved or its
+        // size changed, because fitting them measures each text. Their
+        // controls move in this batch with the others (DESIGN.md: Painting).
+        let mut inspector_fit = placed_inspector
+            .filter(|_| inspector_moved)
+            .map(|placed| self.inspector_fit(placed));
+        if let Some(fit) = &mut inspector_fit {
+            moves.append(&mut fit.moves);
+        }
         if let Some(placed) = placed_inspector {
             moves.push((inspector.icon.hwnd(), placed.icon));
             moves.push((inspector.hide.hwnd(), placed.hide));
@@ -1964,11 +2024,6 @@ impl MainWindow {
             .status
             .place_in_window(&layout.status, &right, memory.as_ref());
         let two_panels = search.is_none();
-        let inspector_moved = created
-            .layout
-            .borrow()
-            .as_ref()
-            .is_none_or(|previous| previous.inspector() != placed_inspector);
         created.layout.replace(Some(layout));
         // Each panel's message is placed for its text in its list.
         for side in Side::BOTH {
@@ -1986,10 +2041,9 @@ impl MainWindow {
                 self.fill_panel_columns();
             }
         }
-        // The inspector's texts are fitted again only when it moved or its
-        // size changed, because fitting them measures each text.
         if inspector_moved {
-            self.show_fields();
+            self.show_field_rows();
+            self.show_inspector_fit(inspector_fit);
         }
         self.update_message();
         hwnd.invalidate();

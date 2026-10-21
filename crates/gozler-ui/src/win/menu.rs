@@ -12,13 +12,13 @@ use windows::Win32::Graphics::Gdi::{COLOR_GRAYTEXT, COLOR_MENUTEXT, HBITMAP};
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN;
 use windows::Win32::UI::WindowsAndMessaging::{
     ACCEL, ACCEL_VIRT_FLAGS, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu,
-    DestroyAcceleratorTable, DestroyMenu, DrawMenuBar, EnableMenuItem, FALT, FCONTROL, FSHIFT,
-    FVIRTKEY, GetMenu, GetMenuItemInfoW, HACCEL, HMENU, InsertMenuItemW, MENU_ITEM_TYPE, MENUINFO,
-    MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_UNCHECKED, MFT_RADIOCHECK,
-    MFT_RIGHTJUSTIFY, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_DATA, MIIM_FTYPE, MIIM_ID,
-    MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_CHECKORBMP, MSG, PostMessageW, SetMenu,
-    SetMenuDefaultItem, SetMenuInfo, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, TranslateAcceleratorW, WM_KEYDOWN, WM_NULL,
+    DestroyAcceleratorTable, DestroyMenu, EnableMenuItem, FALT, FCONTROL, FSHIFT, FVIRTKEY,
+    GetMenu, GetMenuInfo, GetMenuItemCount, GetMenuItemInfoW, HACCEL, HMENU, InsertMenuItemW,
+    MENU_ITEM_TYPE, MENUINFO, MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED,
+    MF_UNCHECKED, MFT_RADIOCHECK, MFT_RIGHTJUSTIFY, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP,
+    MIIM_DATA, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MIIM_SUBMENU, MIM_MENUDATA, MIM_STYLE,
+    MNS_CHECKORBMP, MSG, PostMessageW, SetMenu, SetMenuDefaultItem, SetMenuInfo, SetMenuItemInfoW,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateAcceleratorW, WM_KEYDOWN, WM_NULL,
 };
 use windows::core::PWSTR;
 
@@ -35,25 +35,41 @@ pub(crate) struct Menu {
 /// destroys the bar it had, which no window shows any more. The window
 /// calls it again when its DPI changes, because the icons are bitmaps of
 /// one size.
+///
+/// A bar with the same titles at the same DPI keeps its items and gets only
+/// new menus, so it is not drawn again (DESIGN.md: Painting); `SetMenu`
+/// draws a new bar once, and Windows measures it at the window's DPI.
 pub(crate) fn replace_menu_bar(window: Hwnd, menus: &[MenuNode]) -> windows::core::Result<()> {
+    let old = Menu::of(window);
+    if let Some(old) = old.filter(|old| old.built_side() == old.icon_side && old.has_titles(menus))
+    {
+        return old.replace_submenus(menus);
+    }
     let bar = Menu {
         // SAFETY: no parameters.
         handle: unsafe { CreateMenu() }?,
         icon_side: icon_glyph_height(window.dpi()),
     };
+    // The bar keeps the side its icons were built at.
+    let info = MENUINFO {
+        cbSize: size_of::<MENUINFO>() as u32,
+        fMask: MIM_MENUDATA,
+        dwMenuData: bar.icon_side.0 as usize,
+        ..Default::default()
+    };
+    // SAFETY: `info` outlives the call. Without the data the next
+    // replacement builds the bar again.
+    let _ = unsafe { SetMenuInfo(bar.handle, &info) };
     if let Err(error) = bar.append(menus) {
         bar.destroy();
         return Err(error);
     }
-    let old = Menu::of(window);
     // SAFETY: the window then owns the new bar, and shows the old one no
     // more, so destroying it leaves no window with a destroyed menu.
     if let Err(error) = unsafe { SetMenu(window.0, Some(bar.handle)) } {
         bar.destroy();
         return Err(error);
     }
-    // SAFETY: plain values.
-    let _ = unsafe { DrawMenuBar(window.0) };
     if let Some(old) = old {
         old.destroy();
     }
@@ -266,6 +282,95 @@ impl Menu {
         // still works, with a wider margin.
         let _ = unsafe { SetMenuInfo(menu.handle, &info) };
         Ok(menu)
+    }
+
+    /// The icon side the bar was built at ([`replace_menu_bar`]).
+    fn built_side(self) -> Px {
+        let mut info = MENUINFO {
+            cbSize: size_of::<MENUINFO>() as u32,
+            fMask: MIM_MENUDATA,
+            ..Default::default()
+        };
+        // SAFETY: `info` is a local that the call fills in.
+        let _ = unsafe { GetMenuInfo(self.handle, &mut info) };
+        Px(i32::try_from(info.dwMenuData).unwrap_or(0))
+    }
+
+    /// Whether the bar's items are the titles of `menus`, each a
+    /// [`MenuNode::Submenu`], in the same order and alignment.
+    fn has_titles(self, menus: &[MenuNode]) -> bool {
+        // SAFETY: plain values.
+        let count = unsafe { GetMenuItemCount(Some(self.handle)) };
+        if usize::try_from(count).ok() != Some(menus.len()) {
+            return false;
+        }
+        menus.iter().enumerate().all(|(position, node)| {
+            let MenuNode::Submenu {
+                text,
+                aligned_right,
+                ..
+            } = node
+            else {
+                return false;
+            };
+            let mut shown = [0u16; 128];
+            let mut item = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_FTYPE | MIIM_STRING,
+                dwTypeData: PWSTR(shown.as_mut_ptr()),
+                cch: shown.len() as u32,
+                ..Default::default()
+            };
+            // SAFETY: `item` and `shown` are locals that outlive the call,
+            // which writes at most `cch` characters, its NUL included.
+            if unsafe { GetMenuItemInfoW(self.handle, position as u32, true, &mut item) }.is_err() {
+                return false;
+            }
+            let length = (item.cch as usize).min(shown.len());
+            let right = item.fType.0 & MFT_RIGHTJUSTIFY.0 != 0;
+            String::from_utf16_lossy(&shown[..length]) == *text && right == *aligned_right
+        })
+    }
+
+    /// Gives each of the bar's items the menu of its node in `menus`, which
+    /// [`Self::has_titles`] matched, and destroys the menu it had.
+    fn replace_submenus(self, menus: &[MenuNode]) -> windows::core::Result<()> {
+        for (position, node) in menus.iter().enumerate() {
+            let MenuNode::Submenu { children, .. } = node else {
+                continue;
+            };
+            let submenu = Menu::popup(self.icon_side)?;
+            if let Err(error) = submenu.append(children) {
+                submenu.destroy();
+                return Err(error);
+            }
+            let mut item = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_SUBMENU,
+                ..Default::default()
+            };
+            // SAFETY: `item` is a local that the call fills in.
+            let had = unsafe { GetMenuItemInfoW(self.handle, position as u32, true, &mut item) }
+                .map(|()| item.hSubMenu);
+            item.hSubMenu = submenu.handle;
+            // SAFETY: `item` outlives the call; the submenu then belongs to
+            // the bar, and the bar no longer shows the one it had.
+            let set = unsafe { SetMenuItemInfoW(self.handle, position as u32, true, &item) };
+            if let Err(error) = set {
+                submenu.destroy();
+                return Err(error);
+            }
+            if let Ok(had) = had
+                && !had.is_invalid()
+            {
+                Menu {
+                    handle: had,
+                    icon_side: self.icon_side,
+                }
+                .destroy();
+            }
+        }
+        Ok(())
     }
 
     /// Destroys a menu that no window shows.
