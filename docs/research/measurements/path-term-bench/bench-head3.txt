@@ -1,0 +1,33 @@
+cargo bench --workspace --bench * --no-run
+   Compiling gozler-core v0.4.0 (C:\Users\user\AppData\Local\Temp\claude\C--SynoSoftware-TinyTorrent2-3rdParty-goz\cb994ccb-6b93-4142-9fa6-a0df315b6794\scratchpad\head\crates\gozler-core)
+    Finished `bench` profile [optimized] target(s) in 2m 17s
+  Executable benches\compact.rs (C:\SynoSoftware\TinyTorrent2\3rdParty\goz\target\release\deps\compact-c1dfa6edb704c2a8.exe)
+  Executable benches\query.rs (C:\SynoSoftware\TinyTorrent2\3rdParty\goz\target\release\deps\query-b721921ee0f4da62.exe)
+cargo bench --workspace --bench * two-term|path-term
+    Finished `bench` profile [optimized] target(s) in 0.81s
+     Running benches\compact.rs (C:\SynoSoftware\TinyTorrent2\3rdParty\goz\target\release\deps\compact-c1dfa6edb704c2a8.exe)
+Gnuplot not found, using plotters backend
+     Running benches\query.rs (C:\SynoSoftware\TinyTorrent2\3rdParty\goz\target\release\deps\query-b721921ee0f4da62.exe)
+Gnuplot not found, using plotters backend
+built index: 2096640 files, 2141354 live entries
+Benchmarking query_2M/two-term(report txt)
+Benchmarking query_2M/two-term(report txt): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 6.0s, or reduce sample count to 10.
+Benchmarking query_2M/two-term(report txt): Collecting 20 samples in estimated 6.0479 s (20 iterations)
+Benchmarking query_2M/two-term(report txt): Analyzing
+query_2M/two-term(report txt)
+                        time:   [612.22 Mcycles 642.15 Mcycles 674.69 Mcycles]
+                        change: [-8.8771% -2.5845% +4.1769%] (p = 0.46 > 0.05)
+                        No change in performance detected.
+Benchmarking query_2M/path-term(group_007\bin_x64_03)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Warming up for 3.0000 s
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Collecting 20 samples in estimated 8.6682 s (40 iterations)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Analyzing
+query_2M/path-term(group_007\bin_x64_03)
+                        time:   [328.05 Mcycles 349.61 Mcycles 374.41 Mcycles]
+                        change: [-44.631% -38.723% -32.165%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

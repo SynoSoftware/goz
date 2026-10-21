@@ -1,7 +1,7 @@
-//! Peak heap and time of one search over a deep folder tree, through the
-//! steps gozlerd runs for it: the scan under the volume's index lock, the
-//! sort without it, the rows under the lock again, and the pages of
-//! `stream_rows`, each read under the lock. Or, with
+//! Peak heap and time of one search over a deep folder tree, run as gozlerd
+//! runs it, with the time of each hold of the volume: the scan under the
+//! volume's index lock, the sort without it, the rows under the lock again,
+//! and the pages, each read under the lock. Or, with
 //! `merge`, the time of the name rank merge that the tail runs once the names
 //! added since the build pass 0.1 % of the names.
 //!
@@ -15,11 +15,14 @@
 //! <branches> <name|path|merge> [limit]`
 
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::proto::{PAGE_ROWS, PageEnd, PageItem, ResultsPage, SentFolders};
-use gozler_core::query::{CompiledQuery, Reply, find_matches, parse_query};
+use gozler_core::proto::{Rows, SentFolders, encode_page};
+use gozler_core::query::{CompiledQuery, HeldVolume, IndexedVolume, ResultRows, parse_query};
+use gozler_core::scope::VolumeMounts;
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::RefCell;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
@@ -131,6 +134,64 @@ fn build(branches: u64) -> (VolumeIndex, u64) {
     (index, next)
 }
 
+/// The deep tree's volume, which notes how long each hold of its index
+/// lasts: what gozlerd holds the volume's read lock for.
+struct Timed<'a> {
+    index: &'a VolumeIndex,
+    mounts: [String; 1],
+    /// The seconds of each hold so far, in order.
+    holds: RefCell<Vec<f64>>,
+}
+
+/// One hold of the deep tree's index, noted when it ends.
+struct Hold<'a> {
+    index: &'a VolumeIndex,
+    since: Instant,
+    holds: &'a RefCell<Vec<f64>>,
+}
+
+impl Deref for Hold<'_> {
+    type Target = VolumeIndex;
+
+    fn deref(&self) -> &VolumeIndex {
+        self.index
+    }
+}
+
+impl Drop for Hold<'_> {
+    fn drop(&mut self) {
+        self.holds
+            .borrow_mut()
+            .push(self.since.elapsed().as_secs_f64());
+    }
+}
+
+impl IndexedVolume for &Timed<'_> {
+    type Index<'h>
+        = Hold<'h>
+    where
+        Self: 'h;
+
+    fn read(&self) -> HeldVolume<Hold<'_>> {
+        HeldVolume {
+            index: Hold {
+                index: self.index,
+                since: Instant::now(),
+                holds: &self.holds,
+            },
+            complete: true,
+            metadata_pending: false,
+        }
+    }
+
+    fn mounts(&self) -> VolumeMounts<'_> {
+        VolumeMounts {
+            mounts: &self.mounts,
+            guid: "",
+        }
+    }
+}
+
 fn mb(bytes: usize) -> f64 {
     bytes as f64 / 1_048_576.0
 }
@@ -185,52 +246,49 @@ fn main() {
     let base = LIVE.load(Relaxed);
     peak_since(base);
 
-    // What gozlerd runs under the volume's index read lock, without it, and
-    // under it again.
-    let locked = Instant::now();
-    let matches = find_matches(&index, r"C:\", &query, None, sort, limit, false);
-    let scan_s = locked.elapsed().as_secs_f64();
-    let ordering = Instant::now();
-    let ordered = matches.order();
-    let order_s = ordering.elapsed().as_secs_f64();
-    let reading = Instant::now();
-    let answer = ordered.read_rows(&index).expect("the index did not change");
-    let read_s = reading.elapsed().as_secs_f64();
+    let volume = Timed {
+        index: &index,
+        mounts: [r"C:\".to_string()],
+        holds: RefCell::new(Vec::new()),
+    };
+    let wanted = Rows {
+        sort,
+        offset: 0,
+        limit,
+        want_size: false,
+        want_mtime: false,
+        want_attributes: false,
+        want_sums: false,
+    };
+
+    // The scan under the volume's index read lock, the sort without it, and
+    // the rows under it again.
+    let searching = Instant::now();
+    let mut rows = ResultRows::search(vec![&volume], &query, None, wanted.spec())
+        .expect("the search has no scope");
+    let search_s = searching.elapsed().as_secs_f64();
     let lock_peak = peak_since(base);
+    let (scan_s, read_s) = match volume.holds.take()[..] {
+        [scan, read] => (scan, read),
+        ref holds => panic!("the search holds the volume twice, not {}", holds.len()),
+    };
+    let order_s = search_s - scan_s - read_s;
 
     // The pages, each read under the lock and sent after it.
     let sending = Instant::now();
-    let mut reply = Reply::new(vec![answer], 0, None);
     let mut sent = SentFolders::default();
-    let (mut pipe, mut pages, mut page_lock_s) = (0usize, 0usize, 0f64);
+    let (mut pipe, mut pages) = (0usize, 0usize);
     loop {
-        let mut page = ResultsPage::new(0, false, reply.rows_left());
-        let filling = Instant::now();
-        let more = reply.fill(&[Some(&index)], PAGE_ROWS as usize, |row, names| {
-            let item = PageItem {
-                folder: row.folder,
-                name: row.name,
-                is_dir: row.is_dir,
-                size: None,
-                mtime: None,
-                attributes: None,
-            };
-            page.push(item, names, &mut sent)
-        });
-        page_lock_s = page_lock_s.max(filling.elapsed().as_secs_f64());
-        let end = PageEnd {
-            total: reply.total(),
-            more,
-            volumes_incomplete: reply.index_changed(),
-        };
-        pipe += page.finish(end).len();
+        let (page, more) = encode_page(&mut rows, &wanted, &mut sent);
+        pipe += page.len();
         pages += 1;
         if !more {
             break;
         }
     }
     let send_s = sending.elapsed().as_secs_f64();
-    let total = reply.total();
+    let page_lock_s = volume.holds.take().into_iter().fold(0f64, f64::max);
+    let total = rows.total();
     let peak = lock_peak.max(peak_since(base));
 
     println!(

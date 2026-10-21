@@ -19,6 +19,8 @@
 
 mod answer;
 mod argv;
+#[cfg(test)]
+mod corpus;
 mod exit;
 mod help;
 mod request;

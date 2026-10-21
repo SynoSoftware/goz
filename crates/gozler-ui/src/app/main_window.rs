@@ -26,7 +26,7 @@ use crate::core::commands::{
     TabStop,
 };
 use crate::core::drop_target::{Dragged, DropEffect, DropKeys, DropMenu, SourceEffects};
-use crate::core::fetch::{DaemonFailure, Fetch, List, Purpose, WriteFailure};
+use crate::core::fetch::{ChunkAsk, DaemonFailure, Fetch, List, Purpose, WriteFailure};
 use crate::core::file_operations::{delete_question, exit_question};
 use crate::core::fixer::{FixEvent, SetupEvent, SetupResult};
 use crate::core::glyph::Glyph;
@@ -43,13 +43,14 @@ use crate::core::model::{
     Then,
 };
 use crate::core::open::{self, CommandLine};
+use crate::core::operations::{Answer, OperationDialog, OperationProgress, QueueStep, WindowStep};
 use crate::core::panel::Side;
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
     date_items, size_items,
 };
 use crate::core::results::{Fix, ListButton};
-use crate::core::selection::{DRAG_LIMIT, Selection, wide_path};
+use crate::core::selection::{DRAG_LIMIT, wide_path};
 use crate::core::settings::{Mode, SavedColumn, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
@@ -61,7 +62,7 @@ use crate::win::controls::{
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
 use crate::win::drop_target::{self, AsyncDrop, DropHandler, DropRegistration};
-use crate::win::file_operations::{OPERATION_CHANGED, TAKEN_CHANGED};
+use crate::win::file_operations::{HIDDEN, QUEUE_CHANGED};
 use crate::win::folder::PanelThreads;
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
@@ -80,8 +81,9 @@ use gozler_core::include::IncludeSettings;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortSpec};
-use gozler_fileops::{Destination, OperationId, Request};
+use gozler_fileops::{Destination, OperationId, Request, Taken};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
 use std::ops::Range;
@@ -89,7 +91,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use windows::Win32::Foundation::LRESULT;
 
 mod panels;
@@ -124,6 +126,12 @@ mod timer {
     /// Each search panel's selection is read this long after it last changed,
     /// by side.
     pub(super) const PANEL_SELECTION: [usize; 2] = [14, 15];
+    /// Reads a running file operation's counts, which change without a
+    /// wake.
+    pub(super) const OPERATIONS_POLL: usize = 16;
+    /// Opens the File operations window once an operation has run for a
+    /// while (`core::operations`).
+    pub(super) const OPERATIONS_OPEN: usize = 17;
 
     /// The timer of `list`'s search.
     pub(super) fn search(list: List) -> usize {
@@ -150,6 +158,8 @@ const AGE_REFRESH_MS: u32 = 60_000;
 /// scrolls while a row is dragged past its edge.
 const DROP_SCROLL_MS: u32 = 100;
 const SAVE_DELAY_MS: u32 = 1_000;
+/// Twice a second, as the engine's counters expect to be read.
+const OPERATIONS_POLL_MS: u32 = 500;
 
 /// What Settings' OK or Apply applied (DESIGN.md: Settings dialog).
 pub(super) struct Applied {
@@ -838,6 +848,9 @@ pub(crate) struct MainWindow {
     tray: RefCell<Option<TrayIcon>>,
     /// `TaskbarCreated`, after which the tray icon is added again.
     taskbar_created: u32,
+    /// `TaskbarButtonCreated`, after which the operations' progress is
+    /// shown on the new button.
+    taskbar_button_created: u32,
     /// A start of another program asks this window to exit
     /// ([`super::EXIT_MESSAGE`]).
     exit_message: u32,
@@ -857,9 +870,9 @@ pub(crate) struct MainWindow {
     /// selected once the click is handled (Settings > Search).
     select_search: Cell<bool>,
     update: Arc<Mutex<UpdateCheck>>,
-    /// The File operations window and its queue, which only the first
-    /// window has (DESIGN.md: Interrupted operations).
-    file_operations: RefCell<Option<FileOperations>>,
+    /// The file operations' queue and the File operations window, which
+    /// only the first window has (DESIGN.md: Interrupted operations).
+    file_operations: OnceCell<FileOperations>,
     /// The open Viewers (DESIGN.md: The Viewer).
     viewers: Viewers,
     /// What each panel's list changed since the panel last read it; a
@@ -873,6 +886,34 @@ pub(crate) struct MainWindow {
     drop_target: RefCell<Option<DropRegistration>>,
     /// While files are dragged over the window.
     drag_in: RefCell<Option<DragIn>>,
+    /// The modal steps that wait for [`Message::Deferred`], in the order
+    /// they came.
+    modal_steps: RefCell<VecDeque<ModalStep>>,
+    /// Whether a modal step runs, whose loop the later steps wait for.
+    modal_running: Cell<bool>,
+}
+
+/// A dialog, or another call with its own message loop, that a reply, a
+/// panel's disk event or a file operation starts. It runs from
+/// [`Message::Deferred`], once everything that the same wake brought has
+/// applied, because its loop dispatches the next wakes (DESIGN.md: window
+/// rule 13).
+enum ModalStep {
+    /// Asks whether to download the setup that the fix found.
+    ConfirmSetup,
+    /// Says that the latest release has no setup to install.
+    ExplainNoSetup,
+    ExportFailed {
+        path: PathBuf,
+        error: ExportError,
+    },
+    /// A panel's folder could not be opened.
+    PanelRefused(panels::Refused),
+    /// Opens the first row of `ask`'s search, which `Enter` in the search
+    /// box waited for, while the list still shows it.
+    OpenFirst(ChunkAsk),
+    /// A file operation's conflict question or failure dialog.
+    Operation(OperationDialog),
 }
 
 /// Files dragged over the window.
@@ -948,6 +989,7 @@ impl MainWindow {
             accelerators: RefCell::new(Rc::new(accelerators)),
             tray: RefCell::new(None),
             taskbar_created: win::instance::register_message("TaskbarCreated"),
+            taskbar_button_created: win::instance::register_message("TaskbarButtonCreated"),
             exit_message: win::instance::register_message(super::EXIT_MESSAGE),
             shortcut: RefCell::new(None),
             shortcut_failure: RefCell::new(None),
@@ -957,12 +999,14 @@ impl MainWindow {
             included_count: RefCell::new(None),
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
-            file_operations: RefCell::new(None),
+            file_operations: OnceCell::new(),
             viewers,
             panel_changed: Default::default(),
             panel_typed: RefCell::new([None, None]),
             drop_target: RefCell::new(None),
             drag_in: RefCell::new(None),
+            modal_steps: RefCell::new(VecDeque::new()),
+            modal_running: Cell::new(false),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -977,11 +1021,9 @@ impl MainWindow {
             window.register_saved_shortcut(hwnd);
             window.check_for_updates();
             window.open_file_operations(hwnd);
-            if window.file_operations.borrow().is_some() {
-                let registration =
-                    drop_target::register(hwnd, Rc::clone(&window) as Rc<dyn DropHandler>);
-                window.drop_target.replace(registration);
-            }
+            let registration =
+                drop_target::register(hwnd, Rc::clone(&window) as Rc<dyn DropHandler>);
+            window.drop_target.replace(registration);
         }
         window.update_tray(hwnd);
         let keeps_running = window.model.borrow().choices().keep_running;
@@ -1112,8 +1154,9 @@ impl MainWindow {
             .set_language(choice, Strings::load(language));
         super::set_panic_report(|report| report.language = Some(language));
         self.refresh_text(hwnd);
-        if let Some(operations) = self.file_operations.borrow().as_ref() {
+        if let Some(operations) = self.file_operations.get() {
             operations.set_strings(Strings::load(language));
+            self.refresh_operations();
         }
         self.viewers.set_strings(&Strings::load(language));
     }
@@ -1611,15 +1654,17 @@ impl MainWindow {
         self.apply(hwnd, accepted);
     }
 
-    /// Says why the fix found no setup to install, so it downloads nothing.
+    /// Says why the fix found no setup to install, so it downloads nothing,
+    /// unless another fix started since.
     fn explain_no_setup(&self, hwnd: Hwnd) {
-        let text = self
-            .model
-            .borrow()
-            .strings()
-            .text("fixing.no_setup")
-            .to_owned();
-        self.error_box(self.fix_owner(hwnd), &text);
+        let text = {
+            let model = self.model.borrow();
+            (model.fix().found_no_setup())
+                .then(|| model.strings().text("fixing.no_setup").to_owned())
+        };
+        if let Some(text) = text {
+            self.error_box(self.fix_owner(hwnd), &text);
+        }
     }
 
     /// Starts the checked setup and closes the window, because the setup
@@ -2381,12 +2426,7 @@ impl MainWindow {
                 CommandId::Edit => return,
                 CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
                 CommandId::Paste => return self.paste(),
-                CommandId::FileOperations => {
-                    if let Some(operations) = self.file_operations.borrow().as_ref() {
-                        operations.show();
-                    }
-                    return;
-                }
+                CommandId::FileOperations => return self.show_operations(None, true),
                 CommandId::TwoPanels => {
                     let mut model = self.model.borrow_mut();
                     let other = match model.mode() {
@@ -2635,12 +2675,12 @@ impl MainWindow {
             Some(Then::Cancel(purpose)) => created.requests.cancel(purpose),
             Some(Then::AskLatestRelease) => self.ask_latest_release(),
             Some(Then::RunFix(work)) => created.fixer.start(PromptOwner::new(hwnd), work),
-            Some(Then::ConfirmSetup) => self.confirm_setup(hwnd),
-            Some(Then::ExplainNoSetup) => self.explain_no_setup(hwnd),
+            Some(Then::ConfirmSetup) => self.defer(hwnd, ModalStep::ConfirmSetup),
+            Some(Then::ExplainNoSetup) => self.defer(hwnd, ModalStep::ExplainNoSetup),
             Some(Then::StopFix) => created.fixer.stop(),
             Some(Then::CancelOperation(id)) => {
-                if let Some(operations) = &*self.file_operations.borrow() {
-                    operations.cancel(id);
+                if let Some(operations) = self.file_operations.get() {
+                    operations.run(QueueStep::Cancel(id));
                 }
             }
             Some(Then::RunSetup(setup)) => self.run_setup(hwnd, &setup),
@@ -2657,7 +2697,6 @@ impl MainWindow {
         ) {
             hwnd.set_timer(timer::SAVE, SAVE_DELAY_MS);
         }
-        let mut failed_export = None;
         match accepted.change {
             Change::Nothing | Change::Choice | Change::FolderCounted => {}
             Change::Filters => self.update_filters(),
@@ -2759,15 +2798,25 @@ impl MainWindow {
                 if count > 0 {
                     controls.list.ensure_visible(0);
                 }
+                created.requests.cancel(Purpose::Selection(List::Search));
                 // The new rows no longer hold what the ended deletes and
                 // moves took, and show again what they failed on.
-                self.release_operations();
+                self.release_operations(hwnd);
                 self.update_status();
                 self.update_message();
                 self.fetch_visible(List::Search);
                 self.fill_around_first_rows();
                 if open_first {
-                    self.open_first_or_selected(hwnd);
+                    let shown = self
+                        .model
+                        .borrow()
+                        .search_list()
+                        .results()
+                        .shown_ask()
+                        .cloned();
+                    if let Some(ask) = shown {
+                        self.defer(hwnd, ModalStep::OpenFirst(ask));
+                    }
                 }
             }
             // A search panel's new results show from the top, with the
@@ -2783,7 +2832,8 @@ impl MainWindow {
                 if count > 0 {
                     control.set_focused(Some(0));
                 }
-                self.release_operations();
+                created.requests.cancel(Purpose::Selection(list));
+                self.release_operations(hwnd);
                 self.show_panel(side);
                 self.update_status();
                 self.fetch_visible(list);
@@ -2809,6 +2859,7 @@ impl MainWindow {
                 let control = self.list_control(list);
                 control.select_only(None);
                 control.set_count(0);
+                created.requests.cancel(Purpose::Selection(list));
                 match list {
                     List::Search => self.update_message(),
                     List::Panel(side) => self.show_panel(side),
@@ -2824,7 +2875,7 @@ impl MainWindow {
             }
             Change::ExportFailed { path, error } => {
                 self.update_status();
-                failed_export = Some((path, error));
+                self.defer(hwnd, ModalStep::ExportFailed { path, error });
             }
             Change::Settings => {
                 self.replace_menu_bar(hwnd);
@@ -2843,10 +2894,43 @@ impl MainWindow {
         self.update_bound_controls();
         self.update_inspector(hwnd);
         self.update_poll(hwnd);
-        // Last, because the message box runs its own message loop.
-        if let Some((path, error)) = failed_export {
-            self.show_export_failure(hwnd, &path, &error);
+    }
+
+    /// Runs `step` from [`Message::Deferred`], after every reply and panel
+    /// event of this wake has applied (DESIGN.md: window rule 13).
+    fn defer(&self, hwnd: Hwnd, step: ModalStep) {
+        self.modal_steps.borrow_mut().push_back(step);
+        hwnd.post(DEFERRED);
+    }
+
+    /// Runs the deferred modal steps one at a time. A step's own loop
+    /// dispatches wakes, whose steps wait here for it to end, so no dialog
+    /// opens over another.
+    fn run_modal_steps(&self, hwnd: Hwnd) {
+        if self.modal_running.replace(true) {
+            return;
         }
+        loop {
+            let step = self.modal_steps.borrow_mut().pop_front();
+            let Some(step) = step else { break };
+            match step {
+                ModalStep::ConfirmSetup => self.confirm_setup(hwnd),
+                ModalStep::ExplainNoSetup => self.explain_no_setup(hwnd),
+                ModalStep::ExportFailed { path, error } => {
+                    self.show_export_failure(hwnd, &path, &error);
+                }
+                ModalStep::PanelRefused(refused) => self.refuse(hwnd, refused),
+                ModalStep::OpenFirst(ask) => {
+                    let shown =
+                        self.model.borrow().search_list().results().shown_ask() == Some(&ask);
+                    if shown {
+                        self.open_first_or_selected(hwnd);
+                    }
+                }
+                ModalStep::Operation(dialog) => self.operation_dialog(hwnd, dialog),
+            }
+        }
+        self.modal_running.set(false);
     }
 
     /// Builds the menu bar and the accelerator table again, for the shown
@@ -3821,20 +3905,15 @@ impl MainWindow {
         }
     }
 
-    /// Opens the File operations window and its queue, hidden, and starts
-    /// following the clipboard for Paste.
+    /// Opens the file operations' queue, whose File operations window opens
+    /// the first time it shows, and starts following the clipboard for
+    /// Paste.
     fn open_file_operations(&self, hwnd: Hwnd) {
         let strings = self.model.borrow().strings().clone();
         let saved = self.settings_file.with_file_name("operations.json");
-        match FileOperations::open(hwnd, &saved, strings) {
-            Ok(operations) => {
-                self.file_operations.replace(Some(operations));
-            }
-            Err(error) => super::write_log(
-                &self.settings_file.with_file_name("ui-error.log"),
-                &format!("The File operations window did not open: {error}"),
-            ),
-        }
+        let error_log = self.settings_file.with_file_name("ui-error.log");
+        let operations = FileOperations::new(hwnd, &saved, strings, error_log);
+        let _ = self.file_operations.set(operations);
         clipboard::listen(hwnd);
         self.model
             .borrow_mut()
@@ -3848,9 +3927,178 @@ impl MainWindow {
         request: Request,
         source: Option<FilesSource>,
     ) -> Option<OperationId> {
+        let operations = self.file_operations.get()?;
         let settings = self.model.borrow().choices().speed.settings();
-        let operations = self.file_operations.borrow();
-        Some(operations.as_ref()?.start(request, settings, source))
+        let kind = source.as_ref().map(FilesSource::kind);
+        let id = operations.start(request, settings, source);
+        self.model.borrow_mut().file_operation_started(id, kind);
+        Some(id)
+    }
+
+    /// Reads the queue after it changed, and runs what the model decides:
+    /// the queue's steps first, then the lists', the dialogs, which wait
+    /// for [`Message::Deferred`], the File operations window's, and the
+    /// sources' last, because a drop's source can deliver messages while
+    /// it is told.
+    fn on_operations(&self, hwnd: Hwnd) {
+        let Some(operations) = self.file_operations.get() else {
+            return;
+        };
+        let taken = operations.taken();
+        let snapshot = operations.snapshot();
+        let steps = (self.model.borrow_mut()).accept_operations(&snapshot, &taken, Instant::now());
+        self.run_queue_steps(hwnd, steps.queue);
+        if !self.model.borrow().shows_taken(&taken) {
+            self.show_taken(hwnd, taken);
+        }
+        self.follow_operations(hwnd, &steps.panels);
+        for dialog in steps.dialogs {
+            self.defer(hwnd, ModalStep::Operation(dialog));
+        }
+        hwnd.kill_timer(timer::OPERATIONS_OPEN);
+        match steps.window {
+            WindowStep::Hide => operations.hide(),
+            WindowStep::Show { select } => self.show_operations(select, false),
+            WindowStep::OpenAt(due) if !operations.is_shown() => {
+                let wait = due.saturating_duration_since(Instant::now()).as_millis();
+                let wait = u32::try_from(wait).unwrap_or(u32::MAX).max(1);
+                hwnd.set_timer(timer::OPERATIONS_OPEN, wait);
+                self.refresh_operations();
+            }
+            WindowStep::OpenAt(_) | WindowStep::Stay => self.refresh_operations(),
+        }
+        self.show_progress(hwnd, steps.progress);
+        for step in steps.sources {
+            operations.tell_source(step);
+        }
+    }
+
+    /// Runs `steps` on the queue. A removal changes the taken entries, so
+    /// the window reads the queue again after it.
+    fn run_queue_steps(&self, hwnd: Hwnd, steps: Vec<QueueStep>) {
+        let Some(operations) = self.file_operations.get() else {
+            return;
+        };
+        let mut removed = false;
+        for step in steps {
+            let accepted = operations.run(step);
+            match step {
+                QueueStep::Submit { id, .. } if accepted => {
+                    let told = self.model.borrow_mut().operation_submitted(id);
+                    if let Some(told) = told {
+                        operations.tell_source(told);
+                    }
+                }
+                QueueStep::Remove(_) => removed = true,
+                QueueStep::Submit { .. } | QueueStep::Cancel(_) => {}
+            }
+        }
+        if removed {
+            hwnd.post(QUEUE_CHANGED);
+        }
+    }
+
+    /// Lets the queue remove the ended deletes and moves that no list keeps
+    /// any more, after a list let go of them.
+    fn release_operations(&self, hwnd: Hwnd) {
+        let steps = self.model.borrow_mut().release_operations();
+        self.run_queue_steps(hwnd, steps);
+    }
+
+    /// Shows the File operations window, with `select` selected, in front
+    /// with `front`.
+    fn show_operations(&self, select: Option<OperationId>, front: bool) {
+        if let Some(operations) = self.file_operations.get() {
+            let snapshot = operations.snapshot();
+            let folders = self.model.borrow().operation_folders();
+            operations.show(&snapshot, &folders, select, front);
+        }
+    }
+
+    /// Shows the queue in the File operations window, if it was made.
+    fn refresh_operations(&self) {
+        if let Some(operations) = self.file_operations.get() {
+            let snapshot = operations.snapshot();
+            let folders = self.model.borrow().operation_folders();
+            operations.refresh(&snapshot, &folders);
+        }
+    }
+
+    /// The status bar's operation, the taskbar button and the poll of a
+    /// running operation's counts follow `progress`.
+    fn show_progress(&self, hwnd: Hwnd, progress: OperationProgress) {
+        if progress.status_changed {
+            self.update_status();
+        }
+        if let Some(operations) = self.file_operations.get() {
+            operations.show_taskbar(progress.taskbar);
+        }
+        if progress.polls {
+            hwnd.set_timer(timer::OPERATIONS_POLL, OPERATIONS_POLL_MS);
+        } else {
+            hwnd.kill_timer(timer::OPERATIONS_POLL);
+        }
+    }
+
+    /// Reads a running operation's counts, which change without a wake.
+    fn poll_operations(&self, hwnd: Hwnd) {
+        let Some(operations) = self.file_operations.get() else {
+            return;
+        };
+        let snapshot = operations.snapshot();
+        let progress = self.model.borrow_mut().poll_operations(&snapshot);
+        self.show_progress(hwnd, progress);
+        let folders = self.model.borrow().operation_folders();
+        operations.refresh(&snapshot, &folders);
+    }
+
+    /// The person hid the File operations window.
+    fn operations_hidden(&self, hwnd: Hwnd) {
+        if let Some(operations) = self.file_operations.get() {
+            let snapshot = operations.snapshot();
+            self.model.borrow_mut().hide_operations(&snapshot);
+            hwnd.kill_timer(timer::OPERATIONS_OPEN);
+        }
+    }
+
+    /// Asks an operation's conflict question, or shows what failed in it,
+    /// while it still waits for that.
+    fn operation_dialog(&self, hwnd: Hwnd, dialog: OperationDialog) {
+        match dialog {
+            OperationDialog::Ask(id) => {
+                let question = {
+                    let model = self.model.borrow();
+                    model.operation_question(id, &*self.numbers.borrow())
+                };
+                let Some(question) = question else {
+                    return;
+                };
+                // The question runs its own message loop, so nothing is
+                // borrowed here.
+                let answer = Answer::of(win::dialog::choose(hwnd, &question));
+                let step = self.model.borrow_mut().answer_operation(id, answer);
+                self.run_queue_steps(hwnd, step.into_iter().collect());
+            }
+            OperationDialog::Report(id) => {
+                let windows_text =
+                    |code: u32| win::error_text(&io::Error::from_raw_os_error(code as i32));
+                let (failure, strings) = {
+                    let model = self.model.borrow();
+                    let failure =
+                        model.operation_failure(id, &*self.numbers.borrow(), &windows_text);
+                    (failure, model.strings().clone())
+                };
+                let Some(failure) = failure else {
+                    return;
+                };
+                super::file_operations::show_failure(hwnd, &strings, failure);
+                let steps = self.model.borrow_mut().operation_reported(id);
+                self.run_queue_steps(hwnd, steps);
+            }
+        }
+        // The status bar and the File operations window show the answer or
+        // the report.
+        hwnd.post(QUEUE_CHANGED);
     }
 
     /// Copies `sources` into the folder `destination`, or moves them, for
@@ -3953,36 +4201,19 @@ impl MainWindow {
         self.transfer_into(sources, destination, moves, Some(FilesSource::Paste(files)));
     }
 
-    /// Shows the rows that deletes and moves have taken struck through in
-    /// Search's list and blank in a search panel, and takes them out of the
-    /// selections; the panels also follow the operations that ended. Then
-    /// the queue lets go of the ended operations that no list keeps
-    /// (fast-copy-delete-spec.md: Taken entries).
-    fn show_taken(&self, hwnd: Hwnd) {
-        let Some(taken) = self
-            .file_operations
-            .borrow()
-            .as_ref()
-            .map(FileOperations::taken)
-        else {
-            return;
-        };
-        let ended = self
-            .file_operations
-            .borrow()
-            .as_ref()
-            .map(FileOperations::take_ended)
-            .unwrap_or_default();
-        let follow = self.model.borrow_mut().operations_ended(&ended, &taken);
-        let accepted = self.show_panels_taken(hwnd, taken, follow);
-        let lost = matches!(accepted.change, Change::Selection(List::Search));
-        self.apply(hwnd, accepted);
-        let reading = matches!(
-            self.model.borrow().search_list().selection(),
-            Selection::Reading { .. }
-        );
-        self.show_list_taken(List::Search, lost || reading);
-        self.release_operations();
+    /// Shows the rows that deletes and moves have taken, `taken`, struck
+    /// through in Search's list and blank in a search panel, and takes them
+    /// out of the selections (fast-copy-delete-spec.md: Taken entries).
+    fn show_taken(&self, hwnd: Hwnd, taken: Arc<Taken>) {
+        let shown = self.show_panels_taken(taken);
+        if shown.search_lost {
+            let lost = Accepted {
+                change: Change::Selection(List::Search),
+                then: None,
+            };
+            self.apply(hwnd, lost);
+        }
+        self.show_list_taken(List::Search, shown.search_deselects);
     }
 
     /// Shows `list`'s taken rows blank. With `deselect`, its selection lost
@@ -4155,24 +4386,17 @@ impl MainWindow {
     /// the notification area or another start's request. Returns whether Gozler
     /// ends; `false` when the person kept the operations.
     fn exit(&self, hwnd: Hwnd) -> bool {
-        let counts = self
-            .file_operations
-            .borrow()
-            .as_ref()
-            .map(FileOperations::running_and_waiting);
-        if let Some((running, waiting)) = counts.filter(|(r, w)| r + w > 0) {
-            let question = {
-                let model = self.model.borrow();
-                exit_question(model.strings(), &*self.numbers.borrow(), running, waiting)
-            };
+        let snapshot = (self.file_operations.get()).map_or_else(Vec::new, FileOperations::snapshot);
+        let question = {
+            let model = self.model.borrow();
+            exit_question(model.strings(), &*self.numbers.borrow(), &snapshot)
+        };
+        if let Some(question) = question {
             self.show_window(hwnd);
             // The question runs its own message loop, so nothing is
-            // borrowed here.
+            // borrowed here. `WM_DESTROY` stops the operations.
             if !win::dialog::ask(hwnd, &question) {
                 return false;
-            }
-            if let Some(operations) = self.file_operations.borrow().as_ref() {
-                operations.stop_all();
             }
         }
         // Each Viewer leaves its size, place and Wrap long lines as it
@@ -4448,7 +4672,7 @@ impl MainWindow {
         if edited.choices.show_icons != last.choices.show_icons {
             win::gdi::show_icons(edited.choices.show_icons);
             self.apply_glyphs(hwnd.dpi());
-            if let Some(operations) = self.file_operations.borrow().as_ref() {
+            if let Some(operations) = self.file_operations.get() {
                 operations.apply_glyphs();
             }
             self.viewers.apply_glyphs();
@@ -5070,6 +5294,15 @@ impl WindowProc for MainWindow {
                 self.fetch_selection(hwnd, List::Search);
                 Some(LRESULT(0))
             }
+            Message::Timer(timer::OPERATIONS_POLL) => {
+                self.poll_operations(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::Timer(timer::OPERATIONS_OPEN) => {
+                hwnd.kill_timer(timer::OPERATIONS_OPEN);
+                self.on_operations(hwnd);
+                Some(LRESULT(0))
+            }
             Message::Timer(_) => None,
             Message::Wake => {
                 self.on_wake(hwnd);
@@ -5085,6 +5318,7 @@ impl WindowProc for MainWindow {
                     self.choose_custom(hwnd, range);
                 }
                 self.show_shortcut_failure(hwnd);
+                self.run_modal_steps(hwnd);
                 Some(LRESULT(0))
             }
             Message::VerticalScroll { from, request }
@@ -5149,7 +5383,7 @@ impl WindowProc for MainWindow {
                 removal,
                 notification,
             } => {
-                self.on_device_removal(removal, notification);
+                self.on_device_removal(hwnd, removal, notification);
                 Some(LRESULT(1))
             }
             Message::InitMenuPopup => {
@@ -5252,6 +5486,9 @@ impl WindowProc for MainWindow {
                 // A window gone before the loop ended leaves nothing for
                 // close_for_setup to close.
                 self.closing_for_setup.set(false);
+                // Exit can come inside a modal step's loop, and the steps
+                // that wait for it would run against the destroyed window.
+                self.modal_steps.borrow_mut().clear();
                 self.created().waker.close();
                 self.created().panel_threads.stop_all();
                 self.shortcut.replace(None);
@@ -5259,12 +5496,8 @@ impl WindowProc for MainWindow {
                 self.created().requests.shut_down();
                 self.created().fixer.shut_down();
                 self.drop_target.replace(None);
-                // The queue is never dropped: dropping it waits for every
-                // Windows copy, which deletes the file it stops, while the
-                // process ending leaves that file for Continue.
-                if let Some(operations) = self.file_operations.borrow_mut().take() {
+                if let Some(operations) = self.file_operations.get() {
                     operations.close();
-                    std::mem::forget(operations);
                 }
                 // No Viewer outlives the message loop.
                 self.viewers.close_all();
@@ -5318,18 +5551,18 @@ impl WindowProc for MainWindow {
                     .set_clipboard_holds_files(clipboard::holds_files());
                 Some(LRESULT(0))
             }
-            Message::Other(TAKEN_CHANGED) => {
-                self.show_taken(hwnd);
+            Message::Other(QUEUE_CHANGED) => {
+                self.on_operations(hwnd);
                 Some(LRESULT(0))
             }
-            Message::Other(OPERATION_CHANGED) => {
-                let operation = self
-                    .file_operations
-                    .borrow()
-                    .as_ref()
-                    .and_then(FileOperations::status);
-                self.model.borrow_mut().set_operation(operation);
-                self.update_status();
+            Message::Other(HIDDEN) => {
+                self.operations_hidden(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::Other(msg) if msg == self.taskbar_button_created => {
+                if let Some(operations) = self.file_operations.get() {
+                    operations.forget_taskbar();
+                }
                 Some(LRESULT(0))
             }
             Message::Other(msg) if msg == self.taskbar_created => {

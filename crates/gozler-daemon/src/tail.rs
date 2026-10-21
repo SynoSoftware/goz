@@ -220,6 +220,54 @@ struct ReadFailures {
     degraded: bool,
 }
 
+/// What the tail does after a failed journal read.
+#[derive(Debug, PartialEq, Eq)]
+enum FailedRead {
+    /// Sleep `sleep`, then read again. `newly_degraded` is true for the one
+    /// failure that crossed [`DEGRADE_AFTER`]: the caller must then move the
+    /// volume to Offline.
+    Retry {
+        sleep: Duration,
+        newly_degraded: bool,
+    },
+    /// The run passed [`ESCALATE_AFTER`]: stop retrying and rebuild.
+    Escalate,
+}
+
+impl ReadFailures {
+    /// A run whose first failed read happened at `now`.
+    fn new(now: Instant) -> Self {
+        Self {
+            since: now,
+            backoff: RETRY_BACKOFF_MIN,
+            degraded: false,
+        }
+    }
+
+    /// Records a failed read at `now` and says what to do next. The backoff
+    /// doubles on each retry, up to [`RETRY_BACKOFF_MAX`].
+    fn read_failed(&mut self, now: Instant) -> FailedRead {
+        let failing_for = now.duration_since(self.since);
+        if failing_for >= ESCALATE_AFTER {
+            return FailedRead::Escalate;
+        }
+        let newly_degraded = !self.degraded && failing_for >= DEGRADE_AFTER;
+        self.degraded |= newly_degraded;
+        let sleep = self.backoff;
+        self.backoff = (self.backoff * 2).min(RETRY_BACKOFF_MAX);
+        FailedRead::Retry {
+            sleep,
+            newly_degraded,
+        }
+    }
+
+    /// Ends the run at a good read. Answers whether the run had moved the
+    /// volume to Offline, which the caller must then undo.
+    fn read_succeeded(self) -> bool {
+        self.degraded
+    }
+}
+
 fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse: &TailPulse) {
     // Owned so it drops in THIS frame, on return and on unwind alike, before
     // the spawning closure's retire guard publishes `Retired`. `Retired`
@@ -286,7 +334,11 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                 &mut buf,
             ) {
                 Ok(bytes) => {
-                    if pos.failures.take().is_some_and(|f| f.degraded) {
+                    if pos
+                        .failures
+                        .take()
+                        .is_some_and(ReadFailures::read_succeeded)
+                    {
                         tracing::info!(
                             volume = %state.mount_prefix(),
                             "journal reads recovered; volume is tracking again"
@@ -371,12 +423,8 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     // it complete. Past `DEGRADE_AFTER` the drift is real, so say
                     // so and let `--status`, `Hello.ready`, and every result page
                     // carry it.
-                    let failures = pos.failures.get_or_insert_with(|| ReadFailures {
-                        since: Instant::now(),
-                        backoff: RETRY_BACKOFF_MIN,
-                        degraded: false,
-                    });
-                    let since = failures.since;
+                    let now = Instant::now();
+                    let failures = pos.failures.get_or_insert_with(|| ReadFailures::new(now));
                     // Nor may we retry forever: deleting the journal mid-read can
                     // answer the stale cursor with ERROR_INVALID_PARAMETER (87), a
                     // code no arm maps, and no retry of that can succeed. The
@@ -386,23 +434,25 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     // the journal cannot be trusted, so rebuild. A rescan that fails
                     // retires the tail into the supervisor's revival budget instead
                     // of looping here.
-                    if since.elapsed() >= ESCALATE_AFTER {
+                    let FailedRead::Retry {
+                        sleep,
+                        newly_degraded,
+                    } = failures.read_failed(now)
+                    else {
                         break 'rescan (RescanReason::ReadsKeptFailing, e.to_string());
-                    }
-                    if !failures.degraded && since.elapsed() >= DEGRADE_AFTER {
+                    };
+                    if newly_degraded {
                         tracing::error!(
                             volume = %state.mount_prefix(),
                             error = %e,
-                            failing_for_secs = since.elapsed().as_secs(),
+                            failing_for_secs = now.duration_since(failures.since).as_secs(),
                             "journal reads keep failing; marking volume Offline (its index is no longer current)"
                         );
                         state.reads_keep_failing();
-                        failures.degraded = true;
                     } else {
                         tracing::warn!(volume = %state.mount_prefix(), error = %e, "journal read failed; retrying");
                     }
-                    sleep_unless_stopped(stop, failures.backoff);
-                    failures.backoff = (failures.backoff * 2).min(RETRY_BACKOFF_MAX);
+                    sleep_unless_stopped(stop, sleep);
                     continue 'tail;
                 }
             }
@@ -566,11 +616,13 @@ fn mark_failed(state: &VolumeState, reason: RescanReason, detail: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEGRADE_AFTER, ESCALATE_AFTER, REASON_MASK, RETRY_BACKOFF_MAX, RETRY_BACKOFF_MIN};
+    use super::{
+        DEGRADE_AFTER, FailedRead, REASON_MASK, RETRY_BACKOFF_MAX, RETRY_BACKOFF_MIN, ReadFailures,
+    };
     use gozler_core::types::Frn;
     use gozler_core::usn::ops_for;
     use gozler_core::usn::record::ParsedUsnRecord;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn record_with(reason: u32) -> ParsedUsnRecord {
         ParsedUsnRecord {
@@ -607,37 +659,100 @@ mod tests {
         }
     }
 
-    /// The read-retry policy keeps a volume whose journal reads keep failing
-    /// from reporting `Live`.
-    ///
-    /// The loop itself needs a real `VolumeHandle` and cannot be unit-tested, so
-    /// this pins the constants that bound it.
+    fn retry_sleep(outcome: FailedRead) -> Duration {
+        match outcome {
+            FailedRead::Retry { sleep, .. } => sleep,
+            FailedRead::Escalate => panic!("expected a retry, got an escalation"),
+        }
+    }
+
+    /// A drive spinning up answers `ERROR_NOT_READY` for up to about 15 s.
+    /// If a run of failures that short escalated, every sleepy drive would eat
+    /// a full index rebuild on wake.
     #[test]
-    fn retry_policy_is_bounded_and_degrades() {
-        // Must tolerate a transient failure: a drive spinning up answers
-        // ERROR_NOT_READY for a moment and must not flip the volume Offline.
-        assert!(
-            DEGRADE_AFTER >= Duration::from_secs(1),
-            "degrading on the first failure would flap on every spin-up"
+    fn a_spin_up_window_of_failures_never_escalates() {
+        let start = Instant::now();
+        let mut run = ReadFailures::new(start);
+        for secs in 0..=15 {
+            let outcome = run.read_failed(start + Duration::from_secs(secs));
+            assert!(
+                matches!(outcome, FailedRead::Retry { .. }),
+                "escalated {secs} s into the run: {outcome:?}"
+            );
+        }
+    }
+
+    /// An unmappable read error (for example `ERROR_INVALID_PARAMETER` after
+    /// the journal was deleted mid-read) can never succeed on retry. If the run
+    /// did not escalate, the volume would stay Offline for good while its tail
+    /// kept beating.
+    #[test]
+    fn failures_past_thirty_seconds_escalate() {
+        let start = Instant::now();
+        let mut run = ReadFailures::new(start);
+        assert_eq!(
+            run.read_failed(start + Duration::from_secs(30)),
+            FailedRead::Escalate
         );
-        // Must not be so patient that a dead volume looks healthy for minutes.
-        assert!(
-            DEGRADE_AFTER <= Duration::from_secs(30),
-            "a volume that stopped tracking must be reported promptly"
+    }
+
+    /// `reads_recovered` marks the volume Live again. Reporting it after a run
+    /// that never degraded the volume would be wrong, and not reporting it
+    /// after a degrade would leave the volume Offline for good. The degrade is
+    /// also reported once: a repeat would call `reads_keep_failing` on every
+    /// failed read.
+    #[test]
+    fn recovery_is_reported_only_after_a_degrade() {
+        let start = Instant::now();
+
+        let mut blip = ReadFailures::new(start);
+        assert_eq!(
+            blip.read_failed(start),
+            FailedRead::Retry {
+                sleep: RETRY_BACKOFF_MIN,
+                newly_degraded: false
+            }
         );
-        // Backoff must actually grow, or a permanently sick volume writes a log
-        // line every RETRY_BACKOFF_MIN forever.
-        assert!(RETRY_BACKOFF_MAX > RETRY_BACKOFF_MIN);
-        // The first retry must be prompt enough that a blip costs no freshness.
-        assert!(RETRY_BACKOFF_MIN <= Duration::from_secs(1));
-        // Escalation must announce Offline first and outlast a spin-up's
-        // NOT_READY window, or every sleepy drive would eat a full MFT rebuild
-        // on wake.
-        assert!(ESCALATE_AFTER > DEGRADE_AFTER);
-        assert!(ESCALATE_AFTER >= Duration::from_secs(20));
-        // But not so patient that an unmappable read error parks a volume for
-        // minutes.
-        assert!(ESCALATE_AFTER <= Duration::from_secs(120));
+        assert!(!blip.read_succeeded());
+
+        let mut outage = ReadFailures::new(start);
+        let degrading = outage.read_failed(start + DEGRADE_AFTER);
+        assert!(matches!(
+            degrading,
+            FailedRead::Retry {
+                newly_degraded: true,
+                ..
+            }
+        ));
+        let repeat = outage.read_failed(start + DEGRADE_AFTER + Duration::from_secs(1));
+        assert!(matches!(
+            repeat,
+            FailedRead::Retry {
+                newly_degraded: false,
+                ..
+            }
+        ));
+        assert!(outage.read_succeeded());
+    }
+
+    /// If the backoff did not grow, a permanently sick volume would write a
+    /// log line every `RETRY_BACKOFF_MIN` for the life of the service. If it
+    /// passed `RETRY_BACKOFF_MAX`, the supervisor's stall threshold, which
+    /// is set above that ceiling, would misread a sleeping tail as wedged.
+    #[test]
+    fn backoff_doubles_from_the_minimum_and_stops_at_the_maximum() {
+        let start = Instant::now();
+        let mut run = ReadFailures::new(start);
+        let mut previous: Option<Duration> = None;
+        for _ in 0..12 {
+            let sleep = retry_sleep(run.read_failed(start));
+            match previous {
+                None => assert_eq!(sleep, RETRY_BACKOFF_MIN),
+                Some(before) => assert_eq!(sleep, (before * 2).min(RETRY_BACKOFF_MAX)),
+            }
+            previous = Some(sleep);
+        }
+        assert_eq!(previous, Some(RETRY_BACKOFF_MAX));
     }
 
     /// The converse direction is deliberately NOT asserted: the mask may name

@@ -173,7 +173,7 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
                 black_box(&idx),
                 r"C:\",
                 black_box(&parsed),
-                Some(idx.root()),
+                Some(r"C:\"),
                 SortSpec::default(),
                 Some(100),
             );

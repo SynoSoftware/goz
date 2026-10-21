@@ -4,9 +4,11 @@
 //! The check reads both programs and runs them, so it runs on a thread of
 //! its own and a status request never waits for it: closing the window
 //! joins the status request's thread, and a gozlerd.exe that does not end
-//! would otherwise hold the window open.
+//! would otherwise hold the window open. `core::programs` decides what
+//! runs; this module reads and runs the files.
 
-use crate::core::fetch::{Beside, Local, LocalService, ProgramFile, Programs};
+use crate::core::fetch::Programs;
+use crate::core::programs::{Cache, Files, Found, Printed, check};
 use crate::win;
 use gozler_core::proto::SERVICE_NAME;
 use std::fs::File;
@@ -15,44 +17,19 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// Keeps `gozlerd.exe` from opening a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// How long a program may take to print its answer before it is ended and
-/// its build is not offered; a first run can wait for an antivirus scan.
+/// How long a program may take to print its answer before it is ended; a
+/// first run can wait for an antivirus scan.
 const PRINT_LIMIT: Duration = Duration::from_secs(10);
 
 /// How often the check looks whether the program has ended.
 const POLL: Duration = Duration::from_millis(20);
 
-/// A file's last write time and length, which change with each build.
-type Build = (SystemTime, u64);
-
-/// The files a check reads, with their builds, each when it can be read:
-/// the gozlerd.exe beside the window and the program the service's
-/// configuration names.
-#[derive(Clone, PartialEq, Eq)]
-struct Files {
-    local: Option<(PathBuf, Build)>,
-    registered: Option<(PathBuf, Build)>,
-}
-
-/// The check of the latest [`Files`].
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one value lives in `LATEST`, so boxing would save nothing"
-)]
-enum Check {
-    Running,
-    Done(Programs),
-}
-
-/// The latest files and their check. A check runs once for each build of
-/// the files, because the status poll asks every two seconds, and a
-/// developer who rebuilds gozlerd.exe expects the new build to count.
-static LATEST: Mutex<Option<(Files, Check)>> = Mutex::new(None);
+static LATEST: Mutex<Cache> = Mutex::new(Cache::new());
 
 /// The gozlerd.exe beside the window, when it serves the window's protocol
 /// and its bytes differ from the program the service runs, with that
@@ -67,42 +44,41 @@ static LATEST: Mutex<Option<(Files, Check)>> = Mutex::new(None);
 ///
 /// Returns at once: [`Programs::UNKNOWN`] while the check of these builds
 /// runs, so the window learns its answer at a later status.
+///
+/// [`Local::Mismatched`]: crate::core::fetch::Local::Mismatched
 pub(super) fn local_service() -> Programs {
-    let with_build = |path: PathBuf| {
-        let build = build(&path)?;
-        Some((path, build))
+    let found = |path: PathBuf| {
+        let metadata = std::fs::metadata(&path).ok()?;
+        Some(Found {
+            modified: metadata.modified().ok()?,
+            length: metadata.len(),
+            path,
+        })
     };
     let files = Files {
         local: std::env::current_exe()
             .ok()
-            .and_then(|exe| with_build(exe.with_file_name("gozlerd.exe"))),
+            .and_then(|exe| found(exe.with_file_name("gozlerd.exe"))),
         registered: gozler_winfs::service_program(SERVICE_NAME)
             .ok()
-            .and_then(with_build),
+            .and_then(found),
     };
-    if files.local.is_none() && files.registered.is_none() {
-        return Programs::UNKNOWN;
+    let asked = LATEST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .ask(&files);
+    if asked.start {
+        // Not joined: the thread holds nothing of the window, and a program
+        // that does not end is ended at PRINT_LIMIT.
+        std::thread::spawn(move || {
+            let checked = check(&files, &same_bytes, &is_paired, &printed);
+            LATEST
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .finish(&files, checked);
+        });
     }
-    let mut latest = LATEST.lock().unwrap_or_else(PoisonError::into_inner);
-    match latest.as_ref() {
-        Some((checked, Check::Done(found))) if *checked == files => return found.clone(),
-        Some((checked, Check::Running)) if *checked == files => return Programs::UNKNOWN,
-        _ => {}
-    }
-    *latest = Some((files.clone(), Check::Running));
-    drop(latest);
-    // Not joined: the thread holds nothing of the window, and a program
-    // that does not end is ended at PRINT_LIMIT.
-    std::thread::spawn(move || {
-        let found = check(&files);
-        let mut latest = LATEST.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((checked, check)) = latest.as_mut()
-            && *checked == files
-        {
-            *check = Check::Done(found);
-        }
-    });
-    Programs::UNKNOWN
+    asked.programs
 }
 
 /// Whether `program` is the gozlerd.exe that the setup's build paired with
@@ -119,105 +95,50 @@ pub(super) fn is_paired(program: &Path) -> bool {
         .is_ok_and(|sha256| sha256 == paired)
 }
 
-/// What [`local_service`] answers for `files`.
-fn check(files: &Files) -> Programs {
-    let service = files
-        .registered
-        .as_ref()
-        .map(|(registered, build)| ProgramFile {
-            path: registered.clone(),
-            version: version(registered),
-            modified: filetime(build.0),
-        });
-    let mut programs = Programs {
-        service,
-        ..Programs::UNKNOWN
-    };
-    let Some((program, local_build)) = &files.local else {
-        return programs;
-    };
-    if let Some((registered, registered_build)) = &files.registered
-        && local_build.1 == registered_build.1
-        && matches!(
-            (std::fs::read(program), std::fs::read(registered)),
-            (Ok(a), Ok(b)) if a == b
-        )
-    {
-        programs.beside = Beside::SameAsService(program.clone());
-        return programs;
-    }
-    let paired = is_paired(program);
-    programs.beside = Beside::Other(ProgramFile {
-        path: program.clone(),
-        version: paired.then(|| version(program)).flatten(),
-        modified: filetime(local_build.0),
-    });
-    if !paired {
-        programs.local = Local::Mismatched;
-        return programs;
-    }
-    let installed = programs
-        .service
-        .as_ref()
-        .and_then(|service| service.version.clone());
-    if let Some(local) = printed(program, "protocol")
-        .and_then(|protocol| LocalService::from_protocol(program.clone(), &protocol, installed))
-    {
-        programs.local = Local::Offered(local);
-    }
-    programs
+/// Whether both files can be read and hold the same bytes.
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    matches!((std::fs::read(a), std::fs::read(b)), (Ok(a), Ok(b)) if a == b)
 }
 
-/// What `gozlerd.exe --version` prints after the program's name, such as
-/// `0.3.0 (2026-10-20 09:14)`.
-fn version(program: &Path) -> Option<String> {
-    let printed = printed(program, "--version")?;
-    printed.trim().strip_prefix("gozlerd ").map(str::to_owned)
-}
-
-/// The build of the file at `path`.
-fn build(path: &Path) -> Option<Build> {
-    let metadata = std::fs::metadata(path).ok()?;
-    Some((metadata.modified().ok()?, metadata.len()))
-}
-
-/// `time` as a FILETIME, which the window's date formats read.
-fn filetime(time: SystemTime) -> i64 {
-    let ms = match time.duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(after) => i64::try_from(after.as_millis()).unwrap_or(i64::MAX),
-        Err(before) => -i64::try_from(before.duration().as_millis()).unwrap_or(i64::MAX),
-    };
-    gozler_core::output::filetime::unix_ms_to_filetime(ms)
-}
-
-/// What `program argument` printed when it ended well within
-/// [`PRINT_LIMIT`], run without a console window. Its answer is one line,
-/// far smaller than the pipe's buffer, so it is read after the program
-/// ends.
-fn printed(program: &Path, argument: &str) -> Option<String> {
-    let mut child = Command::new(program)
+/// What `program argument` printed when it ended within [`PRINT_LIMIT`],
+/// run without a console window. Its answer is one line, far smaller than
+/// the pipe's buffer, so it is read after the program ends.
+fn printed(program: &Path, argument: &str) -> Printed {
+    let Ok(mut child) = Command::new(program)
         .arg(argument)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .ok()?;
+    else {
+        return Printed::Failed;
+    };
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < PRINT_LIMIT => std::thread::sleep(POLL),
-            _ => {
+            // The limit passed, or the wait failed.
+            stopped => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return if stopped.is_ok() {
+                    Printed::TimedOut
+                } else {
+                    Printed::Failed
+                };
             }
         }
     };
     let mut output = Vec::new();
-    child.stdout.take()?.read_to_end(&mut output).ok()?;
-    status
-        .success()
-        .then(|| String::from_utf8_lossy(&output).into_owned())
+    let read = child
+        .stdout
+        .take()
+        .is_some_and(|mut stdout| stdout.read_to_end(&mut output).is_ok());
+    if status.success() && read {
+        Printed::Text(String::from_utf8_lossy(&output).into_owned())
+    } else {
+        Printed::Failed
+    }
 }

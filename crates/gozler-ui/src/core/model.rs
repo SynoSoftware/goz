@@ -11,17 +11,20 @@ use super::fetch::{
     Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, List, Local, Outcome,
     Programs, Purpose, WriteFailure, inside,
 };
-use super::file_operations::StatusOperation;
+use super::file_operations::{self, Failure, StatusOperation};
 use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
-use super::panel::{LookIn, Panels, Side, TakenRows, View, drive_root};
+use super::operations::{
+    Answer, OperationProgress, OperationSteps, Operations, QueueStep, Source, SourceStep,
+};
+use super::panel::{LookIn, PanelFollow, Panels, Side, TakenRows, View, drive_root};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
 use super::search_list::{SearchList, is_taken};
 use super::selection::{FolderContents, Selection};
 use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
-use super::text::{self, LanguageChoice, Strings};
+use super::text::{self, LanguageChoice, Numbers, Strings};
 use super::update;
 use gozler_core::escompat::EsPlan;
 use gozler_core::include::IncludeSettings;
@@ -32,12 +35,14 @@ use gozler_core::scope::{Coverage, leaves_matches_out};
 use gozler_core::search::Search;
 use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
-use gozler_fileops::{OperationId, Request, Taken};
+use gozler_fileops::{Operation, OperationId, Request, State, Taken};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 pub(crate) struct Model {
     pub(super) strings: Strings,
@@ -68,6 +73,7 @@ pub(crate) struct Model {
     app_working_set: Option<u64>,
     pub(super) export: Export,
     fix: Fixer,
+    operations: Operations,
     /// The file operation the middle group shows.
     operation: Option<StatusOperation>,
     /// The jobs in the order they last started, the newest last.
@@ -117,6 +123,17 @@ enum LatestRelease {
 pub(crate) struct Accepted {
     pub(crate) change: Change,
     pub(crate) then: Option<Then>,
+}
+
+/// What new taken entries change in the lists ([`Model::set_taken`]).
+#[derive(Debug, PartialEq)]
+pub(crate) struct TakenShown {
+    pub(crate) panels: [TakenRows; 2],
+    /// Search's selection lost files, which its status line counts.
+    pub(crate) search_lost: bool,
+    /// Search's list may still highlight a taken row: its selection lost
+    /// files, or is read.
+    pub(crate) search_deselects: bool,
 }
 
 /// What `Enter` in the search box does ([`Model::enter_in_search_box`]).
@@ -189,7 +206,8 @@ pub(crate) enum Change {
     Searching(List),
     /// A new search's first rows replace the list's old ones, and nothing
     /// is selected; `open_first` when `Enter` in Search's search box waited
-    /// for them to open the first row.
+    /// for them to open the first row. The list's live `Selection` request
+    /// ends, because it reads the old rows (DESIGN.md: T2).
     NewSearch {
         list: List,
         count: u64,
@@ -201,7 +219,8 @@ pub(crate) enum Change {
         rows: Range<u64>,
         count: u64,
     },
-    /// The list is empty and shows a message.
+    /// The list is empty and shows a message. The list's live `Selection`
+    /// request ends, because nothing is selected (DESIGN.md: T3).
     Message(List),
     /// The service's state changed, which the status bar's right group,
     /// the status poll and every list's failure message follow.
@@ -374,6 +393,7 @@ impl Model {
             app_working_set: None,
             export: Export::Idle,
             fix: Fixer::Idle,
+            operations: Operations::default(),
             operation: None,
             started_jobs: Vec::new(),
             failure: None,
@@ -436,18 +456,133 @@ impl Model {
         }
     }
 
+    /// The queue prepares the operation `id`, whose files came from
+    /// `source`, if anywhere but the selection.
+    pub(crate) fn file_operation_started(&mut self, id: OperationId, source: Option<Source>) {
+        if let Some(source) = source {
+            self.operations.started(id, source);
+        }
+    }
+
+    /// Follows `snapshot`, the queue's operations at `now`, which the window
+    /// read after `taken`, so every operation that `taken` has as ended is
+    /// in it. The lists hear of each operation that ended in the same call,
+    /// so none leaves the queue before every list decided whether it keeps
+    /// it.
+    pub(crate) fn accept_operations(
+        &mut self,
+        snapshot: &[Operation],
+        taken: &Taken,
+        now: Instant,
+    ) -> OperationSteps {
+        let seen = self.operations.accept(snapshot, now);
+        let panels = if seen.ended.is_empty() {
+            Vec::new()
+        } else {
+            self.operations_ended(&seen.ended, taken)
+        };
+        let mut queue = seen.queue;
+        queue.extend(self.release_operations());
+        OperationSteps {
+            queue,
+            panels,
+            dialogs: seen.dialogs,
+            window: seen.window,
+            progress: self.poll_operations(snapshot),
+            sources: seen.sources,
+        }
+    }
+
+    /// What the status bar and the taskbar button show of `snapshot`, which
+    /// the window reads twice a second while an operation runs. Asks,
+    /// reports and removals wait for the queue's wakes.
+    pub(crate) fn poll_operations(&mut self, snapshot: &[Operation]) -> OperationProgress {
+        let status = self.operations.status(snapshot);
+        let status_changed = status != self.operation;
+        self.set_operation(status);
+        OperationProgress {
+            status_changed,
+            taskbar: file_operations::taskbar(snapshot),
+            polls: (snapshot.iter()).any(|operation| matches!(operation.state, State::Running(_))),
+        }
+    }
+
+    /// The conflict question of the operation `id`, while it waits to be
+    /// asked; `None` once it no longer does.
+    pub(crate) fn operation_question(
+        &self,
+        id: OperationId,
+        numbers: &dyn Numbers,
+    ) -> Option<file_operations::Choices> {
+        self.operations.question(id, &self.strings, numbers)
+    }
+
+    /// The person answered the conflict question of `id`.
+    pub(crate) fn answer_operation(
+        &mut self,
+        id: OperationId,
+        answer: Answer,
+    ) -> Option<QueueStep> {
+        self.operations.answer(id, answer)
+    }
+
+    /// The queue accepted the submit of `id`.
+    pub(crate) fn operation_submitted(&mut self, id: OperationId) -> Option<SourceStep> {
+        self.operations.submitted(id)
+    }
+
+    /// The failure dialog of the ended operation `id`, while it waits to
+    /// show; `None` once it no longer does. `windows_text` words a Windows
+    /// error code.
+    pub(crate) fn operation_failure(
+        &self,
+        id: OperationId,
+        numbers: &dyn Numbers,
+        windows_text: &dyn Fn(u32) -> String,
+    ) -> Option<Failure> {
+        self.operations
+            .failure(id, &self.strings, numbers, windows_text)
+    }
+
+    /// The window showed the failure dialog of `id`.
+    pub(crate) fn operation_reported(&mut self, id: OperationId) -> Vec<QueueStep> {
+        let mut steps = Vec::from_iter(self.operations.reported(id));
+        steps.extend(self.release_operations());
+        steps
+    }
+
+    /// The person hid the File operations window while the queue held
+    /// `snapshot`.
+    pub(crate) fn hide_operations(&mut self, snapshot: &[Operation]) {
+        self.operations.hide(snapshot);
+    }
+
+    /// Each operation's folder of its sources, which the File operations
+    /// window shows.
+    pub(crate) fn operation_folders(&self) -> HashMap<OperationId, Option<String>> {
+        self.operations.folders()
+    }
+
+    /// Removes from the queue the reported deletes and moves that no list
+    /// keeps any more.
+    pub(crate) fn release_operations(&mut self) -> Vec<QueueStep> {
+        let released: Vec<OperationId> = (self.operations.kept())
+            .filter(|id| !self.keeps(*id))
+            .collect();
+        self.operations.release(&released)
+    }
+
     /// The operations `ended`, which ended since the window last told the
     /// lists, and the taken entries `taken` that the lists show next: each
     /// search list keeps an ended delete or move that takes one of its
     /// fetched rows, until its next search (fast-copy-delete-spec.md:
     /// Taken entries), and the folder panels decide for themselves. Returns
-    /// the panels that read their folders again or ask for their sizes, as
-    /// [`Panels::operations_ended`] does.
-    pub(crate) fn operations_ended(
+    /// what the folder panels do, as [`Panels::operations_ended`] does.
+    fn operations_ended(
         &mut self,
         ended: &[(OperationId, Arc<Request>)],
         taken: &Taken,
-    ) -> Vec<(Side, bool, bool)> {
+    ) -> Vec<PanelFollow> {
         self.search_list.ended(ended, taken);
         for side in Side::BOTH {
             if let Some(search) = self.panels.search_mut(side) {
@@ -466,23 +601,25 @@ impl Model {
             || self.panels.keep(id)
     }
 
+    /// Whether every list shows the taken entries `taken` already.
+    pub(crate) fn shows_taken(&self, taken: &Arc<Taken>) -> bool {
+        Arc::ptr_eq(self.panels.taken(), taken)
+    }
+
     /// Gives every list the taken entries `taken` at once, so no list's
     /// deselect pass reads the ones before: the panels as
     /// [`Panels::set_taken`] says, with `focused` their lists' focused rows,
     /// and Search's selection loses them, its list showing their rows blank
     /// once it draws them again.
-    pub(crate) fn set_taken(
-        &mut self,
-        taken: Arc<Taken>,
-        focused: [Option<u64>; 2],
-    ) -> (Accepted, [TakenRows; 2]) {
-        let rows = self.panels.set_taken(taken, focused);
-        let change = if self.search_list.drop_taken(self.panels.taken()) {
-            Change::Selection(List::Search)
-        } else {
-            Change::Nothing
-        };
-        (Accepted { change, then: None }, rows)
+    pub(crate) fn set_taken(&mut self, taken: Arc<Taken>, focused: [Option<u64>; 2]) -> TakenShown {
+        let panels = self.panels.set_taken(taken, focused);
+        let lost = self.search_list.drop_taken(self.panels.taken());
+        let reading = matches!(self.search_list.selection(), Selection::Reading { .. });
+        TakenShown {
+            panels,
+            search_lost: lost,
+            search_deselects: lost || reading,
+        }
     }
 
     pub(crate) fn strings(&self) -> &Strings {
@@ -1375,16 +1512,15 @@ impl Model {
         self.started_jobs.push(job);
     }
 
-    /// The file operation the File operations window last reported for the
-    /// middle group ([`StatusOperation`]).
+    /// The file operation the middle group shows ([`StatusOperation`]).
     pub(crate) fn operation(&self) -> Option<&StatusOperation> {
         self.operation.as_ref()
     }
 
-    /// The File operations window reported `operation`: another
-    /// operation than the one shown is the newest job, also one that ended
-    /// before the window saw it run.
-    pub(crate) fn set_operation(&mut self, operation: Option<StatusOperation>) {
+    /// The middle group shows `operation`: another operation than the one
+    /// shown is the newest job, also one that ended before the window saw
+    /// it run.
+    fn set_operation(&mut self, operation: Option<StatusOperation>) {
         let id = |operation: &Option<StatusOperation>| operation.as_ref().map(StatusOperation::id);
         if id(&operation).is_some() && id(&operation) != id(&self.operation) {
             self.job_started(Job::Operation);

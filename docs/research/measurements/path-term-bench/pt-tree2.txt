@@ -1,0 +1,26 @@
+cargo bench --workspace --bench * --no-run
+   Compiling gozler-core v0.4.0 (C:\SynoSoftware\TinyTorrent2\3rdParty\goz\crates\gozler-core)
+    Finished `bench` profile [optimized] target(s) in 1m 58s
+  Executable benches\compact.rs (target\release\deps\compact-c1dfa6edb704c2a8.exe)
+  Executable benches\query.rs (target\release\deps\query-b721921ee0f4da62.exe)
+cargo bench --workspace --bench * path-term
+    Finished `bench` profile [optimized] target(s) in 0.52s
+     Running benches\compact.rs (target\release\deps\compact-c1dfa6edb704c2a8.exe)
+Gnuplot not found, using plotters backend
+     Running benches\query.rs (target\release\deps\query-b721921ee0f4da62.exe)
+Gnuplot not found, using plotters backend
+built index: 2096640 files, 2141354 live entries
+Benchmarking query_2M/path-term(group_007\bin_x64_03)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 9.0s, or reduce sample count to 10.
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Collecting 20 samples in estimated 8.9751 s (20 iterations)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Analyzing
+query_2M/path-term(group_007\bin_x64_03)
+                        time:   [831.71 Mcycles 842.83 Mcycles 853.80 Mcycles]
+                        change: [+124.46% +141.08% +157.19%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+

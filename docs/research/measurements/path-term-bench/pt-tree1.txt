@@ -1,0 +1,29 @@
+cargo bench --workspace --bench * --no-run
+    Blocking waiting for file lock on build directory
+   Compiling gozler-core v0.4.0 (C:\SynoSoftware\TinyTorrent2\3rdParty\goz\crates\gozler-core)
+error: linking with `link.exe` failed: exit code: 0xc0000142
+  |
+  = note: "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "<233 object files omitted>" "C:\\SynoSoftware\\TinyTorrent2\\3rdParty\\goz\\target\\release\\deps\\rustcAhd5jj/{libgozler_winfs-0e33f96c81fdd024,liblibmimalloc_sys-6535a551c859bd7f,libjiff-a329063ff7a1e437,libwindows_sys-fd8ba03949839914,libstd-3854312d46c17a37}.rlib" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/libcompiler_builtins-*.rlib" "psapi.lib" "shell32.lib" "user32.lib" "advapi32.lib" "bcrypt.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:libcmt" "/NXCOMPAT" "/LIBPATH:C:\\SynoSoftware\\TinyTorrent2\\3rdParty\\goz\\target\\release\\build\\libmimalloc-sys-33643ce7faf3d301\\out" "/LIBPATH:C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\atlmfc\\lib\\x64" "/OUT:C:\\SynoSoftware\\TinyTorrent2\\3rdParty\\goz\\target\\release\\deps\\compact-c1dfa6edb704c2a8.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: 
+
+note: `link.exe` returned an unexpected error
+
+note: the Visual Studio build tools may need to be repaired using the Visual Studio installer
+
+note: or a necessary component may be missing from the "C++ build tools" workload
+
+error: could not compile `gozler-core` (bench "compact") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: linking with `link.exe` failed: exit code: 0xc0000142
+  |
+  = note: "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "<233 object files omitted>" "C:\\SynoSoftware\\TinyTorrent2\\3rdParty\\goz\\target\\release\\deps\\rustcfvDfvg/{libgozler_winfs-0e33f96c81fdd024,liblibmimalloc_sys-6535a551c859bd7f,libjiff-a329063ff7a1e437,libwindows_sys-fd8ba03949839914,libstd-3854312d46c17a37}.rlib" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/libcompiler_builtins-*.rlib" "psapi.lib" "shell32.lib" "user32.lib" "advapi32.lib" "bcrypt.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:libcmt" "/NXCOMPAT" "/LIBPATH:C:\\SynoSoftware\\TinyTorrent2\\3rdParty\\goz\\target\\release\\build\\libmimalloc-sys-33643ce7faf3d301\\out" "/LIBPATH:C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\atlmfc\\lib\\x64" "/OUT:C:\\SynoSoftware\\TinyTorrent2\\3rdParty\\goz\\target\\release\\deps\\query-b721921ee0f4da62.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: 
+
+error: could not compile `gozler-core` (bench "query") due to 1 previous error
+[31;1mResourceUnavailable: [0mC:\SynoSoftware\TinyTorrent2\3rdParty\goz\check.ps1:30[0m
+[31;1m[0m[36;1mLine |[0m
+[31;1m[0m[36;1m[36;1m  30 | [0m     [36;1m& cargo @args[0m
+[31;1m[0m[36;1m[36;1m[0m[36;1m[0m[36;1m     | [31;1m     ~~~~~~~~~~~~~[0m
+[31;1m[0m[36;1m[36;1m[0m[36;1m[0m[36;1m[31;1m[31;1m[36;1m     | [31;1mThe Win32 internal error "No process is on the other end of the pipe." 0xE9 occurred while setting the console window title. Contact Microsoft Customer Support Services.[0m

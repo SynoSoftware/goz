@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Pattern fit: gozler-ui</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { curve: "basis" } });
+</script>
+<style>
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .lbl { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
+  .diagram { min-height: 280px; }
+  .mermaid { display: flex; justify-content: center; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-6xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-4">
+  <p class="lbl text-slate-500">SynoSoftware/goz · crates/gozler-ui · 2026-10-21 · main @ 114d80c · second report</p>
+  <h1 class="font-serif text-4xl">Do gozler-ui's patterns fit its job?</h1>
+  <div class="flex flex-wrap gap-4 text-sm text-slate-600">
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border border-slate-400 bg-white"></span>module</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border-2 border-dashed border-slate-500"></span>seam</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-6 h-0.5 bg-red-600"></span>leak across a seam</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 deep"></span>deep module</span>
+  </div>
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm leading-relaxed space-y-2">
+    <p><b>Verdict.</b> The patterns fit what the window does today: one search list over millions of entries, a service behind a pipe, one modeless progress window. Native Win32, a <code>core</code> that decides and is tested on any OS, <code>Rc</code> window state with window rule 1, request slots with generations, and an owner-data list with a chunk cache are what a careful Windows desktop engineer would choose.</p>
+    <p class="rounded bg-indigo-50 border-l-4 border-indigo-600 px-3 py-2"><b>Status, 2026-10-21.</b>
+      <br>P1 and P2: grilled by their author. A reviewer that did not write them then found gaps (red boxes); the author has not yet answered them.
+      <br><b>Changed premise:</b> the <code>file-manager</code> branch, with Stages 3 to 7, is now merged into local <code>main</code> at 7b94f06. That merge is not pushed yet. Every item is being re-checked against the merged code.
+      <br>P3 to P5: not grilled.
+      <br>P6: settled by candidate 4.
+      <br>Outcomes are in the blue boxes under P1 and P2.
+      <br>One defect found: T2 and T3 send no selection cancel.</p>
+    <p><b>The risk is the next work.</b> The file-manager plan adds two panels (three lists), a Viewer and more top-level windows. Stage 3 plans "one state for each list" in <code>core</code> only. Four seams in <code>app</code> and in the update protocol still assume one list and one window. Each is cheapest to decide in Stage 3's restructuring, before features build on it.</p>
+  </div>
+</header>
+
+<section class="space-y-4">
+  <h2 class="font-serif text-2xl">Pattern by pattern</h2>
+  <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+    <table class="w-full text-sm">
+      <thead class="bg-slate-50 text-left">
+        <tr><th class="p-3">Pattern</th><th class="p-3">Today</th><th class="p-3">After the scheduled work</th><th class="p-3">Evidence</th></tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100 align-top">
+        <tr><td class="p-3 font-medium">core / win / app split</td><td class="p-3"><span class="rounded bg-emerald-100 text-emerald-800 px-2">fits</span></td><td class="p-3">holds; the strain is how <code>app</code> is cut (P1)</td><td class="p-3"><code>forbid(unsafe_code)</code> in core and app; <code>Numbers</code> trait inverts locale formatting. <code>app/main_window.rs</code> 4,688 lines vs <code>core/model.rs</code> 2,545: decisions drift into <code>app</code></td></tr>
+        <tr><td class="p-3 font-medium"><code>Model</code> → <code>Accepted { change, then }</code></td><td class="p-3"><span class="rounded bg-amber-100 text-amber-800 px-2">fits with strain</span></td><td class="p-3">one effect, no list named (P2)</td><td class="p-3"><code>then: Option&lt;Then&gt;</code>; <code>Then::ReadSelectionSoon</code> bundles cancel + timer; six methods return a bare <code>Fetch</code> instead</td></tr>
+        <tr><td class="p-3 font-medium"><code>Rc</code> window state, window rule 1</td><td class="p-3"><span class="rounded bg-emerald-100 text-emerald-800 px-2">fits</span></td><td class="p-3">a Viewer is one more trampoline</td><td class="p-3">138 <code>self.model.borrow</code> sites sampled, no violation; ~20 other <code>RefCell</code>s follow the same discipline by convention only</td></tr>
+        <tr><td class="p-3 font-medium">Request slots, generations, a thread per request</td><td class="p-3"><span class="rounded bg-emerald-100 text-emerald-800 px-2">fits</span></td><td class="p-3"><code>Purpose</code> gains a list id: contained</td><td class="p-3"><code>Requests.live</code> indexed by <code>Purpose</code>; joined at close (rule 3)</td></tr>
+        <tr><td class="p-3 font-medium">Owner-data list + chunk cache</td><td class="p-3"><span class="rounded bg-emerald-100 text-emerald-800 px-2">fits</span></td><td class="p-3">folder panels strain selection, not rows (P3)</td><td class="p-3"><code>CACHE_ROWS</code> 32,768, <code>CHUNK_ROWS</code> 16,384</td></tr>
+        <tr><td class="p-3 font-medium">Command table</td><td class="p-3"><span class="rounded bg-amber-100 text-amber-800 px-2">fits with strain</span></td><td class="p-3">keys per mode; <code>State</code> needs the active list</td><td class="p-3">one default key set per row; <code>Focus::List</code> singular; 13 one-list reads in captions and commands</td></tr>
+        <tr><td class="p-3 font-medium"><code>DialogProc</code> + <code>run_modal</code></td><td class="p-3"><span class="rounded bg-emerald-100 text-emerald-800 px-2">fits</span></td><td class="p-3">new dialogs are the same kind</td><td class="p-3"><code>.rc</code> templates; Windows runs Tab, Enter, Esc, DPI</td></tr>
+        <tr><td class="p-3 font-medium">Settings persistence</td><td class="p-3"><span class="rounded bg-emerald-100 text-emerald-800 px-2">fits</span></td><td class="p-3">per-list saved state needs one way (P6)</td><td class="p-3">temp file + rename; <code>timer::SAVE</code>; two ways to hold saved state</td></tr>
+        <tr><td class="p-3 font-medium">Text catalogues, captions</td><td class="p-3"><span class="rounded bg-emerald-100 text-emerald-800 px-2">fits</span></td><td class="p-3">main window must reach each Viewer on a language switch</td><td class="p-3">rule 12; File operations gets <code>Strings::load</code> on switch</td></tr>
+        <tr><td class="p-3 font-medium">One message loop, one modeless slot</td><td class="p-3"><span class="rounded bg-amber-100 text-amber-800 px-2">fits with strain</span></td><td class="p-3">routing by <code>GA_ROOT</code> covers only the outer loop (P4)</td><td class="p-3"><code>MODELESS</code> cell in <code>win::window</code>; Settings is modal over the main window only</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="findings" class="space-y-12">
+
+<article id="p1" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-0.5 text-xs font-semibold">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+    <span class="rounded-full bg-indigo-100 text-indigo-800 px-3 py-0.5 text-xs">decide in Stage 3</span>
+  </div>
+  <h2 class="font-serif text-2xl">P1. Give each list its own controller module in <code>app</code>, not only its own state in <code>core</code></h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>app/main_window.rs — 48 references to controls.list; on_list_notify → fill_cell, draw_row, draw_cell</li>
+    <li>app/main_window.rs — list fields among 42: selection_pending, filled_width, sizing_fits, hidden_widths, filled_around_rows, drag_in</li>
+    <li>core/model.rs — Model::failure, a service fact that two rules read as if it were one list's (corrected by grilling) · win/pane.rs forwards every message to the main window</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-red-700 mb-2">Before · after Stage 3 as planned</p>
+      <pre class="mermaid">
+flowchart TB
+  N["WM_NOTIFY from 3 list views"] --> MW
+  MW["app · MainWindow<br/>one on_list_notify<br/>list fields x 3, list id in every handler"]
+  MW --> S["core · Search list state"]
+  MW --> L["core · left panel state"]
+  MW --> R["core · right panel state"]
+  classDef hot fill:#fef2f2,stroke:#dc2626
+  class MW hot
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-emerald-700 mb-2">After</p>
+      <pre class="mermaid">
+flowchart TB
+  MW["app · MainWindow<br/>routes WM_NOTIFY by hwndFrom"]
+  MW --> C1["list controller · Search"]
+  MW --> C2["list controller · left panel"]
+  MW --> C3["list controller · right panel"]
+  C1 --> S["core · list state"]
+  C2 --> L["core · list state"]
+  C3 --> R["core · list state"]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a
+  class C1,C2,C3 deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> Stage 3 splits the list state in <code>core</code>, but <code>MainWindow</code> stays one dispatcher with one list built in. Three lists through it put a list id into every handler and triple the scattered fields.</p>
+  <p><b>Solution.</b> One controller module per list view, the established Win32 pattern: it owns its control wrapper, its column sizing and drag-over state, its notification handlers and its link to its list state. A panel may also be a child window with its own window procedure, which lets two panels reuse control ids.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Leverage: one controller, three lists</li>
+    <li>Locality: list behaviour leaves MainWindow</li>
+    <li>Explains first report's candidates 2, 6, 8, 10</li>
+    <li>Grilled candidate 2's column sizing lives here</li>
+  </ul>
+  <div class="rounded-lg p-4 text-sm space-y-2" style="border-left:4px solid #4f46e5;background:#eef2ff">
+    <p class="lbl text-indigo-800">Grilled · 2 rounds · frontier empty · stays Strong</p>
+    <ul class="list-disc pl-5 space-y-1">
+      <li><b>What the controller owns:</b> the list control and its message area, which is created before the list so that it comes first in the Tab order. Also the column-sizing state, <code>drag_in</code>, <code>selection_pending</code>, and its SEARCH, SELECTION and DROP_SCROLL timers.</li>
+      <li><b>What the window keeps:</b> fonts, metrics, image lists, icons, numbers, the window-drag flag, the taken set and the OLE drop registration. These reach each call as one value of shared resources.</li>
+      <li><b>A struct, not a child window:</b> events are matched by window handle (<code>ControlEvent::is</code>), and Tab is decided by <code>commands::tab_stop</code>. So nothing forces a child window. Panel controls are children of the main window, hidden on a mode switch, as <code>FilterPane::placed_with</code> already does.</li>
+      <li><b>Model access:</b> the controller holds no <code>Rc</code>. Its methods take <code>&amp;RefCell&lt;Model&gt;</code>. They return an <code>Outcome</code>: <code>Apply(Accepted)</code>, <code>Start(Fetch)</code>, <code>Run(CommandId)</code>, <code>DragOut</code> or <code>None</code>. The window acts on it after every borrow has ended, so window rule 1 holds.</li>
+      <li><b>One type plus composition, no trait.</b> A panel's list switches kind while it runs: <code>Alt+F7</code> makes it a search panel, and <code>Esc</code> makes it a folder panel again. So the differences go in a per-list kind in <code>core</code>: where rows come from, how selection works, how taken rows look, bold parts, how the row is drawn. The parts only a panel has go in a <code>Panel</code> struct that contains one controller.</li>
+      <li><b>Depth:</b> about 18 methods hide about 650 to 730 lines of today's <code>main_window.rs</code>. The deletion test passes: without the controller, three lists would add three copies of each field to <code>MainWindow</code>, and a <code>ListId</code> to every handler.</li>
+      <li><b>Timers:</b> each list timer gets a base well clear of the window's ids 1 to 7, plus <code>ListId</code>. One <code>timer::list</code> decodes them. Switching to Search kills the panels' timers and cancels their requests, as the spec's "ask gozlerd nothing" requires.</li>
+      <li><b>Activation:</b> <code>Model::activate(ListId) → Accepted</code>, saved through candidate 4's compare. It is triggered only by gaining focus, never by losing it: NM_SETFOCUS (which needs a new <code>ListNotify</code> variant), the path box, the panel search box, and explicit calls from the drive button, the status line and Alt+F1 or Alt+F2. A control key goes to the controller that owns the key's target window. A command goes to the active list.</li>
+      <li><b><code>Model::failure</code> is the service's fact.</b> It is renamed, and stays window-wide. A status reply that answers again gives a SearchAgain for each list that shows a recoverable failure.</li>
+      <li><b>P3 does not block P1.</b> Both options need <code>show_states</code> and the control keys that move only the focus. Option (a) adds a <code>capture_states</code> call. Decide P3 before Stage 4.</li>
+      <li><b>Order:</b> P2's reshape, then candidate 2's <code>core::columns</code>, then the extraction (a plain move), then "Two lists in <code>Layout::compute</code>".</li>
+      <li><b>Not unit-tested:</b> routing by window handle, which review and the Stage 4 screenshots cover. Also the loop that re-applies a panel's selection, which is checked once in the running window in Stage 4.</li>
+    </ul>
+  </div>
+</article>
+
+<article id="p2" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-amber-100 text-amber-800 px-3 py-0.5 text-xs font-semibold">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+    <span class="rounded-full bg-indigo-100 text-indigo-800 px-3 py-0.5 text-xs">decide in Stage 3</span>
+  </div>
+  <h2 class="font-serif text-2xl">P2. Let one accepted change carry several effects, each naming its list</h2>
+  <p class="font-mono text-sm text-slate-700">core/model.rs — Accepted { change, then: Option&lt;Then&gt; }, Then::ReadSelectionSoon, set_selection's or_else · app/main_window.rs — apply</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-red-700 mb-3">Before</p>
+      <div class="space-y-2 text-xs">
+        <div class="border border-slate-300 rounded p-2 font-mono">Accepted { change, then: Option&lt;Then&gt; }</div>
+        <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2"><code>Then::ReadSelectionSoon</code> = cancel Selection + start a timer, bundled into one variant</div>
+        <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2"><code>set_selection</code> picks one effect; correct only because a new fetch of a purpose cancels the old one</div>
+        <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">Ctrl+U, an operation's end, a panel search: one action, effects on two lists</div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-emerald-700 mb-3">After</p>
+      <div class="space-y-2 text-xs">
+        <div class="deep rounded p-3 font-mono">Accepted { change, then: Vec&lt;Then&gt; }</div>
+        <div class="text-slate-600">each <code>Change</code> and list-bound <code>Then</code> names its list; <code>apply</code> runs the effects in order</div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem.</b> One effect slot forces combined variants and implicit cancel rules, and nothing names a list.</p>
+  <p><b>Solution.</b> A list of effects (as Elm's <code>Cmd.batch</code>), with a list id on what concerns one list.</p>
+  <div class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm">Meets the grilling of candidate 1. That grilling chose one <code>Then::FileOperations(Steps)</code> variant so as not to change <code>Accepted</code> for every subsystem. If P2 is taken, <code>Steps</code> becomes ordinary entries in the list. Decide P2 first.</div>
+  <div class="rounded border border-indigo-300 bg-indigo-50 px-3 py-2 text-sm space-y-1">
+    <p><b>Found while grilling.</b> <code>apply</code> runs <code>accepted.then</code> before <code>accepted.change</code>. <code>Then::ConfirmSetup</code> and <code>Then::ExplainNoSetup</code> open dialogs, so the person answers a setup question before the same reply's status change shows. This is inferred from the code, not run.</p>
+    <p>Under P2, put the dialog in a field of its own, <code>Accepted { change, effects, dialog: Option&lt;Dialog&gt; }</code>. The type then allows at most one dialog, and <code>apply</code> runs it last.</p>
+  </div>
+  <div class="rounded-lg p-4 text-sm space-y-2" style="border-left:4px solid #4f46e5;background:#eef2ff">
+    <p class="lbl text-indigo-800">Grilled · 2 rounds · frontier empty</p>
+    <ul class="list-disc pl-5 space-y-1">
+      <li><b>When:</b> in Stage 3's restructuring. Stage 3 already edits most <code>Fetch</code> and <code>Cancel</code> sites and every list arm. The reshape touches 21 <code>Change</code> variants, 11 <code>Then</code> variants and 80 places that build an <code>Accepted</code>, all of them in <code>model.rs</code>, plus 28 model tests that change mechanically.</li>
+      <li><b>Shape:</b> <code>changes: Vec&lt;Change&gt;</code>, only for independent facts. Today's code already folds two changes into one in <code>accept_status</code> and <code>set_taken</code>. A plain <code>Vec</code> is enough: hot paths build at most two effects, and an empty <code>Vec</code> does not allocate.</li>
+      <li><b>Order inside <code>apply</code>:</b> changes, then effects, then the footer, then the last slot. No current <code>Then</code> has to run before its change shows. <code>fetch_visible</code> even needs its change applied first. <code>update_status</code> moves to the footer.</li>
+      <li><b>Naming the list:</b> a <code>ListId</code> (Search, Left, Right) goes on each variant that concerns one list. <code>Fetch</code> and <code>Cancel</code> name the list through <code>Purpose</code>. An effect resolves "the active list" to a fixed list when the change is accepted, so a <code>Tab</code> within the 150 ms delay cannot redirect a search or a selection read.</li>
+      <li><b>Cancels:</b> "one live request per purpose" stays the documented rule of the request slots (window rule 4). <code>set_selection</code>'s <code>or_else</code> goes.</li>
+      <li><b>Other return types:</b> the five request methods keep returning a bare <code>Fetch</code>, because they change only request bookkeeping. <code>enter_in_search_box</code> returns <code>Accepted</code>, and <code>SearchBoxEnter</code> goes.</li>
+      <li><b>Effects hidden in change arms move out:</b> the <code>NewSearch</code> arm runs <code>release_ended</code> and <code>fetch_visible</code>. It also opens the first row, and Open can show a modal box from inside that arm.</li>
+      <li><b>Defect: T2 and T3 send no selection cancel.</b> DESIGN requires one. The indirect chain does not provide it: <code>accept_results</code> and <code>show_failure</code> set <code>Selection::None</code> first, so the later <code>set_selection</code> sees no older read to cancel. A selection read of up to 100,000 rows (about 25 pages) runs on until the next selection or Exit. Found by reading, not reproduced.</li>
+      <li><b>Late cancels, not missing ones:</b> the Results branches that show a message (a parse error, a missing folder, Type to search, a failure) cancel only when the next search starts.</li>
+      <li><b>A queue that <code>apply</code> drains:</b> it replaces the nested <code>apply</code> calls. A nested <code>Accepted</code> is appended to the queue. Each <code>Accepted</code> runs whole, its changes and then its effects, before the next one starts. The footer runs once.
+        <ul class="list-disc pl-5">
+          <li>No synchronous Win32 path reaches <code>apply</code> today, apart from direct calls that move out.</li>
+          <li>The queue's rules live in <code>core</code>, with callbacks, so tests can reach them.</li>
+        </ul>
+      </li>
+      <li><b>Modal steps:</b> an ordered <code>Vec&lt;Modal&gt;</code> runs after the footer.
+        <ul class="list-disc pl-5">
+          <li>It is a list because one wake can carry an export failure and a setup question.</li>
+          <li>Each step runs with draining off, so replies show behind the dialog, as T10 requires.</li>
+          <li>Each step asks the model again whether it still applies before it runs.</li>
+          <li>Every reply of a wake is accepted before any dialog opens. Today a dialog inside the drain loop can show replies out of order (found by reading).</li>
+        </ul>
+      </li>
+      <li><b>An <code>Effects</code> type:</b> it holds at most one request step for each purpose, and the last one pushed wins. No legitimate sequence needs a cancel after a fetch of the same purpose. One proptest covers the rule.</li>
+      <li><b>Tests:</b>
+        <ul class="list-disc pl-5">
+          <li>T2 and T3 send their cancel.</li>
+          <li>The message branches cancel the Results request.</li>
+          <li>The <code>Effects</code> proptest.</li>
+          <li><code>enter_in_search_box</code>'s three outcomes.</li>
+          <li>A status failure returns both of its changes.</li>
+          <li>The queue: a nested <code>Accepted</code> runs after the outer one, the footer runs once, and the modal steps run in order with draining off.</li>
+        </ul>
+      </li>
+      <li class="list-none -ml-5 rounded border border-red-300 bg-red-50 p-3 space-y-1"><b>Independent review: the direction holds, with gaps.</b>
+        <ul class="list-disc pl-5">
+          <li><b>The footer can be re-entered.</b> <code>update_inspector</code> makes a shell call that can dispatch messages. A reply accepted during that call is appended to the queue after the queue looked empty, so it never shows, and the list can stall in "Searching…". Rule: drain until the queue is empty, and run the footer again if it refilled.</li>
+          <li><b>Every deferred step must name its purpose.</b> The "last request per purpose wins" rule must count <code>SearchSoon</code>, <code>SearchAgain</code> and the selection timer as requests. Otherwise <code>[SearchSoon, Cancel(Results)]</code> still starts the search.</li>
+          <li><b>Open is a modal step, not an effect.</b> Open calls <code>ShellExecuteExW</code> and can show a box, so it dispatches messages.</li>
+          <li><b>Two dialogs can stack.</b> A <code>WAKE</code> dispatched inside the first dialog's loop opens its own dialog on top. Append new modal steps while one runs, and show one dialog at a time.</li>
+          <li><b>A second mechanism.</b> The Custom range dialog already opens from the posted <code>Message::Deferred</code>. Either use one mechanism, or state why modal steps must run inside <code>apply</code>.</li>
+          <li><b><code>ListId</code> lands with the per-list state,</b> not with the first reshape.</li>
+          <li><b>Strength:</b> P2 should be Strong, because the T2 and T3 fix depends on it.</li>
+          <li><b>The setup-question defect does not need P2.</b> <code>ConfirmSetup</code> and <code>ExplainNoSetup</code> can move now to the last slot that the export failure box already uses.</li>
+          <li><b>T2 and T3 effect corrected.</b> The orphaned read runs to its own end, about 25 pages, and <code>Model::accept</code> then drops the reply. It ends earlier only on the next Selection request or Exit. The defect is also wider: a folder-size count (<code>Selection::Folder { Calculating }</code>) is not cancelled either.</li>
+          <li><b>P1 additions:</b>
+            <ul class="list-disc pl-5">
+              <li>Controller methods must take <code>&amp;self</code> with <code>Cell</code> fields. Holding the controllers as <code>RefCell&lt;[…]&gt;</code> would panic on <code>LVN_ITEMCHANGED</code> sent back during <code>select_only</code>.</li>
+              <li><code>DragIn</code> and <code>DROP_SCROLL</code> stay whole, not split across three controllers. <code>drag_enter</code> has no point to choose a list by, and only Search's list takes drops in this plan.</li>
+            </ul>
+          </li>
+        </ul>
+      </li>
+      <li><b>Moved to P1:</b> per-list timers. <code>timer::SEARCH</code> and <code>timer::SELECTION</code> are shared by every list, so two panels within 150 ms would reset each other's timer. This is the same question as where each list's deferred read lives (candidate 10).</li>
+    </ul>
+  </div>
+</article>
+
+<article id="p3" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-amber-100 text-amber-800 px-3 py-0.5 text-xs font-semibold">Worth exploring</span>
+    <span class="rounded-full bg-indigo-100 text-indigo-800 px-3 py-0.5 text-xs">decide before Stage 4</span>
+  </div>
+  <h2 class="font-serif text-2xl">P3. Folder panels: say who owns the selection when the disk changes</h2>
+  <p class="font-mono text-sm text-slate-700">docs/plans/file-manager-spec.md — "Selecting entries", "The list follows the disk" · DESIGN "The selection"</p>
+  <div class="grid md:grid-cols-2 gap-4 text-xs">
+    <div class="rounded-lg border border-slate-200 p-4 space-y-2">
+      <p class="lbl text-red-700">The spec says both</p>
+      <p class="border-l-4 border-slate-400 pl-3">"The list owns which rows are selected, as in Search"</p>
+      <p class="border-l-4 border-slate-400 pl-3">each disk change applies by name; "The focus and the selection stay on the same names"</p>
+      <p class="text-red-700">An owner-data list view keeps selection by index. A row inserted above the selection moves it to other files unless code maps it by name and sets it again. Search avoids this by striking rows through instead of removing them.</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 space-y-2">
+      <p class="lbl text-emerald-700">Two ways</p>
+      <p><b>a.</b> The list owns the selection; around each applied change, the panel reads the selected names, applies the change, and sets <code>LVIS_SELECTED</code> from those names.</p>
+      <p><b>b.</b> The panel's state owns the selected names (Total Commander and Far keep their own marks); <code>LVIS_SELECTED</code> is set from them, and Ctrl-click, Shift-click and Ctrl+A still go through the list.</p>
+    </div>
+  </div>
+  <p><b>Problem.</b> Without a decision, Stage 4 adds a second owner of the selection under time pressure.</p>
+  <p><b>Solution.</b> Decide a or b in the spec before Stage 4; Stage 4's test "the selection keeps its names" then has one owner to test.</p>
+</article>
+
+<article id="p4" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-amber-100 text-amber-800 px-3 py-0.5 text-xs font-semibold">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">inferred from Win32 docs, not run</span>
+  </div>
+  <h2 class="font-serif text-2xl">P4. Key routing lives only in the outer message loop</h2>
+  <p class="font-mono text-sm text-slate-700">win/window.rs — run_message_loop, MODELESS, IsDialogMessageW · spec Stage 3 — route by GetAncestor(GA_ROOT)</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-red-700 mb-2">Before</p>
+      <pre class="mermaid">
+sequenceDiagram
+  participant S as Settings modal loop
+  participant F as File operations window
+  Note over S: DialogBoxParamW runs its own loop
+  S->>F: dispatches Tab, Enter, Esc directly
+  Note over F: no IsDialogMessageW, no accelerators
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-emerald-700 mb-2">After</p>
+      <pre class="mermaid">
+sequenceDiagram
+  participant S as any message loop
+  participant F as each window
+  S->>F: message
+  Note over F: keys handled in its own window procedure, or by a WH_MSGFILTER hook that runs the same routing
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> <code>DialogBoxParamW</code>, <code>MessageBoxW</code> and menu loops dispatch other windows' messages without our routing. Settings is modal over the main window only, so the File operations window stays enabled while Settings is open, and its Tab, Enter and Esc lose dialog handling. A Viewer's own keys would stop the same way.</p>
+  <p><b>Solution.</b> Route keys where every loop reaches them: each window's procedure, or a <code>WH_MSGFILTER</code> hook. Run the window once to confirm before acting.</p>
+</article>
+
+<article id="p5" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-amber-100 text-amber-800 px-3 py-0.5 text-xs font-semibold">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+  </div>
+  <h2 class="font-serif text-2xl">P5. One route for results from worker threads</h2>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-red-700 mb-2">Before · five routes</p>
+      <pre class="mermaid">
+flowchart LR
+  A["request threads"] -- "Requests channel" --> W["main window"]
+  B["fix thread"] -- "own channel per run" --> W
+  C["update check"] -- "Arc Mutex slots" --> W
+  D["engine queue"] -- "wake + 500 ms poll" --> F["File operations window"]
+  W -- "RefCell mailbox + post_reply" --> G["Settings dialog"]
+  linkStyle 1,2,4 stroke:#dc2626,stroke-width:2px
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-emerald-700 mb-2">After</p>
+      <pre class="mermaid">
+flowchart LR
+  A["any worker"] -- "typed event" --> Q["one channel per window<br/>one wake message"]
+  Q --> W["window"]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a
+  class Q deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> Each route was invented locally. The plan adds at least five more thread kinds: folder reading, folder watching, drive labels, free space, the Viewer's reads.</p>
+  <p><b>Solution.</b> One typed event channel per window with one wake message. <code>OpenWaker</code> already gates the wake, so a send after the window closes fails harmlessly.</p>
+  <div class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm">The grilling of candidate 1 gives the queue its own message in the freed <code>TAKEN_CHANGED</code> slot, because <code>WAKE</code> drains the request channel on every reply. With P5, the queue's event would join the one channel instead, with a cheap check that skips the queue read when no queue event arrived.</div>
+</article>
+
+<article id="p6" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-slate-200 text-slate-700 px-3 py-0.5 text-xs font-semibold">Settled by the grilling</span>
+  </div>
+  <h2 class="font-serif text-2xl">P6. One way to hold saved state</h2>
+  <p>Today the window keeps saved state two ways: some values are live in <code>Settings</code> (<code>Model::sort()</code> returns <code>settings.window.sort</code>), and others are copied in at save time (<code>save_settings(path, placement, columns)</code>). Per-list sorts and panel folders need one way. The grilling of candidate 4 already picked it: <code>Settings</code> is the live store, and the window saves when it differs from the last saved copy. Columns and placement move into it.</p>
+</article>
+
+</section>
+
+<section class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+  <h2 class="font-serif text-xl">Recorded reasons that no longer hold as written (verified)</h2>
+  <ul class="text-sm list-disc pl-5 space-y-1">
+    <li>DESIGN's "Shared code" table says "<code>core</code> makes no filesystem call", but <code>core::settings::Settings::load</code> and <code>save</code> call <code>std::fs::read_to_string</code>, <code>write</code> and <code>rename</code>.</li>
+    <li>DESIGN rejects "a list of commands that one applier runs" because it "cannot answer <code>LVN_GETDISPINFO</code>". The window does run such a list (<code>Then</code>, through <code>apply</code>) and answers <code>LVN_GETDISPINFO</code> with a short read borrow. The reason that holds is that the controls own selection and scroll, so a diffed copy would duplicate that state.</li>
+    <li>DESIGN's "Not planned" says a second window does not fit because "one window serves a session". The File operations window, the "Allow only one Gozler window at a time" setting and the scheduled Viewer contradict it. The same list puts Rename and drag-out under Not planned, while "Dragging" describes drag-out as built and the spec schedules Rename.</li>
+    <li>DESIGN says <code>win</code> holds every <code>unsafe</code> block; <code>src/timing.rs</code> (test-only) has 9.</li>
+  </ul>
+</section>
+
+<section class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+  <h2 class="font-serif text-xl">Settled choices, not re-argued</h2>
+  <p class="text-sm text-slate-700">Native Win32 through the <code>windows</code> crate and native controls; <code>.rc</code> dialog templates; the native list renderer; the 100,000-row limit and no result snapshot yet; sizes and totals from gozlerd; no shell context menu; no old protocols; no Recycle Bin; the window never lags; only the window is translated, with JSON catalogues; Start of words by default; Tab reaches only the search box and results; one window per session by default; Use local points at the gozlerd.exe beside the window; menu icons, disabled-not-hidden buttons and the text rulings.</p>
+</section>
+
+<section id="top-recommendation" class="deep rounded-xl p-8 space-y-3">
+  <p class="lbl text-slate-400">Top recommendation</p>
+  <h2 class="font-serif text-3xl"><a href="#p1" class="underline decoration-slate-500">P1 with P2: a controller per list, and effects that name their list</a></h2>
+  <p class="text-slate-300">Stage 3 is next, and its "one state for each list" splits <code>core</code> only. Deciding the matching seams in <code>app</code> and in <code>Accepted</code> in the same restructuring costs the least rework; every later stage builds on them.</p>
+</section>
+
+</main>
+</body>
+</html>

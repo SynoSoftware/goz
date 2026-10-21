@@ -16,10 +16,10 @@ use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
-use crate::core::model::{Accepted, Column};
+use crate::core::model::{Column, TakenShown};
 use crate::core::open;
 use crate::core::panel::{
-    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, Panels, Place, ReadAsk,
+    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels, Place, ReadAsk,
     ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
 };
 use crate::core::settings::Mode;
@@ -38,16 +38,6 @@ use windows::Win32::Foundation::LRESULT;
 
 /// Where a search panel's list puts its Folder column.
 const FOLDER_COLUMN: usize = 2;
-
-/// A folder of `side` that could not be opened, as
-/// [`ReadChange::Refused`] says it.
-struct Refusal {
-    side: Side,
-    path: String,
-    failure: ReadFailure,
-    reason: String,
-    typed: bool,
-}
 
 /// A panel asks gozlerd for its folder sizes and reads its free space this
 /// long after the last change in its folder (DESIGN.md: Folder sizes).
@@ -117,7 +107,7 @@ pub(super) struct PanelControls {
     pub(super) folder: Label,
     /// Where the controls show the panel searching, `None` for a folder
     /// panel: which controls show, the list's columns, and the status
-    /// line's parts ([`MainWindow::follow_panel_kind`]).
+    /// line's parts ([`MainWindow::show_panel_kind`]).
     pub(super) kind: Cell<Option<LookIn>>,
 }
 
@@ -269,6 +259,18 @@ pub(super) enum ListChanged {
     Selection,
 }
 
+/// A folder that `side` could not open, whose message box waits for the
+/// other events of its wake ([`super::ModalStep::PanelRefused`]).
+pub(super) struct Refused {
+    side: Side,
+    path: String,
+    failure: ReadFailure,
+    /// Windows' reason, such as "Access is denied."
+    reason: String,
+    /// The path the person typed, which the path box shows again.
+    typed: Option<String>,
+}
+
 /// Whether showing a panel's rows scrolls its focused row into view.
 #[derive(Clone, Copy)]
 enum Scroll {
@@ -364,10 +366,11 @@ impl MainWindow {
         // The list wrote its own selection, which the panel already has,
         // and its focus.
         self.panel_changed[side.index()].set(ListChanged::Nothing);
+        let focused = list.focused();
         self.model
             .borrow_mut()
             .panels_mut()
-            .set_focused(side, list.focused());
+            .set_focused(side, focused);
         list.redraw_rows(list.visible_rows());
         self.show_panel_sort(side);
         // A vertical scroll bar that came or went changed the room.
@@ -379,7 +382,7 @@ impl MainWindow {
     /// the list's message and Retry, placed for their text. A path box with
     /// the focus keeps what the person types.
     pub(super) fn show_panel(&self, side: Side) {
-        self.follow_panel_kind(side);
+        self.show_panel_kind(side);
         let captions = PanelCaptions::new(&self.model.borrow(), side, &*self.numbers.borrow());
         let c = self.panel(side);
         let kind = c.kind.get();
@@ -435,10 +438,8 @@ impl MainWindow {
 
     /// Makes `side`'s controls follow the panel when it became a search
     /// panel, left its search, or searches elsewhere: the search row or
-    /// the path box, the Folder column, and the status line's parts. A
-    /// panel that left its search also ends its requests and its timers,
-    /// and lets go of the operations its list kept.
-    fn follow_panel_kind(&self, side: Side) {
+    /// the path box, the Folder column, and the status line's parts.
+    fn show_panel_kind(&self, side: Side) {
         let wanted = self.model.borrow().panels().search(side).map(|s| s.look_in);
         let c = self.panel(side);
         let shown = c.kind.replace(wanted);
@@ -462,17 +463,7 @@ impl MainWindow {
                         },
                     );
                 }
-                None => {
-                    c.list.delete_column(FOLDER_COLUMN);
-                    let requests = &self.created().requests;
-                    requests.cancel(Purpose::Results(List::Panel(side)));
-                    requests.cancel(Purpose::Selection(List::Panel(side)));
-                    let hwnd = c.list.hwnd().parent();
-                    hwnd.kill_timer(timer::PANEL_SEARCH[side.index()]);
-                    hwnd.kill_timer(timer::PANEL_SELECTION[side.index()]);
-                    c.search.hwnd().set_text("");
-                    self.release_operations();
-                }
+                None => c.list.delete_column(FOLDER_COLUMN),
             }
             self.show_panel_sort(side);
             self.fill_panel_columns();
@@ -660,19 +651,9 @@ impl MainWindow {
     /// its kept operations, but keeps its text and Look in, because it
     /// searches again when Two panels shows.
     pub(super) fn stop_panels(&self, hwnd: Hwnd) {
-        let created = self.created();
-        created.panel_threads.stop_all();
+        self.created().panel_threads.stop_all();
         self.model.borrow_mut().panels_mut().stop_reading();
         for side in Side::BOTH {
-            created.requests.cancel(Purpose::FolderSizes(side));
-            created.requests.cancel(Purpose::Results(List::Panel(side)));
-            created
-                .requests
-                .cancel(Purpose::Selection(List::Panel(side)));
-            hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
-            hwnd.kill_timer(timer::PANEL_AGAIN[side.index()]);
-            hwnd.kill_timer(timer::PANEL_SEARCH[side.index()]);
-            hwnd.kill_timer(timer::PANEL_SELECTION[side.index()]);
             let dropped = {
                 let mut model = self.model.borrow_mut();
                 let search = model.panels_mut().search_mut(side);
@@ -681,8 +662,37 @@ impl MainWindow {
             if dropped {
                 self.panel(side).list.set_count(0);
             }
+            self.end_folder_work(hwnd, side);
+            self.end_search_work(hwnd, side);
         }
-        self.release_operations();
+        self.release_operations(hwnd);
+    }
+
+    /// Ends what `side` does as a folder panel besides its reading and
+    /// watch: its folder sizes and their timers. The caller then releases
+    /// the ended operations that its folder kept.
+    fn end_folder_work(&self, hwnd: Hwnd, side: Side) {
+        self.created().requests.cancel(Purpose::FolderSizes(side));
+        hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
+        hwnd.kill_timer(timer::PANEL_AGAIN[side.index()]);
+    }
+
+    /// Ends what `side` does as a search panel: its search's and its
+    /// selection's requests and their timers. The caller then releases the
+    /// ended operations that its list kept.
+    fn end_search_work(&self, hwnd: Hwnd, side: Side) {
+        let requests = &self.created().requests;
+        requests.cancel(Purpose::Results(List::Panel(side)));
+        requests.cancel(Purpose::Selection(List::Panel(side)));
+        hwnd.kill_timer(timer::PANEL_SEARCH[side.index()]);
+        hwnd.kill_timer(timer::PANEL_SELECTION[side.index()]);
+    }
+
+    /// `side` left its search, whose box is empty for the next one.
+    fn left_search(&self, hwnd: Hwnd, side: Side) {
+        self.end_search_work(hwnd, side);
+        self.release_operations(hwnd);
+        self.panel(side).search.hwnd().set_text("");
     }
 
     pub(super) fn read(&self, side: Side, ask: Option<ReadAsk>) {
@@ -701,9 +711,6 @@ impl MainWindow {
     pub(super) fn on_panel_events(&self, hwnd: Hwnd) {
         let threads = &self.created().panel_threads;
         let mut pending: [Vec<FolderChange>; 2] = Default::default();
-        // A message box runs its own message loop, which wakes this method
-        // again, so it opens only after every drained event applied.
-        let mut refusals = Vec::new();
         for event in threads.drain() {
             match event {
                 PanelEvent::Read { side, event } => {
@@ -712,7 +719,7 @@ impl MainWindow {
                         side,
                         std::mem::take(&mut pending[side.index()]),
                     );
-                    refusals.extend(self.on_read(side, event));
+                    self.on_read(hwnd, side, event);
                 }
                 PanelEvent::Changes {
                     side,
@@ -769,9 +776,6 @@ impl MainWindow {
         for side in Side::BOTH {
             self.apply_panel_changes(hwnd, side, std::mem::take(&mut pending[side.index()]));
         }
-        for refusal in refusals {
-            self.refuse(hwnd, refusal);
-        }
     }
 
     /// Applies one batch of `side`'s changes and shows the rows.
@@ -798,18 +802,20 @@ impl MainWindow {
         }
     }
 
-    /// Applies `event` of `side`'s reading; the folder it could not open,
-    /// for the window to say why.
-    fn on_read(&self, side: Side, event: ReadEvent) -> Option<Refusal> {
+    /// Applies `event` of `side`'s reading.
+    fn on_read(&self, hwnd: Hwnd, side: Side, event: ReadEvent) {
         let shown = self.place(side);
-        let change = self
+        let accepted = self
             .model
             .borrow_mut()
             .panels_mut()
             .accept_read(side, event, shown.focused);
+        if accepted.search_ended {
+            self.left_search(hwnd, side);
+        }
         let threads = &self.created().panel_threads;
-        match change {
-            ReadChange::Stale => return None,
+        match accepted.change {
+            ReadChange::Stale => return,
             ReadChange::Cleared => {
                 self.created().requests.cancel(Purpose::FolderSizes(side));
                 self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
@@ -831,7 +837,7 @@ impl MainWindow {
                 self.ask_panel_sizes(side);
                 // The listing may release the ended operations that it
                 // started after.
-                self.release_operations();
+                self.release_operations(hwnd);
             }
             ReadChange::Refused {
                 path,
@@ -845,31 +851,35 @@ impl MainWindow {
                 let ask = self.model.borrow_mut().panels_mut().read_again(side);
                 self.read(side, ask);
                 self.show_panel(side);
-                return Some(Refusal {
+                let typed = self.panel_typed.borrow_mut()[side.index()]
+                    .take()
+                    .filter(|_| typed);
+                let refused = Refused {
                     side,
                     path,
                     failure,
                     reason,
                     typed,
-                });
+                };
+                self.defer(hwnd, super::ModalStep::PanelRefused(refused));
+                return;
             }
         }
         self.show_panel(side);
         self.update_status();
-        None
     }
 
     /// The message box for a folder that could not be opened, after which
-    /// the path box keeps a typed path for the person to correct
+    /// the path box takes back a typed path for the person to correct
     /// (DESIGN.md: A panel).
-    fn refuse(&self, hwnd: Hwnd, refusal: Refusal) {
-        let Refusal {
+    pub(super) fn refuse(&self, hwnd: Hwnd, refused: Refused) {
+        let Refused {
             side,
             path,
             failure,
             reason,
             typed,
-        } = refusal;
+        } = refused;
         let (title, text) = {
             let model = self.model.borrow();
             let strings = model.strings();
@@ -885,8 +895,7 @@ impl MainWindow {
         };
         win::dialog::error_box(Some(hwnd), &text, &title);
         let c = self.panel(side);
-        let typed_text = self.panel_typed.borrow_mut()[side.index()].take();
-        match typed_text.filter(|_| typed) {
+        match typed {
             Some(text) => {
                 c.path.hwnd().focus();
                 c.path.hwnd().set_text(&text);
@@ -986,12 +995,9 @@ impl MainWindow {
         let shown = self.place(side);
         let entered = self.model.borrow_mut().panels_mut().enter_search(side);
         if entered {
-            let created = self.created();
-            created.panel_threads.cancel_read(side);
-            created.requests.cancel(Purpose::FolderSizes(side));
-            hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
-            hwnd.kill_timer(timer::PANEL_AGAIN[side.index()]);
-            self.release_operations();
+            self.created().panel_threads.cancel_read(side);
+            self.end_folder_work(hwnd, side);
+            self.release_operations(hwnd);
             self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
             self.search(hwnd, List::Panel(side));
         }
@@ -1448,7 +1454,8 @@ impl MainWindow {
         match self.panel_changed[side.index()].replace(ListChanged::Nothing) {
             ListChanged::Nothing => return,
             ListChanged::Focus => {
-                (self.model.borrow_mut().panels_mut()).set_focused(side, list.focused());
+                let focused = list.focused();
+                (self.model.borrow_mut().panels_mut()).set_focused(side, focused);
                 // The status line shows the focused result's folder.
                 if self.panel(side).kind.get() == Some(LookIn::AllDrives) {
                     self.show_panel(side);
@@ -1471,6 +1478,7 @@ impl MainWindow {
             self.panel_changed[side.index()].set(ListChanged::Nothing);
             selected = list.selected();
         }
+        let focused = list.focused();
         let search = {
             let mut model = self.model.borrow_mut();
             let panels = model.panels_mut();
@@ -1478,7 +1486,7 @@ impl MainWindow {
             if changed {
                 panels.close_quick(side);
             }
-            panels.set_focused(side, list.focused());
+            panels.set_focused(side, focused);
             changed && panels.search(side).is_some()
         };
         if search {
@@ -1802,7 +1810,7 @@ impl MainWindow {
 
     /// Windows asks to remove, or removed, the drive whose watch it names
     /// with `notification` (DESIGN.md: A panel).
-    pub(super) fn on_device_removal(&self, removal: Removal, notification: isize) {
+    pub(super) fn on_device_removal(&self, hwnd: Hwnd, removal: Removal, notification: isize) {
         let threads = &self.created().panel_threads;
         let Some(side) = threads.removal(notification, removal) else {
             return;
@@ -1818,7 +1826,9 @@ impl MainWindow {
             }
             Removal::Complete => {
                 let shown = self.place(side);
-                self.model.borrow_mut().panels_mut().drive_removed(side);
+                if self.model.borrow_mut().panels_mut().drive_removed(side) {
+                    self.left_search(hwnd, side);
+                }
                 self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
                 self.show_panel(side);
             }
@@ -1826,54 +1836,47 @@ impl MainWindow {
     }
 
     /// Gives every list the taken entries `taken` and shows the panels
-    /// after them, and the panels that ended operations make read their
-    /// folders again or ask for their sizes, as `follow` says
-    /// (fast-copy-delete-spec.md: Taken entries). Returns what Search's
-    /// list applies.
+    /// after them (fast-copy-delete-spec.md: Taken entries). Returns what
+    /// Search's list shows.
     pub(super) fn show_panels_taken(
         &self,
-        hwnd: Hwnd,
         taken: std::sync::Arc<gozler_fileops::Taken>,
-        follow: Vec<(Side, bool, bool)>,
-    ) -> Accepted {
+    ) -> TakenShown {
         let shown = Side::BOTH.map(|side| self.place(side));
-        let (accepted, rows) = self
+        let taken = self
             .model
             .borrow_mut()
             .set_taken(taken, [shown[0].focused, shown[1].focused]);
-        for (side, rows) in Side::BOTH.into_iter().zip(rows) {
+        for (side, rows) in Side::BOTH.into_iter().zip(&taken.panels) {
             match rows {
                 TakenRows::Folder(place) => {
-                    self.show_place(side, &shown[side.index()], &place, Scroll::Keep);
+                    self.show_place(side, &shown[side.index()], place, Scroll::Keep);
                 }
                 TakenRows::Search { deselect } => {
-                    self.show_list_taken(List::Panel(side), deselect);
+                    self.show_list_taken(List::Panel(side), *deselect);
                 }
             }
             self.show_panel(side);
         }
+        taken
+    }
+
+    /// The folder panels that operations ended in read their folders again,
+    /// or ask for their sizes, as `follow` says.
+    pub(super) fn follow_operations(&self, hwnd: Hwnd, follow: &[PanelFollow]) {
         if self.model.borrow().mode() != Mode::TwoPanels {
-            return accepted;
+            return;
         }
-        for (side, again, sizes) in follow {
-            if again {
+        for follow in follow {
+            let side = follow.side;
+            if follow.read_again {
                 let ask = self.model.borrow_mut().panels_mut().read_again(side);
                 self.read(side, ask);
             }
-            if sizes {
+            if follow.sizes {
                 self.ask_panel_sizes(side);
                 hwnd.set_timer(timer::PANEL_AGAIN[side.index()], AGAIN_MS);
             }
-        }
-        accepted
-    }
-
-    /// Removes from the queue the ended deletes and moves that no list
-    /// keeps any more.
-    pub(super) fn release_operations(&self) {
-        if let Some(operations) = self.file_operations.borrow().as_ref() {
-            let model = self.model.borrow();
-            operations.release(|id| model.keeps(id));
         }
     }
 }

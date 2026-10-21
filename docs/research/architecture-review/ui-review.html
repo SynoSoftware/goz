@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Architecture review: gozler-ui</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { curve: "basis" } });
+</script>
+<style>
+  .seam { border-style: dashed; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .lbl { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
+  .diagram { min-height: 300px; }
+  .mermaid { display: flex; justify-content: center; }
+  .grilled { border-left: 4px solid #4f46e5; background: #eef2ff; }
+  .grilled li { margin-top: 0.15rem; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-6xl mx-auto px-4 sm:px-6 py-12 space-y-12">
+
+<header class="space-y-4">
+  <p class="lbl text-slate-500">SynoSoftware/goz · crates/gozler-ui · 2026-10-21 · main @ 114d80c</p>
+  <h1 class="font-serif text-4xl">Deepening opportunities in gozler-ui</h1>
+  <div class="flex flex-wrap gap-4 text-sm text-slate-600">
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border border-slate-400 bg-white"></span>module</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border-2 border-dashed border-slate-500"></span>seam</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-6 h-0.5 bg-red-600"></span>leak across a seam</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 deep"></span>deep module</span>
+  </div>
+  <div class="rounded-lg border border-slate-200 bg-white p-4 text-sm leading-relaxed">
+    <p><b>Where it stands.</b> The crate's three-way split holds: <code>core</code> decides, <code>win</code> holds the <code>unsafe</code>, <code>app</code> turns messages into calls. <code>Model</code> with <code>Accepted</code>, the command table, the request slots and the results cache are deep and tested. The friction is in <code>app</code>: rules that are real behaviour sit in <code>Cell</code>/<code>RefCell</code> fields of window structs, so they have no tests. <code>app/main_window.rs</code> (4,688 lines), <code>app/file_operations.rs</code>, <code>app/settings.rs</code> and <code>app/local_service.rs</code> have 0 tests between them, and so does <code>core/include.rs</code>.</p>
+  </div>
+  <div class="grilled rounded-lg p-4 text-sm leading-relaxed space-y-2">
+    <p><b>Re-check in progress:</b> this report reviewed <code>main</code> at 114d80c. Local <code>main</code> is now 7b94f06, which merges the file-manager branch (Stages 3 to 7) and is not pushed yet. Each candidate and defect is being re-checked against the merged code before any further iteration.</p>
+    <p><b>Status:</b> all 11 candidates are grilled and closed. The pattern-fit report (<code>architecture-review-20261021-patterns.html</code>, same folder) has now grilled its P1 and P2 findings. P2 settles candidate 1's open point: its steps become ordinary effects in a list, and dialogs run last. P2 also found an eighth defect: T2 and T3 send no selection cancel.</p>
+    <p><b>Grilled, 2026-10-21.</b> Every candidate was walked through its design tree in rounds. Two agents answered from the code and pushed back. Each answer was checked against the code before it settled. The outcome sits at the end of each card in a blue box. Strengths changed: 5 and 6 drop to Speculative, and 11 is dropped. Seven defects turned up on the way; they are listed in <a class="underline" href="#defects">Defects found while grilling</a>.</p>
+    <p><b>The thread through the outcomes.</b> The file-manager plan's Stage 3 restructuring is the natural home for candidates 1, 2, 4 and 10. Stage 3 is next, and the plan already has it split <code>core</code> into "one state for each list". The second report, on pattern fit, explains why <code>app</code> and <code>Accepted</code> need the same split.</p>
+  </div>
+</header>
+
+<section id="candidates" class="space-y-12">
+
+<!-- 1 -->
+<article id="c1" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-0.5 text-xs font-semibold">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+    <span class="rounded-full bg-indigo-100 text-indigo-800 px-3 py-0.5 text-xs">file-manager Stage 3 reworks this code</span>
+  </div>
+  <h2 class="font-serif text-2xl">1. Move the life of a file operation into a <code>core</code> module</h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>app/file_operations.rs — Window fields pastes, drops, kept, known, asking; refresh, next, answer, report, release_ended</li>
+    <li>app/main_window.rs — Change::NewSearch → release_ended; WM_DESTROY → std::mem::forget(operations); TAKEN_CHANGED</li>
+    <li>win/file_operations.rs — TAKEN_CHANGED</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-red-700 mb-2">Before</p>
+      <pre class="mermaid">
+flowchart TB
+  Q["gozler_fileops Queue"] --> W
+  subgraph W["app · Window (HWND)"]
+    direction LR
+    k["kept"]
+    p["pastes / drops"]
+    n["known"]
+    a["asking"]
+  end
+  W -- "post TAKEN_CHANGED (win)" --> M["app · MainWindow"]
+  M -- "set_taken" --> MD["core · Model"]
+  M -. "release_ended on NewSearch" .-> W
+  M -. "mem::forget at WM_DESTROY" .-> Q
+  linkStyle 3,4 stroke:#dc2626,stroke-width:2px
+  classDef hot fill:#fef2f2,stroke:#dc2626
+  class W hot
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-emerald-700 mb-2">After</p>
+      <pre class="mermaid">
+flowchart TB
+  Q["Queue snapshot"] --> L
+  E["list events: new search, listing started / complete"] --> L
+  L["core · operation lifecycle<br/>owns taken set per list<br/>kept · sources · shown"]
+  L -- "actions: ask, report, remove, tell source, show / hide, poll" --> W["app · Window adapter<br/>runs actions, draws View"]
+  L -- "taken entries" --> MD["core · Model"]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a
+  class L deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> The rules that decide what is asked next, which ended delete or move stays alive to keep its rows struck through, when a cut paste counts as moved, and when the window opens or polls live in a struct that creates a window, so none of them is tested. The shutdown order is enforced by a <code>mem::forget</code> in a different module.</p>
+  <p><b>Solution.</b> A <code>core</code> module in the <code>Accepted</code>/<code>Then</code> style takes queue snapshots and list events and returns actions. The window becomes an adapter that runs them. The module that owns the <code>Queue</code> owns its shutdown in one method.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Stage 3's taken-set rules get unit tests</li>
+    <li>Locality: one owner for taken entries</li>
+    <li>Delete four <code>RefCell</code> fields from the window</li>
+    <li>Shutdown order leaves the caller's interface</li>
+  </ul>
+  <p class="text-sm text-slate-600">Evidence: the spec's Stage 3 says the queue's taken set splits and asks for core unit tests such as "an ended delete still hiding its rows until a listing started after its end arrives". The current interface cannot host those tests. Reasons that still hold: the conflict question runs its own message loop (window rule 1); dropping the queue waits for every Windows copy.</p>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 4 rounds · frontier empty · stays Strong</p>
+    <ul class="list-disc pl-5">
+      <li><b>Scope:</b> this is how Stage 3's "Taken entries split" item gets built, not a separate plan. The same seam serves Stage 5, where the end of a Rename or a New folder makes a panel read its folder again.</li>
+      <li><b>Who owns what:</b> <code>app</code> keeps the <code>Queue</code>, because the queue exists only on Windows. <code>core</code> reads <code>Operation</code> snapshots. Each list owns the ended operations it keeps. The queue's set holds only waiting and running sources. Today <code>kept</code> holds two facts. "Already reported" belongs to the lifecycle; "kept" belongs to the lists.</li>
+      <li><b>Interface:</b> it is part of <code>Model</code>, as a private field like <code>Fixer</code>. It adds <code>file_operation_started(id, source)</code>, <code>accept_operations(&amp;[Operation]) → Accepted</code>, <code>answered(id, Answer) → Accepted</code> and <code>Change::Taken</code> for each list. The dialogs follow <code>confirm_setup</code>'s steps.</li>
+      <li><b>Several effects:</b> one snapshot can need several effects, and <code>Accepted.then</code> holds one. If pattern P2 is taken, they become ordinary effects in a list. "At most one dialog, run last" is then a type: an <code>Option&lt;Dialog&gt;</code> field.</li>
+      <li><b>Wakes:</b> the engine wakes only on state changes, never on progress. The lifecycle runs on each wake and never on the 500 ms poll. With P5, the wake becomes one <code>QueueChanged</code> event in the window's channel.</li>
+      <li><b>Shutdown:</b> <code>ManuallyDrop&lt;Queue&gt;</code> inside the type that owns the queue replaces the caller's <code>mem::forget</code>. Dropping the queue would cancel <code>CopyFile2</code> and delete partly copied files.</li>
+      <li><b>Engine:</b> <code>gozler-fileops</code> gets a public <code>OperationId</code> constructor and a public way to build a taken set. The engine spec's "Taken entries" text changes with them.</li>
+      <li><b>Tests:</b> Stage 3's listed cases, plus:
+        <ul class="list-disc pl-5">
+          <li>a question is asked once;</li>
+          <li>an ended delete or move is kept only when it took something;</li>
+          <li>each ended operation is reported once;</li>
+          <li>a cut paste counts as moved only once its move was accepted;</li>
+          <li>every drop gets exactly one ending.</li>
+        </ul>
+      </li>
+      <li><b>Vocabulary:</b> "taken" stays out of <code>CONTEXT.md</code>. It is a word of the code and the plans; the person sees a struck-through row.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 2 -->
+<article id="c2" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-0.5 text-xs font-semibold">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process · text-width adapter</span>
+  </div>
+  <h2 class="font-serif text-2xl">2. Give the results list's column sizing and cell content one <code>core</code> owner each</h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>app/main_window.rs — fields filled_width, sizing, sizing_fits, hidden_widths, filled_around_rows</li>
+    <li>app/main_window.rs — fill_on_resize, end_sizing, fill_around_first_rows, fill_columns, fit_column, fits_of; ColumnShown/Hidden arms of apply; on_dpi_changed; EnterSizeMove</li>
+    <li>app/main_window.rs — fill_cell, draw_cell, fits_of, within · core/layout.rs — fill_widths, ColumnFit</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-red-700 mb-3">Before · five facts, four reset sites</p>
+      <div class="grid grid-cols-2 gap-6 text-xs">
+        <div class="space-y-2">
+          <div class="border border-slate-300 rounded px-2 py-1">layout()</div>
+          <div class="border border-slate-300 rounded px-2 py-1">on_dpi_changed</div>
+          <div class="border border-slate-300 rounded px-2 py-1">EnterSizeMove / ExitSizeMove</div>
+          <div class="border border-slate-300 rounded px-2 py-1">apply: ColumnShown / Hidden</div>
+          <div class="border border-slate-300 rounded px-2 py-1">first visible rows</div>
+        </div>
+        <div class="relative">
+          <div class="border-2 border-red-500 bg-red-50 rounded p-2 space-y-1 font-mono">
+            <div>filled_width</div><div>sizing</div><div>sizing_fits</div><div>hidden_widths</div><div>filled_around_rows</div>
+          </div>
+          <p class="text-red-700 mt-2">every site must reset the right fields; no test</p>
+        </div>
+      </div>
+      <div class="mt-4 text-xs">
+        <p class="lbl text-slate-500 mb-1">cell content built three times</p>
+        <div class="flex gap-2 flex-wrap">
+          <span class="border border-red-400 rounded px-2 py-1 font-mono">fill_cell</span>
+          <span class="border border-red-400 rounded px-2 py-1 font-mono">draw_cell</span>
+          <span class="border border-red-400 rounded px-2 py-1 font-mono">fits_of</span>
+          <span class="text-slate-500 self-center">each joins text, bold parts, icon, row accessor</span>
+        </div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-emerald-700 mb-3">After</p>
+      <div class="flex flex-col gap-3 text-xs">
+        <div class="text-slate-600">events: width changed · drag started / ended · DPI changed · rows arrived · column hidden / shown</div>
+        <div class="text-center text-slate-400">▼</div>
+        <div class="deep rounded-lg p-4">
+          <p class="lbl text-slate-300">core · column sizing</p>
+          <p class="mt-1 text-slate-400">the five facts, hidden inside</p>
+        </div>
+        <div class="text-center text-slate-400">▼</div>
+        <div class="text-slate-600">answers: set these widths · measure these columns</div>
+        <div class="border-2 border-dashed border-slate-400 rounded px-2 py-1 text-center">seam: measure(&amp;str) → Px, as CaptionWidths::measure does</div>
+        <div class="deep rounded-lg p-3 mt-2">
+          <p class="lbl text-slate-300">core · cell(column, row)</p>
+          <p class="text-slate-400">text · bold ranges · icon · struck through → 3 callers</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Fill only when the width changed, measure once per border drag and scale, keep the first widths until rows arrive, give a re-shown column its old width at the new DPI: these rules sit in five interacting fields that each caller must reset correctly. <code>MainWindow::layout</code> changed in 10 of the crate's 25 commits.</p>
+  <p><b>Solution.</b> A <code>core</code> column-sizing module takes events and answers widths, with measuring behind a text-width adapter. One <code>core</code> cell function serves the three cell call sites.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Sizing rules tested on any OS</li>
+    <li>DPI reset stops being caller knowledge</li>
+    <li>Leverage: one cell function, three callers</li>
+    <li><code>within</code> moves to <code>core</code> and gets a test</li>
+  </ul>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 2 rounds · frontier empty · stays Strong</p>
+    <ul class="list-disc pl-5">
+      <li><b>Leverage:</b> the panels share the fill on a width change, one measurement per border drag, and the DPI rule. Their fill rule differs ("Name takes the rest"), and they hide no columns. So the module has a fill rule for each list and serves three lists.</li>
+      <li><b>Placement:</b> a new <code>core::columns</code> type, held for each list in <code>app</code>, not in <code>Model</code>; no <code>Model</code> decision reads a width. It keeps no copy of the current widths, because the list view owns them. <code>ColumnFit</code>, <code>fill_widths</code>, <code>scale_to</code>, <code>cell_width</code> and <code>column_width</code> move into it.</li>
+      <li><b>Window rule 1:</b> <code>app</code> reads the list's facts first and passes them as plain values. A lazy provider of fits only borrows <code>Model</code> and measures through the screen DC.</li>
+      <li><b>Cell function:</b> it lives in <code>core::captions</code>, because it reads model facts. For a taken row it returns the text and icon, no bold ranges, and struck through. A pure fits function serves the divider double-click, Fit columns, and the second fit-and-fill in <code>win::controls::ReportList::fit_columns</code>.</li>
+      <li><b>When:</b> inside Stage 3, after "Two lists in <code>Layout::compute</code>". The cell function comes after "One state for each list". First add the item to the spec's Stage 3 list.</li>
+      <li><b>Owner questions, parked for Stage 4:</b> do panel columns fit again for each folder listing? Does "first widths until the first rows" apply once per window? The interface does not depend on the answers.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 3 -->
+<article id="c3" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-0.5 text-xs font-semibold">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+  </div>
+  <h2 class="font-serif text-2xl">3. Put the Include page's state in <code>core</code>, so Settings stops reaching through <code>MainWindow</code></h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>app/main_window.rs — 18 of 21 pub(super) fn serve Settings or Indexed folders; fields included_count, total_commander</li>
+    <li>app/settings.rs — counted, show_preview, include_changed, count_preview, preview_counted, DialogMessage::Reply</li>
+    <li>app/indexed_folders.rs — holds &amp;MainWindow only for include_summary · core/include.rs (0 tests)</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-red-700 mb-2">Before · one preview count</p>
+      <pre class="mermaid">
+sequenceDiagram
+  participant D as Settings dialog
+  participant MW as MainWindow
+  participant M as Model
+  D->>MW: count_included(edited)
+  MW->>M: fetch count
+  M-->>MW: Change::IncludedCount
+  MW->>MW: store in RefCell
+  MW-->>D: post Reply
+  D->>MW: take_included_count()
+  D->>D: keep only if counted == edited
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-emerald-700 mb-2">After</p>
+      <pre class="mermaid">
+sequenceDiagram
+  participant D as Settings dialog
+  participant I as core · Include page state
+  D->>I: edited settings
+  I-->>D: preview line, summary rows
+  Note over I: decides when to count and whether a count is current, generation is the one staleness check
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> The Include preview count travels through a hand-made mailbox in <code>MainWindow</code>, and the dialog runs a second staleness check (<code>counted == edited</code>) beside the one window rule 4 calls the only one. Most of the 18 methods only join <code>core::include</code> functions with the model's status and strings. <code>app/settings.rs</code> changed in 11 commits; 10 also changed <code>main_window.rs</code>.</p>
+  <p><b>Solution.</b> One Include-page state in <code>core</code>, owned by the model while Settings is open, holds the edited and applied settings, the drives and the count in flight, and answers the preview and summary.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Delete two mailbox fields, most pass-throughs</li>
+    <li>One staleness check, not two</li>
+    <li>Include preview rules get tests</li>
+    <li>Locality: Settings edits stop touching main_window.rs</li>
+  </ul>
+  <p class="text-sm text-slate-600">Reason that still holds: window rule 1 makes the dialog edit its own copy and hand it back by a method call. It does not require replies to pass through <code>MainWindow</code> fields.</p>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round + settlement · frontier empty · stays Strong</p>
+    <ul class="list-disc pl-5">
+      <li><b>Who edits:</b> the dialog owns its Include page value, because window rule 1 says a dialog edits its own copy. It formats the page with its own <code>Strings</code> and <code>WindowsNumbers</code>.</li>
+      <li><b>Replies:</b> <code>Model</code> keeps the latest reply for each Settings request (the count and Total Commander). The <code>Change</code> carries no data, and the dialog reads the reply through one method. The fields <code>included_count</code> and <code>total_commander</code>, and four pass-through methods, go.</li>
+      <li><b>Staleness:</b> each edit cancels the live count, so the generation is again the only staleness check. DESIGN's 300 ms delay stays. One "Settings closed" method forgets both replies and cancels both requests.</li>
+      <li><b>Drives:</b> the drive labels are read when the page fills, not on every edit.</li>
+      <li><b>Not in scope:</b> the later service-settings pages need no count reply. Their rule that settings differ from what the service applies belongs to candidate 7.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 4 -->
+<article id="c4" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-emerald-100 text-emerald-800 px-3 py-0.5 text-xs font-semibold">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+  </div>
+  <h2 class="font-serif text-2xl">4. Route every <code>Model</code> change through <code>Accepted</code>, so one place decides what follows and when <code>ui.json</code> is saved</h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>core/model.rs — set_destination_folder, set_clipboard_holds_files, set_app_working_set, set_language, show_index_page, first_hide, update_check_due, offer_file_operations (return no Accepted); set_choices</li>
+    <li>app/main_window.rs — apply (matches! over 5 Change variants), set_language, apply_settings, copy_to_folder, show_index_page, save_settings</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-red-700 mb-3">Before · who starts a save</p>
+      <div class="space-y-2 text-xs">
+        <div class="flex items-center gap-2"><span class="w-48 border border-slate-300 rounded px-2 py-1 font-mono">apply: matches! 5 Change</span><span class="flex-1 h-0.5 bg-slate-400"></span><span class="font-mono">SAVE timer</span></div>
+        <div class="flex items-center gap-2"><span class="w-48 border border-red-400 rounded px-2 py-1 font-mono">copy_to_folder</span><span class="flex-1 h-0.5 bg-red-600"></span><span class="font-mono">SAVE timer</span></div>
+        <div class="flex items-center gap-2"><span class="w-48 border border-red-400 rounded px-2 py-1 font-mono">Language menu arm</span><span class="flex-1 h-0.5 bg-red-600"></span><span class="font-mono">save_settings</span></div>
+        <div class="flex items-center gap-2"><span class="w-48 border border-red-400 rounded px-2 py-1 font-mono">apply_settings</span><span class="flex-1 h-0.5 bg-red-600"></span><span class="font-mono">save_settings</span></div>
+        <div class="flex items-center gap-2"><span class="w-48 border border-red-400 rounded px-2 py-1 font-mono">2 more call sites</span><span class="flex-1 h-0.5 bg-red-600"></span><span class="font-mono">save_settings</span></div>
+        <div class="flex items-center gap-2"><span class="w-48 border-2 border-dashed border-red-500 rounded px-2 py-1 font-mono">header drag reorder</span><span class="flex-1 text-red-700">nothing</span></div>
+        <p class="text-slate-500 pt-2">8 setters skip <code>Accepted</code>, so their callers know the follow-up: refresh captions, poll, ask status, start the timer.</p>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-emerald-700 mb-3">After</p>
+      <div class="flex flex-col gap-3 text-xs">
+        <div class="border border-slate-300 rounded px-2 py-1 text-center">every Model method that changes state</div>
+        <div class="text-center text-slate-400">▼ Accepted { change, then }</div>
+        <div class="deep rounded-lg p-4 text-center">
+          <p class="lbl text-slate-300">app · apply</p>
+          <p class="text-slate-400 mt-1">the one place that refreshes and schedules a save</p>
+        </div>
+        <div class="text-slate-600 text-center">Change says which choices changed, or Accepted carries "saved state changed"</div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem.</b> The rule "this change touches saved state" has no single owner: it is split between <code>apply</code>, two direct timers and four direct saves. <code>apply_settings</code> diffs <code>language</code>, <code>show_icons</code>, <code>show_memory</code> and <code>size_format</code> by hand, because <code>set_choices</code> returns only <code>Change::Settings</code>.</p>
+  <p><b>Solution.</b> Every state-changing <code>Model</code> method returns <code>Accepted</code>, and the change names what it touched. <code>apply</code> becomes the only follow-up owner.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Leverage: one follow-up path for all</li>
+    <li>Save rule gets one owner</li>
+    <li>Follow-ups become testable on Model</li>
+    <li>Reorder save stops being forgotten</li>
+  </ul>
+  <div class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm">Found by reading, not run: the list enables <code>LVS_EX_HEADERDRAGDROP</code>, but nothing handles <code>HDN_ENDDRAG</code>, so a reordered column order is saved only when something else saves, or at exit, hide or session end. The comment on <code>timer::SAVE</code> says a change should survive a window that does not exit.</div>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 2 rounds · frontier empty · stays Strong</p>
+    <ul class="list-disc pl-5">
+      <li><b>How saving is decided:</b> <code>Model</code> keeps a copy of the settings as last saved. Each change compares the settings with that copy and starts the save timer when they differ. A new method cannot forget to save.</li>
+      <li><b>Failed saves:</b> the copy is taken when a save is attempted, so a failing disk is not written after every keystroke.</li>
+      <li><b>Columns:</b> <code>toggle_column</code> and a new reorder method keep the shown columns current in <code>Settings</code>, in display order. The reorder arrives through <code>HDN_ENDDRAG</code> and is read in <code>Message::Deferred</code>.</li>
+      <li><b>Placement:</b> it is recorded on <code>WM_WINDOWPOSCHANGED</code>, the one message that covers maximize, restore, snap and Win+Arrow. It uses its own small compare-and-save step, not <code>apply</code>.</li>
+      <li><b>Setters:</b> only <code>show_index_page</code>, <code>set_language</code> and <code>set_destination_folder</code> need to return <code>Accepted</code>. The other five stay plain.</li>
+      <li><b>Settings Apply:</b> it runs all four refreshes inside one <code>draw_once_after</code>. Whether it flickers is unverified until the window runs once.</li>
+      <li><b>Commits:</b> first a restructuring with no behaviour change, then three fixes. The Saving-defects row in the defects table lists them.</li>
+      <li><b>DESIGN is the authority here:</b> it says <code>ui.json</code> is "written a second after the person last changed the window's state" and lists placement and column order. These fixes match it, so they are not owner questions.</li>
+    </ul>
+  </div>
+  <div class="rounded border border-red-300 bg-red-50 p-3 text-sm space-y-1">
+    <p><b>Independent review: the comparison is right; three corrections.</b></p>
+    <ul class="list-disc pl-5">
+      <li><b>The save can be postponed for a long time.</b> Once a change is pending, every <code>apply</code> restarts the 1-second timer: export progress about twice a second, chunks and selection replies. During an export, a change is then saved only when the export ends. Start the timer only when the settings changed since the previous check. Keep the last-saved copy only for the SAVE handler's skip.</li>
+      <li><b>One <code>draw_once_after</code> does not draw once.</b> It does not nest, and <code>refresh_text</code> wraps itself in its own. Apply all four state changes first, then call <code>refresh_text</code> once.</li>
+      <li><b>Snap adds nothing to save.</b> <code>GetWindowPlacement</code> reports a snapped window's restore rectangle. <code>WM_WINDOWPOSCHANGED</code> is still the right message.</li>
+      <li><b>Open question:</b> recording the placement must start at the first show. Otherwise a window that starts hidden in the tray could replace a saved maximized placement before it ever shows.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 5 -->
+<article id="c5" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-slate-200 text-slate-700 px-3 py-0.5 text-xs font-semibold">Speculative after grilling</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process · text-width adapter</span>
+  </div>
+  <h2 class="font-serif text-2xl">5. Place the inspector in one pass, in <code>core</code></h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>core/captions.rs — InspectorCaptions · core/layout.rs — InspectorLayout, copy_beside, age_beside, after_text</li>
+    <li>app/main_window.rs — update_inspector, show_inspector, show_age, show_fields, fit_inspector, inspector part of layout()</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-red-700 mb-3">Before · cross-section of one placement</p>
+      <div class="space-y-1 text-xs">
+        <div class="border-l-4 border-slate-400 bg-slate-50 px-3 py-2">core · Layout::compute — first rectangles</div>
+        <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">app · fit_inspector — places heading, values, copy icons, age again</div>
+        <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">app · which field rows fit: room.min(fields.len())</div>
+        <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">app · age shows if MODIFIED_ROW &lt; rows &amp;&amp; modified</div>
+        <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2">app · copy icons only for one entry; focused value keeps whole text</div>
+        <div class="border-l-4 border-slate-300 bg-slate-50 px-3 py-2">core · age_beside → after_text (one-line pass-through)</div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-emerald-700 mb-3">After</p>
+      <div class="space-y-1 text-xs">
+        <div class="deep px-3 py-6 rounded">core · inspector placement(captions, layout, focused field, measure) → per control: rectangle, shown, fitted text</div>
+        <div class="border-l-4 border-slate-300 bg-slate-50 px-3 py-2">app · applies the answer</div>
+        <div class="border-2 border-dashed border-slate-400 rounded px-3 py-2">seam: measure and compact_path (PathCompactPathW)</div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Show-or-hide decisions for the inspector's rows are made in <code>app</code> after <code>core</code> has placed the pane, and no test checks the final positions. <code>fit_inspector</code> changed in each of the last three feature commits.</p>
+  <p><b>Solution.</b> One <code>core</code> function returns each inspector control's rectangle, whether it shows, and its text; <code>app</code> only applies it.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Final positions become testable</li>
+    <li>Delete <code>age_beside</code> pass-through</li>
+  </ul>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round · frontier empty · down to Speculative</p>
+    <ul class="list-disc pl-5">
+      <li><b>Why it drops:</b> Two panels does not show the inspector, and no stage changes its placement. <code>fit_inspector</code> changed in 2 commits, not 3, and one of the two was a side effect of the switch to native controls.</li>
+      <li><b>Shape, for when it is next touched:</b> <code>Layout::compute</code> keeps <code>InspectorLayout</code>. A method on it takes the measured widths, the focused field and the shown facts as plain values. It returns each control's rectangle, whether it shows, and whether to keep the whole text or shorten it. <code>app</code> shortens with <code>compact_path</code>, because Windows' path shortening needs the final width. This is the measure-then-place pattern of <code>CaptionWidths</code>.</li>
+      <li><b>Model:</b> <code>InspectorCaptions</code> uses placeholder values to mean other things:
+        <ul class="list-disc pl-5">
+          <li><code>icon: Option</code> means "exactly one entry";</li>
+          <li><code>modified: Option</code> means "the row has an age";</li>
+          <li><code>note: String</code> uses the empty string for "no note".</li>
+        </ul>
+        An enum of the inspector's states (nothing, reading, one entry, several entries) removes them.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 6 -->
+<article id="c6" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-slate-200 text-slate-700 px-3 py-0.5 text-xs font-semibold">Speculative after grilling</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+  </div>
+  <h2 class="font-serif text-2xl">6. Give the filter pane's list position ↔ filter value mapping one owner</h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>core/query.rs — Filters::positions (value → position), date_items, size_items</li>
+    <li>app/main_window.rs — on_kind_selected, on_filter, choose_custom (position → value); range_closing / range_closed</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-red-700 mb-2">Before</p>
+      <pre class="mermaid">
+flowchart LR
+  F["core · Filters"] -- "positions(): value → index" --> C["combo boxes"]
+  C -- "index → value, by hand" --> A["app · on_filter / choose_custom"]
+  A -. "'Custom… is last' = items.len() - 1" .-> F
+  linkStyle 1,2 stroke:#dc2626,stroke-width:2px
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-emerald-700 mb-2">After</p>
+      <pre class="mermaid">
+flowchart LR
+  C["combo boxes"] -- "(list, index)" --> F["core · Filters<br/>both directions"]
+  F -- "set filters · open Custom · nothing" --> A["app"]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a
+  class F deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> One mapping has two owners in two layers, and "Custom… is the last item" is encoded twice. One filter control such as <code>only_directly</code> appears 11 times in main_window.rs, 7 in layout.rs and 2 in captions.rs.</p>
+  <p><b>Solution.</b> A <code>core</code> function maps (filter list, chosen index) to an outcome, tested beside <code>positions</code>.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Round trip tested in one place</li>
+    <li>New filter touches fewer sites</li>
+  </ul>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round · frontier empty · down to Speculative</p>
+    <ul class="list-disc pl-5">
+      <li><b>Why it drops:</b> nothing scheduled touches the filter pane, and Two panels does not show it. The Custom… state machine is already typed (<code>Option&lt;(RangeFilter, ListClosing)&gt;</code>), and no defect was found in it. It stays in <code>app</code>, because Windows decides the order of the messages it guards.</li>
+      <li><b>When done:</b> put the two mappings side by side in <code>query.rs</code>, both using the same current filters, because a set custom range moves the indexes. A pane module follows <code>app/status_bar.rs</code>. It returns outcomes and runs no dialog. The 11 mentions of <code>only_directly</code> in the main window then drop to 0.</li>
+      <li><b>Also:</b> the echo check is made twice. The Match list repeats the same mapping pattern in <code>app</code>.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 7 -->
+<article id="c7" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-amber-100 text-amber-800 px-3 py-0.5 text-xs font-semibold">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+  </div>
+  <h2 class="font-serif text-2xl">7. Deepen <code>SettingsDraft</code> so it owns edits and the result of Apply</h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>core/settings.rs — SettingsDraft (new, can_apply, applied, last_applied, pub edited)</li>
+    <li>app/settings.rs — apply, clicked (SpeedPerProcessor branch), total_commander_found · app/main_window.rs — apply_settings, write_registry</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-red-700 mb-3">Before · mass diagram</p>
+      <div class="flex items-end gap-6 h-56">
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 bg-red-200 border border-red-500" style="height: 150px"></div>
+          <span class="text-xs">interface</span>
+          <span class="text-xs text-slate-500">pub edited: 13 writes, 31 reads</span>
+        </div>
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 bg-slate-200 border border-slate-400" style="height: 60px"></div>
+          <span class="text-xs">implementation</span>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500 mt-2">"applied" spread over SettingsDialog::apply, apply_settings, write_registry</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-emerald-700 mb-3">After</p>
+      <div class="flex items-end gap-6 h-56">
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 bg-slate-200 border border-slate-400" style="height: 40px"></div>
+          <span class="text-xs">interface</span>
+          <span class="text-xs text-slate-500">typed edits, applied(outcome)</span>
+        </div>
+        <div class="flex flex-col items-center gap-1">
+          <div class="w-20 deep" style="height: 170px"></div>
+          <span class="text-xs">implementation</span>
+          <span class="text-xs text-slate-500">page rules, merge after Apply</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem.</b> The draft fails the deletion test: removing it adds two fields to the dialog and loses nothing. What Apply means (choices at once, sign-in reverts on a failed registry write, Include saved as administrator, pages refilled only when values differ) is spread over three untested functions. The dialog clamps delete workers with <code>shown.min(64)</code>, repeating the engine's 1–64 range in <code>gozler-fileops</code>, though <code>core::speed</code> says the engine's types own every range.</p>
+  <p><b>Solution.</b> The draft takes typed edits and an <code>applied(outcome)</code> that takes the registry and Include results and returns what changed and which pages to fill again.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Apply rules get tests</li>
+    <li>Range has one owner again</li>
+  </ul>
+  <p class="text-sm text-slate-600">Becomes Strong when a page with more rules than File operations arrives.</p>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round · frontier empty · stays Worth exploring</p>
+    <ul class="list-disc pl-5">
+      <li><b>Deepen the Apply end, not the edits:</b> 9 of the 13 edit sites only set a field.</li>
+      <li><b>A typed outcome for Apply:</b> one case for each way Apply can fail, and <code>SettingsDraft::applied(outcome)</code> returns what changed.
+        <ul class="list-disc pl-5">
+          <li>A refused shortcut applies nothing.</li>
+          <li>A failed registry write reverts only that value.</li>
+          <li>A declined or failed Include save stays edited.</li>
+        </ul>
+      </li>
+      <li><b>No waiting state yet:</b> Apply blocks the window thread through the administrator copy, for up to 30 s. That is already <a class="underline" href="https://github.com/SynoSoftware/goz/issues/89">SynoSoftware/goz#89</a>. When #89 lands, the draft gets a pending state and a second call.</li>
+      <li><b>The 64:</b> it becomes a <code>core::speed</code> clamp driven by <code>SettingError::OutOfRange</code>, because the engine exposes no constants. <code>ring_blocks()</code> hardcodes <code>16..=26</code>, a second copy of an engine range.</li>
+      <li><b>Refused numbers:</b> the draft keeps them, so <code>can_apply</code> stops reading <code>is_enabled()</code> from Win32.</li>
+      <li><b>Page rules moving to core, with tests:</b> the Total Commander link, Apply's enabled state and shield, and the per-processor clamp.</li>
+      <li><b>Order:</b> candidate 4 goes first.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 8 -->
+<article id="c8" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-amber-100 text-amber-800 px-3 py-0.5 text-xs font-semibold">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+  </div>
+  <h2 class="font-serif text-2xl">8. Move the File operations window's display memory and reorder rules beside <code>RowPhase</code></h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>app/file_operations.rs — fields meters, folders, selected, drag; Window::landing, Window::step, can_step, drag_to, show_hint</li>
+    <li>win/file_operations.rs — TaskbarState (mirrors core's Taskbar arm for arm)</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-red-700 mb-2">Before</p>
+      <pre class="mermaid">
+flowchart TB
+  V["core · view() (pure)"]
+  W["app · Window<br/>meters, folders cache (89891df)<br/>landing, step, drag_to"]
+  W -- "remembers between calls" --> V
+  W -- "translate arm for arm" --> T["win · TaskbarState"]
+  classDef hot fill:#fef2f2,stroke:#dc2626
+  class W hot
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <p class="lbl text-emerald-700 mb-2">After</p>
+      <pre class="mermaid">
+flowchart TB
+  S["core · queue display state<br/>meters, source folders → view at t<br/>reorder: landing, step, no change"]
+  S --> W["app · Window"]
+  W -- "core Taskbar" --> T["win · TaskbarProgress::show"]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a
+  class S deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> Each speed-up of the view adds another map to the window struct, and the drag and step landing rules are pure functions over rows that sit untested in <code>impl Window</code>.</p>
+  <p><b>Solution.</b> A <code>core</code> display state per operation and the reorder rules next to <code>RowPhase::buttons</code>; the taskbar adapter takes <code>core</code>'s enum directly.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5">
+    <li>Reorder rules get tests</li>
+    <li>Delete the shallow <code>TaskbarState</code> mirror</li>
+  </ul>
+  <p class="text-sm text-slate-600">Cheap to do in the same change as candidate 1.</p>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round · frontier empty · stays Worth exploring</p>
+    <ul class="list-disc pl-5">
+      <li><b>Display state:</b> a <code>core</code> value that the File operations window owns. It holds the meters and source folders, and the show and hide rules that moved here from candidate 1. The window passes in its selection, its visibility and <code>now</code> as plain values.</li>
+      <li><b>Reorder rules:</b> <code>landing</code>, <code>step</code> and the "unchanged" test are pure and move beside <code>RowPhase</code>. <code>can_step</code> stays in <code>app</code>, because it asks the engine.</li>
+      <li><b>Taskbar:</b> delete <code>TaskbarState</code>. <code>win</code> already imports <code>core</code> types.</li>
+      <li><b>Hint loop:</b> it already uses <code>PathCompactPathW</code>. It shrinks the path's room by a tenth each pass, because the path sits inside a sentence. Measuring the sentence with an empty title gives the room in one step, as <code>RowLine::fitted</code> does.</li>
+      <li><b>Hint state:</b> whether the hint shows is read back from a control's text, and the window's height depends on it. The display value should keep the refusal instead.</li>
+      <li><b>Tests:</b>
+        <ul class="list-disc pl-5">
+          <li>A new operation shows the window, and a later change to it does not undo Hide.</li>
+          <li>The last operation leaving hides the window.</li>
+          <li>Interrupted operations at start show the window and select the first one.</li>
+          <li>Pausing clears the meters.</li>
+          <li>The reorder rules, in one table.</li>
+          <li>The hint fits its width.</li>
+        </ul>
+      </li>
+    </ul>
+  </div>
+</article>
+
+<!-- 9 -->
+<article id="c9" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-amber-100 text-amber-800 px-3 py-0.5 text-xs font-semibold">Worth exploring</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">local-substitutable</span>
+  </div>
+  <h2 class="font-serif text-2xl">9. Split the "Use local" decision from the file and process reads</h2>
+  <ul class="font-mono text-sm text-slate-700 space-y-0.5">
+    <li>app/local_service.rs — LATEST (static Mutex), local_service, check, is_paired</li>
+    <li>core/fetch.rs — LocalService::from_protocol, Programs</li>
+  </ul>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-red-700 mb-3">Before</p>
+      <div class="border-2 border-red-400 bg-red-50 rounded p-3 text-xs space-y-1">
+        <p class="lbl text-red-700">app · check()</p>
+        <p>read both exes whole · compare bytes</p>
+        <p>run --version and protocol, 10 s limit</p>
+        <p>decide SameAsService / Mismatched / Offered</p>
+        <p>cache per build in a static Mutex</p>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-4 diagram">
+      <p class="lbl text-emerald-700 mb-3">After</p>
+      <div class="space-y-2 text-xs">
+        <div class="border border-slate-300 rounded p-2">app thread · collect facts: lengths, bytes equal, paired, version, protocol</div>
+        <div class="text-center text-slate-400">▼</div>
+        <div class="deep rounded p-3">core · Programs from facts (pure)</div>
+      </div>
+    </div>
+  </div>
+  <p><b>Problem.</b> The decision is woven into I/O, has no test, and the file was rewritten in two of the last 30 commits.</p>
+  <p><b>Solution.</b> The thread gathers facts; a pure <code>core::fetch</code> function turns them into <code>Programs</code>.</p>
+  <ul class="grid sm:grid-cols-2 gap-x-6 text-sm list-disc pl-5"><li>Decision tested on any OS</li><li>I/O stays on its own thread</li></ul>
+  <p class="text-sm text-slate-600">Reasons that still hold: the check runs off the status thread because closing the window joins it; <code>is_paired</code> runs again at confirm time because the file can change in between.</p>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round · frontier empty · stays Worth exploring</p>
+    <ul class="list-disc pl-5">
+      <li><b>The order is a rule.</b> An unpaired gozlerd.exe is never run, and a large file is read only when the lengths match. So the facts cannot all be gathered first.</li>
+      <li><b>Shape:</b> one <code>core::fetch</code> function that takes its I/O as closures (<code>bytes_equal</code>, <code>paired</code>, <code>print</code>), as <code>RowLine::fitted</code> takes <code>width_of</code>. The order then lives in <code>core</code>, and a test can record every <code>print</code> call to prove that an unpaired file is never run.</li>
+      <li><b>Cache:</b> the per-build cache stays in <code>app</code>.</li>
+      <li><b>Doc pointer:</b> the pairing rule lives in DESIGN "Daemon failures", not in SECURITY.md.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 10 -->
+<article id="c10" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-slate-200 text-slate-700 px-3 py-0.5 text-xs font-semibold">Speculative</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process · small</span>
+  </div>
+  <h2 class="font-serif text-2xl">10. Let <code>run</code> read the pending selection</h2>
+  <p class="font-mono text-sm text-slate-700">app/main_window.rs — run, read_list_selection, selection_pending; six direct calls before run</p>
+  <div class="grid md:grid-cols-2 gap-4 text-xs">
+    <div class="rounded-lg border border-slate-200 p-4"><p class="lbl text-red-700 mb-2">Before</p><p>caller: read_list_selection() → run(command)</p><p class="text-slate-500">ordering rule known at 6 call sites</p></div>
+    <div class="rounded-lg border border-slate-200 p-4"><p class="lbl text-emerald-700 mb-2">After</p><p>caller: run(command) — reads it first</p></div>
+  </div>
+  <p><b>Problem.</b> Callers must know to read the selection first. No path is wrong today: the deferred read covers ordinary sequences.</p>
+  <p><b>Solution.</b> <code>run</code> reads the pending selection itself. DESIGN's "the list owns which positions are selected" still holds.</p>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round · frontier empty · stays Speculative</p>
+    <ul class="list-disc pl-5">
+      <li><b>No caller needs to skip the read:</b> the read is one flag check when nothing is pending. No path is wrong today, because the posted <code>DEFERRED</code> runs before input.</li>
+      <li><b>Window rule 1:</b> the read comes first, before <code>focus</code>, because it can move the focus. Six direct calls go.</li>
+      <li><b>When:</b> in Stage 3, once an active list exists. <code>run</code> then asks that list.</li>
+      <li><b>Open for Stage 3:</b> <code>Message::Deferred</code> serves four unrelated flags. With one controller per list, Stage 3 must decide where each list's deferred read lives.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 11 -->
+<article id="c11" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4 shadow-sm">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="rounded-full bg-red-100 text-red-800 px-3 py-0.5 text-xs font-semibold">Dropped after grilling</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 px-3 py-0.5 text-xs">in-process</span>
+  </div>
+  <h2 class="font-serif text-2xl">11. Key the window's rectangles by <code>ControlId</code></h2>
+  <p class="font-mono text-sm text-slate-700">app/main_window.rs — Controls, layout() moves list · core/layout.rs — Layout fields, CaptionWidths::measure</p>
+  <div class="grid md:grid-cols-2 gap-4 text-xs">
+    <div class="rounded-lg border border-slate-200 p-4"><p class="lbl text-red-700 mb-2">Before</p><p>one field per control in Controls, Layout, CaptionWidths and the moves list; 114d80c edited each for one toolbar</p><p class="text-red-700 mt-1">a drop-down's open-list height: × 10 in layout(), × 12 elsewhere</p></div>
+    <div class="rounded-lg border border-slate-200 p-4"><p class="lbl text-emerald-700 mb-2">After</p><p>Layout → rectangles by ControlId (missing = hidden); Controls → handle by ControlId; layout() is one loop</p></div>
+  </div>
+  <div class="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm">Conflicts with the repo's "let the types hold the rules": today the compiler catches a forgotten control field, and a map would not.</div>
+  <div class="grilled rounded-lg p-4 text-sm space-y-2">
+    <p class="lbl text-indigo-800">Grilled · 1 round · dropped</p>
+    <ul class="list-disc pl-5">
+      <li><b>The mode switch fits today's shape.</b> Layout already hides whole groups with <code>Option</code> fields. Two panels hides some groups and adds others.</li>
+      <li><b>An exhaustive match does not fit.</b> <code>ControlId</code> comes from 250 <code>IDC_</code> lines, which cover every dialog, toolbar buttons and status parts. It would need about 190 arms that answer nothing. Also, many controls are placed outside a plain list of rectangles.</li>
+      <li><b>The better existing pattern:</b> <code>controls.status.place(&amp;layout.status, …)</code>. Each pane module places its own group, and the compiler still checks every field. The rest of this candidate merges into the per-pane modules (candidates 5 and 6) and the per-list controllers (pattern P1).</li>
+      <li><b>Correction:</b> × 10 and × 12 are not two values for one rule. Each fits the longest list in its group: Match has up to 5 items, Size up to 10. The reason is not written down anywhere.</li>
+    </ul>
+  </div>
+</article>
+
+</section>
+
+<section id="defects" class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+  <h2 class="font-serif text-xl">Defects found while grilling</h2>
+  <p class="text-sm text-slate-600">Found by reading the code, and checked against it. None was reproduced in the running window. Each fix changes behaviour, so each is its own commit, separate from any restructuring.</p>
+  <div class="overflow-x-auto">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 text-left"><tr><th class="p-2">Defect</th><th class="p-2">What the person sees</th><th class="p-2">Where</th></tr></thead>
+    <tbody class="divide-y divide-slate-100 align-top">
+      <tr><td class="p-2">A late Include count is kept after Settings closes</td><td class="p-2">In the next Settings session, the preview's "After OK" number can show the old count</td><td class="p-2 font-mono text-xs">open_settings, preview_counted (C3)</td></tr>
+      <tr><td class="p-2">File operations are offered before the queue opens</td><td class="p-2">If the queue fails to open, Delete, Copy and Move stay enabled and do nothing</td><td class="p-2 font-mono text-xs">MainWindow::open (C1)</td></tr>
+      <tr><td class="p-2">Another window writes the whole <code>ui.json</code> (corrected by the independent review: the Language menu saving there is allowed by DESIGN "Language")</td><td class="p-2">Another window's Language menu or Apply also writes its own placement, columns, filters, sort and stale choices. That can undo what the first window saved, against "saves only what its Settings applies"</td><td class="p-2 font-mono text-xs">Model::save_settings writes all of Settings (C4)</td></tr>
+      <tr><td class="p-2">Saving: column reorder and window placement</td><td class="p-2">Lost when the window ends without Exit, against DESIGN's "a second after"</td><td class="p-2 font-mono text-xs">no HDN_ENDDRAG / WM_WINDOWPOSCHANGED handling (C4)</td></tr>
+      <tr><td class="p-2">Taken rows are measured with bold parts</td><td class="p-2">A column fill can come out slightly too wide</td><td class="p-2 font-mono text-xs">fits_of (C2)</td></tr>
+      <tr><td class="p-2">A "Use local" check that timed out is cached as final</td><td class="p-2">One first run slower than 10 s, such as during an antivirus scan, hides Use local until restart</td><td class="p-2 font-mono text-xs">local_service::check (C9)</td></tr>
+      <tr><td class="p-2">A new search (T2) and a failed search (T3) send no selection cancel</td><td class="p-2">Nothing visible. An orphaned selection read (up to 100,000 rows, about 25 pages) or folder-size count runs to its own end in gozlerd, and its reply is dropped. This is against DESIGN's T2 and T3 (corrected by the independent review)</td><td class="p-2 font-mono text-xs">accept_results, show_failure (P2)</td></tr>
+      <tr><td class="p-2">A setup question opens before its change shows (inferred, not run)</td><td class="p-2">While the question is open, the status bar still shows the previous fix step</td><td class="p-2 font-mono text-xs">apply runs Then before Change (C1-B5)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="text-sm text-slate-600">Also noted: DESIGN's "How normal changes land" row for "A new column" names the <code>LVN_GETDISPINFO</code> handler, but the per-column match is in <code>text::cell</code>. The 30-second wait for the administrator copy is already <a class="underline" href="https://github.com/SynoSoftware/goz/issues/89">SynoSoftware/goz#89</a>.</p>
+</section>
+
+<section class="rounded-xl border border-red-300 bg-red-50 p-6 space-y-3">
+  <h2 class="font-serif text-xl">Independent review of candidates 1, 3, 7, 8 and 9</h2>
+  <p class="text-sm">A reviewer that wrote none of this work checked these candidates. It kept their strengths, except that candidate 7 rises to Strong. Its corrections:</p>
+  <ul class="text-sm list-disc pl-5 space-y-1">
+    <li><b>C1: create the File operations window only when it is first needed.</b> #98 measured 75 ms of the 627 ms startup in creating that window. The show and hide rules then stay with the lifecycle (C8).</li>
+    <li><b>C1: a quick move ends before its first snapshot.</b> A move within one drive can finish before the lifecycle sees it waiting or running. The lifecycle then never sees it "waiting or running", so the clipboard keeps the cut files and Paste stays enabled. Instead, return the result of <code>submit</code> to <code>core</code>.</li>
+    <li><b>C1: build each operation's taken set on the engine's prepare thread,</b> and pass it in the snapshot as <code>Arc&lt;Taken&gt;</code>. That keeps 100,000 path folds off the window thread. It also closes a race between <code>operations()</code> and <code>taken()</code> that can show deleted rows for a moment.</li>
+    <li><b>C1: remove an ended operation from the queue as soon as the lifecycle sees it.</b> Its "reported" memory and the remove rule then go. The main window must close the queue's waker in <code>WM_DESTROY</code>.</li>
+    <li><b>C3: forget the stored count on each edit,</b> not only cancel the count in flight. Otherwise an old number shows during the 300 ms delay.</li>
+    <li><b>C7 rises to Strong,</b> because visibility stage 3 adds a second setting saved as administrator ("Users and groups who see every file"), and that stage starts at once. Build the typed Apply outcome for every setting saved as administrator. The 64 is better exposed as <code>Count::MAX</code> by the engine.</li>
+    <li><b>C8: compute the common folder off the window thread.</b> It takes 272 ms for 100,000 sources, as measured in window-responsiveness.md. Also, the last taskbar state sent belongs in the display value (#93).</li>
+    <li><b>C9: retry a timeout a bounded number of times, then cache it.</b> Never caching it would restart a slow gozlerd.exe after every 2-second status poll.</li>
+    <li><b>Defects:</b>
+      <ul class="list-disc pl-5">
+        <li>The stale Include count shows only briefly.</li>
+        <li>"Offered before the queue opens" is practically unreachable: <code>Queue::new</code> cannot fail; only creating the window can. It folds into C1.</li>
+        <li>The timeout cache also hides the service's version in Settings > Index.</li>
+      </ul>
+    </li>
+  </ul>
+</section>
+
+<section class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+  <h2 class="font-serif text-xl">Owner questions, parked</h2>
+  <ul class="text-sm list-disc pl-5 space-y-1">
+    <li>Stage 4: do a folder panel's Ext, Size and Date modified columns fit again for each new folder listing? Recommended: yes, but not when rows change within one listing.</li>
+    <li>Stage 4: does Search's "first widths until the first rows" rule apply once per window (as today) or once per listing?</li>
+    <li>The Exit question counts prepared operations as "waiting". It shipped that way; it is kept unless you say otherwise.</li>
+  </ul>
+  <p class="text-sm text-slate-600">No term was added to <code>CONTEXT.md</code>, and no ADR was written. No candidate was rejected for a reason a future review would need.</p>
+</section>
+
+<section class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+  <h2 class="font-serif text-xl">Checked and sound — do not re-propose</h2>
+  <ul class="grid md:grid-cols-2 gap-x-8 gap-y-1 text-sm list-disc pl-5">
+    <li><code>Model</code> with <code>Accepted</code>/<code>Change</code>/<code>Then</code>: deep, 28 tests; window rule 1 still justifies the seam</li>
+    <li><code>core::commands</code>: one row per command feeds menus, keys, buttons (rule 9)</li>
+    <li><code>app::requests</code> with <code>core::fetch</code>: purpose slots, generations, joined threads</li>
+    <li><code>core::results</code> chunk cache: small interface, much behaviour</li>
+    <li><code>win::controls</code> wrappers: shallow on purpose, each the typed adapter over <code>unsafe</code></li>
+    <li><code>core::fixer</code> with <code>app::fix_thread</code>: typed state machine, tested</li>
+    <li><code>win::dialog</code> <code>run_modal</code> + <code>DialogProc</code>: deep</li>
+    <li>Drop target, clipboard, <code>core::speed</code>, <code>app::include</code></li>
+    <li>The three <code>file_operations</code> modules as layers: the friction is the lifecycle in <code>app</code>, not the split</li>
+    <li>Cells update step by step, not by a diffed view: <code>LVN_GETDISPINFO</code> needs the text before it returns</li>
+  </ul>
+  <p class="text-sm text-slate-600">A wait on the window thread was also found: <code>indexed_folders::subfolders</code> calls <code>std::fs::read_dir</code> when a folder-tree node expands. Issue <a class="underline" href="https://github.com/SynoSoftware/goz/issues/89">SynoSoftware/goz#89</a> already covers it.</p>
+</section>
+
+<section id="top-recommendation" class="deep rounded-xl p-8 space-y-3">
+  <p class="lbl text-slate-400">Top recommendation</p>
+  <h2 class="font-serif text-3xl"><a href="#c1" class="underline decoration-slate-500">1. Move the life of a file operation into a core module</a></h2>
+  <p class="text-slate-300">The file-manager plan's Stage 3 must rewrite this code anyway, and it asks for core unit tests of the taken-entry rules that the current interface cannot host. Doing the deepening as Stage 3's restructuring step costs least rework; candidate 8 fits in the same change.</p>
+  <p class="text-slate-300">After grilling, a suggested order for Stage 3's restructuring:</p>
+  <ol class="text-slate-300 list-decimal pl-6">
+    <li>Settle pattern P2: decide whether <code>Accepted</code> carries several effects. Candidate 1's interface depends on it.</li>
+    <li>Candidate 4: one owner for saving, then its fix commits. It is independent and small, and P6 depends on it.</li>
+    <li>Candidate 1: the life of a file operation, then candidate 8.</li>
+    <li>Candidate 2: column sizing after "Two lists in <code>Layout::compute</code>", and the cell function after "One state for each list".</li>
+  </ol>
+  <p class="text-slate-300">Candidates 3, 7 and 9 sit outside Stage 3 and fit whenever Settings or the service status next changes.</p>
+</section>
+
+</main>
+</body>
+</html>

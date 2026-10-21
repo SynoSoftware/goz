@@ -292,10 +292,7 @@ pub(crate) fn build_index(
         if !walked {
             return Ok(None);
         }
-        index.apply_rules(rules.clone());
-        index.compute_folder_sizes();
-        index.optimize_storage();
-        index.rank_names();
+        finish_index(&mut index, rules);
         return Ok(Some(BuiltIndex {
             index,
             read_secs: read_start.elapsed().as_secs_f64(),
@@ -340,16 +337,10 @@ pub(crate) fn build_index(
         }
     };
 
-    index.apply_rules(rules.clone());
-    // A stopped pass left some files' sizes unknown, so a folder's sum would
-    // look exact while it was short: folder sizes stay unknown then.
-    if pass == LayoutPass::Complete {
-        index.compute_folder_sizes();
+    finish_index(&mut index, rules);
+    if pass == LayoutPass::Stopped {
+        index.record_size_pass_stopped();
     }
-    // Every record has been seen, so the FRN map can densify against its true
-    // maximum, and the growth slack of the build goes back.
-    index.optimize_storage();
-    index.rank_names();
 
     Ok(Some(BuiltIndex {
         index,
@@ -440,6 +431,19 @@ impl VolumeReads for Disk<'_> {
             }
         }
     }
+}
+
+/// Ends a build that read the whole volume: removes what `rules` leave out,
+/// sums each folder's size, and readies the index to publish. A pass that
+/// stopped left some files' sizes unknown, and a folder's size then sums the
+/// sizes that were read, because the space found tells more than no size.
+fn finish_index(index: &mut VolumeIndex, rules: &Arc<VolumeRules>) {
+    index.apply_rules(rules.clone());
+    index.compute_folder_sizes();
+    // Every record has been seen, so the FRN map can densify against its true
+    // maximum, and the growth slack of the build goes back.
+    index.optimize_storage();
+    index.rank_names();
 }
 
 /// The FILE_LAYOUT pass: hands each file of each page that `read_page` writes
@@ -661,5 +665,41 @@ mod tests {
         });
         assert_eq!(pass(failed), LayoutPass::Stopped);
         assert_eq!(pass(Ok(None)), LayoutPass::Complete);
+    }
+
+    /// After a pass that stopped, the enumeration names the files the pass
+    /// did not reach, without a size. Their folder still sums the sizes the
+    /// pass read; if it stayed unknown, the window and `-size` would show no
+    /// folder size on that volume until a rescan.
+    #[test]
+    fn a_stopped_pass_still_gives_folder_sizes() {
+        use gozler_core::include::IncludeSettings;
+        use gozler_core::usn::ParsedUsnRecord;
+        use gozler_core::usn::record::FILE_ATTRIBUTE_DIRECTORY;
+
+        let root = gozler_core::index::NTFS_ROOT_FRN;
+        let mut index = VolumeIndex::new(root);
+        let frn = |n: u128| Frn(n | 1 << 48);
+        let (docs, read, unread) = (frn(100), frn(101), frn(102));
+        for (frn, parent, name, attributes) in [
+            (docs, root, "docs", FILE_ATTRIBUTE_DIRECTORY),
+            (read, docs, "read.txt", 0),
+            (unread, docs, "unread.txt", 0),
+        ] {
+            index.insert_enum(&ParsedUsnRecord {
+                frn,
+                parent_frn: parent,
+                reason: 0,
+                attributes,
+                name: name.as_bytes().to_vec(),
+            });
+        }
+        index.set_stat(read, 5, 0);
+        finish_index(
+            &mut index,
+            &Arc::new(IncludeSettings::default().rules_for("V")),
+        );
+        let docs = index.head_of(docs).expect("docs is indexed");
+        assert_eq!(index.entry(docs).size(), Some(5));
     }
 }

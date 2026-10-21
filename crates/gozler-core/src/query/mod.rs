@@ -6,8 +6,8 @@
 //! such as an unknown function), with `dates` resolving each `dm:` value;
 //! [`engine`] compiles it and runs it against the index with
 //! scope, sort, and a limit; [`order`] owns the result order the engine and
-//! the page builder both sort by; `rows` reads the rows of one or more
-//! volumes a page at a time.
+//! the page builder both sort by; `rows` runs a search over one or more
+//! volumes, through [`IndexedVolume`], and reads its rows a page at a time.
 
 mod dates;
 pub mod engine;
@@ -18,13 +18,13 @@ mod rows;
 pub(crate) mod wildcard;
 
 pub use dates::{DateRange, QueryStart};
-pub use engine::{
-    CompiledQuery, IndexChanged, MatchSums, MatchedParts, Matches, OrderedMatches, SizeOverflow,
-    Totals, extension, find_matches, resolve_scope, run_totals,
-};
+pub use engine::{CompiledQuery, MatchSums, MatchedParts, SizeOverflow, Totals, extension};
 pub use parse::{
     Clause, Kind, Malformed, ParseOptions, ParsedQuery, QueryError, SIZE_WORDS, SizeRange,
     SizeWord, Term, TermMatch, Test, parse_query, parse_query_with, regex_test,
 };
 pub use paths::{FolderId, ResultNames};
-pub use rows::{PathRow, QueryOutcome, Reply, RowView, VolumeRows, run_query};
+pub use rows::{
+    HeldVolume, IndexedVolume, NotIndexed, PathRow, QueryOutcome, ResultRows, RowView, RowsSpec,
+    SearchTotals, TotalsError, run_query, search_totals,
+};

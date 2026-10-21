@@ -7,7 +7,7 @@
 //! A row records today's behavior, right or wrong. A row that a fix changed
 //! on purpose carries a comment with its bug number from the "Golden corpus"
 //! section of `docs/DESIGN.md`. The rows for what a command line matches
-//! are in the daemon's corpus, in `gozler-daemon`'s `server` tests.
+//! are in the search corpus, `escompat::corpus`.
 
 use super::ResultWriter;
 use crate::attributes::Attributes;

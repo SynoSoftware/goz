@@ -1,15 +1,22 @@
 //! A search's answer as rows, read from the index one page at a time.
 //!
+//! [`ResultRows::search`] runs a search over the volumes it is given and
+//! [`search_totals`] sums one. A search holds each volume's index twice
+//! through [`IndexedVolume`]: under the first hold it resolves the scope
+//! folder and finds and keys the matches ([`super::engine::find_matches`]),
+//! without a hold it sorts them, and under the second hold they become the
+//! rows. Each page then holds the volumes it reads again.
+//!
 //! After the sort, each match becomes its row: its entry and its file ID,
 //! and nothing else, so an answer of millions of rows holds no name and no
-//! folder. A page is read while the caller holds the index read lock of each
-//! volume it reads: each row is the file as it is then, with its current
-//! name, size and date, as Everything's list shows a renamed file. A row
-//! whose slot is dead or holds another file, that left the search's scope,
-//! or whose folder has no full path is left out, and the reply's total
-//! counts it out, because `gozler` reads the last page's total and exits 10
-//! when it shows fewer rows. A volume whose index was replaced or got new
-//! entry indexes sends no more rows, and the reply says so.
+//! folder. A page is read under the index read lock of each volume it reads:
+//! each row is the file as it is then, with its current name, size and date,
+//! as Everything's list shows a renamed file. A row whose slot is dead or
+//! holds another file, that left the search's scope, or whose folder has no
+//! full path is left out, and the reply's total counts it out, because
+//! `gozler` reads the last page's total and exits 10 when it shows fewer
+//! rows. A volume whose index was replaced or got new entry indexes sends no
+//! more rows, and the reply says so.
 //!
 //! [`Reply`] merges several volumes' rows one page at a time, by [`compare`]
 //! or, for a path sort, by the folders' folded paths, because folder ranks
@@ -20,15 +27,21 @@
 //! another volume before it.
 
 use super::CompiledQuery;
-use super::engine::{MatchSums, find_matches, in_scope};
+use super::engine::{
+    IndexChanged, MatchSums, SizeOverflow, Totals, find_matches, in_scope, resolve_scope,
+    run_totals,
+};
 use super::order::{OrderFields, SortRecord, compare, compare_paths};
 use super::paths::{FolderCopy, FolderId, ResultNames, root_name};
 use crate::attributes::Attributes;
 use crate::fold::fold;
 use crate::index::VolumeIndex;
+use crate::scope::{Scope, VolumeMounts};
 use crate::types::{EntryIdx, Frn, SortDir, SortKey, SortSpec};
 use core::cmp::Ordering;
+use core::ops::Deref;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 /// A row of a volume whose file IDs fit in 64 bits, as NTFS's do. It has the
 /// size and alignment of a [`SortRecord`], so the records become rows in
@@ -109,8 +122,9 @@ impl RowList {
 }
 
 /// One volume's answer to a search: its rows in the result order, from
-/// [`super::OrderedMatches::read_rows`].
-pub struct VolumeRows {
+/// [`super::engine::OrderedMatches::read_rows`]. A reply only reads it; what
+/// a reply changes as it reads is in its [`VolumeReader`].
+pub(crate) struct VolumeRows {
     rows: RowList,
     /// [`VolumeIndex::instance`] of the index the rows name entries of.
     instance: u64,
@@ -147,7 +161,7 @@ impl VolumeRows {
     }
 
     /// Every match's [`MatchSums`], when the search asked for them.
-    pub fn sums(&self) -> Option<MatchSums> {
+    pub(crate) fn sums(&self) -> Option<MatchSums> {
         self.sums
     }
 }
@@ -167,7 +181,7 @@ pub struct RowView<'a> {
 
 /// The rows of every volume of one reply, merged in the result order and
 /// read a page at a time with [`Self::fill`].
-pub struct Reply {
+pub(super) struct Reply {
     volumes: Vec<VolumeReader>,
     /// The folders of every row read so far, of every volume.
     names: ResultNames,
@@ -213,6 +227,9 @@ struct VolumeReader {
     answer: VolumeRows,
     /// The next row to read.
     next: usize,
+    /// The matches after the rows that the limit cut off that `total` still
+    /// counts; from [`VolumeRows`]'s, until the reply leaves them out.
+    past_cut: u64,
     /// The next row's folder, once the page being built found that the row
     /// is still the file, under the scope, with a full path.
     head: Option<FolderId>,
@@ -228,7 +245,7 @@ struct VolumeReader {
 impl Reply {
     /// A reply of `answers`, one for each volume of the same search, which
     /// skips the first `offset` rows and sends at most `limit`.
-    pub fn new(answers: Vec<VolumeRows>, offset: u32, limit: Option<u32>) -> Self {
+    pub(super) fn new(answers: Vec<VolumeRows>, offset: u32, limit: Option<u32>) -> Self {
         let sort = answers.first().map_or_else(SortSpec::default, |a| a.sort);
         assert!(
             answers.iter().all(|a| a.sort == sort),
@@ -246,6 +263,7 @@ impl Reply {
             volumes: answers
                 .into_iter()
                 .map(|answer| VolumeReader {
+                    past_cut: answer.past_cut,
                     answer,
                     next: 0,
                     head: None,
@@ -265,18 +283,18 @@ impl Reply {
 
     /// The matches, less every row left out so far: the total each page
     /// reports.
-    pub fn total(&self) -> u64 {
+    pub(super) fn total(&self) -> u64 {
         self.total
     }
 
     /// Whether a volume's index was replaced, or got new entry indexes,
     /// during the reply, so its rows stopped.
-    pub fn index_changed(&self) -> bool {
+    pub(super) fn index_changed(&self) -> bool {
         self.index_changed
     }
 
     /// The rows not read yet, at most the limit's: what sizes a page.
-    pub fn rows_left(&self) -> usize {
+    pub(super) fn rows_left(&self) -> usize {
         let rows: usize = self
             .volumes
             .iter()
@@ -292,7 +310,7 @@ impl Reply {
     /// given to [`Self::new`]: a volume with rows left, and of volumes that
     /// follow each other only the one whose turn it is, so that a page never
     /// waits for the lock of an index it does not read.
-    pub fn reads_volume(&self, v: usize) -> bool {
+    pub(super) fn reads_volume(&self, v: usize) -> bool {
         match &self.merge {
             Merge::InTurn(order) => order.iter().find(|&&w| self.volumes[w].has_rows()) == Some(&v),
             Merge::Compare | Merge::ComparePaths => self.volumes[v].has_rows(),
@@ -307,7 +325,7 @@ impl Reply {
     /// rows, sent or skipped for the offset, so that one hold of the locks
     /// does a page's work at most. Returns whether rows are left: a row
     /// `push` refused is read again for the next page.
-    pub fn fill(
+    pub(super) fn fill(
         &mut self,
         indexes: &[Option<&VolumeIndex>],
         page_rows: usize,
@@ -392,7 +410,7 @@ impl Reply {
                         return Next::Volume(v);
                     }
                 }
-                if volume.answer.past_cut > 0 {
+                if volume.past_cut > 0 {
                     return Next::End;
                 }
             }
@@ -408,7 +426,7 @@ impl Reply {
                     total,
                 );
             if !found {
-                if volumes[v].answer.past_cut > 0 {
+                if volumes[v].past_cut > 0 {
                     return Next::End;
                 }
                 continue;
@@ -487,10 +505,10 @@ impl VolumeReader {
         if changed || scope_gone {
             *total -= left;
             if scope_gone {
-                *total -= self.answer.past_cut;
+                *total -= self.past_cut;
             }
             self.next = self.answer.rows.len();
-            self.answer.past_cut = 0;
+            self.past_cut = 0;
             return changed;
         }
         self.folders
@@ -512,15 +530,14 @@ impl VolumeReader {
                 .folders
                 .as_mut()
                 .expect("begin_page made the copy of a volume with rows left");
-            let (idx, frn) = self.answer.rows.get(self.next);
-            let sendable = index.holds(idx, frn)
-                && match self.answer.scope {
-                    Some((scope, _)) => in_scope(index, idx, scope, &mut self.scope_memo),
-                    None => true,
-                };
-            if sendable {
-                self.head = folders.entry_folder(index, idx, names);
-            }
+            self.head = row_folder(
+                index,
+                self.answer.rows.get(self.next),
+                self.answer.scope,
+                &mut self.scope_memo,
+                folders,
+                names,
+            );
             if self.head.is_none() {
                 self.next += 1;
                 *total -= 1;
@@ -584,6 +601,28 @@ impl VolumeReader {
     }
 }
 
+/// The folder of the row `(idx, frn)` when a page can send it: its slot still
+/// holds the file, the file is under `scope`, and its folder has a full path.
+/// `scope_memo` keeps which folders are under the scope for the page.
+fn row_folder(
+    index: &VolumeIndex,
+    (idx, frn): (EntryIdx, Frn),
+    scope: Option<(EntryIdx, Frn)>,
+    scope_memo: &mut FxHashMap<EntryIdx, bool>,
+    folders: &mut FolderCopy,
+    names: &mut ResultNames,
+) -> Option<FolderId> {
+    if !index.holds(idx, frn) {
+        return None;
+    }
+    if let Some((scope, _)) = scope
+        && !in_scope(index, idx, scope, scope_memo)
+    {
+        return None;
+    }
+    folders.entry_folder(index, idx, names)
+}
+
 /// A row as the merge of several volumes reads it: straight from its index.
 struct Live<'a> {
     index: &'a VolumeIndex,
@@ -622,6 +661,361 @@ impl OrderFields for Live<'_> {
     }
 }
 
+/// One volume as a search holds it: its index, under the volume's read lock
+/// until this is dropped, and the volume's state, read in the same hold
+/// because a state read on its own could describe another index.
+pub struct HeldVolume<I> {
+    pub index: I,
+    /// The index is as complete as gozler can make it, as
+    /// [`VolumePhase::is_complete`](crate::types::VolumePhase::is_complete)
+    /// says.
+    pub complete: bool,
+    /// The size and date pass failed or stopped, so some sizes and dates are
+    /// unknown.
+    pub metadata_pending: bool,
+}
+
+/// A volume that [`ResultRows::search`] and [`search_totals`] read.
+///
+/// A page holds the read locks of several volumes at once, and takes them in
+/// the order the volumes were given. A caller whose volumes other requests
+/// can lock at the same time gives them in one fixed order, as gozlerd gives
+/// its `VolumeSet`: a reader waits behind a waiting writer, so two requests
+/// that took the locks in different orders could each wait for the other's
+/// volume.
+pub trait IndexedVolume {
+    /// The volume's index, held under its read lock until it is dropped.
+    type Index<'a>: Deref<Target = VolumeIndex>
+    where
+        Self: 'a;
+
+    /// Takes the volume's read lock.
+    fn read(&self) -> HeldVolume<Self::Index<'_>>;
+
+    /// Where the volume is mounted: a scope reaches the volume by it, and its
+    /// rows print with its [`VolumeMounts::display_prefix`].
+    fn mounts(&self) -> VolumeMounts<'_>;
+}
+
+/// A shared volume reads as the volume it points to, so a search can own the
+/// volumes it reads while their owner keeps them too.
+impl<T: IndexedVolume + ?Sized> IndexedVolume for Arc<T> {
+    type Index<'a>
+        = T::Index<'a>
+    where
+        Self: 'a;
+
+    fn read(&self) -> HeldVolume<Self::Index<'_>> {
+        (**self).read()
+    }
+
+    fn mounts(&self) -> VolumeMounts<'_> {
+        (**self).mounts()
+    }
+}
+
+/// A volume searched through a plain borrow of its index, which nothing can
+/// change while it is borrowed: the volume [`run_query`] searches for tests,
+/// the benches and `gozlerd scan`. It reads as complete, with every size and
+/// date known.
+#[derive(Clone, Copy)]
+pub(crate) struct PlainVolume<'a> {
+    index: &'a VolumeIndex,
+    mounts: VolumeMounts<'a>,
+}
+
+impl IndexedVolume for PlainVolume<'_> {
+    type Index<'a>
+        = &'a VolumeIndex
+    where
+        Self: 'a;
+
+    fn read(&self) -> HeldVolume<&VolumeIndex> {
+        HeldVolume {
+            index: self.index,
+            complete: true,
+            metadata_pending: false,
+        }
+    }
+
+    fn mounts(&self) -> VolumeMounts<'_> {
+        self.mounts
+    }
+}
+
+/// The rows a search returns.
+#[derive(Clone, Copy, Debug)]
+pub struct RowsSpec {
+    pub sort: SortSpec,
+    /// Rows to skip from the start of the result order.
+    pub offset: u32,
+    /// The most rows to return; `None` returns every row.
+    pub limit: Option<u32>,
+    /// Count every match's files and folders and sum their sizes
+    /// ([`ResultRows::sums`]).
+    pub sums: bool,
+}
+
+/// A search's scope is on no indexed volume, such as a network drive or a
+/// drive letter that does not exist. The search is refused, because an empty
+/// answer would read as "no such file".
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{scope} is not on an indexed volume; gozlerd indexes fixed NTFS and ReFS volumes")]
+pub struct NotIndexed {
+    scope: String,
+}
+
+/// Why [`search_totals`] has no totals.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TotalsError {
+    #[error(transparent)]
+    NotIndexed(#[from] NotIndexed),
+    #[error(transparent)]
+    Overflow(#[from] SizeOverflow),
+}
+
+/// The totals of every match of a search, and whether they may be short.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchTotals {
+    pub totals: Totals,
+    /// As [`ResultRows::volumes_incomplete`].
+    pub volumes_incomplete: bool,
+    /// As [`ResultRows::metadata_pending`]: a file whose size is unknown adds
+    /// nothing.
+    pub metadata_pending: bool,
+}
+
+/// The rows of a search over several volumes, merged in the result order and
+/// read a page at a time with [`Self::page`]. It keeps the volumes it
+/// searched, whose read locks each page takes.
+pub struct ResultRows<V> {
+    /// The volumes with rows, in the order given, which the answers of
+    /// `reply` follow.
+    volumes: Vec<V>,
+    reply: Reply,
+    sums: Option<MatchSums>,
+    coverage: Coverage,
+}
+
+impl<V: IndexedVolume> ResultRows<V> {
+    /// Searches `volumes` below `scope`, an absolute folder, or everywhere
+    /// without one, for the rows `spec` asks for, and drops the volumes it
+    /// does not search. A volume whose index changed between its two holds
+    /// gives no rows, and the answer says it is incomplete.
+    ///
+    /// # Errors
+    ///
+    /// [`NotIndexed`] when `scope` is on none of `volumes`.
+    pub fn search(
+        volumes: Vec<V>,
+        query: &CompiledQuery,
+        scope: Option<&str>,
+        spec: RowsSpec,
+    ) -> Result<Self, NotIndexed> {
+        // The offset applies after the volumes merge, so each volume keeps
+        // the rows up to the limit's end.
+        let per_volume_limit = spec.limit.map(|limit| spec.offset.saturating_add(limit));
+        let (found, mut coverage) = run_held(
+            targets(volumes, scope)?,
+            query.match_case(),
+            |index, mount_prefix, scope| {
+                find_matches(
+                    index,
+                    mount_prefix,
+                    query,
+                    scope,
+                    spec.sort,
+                    per_volume_limit,
+                    spec.sums,
+                )
+            },
+        );
+        let mut sums = spec.sums.then(MatchSums::default);
+        let mut volumes = Vec::with_capacity(found.len());
+        let mut answers = Vec::with_capacity(found.len());
+        for (volume, matches) in found {
+            // Without a hold, so the journal does not wait for the sort.
+            let ordered = matches.order();
+            let read = ordered.read_rows(&volume.read().index);
+            match read {
+                Ok(answer) => {
+                    if let (Some(sums), Some(found)) = (sums.as_mut(), answer.sums()) {
+                        sums.add(found);
+                    }
+                    volumes.push(volume);
+                    answers.push(answer);
+                }
+                // `IndexChanged` says why this volume's rows are lost.
+                Err(IndexChanged) => coverage.volumes_incomplete = true,
+            }
+        }
+        Ok(Self {
+            volumes,
+            reply: Reply::new(answers, spec.offset, spec.limit),
+            sums,
+            coverage,
+        })
+    }
+
+    /// Reads the next page. It holds the read lock of each volume the page
+    /// reads, in the order the volumes were given, and hands each row to
+    /// `push` with the folders it names, until `push` refuses one, no row is
+    /// left, or it read `page_rows` rows, sent or skipped for the offset. It
+    /// releases the locks before it returns, so the caller sends the page
+    /// without them. Returns whether rows are left: a row `push` refused is
+    /// read again for the next page.
+    pub fn page(
+        &mut self,
+        page_rows: usize,
+        push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
+    ) -> bool {
+        let held: Vec<Option<V::Index<'_>>> = self
+            .volumes
+            .iter()
+            .enumerate()
+            .map(|(v, volume)| self.reply.reads_volume(v).then(|| volume.read().index))
+            .collect();
+        let indexes: Vec<Option<&VolumeIndex>> = held.iter().map(Option::as_deref).collect();
+        self.reply.fill(&indexes, page_rows, push)
+    }
+
+    /// The matches, less every row left out so far: the total each page
+    /// reports.
+    pub fn total(&self) -> u64 {
+        self.reply.total()
+    }
+
+    /// The rows not read yet, at most the limit's: what sizes a page.
+    pub fn rows_left(&self) -> usize {
+        self.reply.rows_left()
+    }
+
+    /// Every match's files and folders and their sizes, when the search asked
+    /// for them.
+    pub fn sums(&self) -> Option<MatchSums> {
+        self.sums
+    }
+
+    /// Whether the answer may be short: a volume searched was indexing,
+    /// rescanning or offline when it was searched, or its index changed
+    /// during the search, so its rows stopped.
+    pub fn volumes_incomplete(&self) -> bool {
+        self.coverage.volumes_incomplete || self.reply.index_changed()
+    }
+
+    /// Whether the size and date pass failed or stopped on a volume searched,
+    /// so some sizes and dates are unknown.
+    pub fn metadata_pending(&self) -> bool {
+        self.coverage.metadata_pending
+    }
+}
+
+/// The totals of every match of `query` over `volumes` below `scope`, an
+/// absolute folder, or everywhere without one. Each volume sums its matches
+/// under one hold from the sizes its index holds, so no row is made:
+/// `-get-folder-size C:\` covers the whole volume.
+///
+/// # Errors
+///
+/// [`TotalsError::NotIndexed`] when `scope` is on none of `volumes`, and
+/// [`TotalsError::Overflow`] when the summed size passes `u64::MAX`.
+pub fn search_totals<V: IndexedVolume>(
+    volumes: Vec<V>,
+    query: &CompiledQuery,
+    scope: Option<&str>,
+) -> Result<SearchTotals, TotalsError> {
+    let (per_volume, coverage) = run_held(
+        targets(volumes, scope)?,
+        query.match_case(),
+        |index, mount_prefix, scope| run_totals(index, mount_prefix, query, scope),
+    );
+    let mut totals = Totals::default();
+    for (_, volume) in per_volume {
+        totals.add(volume?)?;
+    }
+    Ok(SearchTotals {
+        totals,
+        volumes_incomplete: coverage.volumes_incomplete,
+        metadata_pending: coverage.metadata_pending,
+    })
+}
+
+/// What the volumes a search reached said about its answer, read once, at
+/// each volume's first hold: read again for a page, a rescan that began
+/// later would mark rows from a complete index incomplete.
+#[derive(Clone, Copy, Default)]
+struct Coverage {
+    /// A volume searched is indexing, rescanning or offline, or its index
+    /// changed during the search.
+    volumes_incomplete: bool,
+    /// The size and date pass failed or stopped on a volume searched.
+    metadata_pending: bool,
+}
+
+/// What a search reads of one volume: all of it, or the folder below its
+/// mount that the scope names. [`run_held`] resolves the folder under the
+/// same hold as the scan; otherwise a rebuild between the two could swap the
+/// index and leave the resolved entry stale (wrong or empty results, or an
+/// out-of-bounds panic).
+enum VolScope<'s> {
+    All,
+    Folder(&'s str),
+}
+
+/// The volumes that `scope` reaches, by the rule the clients also wait by
+/// ([`Scope::of`]), each with what of it the search reads; the other volumes
+/// are dropped.
+fn targets<'s, V: IndexedVolume>(
+    volumes: Vec<V>,
+    scope: Option<&'s str>,
+) -> Result<Vec<(V, VolScope<'s>)>, NotIndexed> {
+    match Scope::of(scope, volumes.iter().map(|v| v.mounts())) {
+        Scope::Everywhere => Ok(volumes.into_iter().map(|v| (v, VolScope::All)).collect()),
+        Scope::Folder { volume, folder } => {
+            let volume = volumes
+                .into_iter()
+                .nth(volume)
+                .expect("Scope::of routes to one of the volumes");
+            Ok(vec![(volume, VolScope::Folder(folder))])
+        }
+        Scope::Nowhere => Err(NotIndexed {
+            scope: scope
+                .expect("only a scope can miss every volume")
+                .to_string(),
+        }),
+    }
+}
+
+/// Runs `run` under one hold of each target's index, with its mount prefix
+/// and its scope folder resolved, and returns each volume with what `run`
+/// returned. A volume without the scope folder holds no match and is
+/// dropped; its state still counts.
+fn run_held<V: IndexedVolume, T>(
+    targets: Vec<(V, VolScope<'_>)>,
+    match_case: bool,
+    mut run: impl FnMut(&VolumeIndex, &str, Option<EntryIdx>) -> T,
+) -> (Vec<(V, T)>, Coverage) {
+    let mut coverage = Coverage::default();
+    let mut results = Vec::with_capacity(targets.len());
+    for (volume, scope) in targets {
+        let held = volume.read();
+        coverage.volumes_incomplete |= !held.complete;
+        coverage.metadata_pending |= held.metadata_pending;
+        let index: &VolumeIndex = &held.index;
+        let scope = match scope {
+            VolScope::All => None,
+            VolScope::Folder(folder) => match resolve_scope(index, folder.as_bytes(), match_case) {
+                Some(entry) => Some(entry),
+                None => continue,
+            },
+        };
+        let result = run(index, volume.mounts().display_prefix(), scope);
+        drop(held);
+        results.push((volume, result));
+    }
+    (results, coverage)
+}
+
 /// What [`run_query`] returns: the full match count, and the rows with their
 /// full paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -643,24 +1037,39 @@ pub struct PathRow {
 }
 
 /// Runs a query over `index`, the volume mounted at `mount_prefix` (`C:\`),
-/// as [`find_matches`] says, and reads its rows as one page, for a caller
-/// that holds the index for the whole query and wants full paths: tests, the
-/// benches and the daemon's demo query.
+/// below `scope`, an absolute folder on it, and reads its rows as one page
+/// with their full paths, for a caller that owns the index: tests, the
+/// benches and `gozlerd scan`.
+///
+/// # Panics
+///
+/// When `scope` is not on the volume.
 pub fn run_query(
     index: &VolumeIndex,
     mount_prefix: &str,
     query: &CompiledQuery,
-    scope: Option<EntryIdx>,
+    scope: Option<&str>,
     sort: SortSpec,
     limit: Option<u32>,
 ) -> QueryOutcome {
-    let answer = find_matches(index, mount_prefix, query, scope, sort, limit, false)
-        .order()
-        .read_rows(index)
-        .expect("the index is borrowed for the whole query, so it cannot change");
-    let mut reply = Reply::new(vec![answer], 0, None);
+    let mounts = [mount_prefix.to_string()];
+    let volume = PlainVolume {
+        index,
+        mounts: VolumeMounts {
+            mounts: &mounts,
+            guid: "",
+        },
+    };
+    let spec = RowsSpec {
+        sort,
+        offset: 0,
+        limit,
+        sums: false,
+    };
+    let mut reply =
+        ResultRows::search(vec![volume], query, scope, spec).expect("the scope is on the volume");
     let mut rows = Vec::new();
-    reply.fill(&[Some(index)], usize::MAX, |row, names| {
+    reply.page(usize::MAX, |row, names| {
         let mut path = Vec::new();
         names.full_path_into(row.folder, row.name, &mut path);
         rows.push(PathRow {
@@ -686,6 +1095,7 @@ mod tests {
     use crate::query::paths::{DirPaths, NameForm};
     use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
     use proptest::prelude::*;
+    use std::cell::{Cell, RefCell};
 
     /// The folders of every volume of the merge: `Data` and `Data2` beside
     /// the volumes mounted at `C:\Data\` and `C:\Data2\`, `a b`, whose space
@@ -754,25 +1164,21 @@ mod tests {
         ) {
             let indexes: Vec<VolumeIndex> = mounts.iter().zip(&files).map(|(_, f)| volume(f)).collect();
             let held: Vec<&VolumeIndex> = indexes.iter().collect();
+            let mount_lists: Vec<[String; 1]> = mounts.iter().map(|m| [m.to_string()]).collect();
             let query = CompiledQuery::new(&parse_query("").expect("parses")).expect("compiles");
+            // The empty search matches every entry of every volume.
+            let all: Vec<(usize, EntryIdx)> = held
+                .iter()
+                .enumerate()
+                .flat_map(|(v, index)| {
+                    index
+                        .live_entries()
+                        .filter(|&idx| !index.is_synthetic(idx))
+                        .map(move |idx| (v, idx))
+                })
+                .collect();
             for sort in all_sorts() {
-                let answers: Vec<VolumeRows> = mounts
-                    .iter()
-                    .zip(&held)
-                    .map(|(mount, index)| {
-                        find_matches(index, mount, &query, None, sort, None, false)
-                            .order()
-                            .read_rows(index)
-                            .expect("nothing changed")
-                    })
-                    .collect();
-
                 // Every row of every volume, sorted by the result order.
-                let all: Vec<(usize, EntryIdx)> = answers
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(v, a)| (0..a.rows.len()).map(move |at| (v, a.rows.get(at).0)))
-                    .collect();
                 let mut folded: Vec<DirPaths> = held
                     .iter()
                     .zip(&mounts)
@@ -804,24 +1210,160 @@ mod tests {
                     })
                     .collect();
 
-                let mut reply = Reply::new(answers, 0, None);
+                let volumes: Vec<PlainVolume> = indexes
+                    .iter()
+                    .zip(&mount_lists)
+                    .map(|(index, mounts)| PlainVolume {
+                        index,
+                        mounts: VolumeMounts { mounts, guid: "" },
+                    })
+                    .collect();
+                let spec = RowsSpec { sort, offset: 0, limit: None, sums: false };
+                let mut reply = ResultRows::search(volumes, &query, None, spec).expect("no scope");
                 let mut merged = Vec::new();
-                loop {
-                    let page: Vec<Option<&VolumeIndex>> = (0..held.len())
-                        .map(|v| reply.reads_volume(v).then_some(held[v]))
-                        .collect();
-                    let more = reply.fill(&page, usize::MAX, |row, names| {
-                        let mut path = Vec::new();
-                        names.full_path_into(row.folder, row.name, &mut path);
-                        merged.push(path);
-                        true
-                    });
-                    if !more {
-                        break;
-                    }
-                }
+                while reply.page(usize::MAX, |row, names| {
+                    let mut path = Vec::new();
+                    names.full_path_into(row.folder, row.name, &mut path);
+                    merged.push(path);
+                    true
+                }) {}
                 prop_assert_eq!(&merged, &expected, "{:?} on {:?}", sort, mounts);
             }
         }
+    }
+
+    /// A volume that notes, by its number, each time a search takes its read
+    /// lock, and counts the holds alive.
+    struct Noted<'a> {
+        number: usize,
+        index: &'a VolumeIndex,
+        mounts: [String; 1],
+        taken: &'a RefCell<Vec<usize>>,
+        alive: &'a Cell<usize>,
+    }
+
+    struct NotedHold<'a> {
+        index: &'a VolumeIndex,
+        alive: &'a Cell<usize>,
+    }
+
+    impl Deref for NotedHold<'_> {
+        type Target = VolumeIndex;
+
+        fn deref(&self) -> &VolumeIndex {
+            self.index
+        }
+    }
+
+    impl Drop for NotedHold<'_> {
+        fn drop(&mut self) {
+            self.alive.set(self.alive.get() - 1);
+        }
+    }
+
+    impl IndexedVolume for Noted<'_> {
+        type Index<'h>
+            = NotedHold<'h>
+        where
+            Self: 'h;
+
+        fn read(&self) -> HeldVolume<NotedHold<'_>> {
+            self.taken.borrow_mut().push(self.number);
+            self.alive.set(self.alive.get() + 1);
+            HeldVolume {
+                index: NotedHold {
+                    index: self.index,
+                    alive: self.alive,
+                },
+                complete: true,
+                metadata_pending: false,
+            }
+        }
+
+        fn mounts(&self) -> VolumeMounts<'_> {
+            VolumeMounts {
+                mounts: &self.mounts,
+                guid: "",
+            }
+        }
+    }
+
+    /// A page takes the read locks of the volumes it reads in the order the
+    /// volumes were given, not in the order their rows merge, and holds none
+    /// once it returns. A reader waits behind a waiting writer, so two
+    /// requests that took the locks in different orders could each wait for
+    /// the other's volume, and gozlerd would hang.
+    #[test]
+    fn a_page_locks_its_volumes_in_the_order_given_and_releases_them() {
+        let root_file = |name: &str| volume(&[(FOLDERS.len(), name.to_string(), None)]);
+        let indexes = [root_file("b.txt"), root_file("a.txt")];
+        let taken = RefCell::new(Vec::new());
+        let alive = Cell::new(0);
+        let volumes = indexes
+            .iter()
+            .zip([r"D:\", r"C:\"])
+            .enumerate()
+            .map(|(number, (index, mount))| Noted {
+                number,
+                index,
+                mounts: [mount.to_string()],
+                taken: &taken,
+                alive: &alive,
+            })
+            .collect();
+        let query = CompiledQuery::new(&parse_query("txt").expect("parses")).expect("compiles");
+        let spec = RowsSpec {
+            sort: SortSpec::default_for(SortKey::Name),
+            offset: 0,
+            limit: None,
+            sums: false,
+        };
+        let mut rows = ResultRows::search(volumes, &query, None, spec).expect("no scope");
+        taken.borrow_mut().clear();
+        let mut names = Vec::new();
+        let more = rows.page(usize::MAX, |row, _| {
+            names.push(row.name.to_vec());
+            true
+        });
+        assert!(!more);
+        assert_eq!(
+            names,
+            [b"a.txt", b"b.txt"],
+            "the second volume's row comes first"
+        );
+        assert_eq!(*taken.borrow(), [0, 1], "the page locks in the order given");
+        assert_eq!(alive.get(), 0, "the page holds no lock once it returns");
+    }
+
+    /// A file whose size is unknown, as after a size pass that stopped, is
+    /// counted apart and leaves the known sizes in the sum, so the window
+    /// shows the space found instead of "size unknown" for every match.
+    #[test]
+    fn a_sum_keeps_the_known_sizes_and_counts_the_unknown_ones() {
+        let index = volume(&[
+            (0, "read.txt".to_string(), Some(5)),
+            (0, "unread.txt".to_string(), None),
+        ]);
+        let mounts = [r"C:\".to_string()];
+        let plain = PlainVolume {
+            index: &index,
+            mounts: VolumeMounts {
+                mounts: &mounts,
+                guid: "",
+            },
+        };
+        let query = CompiledQuery::new(&parse_query("txt").expect("parses")).expect("compiles");
+        let spec = RowsSpec {
+            sort: SortSpec::default_for(SortKey::Name),
+            offset: 0,
+            limit: None,
+            sums: true,
+        };
+        let rows = ResultRows::search(vec![plain], &query, None, spec).expect("no scope");
+        let sums = rows.sums().expect("the search asked for sums");
+        assert_eq!(
+            (sums.files, sums.file_bytes, sums.files_without_size),
+            (2, 5, 1)
+        );
     }
 }

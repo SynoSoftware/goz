@@ -72,12 +72,15 @@ Each stage is one or more commits, each of which passes `check.ps1`
   bits and the path clauses. `find_matches` and `run_totals` use `scan`, and
   `total` is counted after `evaluate`.
 - **A search reads each volume in several holds of its read lock.**
-  `stream_rows` (`gozler-daemon/src/server.rs`) runs `find_matches` under
-  one hold of `VolumeState::read`, orders the matches with no lock, reads
-  the rows with `read_rows` in a second hold, and reads each page in another
-  (`Reply::fill`, which calls `find_head`, `query/rows.rs`). `read_rows`
-  refuses an index with another instance. `find_head` already leaves out a
-  row that is gone and takes it off the total. `totals` runs in one hold.
+  `ResultRows::search` (`query/rows.rs`) runs `find_matches` under one hold
+  of each volume's `IndexedVolume::read` (in gozlerd, `VolumeState::read`),
+  orders the matches with no lock, and reads the rows with `read_rows` in a
+  second hold. `ResultRows::page` reads each page in another hold
+  (`Reply::fill`, which calls `find_head`). Both first holds run in
+  `run_held`. `read_rows` refuses an index with another instance.
+  `find_head` already leaves out a row that is gone and takes it off the
+  total. `search_totals` runs in one hold. gozlerd's `stream_rows` only
+  loops over `proto::encode_page`.
 - **The index is compacted.** `compact_entries` moves live entries over free
   slots (`EntryTable::compact`, `compact_column`) and gives the index a new
   instance, so a running search sees `IndexChanged`. `EntryTable`'s columns
@@ -504,11 +507,13 @@ user count, and so name, hidden entries. The window's preview line shows
 that refusal's text, as `preview_counted` in `gozler-ui/src/app/settings.rs`
 already shows every refused count, so the window needs no change.
 
-**The answers.** `run_on_volumes` gains the request's `&Visibility`. For
-`Visibility::Caller`, right after it takes a volume's read guard and before
-the scan, it builds that volume's `Listable` with a closure that calls
-`ClientToken::may_list` and maps an error to `false`, so an error hides
-rather than shows. The request keeps each volume's `Listable` to its end:
+**The answers.** `ResultRows::search` and `search_totals` gain one input
+for what the request sees: everything, or a `may_list` closure, which
+gozlerd makes from `Visibility::Caller` by calling `ClientToken::may_list`
+and mapping an error to `false`, so an error hides rather than shows. The
+input is a closure, not `Visibility`, because `gozler-core` holds no token.
+`run_held`, right after it takes a volume's read guard and before the scan,
+builds that volume's `Listable` with it. The request keeps each volume's `Listable` to its end:
 `read_rows` and every page's `find_head` use the same answers in their later
 holds. They stay valid there, because IDs are only added within an instance,
 `read_rows` refuses a new instance, compaction makes one, and an ID past the
@@ -520,8 +525,8 @@ does: `OrderedMatches::read_rows(index, seen_by)` takes the volume's
 `SeenBy` beside its index, and keeps it in `Ranked` for `order_ties`;
 `Reply::fill(indexes, seen_by, page_rows, push)` takes one `SeenBy` per
 volume, beside `indexes`, and passes it to `find_head`, `Live` and the
-`entry` call that reads each row. `stream_rows` holds the `Listable`s for
-the whole reply. So under a caller every folder's size is `None` in the
+`entry` call that reads each row. `ResultRows` holds the `Listable`s for the
+whole reply, beside the volumes it reads. So under a caller every folder's size is `None` in the
 sort's tie runs and in the merge too: folders of equal key are ordered by
 name, never by the real size the caller may not learn.
 
@@ -583,8 +588,10 @@ one row test `is_seen` are what [that plan](result-snapshot.md) builds on.
   `query/paths.rs`, `in_scope` and `resolve_scope` in `query/engine.rs`,
   `index/volume.rs` itself, `index/tests.rs`, and `run_demo_query` in
   `gozler-daemon/src/main.rs` (`gozlerd scan`).
-- The golden corpora run with `Access::Sees(Visibility::Everything)`, so
-  their rows do not change.
+- The golden corpora see everything, so their rows do not change: the search
+  corpus (`gozler-core`'s `escompat::corpus`) calls `ResultRows::search`
+  with the "everything" input, and gozlerd's `serve` tests run with
+  `Access::Sees(Visibility::Everything)`.
 
 ### Folder sizes
 
@@ -988,8 +995,8 @@ Each test names the failure it watches.
   end panics the daemon, or a long export shows a file moved into a hidden
   folder.
 - **T6. `Everything` changes nothing** (stage 2a). The golden corpora run
-  unchanged with `Access::Sees(Visibility::Everything)`. No new test: the
-  existing rows are the check.
+  unchanged, seeing everything (see "The filter"). No new test: the existing
+  rows are the check.
 - **T7. The daemon refuses an unknown caller and filters a caller** (stage
   2a). A `server.rs` test of `serve` with `Access::Refused`: `Search` and
   `CountIncluded` get `ProtoError::Unsupported` with the message; `Hello`,

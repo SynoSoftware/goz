@@ -89,20 +89,17 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
     idx.insert_enum(&rec(frn, 0, "report-root.txt", false));
 
     let parsed = compiled("report");
-    let scope =
-        gozler_core::query::resolve_scope(&idx, b"downloads", false).expect("scope resolves");
-
     let scoped = gozler_core::query::run_query(
         &idx,
-        "",
+        r"C:\",
         &parsed,
-        Some(scope),
+        Some(r"C:\downloads"),
         gozler_core::types::SortSpec::default(),
         None,
     );
     let unscoped = gozler_core::query::run_query(
         &idx,
-        "",
+        r"C:\",
         &parsed,
         None,
         gozler_core::types::SortSpec::default(),
@@ -111,7 +108,7 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
 
     let mut want: Vec<Vec<u8>> = full_paths(&unscoped)
         .into_iter()
-        .filter(|path| path.starts_with(b"downloads\\"))
+        .filter(|path| path.starts_with(br"C:\downloads\"))
         .collect();
     let mut got = full_paths(&scoped);
     want.sort();
