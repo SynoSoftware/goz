@@ -1032,12 +1032,15 @@ impl Panel {
     /// the old rows' entries to the new ones', which costs the selection,
     /// not the folder.
     fn select(&mut self, selected: Vec<Range<u64>>) {
-        let up = self.up_rows();
-        for (ranges, mark) in [(&self.selected, false), (&selected, true)] {
-            for row in ranges.iter().flat_map(Clone::clone) {
-                let at = row.checked_sub(up).and_then(|at| usize::try_from(at).ok());
-                if let Some(i) = at.and_then(|at| self.shown_at(at)) {
-                    self.entries[i].selected = mark;
+        // A search panel has no entries; its list holds its selection.
+        if self.search().is_none() {
+            let up = self.up_rows();
+            for (ranges, mark) in [(&self.selected, false), (&selected, true)] {
+                for row in ranges.iter().flat_map(Clone::clone) {
+                    let at = row.checked_sub(up).and_then(|at| usize::try_from(at).ok());
+                    if let Some(i) = at.and_then(|at| self.shown_at(at)) {
+                        self.entries[i].selected = mark;
+                    }
                 }
             }
         }
@@ -1686,6 +1689,10 @@ pub(crate) struct Panels {
     /// Orders the ends of operations and the starts of readings, and
     /// names each reading.
     moment: u64,
+    /// The entries that deletes and moves have taken, which the lists show
+    /// blank and the selections leave out (file-manager-spec.md: The person
+    /// never waits for the disk); one for all lists, Search's too, which
+    /// each decide with their own kept operations.
     taken: Arc<Taken>,
     /// The drives' labels as the labels thread last read them, by letter.
     labels: HashMap<char, String>,
@@ -2470,6 +2477,11 @@ impl Panels {
         out
     }
 
+    /// The entries that deletes and moves have taken, for every list.
+    pub(super) fn taken(&self) -> &Arc<Taken> {
+        &self.taken
+    }
+
     /// Whether either panel keeps the ended operation `id`.
     pub(crate) fn keep(&self, id: OperationId) -> bool {
         self.panels.iter().any(|panel| panel.keeps(id))
@@ -2478,7 +2490,7 @@ impl Panels {
     /// The taken entries changed: each folder panel's rows show without
     /// them, and each search panel's selection loses them. `focused` are
     /// the lists' focused rows, by side.
-    pub(crate) fn set_taken(
+    pub(super) fn set_taken(
         &mut self,
         taken: Arc<Taken>,
         focused: [Option<u64>; 2],

@@ -2265,8 +2265,9 @@ impl PanelCaptions {
 }
 
 /// A search panel's status line: "Searching…" until its first answer,
-/// then its total and where it searched, or how many of them are selected
-/// and their size once read; nothing while the list shows a message
+/// then its total and where it searched, also "0 results in …" beside the
+/// list's no-results message, or how many of them are selected and their
+/// size once read; nothing while the list shows another message
 /// (file-manager-spec.md: Search in a panel). The count is gozlerd's total,
 /// as Search's is, also past the rows the list reaches.
 fn search_counts(
@@ -2280,7 +2281,7 @@ fn search_counts(
         return strings.text("status.searching").to_owned();
     }
     let total = results.total();
-    if !matches!(results.shown(), Shown::Rows(_)) || total == 0 {
+    if !matches!(results.shown(), Shown::Rows(_)) {
         return String::new();
     }
     let selected =
@@ -2321,7 +2322,10 @@ pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
                 none.to_owned()
             }
         }
-        Shown::Nothing | Shown::Rows(_) => return None,
+        // Only Search's list has a Location folder that can be missing.
+        Shown::Nothing | Shown::Rows(_) | Shown::Message(ListMessage::MissingFolder(_)) => {
+            return None;
+        }
         Shown::Message(ListMessage::Parse(error)) => query_error(strings, error),
         Shown::Message(ListMessage::Failure(failure)) => failure_text(strings, failure),
         Shown::Message(ListMessage::TypeToSearch) if this_folder => {
@@ -2332,9 +2336,6 @@ pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
         }
         Shown::Message(ListMessage::NotIndexed { root }) => {
             strings.format("panel.search_not_indexed", &[root])
-        }
-        Shown::Message(ListMessage::MissingFolder(folder)) => {
-            strings.format("list.missing_folder", &[folder])
         }
     })
 }

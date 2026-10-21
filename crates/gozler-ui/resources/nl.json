@@ -496,7 +496,7 @@
     "shortcut_failed": "Kan {0} niet gebruiken. {1}",
     "lock": "Windows reserveert {0} voor het vergrendelen van de computer. Kies een andere sneltoets.",
     "two_modifiers": "Kies een sneltoets met twee van Ctrl, Alt en Shift, of met de Windows-toets.",
-    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L en Ctrl+R, en Alt met een letter of een cijfer. Een sneltoets op een van deze toetsen werkt alleen in Zoeken."
+    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met een letter, cijfer, komma of punt. Een sneltoets op deze toetsen werkt alleen in Zoeken."
   },
   "settings_file_operations": {
     "speed": "Sne&lheidsinstellingen:",

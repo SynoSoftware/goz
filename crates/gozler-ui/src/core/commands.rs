@@ -940,6 +940,10 @@ const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
         MenuItem::Run(CommandId::Find),
     ),
     (
+        Keystroke::ctrl(Key::Letter(b'F')),
+        MenuItem::Run(CommandId::Find),
+    ),
+    (
         Keystroke::ctrl(Key::Letter(b'R')),
         MenuItem::Run(CommandId::Refresh),
     ),
@@ -1727,9 +1731,16 @@ mod tests {
             takes(Mode::TwoPanels, Keystroke::alt(Key::Function(7))),
             find
         );
+        let ctrl_f = Keystroke::ctrl(Key::Letter(b'F'));
         for mode in Mode::ALL {
-            assert_eq!(takes(mode, Keystroke::ctrl(Key::Letter(b'F'))), find);
+            assert_eq!(takes(mode, ctrl_f), find);
         }
+        // Two panels keeps `Ctrl+F` for Find when the person's shortcut
+        // for Find moves elsewhere, as the Keyboard page says.
+        let mut moved = shortcuts.clone();
+        moved.remove(CommandId::Find, ctrl_f);
+        let fixed = (ctrl_f, MenuItem::Run(CommandId::Find));
+        assert!(accelerators(&moved, Mode::TwoPanels).contains(&fixed));
         let shown = |mode, command| items(&menu_bar(mode)).contains(&MenuItem::Run(command));
         assert!(shown(Mode::Search, CommandId::Refresh));
         assert!(!shown(Mode::TwoPanels, CommandId::Copy));

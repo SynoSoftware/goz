@@ -3545,8 +3545,7 @@ impl MainWindow {
             .map(FileOperations::take_ended)
             .unwrap_or_default();
         let follow = self.model.borrow_mut().operations_ended(&ended, &taken);
-        self.show_panels_taken(hwnd, Arc::clone(&taken), follow);
-        let accepted = self.model.borrow_mut().set_taken(taken);
+        let accepted = self.show_panels_taken(hwnd, taken, follow);
         let lost = matches!(accepted.change, Change::Selection(List::Search));
         self.apply(hwnd, accepted);
         let reading = matches!(
@@ -3561,20 +3560,23 @@ impl MainWindow {
     /// files or is read, so the list may still draw a taken row it selects
     /// highlighted, and deselects each one.
     fn show_list_taken(&self, list: List, deselect: bool) {
-        let control = self.list_control(list);
         if deselect {
-            let selected_taken: Vec<u64> = {
-                let model = self.model.borrow();
-                (control.selected().into_iter().flatten())
-                    .filter(|&row| model.row_taken(list, row))
-                    .collect()
-            };
-            // Each deselect notifies the window, so nothing is borrowed here.
-            for row in selected_taken {
-                control.deselect(row);
-            }
+            self.deselect_taken(list);
         }
+        let control = self.list_control(list);
         control.redraw_rows(control.visible_rows());
+    }
+
+    /// Deselects `list`'s selected rows whose entries are taken, which show
+    /// blank and which the selection leaves out. Returns whether any was.
+    fn deselect_taken(&self, list: List) -> bool {
+        let control = self.list_control(list);
+        let rows = self.model.borrow().taken_rows(list, &control.selected());
+        // Each deselect notifies the window, so nothing is borrowed here.
+        for &row in &rows {
+            control.deselect(row);
+        }
+        !rows.is_empty()
     }
 
     /// Asks where to export the shown search, and starts the export (DESIGN.md:

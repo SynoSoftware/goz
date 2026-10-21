@@ -26,8 +26,8 @@ pub(crate) enum Selection {
         positions: Vec<Range<u64>>,
         asked: Option<Generation>,
     },
-    /// In position order, each at most once; never one folder alone, which
-    /// is [`Selection::Folder`].
+    /// In position order, each at most once. In Search's list never one
+    /// folder alone, which is [`Selection::Folder`].
     Files(Vec<ResultItem>),
     /// One folder alone, whose contents the inspector shows (DESIGN.md:
     /// Inspector pane).

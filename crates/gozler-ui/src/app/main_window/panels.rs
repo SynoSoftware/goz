@@ -15,7 +15,7 @@ use crate::core::fetch::{List, Purpose};
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
-use crate::core::model::Column;
+use crate::core::model::{Accepted, Column};
 use crate::core::open;
 use crate::core::panel::{
     self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, Place, ReadAsk, ReadChange,
@@ -405,7 +405,6 @@ impl MainWindow {
                 true,
             );
         }
-        // A new search starts in this folder, whatever the last one chose.
         if let Some(look_in) = kind {
             c.look_in
                 .select(LookIn::ALL.iter().position(|l| *l == look_in).unwrap_or(0));
@@ -524,7 +523,6 @@ impl MainWindow {
                 c.list.set_header(index, header);
             }
             c.retry.hwnd().set_text(&captions.retry);
-            c.search.set_cue(&captions.search_cue);
             c.look_in_label.hwnd().set_text(&captions.look_in_label);
             // `show_panel` selects the panel's choice.
             c.look_in.set_items(&captions.look_in, 0);
@@ -1438,6 +1436,11 @@ impl MainWindow {
             list.select(0, false);
             self.panel_changed[side.index()].set(ListChanged::Nothing);
         }
+        // Ctrl+A or a drag also selects a search panel's blank taken rows.
+        let searching = self.model.borrow().panels().search(side).is_some();
+        if searching && self.deselect_taken(List::Panel(side)) {
+            self.panel_changed[side.index()].set(ListChanged::Nothing);
+        }
         let selected = list.selected();
         let search = {
             let mut model = self.model.borrow_mut();
@@ -1814,20 +1817,21 @@ impl MainWindow {
         }
     }
 
-    /// The panels after the taken entries changed, and the panels that
-    /// ended operations make read their folders again or ask for their
-    /// sizes, as `follow` says (fast-copy-delete-spec.md: Taken entries).
+    /// Gives every list the taken entries `taken` and shows the panels
+    /// after them, and the panels that ended operations make read their
+    /// folders again or ask for their sizes, as `follow` says
+    /// (fast-copy-delete-spec.md: Taken entries). Returns what Search's
+    /// list applies.
     pub(super) fn show_panels_taken(
         &self,
         hwnd: Hwnd,
         taken: std::sync::Arc<gozler_fileops::Taken>,
         follow: Vec<(Side, bool, bool)>,
-    ) {
+    ) -> Accepted {
         let shown = Side::BOTH.map(|side| self.place(side));
-        let rows = self
+        let (accepted, rows) = self
             .model
             .borrow_mut()
-            .panels_mut()
             .set_taken(taken, [shown[0].focused, shown[1].focused]);
         for (side, rows) in Side::BOTH.into_iter().zip(rows) {
             match rows {
@@ -1841,7 +1845,7 @@ impl MainWindow {
             self.show_panel(side);
         }
         if self.model.borrow().mode() != Mode::TwoPanels {
-            return;
+            return accepted;
         }
         for (side, again, sizes) in follow {
             if again {
@@ -1853,6 +1857,7 @@ impl MainWindow {
                 hwnd.set_timer(timer::PANEL_AGAIN[side.index()], AGAIN_MS);
             }
         }
+        accepted
     }
 
     /// Removes from the queue the ended deletes and moves that no list
