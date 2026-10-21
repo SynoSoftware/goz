@@ -39,18 +39,18 @@ The reasons:
   refreshes the visible rows, so no row that the user can see changes its
   meaning.
 - **The cost is high.** It is the first daemon state that lives longer than a
-  request. It needs ids, caps, expiry and a sweep. It adds 32 to 64 MB to
+  request. It needs ids, caps and expiry. It adds 32 to 64 MB to
   the daemon while a window holds a broad search. Each result snapshot sorts
   every match, though off the volume's read lock. It needs a protocol
   version.
   The window gets two new states and a new limit on the selection ("What
   changes in gozler-ui").
-- **It must come after visibility.** A result snapshot must belong to the
-  user who made it, and the visibility plan adds that ownership: a view for
-  each user, in a registry with an LRU cap, a sweep once a minute and a lock
-  order. Built before, a result snapshot would either let any user read the
-  rows of another user once visibility lands, or invent a second registry.
-  Built after, it uses the same patterns.
+- **It must come after visibility.** A result snapshot must show each user
+  only the rows they may see, and the visibility plan adds the caller's
+  token to each request and the answers that filter its rows ("Who sees
+  what" there). Built before, a result snapshot would let any user read the
+  rows of another user once visibility lands. Built after, each read filters
+  its rows as a page does.
 - **Waiting costs no rework.** The window keeps the daemon behind one `Ask`
   per request, so the work it already has does not change. Only the items in
   "What changes in gozler-ui" are added.
@@ -110,7 +110,8 @@ The reasons:
   from the index, as a page does today.
 - The total and the two coverage flags (`volumes_incomplete`,
   `metadata_pending`) at the moment of the search.
-- The view that made it (after visibility), and when it was last read.
+- Its id, the user SID of the request that made it, for the caps, and when
+  it was last read.
 
 It never changes after it is made, so readers share it through an `Arc`
 without a lock.
@@ -150,8 +151,12 @@ lock, each row is checked:
 3. Otherwise the row is gone: the file was deleted. A page today leaves such
    a row out; a result snapshot marks it gone instead, because the window
    holds rows by their place.
-4. After visibility, a row the view can no longer see is gone too, so a
+4. A row that the reading request's caller cannot see now is gone too, so a
    result snapshot never shows a name its user has lost the right to see.
+   Each read is a request, so it builds its own answers from the caller's
+   token, as every filtered request does, and tests each row with the same
+   test a page uses (`VolumeIndex::is_seen`). The total a read reports counts
+   only the rows the caller sees.
 
 New files appear only after `F5`, as today.
 
@@ -160,20 +165,20 @@ New files appear only after `F5`, as today.
 | Rule | Value | Why |
 | --- | --- | --- |
 | Where | one `Mutex<ResultSnapshots>` for the daemon | the table is needed beyond one connection |
-| Id | a `u64` from a counter, never reused | a stale id can never name a newer result snapshot |
-| Owner | the view of the request that made it; a request from another view gets "gone" | one user cannot read another user's rows |
-| Per view | at most 2; a third drops the one read least recently | the window's and one other client's |
-| In total | at most twice the entries of all indexes, in rows; past it, the one read least recently is dropped, from any view | caps daemon memory at two empty searches |
-| Expiry | 10 minutes since the last read, dropped by the sweep | a person who looks away for a few minutes keeps scrolling without a new search |
-| Release | the request that makes one may name the one it `replaces`, from the same view | the window frees its old one at once, with no extra request |
-| Lock order | the table's mutex is never held while a volume lock is taken | as the visibility plan's view registry |
+| Id | 128 random bits, never reused | only the client that made it learns it, over its own pipe, so another user can neither guess nor read it, and a stale id can never name a newer result snapshot |
+| Owner | whoever holds the id; each read filters the rows by the reader's own token | one user cannot read another user's rows |
+| Per user | at most 2 for each user SID; a third drops the one read least recently | the window's and one other client's; a memory rule, so the user SID is enough |
+| In total | at most twice the entries of all indexes, in rows; past it, the one read least recently is dropped, from any user | caps daemon memory at two empty searches |
+| Expiry | 10 minutes since the last read, dropped whenever the table is used | a person who looks away for a few minutes keeps scrolling without a new search, and no timer is needed |
+| Release | the request that makes one may name the one it `replaces` | the window frees its old one at once, with no extra request |
+| Lock order | the table's mutex is never held while a volume lock is taken | a search never waits for the table |
 
-The sweep is the visibility plan's once-a-minute task in `accept_loop`. A
-dropped result snapshot costs only a new search.
+A dropped result snapshot costs only a new search.
 
 ### Protocol
 
-`PROTO_VERSION` rises by one (from 7 today).
+`PROTO_VERSION` rises by one: from 10, which the visibility plan sets, to
+11.
 
 - **Make one.** `SearchRequest` with a new `Returns::ResultSnapshot { rows:
   Rows, replaces: Option<ResultSnapshotId> }`. The reply is one JSON frame,
