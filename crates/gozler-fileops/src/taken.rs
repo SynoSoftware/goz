@@ -5,7 +5,8 @@
 //! is D14 on identities. The window asks for every row it paints, so a row
 //! is never compared with every taken path, which a large delete would make
 //! millions of compares per paint: a row is taken when its folded path or
-//! one of its parent paths is in a hash map, one lookup per component.
+//! one of its parent paths is in a hash map, looked up only where a taken
+//! path of that length could end.
 //!
 //! A waiting or running operation takes its sources from every list. An
 //! ended one takes them only from the lists that keep it, because each
@@ -17,7 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::names::fold;
+use crate::names::fold_into;
 use crate::operation::OperationId;
 
 const BACKSLASH: u16 = b'\\' as u16;
@@ -32,6 +33,9 @@ pub struct Taken {
     ids: Vec<Vec<OperationId>>,
     /// Each folded taken path, with its place in `ids`.
     paths: HashMap<Vec<u16>, usize>,
+    /// The lengths of the paths in `paths`, sorted, so a row's parent
+    /// paths of other lengths are not looked up.
+    lengths: Vec<usize>,
     /// The operations in `ids` that have ended.
     ended: HashSet<OperationId>,
     /// Each folded folder that holds a taken path, with the name of each
@@ -80,6 +84,9 @@ impl Taken {
                     (self.folders.entry(path[..slash].to_vec()).or_default())
                         .insert(name.into(), at);
                 }
+                if let Err(place) = self.lengths.binary_search(&path.len()) {
+                    self.lengths.insert(place, path.len());
+                }
                 self.paths.insert(path, at);
                 at
             }
@@ -106,10 +113,19 @@ impl Taken {
         Some(TakenFolder { taken: self, names })
     }
 
-    /// Whether `path`, as UTF-16, equals or is below a path that the
-    /// operation `id` takes.
-    pub fn takes(&self, path: &[u16], id: OperationId) -> bool {
-        self.contains_where(path, |ids| ids.contains(&id))
+    /// Gives `found` the operations that take each taken path that `path`,
+    /// as UTF-16, equals or is below, ended or not; `folded` is a buffer
+    /// that the caller reuses for many paths.
+    pub fn takers(
+        &self,
+        path: &[u16],
+        folded: &mut Vec<u16>,
+        mut found: impl FnMut(&[OperationId]),
+    ) {
+        self.contains_where(path, folded, |ids| {
+            found(ids);
+            false
+        });
     }
 
     /// Whether `path`, as UTF-16, equals or is below a path that a waiting
@@ -118,7 +134,7 @@ impl Taken {
     /// case. `keeps` answers from the list's own set of the ended
     /// operations whose rows it still leaves out.
     pub fn contains(&self, path: &[u16], keeps: impl Fn(OperationId) -> bool) -> bool {
-        self.contains_where(path, |ids| self.any_takes(ids, &keeps))
+        self.contains_where(path, &mut Vec::new(), |ids| self.any_takes(ids, &keeps))
     }
 
     /// Whether one of `ids` takes rows from a list that `keeps` the ended
@@ -128,25 +144,25 @@ impl Taken {
     }
 
     /// Whether `path` or a folder above it is taken by operations that
-    /// `taken` accepts.
-    fn contains_where(&self, path: &[u16], taken: impl Fn(&[OperationId]) -> bool) -> bool {
+    /// `taken` accepts, folded into `folded`.
+    fn contains_where(
+        &self,
+        path: &[u16],
+        folded: &mut Vec<u16>,
+        mut taken: impl FnMut(&[OperationId]) -> bool,
+    ) -> bool {
         if self.is_empty() {
             return false;
         }
-        let mut path = folded(path);
-        loop {
-            if self
-                .paths
-                .get(&path)
-                .is_some_and(|&at| taken(&self.ids[at]))
-            {
-                return true;
-            }
-            match path.iter().rposition(|&unit| unit == BACKSLASH) {
-                Some(at) => path.truncate(at),
-                None => return false,
-            }
-        }
+        fold_into(path, folded);
+        trim_root(folded);
+        let folded = &folded[..];
+        let parents =
+            (folded.iter().enumerate()).filter_map(|(at, &unit)| (unit == BACKSLASH).then_some(at));
+        parents.chain([folded.len()]).any(|end| {
+            self.lengths.binary_search(&end).is_ok()
+                && (self.paths.get(&folded[..end])).is_some_and(|&at| taken(&self.ids[at]))
+        })
     }
 
     /// The ended operations whose sources it holds. The window decides
@@ -159,12 +175,17 @@ impl Taken {
 }
 
 fn folded(path: &[u16]) -> Vec<u16> {
-    let mut units = fold(path);
-    // A volume root ends with a backslash; no other path does.
+    let mut units = Vec::with_capacity(path.len());
+    fold_into(path, &mut units);
+    trim_root(&mut units);
+    units
+}
+
+/// A volume root ends with a backslash; no other path does.
+fn trim_root(units: &mut Vec<u16>) {
     while units.last() == Some(&BACKSLASH) {
         units.pop();
     }
-    units
 }
 
 #[cfg(windows)]
@@ -197,6 +218,24 @@ mod tests {
         assert!(taken.contains(&wide(r"c:\A\b\c.txt"), none));
         assert!(!taken.contains(&wide(r"C:\ab"), none));
         assert!(!taken.contains(&wide(r"C:\"), none));
+    }
+
+    /// A search list keeps each ended operation that takes one of its rows,
+    /// so a row below two taken paths names the operations of both, also
+    /// when the outer one is found first.
+    #[test]
+    fn a_row_names_the_takers_of_every_path_above_it() {
+        let (outer, inner) = (OperationId(0), OperationId(1));
+        let mut taken = Taken::default();
+        taken.insert(outer, Path::new(r"C:\a"), true);
+        taken.insert(inner, Path::new(r"C:\a\b"), true);
+        taken.insert(OperationId(2), Path::new(r"C:\a\bc"), true);
+        let mut found = Vec::new();
+        taken.takers(&wide(r"c:\A\B\x.txt"), &mut Vec::new(), |ids| {
+            found.extend_from_slice(ids);
+        });
+        found.sort();
+        assert_eq!(found, [outer, inner]);
     }
 
     /// An ended operation takes its rows only from a list that keeps it,

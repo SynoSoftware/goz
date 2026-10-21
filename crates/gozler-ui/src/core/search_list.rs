@@ -120,8 +120,8 @@ impl SearchList {
     /// The operations `ended`, and the taken entries `taken` that the list
     /// shows next: the list keeps an ended delete or move that takes one of
     /// its fetched rows, until its next search. The fetched rows are walked
-    /// once, each encoded into one buffer, and only while an ended delete
-    /// or move is not yet kept.
+    /// once, each encoded and folded into one buffer and looked up once for
+    /// every ended delete or move, and only while one is not yet kept.
     pub(crate) fn ended(&mut self, ended: &[(OperationId, Arc<Request>)], taken: &Taken) {
         let mut wanted: Vec<OperationId> = (ended.iter())
             .filter(|(id, request)| {
@@ -130,18 +130,20 @@ impl SearchList {
             })
             .map(|(id, _)| *id)
             .collect();
-        let mut path = Vec::new();
+        let (mut path, mut folded) = (Vec::new(), Vec::new());
         for row in self.results.fetched() {
             if wanted.is_empty() {
                 break;
             }
             wide_path_into(row, &mut path);
-            wanted.retain(|id| {
-                let takes = taken.takes(&path, *id);
-                if takes {
-                    self.kept.insert(*id);
-                }
-                !takes
+            taken.takers(&path, &mut folded, |takers| {
+                wanted.retain(|id| {
+                    let takes = takers.contains(id);
+                    if takes {
+                        self.kept.insert(*id);
+                    }
+                    !takes
+                });
             });
         }
         // `taken` may be older than `ended`, so an operation that ended in

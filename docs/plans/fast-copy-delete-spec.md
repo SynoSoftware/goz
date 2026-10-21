@@ -589,7 +589,8 @@ must not compare a row with every taken path: 100,000 deleted rows would
 cost 5 million compares per paint. The queue keeps the taken sources in a
 hash map from each folded full path to the operations that take it, and a
 row is taken when its folded path or one of its parent paths is in the map
-for an operation that takes it from that list, a few dozen lookups per row.
+for an operation that takes it from that list. A parent path is looked up only
+when a taken path has its length, so most rows need one or two lookups.
 At each wake the window takes a snapshot of the map (`Arc`), so a paint
 never waits for the engine's lock while a worker holds it, and decides from
 that snapshot which lists keep each operation that ended.

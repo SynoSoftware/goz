@@ -13,14 +13,23 @@ mod upper;
 /// turns `ß` into `SS` and differs from `CharUpperW` in other units, matches
 /// NTFS, and a false match with Skip would leave a file uncopied.
 pub(crate) fn fold(name: &[u16]) -> Vec<u16> {
-    name.iter()
-        .map(
-            |&unit| match upper::UPPER.binary_search_by_key(&unit, |&(lower, _)| lower) {
-                Ok(i) => upper::UPPER[i].1,
-                Err(_) => unit,
-            },
-        )
-        .collect()
+    let mut folded = Vec::with_capacity(name.len());
+    fold_into(name, &mut folded);
+    folded
+}
+
+/// [`fold`] into `folded`, a buffer that the caller reuses for many names.
+pub(crate) fn fold_into(name: &[u16], folded: &mut Vec<u16>) {
+    folded.clear();
+    folded.extend(name.iter().map(|&unit| match unit {
+        // The table changes no ASCII unit but a–z, which most paths hold.
+        0x61..=0x7a => unit - 0x20,
+        0..0x80 => unit,
+        _ => match upper::UPPER.binary_search_by_key(&unit, |&(lower, _)| lower) {
+            Ok(i) => upper::UPPER[i].1,
+            Err(_) => unit,
+        },
+    }));
 }
 
 /// What a destination entry is, for the conflict rules.
