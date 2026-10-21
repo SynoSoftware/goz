@@ -60,7 +60,8 @@ pub(crate) struct VolumeState {
     indexed: RwLock<Indexed>,
     phase: RwLock<VolumePhase>,
     /// The Include rules a build of the volume applies, and whether they
-    /// changed since the tail last took them. Never held with another lock.
+    /// changed since the last build began or the tail last took them, so the
+    /// index does not apply them yet. Never held with another lock.
     rules: Mutex<Rules>,
 }
 
@@ -187,7 +188,8 @@ impl VolumeState {
         }
     }
 
-    /// The rules set since the last call, for the tail to apply.
+    /// The rules set since the last call or the last build began, which the
+    /// index does not apply yet.
     pub(crate) fn take_new_rules(&self) -> Option<Arc<VolumeRules>> {
         let mut slot = self.rules.lock();
         std::mem::take(&mut slot.changed).then(|| slot.rules.clone())
@@ -265,8 +267,10 @@ impl VolumeState {
         );
     }
 
-    /// The tail starts building the index.
+    /// The tail starts building the index. Read the rules for the build after
+    /// this call: it marks the rules set so far as applied.
     pub(crate) fn begin_build(&self) -> Building<'_> {
+        self.rules.lock().changed = false;
         let first = !self.indexed.read().built;
         self.apply(Event::BuildStarted { first });
         Building { state: self, first }
@@ -380,7 +384,9 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         // `--status` tells a volume that was never indexed from one being
         // rebuilt. A volume whose first build failed is still never indexed.
         (Bootstrapping | Failed { .. }, Event::BuildStarted { first: true }) => Bootstrapping,
-        (Live | Offline | Failed { .. }, Event::BuildStarted { first: false }) => Rescanning,
+        (Live | Offline | Failed { .. } | Snapshot, Event::BuildStarted { first: false }) => {
+            Rescanning
+        }
         (Bootstrapping | Rescanning, Event::Built(journal)) => match journal {
             JournalSetup::Active(_) => Live,
             // Snapshot, not Offline: nothing is wrong and nothing will change,
@@ -398,7 +404,7 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         // corrected before the revival starts, so a revival blocked on sick
         // hardware cannot extend a false Live indefinitely.
         (Live | Rescanning, Event::TailRetired) => Offline,
-        (Bootstrapping | Offline | Failed { .. }, Event::TailRetired) => phase.clone(),
+        (Bootstrapping | Offline | Failed { .. } | Snapshot, Event::TailRetired) => phase.clone(),
         // The tail never started or never finished the first build. Without
         // Failed the volume would claim to be indexing forever.
         (Bootstrapping, Event::GaveUp { last_failure, .. }) => Failed {
@@ -419,6 +425,14 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         },
         // The tail's own exit already set this reason, and logged it.
         (Failed { .. }, Event::GaveUp { .. }) => phase.clone(),
+        // The tails started to apply changed Include settings never built
+        // the volume, so its index still follows the old ones.
+        (Snapshot, Event::GaveUp { last_failure, .. }) => Failed {
+            reason: format!(
+                "the changed Include settings were not applied: {}",
+                last_failure.unwrap_or("its tail kept stopping")
+            ),
+        },
         _ => return None,
     };
     Some(to)
@@ -550,6 +564,7 @@ mod tests {
             VolumePhase::Rescanning,
             VolumePhase::Offline,
             VolumePhase::Failed { reason: "x".into() },
+            VolumePhase::Snapshot,
         ] {
             let in_phase = || {
                 let indexed = Indexed {

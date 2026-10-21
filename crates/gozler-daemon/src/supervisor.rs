@@ -292,7 +292,8 @@ struct Fleet {
     enumerated: Vec<VolumeInfo>,
     /// The indexed volumes that have a tail or may get one. A volume leaves
     /// this list, and stays indexed, when its tail is given up on or when it
-    /// is a snapshot, which needs no tail.
+    /// is a snapshot, which needs no tail. Changed Include settings bring it
+    /// back ([`Fleet::apply_settings`]).
     supervised: Vec<Supervised>,
     /// Volumes found that gozler does not index, each logged once.
     skipped: HashSet<String>,
@@ -371,18 +372,33 @@ impl Fleet {
         }
     }
 
-    /// Applies new Include settings: gives each indexed volume its new rules,
-    /// which its tail applies, and adds and removes the volumes the settings
-    /// include and leave out.
+    /// Applies new Include settings: adds and removes the volumes the
+    /// settings include and leave out, and gives each indexed volume its new
+    /// rules, which its tail applies. A volume without a tail, a snapshot or
+    /// one given up on, gets a new one with a new revival budget, as after a
+    /// restart, and its first build applies the rules. That build runs even
+    /// when the rules only leave more out: removing the entries in place here
+    /// would hold up the scan loop, and with it every other volume's rescue,
+    /// while it removes them and compacts the index.
     fn apply_settings(&mut self) {
-        let settings = self.include.applied();
-        for state in self.volumes.current().iter() {
-            state.set_rules(Arc::new(settings.rules_for(&state.guid)));
-        }
         // The reason a volume is skipped can change with the settings, so
         // each is logged again.
         self.skipped.clear();
+        // First, so a volume the settings now leave out gets no tail.
         self.reconcile(self.enumerated.clone());
+        let settings = self.include.applied();
+        for state in self.volumes.current().iter() {
+            state.set_rules(Arc::new(settings.rules_for(&state.guid)));
+            if !self.supervised.iter().any(|s| s.state.guid == state.guid)
+                && state.take_new_rules().is_some()
+            {
+                tracing::info!(
+                    volume = %state.mount_prefix(),
+                    "the Include settings changed; indexing the volume again"
+                );
+                self.supervised.push(Supervised::start(state.clone()));
+            }
+        }
     }
 
     /// Stops indexing a volume: queries leave it out from now on, and its
@@ -725,11 +741,26 @@ impl Supervised {
             .as_ref()
             .map_or(Pulse::Retired, |t| t.pulse.load());
         let phase = self.state.phase();
-        if pulse == Pulse::Retired && phase == VolumePhase::Snapshot {
+        // Without a tail, a start for changed Include settings failed, and
+        // it is retried as any start is.
+        if pulse == Pulse::Retired && phase == VolumePhase::Snapshot && self.tail.is_some() {
             // The tail built the index and found that the volume has no
             // journal and never will: the index is complete and there is
             // nothing to tail, so reviving it would only rebuild it again.
-            return false;
+            if self.state.take_new_rules().is_none() {
+                return false;
+            }
+            // Unless the Include settings changed during the build, which
+            // applied the old ones.
+            tracing::info!(
+                volume = %self.state.mount_prefix(),
+                "the Include settings changed; indexing the volume again"
+            );
+            if let Some(retired) = self.tail.take() {
+                retired.shutdown();
+            }
+            *self = Supervised::start(self.state.clone());
+            return true;
         }
         // Sampled at scan granularity, which can only under-count health,
         // never fake it. The anchor is only consulted for a refund, so a
@@ -909,7 +940,7 @@ impl Supervised {
         tracing::error!(
             volume = %self.state.mount_prefix(),
             attempts = self.revive_attempts,
-            "the volume's tail keeps failing; giving up until the daemon restarts"
+            "the volume's tail keeps failing; giving up until the daemon restarts or the Include settings change"
         );
         self.state
             .give_up(self.last_failure.as_deref(), self.revive_attempts);
@@ -1072,6 +1103,44 @@ mod tests {
 
         fleet.reconcile(Vec::new());
         assert!(guids().is_empty(), "a volume that is gone leaves the index");
+    }
+
+    /// Only a tail applies changed Include rules, so a volume that has none,
+    /// a snapshot or one given up on, must get one; otherwise searches keep
+    /// finding what the new settings leave out until the daemon restarts.
+    #[test]
+    fn changed_include_settings_start_a_tail_for_a_volume_without_one() {
+        let snapshot = r"\\?\Volume{33333333-0000-0000-0000-000000000000}\";
+        let defaults = IncludeSettings::default();
+        let volumes = Arc::new(VolumeRegistry::default());
+        volumes.add(Arc::new(VolumeState::new(
+            snapshot.into(),
+            vec![r"S:\".into()],
+            bootstrap::Filesystem::Ntfs,
+            Arc::new(defaults.rules_for(snapshot)),
+        )));
+        let changed = IncludeSettings {
+            exclude_hidden: true,
+            ..defaults
+        };
+        let mut fleet = Fleet {
+            volumes,
+            include: Arc::new(Include::new(changed, Box::new(|| {}))),
+            enumerated: vec![VolumeInfo {
+                guid_path: snapshot.into(),
+                mounts: vec![r"S:\".into()],
+                is_fixed: true,
+                filesystem: Some("NTFS".into()),
+            }],
+            supervised: Vec::new(),
+            skipped: HashSet::new(),
+            discovery: None,
+            starting: None,
+        };
+
+        fleet.apply_settings();
+        let guids: Vec<_> = fleet.supervised.iter().map(|s| &s.state.guid).collect();
+        assert_eq!(guids, [snapshot]);
     }
 
     /// A stamp newer than the scan's clock reading (a tail that beat after

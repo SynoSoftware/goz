@@ -504,7 +504,8 @@ fn rescan(
         }
         JournalSetup::Refused => {
             // The tail stops, and the supervisor sees the Snapshot phase and
-            // does not revive it.
+            // does not revive it, unless the Include settings changed during
+            // the build.
             tracing::info!(
                 volume = %state.mount_prefix(),
                 "no USN journal; volume is indexed but its index is a snapshot and cannot track changes"
