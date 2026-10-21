@@ -17,7 +17,7 @@ use crate::core::commands::{CommandId, Key, Keystroke};
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::SummaryRow;
-use crate::core::layout::{self, Px, Rect, StatusLayout, StatusWidths};
+use crate::core::layout::{Px, Rect, StatusLayout, StatusWidths};
 use crate::core::model::Model;
 use crate::core::open::{browse_command, total_commander_command};
 use crate::core::results::Fix;
@@ -30,8 +30,8 @@ use crate::core::shortcuts::{
 use crate::core::speed::{ENGINES, Speed, SpeedNumber, SpeedPreset, ring_blocks};
 use crate::core::text::{LANGUAGES, LanguageChoice, SizeFormat, Strings, without_access_key};
 use crate::win::controls::{
-    Balloon, Button, CheckBox, DropDownList, Edit, HotkeyControl, HotkeyValue, ListBox, ReportList,
-    Tooltip, show_group_glyph,
+    Balloon, Button, CheckBox, DropDownList, Edit, HotkeyControl, HotkeyValue, IconList, ListBox,
+    ReportList, Tooltip, show_group_glyph,
 };
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
@@ -348,28 +348,23 @@ impl<'a> SettingsDialog<'a> {
 
     /// Widens the page list to show its longest page name in the dialog's
     /// language whole, after its icon, and the dialog with it, so the pages
-    /// keep their width.
+    /// keep their width; while the list holds every page, before the pages
+    /// are made.
     fn fit_page_list(&self, dialog: Hwnd) {
-        let Some(list) = dialog::item(dialog, ControlId::SettingsPages.id()) else {
+        let Some(list) = self.page_list(dialog) else {
             return;
         };
-        let Ok(font) = Font::of(list) else {
-            return;
-        };
-        let longest = {
-            let meter = TextMeter::new(&font);
-            SettingsPage::ALL
-                .into_iter()
-                .map(|page| meter.plain_width(self.strings.text(page.label())))
-                .max()
-                .unwrap_or_default()
-        };
-        let rect = list.rect_in(dialog);
-        let frame = rect.width - list.client_size().width;
-        let extra = layout::glyph_list_item_width(longest, dialog.dpi()) + frame - rect.width;
+        let rect = list.hwnd().rect_in(dialog);
+        let frame = rect.width - list.hwnd().client_size().width;
+        let extra = list.row_size().width + frame - rect.width;
         if extra > Px(0) {
             dialog::widen(dialog, rect.right(), extra);
         }
+        list.fill_column();
+    }
+
+    fn page_list(&self, dialog: Hwnd) -> Option<IconList> {
+        IconList::of_dialog(dialog, ControlId::SettingsPages.id())
     }
 
     fn page(&self, page: SettingsPage) -> Option<Hwnd> {
@@ -938,25 +933,31 @@ impl<'a> SettingsDialog<'a> {
 
     /// Lists the pages that the search keeps, with the shown one selected.
     fn fill_page_list(&self, dialog: Hwnd) {
-        let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) else {
+        let Some(list) = self.page_list(dialog) else {
             return;
         };
-        let (labels, glyphs, index) = {
+        let (items, index) = {
             let listed = self.listed.borrow();
             let shown = self.shown.get();
-            let labels: Vec<&str> = listed
+            // Each page shows its icon, at its place in `SettingsPage::ALL`.
+            let items: Vec<(&str, usize)> = listed
                 .iter()
-                .map(|page| self.strings.text(page.label()))
+                .filter_map(|page| {
+                    let icon = SettingsPage::ALL.iter().position(|p| p == page)?;
+                    Some((self.strings.text(page.label()), icon))
+                })
                 .collect();
-            let glyphs: Vec<Glyph> = listed.iter().map(|page| page.glyph()).collect();
-            (
-                labels,
-                glyphs,
-                listed.iter().position(|page| Some(*page) == shown),
-            )
+            (items, listed.iter().position(|page| Some(*page) == shown))
         };
-        self.filling(|| list.set_items(&labels, index.unwrap_or(0)));
-        list.set_glyphs(glyphs);
+        self.filling(|| list.set_items(&items, index.unwrap_or(0)));
+    }
+
+    /// Gives the page list its pages' icons, again when icons are shown or
+    /// hidden.
+    fn show_page_icons(&self, dialog: Hwnd) {
+        if let Some(list) = self.page_list(dialog) {
+            list.set_icons(&SettingsPage::ALL.map(SettingsPage::glyph));
+        }
     }
 
     /// Keeps the pages that the search box's words find. The shown page
@@ -1213,9 +1214,7 @@ impl<'a> SettingsDialog<'a> {
                 if icons_changed {
                     // The page list's rows, the group captions and the
                     // buttons follow.
-                    if let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) {
-                        list.fit_glyph_rows();
-                    }
+                    self.show_page_icons(dialog);
                     self.show_button_glyphs(dialog);
                     self.refresh_index(dialog);
                     dialog.draw_once_after(|| {});
@@ -1366,8 +1365,11 @@ impl<'a> SettingsDialog<'a> {
     /// A control of a page holds another value.
     fn edited(&self, dialog: Hwnd, id: u16) {
         if is(id, ControlId::SettingsPages) {
-            let selected = ListBox::of_dialog(dialog, id)
-                .and_then(ListBox::selected)
+            // A list view also tells of the item that lost the selection,
+            // while none is selected.
+            let selected = self
+                .page_list(dialog)
+                .and_then(IconList::selected)
                 .and_then(|index| self.listed.borrow().get(index).copied());
             if selected.is_some() {
                 self.show_page(dialog, selected);
@@ -1535,6 +1537,11 @@ impl<'a> SettingsDialog<'a> {
 impl DialogProc for SettingsDialog<'_> {
     fn init(&self, dialog: Hwnd) -> Opened {
         let mut fonts = Vec::new();
+        if let Some(list) = self.page_list(dialog) {
+            list.set_up();
+        }
+        self.show_page_icons(dialog);
+        self.fill_page_list(dialog);
         self.fit_page_list(dialog);
         let area =
             dialog::item(dialog, ControlId::SettingsPageArea.id()).map(|a| a.rect_in(dialog));
@@ -1568,9 +1575,6 @@ impl DialogProc for SettingsDialog<'_> {
             pages.push(hwnd);
         }
         self.pages.replace(pages);
-        if let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) {
-            list.fit_glyph_rows();
-        }
         if let Some(label) = self
             .page(SettingsPage::General)
             .and_then(|page| dialog::item(page, ControlId::GeneralLanguageLabel.id()))
@@ -1883,14 +1887,10 @@ impl DialogProc for SettingsDialog<'_> {
         };
         let dpi = dialog.dpi();
         let height = status.fit(StatusLayout::min_height(dpi, *font_height));
-        status.place(&StatusLayout::compute(
-            widths,
-            width,
-            dpi,
-            *font_height,
-            height,
+        status.place(
+            &StatusLayout::compute(widths, width, dpi, *font_height, height, None),
             None,
-        ));
+        );
     }
 
     /// Every caption the Service group's fix buttons can show, and OK and

@@ -38,12 +38,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateMessage,
     WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR,
     WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
-    WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
-    WS_SYSMENU, WS_THICKFRAME,
+    WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -58,6 +58,10 @@ pub(crate) enum Message<'a> {
     },
     Deactivate,
     Size,
+    /// The person starts dragging the window's border or title bar.
+    EnterSizeMove,
+    /// The person ends that drag.
+    ExitSizeMove,
     DpiChanged {
         dpi: Dpi,
         suggested: Rect,
@@ -134,6 +138,9 @@ pub(crate) enum Message<'a> {
         colors: super::gdi::StaticColors,
         control: Hwnd,
     },
+    /// Windows asks for the background before the window paints, or a
+    /// themed control asks for what lies under its corners.
+    EraseBackground(super::gdi::EraseDc),
     Paint,
     SettingChange {
         regional_format: bool,
@@ -432,8 +439,10 @@ pub(crate) fn set_modeless(window: Option<Hwnd>) {
 
 /// Runs the thread's message loop until `WM_QUIT`. The accelerators come
 /// first, then the keys the main window takes for its focused control, then
-/// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
-/// main window's controls (DESIGN.md: window rule 8). A key that
+/// the access keys of the main window's toolbar buttons, which are not
+/// windows that `IsDialogMessageW` can match, then `IsDialogMessageW` for
+/// Tab, the access keys, `Enter` and `Esc` among the main window's controls
+/// (DESIGN.md: window rule 8). A key that
 /// `IsDialogMessageW` moves the focus with is reported to the main window,
 /// which no control notifies of it. A message for the window that
 /// [`set_modeless`] names, or for one of its controls, goes only through
@@ -474,6 +483,9 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
                 msg.message,
                 WM_KEYDOWN | WM_SYSKEYDOWN | WM_CHAR | WM_SYSCHAR
             );
+            if msg.message == WM_SYSCHAR && super::toolbar::press_access_key(main, msg.wParam) {
+                continue;
+            }
             let focused = GetFocus();
             if IsDialogMessageW(main.0, &msg).as_bool() {
                 let now = GetFocus();
@@ -596,6 +608,8 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             from_another_program: from_another_program(HWND(lparam.0 as *mut _)),
         },
         WM_SIZE => Message::Size,
+        WM_ENTERSIZEMOVE => Message::EnterSizeMove,
+        WM_EXITSIZEMOVE => Message::ExitSizeMove,
         WM_DPICHANGED => match Dpi::new(u32::from(high(wparam.0))) {
             Some(dpi) => {
                 // SAFETY: WM_DPICHANGED's lparam points to the suggested
@@ -678,6 +692,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             colors: super::gdi::StaticColors::from_wparam(wparam),
             control: Hwnd(HWND(lparam.0 as *mut _)),
         },
+        WM_ERASEBKGND => Message::EraseBackground(super::gdi::EraseDc::from_wparam(wparam)),
         WM_PAINT => Message::Paint,
         WM_SETTINGCHANGE => Message::SettingChange {
             // SAFETY: WM_SETTINGCHANGE's lparam is null or a NUL-terminated

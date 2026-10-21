@@ -148,12 +148,10 @@ impl MemoryCaptions {
             service: ValuePart {
                 glyph: Some(Glyph::Component),
                 text: strings.format("status.service_memory", &[&service]),
-                muted: false,
             },
             app: ValuePart {
                 glyph: Some(Glyph::Favicon),
                 text: strings.format("status.ui_memory", &[&app]),
-                muted: false,
             },
             service_tip: strings.format("status.service_memory_tooltip", &[&service]),
             app_tip: strings.format("status.ui_memory_tooltip", &[&app]),
@@ -196,7 +194,8 @@ impl MemoryWidest {
 pub(crate) struct JobCaption {
     pub(crate) text: String,
     pub(crate) progress: JobProgress,
-    /// Whether Cancel shows, because the job can stop now.
+    /// Whether Cancel shows, because the job can stop now
+    /// ([`Model::can_cancel_job`]).
     pub(crate) cancel: bool,
 }
 
@@ -1288,17 +1287,23 @@ impl StatusCaptions {
                 results_status(model, numbers),
                 selection_status(model, numbers),
             ),
-            job: match model.job() {
-                Job::Export => JobCaption {
-                    text: export_status(model, numbers),
-                    progress: if model.exporting() {
-                        JobProgress::Unmeasured
-                    } else {
-                        JobProgress::None
-                    },
-                    cancel: model.exporting(),
-                },
-                Job::Fix => fix_status(model.strings(), numbers, model.fix()),
+            job: {
+                let (text, progress) = match model.job() {
+                    Job::Export => (
+                        export_status(model, numbers),
+                        if model.exporting() {
+                            JobProgress::Unmeasured
+                        } else {
+                            JobProgress::None
+                        },
+                    ),
+                    Job::Fix => fix_status(model.strings(), numbers, model.fix()),
+                };
+                JobCaption {
+                    text,
+                    progress,
+                    cancel: model.can_cancel_job(),
+                }
             },
             right: joined_parts(
                 model.strings(),
@@ -1324,10 +1329,9 @@ const FIELD_LABELS: [&str; 5] = [
     "inspector.total_size",
 ];
 
-/// The rows of [`FIELD_LABELS`] that show more than a text: the age after
-/// Date modified, and Attributes in two colours.
+/// The row of [`FIELD_LABELS`] that shows more than a text: the age after
+/// Date modified.
 pub(crate) const MODIFIED_ROW: usize = 2;
-pub(crate) const ATTRIBUTES_ROW: usize = 3;
 
 /// What the inspector shows for the selection (DESIGN.md: Inspector pane).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1341,30 +1345,21 @@ pub(crate) struct InspectorCaptions {
     /// The one selected entry's modification time, a FILETIME, whose
     /// [`age`] the window shows after it and keeps current.
     pub(crate) modified: Option<i64>,
-    /// The one selected entry's Attributes value in parts, separators
-    /// included; its field's value is their text. Empty for any other
-    /// selection.
-    pub(crate) attributes: Vec<ValuePart>,
     /// The gray hint under the heading, or empty.
     pub(crate) note: String,
 }
 
-/// A part of a value that the window draws in the normal or the muted text
-/// colour, after its icon if it has one.
+/// A part of a value, after its icon if it has one, such as a status bar
+/// figure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ValuePart {
     pub(crate) glyph: Option<Glyph>,
     pub(crate) text: String,
-    pub(crate) muted: bool,
 }
 
 impl ValuePart {
     pub(crate) fn plain(text: String) -> ValuePart {
-        ValuePart {
-            glyph: None,
-            text,
-            muted: false,
-        }
+        ValuePart { glyph: None, text }
     }
 }
 
@@ -1422,39 +1417,26 @@ fn entry(
         }
         None => entry.size.map_or_else(unknown, exact),
     };
-    let plain = |text: String| vec![ValuePart::plain(text)];
-    let attributes = entry.attributes.map_or_else(
-        || plain(unknown()),
-        |attributes| {
-            let mut parts = Vec::new();
-            for letter in attributes.letters().chars() {
-                let Some(key) = attribute_word(letter) else {
-                    continue;
-                };
-                if !parts.is_empty() {
-                    parts.extend(plain(", ".to_owned()));
-                }
-                // Gray for the entries that File Explorer hides by default.
-                parts.push(ValuePart {
-                    glyph: None,
-                    text: strings.text(key).to_owned(),
-                    muted: matches!(letter, 'H' | 'S'),
-                });
-            }
-            if parts.is_empty() {
-                plain(strings.text("inspector.no_attributes").to_owned())
-            } else {
-                parts
-            }
-        },
-    );
+    let attributes = entry.attributes.map_or_else(unknown, |attributes| {
+        let words: Vec<&str> = attributes
+            .letters()
+            .chars()
+            .filter_map(attribute_word)
+            .map(|key| strings.text(key))
+            .collect();
+        if words.is_empty() {
+            strings.text("inspector.no_attributes").to_owned()
+        } else {
+            words.join(", ")
+        }
+    });
     let values = [
         gozler_core::winpath::parent_of(&entry.path),
         size,
         entry
             .mtime_ft
             .map_or_else(unknown, |ft| numbers.date_time_seconds(ft)),
-        attributes.iter().map(|part| part.text.as_str()).collect(),
+        attributes,
     ];
     InspectorCaptions {
         heading: name.to_owned(),
@@ -1465,7 +1447,6 @@ fn entry(
             .map(|(key, value)| (strings.text(key).to_owned(), value))
             .collect(),
         modified: entry.mtime_ft,
-        attributes,
         note: String::new(),
     }
 }
@@ -1654,7 +1635,7 @@ fn fix_widest(strings: &Strings, numbers: &dyn Numbers, sizes: &[u64]) -> [Vec<S
     [running, ended].map(|fixes| {
         fixes
             .iter()
-            .map(|fix| fix_status(strings, numbers, fix).text)
+            .map(|fix| fix_status(strings, numbers, fix).0)
             .collect()
     })
 }
@@ -1770,7 +1751,6 @@ fn totals_status(model: &Model, numbers: &dyn Numbers) -> Vec<ValuePart> {
         ValuePart {
             glyph: Some(glyph),
             text: strings.count(key, count, numbers, &[&size]),
-            muted: false,
         }
     };
     [
@@ -1853,25 +1833,16 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// A fix's step, with its progress and whether Cancel stops it, or its
-/// result (DESIGN.md: Service fixes).
-fn fix_status(strings: &Strings, numbers: &dyn Numbers, fix: &Fixer) -> JobCaption {
-    let ended = |text: String| JobCaption {
-        text,
-        progress: JobProgress::None,
-        cancel: false,
-    };
-    let running = |(text, progress), cancel| JobCaption {
-        text,
-        progress,
-        cancel,
-    };
+/// A fix's step, with its progress, or its result (DESIGN.md: Service
+/// fixes).
+fn fix_status(strings: &Strings, numbers: &dyn Numbers, fix: &Fixer) -> (String, JobProgress) {
+    let ended = |text: String| (text, JobProgress::None);
     match fix {
         Fixer::Idle => ended(String::new()),
         Fixer::Commands {
             fix,
             state: FixState::Running(step),
-        } => running(command_step(strings, *fix, step), step.can_cancel()),
+        } => command_step(strings, *fix, step),
         Fixer::Commands {
             fix,
             state: FixState::Ended(result),
@@ -1879,7 +1850,7 @@ fn fix_status(strings: &Strings, numbers: &dyn Numbers, fix: &Fixer) -> JobCapti
         Fixer::Setup {
             state: FixState::Running(step),
             ..
-        } => running(setup_step(strings, numbers, step), step.can_cancel()),
+        } => setup_step(strings, numbers, step),
         Fixer::Setup {
             state: FixState::Ended(result),
             ..

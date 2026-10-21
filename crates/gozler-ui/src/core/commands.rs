@@ -24,7 +24,10 @@ pub(crate) enum CommandId {
     Explore,
     Properties,
     ExportResults,
-    CancelExport,
+    /// Stops the job that the status bar shows. Its shortcuts were saved as
+    /// `cancel_export` while it stopped only an export.
+    #[serde(alias = "cancel_export")]
+    Cancel,
     Settings,
     Exit,
     Copy,
@@ -60,7 +63,7 @@ impl CommandId {
         CommandId::Explore,
         CommandId::Properties,
         CommandId::ExportResults,
-        CommandId::CancelExport,
+        CommandId::Cancel,
         CommandId::Settings,
         CommandId::Exit,
         CommandId::Copy,
@@ -114,7 +117,7 @@ impl CommandId {
                     |s| s.model.can_export(),
                     None,
                 ),
-                C::CancelExport => ("command.cancel_export", &[], |s| s.model.exporting(), None),
+                C::Cancel => ("command.cancel", &[], |s| s.model.can_cancel_job(), None),
                 C::Settings => (
                     "command.settings",
                     const { &[Keystroke::ctrl(Key::Comma)] },
@@ -249,7 +252,7 @@ impl CommandId {
             C::Delete => Glyph::Delete,
             C::Cut => Glyph::Cut,
             C::Paste => Glyph::Paste,
-            C::CancelExport
+            C::Cancel
             | C::FileOperations
             | C::Filters
             | C::Inspector
@@ -592,23 +595,15 @@ impl Keystroke {
 pub(crate) enum TabStop {
     SearchBox,
     Results,
-    /// The status bar's Cancel, while a job runs, because no key stops a
-    /// service fix.
-    Cancel,
 }
 
 /// Where `Tab`, or `Shift+Tab` when `backward`, moves the focus from
 /// `from`, which is `None` for a control outside the cycle: from there
 /// `Tab` goes to the results and `Shift+Tab` to the search box.
-pub(crate) fn tab_stop(from: Option<TabStop>, backward: bool, cancel_shown: bool) -> TabStop {
-    let stops: &[TabStop] = if cancel_shown {
-        &[TabStop::SearchBox, TabStop::Results, TabStop::Cancel]
-    } else {
-        &[TabStop::SearchBox, TabStop::Results]
-    };
-    match from.and_then(|from| stops.iter().position(|stop| *stop == from)) {
-        Some(at) if backward => stops[(at + stops.len() - 1) % stops.len()],
-        Some(at) => stops[(at + 1) % stops.len()],
+pub(crate) fn tab_stop(from: Option<TabStop>, backward: bool) -> TabStop {
+    match from {
+        Some(TabStop::SearchBox) => TabStop::Results,
+        Some(TabStop::Results) => TabStop::SearchBox,
         None if backward => TabStop::SearchBox,
         None => TabStop::Results,
     }
@@ -682,6 +677,12 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
                     (
                         Keystroke::ctrl(Key::Letter(b'V')),
                         KeyAction::Run(CommandId::Paste),
+                    ),
+                    // Stops the status bar's job, as Esc in the search box
+                    // empties the box.
+                    (
+                        Keystroke::plain(Key::Escape),
+                        KeyAction::Run(CommandId::Cancel),
                     ),
                 ]
             }
@@ -889,7 +890,7 @@ pub(crate) fn menu_bar() -> Vec<Menu> {
             vec![
                 run(&[C::Open, C::OpenFileLocation, C::Properties]),
                 run(&[C::CopyToFolder, C::MoveToFolder, C::Delete]),
-                run(&[C::ExportResults]),
+                run(&[C::ExportResults, C::Cancel]),
                 run(&[C::Settings]),
                 run(&[C::Exit]),
             ],
@@ -1115,16 +1116,6 @@ pub(crate) const SHOW_DETAILS: CommandButton = CommandButton {
     tip: Some("inspector.show"),
 };
 
-/// The item that File shows in Export results…' place: Cancel export while
-/// an export runs (DESIGN.md: Menus).
-pub(crate) fn export_slot(model: &Model) -> MenuItem {
-    MenuItem::Run(if model.exporting() {
-        CommandId::CancelExport
-    } else {
-        CommandId::ExportResults
-    })
-}
-
 /// `groups` as a context menu in the language of `strings`. A context menu
 /// shows no shortcuts, as File Explorer's does (DESIGN.md: Menus).
 pub(crate) fn render_popup(groups: &[Vec<MenuItem>], strings: &Strings) -> Vec<MenuNode> {
@@ -1218,21 +1209,6 @@ mod tests {
     use crate::core::text::{Strings, access_key};
     use std::collections::HashSet;
 
-    /// A wrong wrap would send `Tab` past the results or leave Cancel out
-    /// of reach while a fix runs, which no compiler sees.
-    #[test]
-    fn tab_cycles_the_search_box_the_results_and_a_shown_cancel() {
-        use TabStop::{Cancel, Results, SearchBox};
-        assert_eq!(tab_stop(Some(SearchBox), false, false), Results);
-        assert_eq!(tab_stop(Some(Results), false, false), SearchBox);
-        assert_eq!(tab_stop(Some(SearchBox), true, false), Results);
-        assert_eq!(tab_stop(Some(Results), false, true), Cancel);
-        assert_eq!(tab_stop(Some(Cancel), false, true), SearchBox);
-        assert_eq!(tab_stop(Some(SearchBox), true, true), Cancel);
-        assert_eq!(tab_stop(None, false, true), Results);
-        assert_eq!(tab_stop(None, true, true), SearchBox);
-    }
-
     /// `WM_COMMAND` carries only the ID, so two items with one ID, or an ID
     /// that decodes to another item, would run the wrong command.
     #[test]
@@ -1298,16 +1274,12 @@ mod tests {
                 &mut bar_keys,
             );
             for menu in &bar {
-                // A submenu's label shares its menu with the items beside it,
-                // and Cancel export shares File with them in Export
-                // results…' place.
+                // A submenu's label shares its menu with the items beside it.
                 let labels = menu.groups.iter().flatten().map(|entry| match entry {
                     Entry::Item(item) => item.label(&strings),
                     Entry::Submenu { label, .. } => strings.text(label).to_owned(),
                 });
-                let cancel = (menu.label == "menu.file")
-                    .then(|| MenuItem::Run(CommandId::CancelExport).label(&strings));
-                assert_unique(language.tag, labels.chain(cancel), &mut HashSet::new());
+                assert_unique(language.tag, labels, &mut HashSet::new());
                 for entry in menu.groups.iter().flatten() {
                     if let Entry::Submenu { groups, .. } = entry {
                         let labels = groups.iter().flatten().map(|item| item.label(&strings));
@@ -1397,8 +1369,7 @@ mod tests {
         let order = model.column_order();
         model.start_export(r"D:\results.csv".into(), ExportFormat::Csv, &order);
         assert!(!enabled(&model, CommandId::ExportResults));
-        assert!(enabled(&model, CommandId::CancelExport));
-        assert_eq!(export_slot(&model), MenuItem::Run(CommandId::CancelExport));
+        assert!(enabled(&model, CommandId::Cancel));
     }
 
     /// T11: a context menu stays open while new results arrive, and its

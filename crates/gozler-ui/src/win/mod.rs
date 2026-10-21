@@ -21,6 +21,7 @@ pub(crate) mod pairing;
 pub(crate) mod pane;
 pub(crate) mod shell;
 pub(crate) mod shortcut;
+pub(crate) mod toolbar;
 pub(crate) mod tray;
 pub(crate) mod update;
 pub(crate) mod wake;
@@ -35,14 +36,13 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, IsWindowEnabled, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BeginDeferWindowPos, CB_GETDROPPEDCONTROLRECT, DeferWindowPos, DestroyWindow,
-    EndDeferWindowPos, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect, GetParent,
-    GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    IsChild, IsIconic, IsWindowVisible, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT,
-    SW_SHOWMINNOACTIVE, SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_CHANGEUISTATE, WM_SETREDRAW,
-    WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
+    BeginDeferWindowPos, DeferWindowPos, DestroyWindow, EndDeferWindowPos, GWL_EXSTYLE, GWL_STYLE,
+    GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, IsWindowVisible, PostMessageW,
+    SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE, SW_SHOWNA, SW_SHOWNORMAL,
+    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW,
+    ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS, WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT,
+    WM_CHANGEUISTATE, WM_SETREDRAW, WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
 };
 use windows::core::HSTRING;
 
@@ -128,10 +128,11 @@ impl Hwnd {
         let _ = unsafe { ShowWindow(self.0, if visible { SW_SHOWNA } else { SW_HIDE }) };
     }
 
-    /// The rectangle [`move_children`] compares with: the window's
-    /// rectangle in its parent's client coordinates, and for a drop-down
-    /// list the rectangle that includes its open list, as it was set.
-    fn placed_rect(self) -> Rect {
+    /// Whether the window already stands at `rect`, in its parent's client
+    /// coordinates, for [`move_children`]. A drop-down list's height in
+    /// `rect` includes its open list, which the themed combo box sizes
+    /// from its items instead, so only its position and width count.
+    fn is_placed_at(self, rect: Rect) -> bool {
         let mut class = [0u16; 16];
         // SAFETY: `class` is a local whose length the call is given.
         let length = unsafe { GetClassNameW(self.0, &mut class) };
@@ -139,23 +140,12 @@ impl Hwnd {
             .is_ok_and(|n| String::from_utf16_lossy(&class[..n]).eq_ignore_ascii_case("ComboBox"));
         // SAFETY: plain values.
         let parent = Hwnd(unsafe { GetParent(self.0) }.unwrap_or_default());
-        if !is_combo_box {
-            return self.rect_in(parent);
+        let placed = self.rect_in(parent);
+        if is_combo_box {
+            (placed.x, placed.y, placed.width) == (rect.x, rect.y, rect.width)
+        } else {
+            placed == rect
         }
-        let mut rect = RECT::default();
-        // SAFETY: `rect` is a local the combo box fills in with screen
-        // coordinates; it holds the two points MapWindowPoints converts.
-        unsafe {
-            SendMessageW(
-                self.0,
-                CB_GETDROPPEDCONTROLRECT,
-                None,
-                Some(LPARAM(&raw mut rect as isize)),
-            );
-            let points = std::slice::from_raw_parts_mut((&raw mut rect).cast::<POINT>(), 2);
-            MapWindowPoints(None, Some(parent.0), points);
-        }
-        from_rect(rect)
     }
 
     /// The window's rectangle in screen coordinates.
@@ -214,8 +204,12 @@ impl Hwnd {
 
     /// Whether the window is on screen: visible and not minimized.
     pub(crate) fn is_on_screen(self) -> bool {
+        self.is_visible() && !self.is_minimized()
+    }
+
+    pub(crate) fn is_minimized(self) -> bool {
         // SAFETY: plain values.
-        self.is_visible() && !unsafe { IsIconic(self.0) }.as_bool()
+        unsafe { IsIconic(self.0) }.as_bool()
     }
 
     /// Whether the window takes input, which a modal dialog it owns stops.
@@ -382,7 +376,7 @@ impl Hwnd {
 pub(crate) fn move_children(moves: &[(Hwnd, Rect)]) {
     let moves: Vec<&(Hwnd, Rect)> = moves
         .iter()
-        .filter(|(child, rect)| child.placed_rect() != *rect)
+        .filter(|(child, rect)| !child.is_placed_at(*rect))
         .collect();
     if moves.is_empty() {
         return;

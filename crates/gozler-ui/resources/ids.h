@@ -24,6 +24,13 @@
 // Show details, at the right end of the status bar while the inspector is
 // hidden.
 #define IDC_STATUS_SHOW_DETAILS 63
+// The toolbars of the search row (Clear, Match case and Match path) and of
+// the filter pane's header (Clear and Hide filters); a toolbar of one
+// button takes that button's ID.
+#define IDC_SEARCH_TOOLS 64
+#define IDC_FILTER_TOOLS 65
+// The selected entry's file icon, before the inspector's heading.
+#define IDC_INSPECTOR_ICON 66
 // The inspector's Copy name, Copy folder, Explore and the age after Date
 // modified, numbered after the rest.
 #define IDC_INSPECTOR_COPY_NAME 72
@@ -315,3 +322,5 @@
 #define IDC_FILE_OPERATIONS_LIST 3023
 #define IDC_FILE_OPERATIONS_HINT 3024
 #define IDC_FILE_OPERATIONS_HIDE 3025
+// The icon of the running operation's kind, at the card's left.
+#define IDC_FILE_OPERATIONS_ICON 3026

@@ -14,9 +14,8 @@ use super::requests::Requests;
 use super::settings::SettingsDialog;
 use super::status_bar::StatusBar;
 use crate::core::captions::{
-    self, ATTRIBUTES_ROW, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions,
-    InspectorCaptions, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart,
-    WindowCaptions,
+    self, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions, InspectorCaptions,
+    ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart, WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
 use crate::core::commands::{
@@ -34,12 +33,11 @@ use crate::core::include::{
     IncludeDrive, SummaryRow, connected_drives, include_drives, preview, summary_rows,
 };
 use crate::core::layout::{
-    self, CaptionWidths, ColumnFit, Dpi, FilterLayout, InspectorLayout, Layout, MessageArea, Px,
-    Rect, ScrollRequest, Size, StatusLayout,
+    self, CaptionWidths, ColumnFit, ControlSizes, Dpi, FilterLayout, InspectorLayout, Layout,
+    MessageArea, Px, Rect, ScrollRequest, Size, StatusLayout, ToolHeights,
 };
 use crate::core::model::{
-    Accepted, Change, Column, ExportError, ExportFormat, Job, Model, ScopeCheck, SearchBoxEnter,
-    Then,
+    Accepted, Change, Column, ExportError, ExportFormat, Model, ScopeCheck, SearchBoxEnter, Then,
 };
 use crate::core::open::{self, CommandLine};
 use crate::core::query::{
@@ -54,8 +52,8 @@ use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
 use crate::win::clipboard::{self as clipboard, ClipboardBlock};
 use crate::win::controls::{
-    Button, CheckBox, DropDownList, Edit, Label, ListBox, ListClosing, ListColumn, ListView,
-    ScrollEdge, Tooltip,
+    Button, CheckBox, DropDownList, Edit, FileIconLabel, IconList, Label, ListBox, ListClosing,
+    ListColumn, ListView, ScrollEdge, Tooltip,
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
 use crate::win::drop_target::{self, AsyncDrop, DropHandler, DropRegistration};
@@ -64,10 +62,11 @@ use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Accelerators;
 use crate::win::notify::{
-    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, FlatGround, ListNotify,
+    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify,
 };
 use crate::win::shell::{self, FileType, PromptOwner};
 use crate::win::shortcut::{self, RegisterError, Registration};
+use crate::win::toolbar::{Tool, Toolbar};
 use crate::win::tray::{TrayEvent, TrayIcon};
 use crate::win::wake::{OpenWaker, Waker};
 use crate::win::window::{DEFERRED, Message, WindowProc};
@@ -96,9 +95,6 @@ mod timer {
     pub(super) const SELECTION: usize = 3;
     /// The inspector's age of the modification time, while it shows one.
     pub(super) const AGE: usize = 4;
-    /// The columns are fitted again this long after the list's width last
-    /// changed.
-    pub(super) const FILL: usize = 5;
     /// Scrolls the list while dragged files rest at its top or bottom edge.
     pub(super) const DROP_SCROLL: usize = 6;
     /// `ui.json` is saved this long after the window's saved state last
@@ -111,7 +107,6 @@ const SEARCH_DELAY_MS: u32 = 150;
 const STATUS_POLL_MS: u32 = 2_000;
 const SELECTION_DELAY_MS: u32 = 150;
 const AGE_REFRESH_MS: u32 = 60_000;
-const FILL_SETTLE_MS: u32 = 150;
 /// A row each tenth of a second, as the File operations window's queue
 /// scrolls while a row is dragged past its edge.
 const DROP_SCROLL_MS: u32 = 100;
@@ -139,13 +134,10 @@ struct UpdateCheck {
 /// with the window.
 struct Controls {
     search: Edit,
-    clear_search: Button,
-    /// Names Clear, which shows only its icon while icons show.
-    clear_search_tip: Tooltip,
+    /// Clear, Match case and Match path, after the search box.
+    search_tools: Toolbar,
     match_label: Label,
     match_mode: DropDownList,
-    match_case: CheckBox,
-    match_path: CheckBox,
     filters: FilterPane,
     /// The list's message and its buttons, in the list's empty area. They
     /// are created before the list, so they lie above it and come before it
@@ -166,15 +158,30 @@ impl Controls {
             Button::create(parent, ControlId::MessageButton2.id())?,
         ];
         // Show filters is created first, as it stands first.
-        let show_filters = Button::create(parent, ControlId::ShowFilters.id())?;
+        let show_filters = icon_tool(parent, ControlId::ShowFilters, Glyph::ClosePane)?;
         let search = Edit::create(parent, ControlId::Search.id())?;
-        let clear_search = Button::create(parent, ControlId::ClearSearch.id())?;
+        let clear = ControlId::ClearSearch.id();
+        let search_tools = Toolbar::create(
+            parent,
+            ControlId::SearchTools.id(),
+            &[
+                Tool::IconOrText {
+                    id: clear,
+                    glyph: clear_glyph("button.clear"),
+                },
+                Tool::Separator,
+                Tool::Check {
+                    id: ControlId::MatchCase.id(),
+                },
+                Tool::Check {
+                    id: ControlId::MatchPath.id(),
+                },
+                Tool::Separator,
+            ],
+        )?;
         let controls = Controls {
             search,
-            clear_search,
-            clear_search_tip: Tooltip::create(parent, &[clear_search.hwnd()])?,
-            match_case: CheckBox::create(parent, ControlId::MatchCase.id())?,
-            match_path: CheckBox::create(parent, ControlId::MatchPath.id())?,
+            search_tools,
             // The label comes right before its list, so its access key
             // focuses the list (DESIGN.md: C19).
             match_label: Label::create(parent, ControlId::MatchLabel.id())?,
@@ -189,11 +196,26 @@ impl Controls {
         };
         controls.message.hwnd().set_visible(false);
         // The search box starts empty; its changes enable Clear.
-        controls.clear_search.hwnd().set_enabled(false);
+        controls.search_tools.set_enabled(clear, false);
         for button in controls.message_buttons {
             button.hwnd().set_visible(false);
         }
         Ok(controls)
+    }
+
+    /// The toolbars, whose tooltips the window gives.
+    fn toolbars(&self) -> impl Iterator<Item = Toolbar> {
+        let inspector = &self.inspector;
+        [
+            self.search_tools,
+            self.filters.show,
+            self.filters.tools,
+            inspector.hide,
+            inspector.copy_name,
+            inspector.copy_folder,
+        ]
+        .into_iter()
+        .chain(self.status.show_details())
     }
 
     /// Gives every control the window's font, at creation and on a monitor
@@ -201,11 +223,9 @@ impl Controls {
     fn apply_fonts(&self, fonts: &Fonts) {
         let controls = [
             self.search.hwnd(),
-            self.clear_search.hwnd(),
+            self.search_tools.hwnd(),
             self.match_label.hwnd(),
             self.match_mode.hwnd(),
-            self.match_case.hwnd(),
-            self.match_path.hwnd(),
             self.message.hwnd(),
             self.message_buttons[0].hwnd(),
             self.message_buttons[1].hwnd(),
@@ -224,27 +244,64 @@ impl Controls {
         }
         self.inspector.heading.hwnd().set_font(&fonts.heading);
         self.filters.title.hwnd().set_font(&fonts.semibold);
-        self.filters.clear.hwnd().set_font(&fonts.ui);
+        self.filters.tools.hwnd().set_font(&fonts.ui);
         // Rows as tall as a list's that Windows draws.
         let height = TextMeter::new(&fonts.ui).height();
         self.filters.location.set_item_height(height);
     }
 
-    /// Gives the buttons their icons and the Kind list its row height, at
-    /// creation, on a monitor with another DPI, when the system colours
-    /// change and when icons are shown or hidden. The list message's
-    /// buttons get theirs with their captions.
-    fn apply_glyphs(&self) {
-        self.filters.kind.fit_glyph_rows();
-        for (button, control) in self.inspector.text_buttons() {
+    /// Gives the buttons and the Kind list their icons, and the toolbars'
+    /// buttons the `heights` of the controls beside them, at creation, on a
+    /// monitor with another DPI, when the system colours change and when
+    /// icons are shown or hidden, after the fonts, which reset a toolbar's
+    /// buttons. The list message's buttons get theirs with their captions.
+    fn apply_glyphs(&self, heights: ToolHeights) {
+        let inspector = &self.inspector;
+        for toolbar in [
+            self.search_tools,
+            self.filters.show,
+            self.filters.tools,
+            inspector.hide,
+        ] {
+            toolbar.show_images(heights.row);
+        }
+        for copy in [inspector.copy_name, inspector.copy_folder] {
+            copy.show_images(heights.copy);
+        }
+        if let Some(show) = self.status.show_details() {
+            show.show_images(heights.status);
+        }
+        self.filters.kind.set_icons(&Kind::ALL.map(Kind::glyph));
+        for (button, control) in inspector.text_buttons() {
             control.set_icon(button.command.glyph().map(ButtonIcon::Glyph));
         }
-        // Each Clear draws its icon flat instead.
         self.filters
             .choose_folder
             .set_icon(ButtonIcon::of("filter.choose_folder", false));
         self.status.show_cancel_icon();
     }
+
+    /// What the layout needs that only the controls know, once
+    /// [`Self::apply_glyphs`] and the window's texts have set them up.
+    fn sizes(&self) -> ControlSizes {
+        ControlSizes {
+            search_tools: self.search_tools.width(),
+            filter_tools: self.filters.tools.width(),
+            kind_row: self.filters.kind.row_size(),
+        }
+    }
+}
+
+/// A toolbar of one icon-only button, such as Show filters, which takes
+/// the button's ID.
+fn icon_tool(parent: Hwnd, id: ControlId, glyph: Glyph) -> windows::core::Result<Toolbar> {
+    let id = id.id();
+    Toolbar::create(parent, id, &[Tool::Icon { id, glyph }])
+}
+
+/// The icon of a Clear captioned with the catalogue text `key`.
+fn clear_glyph(key: &str) -> Glyph {
+    captions::button_glyph(key).expect("every Clear has an icon")
 }
 
 /// The filter pane's header, its window and its controls, in Tab order, and
@@ -252,16 +309,14 @@ impl Controls {
 /// key focuses the control (DESIGN.md: Filter pane).
 struct FilterPane {
     /// In the search row while the pane is hidden.
-    show: Button,
+    show: Toolbar,
     /// The header, in the main window above the pane's window, so it stays
-    /// while the pane scrolls.
+    /// while the pane scrolls: the title, then Clear and Hide filters.
     title: Label,
-    clear: Button,
-    hide: Button,
-    tips: Tooltip,
+    tools: Toolbar,
     pane: Hwnd,
     kind_label: Label,
-    kind: ListBox,
+    kind: IconList,
     location_label: Label,
     location: ListBox,
     choose_folder: Button,
@@ -294,23 +349,32 @@ enum RangeFilter {
 }
 
 impl FilterPane {
-    fn create(parent: Hwnd, show: Button) -> windows::core::Result<FilterPane> {
+    fn create(parent: Hwnd, show: Toolbar) -> windows::core::Result<FilterPane> {
         let title = Label::create_heading(parent, ControlId::FilterTitle.id())?;
-        let clear = Button::create(parent, ControlId::ClearFilters.id())?;
-        let hide = Button::create(parent, ControlId::HideFilters.id())?;
-        let tips = Tooltip::create(parent, &[show.hwnd(), clear.hwnd(), hide.hwnd()])?;
+        let tools = Toolbar::create(
+            parent,
+            ControlId::FilterTools.id(),
+            &[
+                Tool::IconOrText {
+                    id: ControlId::ClearFilters.id(),
+                    glyph: clear_glyph("filter.clear"),
+                },
+                Tool::Icon {
+                    id: ControlId::HideFilters.id(),
+                    glyph: Glyph::OpenPane,
+                },
+            ],
+        )?;
         let pane = win::pane::create(parent, ControlId::FilterPane.id())?;
         let label = |id: ControlId| Label::create(pane, id.id());
         let drop_down = |id: ControlId| DropDownList::create(pane, id.id());
         let mut filters = FilterPane {
             show,
             title,
-            clear,
-            hide,
-            tips,
+            tools,
             pane,
             kind_label: label(ControlId::KindLabel)?,
-            kind: ListBox::create_with_glyphs(pane, ControlId::Kind.id())?,
+            kind: IconList::create(pane, ControlId::Kind.id())?,
             location_label: label(ControlId::LocationLabel)?,
             location: ListBox::create_paths(pane, ControlId::Location.id())?,
             choose_folder: Button::create(pane, ControlId::ChooseFolder.id())?,
@@ -328,10 +392,10 @@ impl FilterPane {
         Ok(filters)
     }
 
-    /// Whether `control` is the header's or the pane's.
+    /// Whether `control` is the pane's; the header holds nothing that takes
+    /// the focus.
     fn contains(&self, control: Hwnd) -> bool {
-        [self.title.hwnd(), self.clear.hwnd(), self.hide.hwnd()].contains(&control)
-            || self.pane.is_parent_of(control)
+        self.pane.is_parent_of(control)
     }
 
     /// Every control in the pane.
@@ -379,17 +443,16 @@ impl FilterPane {
         placed
     }
 
-    /// Sets the labels and the buttons' captions and tips.
+    /// Sets the labels and the buttons' captions. An icon's caption is the
+    /// name that screen readers say.
     fn set_captions(&self, captions: &FilterCaptions) {
         self.title.hwnd().set_text(&captions.title);
-        self.clear.hwnd().set_text(&captions.clear);
-        self.tips.set(self.clear.hwnd(), &captions.clear_tip);
-        // The buttons draw their icons, and their captions are the names
-        // that screen readers say.
-        for (icon, name) in [(self.hide, &captions.hide), (self.show, &captions.show)] {
-            icon.hwnd().set_text(name);
-            self.tips.set(icon.hwnd(), name);
-        }
+        self.tools
+            .set_text(ControlId::ClearFilters.id(), &captions.clear);
+        self.tools
+            .set_text(ControlId::HideFilters.id(), &captions.hide);
+        self.show
+            .set_text(ControlId::ShowFilters.id(), &captions.show);
         self.kind_label.hwnd().set_text(&captions.kind);
         self.location_label.hwnd().set_text(&captions.location);
         self.choose_folder.hwnd().set_text(&captions.choose_folder);
@@ -418,51 +481,30 @@ impl FilterPane {
     }
 }
 
-/// The inspector's controls, in Tab order (DESIGN.md: Inspector pane). Its icon
-/// is painted by the window.
+/// The inspector's controls, in Tab order (DESIGN.md: Inspector pane).
 struct Inspector {
+    /// The selected entry's file icon.
+    icon: FileIconLabel,
     heading: Label,
     /// [`INSPECTOR_COPY_NAME`], after the heading.
-    copy_name: Button,
+    copy_name: Toolbar,
     /// [`HIDE_DETAILS`], at the right end of the heading's row.
-    hide: Button,
+    hide: Toolbar,
     /// [`INSPECTOR_COPY_FOLDER`], after the folder's value.
-    copy_folder: Button,
+    copy_folder: Toolbar,
     /// [`INSPECTOR_COPY_PATH`], at the end of the Date modified row.
     copy_path: Button,
     /// In [`INSPECTOR_BUTTONS`]' order.
     buttons: [Button; INSPECTOR_BUTTONS.len()],
+    /// The text buttons' tips.
     tips: Tooltip,
-    /// Each field row's label and value.
-    fields: Vec<(Label, FieldValue)>,
+    /// Each field row's label and its value, a read-only box, so the person
+    /// can select and copy it.
+    fields: Vec<(Label, Edit)>,
     /// The muted age after Date modified's value.
     age: Label,
     /// The gray hint while nothing is selected.
     note: Label,
-}
-
-/// A field row's value: a read-only box, so the person can select and copy
-/// it, or for Attributes a text the window draws in two colours.
-#[derive(Clone, Copy)]
-enum FieldValue {
-    Text(Edit),
-    Parts(Label),
-}
-
-impl FieldValue {
-    fn hwnd(self) -> Hwnd {
-        match self {
-            FieldValue::Text(edit) => edit.hwnd(),
-            FieldValue::Parts(label) => label.hwnd(),
-        }
-    }
-
-    fn text(self) -> Option<Edit> {
-        match self {
-            FieldValue::Text(edit) => Some(edit),
-            FieldValue::Parts(_) => None,
-        }
-    }
 }
 
 /// The controls of each inspector field row's label and value.
@@ -477,23 +519,20 @@ impl Inspector {
     /// Creates the controls in reading order.
     fn create(parent: Hwnd) -> windows::core::Result<Inspector> {
         let button = |button: CommandButton| Button::create(parent, button.control.id());
+        let tool = |button: CommandButton, glyph| icon_tool(parent, button.control, glyph);
+        let icon = FileIconLabel::create(parent, ControlId::InspectorIcon.id())?;
         let heading = Label::create_heading(parent, ControlId::InspectorHeading.id())?;
-        let copy_name = button(INSPECTOR_COPY_NAME)?;
-        let hide = button(HIDE_DETAILS)?;
+        let copy_name = tool(INSPECTOR_COPY_NAME, Glyph::Copy)?;
+        let hide = tool(HIDE_DETAILS, Glyph::ChevronDown)?;
         let mut fields = Vec::new();
         let mut copy_folder = None;
         let mut copy_path = None;
         let mut age = None;
         for (index, (label, value)) in FIELD_CONTROLS.into_iter().enumerate() {
             let label = Label::create(parent, label.id())?;
-            let value = if index == ATTRIBUTES_ROW {
-                FieldValue::Parts(Label::create_owner_drawn(parent, value.id())?)
-            } else {
-                FieldValue::Text(Edit::create_read_only(parent, value.id())?)
-            };
-            fields.push((label, value));
+            fields.push((label, Edit::create_read_only(parent, value.id())?));
             if index == 0 {
-                copy_folder = Some(button(INSPECTOR_COPY_FOLDER)?);
+                copy_folder = Some(tool(INSPECTOR_COPY_FOLDER, Glyph::Copy)?);
             } else if index == MODIFIED_ROW {
                 age = Some(Label::create_line(parent, ControlId::InspectorAge.id())?);
                 copy_path = Some(button(INSPECTOR_COPY_PATH)?);
@@ -504,12 +543,9 @@ impl Inspector {
         let buttons = [explore?, open_file_location?, open?];
         let copy_folder = copy_folder.expect("the folder is the first field row");
         let copy_path = copy_path.expect("the inspector has a Date modified row");
-        let tipped: Vec<Hwnd> = buttons
-            .iter()
-            .chain([&copy_name, &copy_folder, &hide])
-            .map(|b| b.hwnd())
-            .collect();
+        let tipped = buttons.map(Button::hwnd);
         Ok(Inspector {
+            icon,
             heading,
             copy_name,
             hide,
@@ -535,22 +571,24 @@ impl Inspector {
         ]
     }
 
-    /// Every button, each with what it runs.
-    fn command_buttons(&self) -> impl Iterator<Item = (CommandButton, Button)> {
-        self.text_buttons().into_iter().chain([
+    /// The icons, each with what it runs.
+    fn icon_tools(&self) -> [(CommandButton, Toolbar); 3] {
+        [
             (INSPECTOR_COPY_NAME, self.copy_name),
             (INSPECTOR_COPY_FOLDER, self.copy_folder),
             (HIDE_DETAILS, self.hide),
-        ])
+        ]
     }
 
-    /// Every control but the heading, which has a font of its own.
+    /// Every control that shows text, but the heading, which has a font of
+    /// its own.
     fn controls(&self) -> Vec<Hwnd> {
         let fields = self
             .fields
             .iter()
             .flat_map(|(label, value)| [label.hwnd(), value.hwnd()]);
-        self.command_buttons()
+        self.text_buttons()
+            .into_iter()
             .map(|(_, b)| b.hwnd())
             .chain(fields)
             .chain([self.age.hwnd(), self.note.hwnd()])
@@ -565,7 +603,7 @@ impl Inspector {
     fn value(&self, control: Hwnd) -> Option<Edit> {
         self.fields
             .iter()
-            .filter_map(|(_, value)| value.text())
+            .map(|(_, value)| *value)
             .find(|value| value.hwnd() == control)
     }
 }
@@ -598,7 +636,8 @@ impl Fonts {
     }
 }
 
-/// What the layout needs that only measuring the text gives.
+/// What the layout needs that only measuring the text and the controls
+/// gives.
 #[derive(Clone, Copy)]
 struct Metrics {
     dpi: Dpi,
@@ -607,12 +646,13 @@ struct Metrics {
 }
 
 impl Metrics {
-    fn measure(fonts: &Fonts, captions: &WindowCaptions, dpi: Dpi) -> Metrics {
+    /// Measures after the controls have their fonts, icons and texts.
+    fn measure(fonts: &Fonts, captions: &WindowCaptions, controls: &Controls, dpi: Dpi) -> Metrics {
         let meter = TextMeter::new(&fonts.ui);
         Metrics {
             dpi,
             font_height: meter.height(),
-            captions: CaptionWidths::measure(captions, &|text| meter.width(text)),
+            captions: CaptionWidths::measure(captions, &|text| meter.width(text), controls.sizes()),
         }
     }
 }
@@ -693,17 +733,27 @@ pub(crate) struct MainWindow {
     inspector_shown: RefCell<(InspectorCaptions, Option<i32>)>,
     /// What the status bar's right group shows, which the window draws.
     status_right: RefCell<Vec<ValuePart>>,
-    /// What the status bar's memory group shows, which the window draws.
+    /// What the status bar's memory parts show, which they show again when
+    /// the parts change.
     status_memory: RefCell<Option<captions::MemoryCaptions>>,
+    /// The tooltip of each toolbar button, by its ID, which a toolbar asks
+    /// for when the pointer rests on the button.
+    tool_tips: RefCell<Vec<(u16, String)>>,
     /// While the person drags the splitter: the pointer's client `y` and the
     /// inspector's height when the drag started.
     splitter_drag: Cell<Option<(i32, Px)>>,
     /// The width the list's columns last filled, so a layout that keeps it
     /// fills nothing.
     filled_width: Cell<Option<Px>>,
-    /// The columns' fits while the list's width keeps changing, which each
-    /// fill of the burst reuses until the width settles.
-    settling_fits: RefCell<Option<Vec<ColumnFit>>>,
+    /// Whether the person drags the window's border or title bar, between
+    /// `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`.
+    sizing: Cell<bool>,
+    /// The columns' fits during a drag, which each fill of the drag scales,
+    /// so the widths follow the pointer without measuring every time.
+    sizing_fits: RefCell<Option<Vec<ColumnFit>>>,
+    /// The width each column had when the person hid it, at the DPI then,
+    /// which it gets again when shown, for the window's life.
+    hidden_widths: RefCell<Vec<(Column, Px, Dpi)>>,
     /// Whether the columns have filled the list around rows; until then
     /// they hold their first widths.
     filled_around_rows: Cell<bool>,
@@ -806,9 +856,12 @@ impl MainWindow {
             inspector_shown: RefCell::new((InspectorCaptions::default(), None)),
             status_right: RefCell::new(Vec::new()),
             status_memory: RefCell::new(None),
+            tool_tips: RefCell::new(Vec::new()),
             splitter_drag: Cell::new(None),
             filled_width: Cell::new(None),
-            settling_fits: RefCell::new(None),
+            sizing: Cell::new(false),
+            sizing_fits: RefCell::new(None),
+            hidden_widths: RefCell::new(Vec::new()),
             filled_around_rows: Cell::new(false),
             accelerators: RefCell::new(Rc::new(accelerators)),
             tray: RefCell::new(None),
@@ -873,7 +926,7 @@ impl MainWindow {
         };
         controls.apply_fonts(&fonts);
         win::gdi::show_icons(self.model.borrow().choices().show_icons);
-        controls.apply_glyphs();
+        controls.apply_glyphs(ToolHeights::new(dpi, TextMeter::new(&fonts.ui).height()));
         let (columns, order) = {
             let model = self.model.borrow();
             let columns: Vec<(Column, Px)> = model
@@ -899,7 +952,8 @@ impl MainWindow {
             controls.list.set_small_images(images);
         }
         let captions = self.captions();
-        let metrics = Metrics::measure(&fonts, &captions, dpi);
+        // Measured again once the controls have their texts.
+        let metrics = Metrics::measure(&fonts, &captions, &controls, dpi);
         let waker = OpenWaker::new(hwnd);
         let _ = self.created.set(Created {
             controls,
@@ -913,8 +967,28 @@ impl MainWindow {
             large_images: ImageList::system_large(),
         });
         self.apply_text(hwnd, &captions);
+        self.measure(&captions, dpi);
         self.layout(hwnd);
         true
+    }
+
+    /// Gives the controls and the memory figures their icons at `dpi`, in
+    /// the system colours and with Show icons of now, after the fonts.
+    fn apply_glyphs(&self, dpi: Dpi) {
+        let created = self.created();
+        let font_height = TextMeter::new(&created.fonts.borrow().ui).height();
+        created
+            .controls
+            .apply_glyphs(ToolHeights::new(dpi, font_height));
+        self.update_status();
+    }
+
+    /// Measures the texts and the controls again at `dpi`, after their
+    /// texts, their fonts or their icons changed.
+    fn measure(&self, captions: &WindowCaptions, dpi: Dpi) {
+        let created = self.created();
+        let metrics = Metrics::measure(&created.fonts.borrow(), captions, &created.controls, dpi);
+        created.metrics.set(metrics);
     }
 
     /// Every caption, from the model's facts and the current strings
@@ -930,9 +1004,7 @@ impl MainWindow {
         hwnd.draw_once_after(|| {
             let captions = self.captions();
             self.apply_text(hwnd, &captions);
-            let created = self.created();
-            let metrics = Metrics::measure(&created.fonts.borrow(), &captions, hwnd.dpi());
-            created.metrics.set(metrics);
+            self.measure(&captions, hwnd.dpi());
             self.layout(hwnd);
         });
     }
@@ -960,20 +1032,14 @@ impl MainWindow {
         controls.search.set_cue(&captions.search_cue);
         // The caption stays the name that screen readers say, and the
         // access key, while Clear shows only its icon.
-        controls
-            .clear_search
-            .hwnd()
-            .set_text(&captions.clear_search);
-        controls.clear_search_tip.set(
-            controls.clear_search.hwnd(),
-            &without_access_key(&captions.clear_search),
-        );
+        let tools = controls.search_tools;
+        tools.set_text(ControlId::ClearSearch.id(), &captions.clear_search);
+        tools.set_text(ControlId::MatchCase.id(), &captions.match_case);
+        tools.set_text(ControlId::MatchPath.id(), &captions.match_path);
         controls.match_label.hwnd().set_text(&captions.match_label);
         let mode = self.match_mode_index();
         let modes = captions.match_modes.each_ref().map(String::as_str);
         controls.match_mode.set_items(&modes, mode);
-        controls.match_case.hwnd().set_text(&captions.match_case);
-        controls.match_path.hwnd().set_text(&captions.match_path);
         controls.filters.set_captions(&captions.filters);
         self.show_filters(&captions.filters);
         for (index, header) in captions.headers.iter().enumerate() {
@@ -986,18 +1052,45 @@ impl MainWindow {
             (inspector.buttons[1], open_file_location),
             (inspector.buttons[2], open),
             (inspector.copy_path, &captions.copy_path),
-            (inspector.copy_name, &captions.copy_name),
-            (inspector.copy_folder, &captions.copy_folder),
-            (inspector.hide, &captions.hide_details),
         ] {
             button.hwnd().set_text(&caption.caption);
             inspector.tips.set(button.hwnd(), &caption.tip);
+        }
+        for ((button, toolbar), caption) in inspector.icon_tools().into_iter().zip([
+            &captions.copy_name,
+            &captions.copy_folder,
+            &captions.hide_details,
+        ]) {
+            toolbar.set_text(button.control.id(), &caption.caption);
         }
         self.show_inspector(hwnd, captions.inspector.clone());
         controls.status.set_cancel_caption(&captions.status_cancel);
         controls
             .status
-            .set_show_details_caption(&captions.show_details);
+            .set_show_details_caption(&captions.show_details.caption);
+        let filters = &captions.filters;
+        self.tool_tips.replace(vec![
+            (
+                ControlId::ClearSearch.id(),
+                without_access_key(&captions.clear_search),
+            ),
+            (ControlId::ShowFilters.id(), filters.show.clone()),
+            (ControlId::ClearFilters.id(), filters.clear_tip.clone()),
+            (ControlId::HideFilters.id(), filters.hide.clone()),
+            (
+                INSPECTOR_COPY_NAME.control.id(),
+                captions.copy_name.tip.clone(),
+            ),
+            (
+                INSPECTOR_COPY_FOLDER.control.id(),
+                captions.copy_folder.tip.clone(),
+            ),
+            (HIDE_DETAILS.control.id(), captions.hide_details.tip.clone()),
+            (
+                ControlId::StatusShowDetails.id(),
+                captions.show_details.tip.clone(),
+            ),
+        ]);
         self.show_status(&captions.status);
         self.show_message(captions.message.as_ref());
         self.update_bound_controls();
@@ -1016,8 +1109,10 @@ impl MainWindow {
                 filters.only_directly,
             )
         };
-        pane.kind.set_items(&captions.kinds, positions.kind);
-        pane.kind.set_glyphs(Kind::ALL.map(Kind::glyph));
+        // Each item shows the icon of its place in `Kind::ALL`.
+        let kinds: Vec<(&str, usize)> =
+            captions.kinds.iter().map(String::as_str).zip(0..).collect();
+        pane.kind.set_items(&kinds, positions.kind);
         pane.location
             .set_items(&captions.locations, positions.location);
         // Only directly in a folder needs a folder.
@@ -1068,7 +1163,7 @@ impl MainWindow {
     /// header's sort arrow.
     fn update_bound_controls(&self) {
         let controls = &self.created().controls;
-        let (enabled, can_clear, buttons, matching) = {
+        let (enabled, can_clear, buttons, icons, matching) = {
             let model = self.model.borrow();
             let state = State {
                 model: &model,
@@ -1079,27 +1174,39 @@ impl MainWindow {
                 (CommandId::ClearFilters.row().enabled)(&state),
                 controls
                     .inspector
-                    .command_buttons()
-                    .map(|(button, control)| (control, (button.command.row().enabled)(&state)))
-                    .collect::<Vec<_>>(),
+                    .text_buttons()
+                    .map(|(button, control)| (control, (button.command.row().enabled)(&state))),
+                controls.inspector.icon_tools().map(|(button, toolbar)| {
+                    (
+                        toolbar,
+                        button.control,
+                        (button.command.row().enabled)(&state),
+                    )
+                }),
                 model.matching(),
             )
         };
-        controls.filters.clear.hwnd().set_enabled(can_clear);
+        controls
+            .filters
+            .tools
+            .set_enabled(ControlId::ClearFilters.id(), can_clear);
         for (button, enabled) in buttons {
             button.hwnd().set_enabled(enabled);
         }
-        for control in [
-            controls.match_label.hwnd(),
-            controls.match_mode.hwnd(),
-            controls.match_case.hwnd(),
-            controls.match_path.hwnd(),
-        ] {
+        for (toolbar, id, enabled) in icons {
+            toolbar.set_enabled(id.id(), enabled);
+        }
+        for control in [controls.match_label.hwnd(), controls.match_mode.hwnd()] {
             control.set_enabled(enabled);
         }
+        for (id, checked) in [
+            (ControlId::MatchCase.id(), matching.case),
+            (ControlId::MatchPath.id(), matching.path),
+        ] {
+            controls.search_tools.set_enabled(id, enabled);
+            controls.search_tools.set_checked(id, checked);
+        }
         controls.match_mode.select(self.match_mode_index());
-        controls.match_case.set_checked(matching.case);
-        controls.match_path.set_checked(matching.path);
         self.show_sort();
     }
 
@@ -1126,9 +1233,6 @@ impl MainWindow {
                 .map_or(("", ""), |(l, v)| (l.as_str(), v.as_str()));
             label.hwnd().set_text(label_text);
             value.hwnd().set_text(value_text);
-            if let FieldValue::Parts(parts) = value {
-                parts.hwnd().invalidate();
-            }
         }
         inspector.note.hwnd().set_text(&captions.note);
         if captions.modified.is_some() {
@@ -1147,7 +1251,9 @@ impl MainWindow {
         self.show_age();
         self.show_fields();
         if icon_changed {
-            hwnd.invalidate();
+            inspector
+                .icon
+                .show_file_icon(self.created().large_images.zip(icon));
         }
     }
 
@@ -1200,9 +1306,9 @@ impl MainWindow {
     /// after the text it copies, for one entry only, whose name and folder
     /// it copies, the age a space after the modification time, and a value
     /// too long for its line ends in "…", a path losing its middle as
-    /// Windows shortens one (DESIGN.md: Inspector pane). The name, the age
-    /// and Attributes end in an ellipsis themselves, and a value that has
-    /// the focus keeps its whole text, so the person selects what is there.
+    /// Windows shortens one (DESIGN.md: Inspector pane). The name and the
+    /// age end in an ellipsis themselves, and a value that has the focus
+    /// keeps its whole text, so the person selects what is there.
     fn fit_inspector(&self) {
         let created = self.created();
         let inspector = &created.controls.inspector;
@@ -1230,22 +1336,9 @@ impl MainWindow {
         }
         moves.push((inspector.heading.hwnd(), heading));
         let mut texts: Vec<(Edit, String)> = Vec::new();
-        for (index, ((_, line), (_, value))) in
+        for (index, ((_, line), &(_, value))) in
             placed.fields.iter().zip(&inspector.fields).enumerate()
         {
-            let value = match value {
-                FieldValue::Text(edit) => *edit,
-                // Its text starts where a box's does.
-                FieldValue::Parts(parts) => {
-                    let inset = inspector
-                        .fields
-                        .iter()
-                        .find_map(|(_, v)| v.text())
-                        .map_or(Px(0), Edit::left_margin);
-                    moves.push((parts.hwnd(), InspectorLayout::drawn_value(*line, inset)));
-                    continue;
-                }
-            };
             let text = shown.0.fields.get(index).map_or("", |(_, v)| v.as_str());
             let margins = value.margins();
             let mut rect = *line;
@@ -1333,16 +1426,9 @@ impl MainWindow {
     }
 
     /// The status bar's Cancel, in the window or in Settings: stops the job
-    /// that the bar shows.
+    /// that the bar shows, as File > Cancel does.
     pub(super) fn cancel_job(&self, hwnd: Hwnd) {
-        let job = self.model.borrow().job();
-        match job {
-            Job::Export => self.run(hwnd, MenuItem::Run(CommandId::CancelExport)),
-            Job::Fix => {
-                let accepted = self.model.borrow_mut().cancel_fix();
-                self.apply(hwnd, accepted);
-            }
-        }
+        self.run(hwnd, MenuItem::Run(CommandId::Cancel));
     }
 
     /// Runs a failure's fix (DESIGN.md: Service fixes). The list's button
@@ -1551,7 +1637,7 @@ impl MainWindow {
         );
         let mut moves = vec![
             (controls.search.hwnd(), layout.search),
-            (controls.clear_search.hwnd(), layout.clear_search),
+            (controls.search_tools.hwnd(), layout.search_tools),
             (controls.match_label.hwnd(), layout.match_label),
             // A drop-down list's height includes its open list.
             (
@@ -1561,16 +1647,13 @@ impl MainWindow {
                     ..layout.match_mode
                 },
             ),
-            (controls.match_case.hwnd(), layout.match_case),
-            (controls.match_path.hwnd(), layout.match_path),
             (controls.list.hwnd(), layout.list),
         ];
         let pane = &controls.filters;
         if let Some(filters) = &layout.filters {
             moves.extend([
                 (pane.title.hwnd(), filters.title),
-                (pane.clear.hwnd(), filters.clear),
-                (pane.hide.hwnd(), filters.hide),
+                (pane.tools.hwnd(), filters.tools),
                 (pane.pane, filters.pane),
             ]);
         }
@@ -1578,8 +1661,10 @@ impl MainWindow {
             moves.push((pane.show.hwnd(), show));
         }
         let inspector = &controls.inspector;
+        // The heading, the values and the copy icons are placed where
+        // `fit_inspector` fits their texts.
         if let Some(placed) = &layout.inspector {
-            moves.push((inspector.heading.hwnd(), placed.heading));
+            moves.push((inspector.icon.hwnd(), placed.icon));
             moves.push((inspector.hide.hwnd(), placed.hide));
             moves.push((inspector.copy_path.hwnd(), placed.copy_path));
             moves.extend(
@@ -1589,65 +1674,88 @@ impl MainWindow {
                     .map(|b| b.hwnd())
                     .zip(placed.buttons),
             );
-            for ((label, value), (label_rect, value_rect)) in
-                inspector.fields.iter().zip(&placed.fields)
-            {
+            for ((label, _), (label_rect, _)) in inspector.fields.iter().zip(&placed.fields) {
                 moves.push((label.hwnd(), *label_rect));
-                moves.push((value.hwnd(), *value_rect));
             }
             if let Some(note) = placed.note {
                 moves.push((inspector.note.hwnd(), note));
             }
         }
-        win::move_children(&moves);
+        // The list draws once, after the fill has set its new widths, so a
+        // narrower window does not flash its horizontal scroll bar.
+        controls.list.hwnd().draw_once_after(|| {
+            win::move_children(&moves);
+            self.fill_on_resize();
+        });
         if let Some(filters) = &layout.filters {
             self.place_filters(filters, self.filter_scroll.get());
+            pane.kind.fill_column();
         }
         let shown = layout.filters.is_some();
-        for control in [
-            pane.title.hwnd(),
-            pane.clear.hwnd(),
-            pane.hide.hwnd(),
-            pane.pane,
-        ] {
+        for control in [pane.title.hwnd(), pane.tools.hwnd(), pane.pane] {
             control.set_visible(shown);
         }
         pane.show.hwnd().set_visible(!shown);
         let shown = layout.inspector.is_some();
+        inspector.icon.hwnd().set_visible(shown);
         inspector.heading.hwnd().set_visible(shown);
         inspector.hide.hwnd().set_visible(shown);
         inspector.copy_path.hwnd().set_visible(shown);
         for button in inspector.buttons {
             button.hwnd().set_visible(shown);
         }
-        controls.status.place(&layout.status);
+        let memory = self.status_memory.borrow().clone();
+        controls.status.place(&layout.status, memory.as_ref());
+        let inspector_moved = created
+            .layout
+            .borrow()
+            .as_ref()
+            .is_none_or(|previous| previous.inspector != layout.inspector);
         created.layout.replace(Some(layout));
-        self.fill_on_resize(hwnd);
-        self.show_fields();
+        // The inspector's texts are fitted again only when it moved or its
+        // size changed, because fitting them measures each text.
+        if inspector_moved {
+            self.show_fields();
+        }
         self.update_message();
         hwnd.invalidate();
     }
 
     /// Fills the list's width with its columns when the width changed: when
     /// the window shows, is resized, or a pane beside the list shows, hides
-    /// or moves (DESIGN.md: Results list). A burst of changes, such as a
-    /// window resize, fits the columns once and scales those fits at each
-    /// change, so the widths follow the pointer; once the width has kept
-    /// for a moment, the columns are fitted again at the final width.
-    fn fill_on_resize(&self, hwnd: Hwnd) {
+    /// or moves (DESIGN.md: Results list). A drag of the window's border
+    /// fits the columns once and scales those fits at each change, so the
+    /// widths follow the pointer; [`Self::end_sizing`] fits them again at
+    /// the final width.
+    fn fill_on_resize(&self) {
         let width = self.created().controls.list.fill_width();
         if self.filled_width.replace(Some(width)) == Some(width) {
             return;
         }
+        if !self.sizing.get() {
+            self.fill_columns(&self.column_fits());
+            return;
+        }
         let columns = self.model.borrow().columns().len();
         let fits = self
-            .settling_fits
+            .sizing_fits
             .take()
             .filter(|fits| fits.len() == columns)
             .unwrap_or_else(|| self.column_fits());
         self.fill_columns(&fits);
-        self.settling_fits.replace(Some(fits));
-        hwnd.set_timer(timer::FILL, FILL_SETTLE_MS);
+        self.sizing_fits.replace(Some(fits));
+    }
+
+    /// The person ended a drag of the window's border or title bar: when
+    /// the drag resized the list, its columns are fitted afresh at the
+    /// final width, on the rows the list shows now.
+    fn end_sizing(&self) {
+        self.sizing.set(false);
+        if self.sizing_fits.take().is_some() {
+            let list = self.created().controls.list;
+            list.hwnd()
+                .draw_once_after(|| self.fill_columns(&self.column_fits()));
+        }
     }
 
     /// Fills the list's width once the first rows on screen arrive, because
@@ -1662,20 +1770,22 @@ impl MainWindow {
             return;
         }
         self.filled_around_rows.set(true);
-        // A resize burst that follows measures these rows, not the first
-        // widths.
-        self.settling_fits.take();
+        // A drag that follows measures these rows, not the first widths.
+        self.sizing_fits.take();
         self.fill_columns(&self.column_fits());
     }
 
     /// Gives the columns the widths that scale `fits` to end at the list's
-    /// right edge.
+    /// right edge, each only when it differs from the column's, because
+    /// each width that the list takes draws it again.
     fn fill_columns(&self, fits: &[ColumnFit]) {
         let created = self.created();
         let list = created.controls.list;
         let widths = layout::fill_widths(fits, list.fill_width(), created.metrics.get().dpi);
         for (index, width) in widths.into_iter().enumerate() {
-            list.set_column_width(index, width);
+            if list.column_width(index) != width {
+                list.set_column_width(index, width);
+            }
         }
     }
 
@@ -1683,7 +1793,7 @@ impl MainWindow {
     /// a double-click on its divider and Fit column do; the others keep
     /// their widths.
     fn fit_column(&self, index: usize) {
-        if let Some(fit) = self.column_fits().get(index) {
+        if let Some(fit) = self.fits_of(index..index + 1).first() {
             self.created()
                 .controls
                 .list
@@ -1691,18 +1801,26 @@ impl MainWindow {
         }
     }
 
-    /// Each column's fit, from its header and the cells of the rows the
-    /// list shows and one row above and below them, which are the rows the
-    /// person reads and those a small scroll brings (DESIGN.md: Results
-    /// list). While the list holds none of those rows, every column would
-    /// fit its header and Size would get as much room as Name, so each
-    /// column's first width stands for its fit until the rows arrive.
+    /// Every column's fit, as [`Self::fits_of`] measures it.
     fn column_fits(&self) -> Vec<ColumnFit> {
+        self.fits_of(0..self.model.borrow().columns().len())
+    }
+
+    /// The fit of each of the shown columns at `indexes`, from its header
+    /// and the cells of the rows the list shows and one row above and below
+    /// them, which are the rows the person reads and those a small scroll
+    /// brings (DESIGN.md: Results list). While the list holds none of those
+    /// rows, every column would fit its header and Size would get as much
+    /// room as Name, so each column's first width stands for its fit until
+    /// the rows arrive.
+    fn fits_of(&self, indexes: Range<usize>) -> Vec<ColumnFit> {
         let created = self.created();
         let list = created.controls.list;
         let dpi = created.metrics.get().dpi;
         let shown = list.visible_rows();
-        let rows = shown.start.saturating_sub(1)..(shown.end + 1).min(list.count());
+        // The shown rows end with a part row, or with the row below them.
+        let below = u64::from(list.shows_part_row());
+        let rows = shown.start.saturating_sub(1)..(shown.end + below).min(list.count());
         let label = list.first_label_offset(rows.start).unwrap_or_default();
         // The model is borrowed while the texts are formatted, and the
         // measuring follows.
@@ -1712,21 +1830,19 @@ impl MainWindow {
             let strings = model.strings();
             let sizes = model.choices().size_format;
             let results = model.results();
+            let columns = model.columns().get(indexes.clone()).unwrap_or_default();
             let items: Vec<_> = rows.filter_map(|row| results.row(row)).collect();
             if items.is_empty() {
-                return model
-                    .columns()
+                return columns
                     .iter()
                     .map(|column| ColumnFit::first(*column, dpi))
                     .collect();
             }
-            let headers: Vec<String> = model
-                .columns()
+            let headers: Vec<String> = columns
                 .iter()
                 .map(|column| captions::header(strings, *column))
                 .collect();
-            let cells: Vec<Vec<(String, Vec<Range<usize>>)>> = model
-                .columns()
+            let cells: Vec<Vec<(String, Vec<Range<usize>>)>> = columns
                 .iter()
                 .map(|&column| {
                     items
@@ -1751,8 +1867,8 @@ impl MainWindow {
         headers
             .iter()
             .zip(cells)
-            .enumerate()
-            .map(|(index, (header, cells))| {
+            .zip(indexes)
+            .map(|((header, cells), index)| {
                 let first = index == 0;
                 let label = if first { label } else { Px(0) };
                 let widest = cells
@@ -1833,21 +1949,15 @@ impl MainWindow {
         let controls = &created.controls;
         let Ok(fonts) = Fonts::new(dpi) else { return };
         controls.apply_fonts(&fonts);
-        controls.apply_glyphs();
         drop(created.fonts.replace(fonts));
-        let old = created.metrics.get().dpi;
-        let columns = self.model.borrow().columns().len();
-        for index in 0..columns {
-            let width = controls.list.column_width(index);
-            controls
-                .list
-                .set_column_width(index, width.rescale(old, dpi));
-        }
+        self.apply_glyphs(dpi);
+        // The columns' widths and the drag's fits are in the old DPI's
+        // pixels, so the layout that follows fills the columns afresh.
+        self.sizing_fits.take();
+        self.filled_width.set(None);
         let captions = self.captions();
         let _ = win::menu::replace_menu_bar(hwnd, &captions.menu_bar);
-        created
-            .metrics
-            .set(Metrics::measure(&created.fonts.borrow(), &captions, dpi));
+        self.measure(&captions, dpi);
         // The minimum size is in the old DPI's pixels until the layout
         // runs again, so it does not hold the window to the old size.
         created.layout.replace(None);
@@ -1906,29 +2016,14 @@ impl MainWindow {
     }
 
     /// Sets every menu item's enabled state and mark from the command
-    /// table, with Export results… or Cancel export in its place, after the
-    /// selection of the action that opened the menu is read.
+    /// table, after the selection of the action that opened the menu is
+    /// read.
     fn update_menu(&self, hwnd: Hwnd) {
         self.read_list_selection(hwnd);
         let Some(bar) = win::menu::Menu::of(hwnd) else {
             return;
         };
-        let (slot, node) = {
-            let model = self.model.borrow();
-            let slot = commands::export_slot(&model);
-            let node = commands::node(&slot, model.strings(), &model.choices().shortcuts);
-            (slot, node)
-        };
-        let export = [CommandId::ExportResults, CommandId::CancelExport]
-            .map(|command| MenuItem::Run(command).id());
-        bar.replace_item(&export, &node);
-        let items: Vec<MenuItem> = commands::items(&self.menus)
-            .into_iter()
-            .map(|item| match item {
-                MenuItem::Run(CommandId::ExportResults) => slot,
-                item => item,
-            })
-            .collect();
+        let items = commands::items(&self.menus);
         for (id, enabled, checked) in self.item_states(&items) {
             bar.set_state(id, enabled, checked);
         }
@@ -1967,7 +2062,7 @@ impl MainWindow {
                 CommandId::Explore => return self.explore_selected(hwnd),
                 CommandId::Properties => return self.show_properties(hwnd),
                 CommandId::ExportResults => return self.export(hwnd),
-                CommandId::CancelExport => self.model.borrow_mut().cancel_export(),
+                CommandId::Cancel => self.model.borrow_mut().cancel_job(),
                 CommandId::Copy => match focus {
                     Focus::SearchBox { .. } => return controls.search.copy(),
                     Focus::Value { .. } => {
@@ -2249,27 +2344,16 @@ impl MainWindow {
             Change::Panes => {
                 let panes = self.model.borrow().panes();
                 // A hidden control keeps the focus but takes no key, so the
-                // focus moves to the button that brings the pane back, or
-                // the one that hides it again, or else to the search box.
-                let filters = &controls.filters;
-                let inspector = &controls.inspector;
-                let show_details = controls.status.show_details().map(|show| show.hwnd());
-                let focus = Hwnd::focused().and_then(|focused| {
-                    if !panes.filters && filters.contains(focused) {
-                        Some(filters.show.hwnd())
-                    } else if panes.filters && focused == filters.show.hwnd() {
-                        Some(filters.hide.hwnd())
-                    } else if !panes.inspector && inspector.contains(focused) {
-                        show_details.or(Some(controls.search.hwnd()))
-                    } else if panes.inspector && Some(focused) == show_details {
-                        Some(inspector.hide.hwnd())
-                    } else {
-                        None
-                    }
+                // focus moves to the search box, because the buttons that
+                // show and hide the panes are toolbar buttons, which take no
+                // focus.
+                let hidden_focus = Hwnd::focused().is_some_and(|focused| {
+                    (!panes.filters && controls.filters.contains(focused))
+                        || (!panes.inspector && controls.inspector.contains(focused))
                 });
                 self.layout(hwnd);
-                if let Some(focus) = focus {
-                    focus.focus();
+                if hidden_focus {
+                    controls.search.hwnd().focus();
                 }
                 self.update_status();
             }
@@ -2280,16 +2364,31 @@ impl MainWindow {
                     let column = model.columns()[index];
                     (column, captions::header(model.strings(), column))
                 };
+                // A column shown again gets the width it had, as
+                // TableView's does.
+                let kept = self
+                    .hidden_widths
+                    .borrow()
+                    .iter()
+                    .find(|(hidden, ..)| *hidden == column)
+                    .map(|(_, width, dpi)| width.rescale(*dpi, hwnd.dpi()));
                 controls.list.insert_column(
                     index,
                     &ListColumn {
                         header: &header,
-                        width: layout::column_width(column, hwnd.dpi()),
+                        width: kept.unwrap_or_else(|| layout::column_width(column, hwnd.dpi())),
                         right_aligned: column.right_aligned(),
                     },
                 );
             }
-            Change::ColumnHidden { index } => controls.list.delete_column(index),
+            Change::ColumnHidden { index, column } => {
+                let width = controls.list.column_width(index);
+                let mut hidden = self.hidden_widths.borrow_mut();
+                hidden.retain(|(kept, ..)| *kept != column);
+                hidden.push((column, width, hwnd.dpi()));
+                drop(hidden);
+                controls.list.delete_column(index);
+            }
             Change::Status => {
                 self.read_app_memory();
                 self.update_status();
@@ -2446,8 +2545,7 @@ impl MainWindow {
             .inspector
             .fields
             .iter()
-            .filter_map(|(_, value)| value.text())
-            .any(|value| value.focused(event) || value.unfocused(event))
+            .any(|(_, value)| value.focused(event) || value.unfocused(event))
         {
             // A value shows its whole text while it has the focus.
             self.fit_inspector();
@@ -2463,11 +2561,13 @@ impl MainWindow {
             return;
         }
         let matching = || self.model.borrow().matching();
+        let search_tool = controls.search_tools.clicked(event);
+        let tools = controls.search_tools;
         let accepted = if controls.search.changed(event) {
             let text = controls.search.text();
-            controls.clear_search.hwnd().set_enabled(!text.is_empty());
+            tools.set_enabled(ControlId::ClearSearch.id(), !text.is_empty());
             self.model.borrow_mut().set_typed_search(text)
-        } else if controls.clear_search.clicked(event) {
+        } else if search_tool == Some(ControlId::ClearSearch.id()) {
             // As Esc in the search box does; the box's change runs the search.
             controls.search.hwnd().set_text("");
             controls.search.hwnd().focus();
@@ -2482,15 +2582,15 @@ impl MainWindow {
             };
             let choice = Matching { mode, ..matching() };
             self.model.borrow_mut().set_matching(choice)
-        } else if controls.match_case.clicked(event) {
+        } else if search_tool == Some(ControlId::MatchCase.id()) {
             let choice = Matching {
-                case: controls.match_case.is_checked(),
+                case: tools.is_checked(ControlId::MatchCase.id()),
                 ..matching()
             };
             self.model.borrow_mut().set_matching(choice)
-        } else if controls.match_path.clicked(event) {
+        } else if search_tool == Some(ControlId::MatchPath.id()) {
             let choice = Matching {
-                path: controls.match_path.is_checked(),
+                path: tools.is_checked(ControlId::MatchPath.id()),
                 ..matching()
             };
             self.model.borrow_mut().set_matching(choice)
@@ -2513,17 +2613,7 @@ impl MainWindow {
                 None => {}
             }
             return;
-        } else if let Some((button, _)) = controls
-            .inspector
-            .command_buttons()
-            .chain(
-                controls
-                    .status
-                    .show_details()
-                    .map(|show| (SHOW_DETAILS, show)),
-            )
-            .find(|(_, control)| control.clicked(event))
-        {
+        } else if let Some(button) = self.command_button_clicked(event) {
             // The button runs its menu item's command (DESIGN.md:
             // window rule 9).
             self.read_list_selection(hwnd);
@@ -2536,17 +2626,52 @@ impl MainWindow {
         self.apply(hwnd, accepted);
     }
 
+    /// The inspector's button or Show details that `event` says the person
+    /// clicked, with what it runs.
+    fn command_button_clicked(&self, event: ControlEvent) -> Option<CommandButton> {
+        let controls = &self.created().controls;
+        let inspector = &controls.inspector;
+        let text = inspector
+            .text_buttons()
+            .into_iter()
+            .find(|(_, control)| control.clicked(event))
+            .map(|(button, _)| button);
+        let icon = || {
+            inspector
+                .icon_tools()
+                .into_iter()
+                .chain(
+                    controls
+                        .status
+                        .show_details()
+                        .map(|show| (SHOW_DETAILS, show)),
+                )
+                .find(|(button, toolbar)| toolbar.clicked(event) == Some(button.control.id()))
+                .map(|(button, _)| button)
+        };
+        text.or_else(icon)
+    }
+
+    /// The Kind list selected another item. A list view also tells of a
+    /// selection that the window made to show the model's kind, which
+    /// changes nothing.
+    fn on_kind_selected(&self, hwnd: Hwnd) {
+        let selected = self.created().controls.filters.kind.selected();
+        let kind = selected.and_then(|index| Kind::ALL.get(index).copied());
+        if let Some(kind) = kind.filter(|kind| *kind != self.model.borrow().filters().kind) {
+            self.change_filters(hwnd, |f| f.kind = kind);
+        }
+    }
+
     /// A notification of a control in the filter pane.
     fn on_filter(&self, hwnd: Hwnd, event: ControlEvent) {
         let pane = &self.created().controls.filters;
-        if pane.clear.clicked(event) {
+        let tool = pane.tools.clicked(event).or(pane.show.clicked(event));
+        if tool == Some(ControlId::ClearFilters.id()) {
             self.run(hwnd, MenuItem::Run(CommandId::ClearFilters));
-        } else if pane.hide.clicked(event) || pane.show.clicked(event) {
+        } else if tool.is_some() {
+            // Hide filters, or Show filters in the search row.
             self.run(hwnd, MenuItem::Run(CommandId::Filters));
-        } else if pane.kind.selection_changed(event) {
-            if let Some(kind) = pane.kind.selected().and_then(|i| Kind::ALL.get(i)) {
-                self.change_filters(hwnd, |f| f.kind = *kind);
-            }
         } else if pane.location.selection_changed(event) {
             let location = {
                 let model = self.model.borrow();
@@ -2722,10 +2847,14 @@ impl MainWindow {
                 }
                 Some(LRESULT(0))
             }
-            ListNotify::CustomDraw(draw) => Some(CustomDraw::answer(match draw.stage() {
+            ListNotify::CustomDraw(mut draw) => Some(CustomDraw::answer(match draw.stage() {
                 DrawStage::Paint => DrawAnswer::EachRow,
-                DrawStage::Row => DrawAnswer::EachCell,
+                DrawStage::Row { row } => self.draw_row(&mut draw, row),
                 DrawStage::Cell { row, column } => self.draw_cell(&draw, hwnd.dpi(), row, column),
+                DrawStage::RowPainted => {
+                    draw.restore_font(&self.created().fonts.borrow().ui);
+                    DrawAnswer::Default
+                }
                 DrawStage::Other => DrawAnswer::Default,
             })),
             ListNotify::SelectionChanged => {
@@ -2804,39 +2933,26 @@ impl MainWindow {
         }
     }
 
-    /// Draws every cell of a row whose entry a delete or a move took, struck
-    /// through in grey with its Name's icon, and a Name or Path cell whose
-    /// text the search matched, with the matched parts in bold (DESIGN.md:
-    /// Results list); the list draws every other cell.
-    fn draw_cell(&self, draw: &CustomDraw, dpi: Dpi, row: u64, column: usize) -> DrawAnswer {
+    /// Has the list draw a row whose entry a delete or a move took struck
+    /// through in grey (DESIGN.md: Results list), and asks for every other
+    /// row's cells, which [`Self::draw_cell`] draws.
+    fn draw_row(&self, draw: &mut CustomDraw, row: u64) -> DrawAnswer {
         let taken = {
             let model = self.model.borrow();
-            let shown = model.columns().get(column).copied();
-            model
-                .results()
-                .row(row)
-                .filter(|_| model.row_taken(row))
-                .map(|item| {
-                    let icon = (shown == Some(Column::Name)).then(|| {
-                        (
-                            crate::core::text::name_of(&item.path).to_owned(),
-                            item.is_dir,
-                        )
-                    });
-                    (icon, shown.is_some_and(Column::right_aligned))
-                })
+            model.results().row(row).is_some() && model.row_taken(row)
         };
-        if let Some((icon, right_aligned)) = taken {
-            let icon = icon.map(|(name, is_folder)| self.icons.index(&name, is_folder));
-            let created = self.created();
-            draw.draw_grey(
-                &created.fonts.borrow().struck,
-                created.images.zip(icon),
-                layout::cell_text_inset(column == 0, dpi),
-                right_aligned,
-            );
-            return DrawAnswer::Drawn;
+        if taken {
+            draw.draw_row_struck(&self.created().fonts.borrow().struck);
+            DrawAnswer::NewFont
+        } else {
+            DrawAnswer::EachCell
         }
+    }
+
+    /// Draws a Name or Path cell whose text the search matched, with the
+    /// matched parts in bold (DESIGN.md: Results list); the list draws every
+    /// other cell.
+    fn draw_cell(&self, draw: &CustomDraw, dpi: Dpi, row: u64, column: usize) -> DrawAnswer {
         let cell = {
             let model = self.model.borrow();
             let column = model.columns().get(column).copied();
@@ -2916,23 +3032,19 @@ impl MainWindow {
     fn move_tab_focus(&self, hwnd: Hwnd, target: Hwnd, backward: bool) {
         hwnd.show_focus_cues();
         let controls = &self.created().controls;
-        let cancel = controls.status.cancel().hwnd();
         let from = if target == controls.search.hwnd() {
             Some(TabStop::SearchBox)
         } else if target == controls.list.hwnd() {
             Some(TabStop::Results)
-        } else if target == cancel {
-            Some(TabStop::Cancel)
         } else {
             None
         };
-        match commands::tab_stop(from, backward, cancel.is_visible()) {
+        match commands::tab_stop(from, backward) {
             TabStop::SearchBox => {
                 controls.search.hwnd().focus();
                 controls.search.select_all();
             }
             TabStop::Results => controls.list.hwnd().focus(),
-            TabStop::Cancel => cancel.focus(),
         }
     }
 
@@ -3746,7 +3858,7 @@ impl MainWindow {
         }
         if edited.choices.show_icons != last.choices.show_icons {
             win::gdi::show_icons(edited.choices.show_icons);
-            self.created().controls.apply_glyphs();
+            self.apply_glyphs(hwnd.dpi());
             if let Some(operations) = self.file_operations.borrow().as_ref() {
                 operations.apply_glyphs();
             }
@@ -3764,9 +3876,8 @@ impl MainWindow {
             self.refresh_text(hwnd);
         }
         if edited.choices.size_format != last.choices.size_format {
-            // The columns fill the list again around the new Size texts,
-            // which are much wider in bytes than in KB.
-            self.fill_columns(&self.column_fits());
+            // The columns keep their widths, as TableView's do when a
+            // property changes; Fit column fits the new Size texts.
             let list = self.created().controls.list;
             list.redraw_rows(list.visible_rows());
         }
@@ -4187,10 +4298,25 @@ impl WindowProc for MainWindow {
             // controls, because notifications arrive while it runs.
             _ if self.created.get().is_none() => None,
             Message::Size => {
-                self.layout(hwnd);
+                // A minimized window has no room for its controls, and laying
+                // them out would fill the columns into it, so restoring it
+                // keeps the widths the person dragged.
+                if !hwnd.is_minimized() {
+                    self.layout(hwnd);
+                }
                 // Minimizing and restoring send it too.
                 self.follow_visibility(hwnd);
                 Some(LRESULT(0))
+            }
+            Message::EnterSizeMove => {
+                self.sizing.set(true);
+                // Fits measured before this drag were measured on other rows.
+                self.sizing_fits.take();
+                None
+            }
+            Message::ExitSizeMove => {
+                self.end_sizing();
+                None
             }
             Message::DpiChanged { dpi, suggested } => {
                 self.on_dpi_changed(hwnd, dpi, suggested);
@@ -4241,40 +4367,24 @@ impl WindowProc for MainWindow {
             }
             Message::Notify(notification) => {
                 let controls = &self.created().controls;
+                if let Some(request) = controls
+                    .toolbars()
+                    .find_map(|toolbar| toolbar.tip_request(&notification))
                 {
-                    let filters = &controls.filters;
-                    let inspector = &controls.inspector;
-                    let window = |button, glyph| (button, glyph, FlatGround::Window);
-                    let flat = [
-                        window(inspector.copy_name, Glyph::Copy),
-                        window(inspector.copy_folder, Glyph::Copy),
-                        window(inspector.hide, Glyph::ChevronDown),
-                        window(filters.hide, Glyph::OpenPane),
-                        window(filters.show, Glyph::ClosePane),
-                    ]
-                    .into_iter()
-                    .chain(
-                        [
-                            (controls.clear_search, "button.clear"),
-                            (filters.clear, "filter.clear"),
-                        ]
-                        .into_iter()
-                        .filter(|_| self.created().metrics.get().captions.clear_is_icon())
-                        .filter_map(|(button, key)| {
-                            Some(window(button, captions::button_glyph(key)?))
-                        }),
-                    )
-                    .chain(
-                        controls
-                            .status
-                            .show_details()
-                            .map(|show| (show, Glyph::ChevronUp, FlatGround::Face)),
-                    );
-                    for (button, glyph, ground) in flat {
-                        if let Some(answer) = button.draw_flat(&notification, glyph, ground) {
-                            return Some(answer);
-                        }
+                    let tip = request.id().and_then(|id| {
+                        let tips = self.tool_tips.borrow();
+                        tips.iter()
+                            .find(|(tipped, _)| *tipped == id)
+                            .map(|(_, tip)| tip.clone())
+                    });
+                    if let Some(tip) = tip {
+                        request.set(&tip);
                     }
+                    return Some(LRESULT(0));
+                }
+                if controls.filters.kind.selection_changed(&notification) {
+                    self.on_kind_selected(hwnd);
+                    return Some(LRESULT(0));
                 }
                 if controls.status.service_clicked(&notification) {
                     self.on_status_click(hwnd);
@@ -4289,12 +4399,6 @@ impl WindowProc for MainWindow {
             }
             Message::Timer(timer::STATUS) => {
                 self.ask_status();
-                Some(LRESULT(0))
-            }
-            Message::Timer(timer::FILL) => {
-                hwnd.kill_timer(timer::FILL);
-                self.settling_fits.take();
-                self.fill_columns(&self.column_fits());
                 Some(LRESULT(0))
             }
             Message::Timer(timer::AGE) => {
@@ -4448,55 +4552,24 @@ impl WindowProc for MainWindow {
                     colors.window_background()
                 })
             }
+            // The status bar's right group, the only part it does not draw.
             Message::DrawItem(item) if item.control() == self.created().controls.status.hwnd() => {
-                let created = self.created();
-                let fonts = created.fonts.borrow();
-                if item.status_part() == super::status_bar::MEMORY_GROUP {
-                    let layout = created.layout.borrow();
-                    let shown = self.status_memory.borrow();
-                    if let (Some(place), Some(memory)) = (
-                        layout.as_ref().and_then(|layout| layout.status.memory),
-                        shown.as_ref(),
-                    ) {
-                        item.draw_status_slots(
-                            &fonts.ui,
-                            &[(place.service, &memory.service), (place.app, &memory.app)],
-                        );
-                    }
-                } else {
-                    item.draw_status_parts(&fonts.ui, &self.status_right.borrow());
-                }
-                Some(LRESULT(1))
-            }
-            Message::DrawItem(item) => {
-                let inspector = &self.created().controls.inspector;
-                let attributes = inspector
-                    .fields
-                    .iter()
-                    .any(|(_, v)| matches!(v, FieldValue::Parts(_)) && v.hwnd() == item.control());
-                if !attributes {
-                    return None;
-                }
                 let fonts = self.created().fonts.borrow();
-                item.draw_parts(&fonts.ui, &self.inspector_shown.borrow().0.attributes);
+                item.draw_status_parts(&fonts.ui, &self.status_right.borrow());
                 Some(LRESULT(1))
             }
+            Message::DrawItem(_) => None,
+            // The class brush paints the background.
+            Message::EraseBackground(_) => None,
             Message::Paint => {
-                let created = self.created();
-                let (dividers, icon) = {
-                    let layout = created.layout.borrow();
-                    let layout = layout.as_ref();
-                    let icon = self.inspector_shown.borrow().1;
-                    (
-                        layout.map(|l| l.dividers.clone()).unwrap_or_default(),
-                        created
-                            .large_images
-                            .zip(icon)
-                            .zip(layout.and_then(|l| l.inspector.as_ref()))
-                            .map(|((images, index), inspector)| (images, index, inspector.icon)),
-                    )
-                };
-                hwnd.paint_window(&dividers, icon);
+                let dividers = self
+                    .created()
+                    .layout
+                    .borrow()
+                    .as_ref()
+                    .map(|l| l.dividers.clone())
+                    .unwrap_or_default();
+                hwnd.paint_window(&dividers);
                 Some(LRESULT(0))
             }
             Message::SettingChange {
@@ -4508,7 +4581,7 @@ impl WindowProc for MainWindow {
             }
             Message::SettingChange { .. } => None,
             Message::SysColorChange => {
-                self.created().controls.apply_glyphs();
+                self.apply_glyphs(hwnd.dpi());
                 None
             }
             Message::EndSession { ending: true } => {

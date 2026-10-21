@@ -6,22 +6,25 @@
 //! right end; `core::captions` gives it the texts and `core::layout` the
 //! places.
 
-use crate::core::captions::{
-    ButtonCaption, ButtonIcon, JobCaption, JobProgress, MemoryCaptions, StatusCaptions,
-};
+use crate::core::captions::{ButtonIcon, JobCaption, JobProgress, MemoryCaptions, StatusCaptions};
+use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
 use crate::core::layout::{Px, StatusLayout};
 use crate::win::controls::{self, Button, ProgressBar, Tooltip};
 use crate::win::notify::{ControlEvent, Notification};
+use crate::win::toolbar::{Tool, Toolbar};
 use crate::win::{self, Hwnd};
 
 const VIEW_GROUP: usize = 0;
 const JOB_GROUP: usize = 1;
-/// The right group, where a click on a newer release runs Update.
+/// The right group, which the window draws, and where a click on a newer
+/// release runs Update.
 const SERVICE_GROUP: usize = 2;
-/// The main window's memory group, which the window draws.
-pub(super) const MEMORY_GROUP: usize = 3;
-/// The memory group's figures, by their tooltip's area.
+/// The parts of the main window's memory figures, after the right group
+/// while they show.
+const SERVICE_MEMORY_PART: usize = 3;
+const APP_MEMORY_PART: usize = 4;
+/// The memory figures, by their tooltip's area.
 const SERVICE_MEMORY: usize = 0;
 const APP_MEMORY: usize = 1;
 
@@ -30,8 +33,8 @@ pub(super) struct StatusBar {
     bar: controls::StatusBar,
     progress: ProgressBar,
     cancel: Button,
-    /// The main window's Show details and its tooltip.
-    show_details: Option<(Button, Tooltip)>,
+    /// The main window's Show details, a toolbar of its one icon.
+    show_details: Option<Toolbar>,
     /// The tooltips of the main window's memory figures.
     memory_tips: Option<Tooltip>,
 }
@@ -42,10 +45,17 @@ impl StatusBar {
     /// group and Show details.
     pub(super) fn for_window(parent: Hwnd) -> windows::core::Result<StatusBar> {
         let mut status = StatusBar::create(parent, true)?;
-        let show = Button::create(status.bar.hwnd(), ControlId::StatusShowDetails.id())?;
+        let id = ControlId::StatusShowDetails.id();
+        let show = Toolbar::create(
+            status.bar.hwnd(),
+            id,
+            &[Tool::Icon {
+                id,
+                glyph: Glyph::ChevronUp,
+            }],
+        )?;
         show.hwnd().set_visible(false);
-        let tips = Tooltip::create(status.bar.hwnd(), &[show.hwnd()])?;
-        status.show_details = Some((show, tips));
+        status.show_details = Some(show);
         status.memory_tips = Some(Tooltip::create_areas(status.bar.hwnd(), 2)?);
         Ok(status)
     }
@@ -69,21 +79,15 @@ impl StatusBar {
         Ok(status)
     }
 
-    /// Cancel, which shows while a job runs.
-    pub(super) fn cancel(&self) -> Button {
-        self.cancel
+    /// Show details, whose tooltip the main window gives.
+    pub(super) fn show_details(&self) -> Option<Toolbar> {
+        self.show_details
     }
 
-    /// Show details, which the main window draws as an icon.
-    pub(super) fn show_details(&self) -> Option<Button> {
-        self.show_details.as_ref().map(|(show, _)| *show)
-    }
-
-    /// Gives Show details the name that screen readers say and its tip.
-    pub(super) fn set_show_details_caption(&self, caption: &ButtonCaption) {
-        if let Some((show, tips)) = &self.show_details {
-            show.hwnd().set_text(&caption.caption);
-            tips.set(show.hwnd(), &caption.tip);
+    /// Gives Show details the name that screen readers say.
+    pub(super) fn set_show_details_caption(&self, caption: &str) {
+        if let Some(show) = self.show_details {
+            show.set_text(ControlId::StatusShowDetails.id(), caption);
         }
     }
 
@@ -110,9 +114,10 @@ impl StatusBar {
     }
 
     /// Places the groups and the controls, and shows Show details while
-    /// `layout` has a place for it.
-    pub(super) fn place(&self, layout: &StatusLayout) {
-        self.bar.set_parts(&layout.part_widths());
+    /// `layout` has a place for it. `memory` is what the memory figures
+    /// show, which their parts show again when the parts change.
+    pub(super) fn place(&self, layout: &StatusLayout, memory: Option<&MemoryCaptions>) {
+        let parts_changed = self.bar.set_parts(&layout.part_widths());
         if let Some(tips) = &self.memory_tips {
             // A hidden group's tips cover nothing.
             let (service, app) = layout
@@ -121,16 +126,15 @@ impl StatusBar {
                 .unwrap_or_default();
             tips.place_area(SERVICE_MEMORY, service);
             tips.place_area(APP_MEMORY, app);
-            if layout.memory.is_some() {
-                // A part that the parts just added has no text yet.
-                self.bar.redraw_owner_drawn(MEMORY_GROUP);
+            if parts_changed {
+                self.show_memory(memory.filter(|_| layout.memory.is_some()));
             }
         }
         let mut moves = vec![
             (self.progress.hwnd(), layout.progress),
             (self.cancel.hwnd(), layout.cancel),
         ];
-        if let Some(show) = self.show_details() {
+        if let Some(show) = self.show_details {
             if let Some(rect) = layout.show_details {
                 moves.push((show.hwnd(), rect));
             }
@@ -144,23 +148,38 @@ impl StatusBar {
     }
 
     /// Shows every group of `captions` as the main window's, which draws
-    /// the right group from `captions.right` and the memory group from
-    /// `captions.memory`, so their icons show. Returns what
-    /// [`Self::show_work`] returns.
+    /// the right group from `captions.right`, so its icons show. Returns
+    /// what [`Self::show_work`] returns.
     pub(super) fn show(&self, captions: &StatusCaptions) -> bool {
         self.show_view(&captions.view);
         self.bar.redraw_owner_drawn(SERVICE_GROUP);
-        if let Some(memory) = &captions.memory {
-            self.show_memory(memory);
+        if captions.memory.is_some() {
+            self.show_memory(captions.memory.as_ref());
         }
         self.show_job(&captions.job)
     }
 
-    fn show_memory(&self, memory: &MemoryCaptions) {
-        if let Some(tips) = &self.memory_tips {
+    /// Shows the memory figures, each after its icon, or for `None` empties
+    /// their parts' indexes, which other parts take while the figures are
+    /// hidden.
+    fn show_memory(&self, memory: Option<&MemoryCaptions>) {
+        let Some(tips) = &self.memory_tips else {
+            return;
+        };
+        let figures = memory.map(|memory| {
             tips.set_area(SERVICE_MEMORY, &memory.service_tip);
             tips.set_area(APP_MEMORY, &memory.app_tip);
-            self.bar.redraw_owner_drawn(MEMORY_GROUP);
+            [&memory.service, &memory.app]
+        });
+        for (index, part) in [SERVICE_MEMORY_PART, APP_MEMORY_PART]
+            .into_iter()
+            .enumerate()
+        {
+            let figure = figures.map(|figures| figures[index]);
+            self.bar
+                .set_text(part, figure.map_or("", |figure| figure.text.as_str()));
+            self.bar
+                .set_icon(part, figure.and_then(|figure| figure.glyph));
         }
     }
 

@@ -168,36 +168,6 @@ impl Menu {
         let _ = unsafe { SetMenuItemInfoW(self.handle, u32::from(id), false, &item) };
     }
 
-    /// Replaces the item whose ID is one of `ids`, wherever it is in the
-    /// menu's submenus, with `item`, a [`MenuNode::Item`], so one place of
-    /// a menu shows one of several commands.
-    pub(crate) fn replace_item(self, ids: &[u16], item: &MenuNode) {
-        let MenuNode::Item {
-            id, text, glyph, ..
-        } = item
-        else {
-            return;
-        };
-        let mut text = wide(text);
-        let (bitmap, data) = self.icon(*glyph);
-        let info = MENUITEMINFOW {
-            cbSize: size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_ID | MIIM_STRING | MIIM_BITMAP | MIIM_DATA,
-            wID: u32::from(*id),
-            dwTypeData: PWSTR(text.as_mut_ptr()),
-            hbmpItem: bitmap,
-            dwItemData: data,
-            ..Default::default()
-        };
-        for old in ids {
-            // SAFETY: `info` and its text outlive the call, which copies
-            // them; an ID the menu lacks fails and changes nothing.
-            if unsafe { SetMenuItemInfoW(self.handle, u32::from(*old), false, &info) }.is_ok() {
-                return;
-            }
-        }
-    }
-
     /// Shows `items` as a context menu at `point`, in screen coordinates,
     /// with the item `default` in bold, and returns the ID of the item
     /// chosen. The menu runs its own message loop, so the caller holds no

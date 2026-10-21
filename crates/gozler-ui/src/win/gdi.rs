@@ -28,7 +28,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::Controls::{
     DRAWITEMSTRUCT, HIMAGELIST, ILC_COLOR32, ILD_TRANSPARENT, ImageList_Create, ImageList_Draw,
-    ImageList_GetIconSize, ImageList_ReplaceIcon,
+    ImageList_GetIcon, ImageList_GetIconSize, ImageList_ReplaceIcon,
 };
 use windows::Win32::UI::Shell::{
     PathCompactPathW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_LARGEICON, SHGFI_SMALLICON,
@@ -174,6 +174,14 @@ pub(super) struct IconFont {
     /// button holds its image list without owning it, so each list lives as
     /// long as the thread.
     images: HashMap<(Glyph, i32, u32, u32), HIMAGELIST>,
+    /// By glyphs, side and colour: the image lists of toolbars and lists,
+    /// one image for each glyph. A control holds them without owning them,
+    /// so each lives as long as the thread.
+    lists: HashMap<(Vec<Glyph>, i32, u32), HIMAGELIST>,
+    /// By glyph, side and colour: the icons of status bar parts and static
+    /// controls, which hold an icon without owning it, so each lives as
+    /// long as the thread.
+    icons: HashMap<(Glyph, i32, u32), Icon>,
     /// By glyph, side and colour: the icons drawn on a DC and the menu
     /// items' bitmaps. A menu holds an item's bitmap without owning it, so
     /// each bitmap lives as long as the thread.
@@ -218,6 +226,8 @@ impl IconFont {
                 fonts: HashMap::new(),
                 present: HashMap::new(),
                 images: HashMap::new(),
+                lists: HashMap::new(),
+                icons: HashMap::new(),
                 bitmaps: HashMap::new(),
             }))
         })
@@ -308,21 +318,15 @@ pub(super) fn system_color(index: SYS_COLOR_INDEX) -> COLORREF {
     COLORREF(unsafe { GetSysColor(index) })
 }
 
-/// Draws `glyph` `size` pixels tall in the middle of `area` on `dc`, in
-/// `color`, beside text, which draws nothing while icons are hidden (see
-/// [`show_icons`]); otherwise as [`draw_lone_glyph`] does.
+/// Draws `glyph` `size` pixels square in the middle of `area` on `dc`, in
+/// `color`, beside text: nothing while icons are hidden (see
+/// [`show_icons`]), or when the icon font lacks it, so no box shows in its
+/// place. It copies the kept image, which is smoothed as every icon is (see
+/// [`glyph_coverage`]), so `dc` keeps its state.
 pub(super) fn draw_glyph(dc: HDC, glyph: Glyph, area: RECT, size: Px, color: COLORREF) {
-    if icons_shown() {
-        draw_lone_glyph(dc, glyph, area, size, color);
+    if !icons_shown() {
+        return;
     }
-}
-
-/// Draws the icon of a control that shows nothing else, such as an
-/// icon-only button: `glyph` `size` pixels square in the middle of `area`
-/// on `dc`, in `color`, or nothing when the icon font lacks it, so no box
-/// shows in its place. It copies the kept image, which is smoothed as every
-/// icon is (see [`glyph_coverage`]), so `dc` keeps its state.
-pub(super) fn draw_lone_glyph(dc: HDC, glyph: Glyph, area: RECT, size: Px, color: COLORREF) {
     let Some(bitmap) = IconFont::with(|icons| icons.bitmap(glyph, size, color)) else {
         return;
     };
@@ -356,6 +360,12 @@ pub(super) fn button_images(glyph: Glyph, side: Px) -> Option<HIMAGELIST> {
     if !icons_shown() {
         return None;
     }
+    lone_button_images(glyph, side)
+}
+
+/// [`button_images`] also while icons are hidden, for a button that shows
+/// only its icon.
+pub(super) fn lone_button_images(glyph: Glyph, side: Px) -> Option<HIMAGELIST> {
     let text = system_color(COLOR_BTNTEXT);
     let gray = system_color(COLOR_GRAYTEXT);
     IconFont::with(|icons| {
@@ -378,6 +388,51 @@ pub(super) fn button_images(glyph: Glyph, side: Px) -> Option<HIMAGELIST> {
         }
         icons.images.insert(key, images);
         Some(images)
+    })
+}
+
+/// An image list of `glyphs`, `side` pixels square, in `color`, one image
+/// for each in their order, as a toolbar or a list view takes it. A glyph
+/// the icon font lacks gets a blank image, which keeps the others' indexes.
+/// `None` when GDI fails.
+pub(super) fn glyph_list(glyphs: &[Glyph], side: Px, color: COLORREF) -> Option<HIMAGELIST> {
+    IconFont::with(|icons| {
+        let key = (glyphs.to_vec(), side.0, color.0);
+        if let Some(images) = icons.lists.get(&key) {
+            return Some(*images);
+        }
+        let count = glyphs.len() as i32;
+        // SAFETY: plain values; the list copies each icon.
+        let images = unsafe { ImageList_Create(side.0, side.0, ILC_COLOR32, count, 0) };
+        if images.is_invalid() {
+            return None;
+        }
+        for &glyph in glyphs {
+            let icon = glyph_coverage(icons, glyph, side)
+                .and_then(|coverage| Icon::colored(&coverage, side, color));
+            let handle = icon.as_ref().map(|icon| icon.0).unwrap_or_default();
+            // SAFETY: as above.
+            unsafe { ImageList_ReplaceIcon(images, -1, handle) };
+        }
+        icons.lists.insert(key, images);
+        Some(images)
+    })
+}
+
+/// The icon of `glyph`, `side` pixels square, in `color`, which lives as
+/// long as the thread, as a status bar part or a static control needs.
+/// `None` when the icon font lacks the glyph or GDI fails.
+pub(super) fn glyph_icon(glyph: Glyph, side: Px, color: COLORREF) -> Option<HICON> {
+    IconFont::with(|icons| {
+        let key = (glyph, side.0, color.0);
+        if let Some(icon) = icons.icons.get(&key) {
+            return Some(icon.0);
+        }
+        let coverage = glyph_coverage(icons, glyph, side)?;
+        let icon = Icon::colored(&coverage, side, color)?;
+        let handle = icon.0;
+        icons.icons.insert(key, icon);
+        Some(handle)
     })
 }
 
@@ -535,6 +590,13 @@ impl Icon {
             icon
         }
     }
+
+    /// The handle, which the caller destroys from now on.
+    pub(super) fn into_handle(self) -> HICON {
+        let handle = self.0;
+        std::mem::forget(self);
+        handle
+    }
 }
 
 impl Drop for Icon {
@@ -580,6 +642,14 @@ impl ImageList {
 
     pub(super) fn handle(self) -> isize {
         self.0.0
+    }
+
+    /// A copy of the icon `index`, which the caller owns.
+    pub(super) fn icon(self, index: i32) -> Option<Icon> {
+        // SAFETY: the system image list lives as long as the process; the
+        // copy it returns is the caller's.
+        let icon = unsafe { ImageList_GetIcon(self.0, index, ILD_TRANSPARENT) };
+        (!icon.is_invalid()).then_some(Icon(icon))
     }
 
     /// Draws the icon `index` in the middle of `area`.
@@ -645,10 +715,9 @@ impl Hwnd {
         HFONT(font.0 as *mut _)
     }
 
-    /// Paints the window's background, fills `dividers` with the divider
-    /// colour, and draws `icon`, an icon of an image list, in the middle of
-    /// its rectangle.
-    pub(crate) fn paint_window(self, dividers: &[Rect], icon: Option<(ImageList, i32, Rect)>) {
+    /// Paints the window's background and fills `dividers` with the divider
+    /// colour.
+    pub(crate) fn paint_window(self, dividers: &[Rect]) {
         let mut paint = PAINTSTRUCT::default();
         // SAFETY: BeginPaint and EndPaint pair on the same window and
         // structure; the brushes are system brushes, which are never freed.
@@ -657,9 +726,6 @@ impl Hwnd {
             let brush = GetSysColorBrush(COLOR_3DLIGHT);
             for divider in dividers {
                 FillRect(dc, &to_rect(*divider), brush);
-            }
-            if let Some((images, index, area)) = icon {
-                images.draw(dc, index, to_rect(area));
             }
             let _ = EndPaint(self.0, &paint);
         }
@@ -824,6 +890,16 @@ impl StaticColors {
     }
 }
 
+/// `WM_ERASEBKGND`'s device context, valid for the length of the message.
+#[derive(Clone, Copy)]
+pub(crate) struct EraseDc(pub(super) HDC);
+
+impl EraseDc {
+    pub(crate) fn from_wparam(wparam: WPARAM) -> EraseDc {
+        EraseDc(HDC(wparam.0 as *mut _))
+    }
+}
+
 /// The colour of text that steps back from the content: gray, or the normal
 /// text colour in high contrast, where gray text means unavailable.
 fn muted_text() -> SYS_COLOR_INDEX {
@@ -834,11 +910,11 @@ fn muted_text() -> SYS_COLOR_INDEX {
     }
 }
 
-/// The colour of a disabled flat button's icon or caption on `ground`, as
-/// Windows 11's command bars draw a disabled command: the text colour at
-/// 36 % over the ground. A toolbar's `COLOR_GRAYTEXT` is too close to the
-/// text colour to read as unavailable. High contrast keeps it, because its
-/// scheme chooses that colour for unavailable text.
+/// The colour of a disabled toolbar button's icon on `ground`, as Windows
+/// 11's command bars draw a disabled command: the text colour at 36 % over
+/// the ground. `COLOR_GRAYTEXT` is too close to the text colour to read as
+/// unavailable. High contrast keeps it, because its scheme chooses that
+/// colour for unavailable text.
 pub(super) fn disabled_color(ground: SYS_COLOR_INDEX) -> COLORREF {
     if high_contrast() {
         return system_color(COLOR_GRAYTEXT);
@@ -882,76 +958,33 @@ impl OwnerDraw<'_> {
         Hwnd(self.0.hwndItem)
     }
 
-    /// Draws `parts` on one line from the top left, on the window colour,
-    /// as [`Self::draw_line`] does.
-    pub(crate) fn draw_parts(&self, font: &Font, parts: &[ValuePart]) {
-        // SAFETY: the DC and the rectangle are the ones Windows passed for
-        // this message.
-        unsafe { FillRect(self.0.hDC, &self.0.rcItem, GetSysColorBrush(COLOR_WINDOW)) };
-        self.draw_line(self.0.rcItem, font, parts, COLOR_WINDOWTEXT);
-    }
-
-    /// Which part of a status bar asks to be drawn.
-    pub(crate) fn status_part(&self) -> usize {
-        self.0.itemID as usize
-    }
-
     /// Draws `parts` in an owner-drawn part of a status bar, which has drawn
-    /// the part's background, on one line in its middle, as
-    /// [`Self::draw_line`] does.
+    /// the part's background, on one line in its middle, each after its
+    /// icon, in the button text colour. The first part that does not fit
+    /// ends in "…", and the parts after it are left out.
     pub(crate) fn draw_status_parts(&self, font: &Font, parts: &[ValuePart]) {
         let area = self.0.rcItem;
         let dpi = self.control().dpi();
-        let line = RECT {
-            left: area.left + layout::list_box_text_inset(dpi).0,
-            ..self.status_line(font)
-        };
-        self.draw_line(line, font, parts, COLOR_BTNTEXT);
-    }
-
-    /// Draws each part of `slots` in its place in an owner-drawn part of a
-    /// status bar, as [`Self::draw_status_parts`] draws a part's.
-    pub(crate) fn draw_status_slots(&self, font: &Font, slots: &[(Rect, &ValuePart)]) {
-        let line = self.status_line(font);
-        for (slot, part) in slots {
-            let line = RECT {
-                left: slot.x.0,
-                right: slot.right().0,
-                ..line
-            };
-            self.draw_line(line, font, std::slice::from_ref(*part), COLOR_BTNTEXT);
-        }
-    }
-
-    /// The owner-drawn part's area, cut to one line of `font` in its middle.
-    fn status_line(&self, font: &Font) -> RECT {
-        let area = self.0.rcItem;
         let height = TextMeter::new(font).height().0;
         let top = area.top + (area.bottom - area.top - height) / 2;
-        RECT {
+        let line = RECT {
+            left: area.left + layout::list_box_text_inset(dpi).0,
             top,
             bottom: top + height,
             ..area
-        }
-    }
-
-    /// Draws `parts` on one line from the top left of `line`, each after
-    /// its icon, in `normal` or the muted text colour. The first part that
-    /// does not fit ends in "…", and the parts after it are left out.
-    fn draw_line(&self, line: RECT, font: &Font, parts: &[ValuePart], normal: SYS_COLOR_INDEX) {
+        };
         let dc = self.0.hDC;
-        let dpi = self.control().dpi();
         let (icon, gap) = (layout::icon_glyph_height(dpi), layout::glyph_gap(dpi));
         let flags = DT_SINGLELINE | DT_NOPREFIX;
-        let muted = muted_text();
+        let color = system_color(COLOR_BTNTEXT);
         // SAFETY: the DC is the one Windows passed for this message; its
         // font is restored before the answer.
         unsafe {
             let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
             SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, color);
             let mut left = line.left;
             for part in parts {
-                let color = system_color(if part.muted { muted } else { normal });
                 let mut size = RECT::default();
                 draw_text(dc, &part.text, &mut size, flags | DT_CALCRECT);
                 if let Some(glyph) = part.glyph.filter(|_| icons_shown()) {
@@ -969,7 +1002,6 @@ impl OwnerDraw<'_> {
                     left += icon.0 + gap.0;
                 }
                 let fits = left + size.right <= line.right;
-                SetTextColor(dc, color);
                 let mut rect = RECT { left, ..line };
                 if !fits {
                     draw_text(dc, &part.text, &mut rect, flags | DT_END_ELLIPSIS);

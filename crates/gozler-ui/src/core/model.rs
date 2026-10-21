@@ -171,9 +171,10 @@ pub(crate) enum Change {
     ColumnShown {
         index: usize,
     },
-    /// The column that was at `index` of [`Model::columns`] was removed.
+    /// `column`, which was at `index` of [`Model::columns`], was removed.
     ColumnHidden {
         index: usize,
+        column: Column,
     },
     /// A new search runs; the list keeps its rows.
     Searching,
@@ -872,7 +873,7 @@ impl Model {
         Accepted::only(match self.columns.iter().position(|c| *c == column) {
             Some(index) => {
                 self.columns.remove(index);
-                Change::ColumnHidden { index }
+                Change::ColumnHidden { index, column }
             }
             None => {
                 self.columns.push(column);
@@ -1131,6 +1132,23 @@ impl Model {
             (true, false) => Job::Export,
             (false, true) => Job::Fix,
             (true, true) | (false, false) => self.newest_job,
+        }
+    }
+
+    /// Whether File > Cancel, and the status bar's Cancel, can stop the job
+    /// that [`Self::job`] says the status bar shows.
+    pub(crate) fn can_cancel_job(&self) -> bool {
+        match self.job() {
+            Job::Export => self.exporting(),
+            Job::Fix => self.fix.can_cancel(),
+        }
+    }
+
+    /// Stops the job that the status bar shows, if it can stop.
+    pub(crate) fn cancel_job(&mut self) -> Accepted {
+        match self.job() {
+            Job::Export => self.cancel_export(),
+            Job::Fix => self.cancel_fix(),
         }
     }
 

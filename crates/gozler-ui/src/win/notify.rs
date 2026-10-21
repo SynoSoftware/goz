@@ -4,32 +4,29 @@
 //! so no handler can keep it past the message.
 
 use super::Hwnd;
-use super::controls::{Button, ListView, StatusBar};
-use super::gdi::{Font, ImageList, disabled_color, draw_lone_glyph, draw_text, system_color};
-use crate::core::glyph::Glyph;
-use crate::core::layout::{Px, icon_glyph_height};
+use super::controls::{IconList, ListView, StatusBar};
+use super::gdi::{Font, ImageList, draw_text, system_color};
+use crate::core::layout::Px;
 use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS,
-    DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DrawFocusRect, FillRect,
-    GetSysColor, GetSysColorBrush, HGDIOBJ, InflateRect, SelectObject, SetBkMode, SetTextColor,
+    COLOR_GRAYTEXT, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_PATH_ELLIPSIS,
+    DT_SINGLELINE, DT_VCENTER, GetSysColor, HGDIOBJ, SelectObject, SetBkMode, SetTextColor,
     TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT,
-    CDIS_SELECTED, CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
-    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, CloseThemeData, DrawThemeBackground,
-    HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL,
-    LVIS_DROPHILITED, LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW,
+    CDDS_ITEMPOSTPAINT, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDRF_DODEFAULT,
+    CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT, CDRF_NOTIFYSUBITEMDRAW,
+    CDRF_SKIPDEFAULT, HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON,
+    LVIR_LABEL, LVIS_DROPHILITED, LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW,
     LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK, LVN_GETDISPINFOW,
     LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED, NM_CLICK,
-    NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW,
-    NMLVDISPINFOW, NMLVODSTATECHANGE, NMMOUSE, OpenThemeData, TP_BUTTON, TS_HOT, TS_PRESSED,
+    NM_CUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW,
+    NMLVODSTATECHANGE, NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-use windows::core::{PWSTR, w};
+use windows::core::PWSTR;
 
 /// A `WM_COMMAND`.
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +43,8 @@ pub(crate) enum Command {
 pub(crate) struct ControlEvent {
     pub(super) code: u32,
     pub(super) from: Hwnd,
+    /// The sender's ID, or for a toolbar the clicked button's.
+    pub(super) id: u16,
 }
 
 impl ControlEvent {
@@ -63,6 +62,7 @@ pub(super) fn command(wparam: WPARAM, lparam: LPARAM) -> Command {
         Command::Control(ControlEvent {
             code: ((wparam.0 >> 16) & 0xffff) as u32,
             from: Hwnd(HWND(lparam.0 as *mut _)),
+            id,
         })
     }
 }
@@ -187,80 +187,19 @@ impl ListView {
     }
 }
 
-/// The background a flat button stands on, which it fills.
-#[derive(Clone, Copy)]
-pub(crate) enum FlatGround {
-    /// The window's background, as a pane's.
-    Window,
-    /// The dialog face, as a status bar's.
-    Face,
-}
-
-impl Button {
-    /// Draws this button, if `notification` is its `NM_CUSTOMDRAW`, as a
-    /// flat icon button, as a toolbar's: `glyph` centred on `ground`, on the
-    /// toolbar's hot or pressed background while the mouse is on it or it
-    /// is pressed. A focus rectangle shows while the window shows keyboard
-    /// cues. The button's caption stays the name that screen readers say.
-    /// Returns the answer to the notification.
-    pub(crate) fn draw_flat(
-        self,
-        notification: &Notification,
-        glyph: Glyph,
-        ground: FlatGround,
-    ) -> Option<LRESULT> {
+impl IconList {
+    /// Whether `notification` says that this list selected another item,
+    /// which the person or the window chose.
+    pub(crate) fn selection_changed(self, notification: &Notification) -> bool {
         let header = notification.header();
-        if header.hwndFrom != self.hwnd().0 || header.code != NM_CUSTOMDRAW {
-            return None;
+        if header.hwndFrom != self.hwnd().0 || header.code != LVN_ITEMCHANGED {
+            return false;
         }
-        // SAFETY: a button sends NM_CUSTOMDRAW with an NMCUSTOMDRAW, valid
-        // for the notification's lifetime.
-        let draw = unsafe { &*notification.header.cast::<NMCUSTOMDRAW>() };
-        if draw.dwDrawStage != CDDS_PREPAINT {
-            return Some(LRESULT(CDRF_DODEFAULT as isize));
-        }
-        let state = draw.uItemState;
-        let dc = draw.hdc;
-        let mut rect = draw.rc;
-        let hot = if state.contains(CDIS_SELECTED) {
-            Some(TS_PRESSED.0)
-        } else if state.contains(CDIS_HOT) {
-            Some(TS_HOT.0)
-        } else {
-            None
-        };
-        let ground = match ground {
-            FlatGround::Window => COLOR_WINDOW,
-            FlatGround::Face => COLOR_BTNFACE,
-        };
-        let color = if state.contains(CDIS_DISABLED) {
-            disabled_color(ground)
-        } else {
-            system_color(COLOR_WINDOWTEXT)
-        };
-        // SAFETY: the DC is the notification's, which the button holds for
-        // it; the theme is closed before the answer.
-        unsafe {
-            FillRect(dc, &rect, GetSysColorBrush(ground));
-            if let Some(hot) = hot {
-                // High contrast has no theme, and its button face shows the
-                // state instead.
-                let theme = OpenThemeData(Some(self.hwnd().0), w!("Toolbar"));
-                if theme.is_invalid() {
-                    FillRect(dc, &rect, GetSysColorBrush(COLOR_BTNFACE));
-                } else {
-                    let _ = DrawThemeBackground(theme, dc, TP_BUTTON.0, hot, &rect, None);
-                    let _ = CloseThemeData(theme);
-                }
-            }
-            let size = icon_glyph_height(self.hwnd().dpi());
-            draw_lone_glyph(dc, glyph, rect, size, color);
-            if state.contains(CDIS_FOCUS) && state.contains(CDIS_SHOWKEYBOARDCUES) {
-                let _ = InflateRect(&mut rect, -2, -2);
-                let _ = DrawFocusRect(dc, &rect);
-            }
-        }
-        Some(LRESULT(CDRF_SKIPDEFAULT as isize))
+        // SAFETY: a list view sends LVN_ITEMCHANGED with an NMLISTVIEW,
+        // valid for the notification's lifetime.
+        let change = unsafe { &*notification.header.cast::<NMLISTVIEW>() };
+        change.uChanged.contains(LVIF_STATE)
+            && change.uNewState & !change.uOldState & LVIS_SELECTED.0 != 0
     }
 }
 
@@ -360,13 +299,17 @@ pub(crate) struct CustomDraw<'a> {
 pub(crate) enum DrawStage {
     /// Before the list paints.
     Paint,
-    /// Before a row.
-    Row,
+    /// Before `row`.
+    Row {
+        row: u64,
+    },
     /// Before the cell of `row` in the column at index `column`.
     Cell {
         row: u64,
         column: usize,
     },
+    /// After a row that [`DrawAnswer::NewFont`] answered.
+    RowPainted,
     Other,
 }
 
@@ -381,6 +324,9 @@ pub(crate) enum DrawAnswer {
     EachCell,
     /// The window drew the cell, and the list draws nothing in it.
     Drawn,
+    /// The list draws the row in the font and colour that
+    /// [`CustomDraw::draw_row_struck`] set, and asks again after it.
+    NewFont,
 }
 
 impl CustomDraw<'_> {
@@ -397,15 +343,18 @@ impl CustomDraw<'_> {
 
     pub(crate) fn stage(&self) -> DrawStage {
         let stage = self.draw.nmcd.dwDrawStage;
+        let row = self.draw.nmcd.dwItemSpec as u64;
         if stage == CDDS_PREPAINT {
             DrawStage::Paint
         } else if stage == CDDS_ITEMPREPAINT {
-            DrawStage::Row
+            DrawStage::Row { row }
         } else if stage.0 == CDDS_ITEMPREPAINT.0 | CDDS_SUBITEM.0 {
             DrawStage::Cell {
-                row: self.draw.nmcd.dwItemSpec as u64,
+                row,
                 column: usize::try_from(self.draw.iSubItem).unwrap_or(0),
             }
+        } else if stage == CDDS_ITEMPOSTPAINT {
+            DrawStage::RowPainted
         } else {
             DrawStage::Other
         }
@@ -417,45 +366,32 @@ impl CustomDraw<'_> {
             DrawAnswer::EachRow => CDRF_NOTIFYITEMDRAW,
             DrawAnswer::EachCell => CDRF_NOTIFYSUBITEMDRAW,
             DrawAnswer::Drawn => CDRF_SKIPDEFAULT,
+            DrawAnswer::NewFont => CDRF_NEWFONT | CDRF_NOTIFYPOSTPAINT,
         } as isize)
     }
 
-    /// Draws the cell at `DrawStage::Cell` as the list would, with its text
-    /// in `font`, at the right when `right_aligned`, and in grey, unless the
-    /// list gives the row a colour of its own, as a selected row has in high
-    /// contrast, where grey on the selection would not read.
-    pub(crate) fn draw_grey(
-        &self,
-        font: &Font,
-        icon: Option<(ImageList, i32)>,
-        inset: Px,
-        right_aligned: bool,
-    ) {
-        let colour = match self.draw.clrText {
-            CLR_DEFAULT => system_color(COLOR_GRAYTEXT),
-            colour => colour,
-        };
-        self.draw_icon(icon);
-        let label = self.cell_part(LVIR_LABEL);
-        let mut area = RECT {
-            left: label.left + inset.0,
-            right: label.right - inset.0,
-            ..label
-        };
-        let mut flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
-        if right_aligned {
-            flags |= DT_RIGHT;
+    /// Has the list draw the row at `DrawStage::Row` in `font` and in grey,
+    /// unless the list gives the row a colour of its own, as a selected row
+    /// has in high contrast, where grey on the selection would not read.
+    /// The list then draws every cell, its icon, its alignment and its
+    /// ellipsis as in any row. Answer [`DrawAnswer::NewFont`], and at
+    /// [`DrawStage::RowPainted`] give the DC the list's font back with
+    /// [`Self::restore_font`], because the list does not, and would draw the
+    /// next rows in `font`.
+    pub(crate) fn draw_row_struck(&mut self, font: &Font) {
+        if self.draw.clrText == CLR_DEFAULT {
+            self.draw.clrText = system_color(COLOR_GRAYTEXT);
         }
-        let dc = self.draw.nmcd.hdc;
-        // SAFETY: the list's DC for the length of the message; the font
-        // selected into it is restored before the message returns.
-        unsafe {
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, colour);
-            let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
-            draw_text(dc, &self.cell_text(), &mut area, flags);
-            SelectObject(dc, previous);
-        }
+        // SAFETY: the list's DC for the length of its paint; the list's own
+        // font goes back into it at the row's post-paint stage.
+        unsafe { SelectObject(self.draw.nmcd.hdc, HGDIOBJ(font.handle().0)) };
+    }
+
+    /// Selects `font`, the list's own, into the DC after a row that
+    /// [`Self::draw_row_struck`] drew.
+    pub(crate) fn restore_font(&self, font: &Font) {
+        // SAFETY: the list's DC for the length of its paint.
+        unsafe { SelectObject(self.draw.nmcd.hdc, HGDIOBJ(font.handle().0)) };
     }
 
     /// Draws the cell at `DrawStage::Cell` as the list would, with the

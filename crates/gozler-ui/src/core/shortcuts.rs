@@ -12,19 +12,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 /// Every command that takes a shortcut, each with the catalogue key of the
-/// menu that holds it: each command of the menu bar, Cancel export in
-/// Export results…' place, and the context menu's commands that no menu of
-/// the bar holds (DESIGN.md: The Keyboard page). A submenu of choices, the
-/// match controls, Clear filters and the tray's Show window take none.
+/// menu that holds it: each command of the menu bar, and the context
+/// menu's commands that no menu of the bar holds (DESIGN.md: The Keyboard
+/// page). A submenu of choices, the match controls, Clear filters and the
+/// tray's Show window take none.
 pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
     let mut listed: Vec<(CommandId, &'static str)> = Vec::new();
     for menu in menu_bar() {
         for entry in menu.groups.iter().flatten() {
             if let Entry::Item(MenuItem::Run(command)) = entry {
                 listed.push((*command, menu.label));
-                if *command == CommandId::ExportResults {
-                    listed.push((CommandId::CancelExport, menu.label));
-                }
             }
         }
     }

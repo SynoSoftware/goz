@@ -10,7 +10,7 @@
 
 use super::controls::{Button, TreeItem, has_image};
 use super::gdi::{Font, TextMeter, icons_shown};
-use super::notify::{CustomDraw, DrawAnswer, DrawStage, FlatGround, Notification};
+use super::notify::{CustomDraw, DrawAnswer, DrawStage, Notification};
 use super::{Hwnd, wide};
 use crate::core::captions::{ButtonIcon, DialogCaptions, Guard, Question, QuestionBody};
 use crate::core::commands::Keystroke;
@@ -34,7 +34,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE,
     GetClassNameW, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK,
     MB_ICONERROR, MB_OK, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
-    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_DRAWITEM, WM_INITDIALOG, WM_NOTIFY, WM_TIMER,
+    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_INITDIALOG, WM_NOTIFY, WM_TIMER,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR};
 
@@ -148,8 +148,9 @@ pub(crate) trait DialogProc {
     /// Settings' status bar Cancel. Runs once, after [`DialogProc::init`].
     fn buttons_sized(&self, _dialog: Hwnd, _width: Px) {}
     /// The icon of the push button `id` if it is a Clear button, which
-    /// shows only that icon, flat, while icons show, and its caption while
-    /// they are hidden (DESIGN.md: Look); `None` for any other button.
+    /// shows only that icon, in its middle, while icons show, and its
+    /// caption while they are hidden (DESIGN.md: Look); `None` for any
+    /// other button.
     fn clear_glyph(&self, _id: u16) -> Option<Glyph> {
         None
     }
@@ -231,10 +232,6 @@ unsafe extern "system" fn procedure<D: DialogProc>(
     // runs.
     let running = unsafe { &*running };
     let dialog = Hwnd(hwnd);
-    // SAFETY: the lparam is the one Windows passed with WM_DRAWITEM.
-    if msg == WM_DRAWITEM && unsafe { super::controls::draw_list_item(lparam) } {
-        return 1;
-    }
     let message = match msg {
         WM_INITDIALOG => {
             open(dialog, running);
@@ -296,30 +293,23 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                     return 0;
                 }
                 NM_CUSTOMDRAW => {
-                    // SAFETY: the notification is the one Windows passed.
-                    let notification = unsafe { Notification::new(lparam) };
-                    if let Some(glyph) = running.state.clear_glyph(id).filter(|_| icons_shown())
-                        && let Some(button) = Button::of_dialog(Hwnd(header.hwndFrom).parent(), id)
-                        && let Some(answer) =
-                            button.draw_flat(&notification, glyph, FlatGround::Face)
-                    {
-                        // SAFETY: plain values.
-                        unsafe { SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, answer.0) };
-                        return 1;
-                    }
                     let Some(column) = running.state.path_column(id) else {
                         return 0;
                     };
+                    // SAFETY: the notification is the one Windows passed.
+                    let notification = unsafe { Notification::new(lparam) };
                     // SAFETY: only a list view has a path column.
                     let draw = unsafe { CustomDraw::of_list(&notification) };
                     let answer = match draw.stage() {
                         DrawStage::Paint => DrawAnswer::EachRow,
-                        DrawStage::Row => DrawAnswer::EachCell,
+                        DrawStage::Row { .. } => DrawAnswer::EachCell,
                         DrawStage::Cell { column: drawn, .. } if drawn == column => {
                             draw.draw_path(layout::cell_text_inset(column == 0, dialog.dpi()));
                             DrawAnswer::Drawn
                         }
-                        DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
+                        DrawStage::Cell { .. } | DrawStage::RowPainted | DrawStage::Other => {
+                            DrawAnswer::Default
+                        }
                     };
                     // SAFETY: plain values.
                     unsafe {
@@ -467,16 +457,11 @@ unsafe extern "system" fn page_procedure(
                     return 0;
                 };
                 let answer = SendMessageW(dialog, msg, Some(wparam), Some(lparam)).0;
-                // The notifications whose answer the control reads, such as
-                // a flat Clear's custom draw: the page passes the dialog's
-                // on. Others keep the page's 0, because the dialog leaves its
-                // own answer unset for them.
-                if msg == WM_NOTIFY
-                    && matches!(
-                        (*(lparam.0 as *const NMHDR)).code,
-                        LVN_GETEMPTYMARKUP | NM_CUSTOMDRAW
-                    )
-                {
+                // The notifications whose answer the control reads, a list's
+                // empty text: the page passes the dialog's on. Others keep
+                // the page's 0, because the dialog leaves its own answer
+                // unset for them.
+                if msg == WM_NOTIFY && (*(lparam.0 as *const NMHDR)).code == LVN_GETEMPTYMARKUP {
                     SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, answer);
                 }
                 answer
@@ -546,9 +531,9 @@ pub(crate) fn widen(dialog: Hwnd, at: Px, extra: Px) {
 /// of their captions and `state`'s later captions in the current language,
 /// placed as [`layout::sized_buttons`] says, and returns that width. Each
 /// Clear that `state` names gets its own width ([`layout::clear_width`]),
-/// placed the same way. A button inside another control, such as the
-/// status bar's Cancel, keeps its own place, because the control that holds
-/// it places it.
+/// placed the same way, and only its icon while icons show. A button inside
+/// another control, such as the status bar's Cancel, keeps its own place,
+/// because the control that holds it places it.
 pub(crate) fn size_buttons<D: DialogProc>(dialog: Hwnd, state: &D) -> Px {
     let minimum = horizontal_units(dialog, 50);
     let Ok(font) = Font::of(dialog) else {
@@ -615,6 +600,10 @@ pub(crate) fn size_buttons<D: DialogProc>(dialog: Hwnd, state: &D) -> Px {
     // its box, ends its gap before it.
     for clear in clears {
         let parent = clear.parent();
+        let id = control_id(clear);
+        if let Some(button) = Button::of_dialog(parent, id) {
+            button.set_lone_icon(state.clear_glyph(id).filter(|_| icons_shown()));
+        }
         let beside: Vec<Hwnd> = others
             .iter()
             .copied()
