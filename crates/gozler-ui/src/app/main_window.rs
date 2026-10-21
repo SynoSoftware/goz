@@ -3351,7 +3351,7 @@ impl MainWindow {
     /// row's cells, which [`Self::draw_cell`] draws.
     fn draw_row(&self, draw: &mut CustomDraw, row: u64) -> DrawAnswer {
         let taken = !(self.model.borrow())
-            .taken_rows(List::Search, &[row..row + 1])
+            .taken_rows(List::Search, std::slice::from_ref(&(row..row + 1)))
             .is_empty();
         if taken {
             draw.draw_row_struck(&self.created().fonts.borrow().struck);
