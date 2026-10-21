@@ -8,7 +8,7 @@ plan lists what is still to build.
 
 ## Schedule
 
-**Not scheduled.** The owner decides when. Stages A, B, E, F and G are built:
+**Not scheduled.** The owner decides when. Stages A, B, E, F and G and item C3 are built:
 
 - A: a wake opens no dialog until every reply and panel event drained with it
   is applied (DESIGN.md: window rule 13); a new or failed search cancels its
@@ -17,6 +17,8 @@ plan lists what is still to build.
   operations window is made on first use; core decides the taskbar state.
 - E: the "Use local" decision is in `core::programs`; a check that timed out
   runs once more.
+- C3: an Include edit and closing Settings forget the Include count
+  (DESIGN.md: The Include page).
 - F: `run` reads the pending selection of both modes (DESIGN.md: The
   selection).
 - G: a `WH_MSGFILTER` hook gives the File operations window and the Viewers
@@ -95,23 +97,6 @@ sizing fields by hand.
    and DESIGN.md's "A panel" ("fit their content") to say so. A longer
    extension ends in "…". Check whether the label tip shows it whole for
    owner-drawn panel rows.
-
-## C3. The Include page's count
-
-Each Include edit calls one `Model` method that cancels the live count and
-forgets the stored count, so the preview shows no "After OK" number until
-the count for the current edit arrives. Closing Settings forgets the count
-and cancels its request. Today a late count can show briefly in the next
-Settings session. Test: a stale count never shows "After OK".
-
-Also in the Include page:
-
-- The page reads the drives, which costs one Win32 volume label per drive,
-  when it fills and after Modify or a status change, not on every edit as
-  today.
-- The dialog formats its preview and summary with its own `Strings`, as
-  its captions do. After an Apply that changes the language, they now mix
-  two languages; one dialog keeps its own language until it closes.
 
 ## C7. Apply's outcome, in core
 

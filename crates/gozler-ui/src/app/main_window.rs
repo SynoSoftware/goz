@@ -32,7 +32,8 @@ use crate::core::fixer::{FixEvent, SetupEvent, SetupResult};
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId, IconId};
 use crate::core::include::{
-    IncludeDrive, SummaryRow, connected_drives, include_drives, preview, summary_rows,
+    IncludeDrive, SummaryRow, connected_drives, connected_volumes, include_drives, preview,
+    summary_rows,
 };
 use crate::core::layout::{
     self, Body, CaptionWidths, ColumnFit, ControlSizes, Dpi, FilterLayout, InspectorLayout, Layout,
@@ -873,7 +874,6 @@ pub(crate) struct MainWindow {
     /// The open Settings dialog, from its WM_INITDIALOG until it closes.
     settings: Cell<Option<OpenSettings>>,
     total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
-    included_count: RefCell<Option<Result<u64, DaemonFailure>>>,
     /// The save of the Include settings while it runs.
     include_saving: RefCell<Option<Saving>>,
     /// The save's answer, once it arrived, for the Settings dialog.
@@ -1010,7 +1010,6 @@ impl MainWindow {
             unshown: Cell::new(false),
             settings: Cell::new(None),
             total_commander: RefCell::new(None),
-            included_count: RefCell::new(None),
             include_saving: RefCell::new(None),
             include_saved: RefCell::new(None),
             pasting: RefCell::new(None),
@@ -2905,10 +2904,7 @@ impl MainWindow {
                 self.total_commander.replace(Some(found));
                 self.post_settings_reply();
             }
-            Change::IncludedCount(counted) => {
-                self.included_count.replace(Some(counted));
-                self.post_settings_reply();
-            }
+            Change::IncludedCount => self.post_settings_reply(),
             Change::FolderSizes(side) => self.show_panel_sizes(side),
         }
         self.update_bound_controls();
@@ -4636,9 +4632,9 @@ impl MainWindow {
         self.open_dialog(hwnd, DialogId::Settings, &dialog);
         self.settings.set(None);
         self.total_commander.replace(None);
-        self.included_count.replace(None);
         let accepted = self.model.borrow_mut().forget_total_commander();
         self.apply(hwnd, accepted);
+        self.forget_included_count(hwnd);
         self.show_index_page(hwnd, false);
         if dialog.resets() {
             self.reset_all(hwnd);
@@ -4828,6 +4824,14 @@ impl MainWindow {
             .map_or_else(Vec::new, |status| include_drives(status, settings, &label))
     }
 
+    /// The GUID paths of the drives the service lists, which Settings >
+    /// Include's preview reads on every edit without asking Windows for a
+    /// label.
+    pub(super) fn connected_volumes(&self) -> Vec<String> {
+        let model = self.model.borrow();
+        model.service().0.map_or_else(Vec::new, connected_volumes)
+    }
+
     /// The entries the index holds now.
     pub(super) fn indexed_entries(&self) -> u64 {
         let model = self.model.borrow();
@@ -4838,20 +4842,27 @@ impl MainWindow {
     }
 
     /// The rows of the summary of the indexed folders, which Settings >
-    /// Include and Indexed folders show, in the person's numbers.
+    /// Include and Indexed folders show, in the person's numbers and in the
+    /// language of the dialog, which keeps its own until it closes.
     pub(super) fn include_summary(
         &self,
+        strings: &Strings,
         drives: &[IncludeDrive],
         settings: &IncludeSettings,
     ) -> Vec<SummaryRow> {
-        let model = self.model.borrow();
-        summary_rows(drives, settings, model.strings(), &*self.numbers.borrow())
+        summary_rows(drives, settings, strings, &*self.numbers.borrow())
     }
 
-    /// Settings > Include's preview line, in the person's numbers.
-    pub(super) fn include_preview(&self, now: u64, after: Option<u64>, adds: bool) -> String {
-        let model = self.model.borrow();
-        preview(model.strings(), &*self.numbers.borrow(), now, after, adds)
+    /// Settings > Include's preview line, in the person's numbers and the
+    /// dialog's language.
+    pub(super) fn include_preview(
+        &self,
+        strings: &Strings,
+        now: u64,
+        after: Option<u64>,
+        adds: bool,
+    ) -> String {
+        preview(strings, &*self.numbers.borrow(), now, after, adds)
     }
 
     /// Settings > Include's preview: counts the entries the index keeps
@@ -4861,9 +4872,17 @@ impl MainWindow {
         self.start(fetch);
     }
 
-    /// Include's count, once it arrived.
-    pub(super) fn take_included_count(&self) -> Option<Result<u64, DaemonFailure>> {
-        self.included_count.take()
+    /// Include's count of the settings the dialog shows, once it arrived.
+    pub(super) fn included_count(&self) -> Option<Result<u64, DaemonFailure>> {
+        self.model.borrow().included_count().cloned()
+    }
+
+    /// The Include settings changed, or Settings closed: the count in
+    /// flight ends and the one that arrived is forgotten. `hwnd` is the
+    /// main window.
+    pub(super) fn forget_included_count(&self, hwnd: Hwnd) {
+        let accepted = self.model.borrow_mut().forget_included_count();
+        self.apply(hwnd, accepted);
     }
 
     /// Starts saving the Include settings as administrator, after Windows

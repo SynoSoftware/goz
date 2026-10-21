@@ -267,10 +267,6 @@ pub(super) struct SettingsDialog<'a> {
     commands: RefCell<Vec<CommandRow>>,
     /// What the Index page shows, so a refresh sets only what changed.
     index: RefCell<Option<IndexCaptions>>,
-    /// The Include settings the service was last asked to count, and its
-    /// answer once it arrived; the preview shows the answer only while the
-    /// page still holds those settings.
-    counted: RefCell<Option<(IncludeSettings, Option<u64>)>>,
     /// The rows that Folders Gozler indexes shows, whose tooltips list the
     /// full paths of the folders left out.
     include_rows: RefCell<Vec<SummaryRow>>,
@@ -320,7 +316,6 @@ impl<'a> SettingsDialog<'a> {
             shown: Cell::new(None),
             commands: RefCell::new(Vec::new()),
             index: RefCell::new(None),
-            counted: RefCell::new(None),
             include_rows: RefCell::new(Vec::new()),
             filling: Cell::new(false),
             balloon: OnceCell::new(),
@@ -626,7 +621,7 @@ impl<'a> SettingsDialog<'a> {
             edit.set_text(&include.excluded_names);
         }
         let drives = self.main.include_drives(include);
-        let rows = self.main.include_summary(&drives, include);
+        let rows = self.main.include_summary(&self.strings, &drives, include);
         let cells: Vec<[String; 3]> = rows.iter().map(|row| row.cells.clone()).collect();
         self.include_rows.replace(rows);
         if let Some(list) = self.include_folders() {
@@ -663,25 +658,26 @@ impl<'a> SettingsDialog<'a> {
         let after = if edited == applied {
             Some(now)
         } else {
-            match &*self.counted.borrow() {
-                Some((counted, entries)) if *counted == edited => *entries,
-                _ => None,
+            match self.main.included_count() {
+                Some(Ok(entries)) => Some(entries),
+                Some(Err(failure)) => {
+                    label.set_text(&failure_text(&self.strings, &failure));
+                    return;
+                }
+                None => None,
             }
         };
-        let drives = self.main.include_drives(&edited);
-        let volumes: Vec<&str> = drives
-            .iter()
-            .filter(|d| d.root.is_some())
-            .map(|d| d.volume.as_str())
-            .collect();
+        let volumes = self.main.connected_volumes();
+        let volumes: Vec<&str> = volumes.iter().map(String::as_str).collect();
         let adds = edited.adds_to(&applied, &volumes);
-        label.set_text(&self.main.include_preview(now, after, adds));
+        let text = self.main.include_preview(&self.strings, now, after, adds);
+        label.set_text(&text);
     }
 
     /// The Include settings changed: the preview asks the service for a new
     /// count once the person stops changing them for a moment.
     fn include_changed(&self, dialog: Hwnd) {
-        self.counted.replace(None);
+        self.main.forget_included_count(self.window);
         self.show_preview();
         dialog.set_timer(PREVIEW_TIMER, PREVIEW_DELAY_MS);
     }
@@ -700,29 +696,7 @@ impl<'a> SettingsDialog<'a> {
         if let Some(edited) = edited
             && Some(&edited) != applied.as_ref()
         {
-            self.counted.replace(Some((edited.clone(), None)));
             self.main.count_included(edited);
-        }
-    }
-
-    /// The preview's count, which the main window holds.
-    fn preview_counted(&self) {
-        let Some(counted) = self.main.take_included_count() else {
-            return;
-        };
-        match counted {
-            Ok(entries) => {
-                if let Some((_, answer)) = &mut *self.counted.borrow_mut() {
-                    *answer = Some(entries);
-                }
-                self.show_preview();
-            }
-            Err(failure) => {
-                if let Some(label) = self.control(SettingsPage::Include, ControlId::IncludePreview)
-                {
-                    label.set_text(&failure_text(&self.strings, &failure));
-                }
-            }
         }
     }
 
@@ -2001,7 +1975,8 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Reply => {
                 self.total_commander_found(dialog);
-                self.preview_counted();
+                // The Include count, which the model holds.
+                self.show_preview();
                 self.save_answered(dialog);
                 // A fix moved on, which the fix button follows.
                 self.refresh_index(dialog);

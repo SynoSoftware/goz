@@ -87,6 +87,10 @@ pub(crate) struct Model {
     program_asked: Option<Generation>,
     /// Settings > Include's count in flight.
     include_count_asked: Option<Generation>,
+    /// Settings > Include's count for the current edit, once it arrived:
+    /// the entries the index would keep, or why the service could not
+    /// count them.
+    included_count: Option<Result<u64, DaemonFailure>>,
     /// The notice that the Include settings are saved, in flight.
     settings_saved_asked: Option<Generation>,
     /// Whether Settings shows its Index page, which follows the service's
@@ -252,9 +256,8 @@ pub(crate) enum Change {
     /// The Use Total Commander link's search answered: the path of the Total
     /// Commander it takes, none, or why the service could not search.
     TotalCommander(Result<Option<String>, DaemonFailure>),
-    /// Settings > Include's count answered: the entries the index would
-    /// keep, or why the service could not count them.
-    IncludedCount(Result<u64, DaemonFailure>),
+    /// Settings > Include's count answered ([`Model::included_count`]).
+    IncludedCount,
     /// gozlerd answered a panel's folder sizes.
     FolderSizes(Side),
 }
@@ -400,6 +403,7 @@ impl Model {
             status_asked: None,
             program_asked: None,
             include_count_asked: None,
+            included_count: None,
             settings_saved_asked: None,
             index_page_shown: false,
             newer_release: None,
@@ -798,10 +802,32 @@ impl Model {
     pub(crate) fn count_included(&mut self, settings: IncludeSettings) -> Fetch {
         let generation = self.generation();
         self.include_count_asked = Some(generation);
+        self.included_count = None;
         Fetch {
             generation,
             ask: Ask::CountIncluded(settings),
         }
+    }
+
+    /// The Include settings changed, or Settings closed: the count in
+    /// flight and the one that arrived are of other settings, so the
+    /// preview shows no count until the next one arrives (DESIGN.md: The
+    /// Include page).
+    pub(crate) fn forget_included_count(&mut self) -> Accepted {
+        self.included_count = None;
+        Accepted {
+            change: Change::Nothing,
+            then: self
+                .include_count_asked
+                .take()
+                .map(|_| Then::Cancel(Purpose::IncludeCount)),
+        }
+    }
+
+    /// Settings > Include's count of the settings it shows, once it
+    /// arrived.
+    pub(crate) fn included_count(&self) -> Option<&Result<u64, DaemonFailure>> {
+        self.included_count.as_ref()
     }
 
     /// An administrator saved the Include settings: the service reads and
@@ -1726,11 +1752,12 @@ impl Model {
             }
             Purpose::IncludeCount if self.include_count_asked == Some(generation) => {
                 self.include_count_asked = None;
-                Accepted::only(Change::IncludedCount(match fetched.outcome {
+                self.included_count = Some(match fetched.outcome {
                     Outcome::IncludedCount(entries) => Ok(entries),
                     Outcome::Failed(failure) => Err(failure),
                     other => unreachable!("a count's reply is a count or a failure: {other:?}"),
-                }))
+                });
+                Accepted::only(Change::IncludedCount)
             }
             Purpose::SettingsSaved if self.settings_saved_asked == Some(generation) => {
                 self.settings_saved_asked = None;
@@ -3191,6 +3218,31 @@ pub(crate) mod tests {
             model.accept(failed(&fetch, DaemonFailure::Lost)).change,
             Change::Nothing
         );
+    }
+
+    /// A count that arrives after the Include settings changed again, or
+    /// after Settings closed, never shows as the preview's "After OK".
+    #[test]
+    fn a_stale_include_count_is_never_shown() {
+        let mut model = showing(10);
+        let counted = |fetch: &Fetch| Fetched {
+            purpose: Purpose::IncludeCount,
+            generation: fetch.generation,
+            outcome: Outcome::IncludedCount(7),
+        };
+        let first = model.count_included(IncludeSettings::default());
+        assert_eq!(
+            model.forget_included_count().then,
+            Some(Then::Cancel(Purpose::IncludeCount))
+        );
+        assert_eq!(model.accept(counted(&first)).change, Change::Nothing);
+        assert_eq!(model.included_count(), None);
+        let second = model.count_included(IncludeSettings::default());
+        assert_eq!(model.accept(counted(&second)).change, Change::IncludedCount);
+        assert_eq!(model.included_count(), Some(&Ok(7)));
+        // Closing Settings forgets it, so the next session starts empty.
+        assert_eq!(model.forget_included_count().then, None);
+        assert_eq!(model.included_count(), None);
     }
 
     /// The rows fetch that `fetch`'s chunk ask stands for, so [`rows`]

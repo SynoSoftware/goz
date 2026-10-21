@@ -250,7 +250,7 @@ impl<'a> IndexedFolders<'a> {
     fn fill_summary(&self, dialog: Hwnd) {
         let rows = self
             .main
-            .include_summary(self.drives, &self.settings.borrow());
+            .include_summary(self.strings, self.drives, &self.settings.borrow());
         let cells: Vec<[String; 3]> = rows.iter().map(|row| row.cells.clone()).collect();
         self.rows.replace(rows);
         if let Some(list) = Self::summary(dialog) {

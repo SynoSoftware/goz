@@ -78,6 +78,15 @@ pub(crate) fn include_drives(
     drives
 }
 
+/// The GUID paths of the drives that `status` lists, indexed or left out:
+/// the connected drives of [`include_drives`], read without their labels.
+pub(crate) fn connected_volumes(status: &DaemonStatus) -> Vec<String> {
+    let indexed = status.volumes.iter().map(|v| v.guid.clone());
+    indexed
+        .chain(status.left_out.iter().map(|v| v.guid.clone()))
+        .collect()
+}
+
 /// One row of the summary of the indexed folders.
 pub(crate) struct SummaryRow {
     /// The index of its drive in the drive list.
