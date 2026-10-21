@@ -42,9 +42,9 @@ pub(crate) fn register() -> windows::core::Result<()> {
     Ok(())
 }
 
-/// Creates the pane in `parent`. `Tab` and the access keys reach the
-/// pane's controls, as `WS_EX_CONTROLPARENT` lets `IsDialogMessageW` look
-/// inside it.
+/// Creates the pane in `parent`. The access keys reach the pane's
+/// controls, as `WS_EX_CONTROLPARENT` lets `IsDialogMessageW` look inside
+/// it.
 pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Hwnd> {
     // SAFETY: a child window with an ID in place of a menu, as Windows
     // documents it.

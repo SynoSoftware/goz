@@ -87,6 +87,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Registry",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
     "Win32_UI_Controls",
@@ -97,7 +98,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 # ui: `#[windows::core::implement]` expands to `::windows_core` paths, so the
-# window, which implements a COM interface for the shell, names it itself.
+# window, which implements COM interfaces for the shell (the drag's find data
+# and the drop target), names it itself.
 windows-core = "0.62"
 # Compiles the window's .rc file with the Windows SDK's rc.exe.
 embed-resource = "3"
@@ -127,10 +129,8 @@ unreachable_pub = "warn"
 # keeps the next one from skipping it.
 undocumented_unsafe_blocks = "deny"
 
+# Thin LTO optimises across crates on every core. Fat LTO in one codegen unit
+# ran on one core for minutes after each change. Benchmarks build with this
+# profile too, so they share target\release instead of a tree of their own.
 [profile.release]
-lto = "fat"
-codegen-units = 1
-
-[profile.bench]
-debug = true
-lto = "fat"
+lto = "thin"

@@ -5,7 +5,7 @@
 //! between related controls, 23 px tall text boxes and lists, 17 px check
 //! boxes.
 
-use super::captions::{MODIFIED_ROW, StatusWidest, WindowCaptions};
+use super::captions::{MODIFIED_ROW, MemoryWidest, StatusWidest, WindowCaptions};
 use super::commands::INSPECTOR_BUTTONS;
 use super::model::Column;
 use super::query::Kind;
@@ -384,13 +384,20 @@ pub(crate) struct CaptionWidths {
     /// The widest label of an inspector field.
     inspector_labels: Px,
     status: StatusWidths,
-    /// Every push button's but the filter pane's: Clear, the inspector's,
-    /// the list message's and the status bar's Cancel.
-    buttons: ButtonWidths,
+    memory: Option<MemoryWidths>,
+    /// Whether icons show beside text, which makes each Clear an icon
+    /// button.
+    icons: bool,
+    clear_search: Px,
+    /// Explore, Open location, Open and Copy path.
+    inspector_buttons: ButtonWidths,
+    /// The list message's buttons, every fix's included.
+    message_buttons: ButtonWidths,
+    status_cancel: ButtonWidths,
 }
 
-/// The widest captions of push buttons that share one width, as a
-/// dialog's buttons do (DESIGN.md: Look).
+/// The widest captions of push buttons that share one width, as a row of a
+/// dialog's buttons does (DESIGN.md: Look).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ButtonWidths {
     plain: Px,
@@ -400,6 +407,24 @@ pub(crate) struct ButtonWidths {
 }
 
 impl ButtonWidths {
+    /// Measures `buttons`, each a caption and whether it shows an image,
+    /// with `measure`, as [`CaptionWidths::measure`] does.
+    fn measure<'a>(
+        buttons: impl IntoIterator<Item = (&'a String, bool)>,
+        measure: &dyn Fn(&str) -> Px,
+    ) -> ButtonWidths {
+        let mut widths = ButtonWidths::default();
+        for (caption, with_image) in buttons {
+            let widest = if with_image {
+                &mut widths.with_image
+            } else {
+                &mut widths.plain
+            };
+            *widest = (*widest).max(measure(caption));
+        }
+        widths
+    }
+
     /// The buttons' one width.
     pub(crate) fn width(self, dpi: Dpi) -> Px {
         button_width(self.plain, dpi).max(button_width(
@@ -427,6 +452,28 @@ impl StatusWidths {
             view: widest_of(&widest.view),
             running: widest_of(&widest.running),
             done: widest_of(&widest.done),
+        }
+    }
+}
+
+/// The measured widths of the main window's memory group (DESIGN.md: Status
+/// bar).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryWidths {
+    /// The service's widest figure.
+    service: Px,
+    /// The app's widest figure.
+    app: Px,
+}
+
+impl MemoryWidths {
+    /// Measures with `measure`, as [`CaptionWidths::measure`] does.
+    fn measure(widest: &MemoryWidest, measure: &dyn Fn(&str) -> Px) -> MemoryWidths {
+        let widest_of =
+            |texts: &[String]| texts.iter().map(|t| measure(t)).max().unwrap_or_default();
+        MemoryWidths {
+            service: widest_of(&widest.service),
+            app: widest_of(&widest.app),
         }
     }
 }
@@ -462,29 +509,15 @@ impl CaptionWidths {
         // Every button shows an icon while icons show, and a button that
         // needs administrator permission shows the shield also while they
         // are hidden.
-        let glyph_buttons = [&captions.clear_search, &captions.status_cancel]
-            .into_iter()
-            .chain(
-                captions
-                    .inspector_buttons
-                    .iter()
-                    .map(|button| &button.caption),
-            )
-            .chain([&captions.copy_path.caption])
-            .map(|caption| (caption, captions.icons));
-        let list = captions
+        let inspector_buttons = captions
+            .inspector_buttons
+            .iter()
+            .chain([&captions.copy_path])
+            .map(|button| (&button.caption, captions.icons));
+        let message_buttons = captions
             .list_buttons
             .iter()
             .map(|(caption, shielded)| (caption, *shielded || captions.icons));
-        let mut buttons = ButtonWidths::default();
-        for (caption, with_image) in glyph_buttons.chain(list) {
-            let widest = if with_image {
-                &mut buttons.with_image
-            } else {
-                &mut buttons.plain
-            };
-            *widest = (*widest).max(measure(caption));
-        }
         CaptionWidths {
             match_label: measure(&captions.match_label),
             match_modes: widest(&captions.match_modes),
@@ -510,13 +543,36 @@ impl CaptionWidths {
             },
             inspector_labels: widest(&captions.inspector_labels),
             status: StatusWidths::measure(&captions.status_widest, measure),
-            buttons,
+            memory: captions
+                .memory_widest
+                .as_ref()
+                .map(|widest| MemoryWidths::measure(widest, measure)),
+            icons: captions.icons,
+            clear_search: measure(&captions.clear_search),
+            inspector_buttons: ButtonWidths::measure(inspector_buttons, measure),
+            message_buttons: ButtonWidths::measure(message_buttons, measure),
+            status_cancel: ButtonWidths::measure(
+                [(&captions.status_cancel, captions.icons)],
+                measure,
+            ),
         }
     }
 
-    /// The width every push button of the window shares.
-    pub(crate) fn button_width(&self, dpi: Dpi) -> Px {
-        self.buttons.width(dpi)
+    /// Whether the window's Clear buttons, the search row's and the filter
+    /// pane's, are icon buttons: they are while icons beside text show, and
+    /// show their caption otherwise.
+    pub(crate) fn clear_is_icon(&self) -> bool {
+        self.icons
+    }
+
+    /// The width the inspector's buttons share.
+    pub(crate) fn inspector_button_width(&self, dpi: Dpi) -> Px {
+        self.inspector_buttons.width(dpi)
+    }
+
+    /// The width the list message's buttons share.
+    pub(crate) fn message_button_width(&self, dpi: Dpi) -> Px {
+        self.message_buttons.width(dpi)
     }
 }
 
@@ -544,6 +600,18 @@ fn button_width(caption: Px, dpi: Dpi) -> Px {
 /// [`button_content`] gives, before any least width.
 pub(crate) fn button_room(content: Px, dpi: Dpi) -> Px {
     content + BUTTON_PADDING.to_px(dpi)
+}
+
+/// The width of a Clear button `height` tall with a caption `caption` wide
+/// (DESIGN.md: Look): square while `icons` show, because it then shows only
+/// its icon, and otherwise its caption's room, with no least width, because
+/// it stands beside the box it clears and shares no row with other buttons.
+pub(crate) fn clear_width(caption: Px, icons: bool, height: Px, dpi: Dpi) -> Px {
+    if icons {
+        height
+    } else {
+        button_room(caption, dpi)
+    }
 }
 
 /// The places that give the push buttons of one dialog or page, `buttons`,
@@ -756,7 +824,7 @@ impl FilterLayout {
             width: side,
             height: side,
         };
-        let clear_width = button_room(button_content(widths.clear, widths.icons, dpi), dpi);
+        let clear_width = clear_width(widths.clear, widths.icons, side, dpi);
         let clear = Rect {
             x: hide.x - related - clear_width,
             width: clear_width,
@@ -876,12 +944,12 @@ impl FilterLayout {
     /// its scroll bar.
     fn min_width(dpi: Dpi, font_height: Px, widths: &FilterWidths) -> Px {
         let px = |dip: Dip| dip.to_px(dpi);
+        let side = font_height + px(CONTROL_PADDING);
         let header = widths.title
             + px(RELATED)
-            + button_room(button_content(widths.clear, widths.icons, dpi), dpi)
+            + clear_width(widths.clear, widths.icons, side, dpi)
             + px(RELATED)
-            + font_height
-            + px(CONTROL_PADDING);
+            + side;
         let content = [
             header,
             button_width(button_content(widths.choose_folder, widths.icons, dpi), dpi),
@@ -987,7 +1055,7 @@ impl InspectorLayout {
     ) -> InspectorLayout {
         let px = |dip: Dip| dip.to_px(dpi);
         let related = px(RELATED);
-        let width = captions.button_width(dpi);
+        let width = captions.inspector_button_width(dpi);
         let button_height = font_height + px(CONTROL_PADDING);
         let row = Rect {
             height: px(ICON).max(button_height),
@@ -1127,7 +1195,7 @@ impl InspectorLayout {
     /// whose labels and buttons fit side by side.
     fn min_width(dpi: Dpi, font_height: Px, captions: &CaptionWidths) -> Px {
         let px = |dip: Dip| dip.to_px(dpi);
-        let button = captions.button_width(dpi);
+        let button = captions.inspector_button_width(dpi);
         let hide = font_height + px(CONTROL_PADDING);
         let heading = px(ICON) + px(RELATED) + px(HEADING_MIN_WIDTH) + px(RELATED) + hide;
         let buttons =
@@ -1255,6 +1323,12 @@ impl Layout {
             right = rect.x - related;
             rect
         };
+        let match_mode = place_left(
+            captions.match_modes + px(DROP_DOWN_CHROME),
+            margin,
+            control_height,
+        );
+        let match_label = place_left(captions.match_label, centred(font_height), font_height);
         let match_path = place_left(
             captions.match_path + px(CHECK_BOX_CHROME),
             centred(check_height),
@@ -1265,13 +1339,11 @@ impl Layout {
             centred(check_height),
             check_height,
         );
-        let match_mode = place_left(
-            captions.match_modes + px(DROP_DOWN_CHROME),
+        let clear_search = place_left(
+            clear_width(captions.clear_search, captions.icons, control_height, dpi),
             margin,
             control_height,
         );
-        let match_label = place_left(captions.match_label, centred(font_height), font_height);
-        let clear_search = place_left(captions.button_width(dpi), margin, control_height);
         let show_filters = (!panes.filters).then_some(Rect {
             x: margin,
             y: margin,
@@ -1351,11 +1423,16 @@ impl Layout {
 
         let status = StatusLayout::compute(
             &captions.status,
-            captions.button_width(dpi),
+            captions.status_cancel.width(dpi),
             dpi,
             font_height,
             status_height,
-            (!panes.inspector).then_some(client.width),
+            Some(&WindowEnd {
+                width: client.width,
+                memory: captions.memory,
+                icons: captions.icons,
+                show_details: !panes.inspector,
+            }),
         );
         let body_width =
             left + if panes.inspector {
@@ -1410,8 +1487,72 @@ pub(crate) struct StatusLayout {
     /// Show details, a square icon at the right end before the size grip,
     /// in a part of its own, while the inspector is hidden.
     pub(crate) show_details: Option<Rect>,
-    /// The right group's width while Show details follows it.
+    /// The main window's memory group, in a part of its own before Show
+    /// details and the size grip, while Settings > General shows it.
+    pub(crate) memory: Option<MemoryLayout>,
+    /// The right group's width while the memory group or Show details
+    /// follows it.
     right: Option<Px>,
+    /// What the right end takes from the bar's width: the memory group,
+    /// Show details and the size grip.
+    end: Px,
+}
+
+/// The main window's status bar's right end, which the Settings dialog's
+/// lacks: the memory group while Settings > General shows it, then Show
+/// details while the inspector is hidden, then the size grip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowEnd {
+    /// The status bar's width.
+    pub(crate) width: Px,
+    pub(crate) memory: Option<MemoryWidths>,
+    /// Whether an icon stands before each memory figure.
+    pub(crate) icons: bool,
+    pub(crate) show_details: bool,
+}
+
+/// The places of the memory group's figures, each an icon and its text, in
+/// the status bar's coordinates. Each figure has the width of its widest
+/// form, so a changing figure never moves the next (DESIGN.md: Look).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryLayout {
+    pub(crate) service: Rect,
+    pub(crate) app: Rect,
+    /// The status bar part that holds the group.
+    part: Rect,
+}
+
+impl MemoryLayout {
+    /// The group in a part that ends at `right`, as tall as the bar's
+    /// `height`, with an icon before each figure while `icons` show.
+    fn compute(
+        widths: &MemoryWidths,
+        icons: bool,
+        right: Px,
+        height: Px,
+        dpi: Dpi,
+    ) -> MemoryLayout {
+        let px = |dip: Dip| dip.to_px(dpi);
+        let figure = |text: Px| {
+            if icons {
+                icon_glyph_height(dpi) + glyph_gap(dpi) + text
+            } else {
+                text
+            }
+        };
+        let (service, app) = (figure(widths.service), figure(widths.app));
+        let width = service + px(GROUP) + app + px(STATUS_PART_PADDING);
+        let slot = |x: Px, width: Px| Rect {
+            x,
+            y: Px(0),
+            width,
+            height,
+        };
+        let part = slot(right - width, width);
+        let service = slot(part.x + list_box_text_inset(dpi), service);
+        let app = slot(service.right() + px(GROUP), app);
+        MemoryLayout { service, app, part }
+    }
 }
 
 impl StatusLayout {
@@ -1422,17 +1563,16 @@ impl StatusLayout {
         font_height + STATUS_BUTTON_PADDING.to_px(dpi) + inset + inset
     }
 
-    /// `cancel` is Cancel's width, the push buttons' one width of the
-    /// window or the dialog that holds the bar; `height` is the status
-    /// bar's height; `show_details` is its width when it shows Show
-    /// details.
+    /// `cancel_width` is Cancel's width, which the window or the dialog
+    /// that holds the bar decides; `height` is the status bar's height;
+    /// `window_end` is the main window's right end.
     pub(crate) fn compute(
         widths: &StatusWidths,
         cancel_width: Px,
         dpi: Dpi,
         font_height: Px,
         height: Px,
-        show_details: Option<Px>,
+        window_end: Option<&WindowEnd>,
     ) -> StatusLayout {
         let px = |dip: Dip| dip.to_px(dpi);
         let related = px(RELATED);
@@ -1456,36 +1596,54 @@ impl StatusLayout {
             height: px(PROGRESS_HEIGHT),
         };
         // Left of the size grip, as wide as a scroll bar.
-        let show_details = show_details.map(|width| Rect {
-            x: width - px(SCROLL_BAR) - px(STATUS_INSET) - button_height,
+        let grip = |end: &WindowEnd| end.width - px(SCROLL_BAR);
+        let show_details = window_end.filter(|end| end.show_details).map(|end| Rect {
+            x: grip(end) - px(STATUS_INSET) - button_height,
             y: centred(button_height),
             width: button_height,
             height: button_height,
         });
-        let right =
-            show_details.map(|show| (show.x - px(STATUS_INSET) - groups[0] - groups[1]).max(Px(0)));
+        let memory = window_end.and_then(|end| {
+            let right = show_details.map_or(grip(end), |show| show.x - px(STATUS_INSET));
+            let widths = end.memory.as_ref()?;
+            Some(MemoryLayout::compute(widths, end.icons, right, height, dpi))
+        });
+        // Where the right group ends while a part follows it.
+        let right_end = memory
+            .map(|memory| memory.part.x)
+            .or(show_details.map(|show| show.x - px(STATUS_INSET)));
         StatusLayout {
             groups,
             progress,
             cancel,
             show_details,
-            right,
+            memory,
+            right: right_end.map(|end| (end - groups[0] - groups[1]).max(Px(0))),
+            end: window_end
+                .zip(right_end)
+                .map_or(Px(0), |(end, right_end)| end.width - right_end),
         }
     }
 
     /// The widths of the status bar's parts but the last, which takes the
-    /// rest: the left and middle groups, and the right group when Show
-    /// details has the last part.
+    /// rest: the left and middle groups, then the right group when a part
+    /// follows it, and the memory group when Show details has the last
+    /// part.
     pub(crate) fn part_widths(&self) -> Vec<Px> {
-        self.groups.iter().copied().chain(self.right).collect()
+        let memory = self
+            .memory
+            .filter(|_| self.show_details.is_some())
+            .map(|memory| memory.part.width);
+        self.groups
+            .iter()
+            .copied()
+            .chain(self.right)
+            .chain(memory)
+            .collect()
     }
 
     fn min_width(&self, dpi: Dpi) -> Px {
-        let px = |dip: Dip| dip.to_px(dpi);
-        let show_details = self.show_details.map_or(Px(0), |show| {
-            show.width + px(SCROLL_BAR) + px(STATUS_INSET) + px(STATUS_INSET)
-        });
-        self.groups[0] + self.groups[1] + STATUS_REST_MIN_WIDTH.to_px(dpi) + show_details
+        self.groups[0] + self.groups[1] + STATUS_REST_MIN_WIDTH.to_px(dpi) + self.end
     }
 }
 
@@ -1561,9 +1719,11 @@ mod tests {
 
     /// Caption widths as a font of `char_width` pixels per character would
     /// give them; `stretch` stands for a longer language.
-    fn captions(dpi: Dpi, stretch: f64) -> CaptionWidths {
+    fn captions(dpi: Dpi, stretch: f64, show_memory: bool) -> CaptionWidths {
         let char_width = f64::from(Dip(7).to_px(dpi).0);
-        let captions = WindowCaptions::new(&model(), &English);
+        let mut model = model();
+        model.settings.choices.show_memory = show_memory;
+        let captions = WindowCaptions::new(&model, &English);
         CaptionWidths::measure(&captions, &|text: &str| {
             Px((text.chars().count() as f64 * char_width * stretch).ceil() as i32)
         })
@@ -1580,8 +1740,8 @@ mod tests {
     #[test]
     fn every_control_fits_without_overlap() {
         for dpi in [96, 144, 192].map(|d| Dpi::new(d).expect("a DPI is not zero")) {
-            for stretch in [1.0, 2.0] {
-                let captions = captions(dpi, stretch);
+            for (stretch, show_memory) in [(1.0, false), (2.0, false), (1.0, true), (2.0, true)] {
+                let captions = captions(dpi, stretch, show_memory);
                 let font_height = Dip(15).to_px(dpi);
                 // The drawing area and the borders Windows adds to it.
                 let status_height = StatusLayout::min_height(dpi, font_height) + Dip(4).to_px(dpi);
@@ -1704,6 +1864,15 @@ mod tests {
                             view + middle < client.width,
                             "the status bar's fixed groups leave the right group room"
                         );
+                        assert_eq!(status.memory.is_some(), show_memory);
+                        if let Some(memory) = status.memory {
+                            assert!(
+                                view + middle + Dip(100).to_px(dpi) < memory.service.x
+                                    && memory.app.right() <= client.width - Dip(17).to_px(dpi),
+                                "the memory group leaves the right group its room and stays \
+                                 left of the size grip: {status:?} at {dpi:?}, stretch {stretch}"
+                            );
+                        }
                         // A running job's text, which the status bar draws
                         // about 5 px after the part's edge, its progress bar
                         // and Cancel fit the middle group side by side,

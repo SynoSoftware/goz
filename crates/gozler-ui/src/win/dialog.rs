@@ -9,11 +9,13 @@
 //! controls the dialog's procedure handles.
 
 use super::controls::{Button, TreeItem, has_image};
-use super::gdi::{Font, TextMeter};
-use super::notify::{CustomDraw, DrawAnswer, DrawStage, Notification};
+use super::gdi::{Font, TextMeter, icons_shown};
+use super::notify::{CustomDraw, DrawAnswer, DrawStage, FlatGround, Notification};
 use super::{Hwnd, wide};
 use crate::core::captions::{ButtonIcon, DialogCaptions, Guard, Question, QuestionBody};
+use crate::core::commands::Keystroke;
 use crate::core::file_operations::Choices;
+use crate::core::glyph::Glyph;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Px, Rect};
 use std::cell::RefCell;
@@ -29,10 +31,10 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_SELCHANGE, CreateDialogParamW,
-    DialogBoxParamW, EN_CHANGE, EndDialog, EnumChildWindows, GWL_STYLE, GetClassNameW, GetDlgItem,
-    GetParent, GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR, MB_OK, MapDialogRect, MessageBoxW,
-    SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_DRAWITEM, WM_INITDIALOG,
-    WM_NOTIFY, WM_TIMER,
+    DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE,
+    GetClassNameW, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK,
+    MB_ICONERROR, MB_OK, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
+    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_DRAWITEM, WM_INITDIALOG, WM_NOTIFY, WM_TIMER,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR};
 
@@ -59,6 +61,17 @@ pub(crate) enum DialogMessage {
     /// box.
     Edited {
         id: u16,
+    },
+    /// The edit control `id` got the focus, or lost it.
+    Focus {
+        id: u16,
+        focused: bool,
+    },
+    /// A [`super::shortcut::Capture`] caught keys that a shortcut can be:
+    /// the others besides the Windows key, if it was held.
+    KeysCaptured {
+        windows: bool,
+        keystroke: Keystroke,
     },
     /// A click or `Enter` on the SysLink control `id`.
     LinkActivated {
@@ -134,6 +147,12 @@ pub(crate) trait DialogProc {
     /// Places what follows the push buttons' one width `width`, such as
     /// Settings' status bar Cancel. Runs once, after [`DialogProc::init`].
     fn buttons_sized(&self, _dialog: Hwnd, _width: Px) {}
+    /// The icon of the push button `id` if it is a Clear button, which
+    /// shows only that icon, flat, while icons show, and its caption while
+    /// they are hidden (DESIGN.md: Look); `None` for any other button.
+    fn clear_glyph(&self, _id: u16) -> Option<Glyph> {
+        None
+    }
 }
 
 /// How a dialog ended.
@@ -228,6 +247,8 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                 BN_CLICKED => DialogMessage::Command { id },
                 // A list box's LBN_SELCHANGE is a combo box's CBN_SELCHANGE.
                 EN_CHANGE | CBN_SELCHANGE => DialogMessage::Edited { id },
+                EN_SETFOCUS => DialogMessage::Focus { id, focused: true },
+                EN_KILLFOCUS => DialogMessage::Focus { id, focused: false },
                 _ => DialogMessage::Other,
             }
         }
@@ -275,12 +296,22 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                     return 0;
                 }
                 NM_CUSTOMDRAW => {
+                    // SAFETY: the notification is the one Windows passed.
+                    let notification = unsafe { Notification::new(lparam) };
+                    if let Some(glyph) = running.state.clear_glyph(id).filter(|_| icons_shown())
+                        && let Some(button) = Button::of_dialog(Hwnd(header.hwndFrom).parent(), id)
+                        && let Some(answer) =
+                            button.draw_flat(&notification, glyph, FlatGround::Face)
+                    {
+                        // SAFETY: plain values.
+                        unsafe { SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, answer.0) };
+                        return 1;
+                    }
                     let Some(column) = running.state.path_column(id) else {
                         return 0;
                     };
-                    // SAFETY: only a list view has a path column, and the
-                    // notification is the one Windows passed.
-                    let draw = unsafe { CustomDraw::of_list(&Notification::new(lparam)) };
+                    // SAFETY: only a list view has a path column.
+                    let draw = unsafe { CustomDraw::of_list(&notification) };
                     let answer = match draw.stage() {
                         DrawStage::Paint => DrawAnswer::EachRow,
                         DrawStage::Row => DrawAnswer::EachCell,
@@ -330,11 +361,17 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         }
         WM_TIMER => DialogMessage::Timer { id: wparam.0 },
         REPLY => DialogMessage::Reply,
+        super::shortcut::CAPTURED => match super::shortcut::captured(wparam, lparam) {
+            Some((windows, keystroke)) => DialogMessage::KeysCaptured { windows, keystroke },
+            None => DialogMessage::Other,
+        },
         _ => DialogMessage::Other,
     };
     let command = match message {
         DialogMessage::Command { id, .. } => Some(id),
         DialogMessage::Edited { .. }
+        | DialogMessage::Focus { .. }
+        | DialogMessage::KeysCaptured { .. }
         | DialogMessage::LinkActivated { .. }
         | DialogMessage::DoubleClicked { .. }
         | DialogMessage::Timer { .. }
@@ -364,7 +401,7 @@ fn open<D: DialogProc>(dialog: Hwnd, running: &Running<D>) {
     }
     show_glyphs(dialog, running.captions);
     let opened = running.state.init(dialog);
-    let width = size_buttons(dialog, &running.state.later_captions());
+    let width = size_buttons(dialog, running.state);
     running.state.buttons_sized(dialog, width);
     running.fonts.replace(opened.fonts);
     if let Some(control) = item(dialog, opened.focus) {
@@ -430,10 +467,16 @@ unsafe extern "system" fn page_procedure(
                     return 0;
                 };
                 let answer = SendMessageW(dialog, msg, Some(wparam), Some(lparam)).0;
-                // The one notification whose answer the control reads: the
-                // page passes the dialog's on. Others keep the page's 0,
-                // because the dialog leaves its own answer unset for them.
-                if msg == WM_NOTIFY && (*(lparam.0 as *const NMHDR)).code == LVN_GETEMPTYMARKUP {
+                // The notifications whose answer the control reads, such as
+                // a flat Clear's custom draw: the page passes the dialog's
+                // on. Others keep the page's 0, because the dialog leaves its
+                // own answer unset for them.
+                if msg == WM_NOTIFY
+                    && matches!(
+                        (*(lparam.0 as *const NMHDR)).code,
+                        LVN_GETEMPTYMARKUP | NM_CUSTOMDRAW
+                    )
+                {
                     SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, answer);
                 }
                 answer
@@ -500,11 +543,13 @@ pub(crate) fn widen(dialog: Hwnd, at: Px, extra: Px) {
 
 /// Gives every push button of `dialog` and of its pages one width
 /// (DESIGN.md: Look): 50 DLU, as the templates give them, or the widest
-/// of their captions and `later` in the current language, placed as
-/// [`layout::sized_buttons`] says, and returns that width. A button inside
-/// another control, such as the status bar's Cancel, keeps its own place,
-/// because the control that holds it places it.
-pub(crate) fn size_buttons(dialog: Hwnd, later: &[(String, bool)]) -> Px {
+/// of their captions and `state`'s later captions in the current language,
+/// placed as [`layout::sized_buttons`] says, and returns that width. Each
+/// Clear that `state` names gets its own width ([`layout::clear_width`]),
+/// placed the same way. A button inside another control, such as the
+/// status bar's Cancel, keeps its own place, because the control that holds
+/// it places it.
+pub(crate) fn size_buttons<D: DialogProc>(dialog: Hwnd, state: &D) -> Px {
     let minimum = horizontal_units(dialog, 50);
     let Ok(font) = Font::of(dialog) else {
         return minimum;
@@ -530,11 +575,15 @@ pub(crate) fn size_buttons(dialog: Hwnd, later: &[(String, bool)]) -> Px {
         .into_iter()
         .filter(|child| parents.contains(&child.parent()))
         .partition(|child| is_push_button(*child));
+    let (clears, buttons): (Vec<Hwnd>, Vec<Hwnd>) = buttons
+        .into_iter()
+        .partition(|button| state.clear_glyph(control_id(*button)).is_some());
     let width = buttons
         .iter()
         .map(|&button| room(&button.text(), has_image(button)))
         .chain(
-            later
+            state
+                .later_captions()
                 .iter()
                 .map(|(caption, shielded)| room(caption, *shielded)),
         )
@@ -562,7 +611,39 @@ pub(crate) fn size_buttons(dialog: Hwnd, later: &[(String, bool)]) -> Px {
             .collect();
         super::move_children(&moves);
     }
+    // After the rows have moved, so the control beside a Clear, such as
+    // its box, ends its gap before it.
+    for clear in clears {
+        let parent = clear.parent();
+        let beside: Vec<Hwnd> = others
+            .iter()
+            .copied()
+            .filter(|control| control.parent() == parent)
+            .collect();
+        let rects: Vec<Rect> = beside
+            .iter()
+            .map(|control| control.rect_in(parent))
+            .collect();
+        let rect = clear.rect_in(parent);
+        let caption = meter.width(&clear.text());
+        let width = layout::clear_width(caption, icons_shown(), rect.height, dpi);
+        let (placed, shrunk) = layout::sized_buttons(&[rect], &rects, width, margin);
+        let moves: Vec<(Hwnd, Rect)> = std::iter::once((clear, placed[0]))
+            .chain(
+                shrunk
+                    .into_iter()
+                    .map(|(index, rect)| (beside[index], rect)),
+            )
+            .collect();
+        super::move_children(&moves);
+    }
     width
+}
+
+/// The control ID of `control`, a dialog's or a page's.
+fn control_id(control: Hwnd) -> u16 {
+    // SAFETY: plain values; a window without an ID gives 0.
+    unsafe { GetDlgCtrlID(control.0) as u16 }
 }
 
 /// Every window inside `dialog`, at any depth.

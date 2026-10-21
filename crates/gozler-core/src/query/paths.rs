@@ -6,7 +6,9 @@
 //! [`DirPaths`] builds each folder's path once per query, from its parent's,
 //! and an entry's path is its folder's path, a separator and its name. Its
 //! cache is bounded, because the folders a local user creates decide how large
-//! it would grow.
+//! it would grow. A path term that one component decides needs no path:
+//! [`ComponentBits`] passes which terms each folder matches down to its
+//! children in the same way.
 //!
 //! A query's results hold no full paths at all: each row names its folder in
 //! a [`ResultNames`] table, which holds each folder once, as its parent and its
@@ -27,6 +29,23 @@ pub(crate) enum NameForm {
     /// Case-folded: what a case-insensitive query matches and the path sort
     /// compares.
     Folded,
+}
+
+impl NameForm {
+    fn name_of(self, index: &VolumeIndex, idx: EntryIdx) -> &[u8] {
+        match self {
+            NameForm::Raw => index.entry(idx).name(),
+            NameForm::Folded => index.folded_name(idx),
+        }
+    }
+
+    fn root_name_of(self, mount_prefix: &str) -> Vec<u8> {
+        let root = root_name(mount_prefix);
+        match self {
+            NameForm::Raw => root.to_vec(),
+            NameForm::Folded => crate::fold::fold(root),
+        }
+    }
 }
 
 /// A cached folder: its path's place in [`DirPaths`]' arena, and how many
@@ -74,11 +93,7 @@ impl DirPaths {
     /// Paths of `index`'s entries under `mount_prefix` (`C:\`; empty for a
     /// path within the volume).
     pub(crate) fn new(index: &VolumeIndex, form: NameForm, mount_prefix: &str) -> Self {
-        let root_path = root_name(mount_prefix);
-        let arena = match form {
-            NameForm::Raw => root_path.to_vec(),
-            NameForm::Folded => crate::fold::fold(root_path),
-        };
+        let arena = form.root_name_of(mount_prefix);
         let root = Folder {
             start: 0,
             end: arena.len(),
@@ -108,7 +123,7 @@ impl DirPaths {
                 if !out.is_empty() {
                     out.push(b'\\');
                 }
-                out.extend_from_slice(self.name(index, idx));
+                out.extend_from_slice(self.form.name_of(index, idx));
                 true
             }
             _ => {
@@ -174,7 +189,7 @@ impl DirPaths {
             if !out.is_empty() {
                 out.push(b'\\');
             }
-            out.extend_from_slice(self.name(index, folder));
+            out.extend_from_slice(self.form.name_of(index, folder));
             if out.len() <= CACHED_PATH_MAX {
                 let start = self.arena.len();
                 self.arena.extend_from_slice(out);
@@ -184,12 +199,115 @@ impl DirPaths {
         }
         Some(depth)
     }
+}
 
-    fn name<'i>(&self, index: &'i VolumeIndex, idx: EntryIdx) -> &'i [u8] {
-        match self.form {
-            NameForm::Raw => index.entry(idx).name(),
-            NameForm::Folded => index.folded_name(idx),
+/// Which of a query's component terms the full path of each entry matches,
+/// as bits, found without building any path.
+///
+/// A component term's text holds no separator, so it lies inside one
+/// component of a full path: the path matches the term exactly when the
+/// root's name, the name of a folder above the entry or the entry's own
+/// name does. So each folder's bits are its parent's and its own name's,
+/// built once per query from its parent's as [`DirPaths`] builds paths, and
+/// an entry's bits are its folder's and its name's. An entry has bits
+/// exactly when it has a full path, by the walk of
+/// [`DirPaths::folder_path_into`]. Each folder's bits take the same space
+/// whatever its depth, so the cache needs no limit beyond the folders of the
+/// index.
+pub(crate) struct ComponentBits {
+    form: NameForm,
+    /// Each folder's bits and its depth, counted as [`DirPaths`] counts it,
+    /// and `None` for a folder known to have no path.
+    memo: FxHashMap<EntryIdx, Option<(u64, usize)>>,
+}
+
+impl ComponentBits {
+    /// The bits of `index`'s entries under `mount_prefix` (`C:\`; empty for a
+    /// path within the volume). `bits` gives the bits of one name in `form`,
+    /// and of the root's name: the mount prefix without its last separator.
+    pub(crate) fn new(
+        index: &VolumeIndex,
+        form: NameForm,
+        mount_prefix: &str,
+        mut bits: impl FnMut(&[u8]) -> u64,
+    ) -> Self {
+        let mut memo = FxHashMap::default();
+        memo.insert(
+            index.root(),
+            Some((bits(&form.root_name_of(mount_prefix)), 1)),
+        );
+        Self { form, memo }
+    }
+
+    /// The bits of entry `idx`, or `None` when the entry has no path.
+    pub(crate) fn entry_bits(
+        &mut self,
+        index: &VolumeIndex,
+        idx: EntryIdx,
+        mut bits: impl FnMut(&[u8]) -> u64,
+    ) -> Option<u64> {
+        let folder = self.parent_bits(index, idx, &mut bits)?;
+        Some(folder | bits(self.form.name_of(index, idx)))
+    }
+
+    /// The bits of the folder that holds entry `idx`, or `None` when the
+    /// entry has no path.
+    pub(crate) fn parent_bits(
+        &mut self,
+        index: &VolumeIndex,
+        idx: EntryIdx,
+        mut bits: impl FnMut(&[u8]) -> u64,
+    ) -> Option<u64> {
+        match self.folder_bits(index, index.entry(idx).parent(), &mut bits) {
+            // The entry's own walk is one entry longer than its folder's.
+            Some((folder, depth)) if depth < MAX_PATH_HOPS => Some(folder),
+            _ => None,
         }
+    }
+
+    /// The bits of folder `dir` and its depth, or `None` when it has no
+    /// path.
+    fn folder_bits(
+        &mut self,
+        index: &VolumeIndex,
+        dir: EntryIdx,
+        bits: &mut impl FnMut(&[u8]) -> u64,
+    ) -> Option<(u64, usize)> {
+        let mut chain: SmallVec<[EntryIdx; 32]> = SmallVec::new();
+        let mut cur = dir;
+        let base = loop {
+            if let Some(&known) = self.memo.get(&cur) {
+                break known;
+            }
+            let parent = index.entry(cur).parent();
+            if parent == NIL {
+                break None; // lost+found
+            }
+            if chain.len() == MAX_PATH_HOPS {
+                // Longer than any walk that has a path, or a cycle.
+                return None;
+            }
+            chain.push(cur);
+            cur = parent;
+        };
+        let Some((mut found, mut depth)) = base else {
+            for &folder in &chain {
+                self.memo.insert(folder, None);
+            }
+            return None;
+        };
+        for (i, &folder) in chain.iter().rev().enumerate() {
+            depth += 1;
+            if depth > MAX_PATH_HOPS {
+                for &deeper in chain.iter().rev().skip(i) {
+                    self.memo.insert(deeper, None);
+                }
+                return None;
+            }
+            found |= bits(self.form.name_of(index, folder));
+            self.memo.insert(folder, Some((found, depth)));
+        }
+        Some((found, depth))
     }
 }
 
@@ -448,7 +566,8 @@ mod tests {
     }
 
     /// An entry has a full path exactly when `path_of` gives one, both as a
-    /// query builds it and as its results' copied folders spell it, whatever
+    /// query builds it, finds its component bits and as its results' copied
+    /// folders spell it, whatever
     /// order the query visits entries in, and a deep chain does not fill the
     /// cache.
     #[test]
@@ -470,7 +589,13 @@ mod tests {
             let mut dirs = DirPaths::new(&index, NameForm::Raw, r"C:\");
             let mut names = ResultNames::default();
             let mut copy = FolderCopy::new(&index, r"C:\", &mut names);
+            let mut bits = ComponentBits::new(&index, NameForm::Raw, r"C:\", |_| 0);
             for idx in order {
+                assert_eq!(
+                    bits.entry_bits(&index, idx, |_| 0).is_some(),
+                    expected(idx).is_some(),
+                    "bits of entry {idx}"
+                );
                 let built = dirs
                     .full_path_into(&index, idx, &mut out)
                     .then(|| out.clone());

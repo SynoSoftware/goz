@@ -73,6 +73,8 @@ pub(crate) struct WindowCaptions {
     /// The status bar's Cancel, which stops the running job.
     pub(crate) status_cancel: String,
     pub(crate) status_widest: StatusWidest,
+    /// `None` while Settings > General hides the memory group.
+    pub(crate) memory_widest: Option<MemoryWidest>,
     pub(crate) message: Option<ListCaption>,
 }
 
@@ -116,6 +118,76 @@ pub(crate) struct StatusCaptions {
     /// The main window's right group: `service`, then the search's totals,
     /// each after its icon.
     pub(crate) right: Vec<ValuePart>,
+    /// The main window's memory group; `None` while Settings > General
+    /// hides it.
+    pub(crate) memory: Option<MemoryCaptions>,
+}
+
+/// The status bar's memory group: the working sets of the service and of
+/// the app, each after its icon, with a tooltip for each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryCaptions {
+    pub(crate) service: ValuePart,
+    pub(crate) app: ValuePart,
+    pub(crate) service_tip: String,
+    pub(crate) app_tip: String,
+}
+
+impl MemoryCaptions {
+    fn new(model: &Model, numbers: &dyn Numbers) -> MemoryCaptions {
+        let strings = model.strings();
+        let figure = |bytes: Option<u64>| {
+            bytes.map_or_else(
+                || strings.text("status.memory_unknown").to_owned(),
+                |bytes| text::bytes(strings, numbers, bytes),
+            )
+        };
+        let service = figure(model.service_working_set());
+        let app = figure(model.app_working_set());
+        MemoryCaptions {
+            service: ValuePart {
+                glyph: Some(Glyph::Component),
+                text: strings.format("status.service_memory", &[&service]),
+                muted: false,
+            },
+            app: ValuePart {
+                glyph: Some(Glyph::Favicon),
+                text: strings.format("status.ui_memory", &[&app]),
+                muted: false,
+            },
+            service_tip: strings.format("status.service_memory_tooltip", &[&service]),
+            app_tip: strings.format("status.ui_memory_tooltip", &[&app]),
+        }
+    }
+}
+
+/// The memory group's widest texts, which its fixed width fits (DESIGN.md:
+/// Look).
+pub(crate) struct MemoryWidest {
+    pub(crate) service: Vec<String>,
+    pub(crate) app: Vec<String>,
+}
+
+impl MemoryWidest {
+    /// Every form of a figure in MB and in GB, the units a process's
+    /// working set takes, and the unknown figure.
+    fn new(strings: &Strings, numbers: &dyn Numbers) -> MemoryWidest {
+        let figures: Vec<String> = (2..=3)
+            .flat_map(|unit| [9.99, 99.9, 999.0].map(|value| (value * 1024f64.powi(unit)) as u64))
+            .map(|bytes| text::bytes(strings, numbers, bytes))
+            .chain([strings.text("status.memory_unknown").to_owned()])
+            .collect();
+        let all = |key: &str| -> Vec<String> {
+            figures
+                .iter()
+                .map(|figure| strings.format(key, &[figure]))
+                .collect()
+        };
+        MemoryWidest {
+            service: all("status.service_memory"),
+            app: all("status.ui_memory"),
+        }
+    }
 }
 
 /// The status bar's middle group: the running job, or the last job's
@@ -395,7 +467,8 @@ impl DialogItem {
 
 /// The group boxes of the Settings pages, each with the icon before its
 /// caption.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 14] = [
+pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 15] = [
+    (ControlId::GeneralDisplay, Glyph::Globe),
     (ControlId::GeneralStarting, Glyph::PowerButton),
     (ControlId::SearchBoxGroup, Glyph::Search),
     (ControlId::ContextMenuItemGroup, Glyph::BulletedList),
@@ -419,8 +492,8 @@ pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 14] = [
 const BUTTON_GLYPHS: [(&str, Glyph); 23] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
-    ("button.close", Glyph::ChromeClose),
-    ("button.clear", Glyph::Clear),
+    ("button.close", Glyph::Cancel),
+    ("button.clear", Glyph::EraseTool),
     ("settings.apply", Glyph::Save),
     ("settings.reset", Glyph::Undo),
     ("settings.reset_all", Glyph::Undo),
@@ -431,10 +504,10 @@ const BUTTON_GLYPHS: [(&str, Glyph); 23] = [
     ("settings_keyboard.edit", Glyph::Edit),
     ("settings_keyboard.remove", Glyph::Remove),
     ("service_report.copy", Glyph::Copy),
-    ("file_operations.hide", Glyph::ChromeMinimize),
-    ("filter.clear", Glyph::Clear),
+    ("file_operations.hide", Glyph::Remove),
+    ("filter.clear", Glyph::EraseTool),
     ("filter.choose_folder", Glyph::FolderOpen),
-    ("command.clear_filters", Glyph::Clear),
+    ("command.clear_filters", Glyph::EraseTool),
     ("list.search_everywhere", Glyph::Search),
     ("fix.download", Glyph::Download),
     ("fix.update", Glyph::Download),
@@ -539,6 +612,7 @@ impl CaptionTable {
                         Control(C::GeneralLanguageLabel),
                         "settings_general.language",
                     ),
+                    (Control(C::GeneralSizesLabel), "settings_general.sizes"),
                     (Control(C::GeneralSignIn), "settings_general.sign_in"),
                     (Control(C::GeneralUpdates), "settings_general.updates"),
                     (
@@ -547,10 +621,15 @@ impl CaptionTable {
                     ),
                     (Control(C::GeneralOneWindow), "settings_general.one_window"),
                     (Control(C::GeneralShowIcons), "settings_general.show_icons"),
+                    (
+                        Control(C::GeneralShowMemory),
+                        "settings_general.show_memory",
+                    ),
                     (Control(C::GeneralRestore), "settings.reset"),
                 ],
                 plain: &[
                     (Control(C::GeneralHeading), "settings.general"),
+                    (Control(C::GeneralDisplay), "settings_general.display"),
                     (Control(C::GeneralStarting), "settings_general.starting"),
                 ],
             },
@@ -639,10 +718,6 @@ impl CaptionTable {
                     (
                         Control(C::KeyboardShortcutLabel),
                         "settings_keyboard.shortcut",
-                    ),
-                    (
-                        Control(C::KeyboardWindowsKey),
-                        "settings_keyboard.windows_key",
                     ),
                     (Control(C::KeyboardFilterLabel), "settings_keyboard.filter"),
                     (Control(C::KeyboardKeysLabel), "settings_keyboard.keys"),
@@ -1019,10 +1094,9 @@ impl IndexCaptions {
             ]
         });
         let drives = indexed.chain(left_out).collect();
-        // 0 is a service that could not read its own memory.
-        let service = match status.process_private_bytes {
-            0 => strings.text("settings_index.running").to_owned(),
-            bytes => strings.format(
+        let service = match model.service_working_set() {
+            None => strings.text("settings_index.running").to_owned(),
+            Some(bytes) => strings.format(
                 "settings_index.running_memory",
                 &[&text::bytes(strings, numbers, bytes)],
             ),
@@ -1196,6 +1270,10 @@ impl WindowCaptions {
             status: StatusCaptions::new(model, numbers),
             status_cancel: strings.text("button.cancel").to_owned(),
             status_widest: status_widest(strings, numbers),
+            memory_widest: model
+                .choices()
+                .show_memory
+                .then(|| MemoryWidest::new(strings, numbers)),
             message: list_message(model),
         }
     }
@@ -1228,6 +1306,10 @@ impl StatusCaptions {
                     .chain(totals_status(model, numbers)),
             ),
             service,
+            memory: model
+                .choices()
+                .show_memory
+                .then(|| MemoryCaptions::new(model, numbers)),
         }
     }
 }
@@ -1935,7 +2017,7 @@ pub(crate) fn setup_question(model: &Model, numbers: &dyn Numbers) -> Option<Que
     let cancel = strings.text("button.cancel").to_owned();
     if fix == SetupFix::Download {
         return Some(Question {
-            title: strings.text("window.title").to_owned(),
+            title: strings.text("fixing.install").to_owned(),
             instruction: strings.format("fixing.install_question", &[&setup.version]),
             body: QuestionBody::Text(strings.format("fixing.install_details", &[&size])),
             footer: None,
@@ -1993,6 +2075,20 @@ pub(crate) fn use_local_question(strings: &Strings, local: &LocalService) -> Que
         confirm: strings.text("fixing.switch").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::None,
+    }
+}
+
+/// The question before Settings' Reset all deletes `ui.json` and opens the
+/// window again (DESIGN.md: Settings dialog).
+pub(crate) fn reset_all_question(strings: &Strings) -> Question {
+    Question {
+        title: text::without_access_key(strings.text("settings.reset_all")),
+        instruction: strings.text("settings.reset_all_question").to_owned(),
+        body: QuestionBody::Text(strings.text("settings.reset_all_body").to_owned()),
+        footer: None,
+        confirm: text::without_access_key(strings.text("settings.reset")),
+        cancel: strings.text("button.cancel").to_owned(),
+        guard: Guard::CancelFirst,
     }
 }
 

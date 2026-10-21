@@ -149,6 +149,46 @@ pub(crate) fn run() {
     );
     win::window::run_message_loop(hwnd, &|| window.accelerators());
     window.close_for_setup(hwnd);
+    if window.resets_settings() {
+        // The new window must find no first one.
+        drop(first);
+        reset_and_start_again(&data_dir, arguments.data_dir.as_deref());
+    }
+}
+
+/// Settings' Reset all, after the window exited: deletes `ui.json` and the
+/// sign-in entry, which a new installation does not have, and starts the
+/// window again with the same data folder (DESIGN.md: Settings dialog).
+fn reset_and_start_again(data_dir: &Path, given_data_dir: Option<&Path>) {
+    let log = data_dir.join("ui-error.log");
+    let settings_file = data_dir.join("ui.json");
+    if let Err(error) = std::fs::remove_file(&settings_file)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        write_log(&log, &format!("Reset all did not delete ui.json: {error}"));
+    }
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(error) => {
+            write_log(
+                &log,
+                &format!("Reset all did not find gozler-ui.exe: {error}"),
+            );
+            return;
+        }
+    };
+    // Settings > General shows the registry, so a failure shows there.
+    let _ = win::shell::set_start_at_sign_in(false, &program);
+    let mut command = std::process::Command::new(&program);
+    if let Some(folder) = given_data_dir {
+        command.arg("--data-dir").arg(folder);
+    }
+    if let Err(error) = command.spawn() {
+        write_log(
+            &log,
+            &format!("Reset all did not start Gozler again: {error}"),
+        );
+    }
 }
 
 /// The command line: `--data-dir <folder>`, `--sign-in`, which the `Run`

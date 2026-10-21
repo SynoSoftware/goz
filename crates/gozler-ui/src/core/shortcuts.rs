@@ -41,10 +41,16 @@ pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
 /// Where `command` is, as the Keyboard page lists it and its messages name
 /// it, such as "Edit > Find".
 pub(crate) fn command_place(strings: &Strings, command: CommandId) -> String {
-    let menu = listed_commands()
-        .into_iter()
-        .find(|(c, _)| *c == command)
-        .map_or("", |(_, menu)| menu);
+    // Show window is the notification area menu's, which the menu bar and
+    // the context menu lack.
+    let menu = if command == CommandId::ShowWindow {
+        "settings_keyboard.notification_area"
+    } else {
+        listed_commands()
+            .into_iter()
+            .find(|(c, _)| *c == command)
+            .map_or("", |(_, menu)| menu)
+    };
     format!(
         "{} > {}",
         without_access_key(strings.text(menu)),
@@ -62,16 +68,23 @@ pub(crate) struct CommandRow {
     pub(crate) keys: String,
 }
 
-/// The listed commands whose place or shortcuts contain `filter`, ignoring
-/// case, so `ctrl+e` finds the command that has it (DESIGN.md: The Keyboard
-/// page).
+/// Show window with `show`, the shortcut that shows Gozler from any
+/// program, then the listed commands, each kept when its place or
+/// shortcuts contain `filter`, ignoring case, so `ctrl+e` finds the command
+/// that has it (DESIGN.md: The Keyboard page).
 pub(crate) fn command_rows(
     strings: &Strings,
     shortcuts: &CommandShortcuts,
+    show: Option<ShowShortcut>,
     filter: &str,
 ) -> Vec<CommandRow> {
     let filter = filter.trim().to_lowercase();
-    listed_commands()
+    let show = CommandRow {
+        command: CommandId::ShowWindow,
+        place: command_place(strings, CommandId::ShowWindow),
+        keys: show.map(|show| show.text(strings)).unwrap_or_default(),
+    };
+    let listed = listed_commands()
         .into_iter()
         .map(|(command, _)| CommandRow {
             command,
@@ -82,7 +95,9 @@ pub(crate) fn command_rows(
                 .map(|k| k.text(strings))
                 .collect::<Vec<_>>()
                 .join(", "),
-        })
+        });
+    std::iter::once(show)
+        .chain(listed)
         .filter(|row| {
             row.place.to_lowercase().contains(&filter) || row.keys.to_lowercase().contains(&filter)
         })
@@ -300,29 +315,32 @@ pub(crate) struct ShowShortcut {
     keystroke: Keystroke,
 }
 
-/// Why a shortcut cannot show Gozler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ShowRefusal {
-    /// `Win+L` always locks the computer.
-    Lock,
-    /// Without the Windows key, it has fewer than two of `Ctrl`, `Alt` and
-    /// `Shift`, so it would take a key from every program.
-    Modifiers,
-}
-
 impl ShowShortcut {
-    pub(crate) fn new(windows: bool, keystroke: Keystroke) -> Result<ShowShortcut, ShowRefusal> {
-        let held = [keystroke.ctrl, keystroke.alt, keystroke.shift]
-            .into_iter()
-            .filter(|held| *held)
-            .count();
-        if windows && keystroke == Keystroke::plain(Key::Letter(b'L')) {
-            return Err(ShowRefusal::Lock);
-        }
-        if !windows && held < 2 {
-            return Err(ShowRefusal::Modifiers);
-        }
-        Ok(ShowShortcut { windows, keystroke })
+    /// The shortcut, unless `Win+L`, which always locks the computer, or a
+    /// key without the Windows key and with fewer than two of `Ctrl`, `Alt`
+    /// and `Shift`, which would take that key from every program.
+    pub(crate) fn new(windows: bool, keystroke: Keystroke) -> Option<ShowShortcut> {
+        let lock = windows && keystroke == Keystroke::plain(Key::Letter(b'L'));
+        let taken = !windows && modifiers_held(keystroke) < 2;
+        (!lock && !taken).then_some(ShowShortcut { windows, keystroke })
+    }
+
+    /// The shortcut that the keys pressed in the shortcut box make. A key
+    /// without the Windows key and with fewer than two of `Ctrl`, `Alt`
+    /// and `Shift` becomes `Ctrl+Alt` and the key, as the Shortcut key field
+    /// of a Windows shortcut turns it.
+    pub(crate) fn pressed(windows: bool, keystroke: Keystroke) -> Option<ShowShortcut> {
+        let keystroke = if windows || modifiers_held(keystroke) >= 2 {
+            keystroke
+        } else {
+            Keystroke {
+                ctrl: true,
+                alt: true,
+                shift: false,
+                key: keystroke.key,
+            }
+        };
+        ShowShortcut::new(windows, keystroke)
     }
 
     /// Whether it holds the Windows key.
@@ -335,30 +353,14 @@ impl ShowShortcut {
         self.keystroke
     }
 
-    /// `keystroke` as the shortcut to show Gozler without the Windows key:
-    /// with fewer than two of `Ctrl`, `Alt` and `Shift`, it becomes
-    /// `Ctrl+Alt` and the key, as the hotkey control turns what the person
-    /// presses, because the Windows key check box can be cleared after.
-    pub(crate) fn two_modifiers(keystroke: Keystroke) -> Keystroke {
-        let held = [keystroke.ctrl, keystroke.alt, keystroke.shift]
-            .into_iter()
-            .filter(|held| *held)
-            .count();
-        if held >= 2 {
-            keystroke
-        } else {
-            Keystroke {
-                ctrl: true,
-                alt: true,
-                shift: false,
-                key: keystroke.key,
-            }
-        }
-    }
-
     /// As the dialog and the messages show it, such as "Win+S".
     pub(crate) fn text(self, strings: &Strings) -> String {
-        show_text(strings, self.windows, self.keystroke)
+        let keys = self.keystroke.text(strings);
+        if self.windows {
+            format!("{}+{keys}", strings.text("key.windows"))
+        } else {
+            keys
+        }
     }
 
     /// Its name in `ui.json`, such as "Win+S".
@@ -376,7 +378,7 @@ impl ShowShortcut {
             Some(keys) => (true, keys),
             None => (false, name),
         };
-        ShowShortcut::new(windows, Keystroke::from_name(keys)?).ok()
+        ShowShortcut::new(windows, Keystroke::from_name(keys)?)
     }
 }
 
@@ -393,32 +395,12 @@ impl<'de> Deserialize<'de> for ShowShortcut {
     }
 }
 
-/// `keystroke`, with the Windows key when `windows`, as the dialog shows a
-/// shortcut to show Gozler.
-fn show_text(strings: &Strings, windows: bool, keystroke: Keystroke) -> String {
-    let keys = keystroke.text(strings);
-    if windows {
-        format!("{}+{keys}", strings.text("key.windows"))
-    } else {
-        keys
-    }
-}
-
-/// What the dialog says when `keystroke`, with the Windows key when
-/// `windows`, cannot show Gozler.
-pub(crate) fn show_refusal_message(
-    strings: &Strings,
-    refusal: ShowRefusal,
-    windows: bool,
-    keystroke: Keystroke,
-) -> String {
-    match refusal {
-        ShowRefusal::Lock => strings.format(
-            "settings_keyboard.lock",
-            &[&show_text(strings, windows, keystroke)],
-        ),
-        ShowRefusal::Modifiers => strings.text("settings_keyboard.two_modifiers").to_owned(),
-    }
+/// How many of `Ctrl`, `Alt` and `Shift` `keystroke` holds.
+fn modifiers_held(keystroke: Keystroke) -> usize {
+    [keystroke.ctrl, keystroke.alt, keystroke.shift]
+        .into_iter()
+        .filter(|held| *held)
+        .count()
 }
 
 #[cfg(test)]
@@ -447,8 +429,7 @@ mod tests {
         }
     }
 
-    /// C18 and the Keyboard page's rules, with the messages the dialog
-    /// shows.
+    /// C18 and the Keyboard page's rules.
     #[test]
     fn a_command_shortcut_follows_the_keyboard_page_rules() {
         let strings = english();
@@ -460,56 +441,32 @@ mod tests {
             table.of(CommandId::Find),
             [key("Ctrl+F"), key("Ctrl+E"), key("Ctrl+K")]
         );
-        for (name, refusal, message) in [
-            (
-                "Alt+F",
-                Refusal::Typing,
-                "Alt+F is used for typing or the menus. Choose a shortcut with Ctrl, such as \
-                 Ctrl+K, or a function key, such as F3.",
-            ),
-            (
-                "K",
-                Refusal::Typing,
-                "K is used for typing or the menus. Choose a shortcut with Ctrl, such as Ctrl+K, \
-                 or a function key, such as F3.",
-            ),
-            (
-                "Ctrl+V",
-                Refusal::Control,
-                "Ctrl+V is used by the search box or the results list.",
-            ),
-            (
-                "Ctrl+Home",
-                Refusal::Control,
-                "Ctrl+Home is used by the search box or the results list.",
-            ),
+        for (name, refusal) in [
+            ("Alt+F", Refusal::Typing),
+            ("K", Refusal::Typing),
+            ("Ctrl+V", Refusal::Control),
+            ("Ctrl+Home", Refusal::Control),
         ] {
             assert_eq!(
                 table.check(CommandId::Copy, key(name)),
                 Err(refusal),
                 "{name}"
             );
-            assert_eq!(refusal.message(&strings, key(name)), message);
         }
-        let taken = table.check(CommandId::Copy, key("Ctrl+E"));
-        assert_eq!(taken, Err(Refusal::Taken(CommandId::Find)));
         assert_eq!(
-            taken.unwrap_err().message(&strings, key("Ctrl+E")),
-            "Ctrl+E is the shortcut for Edit > Find. Remove it there first."
+            table.check(CommandId::Copy, key("Ctrl+E")),
+            Err(Refusal::Taken(CommandId::Find))
         );
         // A function key alone and Alt with a key that is not a letter are
         // free of typing.
         assert_eq!(table.check(CommandId::Copy, key("F3")), Ok(()));
         assert_eq!(table.check(CommandId::Copy, key("Alt+Down")), Ok(()));
-        // The list shows the new key after the command, and finds it.
-        assert_eq!(
-            command_rows(&strings, &table, " ctrl+k"),
-            [CommandRow {
-                command: CommandId::Find,
-                place: "Edit > Find".into(),
-                keys: "Ctrl+F, Ctrl+E, Ctrl+K".into(),
-            }]
-        );
+        // The list finds a command by its new key.
+        let found: Vec<CommandId> = command_rows(&strings, &table, None, " ctrl+k")
+            .into_iter()
+            .map(|row| row.command)
+            .collect();
+        assert_eq!(found, [CommandId::Find]);
 
         // Reset is the empty table, which saves nothing.
         table.remove(CommandId::Find, key("Ctrl+K"));
@@ -520,21 +477,12 @@ mod tests {
     /// program, and Windows keeps Win+L however Gozler asks.
     #[test]
     fn the_shortcut_to_show_gozler_needs_the_windows_key_or_two_modifiers() {
-        let strings = english();
         assert_eq!(
-            ShowShortcut::two_modifiers(key("Ctrl+F")),
-            key("Ctrl+Alt+F")
+            ShowShortcut::pressed(false, key("Ctrl+F")),
+            ShowShortcut::new(false, key("Ctrl+Alt+F"))
         );
-        let win_s = ShowShortcut::new(true, key("S")).expect("Win+S is a shortcut");
-        assert_eq!(win_s.text(&strings), "Win+S");
-        assert_eq!(ShowShortcut::new(true, key("L")), Err(ShowRefusal::Lock));
-        assert_eq!(
-            show_refusal_message(&strings, ShowRefusal::Lock, true, key("L")),
-            "Windows keeps Win+L for locking the computer. Choose another shortcut."
-        );
-        assert_eq!(
-            ShowShortcut::new(false, key("Ctrl+F")),
-            Err(ShowRefusal::Modifiers)
-        );
+        assert!(ShowShortcut::pressed(true, key("S")).is_some());
+        assert_eq!(ShowShortcut::pressed(true, key("L")), None);
+        assert_eq!(ShowShortcut::new(false, key("Ctrl+F")), None);
     }
 }

@@ -1,7 +1,8 @@
 # gozler
 
 gozler finds files and folders on NTFS and ReFS volumes by name, path, size and
-date, from an index of each volume that a daemon keeps current.
+date, from an index of each volume that a daemon keeps current. Its window
+also copies, moves and deletes them.
 
 **Gozler**:
 **Owner ruling.** The product's name wherever a person sees it outside the
@@ -137,17 +138,24 @@ The order gozler prints matches in: by the sort key, then folded name, volume,
 file ID, parent file ID and raw name, so the same query over the same index
 prints the same list, and a limited list is the start of the full one.
 
-## Window
+## App
 
-The window uses TinyTorrent2's words where both mean the same thing, so the
+The app uses TinyTorrent2's words where both mean the same thing, so the
 owner's programs read alike.
 
+**App**:
+`gozler-ui`, the desktop app that searches through the service and copies,
+moves and deletes files: its window,
+its dialogs and its notification area icon. The status bar's memory figure
+calls it "UI", as TinyTorrent2 does (owner ruling).
+_Avoid_: GUI
+
 **Window**:
-`gozler-ui`, the desktop window that searches through the service.
-_Avoid_: UI, GUI, app (in text the person reads)
+The app's main window: the search box, the panes and the results list.
+_Avoid_: UI, app (for the window)
 
 **Service**:
-`gozlerd` as the window names it, "the Gozler service", and the command line,
+`gozlerd` as the app names it, "the Gozler service", and the command line,
 "the gozler service".
 _Avoid_: daemon (in text the person reads)
 

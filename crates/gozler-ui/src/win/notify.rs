@@ -12,20 +12,21 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX,
-    DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawFocusRect, FillRect, GetSysColor,
-    GetSysColorBrush, HGDIOBJ, InflateRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS,
+    DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DrawFocusRect, FillRect,
+    GetSysColor, GetSysColorBrush, HGDIOBJ, InflateRect, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT,
     CDIS_SELECTED, CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
     CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, CloseThemeData, DrawThemeBackground,
-    HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_SELECTED,
-    LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
-    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
-    LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW,
-    NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE, NMMOUSE, OpenThemeData,
-    TP_BUTTON, TS_HOT, TS_PRESSED,
+    HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL,
+    LVIS_DROPHILITED, LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW,
+    LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK, LVN_GETDISPINFOW,
+    LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED, NM_CLICK,
+    NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW,
+    NMLVDISPINFOW, NMLVODSTATECHANGE, NMMOUSE, OpenThemeData, TP_BUTTON, TS_HOT, TS_PRESSED,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use windows::core::{PWSTR, w};
@@ -324,7 +325,29 @@ impl DispInfo<'_> {
         // I_IMAGENONE
         self.0.item.iImage = image.unwrap_or(-2);
     }
+
+    /// Whether the list asks for the row's state, which it does only for
+    /// the states the window keeps (`ListView::create`).
+    pub(crate) fn wants_state(&self) -> bool {
+        self.0.item.mask.contains(LVIF_STATE)
+    }
+
+    /// Shows the row highlighted as the folder that dragged files would be
+    /// dropped into, as File Explorer does.
+    pub(crate) fn set_drop_target(&mut self, target: bool) {
+        let item = &mut self.0.item;
+        let bit = LVIS_DROPHILITED.0;
+        item.stateMask.0 |= bit;
+        item.state.0 = if target {
+            item.state.0 | bit
+        } else {
+            item.state.0 & !bit
+        };
+    }
 }
+
+/// `clrText` when the list gives the row no colour of its own.
+const CLR_DEFAULT: COLORREF = COLORREF(0xFF00_0000);
 
 /// `NM_CUSTOMDRAW` from the list, which lets the window draw a cell itself.
 pub(crate) struct CustomDraw<'a> {
@@ -397,6 +420,44 @@ impl CustomDraw<'_> {
         } as isize)
     }
 
+    /// Draws the cell at `DrawStage::Cell` as the list would, with its text
+    /// in `font`, at the right when `right_aligned`, and in grey, unless the
+    /// list gives the row a colour of its own, as a selected row has in high
+    /// contrast, where grey on the selection would not read.
+    pub(crate) fn draw_grey(
+        &self,
+        font: &Font,
+        icon: Option<(ImageList, i32)>,
+        inset: Px,
+        right_aligned: bool,
+    ) {
+        let colour = match self.draw.clrText {
+            CLR_DEFAULT => system_color(COLOR_GRAYTEXT),
+            colour => colour,
+        };
+        self.draw_icon(icon);
+        let label = self.cell_part(LVIR_LABEL);
+        let mut area = RECT {
+            left: label.left + inset.0,
+            right: label.right - inset.0,
+            ..label
+        };
+        let mut flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
+        if right_aligned {
+            flags |= DT_RIGHT;
+        }
+        let dc = self.draw.nmcd.hdc;
+        // SAFETY: the list's DC for the length of the message; the font
+        // selected into it is restored before the message returns.
+        unsafe {
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, colour);
+            let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
+            draw_text(dc, &self.cell_text(), &mut area, flags);
+            SelectObject(dc, previous);
+        }
+    }
+
     /// Draws the cell at `DrawStage::Cell` as the list would, with the
     /// parts `bold` of `text`, byte ranges, in `fonts.1`: the text where the
     /// list puts it, in the colour it gives the row's state, ending in an
@@ -412,10 +473,7 @@ impl CustomDraw<'_> {
     ) {
         let dc = self.draw.nmcd.hdc;
         let label = self.cell_part(LVIR_LABEL);
-        if let Some((images, index)) = icon.filter(|_| self.draw.iSubItem == 0) {
-            let area = self.cell_part(LVIR_ICON);
-            images.draw(dc, index, area);
-        }
+        self.draw_icon(icon);
         let colour = self.text_colour();
         let mut x = label.left + inset.0;
         let right = label.right - inset.0;
@@ -482,6 +540,14 @@ impl CustomDraw<'_> {
         );
     }
 
+    /// Draws `icon` from its image list where the list puts the first
+    /// column's icon; other columns have none.
+    fn draw_icon(&self, icon: Option<(ImageList, i32)>) {
+        if let Some((images, index)) = icon.filter(|_| self.draw.iSubItem == 0) {
+            images.draw(self.draw.nmcd.hdc, index, self.cell_part(LVIR_ICON));
+        }
+    }
+
     /// The part `part`, such as `LVIR_LABEL`, of the cell being drawn.
     fn cell_part(&self, part: u32) -> RECT {
         let column = self.draw.iSubItem;
@@ -513,8 +579,7 @@ impl CustomDraw<'_> {
     /// The colour the list gives the text of the row's state.
     fn text_colour(&self) -> COLORREF {
         match self.draw.clrText {
-            // CLR_DEFAULT
-            COLORREF(0xFF00_0000) => COLORREF(
+            CLR_DEFAULT => COLORREF(
                 // SAFETY: no parameters.
                 unsafe { GetSysColor(COLOR_WINDOWTEXT) },
             ),

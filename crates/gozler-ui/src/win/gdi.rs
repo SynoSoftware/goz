@@ -12,15 +12,15 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use windows::Win32::Foundation::{COLORREF, LRESULT, MAX_PATH, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLOR_3DLIGHT,
-    COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateBitmap,
-    CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET, DIB_RGB_COLORS,
-    DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FW_BOLD, FW_SEMIBOLD,
-    FillRect, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW,
-    GetSysColor, GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ,
-    LOGFONTW, PAINTSTRUCT, ReleaseDC, RestoreDC, SYS_COLOR_INDEX, SaveDC, SelectObject, SetBkColor,
-    SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
+    AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, AlphaBlend, BI_RGB, BITMAPINFO,
+    BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint, COLOR_3DLIGHT, COLOR_BTNTEXT, COLOR_GRAYTEXT,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, CreateBitmap, CreateCompatibleDC, CreateDIBSection,
+    CreateFontIndirectW, DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER,
+    DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject,
+    DrawTextW, EndPaint, FW_BOLD, FW_SEMIBOLD, FillRect, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush,
+    GetDC, GetGlyphIndicesW, GetObjectW, GetSysColor, GetSysColorBrush, GetTextFaceW,
+    GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, ReleaseDC,
+    SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
@@ -103,6 +103,14 @@ impl Font {
         Font::from_logfont(&logfont)
     }
 
+    /// This font struck through, for a row whose entry a delete or a move
+    /// took.
+    pub(crate) fn struck_out(&self) -> windows::core::Result<Font> {
+        let mut logfont = logfont(self.0)?;
+        logfont.lfStrikeOut = 1;
+        Font::from_logfont(&logfont)
+    }
+
     /// Consolas at the height of `hwnd`'s font, so text laid out in columns
     /// for a console lines up.
     pub(crate) fn monospace_of(hwnd: Hwnd) -> windows::core::Result<Font> {
@@ -154,8 +162,8 @@ impl Drop for Font {
 /// The Windows icon font, which draws every [`Glyph`] (DESIGN.md: Look):
 /// Segoe Fluent Icons, or Segoe MDL2 Assets on Windows 10, which lacks it.
 /// The face is chosen once, and the fonts, which glyphs the face has and
-/// the buttons' images are kept, because the window draws the same few
-/// icons on every paint.
+/// the icons' images are kept, because the window draws the same few icons
+/// on every paint.
 pub(super) struct IconFont {
     face: &'static str,
     /// By height in pixels.
@@ -166,13 +174,17 @@ pub(super) struct IconFont {
     /// button holds its image list without owning it, so each list lives as
     /// long as the thread.
     images: HashMap<(Glyph, i32, u32, u32), HIMAGELIST>,
-    /// By glyph, side and colour. A menu holds an item's bitmap without
-    /// owning it, so each bitmap lives as long as the thread.
-    menu_bitmaps: HashMap<(Glyph, i32, u32), Bitmap>,
+    /// By glyph, side and colour: the icons drawn on a DC and the menu
+    /// items' bitmaps. A menu holds an item's bitmap without owning it, so
+    /// each bitmap lives as long as the thread.
+    bitmaps: HashMap<(Glyph, i32, u32), Bitmap>,
 }
 
 const FLUENT_ICONS: &str = "Segoe Fluent Icons";
 const MDL2_ASSETS: &str = "Segoe MDL2 Assets";
+/// How many times larger [`glyph_coverage`] draws a glyph before it averages
+/// it down to the icon's size.
+const OVERSAMPLE: i32 = 4;
 
 thread_local! {
     /// The window's thread draws every icon.
@@ -206,7 +218,7 @@ impl IconFont {
                 fonts: HashMap::new(),
                 present: HashMap::new(),
                 images: HashMap::new(),
-                menu_bitmaps: HashMap::new(),
+                bitmaps: HashMap::new(),
             }))
         })
     }
@@ -224,6 +236,29 @@ impl IconFont {
             .present
             .entry(glyph)
             .or_insert_with(|| font_has(dc, glyph))
+    }
+
+    /// `glyph`, `side` pixels square, in `color`: a 32-bit bitmap with
+    /// premultiplied alpha, which `AlphaBlend` and menus draw. `None` when
+    /// the icon font lacks the glyph or GDI fails.
+    fn bitmap(&mut self, glyph: Glyph, side: Px, color: COLORREF) -> Option<HBITMAP> {
+        let key = (glyph, side.0, color.0);
+        if let Some(bitmap) = self.bitmaps.get(&key) {
+            return Some(bitmap.handle);
+        }
+        let coverage = glyph_coverage(self, glyph, side)?;
+        let mut bitmap = Bitmap::new(side)?;
+        let [red, green, blue, _] = color.0.to_le_bytes();
+        let premultiplied = |channel: u8, alpha: u8| u32::from(channel) * u32::from(alpha) / 255;
+        for (pixel, alpha) in bitmap.pixels_mut().iter_mut().zip(coverage) {
+            *pixel = (u32::from(alpha) << 24)
+                | (premultiplied(red, alpha) << 16)
+                | (premultiplied(green, alpha) << 8)
+                | premultiplied(blue, alpha);
+        }
+        let handle = bitmap.handle;
+        self.bitmaps.insert(key, bitmap);
+        Some(handle)
     }
 }
 
@@ -283,33 +318,33 @@ pub(super) fn draw_glyph(dc: HDC, glyph: Glyph, area: RECT, size: Px, color: COL
 }
 
 /// Draws the icon of a control that shows nothing else, such as an
-/// icon-only button: `glyph` `size` pixels tall in the middle of `area` on
-/// `dc`, in `color`, or nothing when the icon font lacks it, so no box
-/// shows in its place. `dc` is the caller's for the call, and keeps its
-/// state.
+/// icon-only button: `glyph` `size` pixels square in the middle of `area`
+/// on `dc`, in `color`, or nothing when the icon font lacks it, so no box
+/// shows in its place. It copies the kept image, which is smoothed as every
+/// icon is (see [`glyph_coverage`]), so `dc` keeps its state.
 pub(super) fn draw_lone_glyph(dc: HDC, glyph: Glyph, area: RECT, size: Px, color: COLORREF) {
-    IconFont::with(|icons| {
-        let Some(font) = icons.font(size) else {
-            return;
-        };
-        // SAFETY: the DC's state is saved first and restored at the end.
-        unsafe {
-            let saved = SaveDC(dc);
-            SelectObject(dc, HGDIOBJ(font.0));
-            if icons.has(dc, glyph) {
-                SetTextColor(dc, color);
-                SetBkMode(dc, TRANSPARENT);
-                let mut rect = area;
-                draw_text(
-                    dc,
-                    &glyph.code_point().to_string(),
-                    &mut rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                );
-            }
-            let _ = RestoreDC(dc, saved);
-        }
-    });
+    let Some(bitmap) = IconFont::with(|icons| icons.bitmap(glyph, size, color)) else {
+        return;
+    };
+    let x = area.left + (area.right - area.left - size.0) / 2;
+    let y = area.top + (area.bottom - area.top - size.0) / 2;
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    // SAFETY: the memory DC holds the bitmap only inside this block and is
+    // deleted at its end.
+    unsafe {
+        let source = CreateCompatibleDC(None);
+        let previous = SelectObject(source, HGDIOBJ(bitmap.0));
+        let _ = AlphaBlend(
+            dc, x, y, size.0, size.0, source, 0, 0, size.0, size.0, blend,
+        );
+        SelectObject(source, previous);
+        let _ = DeleteDC(source);
+    }
 }
 
 /// The image list of a push button that shows `glyph` before its caption,
@@ -356,32 +391,20 @@ pub(super) fn menu_bitmap(glyph: Glyph, side: Px, color: COLORREF) -> Option<HBI
     if !icons_shown() {
         return None;
     }
-    IconFont::with(|icons| {
-        let key = (glyph, side.0, color.0);
-        if let Some(bitmap) = icons.menu_bitmaps.get(&key) {
-            return Some(bitmap.handle);
-        }
-        let coverage = glyph_coverage(icons, glyph, side)?;
-        let mut bitmap = Bitmap::new(side)?;
-        let [red, green, blue, _] = color.0.to_le_bytes();
-        let premultiplied = |channel: u8, alpha: u8| u32::from(channel) * u32::from(alpha) / 255;
-        for (pixel, alpha) in bitmap.pixels_mut().iter_mut().zip(coverage) {
-            *pixel = (u32::from(alpha) << 24)
-                | (premultiplied(red, alpha) << 16)
-                | (premultiplied(green, alpha) << 8)
-                | premultiplied(blue, alpha);
-        }
-        let handle = bitmap.handle;
-        icons.menu_bitmaps.insert(key, bitmap);
-        Some(handle)
-    })
+    IconFont::with(|icons| icons.bitmap(glyph, side, color))
 }
 
 /// How much of each pixel of a `side`-pixel square `glyph` covers, from 0
 /// to 255, row by row; `None` when the icon font lacks it.
+///
+/// The glyph is drawn at [`OVERSAMPLE`] times the side and each block of
+/// pixels averaged into one, because GDI's own antialiasing at icon sizes
+/// draws diagonal strokes much lighter than upright ones. Every icon is
+/// smoothed here, so all of them have the same weight.
 pub(super) fn glyph_coverage(icons: &mut IconFont, glyph: Glyph, side: Px) -> Option<Vec<u8>> {
-    let font = icons.font(side)?;
-    let bitmap = Bitmap::new(side)?;
+    let large = Px(side.0 * OVERSAMPLE);
+    let font = icons.font(large)?;
+    let bitmap = Bitmap::new(large)?;
     // SAFETY: the memory DC holds the bitmap and the font only inside this
     // block and is deleted at its end; the pixels are read after GdiFlush.
     unsafe {
@@ -392,8 +415,8 @@ pub(super) fn glyph_coverage(icons: &mut IconFont, glyph: Glyph, side: Px) -> Op
             SetTextColor(dc, COLORREF(0x00ff_ffff));
             SetBkMode(dc, TRANSPARENT);
             let mut rect = RECT {
-                right: side.0,
-                bottom: side.0,
+                right: large.0,
+                bottom: large.0,
                 ..RECT::default()
             };
             draw_text(
@@ -404,10 +427,17 @@ pub(super) fn glyph_coverage(icons: &mut IconFont, glyph: Glyph, side: Px) -> Op
             );
             let _ = GdiFlush();
             // White on black: each colour channel holds the coverage.
-            bitmap
-                .pixels()
-                .iter()
-                .map(|pixel| (pixel >> 8) as u8)
+            let pixels = bitmap.pixels();
+            let (side, large, block) = (side.0 as usize, large.0 as usize, OVERSAMPLE as usize);
+            let covered = |x: usize, y: usize| u32::from((pixels[y * large + x] >> 8) as u8);
+            (0..side * side)
+                .map(|at| {
+                    let (x, y) = (at % side * block, at / side * block);
+                    let sum: u32 = (0..block * block)
+                        .map(|i| covered(x + i % block, y + i / block))
+                        .sum();
+                    (sum / (block * block) as u32) as u8
+                })
                 .collect()
         });
         SelectObject(dc, previous_font);
@@ -861,21 +891,48 @@ impl OwnerDraw<'_> {
         self.draw_line(self.0.rcItem, font, parts, COLOR_WINDOWTEXT);
     }
 
+    /// Which part of a status bar asks to be drawn.
+    pub(crate) fn status_part(&self) -> usize {
+        self.0.itemID as usize
+    }
+
     /// Draws `parts` in an owner-drawn part of a status bar, which has drawn
     /// the part's background, on one line in its middle, as
     /// [`Self::draw_line`] does.
     pub(crate) fn draw_status_parts(&self, font: &Font, parts: &[ValuePart]) {
         let area = self.0.rcItem;
         let dpi = self.control().dpi();
-        let height = TextMeter::new(font).height().0;
-        let top = area.top + (area.bottom - area.top - height) / 2;
         let line = RECT {
             left: area.left + layout::list_box_text_inset(dpi).0,
+            ..self.status_line(font)
+        };
+        self.draw_line(line, font, parts, COLOR_BTNTEXT);
+    }
+
+    /// Draws each part of `slots` in its place in an owner-drawn part of a
+    /// status bar, as [`Self::draw_status_parts`] draws a part's.
+    pub(crate) fn draw_status_slots(&self, font: &Font, slots: &[(Rect, &ValuePart)]) {
+        let line = self.status_line(font);
+        for (slot, part) in slots {
+            let line = RECT {
+                left: slot.x.0,
+                right: slot.right().0,
+                ..line
+            };
+            self.draw_line(line, font, std::slice::from_ref(*part), COLOR_BTNTEXT);
+        }
+    }
+
+    /// The owner-drawn part's area, cut to one line of `font` in its middle.
+    fn status_line(&self, font: &Font) -> RECT {
+        let area = self.0.rcItem;
+        let height = TextMeter::new(font).height().0;
+        let top = area.top + (area.bottom - area.top - height) / 2;
+        RECT {
             top,
             bottom: top + height,
             ..area
-        };
-        self.draw_line(line, font, parts, COLOR_BTNTEXT);
+        }
     }
 
     /// Draws `parts` on one line from the top left of `line`, each after

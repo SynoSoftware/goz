@@ -452,8 +452,8 @@ Commander's Find File searches from the current folder.
   no destination folder.
 - **Quick search** in a search panel looks only at the rows already
   fetched, because the rest are not in the window.
-- **A result that a delete or a move takes shows blank** (see "The person
-  never waits for the disk").
+- **A result that a delete or a move takes shows struck through, in
+  grey** (see "The person never waits for the disk").
 - **States:** the search panel's list area shows Search's messages for no
   results, a search that does not parse and a failure of the service
   (DESIGN.md: States, S5, S7 and S9), and the "not indexed" state above. In
@@ -760,7 +760,7 @@ and Rename.
 1. **Copy and Move ask first.** Two panels asks with the destination dialog
    of "Copy and Move"; Search asks with the folder picker of "Search mode".
 2. **Delete asks:** "Permanently delete 12 items?" and below it "They won't
-   go to the Recycle Bin, and you can't undo this." Delete and Cancel, with
+   go to the Recycle Bin." Delete and Cancel, with
    Cancel as the default. Gozler never uses the Recycle Bin (owner ruling).
 3. **Conflicts are asked once for the whole operation,** before any file is
    written: Replace the files in the destination, Skip these files, Keep
@@ -789,7 +789,8 @@ and Rename.
    again. The taskbar button shows the progress of all operations together.
 6. **When an operation ends,** both panels show the change, through their
    change notifications and the reading that the operation's end starts. A
-   search list shows the rows that the operation took blank. "The person
+   search list shows the rows that the operation took struck through, in
+   grey. "The person
    never waits for the disk" says both.
 7. **A failure does not stop the operation.** At its end, a dialog lists
    each item that failed or was skipped, with Windows' reason. An operation
@@ -814,8 +815,8 @@ to skip it, and one forgot.
 - **Prepare runs off the UI thread too.** The File operations window shows
   "Preparing…", and the conflict question appears when prepare is done.
 - **An entry that a delete or a move takes leaves the panels and shows
-  blank in the search results at once,** before the disk work ends. A row
-  never carries a "being deleted" flag.
+  struck through in the search results at once,** before the disk work
+  ends. A row never carries a "being deleted" flag.
 - **A folder panel's rows** are the folder listing minus the sources of the
   deletes and moves that wait or run, and of those that ended until the
   panel has read its folder again (engine spec, "The interface", taken
@@ -833,18 +834,19 @@ to skip it, and one forgot.
   `Queue::taken()` also holds ended operations, which the window releases
   only on a new search in Search (`release_ended`); stage 3 splits the
   queue's set into the waiting and running sources and the ended ones.
-- **Each search list keeps the ended operations it shows blank,** and
-  releases them on its own next search, or when a search panel leaves its
+- **Each search list keeps the ended operations it shows struck through,**
+  and releases them on its own next search, or when a search panel leaves its
   search in any way (see "Search in a panel") and drops its rows. So one list's new search never makes
-  another list's blank rows show deleted files again. Search's list and
+  another list's struck-through rows show deleted files as present again. Search's list and
   each search panel are separate lists.
-- **A search list shows a taken row blank,** with empty cells, as it shows
-  a row not fetched yet (DESIGN.md, "Rows on demand"), and the selection
-  leaves taken rows out. The list keeps gozlerd's count and positions,
-  because gozlerd renumbers its results when its journal tail applies the
-  delete, and a list that removed rows itself would then map positions to
-  the wrong files. The blank rows go when the person searches again, or when
-  their chunk is fetched again after gozlerd has applied the delete.
+- **A search list shows a taken row struck through, in grey,** with the
+  text and icon it had, so the person sees what the delete or move took,
+  and the selection leaves taken rows out. The list keeps gozlerd's count
+  and positions, because gozlerd renumbers its results when its journal
+  tail applies the delete, and a list that removed rows itself would then
+  map positions to the wrong files. The struck-through rows go when the
+  person searches again, or when their chunk is fetched again after
+  gozlerd has applied the delete.
 - **A rename or a new folder that waits** shows in the File operations
   window; the panel shows the change when the disk has it.
 

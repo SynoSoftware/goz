@@ -233,7 +233,7 @@ impl CommandId {
             C::Properties => Glyph::Info,
             C::ExportResults => Glyph::Export,
             C::Settings => Glyph::Settings,
-            C::Exit => Glyph::ChromeClose,
+            C::Exit => Glyph::Cancel,
             C::Copy => Glyph::Copy,
             C::CopyName => Glyph::Rename,
             C::CopyFolder => Glyph::Folder,
@@ -584,10 +584,45 @@ impl Keystroke {
     }
 }
 
+/// A control that `Tab` and `Shift+Tab` move the focus between. Every
+/// other control has an access key, a menu command or a shortcut, so a
+/// person who typed a search reaches the results with one `Tab`
+/// (DESIGN.md: Dialogs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabStop {
+    SearchBox,
+    Results,
+    /// The status bar's Cancel, while a job runs, because no key stops a
+    /// service fix.
+    Cancel,
+}
+
+/// Where `Tab`, or `Shift+Tab` when `backward`, moves the focus from
+/// `from`, which is `None` for a control outside the cycle: from there
+/// `Tab` goes to the results and `Shift+Tab` to the search box.
+pub(crate) fn tab_stop(from: Option<TabStop>, backward: bool, cancel_shown: bool) -> TabStop {
+    let stops: &[TabStop] = if cancel_shown {
+        &[TabStop::SearchBox, TabStop::Results, TabStop::Cancel]
+    } else {
+        &[TabStop::SearchBox, TabStop::Results]
+    };
+    match from.and_then(|from| stops.iter().position(|stop| *stop == from)) {
+        Some(at) if backward => stops[(at + stops.len() - 1) % stops.len()],
+        Some(at) => stops[(at + 1) % stops.len()],
+        None if backward => TabStop::SearchBox,
+        None => TabStop::Results,
+    }
+}
+
 /// What a key does in the focused control (DESIGN.md: window rule 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyAction {
     Run(CommandId),
+    /// `Tab`, or `Shift+Tab` when `backward`, in any control: the focus
+    /// moves as [`tab_stop`] says.
+    MoveTab {
+        backward: bool,
+    },
     /// `Down` in the search box: the focus moves to the list's first row.
     FocusList,
     /// `Enter` in the search box: the search runs, or the result opens
@@ -604,6 +639,11 @@ pub(crate) enum KeyAction {
 /// `IDCANCEL`, and before the control itself sees the key. The message loop
 /// translates a command's shortcut first, so no shortcut reaches this table.
 pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
+    if key.key == Key::Tab && !key.ctrl && !key.alt {
+        return Some(KeyAction::MoveTab {
+            backward: key.shift,
+        });
+    }
     let table: &[(Keystroke, KeyAction)] = match focus {
         Focus::SearchBox { .. } => {
             const {
@@ -1177,6 +1217,21 @@ mod tests {
     use crate::core::results::{Fix, ListButton};
     use crate::core::text::{Strings, access_key};
     use std::collections::HashSet;
+
+    /// A wrong wrap would send `Tab` past the results or leave Cancel out
+    /// of reach while a fix runs, which no compiler sees.
+    #[test]
+    fn tab_cycles_the_search_box_the_results_and_a_shown_cancel() {
+        use TabStop::{Cancel, Results, SearchBox};
+        assert_eq!(tab_stop(Some(SearchBox), false, false), Results);
+        assert_eq!(tab_stop(Some(Results), false, false), SearchBox);
+        assert_eq!(tab_stop(Some(SearchBox), true, false), Results);
+        assert_eq!(tab_stop(Some(Results), false, true), Cancel);
+        assert_eq!(tab_stop(Some(Cancel), false, true), SearchBox);
+        assert_eq!(tab_stop(Some(SearchBox), true, true), Cancel);
+        assert_eq!(tab_stop(None, false, true), Results);
+        assert_eq!(tab_stop(None, true, true), SearchBox);
+    }
 
     /// `WM_COMMAND` carries only the ID, so two items with one ID, or an ID
     /// that decodes to another item, would run the wrong command.

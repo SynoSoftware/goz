@@ -9,6 +9,7 @@
 pub(crate) mod clipboard;
 pub(crate) mod controls;
 pub(crate) mod dialog;
+pub(crate) mod drop_target;
 pub(crate) mod file_operations;
 pub(crate) mod gdi;
 pub(crate) mod instance;
@@ -39,8 +40,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     IsChild, IsIconic, IsWindowVisible, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT,
     SW_SHOWMINNOACTIVE, SW_SHOWNA, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WINDOWPLACEMENT, WM_SETREDRAW, WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
+    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WINDOWPLACEMENT, WM_CHANGEUISTATE, WM_SETREDRAW,
+    WPF_RESTORETOMAXIMIZED, WS_VISIBLE,
 };
 use windows::core::HSTRING;
 
@@ -210,6 +212,12 @@ impl Hwnd {
         unsafe { IsWindowVisible(self.0) }.as_bool()
     }
 
+    /// Whether the window is on screen: visible and not minimized.
+    pub(crate) fn is_on_screen(self) -> bool {
+        // SAFETY: plain values.
+        self.is_visible() && !unsafe { IsIconic(self.0) }.as_bool()
+    }
+
     /// Whether the window takes input, which a modal dialog it owns stops.
     pub(crate) fn is_enabled(self) -> bool {
         // SAFETY: plain values.
@@ -293,6 +301,21 @@ impl Hwnd {
     pub(crate) fn focus(self) {
         // SAFETY: plain values.
         let _ = unsafe { SetFocus(Some(self.0)) };
+    }
+
+    /// Shows the focus rectangles in this top-level window, as
+    /// `IsDialogMessageW` does when the person presses `Tab`.
+    pub(crate) fn show_focus_cues(self) {
+        let action = (UISF_HIDEFOCUS << 16) | UIS_CLEAR;
+        // SAFETY: plain values.
+        unsafe {
+            SendMessageW(
+                self.0,
+                WM_CHANGEUISTATE,
+                Some(WPARAM(action as usize)),
+                None,
+            )
+        };
     }
 
     /// Whether `window` is a child of this window, or a child of one.

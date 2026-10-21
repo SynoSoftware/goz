@@ -64,6 +64,8 @@ impl DialogProc for About {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -142,6 +144,8 @@ impl DialogProc for ServiceReport {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -252,6 +256,8 @@ impl DialogProc for CustomDate {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -392,6 +398,8 @@ impl DialogProc for CustomSize {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
         }
     }

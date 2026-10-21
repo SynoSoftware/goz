@@ -11,7 +11,7 @@ use super::model::Column;
 use super::query::{Filters, Matching};
 use super::shortcuts::{CommandShortcuts, ShowShortcut};
 use super::speed::Speed;
-use super::text::LanguageChoice;
+use super::text::{LanguageChoice, SizeFormat};
 use gozler_core::include::IncludeSettings;
 use gozler_core::types::SortSpec;
 use serde::de::DeserializeOwned;
@@ -57,6 +57,11 @@ pub(crate) struct Choices {
     /// captions and the status bar's totals (DESIGN.md: Look).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) show_icons: bool,
+    /// The status bar's memory group (DESIGN.md: Status bar).
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) show_memory: bool,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) size_format: SizeFormat,
     /// The open commands; empty does what File Explorer does (DESIGN.md: The
     /// Context menu page).
     #[serde(default, deserialize_with = "or_default")]
@@ -100,6 +105,8 @@ impl Default for Choices {
             keep_running: on(),
             one_window: on(),
             show_icons: on(),
+            show_memory: false,
+            size_format: SizeFormat::Kb,
             open_folders: String::new(),
             open_files: String::new(),
             open_file_location: String::new(),
@@ -126,9 +133,6 @@ pub(crate) struct SettingsValues {
     /// drive; `None` while the service gives no status, and the Include page
     /// then changes nothing.
     pub(crate) include: Option<IncludeSettings>,
-    /// Whether applying shows the one-time notices again, such as the first
-    /// hide's notification, which Reset all asks for.
-    pub(crate) show_notices_again: bool,
 }
 
 /// A page of the Settings dialog, in the page list's order.
@@ -200,16 +204,6 @@ impl SettingsPage {
 }
 
 impl SettingsValues {
-    /// Sets every page's settings to their defaults, and the one-time
-    /// notices to show again, which Apply or OK then applies (DESIGN.md:
-    /// Settings dialog).
-    pub(crate) fn restore_all_defaults(&mut self) {
-        for page in SettingsPage::ALL {
-            self.restore_defaults(page);
-        }
-        self.show_notices_again = true;
-    }
-
     /// Sets `page`'s settings to their defaults, which Apply or OK then
     /// applies (DESIGN.md: Settings dialog).
     pub(crate) fn restore_defaults(&mut self, page: SettingsPage) {
@@ -222,6 +216,8 @@ impl SettingsValues {
                 choices.keep_running = defaults.keep_running;
                 choices.one_window = defaults.one_window;
                 choices.show_icons = defaults.show_icons;
+                choices.show_memory = defaults.show_memory;
+                choices.size_format = defaults.size_format;
                 self.start_at_sign_in = false;
             }
             SettingsPage::Search => {
@@ -445,7 +441,7 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) placement: Option<Placement>,
-    #[serde(default, deserialize_with = "or_default")]
+    #[serde(default = "matching", deserialize_with = "matching_or_default")]
     pub(crate) matching: Matching,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) sort: SortSpec,
@@ -499,7 +495,7 @@ impl Default for WindowState {
     fn default() -> WindowState {
         WindowState {
             placement: None,
-            matching: Matching::default(),
+            matching: matching(),
             sort: SortSpec::default(),
             columns: Vec::new(),
             filter_pane: on(),
@@ -571,6 +567,20 @@ fn on() -> bool {
 
 fn on_or_default<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
     Ok(or_default::<D, Option<bool>>(deserializer)?.unwrap_or_else(on))
+}
+
+/// The match controls a new install starts with: Match path on, because a
+/// typed word then also finds what is in a folder of that name (DESIGN.md:
+/// Search box).
+fn matching() -> Matching {
+    Matching {
+        path: true,
+        ..Matching::default()
+    }
+}
+
+fn matching_or_default<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Matching, D::Error> {
+    Ok(or_default::<D, Option<Matching>>(deserializer)?.unwrap_or_else(matching))
 }
 
 fn inspector_height() -> Dip {
@@ -663,6 +673,19 @@ mod tests {
         );
     }
 
+    /// A new install starts with Match path on, while a person who turned it
+    /// off keeps it off: a default read over the saved value would turn it
+    /// on again at each start.
+    #[test]
+    fn match_path_starts_on_and_stays_off_once_turned_off() {
+        let new_install: Settings = serde_json::from_str("{}").expect("an object");
+        assert!(new_install.window.matching.path);
+        let text = r#"{ "window": { "matching":
+            { "mode": "start_of_words", "case": false, "path": false } } }"#;
+        let turned_off: Settings = serde_json::from_str(text).expect("an object");
+        assert!(!turned_off.window.matching.path);
+    }
+
     /// Apply that stays enabled after Apply, or is disabled while a value
     /// differs, misleads about what OK and Cancel do (DESIGN.md: Dialogs).
     #[test]
@@ -675,7 +698,6 @@ mod tests {
             },
             start_at_sign_in: true,
             include: None,
-            show_notices_again: false,
         };
         let mut draft = SettingsDraft::new(values.clone());
         assert!(!draft.can_apply());

@@ -21,6 +21,7 @@ use crate::core::text::Strings;
 use crate::win::clipboard::ClipboardFiles;
 use crate::win::controls::{Button, Label, ProgressBar, ReportList, Tooltip};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
+use crate::win::drop_target::AsyncDrop;
 use crate::win::file_operations::{
     ERASE_BACKGROUND, PathLabel, QueueList, QueueNotify, TAKEN_CHANGED, TaskbarProgress,
     TaskbarState, Tile, paint_card, set_client_size, show_drag_cursor, show_paused, window_size,
@@ -33,7 +34,8 @@ use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_fileops::{
-    OperationId, OrderRefused, Outcome, Prepared, Queue, Request, Side, SpeedSettings, State, Taken,
+    End, OperationId, OrderRefused, Outcome, Prepared, Queue, Request, Side, SpeedSettings, State,
+    Taken,
 };
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -167,11 +169,22 @@ struct Window {
     /// The clipboard's files that Paste prepares an operation from, until
     /// it is submitted or ends.
     pastes: RefCell<HashMap<OperationId, ClipboardFiles>>,
-    /// Ended deletes and moves that the search list still shows blank,
+    /// The sources of dropped files that wait for their operation's end.
+    drops: RefCell<HashMap<OperationId, AsyncDrop>>,
+    /// Ended deletes and moves that the search list still strikes through,
     /// which stay in the queue until the search changes.
     kept: RefCell<HashSet<OperationId>>,
     /// The queue's taken entries as the window last read them.
     taken: RefCell<Arc<Taken>>,
+}
+
+/// Where the files that an operation copies or moves came from.
+pub(super) enum FilesSource {
+    /// The clipboard, which Paste read; a move of cut files tells it that
+    /// they moved.
+    Paste(ClipboardFiles),
+    /// A drop whose source keeps its files until the operation ends.
+    Drop(AsyncDrop),
 }
 
 /// An operation that waits for the window.
@@ -221,6 +234,7 @@ impl FileOperations {
             taskbar: TaskbarProgress::new(owner),
             asking: Cell::new(false),
             pastes: RefCell::new(HashMap::new()),
+            drops: RefCell::new(HashMap::new()),
             kept: RefCell::new(HashSet::new()),
         });
         let hwnd = window::create_owned_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
@@ -247,24 +261,30 @@ impl FileOperations {
     }
 
     /// The entries that deletes and moves take, which the search list
-    /// shows blank. The owner gets [`TAKEN_CHANGED`] after it changes.
+    /// strikes through. The owner gets [`TAKEN_CHANGED`] after it changes.
     pub(super) fn taken(&self) -> Arc<Taken> {
         Arc::clone(&self.window.taken.borrow())
     }
 
     /// Prepares `request`; the window asks about its conflicts when the
-    /// count is ready, and then submits it. `paste` holds the clipboard's
-    /// files that the request copies or moves, which a submitted move of
-    /// cut files reports as moved.
+    /// count is ready, and then submits it. `source` is where the files
+    /// that the request copies or moves came from, which hears what became
+    /// of them.
     pub(super) fn start(
         &self,
         request: Request,
         settings: SpeedSettings,
-        paste: Option<ClipboardFiles>,
+        source: Option<FilesSource>,
     ) {
         let id = self.window.queue().prepare(request, settings);
-        if let Some(paste) = paste {
-            self.window.pastes.borrow_mut().insert(id, paste);
+        match source {
+            Some(FilesSource::Paste(paste)) => {
+                self.window.pastes.borrow_mut().insert(id, paste);
+            }
+            Some(FilesSource::Drop(dropped)) => {
+                self.window.drops.borrow_mut().insert(id, dropped);
+            }
+            None => {}
         }
     }
 
@@ -745,9 +765,13 @@ impl Window {
     }
 
     /// Shows what failed in an ended operation, then removes it, unless it
-    /// deleted or moved entries that the search list still shows blank.
+    /// deleted or moved entries that the search list still strikes through.
     fn report(&self, id: OperationId, request: &Request, outcome: &Outcome) {
         self.pastes.borrow_mut().remove(&id);
+        let dropped = self.drops.borrow_mut().remove(&id);
+        if let Some(dropped) = dropped {
+            dropped.end(outcome.end == End::Complete && outcome.listed.is_empty());
+        }
         let failure = file_operations::failure(
             &self.strings.borrow(),
             &*self.numbers.borrow(),

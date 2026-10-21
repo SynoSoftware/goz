@@ -192,9 +192,7 @@ pub(crate) fn read_files() -> Option<ClipboardFiles> {
     unsafe {
         let sequence = GetClipboardSequenceNumber();
         let data = OleGetClipboard().ok()?;
-        let mut files = read_format(&data, CF_HDROP)?;
-        let paths = drop_paths(&files);
-        ReleaseStgMedium(&mut files);
+        let paths = files_of(&data);
         let cut = match read_format(&data, preferred_drop_effect()) {
             Some(mut effect) => {
                 let value = read_effect(&effect);
@@ -223,24 +221,7 @@ impl ClipboardFiles {
         if unsafe { GetClipboardSequenceNumber() } != self.sequence {
             return;
         }
-        if let Some(block) = effect_block(DROPEFFECT_MOVE) {
-            let medium = STGMEDIUM {
-                tymed: TYMED_HGLOBAL.0 as u32,
-                u: STGMEDIUM_0 { hGlobal: block },
-                pUnkForRelease: ManuallyDrop::new(None),
-            };
-            // SAFETY: with fRelease set, the data object owns the medium
-            // once the call succeeds; otherwise it stays this block's.
-            if unsafe {
-                self.data
-                    .SetData(&format_of(paste_succeeded()), &medium, true)
-            }
-            .is_err()
-            {
-                // SAFETY: the block is this function's own.
-                let _ = unsafe { GlobalFree(Some(block)) };
-            }
-        }
+        set_effect(&self.data, paste_succeeded(), DROPEFFECT_MOVE);
         // SAFETY: plain values; a clipboard another program holds stays as
         // it is.
         unsafe {
@@ -249,6 +230,46 @@ impl ClipboardFiles {
                 let _ = CloseClipboard();
             }
         }
+    }
+}
+
+/// The format a drop target tells the files' source in what it did with
+/// them, which a source that sees move takes as an order to delete them.
+pub(super) fn performed_drop_effect() -> u32 {
+    // SAFETY: a constant name; the call returns the format's number.
+    unsafe { RegisterClipboardFormatW(w!("Performed DropEffect")) }
+}
+
+/// Sets the effect format `format` of `data`, the files' source, to
+/// `value`.
+pub(super) fn set_effect(data: &IDataObject, format: u32, value: u32) {
+    let Some(block) = effect_block(value) else {
+        return;
+    };
+    let medium = STGMEDIUM {
+        tymed: TYMED_HGLOBAL.0 as u32,
+        u: STGMEDIUM_0 { hGlobal: block },
+        pUnkForRelease: ManuallyDrop::new(None),
+    };
+    // SAFETY: with fRelease set, the data object owns the medium once the
+    // call succeeds; otherwise it stays this block's.
+    if unsafe { data.SetData(&format_of(format), &medium, true) }.is_err() {
+        // SAFETY: the block is this function's own.
+        let _ = unsafe { GlobalFree(Some(block)) };
+    }
+}
+
+/// The paths of the files that `data` holds as `CF_HDROP`, none when it
+/// holds no files.
+pub(super) fn files_of(data: &IDataObject) -> Vec<PathBuf> {
+    // SAFETY: the medium is released once its paths are read.
+    unsafe {
+        let Some(mut files) = read_format(data, CF_HDROP) else {
+            return Vec::new();
+        };
+        let paths = drop_paths(&files);
+        ReleaseStgMedium(&mut files);
+        paths
     }
 }
 

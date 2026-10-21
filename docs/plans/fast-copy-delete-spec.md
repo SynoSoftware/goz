@@ -568,8 +568,8 @@ is the one that started last.
 **Taken entries.** The queue answers whether a path is taken: it equals or
 is below a source of a waiting, running or ended delete or move, compared
 as Windows compares names, ignoring case. The window asks this, and nothing
-else, to leave those entries out of the panels and show them blank in the
-search results. The
+else, to leave those entries out of the panels and show them struck
+through, in grey, in the search results. The
 window removes an ended operation from the queue when no list still needs
 it: a panel releases it when the operation ends, because it lists the disk
 again; a search list releases it when its search changes, because gozlerd

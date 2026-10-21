@@ -2,8 +2,6 @@
 //! Window lifetime).
 
 use super::Hwnd;
-use super::menu::Menu;
-use crate::core::commands::MenuNode;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{LIM_SMALL, LoadIconMetric};
@@ -12,7 +10,7 @@ use windows::Win32::UI::Shell::{
     NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NINF_KEY, NOTIFY_ICON_DATA_FLAGS, NOTIFY_ICON_MESSAGE,
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON, WM_CONTEXTMENU, WM_NULL};
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON, WM_CONTEXTMENU};
 use windows::core::PCWSTR;
 
 /// The private message that the icon sends the window
@@ -132,20 +130,4 @@ fn copy(field: &mut [u16], text: &str) {
     let units: Vec<u16> = text.encode_utf16().take(field.len() - 1).collect();
     field[..units.len()].copy_from_slice(&units);
     field[units.len()] = 0;
-}
-
-/// Shows the icon's menu of `items` at `point`, with `default` in bold, and
-/// returns the chosen item's ID. The window comes to the front first and
-/// is sent a message after, as the `Shell_NotifyIconW` documentation
-/// requires, so the menu closes on a click elsewhere.
-pub(crate) fn track_menu(
-    window: Hwnd,
-    items: &[MenuNode],
-    point: (i32, i32),
-    default: Option<u16>,
-) -> Option<u16> {
-    window.set_foreground();
-    let chosen = Menu::track_popup(window, items, point, &[], default);
-    window.post(WM_NULL);
-    chosen
 }

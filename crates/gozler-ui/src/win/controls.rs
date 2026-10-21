@@ -33,32 +33,32 @@ use windows::Win32::UI::Controls::{
     BUTTON_IMAGELIST_ALIGN_LEFT, CloseThemeData, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME,
     DTM_SETSYSTEMTIME, DrawThemeBackground, EM_GETMARGINS, EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL,
     GBS_DISABLED, GBS_NORMAL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO,
-    HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW, HDM_HITTEST, HDM_SETITEMW, HKCOMB_A,
-    HKCOMB_C, HKCOMB_NONE, HKCOMB_S, HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT,
-    HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT, HTREEITEM, ICC_BAR_CLASSES, ICC_DATE_CLASSES,
-    ICC_HOTKEY_CLASS, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
-    ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
-    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO,
-    LVIF_TEXT, LVIR_BOUNDS, LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
-    LVM_DELETECOLUMN, LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH,
-    LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM,
-    LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT,
-    LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR, ODS_FLAGS,
-    ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, ODT_LISTBOX, OpenThemeData, PBM_SETMARQUEE,
-    PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETRECT, SB_SETMINHEIGHT,
-    SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, SBT_OWNERDRAW,
-    STATUSCLASSNAMEW, SetWindowTheme, TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE,
-    TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH,
-    TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX,
-    TTTOOLINFOW, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVGN_ROOT, TVI_LAST, TVI_ROOT,
-    TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0,
-    TVIS_STATEIMAGEMASK, TVITEMEXW_CHILDREN, TVITEMW, TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW,
-    TVM_GETNEXTITEM, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETEXTENDEDSTYLE, TVM_SETITEMW,
-    TVS_CHECKBOXES, TVS_EX_DOUBLEBUFFER, TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
+    HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW, HDM_HITTEST, HDM_SETITEMW, HKM_GETHOTKEY,
+    HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT,
+    HTREEITEM, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS,
+    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
+    LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO, LVIF_TEXT, LVIR_BOUNDS, LVIR_LABEL, LVIS_DROPHILITED,
+    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
+    LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETHEADER,
+    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX,
+    LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_REDRAWITEMS, LVM_SETCALLBACKMASK,
+    LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE,
+    LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_FOCUSED,
+    LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP,
+    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR, ODS_FLAGS, ODS_FOCUS, ODS_NOFOCUSRECT,
+    ODS_SELECTED, ODT_LISTBOX, OpenThemeData, PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32,
+    PBS_MARQUEE, PROGRESS_CLASSW, SB_GETRECT, SB_SETMINHEIGHT, SB_SETPARTS, SB_SETTEXTW,
+    SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, SBT_OWNERDRAW, STATUSCLASSNAMEW,
+    SetWindowTheme, TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND,
+    TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
+    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND,
+    TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVGN_ROOT, TVI_LAST, TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM,
+    TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVIS_STATEIMAGEMASK,
+    TVITEMEXW_CHILDREN, TVITEMW, TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW, TVM_GETNEXTITEM,
+    TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETEXTENDEDSTYLE, TVM_SETITEMW, TVS_CHECKBOXES,
+    TVS_EX_DOUBLEBUFFER, TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
@@ -71,11 +71,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetParent, GetWindowLongPtrW, GetWindowRect, HMENU, IsChild, LB_ADDSTRING,
     LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT, LB_GETTEXTLEN, LB_ITEMFROMPOINT,
     LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMDATA, LB_SETITEMHEIGHT, LBN_SELCHANGE, LBS_HASSTRINGS,
-    LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, SM_CXVSCROLL, SendMessageW,
-    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_COPY, WM_CTLCOLORSTATIC,
-    WM_ENABLE, WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SETTEXT, WM_SIZE,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT,
-    WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, SB_LINEDOWN, SB_LINEUP, SM_CXVSCROLL,
+    SendMessageW, SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_COPY,
+    WM_CTLCOLORSTATIC, WM_ENABLE, WM_GETFONT, WM_MOUSEMOVE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
+    WM_SETTEXT, WM_SIZE, WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE,
+    WS_EX_CONTROLPARENT, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -275,6 +275,14 @@ impl Edit {
 
     pub(crate) fn select_all(self) {
         send(self.0, EM_SETSEL, 0, -1);
+    }
+
+    /// Sets the text with the caret after it, as a hotkey control shows the
+    /// keys pressed.
+    pub(crate) fn set_text_caret_at_end(self, text: &str) {
+        self.0.set_text(text);
+        let end = text.encode_utf16().count();
+        send(self.0, EM_SETSEL, end, end as isize);
     }
 
     /// Copies the selected text, as `Ctrl+C` does in a text box.
@@ -1233,6 +1241,51 @@ impl Tooltip {
         unsafe { send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
     }
 
+    /// A tooltip for `areas` places in `parent`, numbered from 0, such as
+    /// the parts of what `parent` draws itself, which show no tip until
+    /// [`Tooltip::place_area`] places them and [`Tooltip::set_area`] gives
+    /// them text.
+    pub(crate) fn create_areas(parent: Hwnd, areas: usize) -> windows::core::Result<Tooltip> {
+        let tooltip = Tooltip::create(parent, &[])?;
+        for area in 0..areas {
+            let mut empty = wide("");
+            let tool = tooltip.area_tool(area, RECT::default(), &mut empty);
+            // SAFETY: `tool` and its text outlive the call, which copies them.
+            unsafe { send_pointer(tooltip.tip, TTM_ADDTOOLW, 0, &raw const tool) };
+        }
+        Ok(tooltip)
+    }
+
+    /// Moves area `area` to `rect`, in its parent's client coordinates.
+    pub(crate) fn place_area(&self, area: usize, rect: layout::Rect) {
+        let mut text = wide("");
+        let tool = self.area_tool(area, super::to_rect(rect), &mut text);
+        // SAFETY: `tool` outlives the call, which reads only its rectangle.
+        unsafe { send_pointer(self.tip, TTM_NEWTOOLRECTW, 0, &raw const tool) };
+    }
+
+    /// Shows `text` while the mouse rests on area `area`; an empty text
+    /// shows no tip.
+    pub(crate) fn set_area(&self, area: usize, text: &str) {
+        let mut text = wide(text);
+        let tool = self.area_tool(area, RECT::default(), &mut text);
+        // SAFETY: `tool` and its text outlive the call, which copies them.
+        unsafe { send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
+    }
+
+    /// The tool of area `area`, which the tooltip knows by its number.
+    fn area_tool(&self, area: usize, rect: RECT, text: &mut [u16]) -> TTTOOLINFOW {
+        TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_SUBCLASS,
+            hwnd: self.parent.0,
+            uId: area,
+            rect,
+            lpszText: PWSTR(text.as_mut_ptr()),
+            ..TTTOOLINFOW::default()
+        }
+    }
+
     /// The tool of `control`, which the tooltip knows by its handle.
     fn tool(&self, control: Hwnd, text: &mut [u16]) -> TTTOOLINFOW {
         TTTOOLINFOW {
@@ -1294,6 +1347,13 @@ impl CheckBox {
 #[derive(Clone, Copy)]
 pub(crate) struct ListView(Hwnd);
 
+/// The edge of the results list that it scrolls toward during a drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollEdge {
+    Top,
+    Bottom,
+}
+
 /// One column as the list shows it.
 pub(crate) struct ListColumn<'a> {
     pub(crate) header: &'a str,
@@ -1327,6 +1387,9 @@ impl ListView {
             extended as usize,
             extended as isize,
         );
+        // A virtual list keeps only the selection and the focus, so it asks
+        // the window which row a drop would go to (DispInfo::set_drop_target).
+        send(list, LVM_SETCALLBACKMASK, LVIS_DROPHILITED.0 as usize, 0);
         // SAFETY: plain values; a missing theme leaves the classic look.
         let _ = unsafe { SetWindowTheme(list.0, w!("Explorer"), PCWSTR::null()) };
         Ok(ListView(list))
@@ -1545,6 +1608,51 @@ impl ListView {
         // SAFETY: `hit` is a local that the list reads and fills in.
         let row = unsafe { send_pointer(self.0, LVM_HITTEST, 0, &raw mut hit) };
         u64::try_from(row).ok()
+    }
+
+    /// The edge that the list scrolls toward while dragged files rest at
+    /// `point`, in screen coordinates, as File Explorer's list does: the
+    /// header and the row height below it, or the last row height above the
+    /// bottom.
+    pub(crate) fn drag_scroll_edge(self, point: (i32, i32)) -> Option<ScrollEdge> {
+        let mut client = POINT {
+            x: point.0,
+            y: point.1,
+        };
+        // SAFETY: `client` is a local the call converts in place.
+        if !unsafe { ScreenToClient(self.0.0, &mut client) }.as_bool() {
+            return None;
+        }
+        let size = self.0.client_size();
+        if client.x < 0 || client.x >= size.width.0 || client.y < 0 || client.y >= size.height.0 {
+            return None;
+        }
+        let mut rect = RECT {
+            left: LVIR_BOUNDS as i32,
+            ..RECT::default()
+        };
+        // SAFETY: `rect` is a local that the list reads the part from and
+        // fills in; a list without rows fails, and nothing scrolls.
+        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, 0, &raw mut rect) } == 0 {
+            return None;
+        }
+        let row = rect.bottom - rect.top;
+        if client.y < self.header().client_size().height.0 + row {
+            Some(ScrollEdge::Top)
+        } else if client.y >= size.height.0 - row {
+            Some(ScrollEdge::Bottom)
+        } else {
+            None
+        }
+    }
+
+    /// Scrolls the list one row toward `edge`.
+    pub(crate) fn scroll_row(self, edge: ScrollEdge) {
+        let code = match edge {
+            ScrollEdge::Top => SB_LINEUP,
+            ScrollEdge::Bottom => SB_LINEDOWN,
+        };
+        send(self.0, WM_VSCROLL, code.0 as usize, 0);
     }
 
     /// Where a context menu for the focused row opens, in screen
@@ -1913,19 +2021,10 @@ impl HotkeyControl {
         send(self.0, HKM_SETHOTKEY, word as usize, 0);
     }
 
-    /// With `required`, the control turns a key with fewer than two of
-    /// `Ctrl`, `Alt` and `Shift` into `Ctrl+Alt` and the key; without it,
-    /// it takes any key.
-    pub(crate) fn require_two_modifiers(self, required: bool) {
-        let (invalid, replacement) = if required {
-            (
-                HKCOMB_NONE | HKCOMB_S | HKCOMB_C | HKCOMB_A,
-                HOTKEYF_CONTROL | HOTKEYF_ALT,
-            )
-        } else {
-            (0, 0)
-        };
-        send(self.0, HKM_SETRULES, invalid as usize, replacement as isize);
+    /// Makes the control take any key as it is pressed, instead of turning
+    /// some keys into others by its own rules.
+    pub(crate) fn take_any_key(self) {
+        send(self.0, HKM_SETRULES, 0, 0);
     }
 }
 

@@ -24,8 +24,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON,
-    VK_MENU, VK_SHIFT,
+    GetAsyncKeyState, GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL,
+    VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, EndMenu,
@@ -790,6 +790,16 @@ fn held(key: VIRTUAL_KEY) -> bool {
 /// was read, as it is while a click gives a control the focus.
 pub(crate) fn left_button_down() -> bool {
     held(VK_LBUTTON)
+}
+
+/// Whether the left or the right mouse button is down now, whichever
+/// program has the mouse, as during a drag from another program.
+pub(crate) fn mouse_button_down() -> bool {
+    [VK_LBUTTON, VK_RBUTTON]
+        .into_iter()
+        // SAFETY: plain values; the high bit is set while the button is
+        // down.
+        .any(|button| unsafe { GetAsyncKeyState(i32::from(button.0)) } < 0)
 }
 
 impl Hwnd {
