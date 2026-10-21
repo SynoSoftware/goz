@@ -5,8 +5,7 @@
 
 use super::Hwnd;
 use super::controls::{Button, IconList, ListView, StatusBar};
-use super::gdi::{Font, ImageList, draw_glyph, draw_text, system_color};
-use crate::core::glyph::Glyph;
+use super::gdi::{Font, ImageList, draw_text, system_color};
 use crate::core::layout::Px;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -378,11 +377,8 @@ pub(crate) enum DrawStage {
         row: u64,
         column: usize,
     },
-    /// After `row`, which [`DrawAnswer::NewFont`] or
-    /// [`DrawAnswer::AfterRow`] answered.
-    RowPainted {
-        row: u64,
-    },
+    /// After a row that [`DrawAnswer::NewFont`] answered.
+    RowPainted,
     Other,
 }
 
@@ -403,8 +399,6 @@ pub(crate) enum DrawAnswer {
     /// The list draws the row in the font and colour that
     /// [`CustomDraw::draw_row_struck`] set, and asks again after it.
     NewFont,
-    /// The list draws the row as usual, and asks again after it.
-    AfterRow,
 }
 
 impl CustomDraw<'_> {
@@ -421,7 +415,7 @@ impl CustomDraw<'_> {
                 column: usize::try_from(self.draw.iSubItem).unwrap_or(0),
             }
         } else if stage == CDDS_ITEMPOSTPAINT {
-            DrawStage::RowPainted { row }
+            DrawStage::RowPainted
         } else {
             DrawStage::Other
         }
@@ -435,7 +429,6 @@ impl CustomDraw<'_> {
             DrawAnswer::Drawn => CDRF_SKIPDEFAULT,
             DrawAnswer::NewColour => CDRF_NEWFONT,
             DrawAnswer::NewFont => CDRF_NEWFONT | CDRF_NOTIFYPOSTPAINT,
-            DrawAnswer::AfterRow => CDRF_NOTIFYPOSTPAINT,
         } as isize)
     }
 
@@ -467,25 +460,6 @@ impl CustomDraw<'_> {
     pub(crate) fn restore_font(&self, font: &Font) {
         // SAFETY: the list's DC for the length of its paint.
         unsafe { SelectObject(self.draw.nmcd.hdc, HGDIOBJ(font.handle().0)) };
-    }
-
-    /// Draws `glyph` in the window text colour over the lower part of the
-    /// icon of the row at [`DrawStage::RowPainted`], as a badge on it.
-    pub(crate) fn draw_over_icon(&self, glyph: Glyph) {
-        let icon = self.cell_part(LVIR_ICON);
-        let height = icon.bottom - icon.top;
-        let area = RECT {
-            top: icon.top + height / 4,
-            ..icon
-        };
-        let side = Px(height * 9 / 16);
-        draw_glyph(
-            self.draw.nmcd.hdc,
-            glyph,
-            side,
-            system_color(COLOR_WINDOWTEXT),
-            area,
-        );
     }
 
     /// Draws the cell at `DrawStage::Cell` as the list would, with the

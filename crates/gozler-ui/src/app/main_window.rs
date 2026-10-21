@@ -3411,7 +3411,7 @@ impl MainWindow {
                 DrawStage::Paint => DrawAnswer::EachRow,
                 DrawStage::Row { row } => self.draw_row(&mut draw, row),
                 DrawStage::Cell { row, column } => self.draw_cell(&draw, hwnd.dpi(), row, column),
-                DrawStage::RowPainted { .. } => {
+                DrawStage::RowPainted => {
                     draw.restore_font(&self.created().fonts.borrow().ui);
                     DrawAnswer::Default
                 }

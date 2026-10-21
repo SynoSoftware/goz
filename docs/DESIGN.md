@@ -839,7 +839,7 @@ Two panels is the window's second mode: a file manager that works like Norton Co
   | Size | a file's size, in the unit of Settings > General's "Show sizes in", as in Search (see "Results list"); a folder's size from gozlerd, or "Folder" while gozlerd does not know it |
   | Date modified | as in Search |
 
-  - The first row is `..` in every folder except a drive's or a share's root. Its icon is a folder with an arrow up, as Total Commander's, drawn in the window's own image list. It has no size and no date, and no command acts on it.
+  - The first row is `..` in every folder except a drive's or a share's root. Its icon is Windows' open folder (`SIID_FOLDEROPEN`), which is already in the system image list, so the list draws it as it draws every other icon (**Owner decision**: no arrow, because the native control wins over a detail of the prototype; on Windows 11 the small open folder looks almost like a closed one, and that is accepted). It has no size and no date, and no command acts on it.
   - Folders come first, then files. Each group is sorted by the chosen column. Names compare by their folded form, as Search's name sort does, so the two modes order names the same.
   - A click on a column header sorts by it, and a second click reverses the order; View > Sort by does the same for the active panel, without Path, which a panel has no column for. The first sort by Size or Date modified puts the largest or the newest first, as in Search. The header shows the arrow.
   - Hidden and system entries are shown, in the gray text color, as File Explorer shows them when "Hidden items" is on. A copy of a folder copies them too, so the person must see them.

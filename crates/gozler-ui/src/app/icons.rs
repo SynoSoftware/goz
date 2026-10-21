@@ -1,8 +1,8 @@
 //! The system image list's index for each extension, asked of Windows once
-//! per extension (DESIGN.md: Results list).
+//! per extension (DESIGN.md: Results list), and of the panels' `..`.
 
 use crate::win::gdi::ImageList;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 /// The extension, lowercased, or `None` for a folder; a file without an
@@ -12,6 +12,7 @@ type Kind = Option<String>;
 #[derive(Default)]
 pub(super) struct Icons {
     kinds: RefCell<HashMap<Kind, i32>>,
+    up: Cell<Option<i32>>,
 }
 
 impl Icons {
@@ -34,6 +35,17 @@ impl Icons {
         };
         let index = ImageList::system_index(&sample, is_folder);
         self.kinds.borrow_mut().insert(kind, index);
+        index
+    }
+
+    /// The icon of a panel's `..` row: Windows' open folder (DESIGN.md: A
+    /// panel); a folder's when the shell does not say.
+    pub(super) fn up(&self) -> i32 {
+        if let Some(index) = self.up.get() {
+            return index;
+        }
+        let index = ImageList::open_folder_index().unwrap_or_else(|| self.index("", true));
+        self.up.set(Some(index));
         index
     }
 }

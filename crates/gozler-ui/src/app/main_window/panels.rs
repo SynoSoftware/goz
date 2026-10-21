@@ -12,7 +12,6 @@ use crate::core::commands::{
     self, CommandId, Focus, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey, State,
 };
 use crate::core::fetch::{List, Purpose};
-use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
@@ -1387,11 +1386,8 @@ impl MainWindow {
             ListNotify::CustomDraw(mut draw) => Some(CustomDraw::answer(match draw.stage() {
                 DrawStage::Paint => DrawAnswer::EachRow,
                 DrawStage::Row { row } => self.draw_panel_row(side, &mut draw, row),
-                DrawStage::RowPainted { row } => {
+                DrawStage::RowPainted => {
                     draw.restore_font(&self.created().fonts.borrow().ui);
-                    if matches!(self.model.borrow().panels().row(side, row), Some(Row::Up)) {
-                        draw.draw_over_icon(Glyph::Up);
-                    }
                     DrawAnswer::Default
                 }
                 DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
@@ -1764,7 +1760,7 @@ impl MainWindow {
         }
         if info.wants_image() {
             info.set_image(icon.map(|icon| match icon {
-                RowIcon::Up => self.icons.index("", true),
+                RowIcon::Up => self.icons.up(),
                 RowIcon::Item(name, is_folder) => self.icons.index(&name, is_folder),
             }));
         }
@@ -1772,23 +1768,19 @@ impl MainWindow {
 
     /// Has the list draw `row` of `side` in grey when it is a hidden or
     /// system entry, or struck through in grey when a delete or a move took
-    /// it (DESIGN.md: Selecting entries), and ask again after `..`, whose
-    /// arrow goes over its folder icon; the list draws every other row as
+    /// it (DESIGN.md: Selecting entries); the list draws every other row as
     /// it is.
     fn draw_panel_row(&self, side: Side, draw: &mut CustomDraw, row: u64) -> DrawAnswer {
-        let (taken, dimmed, up) = {
+        let (taken, dimmed) = {
             let model = self.model.borrow();
             let taken = model.taken_rows(List::Panel(side), std::slice::from_ref(&(row..row + 1)));
             let shown = model.panels().row(side, row);
             (
                 !taken.is_empty(),
                 matches!(shown, Some(Row::Entry(entry)) if entry.is_dimmed()),
-                matches!(shown, Some(Row::Up)),
             )
         };
-        if up {
-            DrawAnswer::AfterRow
-        } else if taken {
+        if taken {
             draw.draw_row_struck(&self.created().fonts.borrow().struck);
             DrawAnswer::NewFont
         } else if dimmed {
@@ -1887,8 +1879,7 @@ fn drive_id(letter: char) -> u16 {
 
 /// What a row's icon is looked up by.
 enum RowIcon {
-    /// `..`: a folder's icon, which [`Glyph::Up`] is drawn over after the
-    /// row ([`MainWindow::draw_panel_row`]).
+    /// `..`'s icon ([`Icons::up`](super::super::icons::Icons::up)).
     Up,
     /// An entry's or a result's name and whether it is a folder.
     Item(String, bool),
