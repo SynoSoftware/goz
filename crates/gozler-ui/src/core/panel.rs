@@ -345,6 +345,17 @@ impl ChosenEntry {
     }
 }
 
+/// What a folder panel does after operations ended
+/// ([`Panels::operations_ended`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PanelFollow {
+    pub(crate) side: Side,
+    /// It reads its folder again ([`ends_in`]).
+    pub(crate) read_again: bool,
+    /// It asks for its folder sizes again ([`changes_sizes`]).
+    pub(crate) sizes: bool,
+}
+
 /// What new taken entries change in a panel's list ([`Panels::set_taken`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TakenRows {
@@ -584,6 +595,15 @@ pub(crate) enum ReadChange {
     },
     /// The shown drive is not ready.
     NotReady,
+}
+
+/// What a reading's answer did ([`Panels::accept_read`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadAccepted {
+    pub(crate) change: ReadChange,
+    /// The panel searched until this answer, which replaced its search, so
+    /// the window ends the search's requests and timers.
+    pub(crate) search_ended: bool,
 }
 
 /// What `Enter` on a row does.
@@ -2038,7 +2058,16 @@ impl Panels {
         side: Side,
         event: ReadEvent,
         focused: Option<u64>,
-    ) -> ReadChange {
+    ) -> ReadAccepted {
+        let searched = self.search(side).is_some();
+        let change = self.apply_read(side, event, focused);
+        ReadAccepted {
+            change,
+            search_ended: searched && self.search(side).is_none(),
+        }
+    }
+
+    fn apply_read(&mut self, side: Side, event: ReadEvent, focused: Option<u64>) -> ReadChange {
         let generation = match &event {
             ReadEvent::Opened { generation, .. }
             | ReadEvent::Listed { generation, .. }
@@ -2174,8 +2203,11 @@ impl Panels {
     /// The shown drive of `side` is gone, as Windows said when it removed
     /// it. A panel that was going to another folder shows that folder's
     /// drive, whose watch Windows named, and Retry reads that folder.
-    pub(crate) fn drive_removed(&mut self, side: Side) {
+    /// Returns whether the panel searched until now, which ends its search,
+    /// as [`ReadAccepted::search_ended`] says.
+    pub(crate) fn drive_removed(&mut self, side: Side) -> bool {
         let panel = self.panel_mut(side);
+        let searched = panel.search().is_some();
         if let Some(Read {
             kind: ReadKind::Go { .. },
             path,
@@ -2188,6 +2220,7 @@ impl Panels {
             drive: drive_root(&panel.folder),
         };
         panel.clear();
+        searched
     }
 
     /// The list's selected rows, as it tells them; whether they changed.
@@ -2442,12 +2475,11 @@ impl Panels {
     /// The ended operations `ended`, each with its request, which each
     /// folder panel keeps when its end makes it read its folder again; a
     /// search panel's list decides for itself ([`SearchList::ended`]).
-    /// Returns the panels that read their folders again, and those whose
-    /// sizes change.
+    /// Returns what each panel that they changed does.
     pub(crate) fn operations_ended(
         &mut self,
         ended: &[(OperationId, Arc<Request>)],
-    ) -> Vec<(Side, bool, bool)> {
+    ) -> Vec<PanelFollow> {
         self.moment += 1;
         let moment = self.moment;
         let mut out = Vec::new();
@@ -2471,7 +2503,11 @@ impl Panels {
                 sizes |= changes_sizes(request, &panel.folder);
             }
             if again || sizes {
-                out.push((side, again, sizes));
+                out.push(PanelFollow {
+                    side,
+                    read_again: again,
+                    sizes,
+                });
             }
         }
         out
@@ -2792,7 +2828,7 @@ pub(crate) mod tests {
             entries,
             focus: None,
         };
-        match panels.accept_read(Side::Left, event, None) {
+        match panels.accept_read(Side::Left, event, None).change {
             ReadChange::Listed { place, .. } => place,
             other => panic!("not listed: {other:?}"),
         }
@@ -2837,7 +2873,14 @@ pub(crate) mod tests {
                 panels.apply_changes(Side::Left, gone(), None);
             }
             let again = panels.operations_ended(&[(id, delete(&[r"C:\f\a.txt", r"C:\f\b.txt"]))]);
-            assert_eq!(again, [(Side::Left, true, true)]);
+            assert_eq!(
+                again,
+                [PanelFollow {
+                    side: Side::Left,
+                    read_again: true,
+                    sizes: true
+                }]
+            );
             panels.set_taken(running(true), [None; 2]);
             if !change_first {
                 panels.apply_changes(Side::Left, gone(), None);
@@ -2923,7 +2966,7 @@ pub(crate) mod tests {
             entries: listed,
             focus: None,
         };
-        let change = panels.accept_read(Side::Left, event, Some(1));
+        let change = panels.accept_read(Side::Left, event, Some(1)).change;
         assert!(matches!(change, ReadChange::Listed { again: false, .. }));
         assert_eq!(names(&panels, Side::Left), ["..", "b", "a"]);
     }
@@ -2943,7 +2986,7 @@ pub(crate) mod tests {
             folder: r"E:\x".to_owned(),
         };
         assert_eq!(
-            panels.accept_read(Side::Left, stale, None),
+            panels.accept_read(Side::Left, stale, None).change,
             ReadChange::Stale
         );
         panels.drive_removed(Side::Left);
@@ -2971,7 +3014,7 @@ pub(crate) mod tests {
             entries: vec![],
             focus: None,
         };
-        let change = panels.accept_read(Side::Left, event, None);
+        let change = panels.accept_read(Side::Left, event, None).change;
         assert!(matches!(change, ReadChange::Listed { stale: true, .. }));
     }
 
@@ -3390,7 +3433,7 @@ pub(crate) mod tests {
             entries: vec![file("a.txt", 1, 0), file("b.txt", 1, 0)],
             focus: Some(wide("b.txt")),
         };
-        let change = panels.accept_read(Side::Left, event, None);
+        let change = panels.accept_read(Side::Left, event, None).change;
         assert_eq!(
             change,
             ReadChange::Listed {

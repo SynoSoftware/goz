@@ -123,8 +123,6 @@ pub(crate) struct View {
     pub(crate) rows: Vec<Row>,
     /// The header over the list, such as "Queue · 3 waiting".
     pub(crate) queue: String,
-    /// What the taskbar button shows for every running operation together.
-    pub(crate) taskbar: Taskbar,
 }
 
 /// The running operation the card shows: the first one the queue runs.
@@ -413,6 +411,52 @@ pub(crate) struct RowButtons {
     pub(crate) end: QueueAction,
 }
 
+/// The waiting rows' operations, in the queue's order.
+fn waiting_ids(rows: &[Row]) -> impl Iterator<Item = OperationId> + '_ {
+    (rows.iter())
+        .filter(|row| row.phase == RowPhase::Waiting)
+        .map(|row| row.id)
+}
+
+/// Where a row dropped at `gap`, a place between the rows, lands: the gap
+/// before the first waiting row from there, which it goes before, or else
+/// the gap after the last waiting row, with `None` for the end of the
+/// waiting operations. The queue lists the running operations first and
+/// the waiting ones next, and moves only the waiting ones.
+pub(crate) fn landing(rows: &[Row], gap: usize) -> (usize, Option<OperationId>) {
+    let waiting = |row: &Row| row.phase == RowPhase::Waiting;
+    match (rows.iter().enumerate().skip(gap)).find(|(_, row)| waiting(row)) {
+        Some((index, row)) => (index, Some(row.id)),
+        None => {
+            let after = (rows.iter().rposition(waiting)).map_or(gap, |last| last + 1);
+            (after, None)
+        }
+    }
+}
+
+/// Whether the waiting row `id`, put before `before`, stays where it is:
+/// just before itself, or before the waiting row after it.
+pub(crate) fn stays_in_place(rows: &[Row], id: OperationId, before: Option<OperationId>) -> bool {
+    let next = waiting_ids(rows)
+        .skip_while(|waiting| *waiting != id)
+        .nth(1);
+    before == Some(id) || before == next
+}
+
+/// The place before which Move up or Move down puts the waiting row `id`,
+/// or `None` when it is first or last among the waiting rows already. The
+/// inner `None` is the end of the queue.
+pub(crate) fn move_step(rows: &[Row], id: OperationId, up: bool) -> Option<Option<OperationId>> {
+    let waiting: Vec<OperationId> = waiting_ids(rows).collect();
+    let index = waiting.iter().position(|w| *w == id)?;
+    if up {
+        Some(Some(*waiting.get(index.checked_sub(1)?)?))
+    } else {
+        waiting.get(index + 1)?;
+        Some(waiting.get(index + 2).copied())
+    }
+}
+
 /// The context menu of a row in `phase`.
 pub(crate) fn row_menu(strings: &Strings, phase: RowPhase) -> Vec<MenuNode> {
     let mut nodes = Vec::new();
@@ -602,8 +646,7 @@ pub(crate) fn sources_folder(request: &Request) -> Option<String> {
         Request::Copy { sources, .. }
         | Request::Move { sources, .. }
         | Request::Delete { sources } => {
-            let paths: Vec<String> = sources.iter().map(|path| text_of(path)).collect();
-            common_folder(paths.iter().map(String::as_str))
+            common_folder(sources.iter().map(|path| path.to_string_lossy()))
         }
         Request::NewFolder { .. } => None,
     }
@@ -704,7 +747,6 @@ pub(crate) fn view(
         card,
         queue,
         rows,
-        taskbar: taskbar(operations),
     }
 }
 
@@ -747,7 +789,7 @@ fn measure_of(running: &Running) -> Option<Measure> {
 /// Every running operation's progress together, as File Explorer shows its
 /// copies on the taskbar button: measured while any running operation
 /// knows its total, moving while none does.
-fn taskbar(operations: &[Operation]) -> Taskbar {
+pub(crate) fn taskbar(operations: &[gozler_fileops::Operation]) -> Taskbar {
     let running: Vec<&Running> = operations
         .iter()
         .filter_map(|operation| match &operation.state {
@@ -1425,31 +1467,38 @@ fn folder_name(path: &str) -> &str {
 
 /// The deepest folder that holds every path of `paths`, compared as Windows
 /// compares names, ignoring case; `None` when they share no drive or
-/// server.
-fn common_folder<'a>(paths: impl IntoIterator<Item = &'a str>) -> Option<String> {
+/// server. It allocates nothing for each path, because an operation can
+/// have 100,000 sources.
+fn common_folder(paths: impl IntoIterator<Item = impl AsRef<str>>) -> Option<String> {
     let mut paths = paths.into_iter();
     let first = paths.next()?;
-    let mut common: Vec<&str> = parent_of(first).split('\\').collect();
+    let first = parent_of(first.as_ref());
+    // How many of `first`'s parts every path shares.
+    let mut common = first.split('\\').count();
     for path in paths {
-        let parts: Vec<&str> = parent_of(path).split('\\').collect();
-        let same = common
-            .iter()
-            .zip(&parts)
-            .take_while(|(a, b)| a.to_lowercase() == b.to_lowercase())
+        common = (first.split('\\').zip(parent_of(path.as_ref()).split('\\')))
+            .take(common)
+            .take_while(|(a, b)| same_name(a, b))
             .count();
-        common.truncate(same);
     }
+    let parts = || first.split('\\').take(common);
     // Two drives share nothing, and two servers share only the `\\` that
     // starts each path.
-    if common.iter().all(|part| part.is_empty()) {
+    if parts().all(str::is_empty) {
         return None;
     }
-    let folder = common.join("\\");
+    let end = parts().map(str::len).sum::<usize>() + common - 1;
+    let folder = &first[..end];
     Some(if folder.ends_with(':') {
-        folder + "\\"
+        format!("{folder}\\")
     } else {
-        folder
+        folder.to_owned()
     })
+}
+
+/// Whether `a` and `b` are one name to Windows, which ignores case.
+fn same_name(a: &str, b: &str) -> bool {
+    a == b || (a.chars().flat_map(char::to_lowercase)).eq(b.chars().flat_map(char::to_lowercase))
 }
 
 /// `path` relative to the folder `from`, or `path` whole when it is not
@@ -1479,6 +1528,14 @@ pub(crate) struct Choices {
 /// The conflict question's answers, in the order of its links.
 const CONFLICT_CHOICES: [Choice; 3] = [Choice::Replace, Choice::Skip, Choice::KeepBoth];
 
+/// Whether the person answers a [`conflict_question`] before the prepared
+/// copy or move runs.
+pub(crate) fn asks(request: &Request, prepared: &Prepared) -> bool {
+    matches!(request, Request::Copy { .. } | Request::Move { .. })
+        && (prepared.conflicts)
+            .is_some_and(|found| found.files + found.merges + found.same_name > 0)
+}
+
 /// The choice of the conflict question's answer `index`.
 pub(crate) fn conflict_choice(index: usize) -> Option<Choice> {
     CONFLICT_CHOICES.get(index).copied()
@@ -1490,26 +1547,22 @@ pub(crate) fn conflict_choice(index: usize) -> Option<Choice> {
 /// `None` when it found none, so nobody is asked. As File Explorer's
 /// question does, it names the folders by their own names, so a long path
 /// never widens the dialog. Without a total from gozlerd it counts the
-/// selected entries, as File Explorer does before it has counted.
+/// selected entries, as File Explorer does before it has counted. `folder`
+/// is the request's [`sources_folder`].
 pub(crate) fn conflict_question(
     strings: &Strings,
     numbers: &dyn Numbers,
     request: &Request,
     prepared: &Prepared,
+    folder: Option<&str>,
 ) -> Option<Choices> {
     let found = prepared.conflicts?;
     let (key, destination) = match request {
         Request::Copy { destination, .. } => ("file_operations.conflict_copying", destination),
         Request::Move { destination, .. } => ("file_operations.conflict_moving", destination),
-        Request::Delete { .. } | Request::NewFolder { .. } => {
-            return None;
-        }
+        Request::Delete { .. } | Request::NewFolder { .. } => return None,
     };
-    let from = folder_or(
-        strings,
-        sources_folder(request).as_deref(),
-        "file_operations.several_folders_inline",
-    );
+    let from = folder_or(strings, folder, "file_operations.several_folders_inline");
     let to = text_of(&destination.path());
     let items = prepared
         .total
@@ -1568,15 +1621,26 @@ pub(crate) fn delete_question(
     }
 }
 
-/// The Exit question while operations run or wait (file-manager-spec.md:
-/// File operations, step 8): `running` operations stop and are offered
-/// again as Interrupted, and `waiting` ones, which are not saved, never run.
+/// The Exit question while `operations` run or wait (file-manager-spec.md:
+/// File operations, step 8), or `None` while none does: the running ones
+/// stop and are offered again as Interrupted, and the waiting ones, which
+/// are not saved, never run. A prepared operation waits for its answer.
 pub(crate) fn exit_question(
     strings: &Strings,
     numbers: &dyn Numbers,
-    running: u64,
-    waiting: u64,
-) -> Question {
+    operations: &[gozler_fileops::Operation],
+) -> Option<Question> {
+    let (mut running, mut waiting) = (0, 0);
+    for operation in operations {
+        match operation.state {
+            State::Running(_) => running += 1,
+            State::Preparing | State::Prepared(_) | State::Waiting { .. } => waiting += 1,
+            State::Ended(_) | State::Interrupted => {}
+        }
+    }
+    if running + waiting == 0 {
+        return None;
+    }
     let (instruction, body) = if running > 0 {
         let mut body = strings.count("file_operations.exit_body", running, numbers, &[]);
         if waiting > 0 {
@@ -1593,7 +1657,7 @@ pub(crate) fn exit_question(
             strings.text("file_operations.exit_waiting_body").to_owned(),
         )
     };
-    Question {
+    Some(Question {
         title: without_access_key(strings.text("command.exit")),
         instruction,
         body: QuestionBody::Text(body),
@@ -1601,7 +1665,7 @@ pub(crate) fn exit_question(
         confirm: strings.text("file_operations.exit_button").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::CancelFirst,
-    }
+    })
 }
 
 /// What the failure dialog shows (file-manager-spec.md: File operations,
@@ -1626,6 +1690,9 @@ pub(crate) fn failure(
     outcome: &Outcome,
     windows_text: &dyn Fn(u32) -> String,
 ) -> Option<Failure> {
+    if !reports(outcome) {
+        return None;
+    }
     let rows: Vec<[String; 2]> = outcome
         .listed
         .iter()
@@ -1646,7 +1713,6 @@ pub(crate) fn failure(
     let count = rows.len() as u64;
     let done = strings.count("file_operations.done", outcome.items, numbers, &[]);
     let (instruction, body) = match outcome.end {
-        End::Complete | End::Cancelled if rows.is_empty() => return None,
         End::Complete | End::Cancelled => (
             strings.count("file_operations.failed", count, numbers, &[]),
             joined_sentences([done, strings.text("file_operations.failed_body").to_owned()]),
@@ -1663,6 +1729,13 @@ pub(crate) fn failure(
         body,
         rows,
     })
+}
+
+/// Whether an operation that ended as `outcome` has a [`failure`] dialog:
+/// something failed or was skipped, the disk filled, or the engine refused
+/// the operation.
+pub(crate) fn reports(outcome: &Outcome) -> bool {
+    !(matches!(outcome.end, End::Complete | End::Cancelled) && outcome.listed.is_empty())
 }
 
 fn joined_sentences(sentences: impl IntoIterator<Item = String>) -> String {
@@ -2149,8 +2222,10 @@ mod tests {
                 ..Conflicts::default()
             }),
         };
+        let folder = sources_folder(&request);
         let question =
-            conflict_question(&strings, &English, &request, &prepared).expect("12 conflicts ask");
+            conflict_question(&strings, &English, &request, &prepared, folder.as_deref())
+                .expect("12 conflicts ask");
         assert!(!question.body.contains('\\'), "{}", question.body);
         assert!(question.body.contains("2026") && question.body.contains("Photos"));
     }
@@ -2173,7 +2248,42 @@ mod tests {
                 ..Conflicts::default()
             }),
         };
-        assert!(conflict_question(&strings, &English, &request, &prepared).is_some());
+        assert!(conflict_question(&strings, &English, &request, &prepared, None).is_some());
+    }
+
+    /// The queue moves only waiting operations, after the running ones and
+    /// before the interrupted ones, so a drop or Move up and Move down land
+    /// among the waiting rows, and a drop that leaves a row where it is
+    /// moves nothing.
+    #[test]
+    fn a_moved_row_lands_among_the_waiting_rows() {
+        let id = OperationId::for_tests;
+        let row = |n, phase| Row {
+            id: id(n),
+            glyph: Glyph::Copy,
+            title: RowLine::Plain(String::new()),
+            detail: RowLine::Plain(String::new()),
+            phase,
+        };
+        let rows = [
+            row(1, RowPhase::Running { paused: false }),
+            row(2, RowPhase::Waiting),
+            row(3, RowPhase::Waiting),
+            row(4, RowPhase::Waiting),
+            row(5, RowPhase::Interrupted),
+        ];
+        assert_eq!(landing(&rows, 0), (1, Some(id(2))));
+        assert_eq!(landing(&rows, 3), (3, Some(id(4))));
+        assert_eq!(landing(&rows, 5), (4, None));
+        assert!(stays_in_place(&rows, id(3), Some(id(3))));
+        assert!(stays_in_place(&rows, id(3), Some(id(4))));
+        assert!(stays_in_place(&rows, id(4), None));
+        assert!(!stays_in_place(&rows, id(3), Some(id(2))));
+        assert_eq!(move_step(&rows, id(3), true), Some(Some(id(2))));
+        assert_eq!(move_step(&rows, id(3), false), Some(None));
+        assert_eq!(move_step(&rows, id(2), false), Some(Some(id(4))));
+        assert_eq!(move_step(&rows, id(2), true), None);
+        assert_eq!(move_step(&rows, id(4), false), None);
     }
 
     /// A title wider than its tile wraps and hides the row's state on the

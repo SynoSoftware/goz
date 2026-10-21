@@ -21,6 +21,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -28,25 +29,26 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LBUTTON, VK_MENU, VK_RBUTTON, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DBT_DEVICEQUERYREMOVE,
+    CREATESTRUCTW, CW_USEDEFAULT, CallNextHookEx, CreateWindowExW, DBT_DEVICEQUERYREMOVE,
     DBT_DEVICEQUERYREMOVEFAILED, DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE,
     DEV_BROADCAST_HDR, DefWindowProcW, DispatchMessageW, EndMenu, GA_ROOT, GWLP_USERDATA,
     GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW,
-    KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG, PM_REMOVE, PeekMessageW,
-    PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
-    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS,
-    SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW,
-    SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateMessage, WA_INACTIVE,
-    WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-    WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION, WM_ENTERSIZEMOVE,
-    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
-    WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
-    WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
-    WS_SYSMENU, WS_THICKFRAME,
+    GetWindowThreadProcessId, HHOOK, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON,
+    IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
+    MSGF_DIALOGBOX, MSGF_MESSAGEBOX, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW,
+    SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK,
+    SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON,
+    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer,
+    SetWindowLongPtrW, SetWindowPlacement, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA,
+    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED,
+    WM_DRAWITEM, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
+    WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -461,6 +463,8 @@ thread_local! {
     static MODELESS: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     /// The windows that [`own_keys`] names.
     static OWN_KEYS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
+    /// Whether [`message_filter`] is routing a message.
+    static FILTERING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Names the top-level window besides the main one whose controls take Tab,
@@ -504,6 +508,25 @@ pub(super) fn offer_key(window: HWND, target: HWND, key: WPARAM, flags: LPARAM) 
     .0 != 0
 }
 
+/// Gives `msg`, a message of the top-level window `root` besides the main
+/// one, to that window's keys: for a window that [`own_keys`] names, first
+/// as [`Message::KeyDown`], then to its `IsDialogMessageW`; for the window
+/// that [`set_modeless`] names, only to its `IsDialogMessageW`. Whether the
+/// window took the message. Any other window, such as a tooltip, takes none,
+/// and the caller lets the message go on.
+fn route_other(root: HWND, msg: &MSG) -> bool {
+    let own_keys = OWN_KEYS.with_borrow(|windows| windows.contains(&root));
+    if own_keys && msg.message == WM_KEYDOWN && offer_key(root, msg.hwnd, msg.wParam, msg.lParam) {
+        return true;
+    }
+    if !own_keys && (root.is_invalid() || root != MODELESS.get()) {
+        return false;
+    }
+    // SAFETY: `msg` is a message that a loop read; a stale window only
+    // fails.
+    unsafe { IsDialogMessageW(root, msg) }.as_bool()
+}
+
 /// Runs the thread's message loop until `WM_QUIT`, giving each message to
 /// the keys of the top-level window it belongs to, so a key pressed in one
 /// window never runs another window's command. For the main window, the
@@ -514,16 +537,20 @@ pub(super) fn offer_key(window: HWND, target: HWND, key: WPARAM, flags: LPARAM) 
 /// main window's controls (DESIGN.md: window rule 8). A key that
 /// `IsDialogMessageW` moves the focus with is reported to the main window,
 /// which no control notifies of it. A message for the window that
-/// [`set_modeless`] names, or for one of its controls, goes only through
-/// that window's `IsDialogMessageW`. A message for a window that
-/// [`own_keys`] names, or for one of its controls, goes to that window's
-/// keys first and then its `IsDialogMessageW`, and one for any other
+/// [`set_modeless`] names, for a window that [`own_keys`] names, or for one
+/// of their controls, goes through `route_other`, and one for any other
 /// window, such as a tooltip, is only dispatched.
+///
+/// A dialog or message box that the main window opens runs a loop of its own,
+/// which never reaches this one. For its length, a message hook gives the
+/// same messages to `route_other`, so the windows besides the main one keep
+/// their keys ([`MessageFilter`]).
 ///
 /// `accelerators` gives the table of the moment, because Settings and the
 /// mode replace it; the loop holds each table until the command it sent
 /// returns.
 pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Accelerators>) {
+    let _filter = MessageFilter::install();
     let mut msg = MSG::default();
     // SAFETY: `msg` is a local that each call fills in or reads.
     unsafe {
@@ -535,23 +562,7 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
                 GetAncestor(msg.hwnd, GA_ROOT)
             };
             if root != main.0 {
-                if OWN_KEYS.with_borrow(|windows| windows.contains(&root)) {
-                    if msg.message == WM_KEYDOWN
-                        && offer_key(root, msg.hwnd, msg.wParam, msg.lParam)
-                    {
-                        continue;
-                    }
-                    if !IsDialogMessageW(root, &msg).as_bool() {
-                        let _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                    }
-                    continue;
-                }
-                let modeless = MODELESS.get();
-                if modeless.is_invalid()
-                    || root != modeless
-                    || !IsDialogMessageW(modeless, &msg).as_bool()
-                {
+                if !route_other(root, &msg) {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -597,6 +608,77 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
             DispatchMessageW(&msg);
         }
     }
+}
+
+/// The thread's `WH_MSGFILTER` hook, removed on drop. The loops of dialog
+/// boxes and message boxes call it with `MSGF_DIALOGBOX` or
+/// `MSGF_MESSAGEBOX` before they process a message. While the main window
+/// has one open, [`run_message_loop`] does not run, so without the hook the
+/// File operations window and the Viewers, which stay usable, would get no
+/// Tab, access keys, `Enter` or `Esc` (DESIGN.md: window rule 8).
+struct MessageFilter(Option<HHOOK>);
+
+impl MessageFilter {
+    /// Installs the hook for the calling thread. When Windows refuses, the
+    /// modal loops stay as they were.
+    fn install() -> MessageFilter {
+        // SAFETY: `message_filter` is code of this program, so no module is
+        // named, and the hook is for this thread only. `Drop` removes it on
+        // the same thread.
+        let hook = unsafe {
+            SetWindowsHookExW(
+                WH_MSGFILTER,
+                Some(message_filter),
+                None,
+                GetCurrentThreadId(),
+            )
+        };
+        MessageFilter(hook.ok())
+    }
+}
+
+impl Drop for MessageFilter {
+    fn drop(&mut self) {
+        if let Some(hook) = self.0 {
+            // SAFETY: the hook is this value's own and not yet removed.
+            let _ = unsafe { UnhookWindowsHookEx(hook) };
+        }
+    }
+}
+
+/// Clears [`FILTERING`] when [`message_filter`] ends.
+struct Filtering;
+
+impl Drop for Filtering {
+    fn drop(&mut self) {
+        FILTERING.set(false);
+    }
+}
+
+/// The procedure of [`MessageFilter`]: gives the message of a dialog's or
+/// message box's loop to `route_other`, and the loop skips a message that a
+/// window took. Routing a key can run a handler that opens another dialog,
+/// whose loop calls this hook again while the first call is still running.
+/// That call passes every message on, so a key is not routed into the
+/// handler that is running.
+unsafe extern "system" fn message_filter(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let modal =
+        u32::try_from(code).is_ok_and(|code| code == MSGF_DIALOGBOX || code == MSGF_MESSAGEBOX);
+    if modal && !FILTERING.replace(true) {
+        let _filtering = Filtering;
+        // SAFETY: for these codes lparam points to the MSG that the loop is
+        // about to process, valid for this call.
+        let msg = unsafe { &*(lparam.0 as *const MSG) };
+        if !msg.hwnd.is_invalid() {
+            // SAFETY: a plain value; a stale window gives none.
+            let root = unsafe { GetAncestor(msg.hwnd, GA_ROOT) };
+            if route_other(root, msg) {
+                return LRESULT(1);
+            }
+        }
+    }
+    // SAFETY: the parameters are the ones Windows passed.
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
 /// Opens the menu bar with its first menu highlighted, as `Alt` pressed

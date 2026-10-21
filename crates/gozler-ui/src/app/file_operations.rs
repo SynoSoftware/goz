@@ -1,31 +1,33 @@
-//! The File operations window (file-manager-spec.md: File operations, step
-//! 5): a window of its own, which the main window owns, with a card for the
-//! running operation and the queue list under it. It never blocks Gozler:
+//! The first window's file operations (file-manager-spec.md: File
+//! operations): the engine's queue, and the File operations window, a
+//! window of its own that the main window owns, with a card for the running
+//! operation and the queue list under it. The window never blocks Gozler:
 //! closing it only hides it, and the operations go on.
 //!
-//! It owns the engine's queue. The queue calls its wake function on an
-//! engine thread after each change of an operation's state; the wake only
-//! posts a message, and the window then reads the states. A running
-//! operation's counts change without a wake, so the window polls them
+//! The queue calls its wake function on an engine thread after each change
+//! of an operation's state; the wake only posts [`QUEUE_CHANGED`] to the
+//! main window, which then reads the states and runs what
+//! `core::operations` decides, also when this window shows. A running
+//! operation's counts change without a wake, so the main window polls them
 //! twice a second while one runs.
 
 use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
-    self, Bar, CARD_CORNER, CARD_ICON, Failure, LastEnded, Layout, Meter, Metrics, OPEN_WIDTH,
-    QueueAction, ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, StatusOperation,
-    Taskbar, View, icon_index,
+    self, Bar, CARD_CORNER, CARD_ICON, Failure, Layout, Meter, Metrics, OPEN_WIDTH, QueueAction,
+    ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::layout::{Px, Rect, Size, button_content, button_room};
+use crate::core::operations::{QueueStep, Source, SourceStep};
 use crate::core::text::Strings;
 use crate::win::clipboard::ClipboardFiles;
 use crate::win::controls::{Button, GlyphLabel, Label, ProgressBar, ReportList, Tooltip};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
 use crate::win::drop_target::AsyncDrop;
 use crate::win::file_operations::{
-    OPERATION_CHANGED, PathLabel, QueueList, QueueNotify, TAKEN_CHANGED, TaskbarProgress,
-    TaskbarState, Tile, paint_card, set_client_size, show_drag_cursor, show_paused, window_size,
+    PathLabel, QUEUE_CHANGED, QueueList, QueueNotify, TaskbarProgress, Tile, paint_card,
+    set_client_size, show_drag_cursor, show_paused, tell_hidden, window_size,
 };
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::WindowsNumbers;
@@ -35,29 +37,18 @@ use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_fileops::{
-    Choice, End, OperationId, OrderRefused, Outcome, Prepared, Queue, Request, Side, SpeedSettings,
-    State, Taken,
+    Operation, OperationId, OrderRefused, Queue, Request, Side, SpeedSettings, State, Taken,
 };
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::collections::HashMap;
+use std::mem::ManuallyDrop;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.file_operations";
-
-/// The timer that polls a running operation's counts.
-const POLL: usize = 1;
-/// Twice a second, as the engine's counters expect to be read.
-const POLL_MS: u32 = 500;
-
-/// Opens the window when an operation still runs [`OPEN_AFTER`] after it
-/// started.
-const OPEN: usize = 3;
-
-const OPEN_AFTER: Duration = Duration::from_secs(2);
 
 /// The timer that scrolls the queue list while a dragged row is held above
 /// or below it.
@@ -69,9 +60,29 @@ const DRAG_SCROLL_MS: u32 = 100;
 /// `IDCANCEL`, which `Esc` sends through `IsDialogMessageW`.
 const ESCAPE: u16 = 2;
 
-/// The window, as the main window holds it.
+/// The queue and the File operations window, as the main window holds them.
 pub(super) struct FileOperations {
-    window: Rc<Window>,
+    owner: Hwnd,
+    /// Never dropped, because dropping it waits for every Windows copy, and
+    /// a copy that Windows stops deletes its file, while the process ending
+    /// leaves that file for Continue.
+    queue: Rc<ManuallyDrop<Queue>>,
+    /// Wakes the owner from the engine's threads, which outlive it, until
+    /// [`FileOperations::close`].
+    waker: OpenWaker,
+    strings: RefCell<Strings>,
+    /// The File operations window, made the first time it shows; `None`
+    /// inside when it could not open, and the operations then show only in
+    /// the status bar and on the taskbar button.
+    window: OnceCell<Option<Rc<Window>>>,
+    /// Where the window's failure to open is written.
+    error_log: PathBuf,
+    /// Where the files of each copy or move came from, until the source
+    /// hears what became of them.
+    sources: RefCell<HashMap<OperationId, FilesSource>>,
+    /// Made at the first operation, because the taskbar's interface costs
+    /// start-up time.
+    taskbar: OnceCell<TaskbarProgress>,
 }
 
 struct Controls {
@@ -151,62 +162,25 @@ struct Drag {
 
 struct Window {
     hwnd: Cell<Option<Hwnd>>,
+    queue: Rc<ManuallyDrop<Queue>>,
     owner: Hwnd,
-    queue: OnceCell<Queue>,
-    /// Wakes the window from the engine's threads, which outlive it, until
-    /// `WM_DESTROY` closes it.
-    waker: OnceCell<OpenWaker>,
     strings: RefCell<Strings>,
     numbers: RefCell<WindowsNumbers>,
     controls: OnceCell<Controls>,
     fonts: RefCell<Option<Fonts>>,
     layout: Cell<Layout>,
     meters: RefCell<HashMap<OperationId, Meter>>,
-    /// Each operation's [`file_operations::Operation::folder`].
-    folders: RefCell<HashMap<OperationId, Option<String>>>,
-    /// The operations the window has seen, so an interrupted one shows the
-    /// window at once.
-    known: RefCell<HashSet<OperationId>>,
-    /// When each live operation started, which the window opens 2 seconds
-    /// after. An operation whose conflict question is open has none, so the
-    /// time the person takes to answer does not count.
-    started: RefCell<HashMap<OperationId, Instant>>,
-    /// The operations that were live when the person hid the window, which
-    /// do not show it again.
-    hidden: RefCell<HashSet<OperationId>>,
-    /// The operation that ended last, with its request and outcome, which
-    /// the owner's status bar shows after the queue let it go.
-    last_ended: RefCell<Option<LastEnded>>,
-    /// The operations whose conflict question Keep both answered, whose
-    /// status line cannot name an entry's numbered name.
-    numbered: RefCell<HashSet<OperationId>>,
-    /// What the owner's status bar shows, as the window last told it.
-    status: RefCell<Option<StatusOperation>>,
     /// What the window shows now.
     view: RefCell<Option<View>>,
     selected: Cell<Option<OperationId>>,
     queue_open: Cell<bool>,
     drag: Cell<Option<Drag>>,
-    taskbar: TaskbarProgress,
-    /// A conflict question or a failure dialog is open. Its modal loop
-    /// delivers wakes, which then only refresh what the window shows.
-    asking: Cell<bool>,
-    /// The clipboard's files that Paste prepares an operation from, until
-    /// it is submitted or ends.
-    pastes: RefCell<HashMap<OperationId, ClipboardFiles>>,
-    /// The sources of dropped files that wait for their operation's end.
-    drops: RefCell<HashMap<OperationId, AsyncDrop>>,
-    /// Ended deletes and moves whose failures were reported, which stay in
-    /// the queue while a list of the window keeps them (fast-copy-delete-spec.md:
-    /// Taken entries).
-    reported: RefCell<HashSet<OperationId>>,
-    /// The queue's taken entries as the window last read them.
-    taken: RefCell<Arc<Taken>>,
-    /// Every operation that ended since the owner last took them, with its
-    /// request, which the owner's panels compare with their folders.
-    ended: RefCell<Vec<(OperationId, Arc<Request>)>>,
-    /// The ended operations already put in `ended`, so each goes once.
-    told: RefCell<HashSet<OperationId>>,
+    /// Why the queue refused the move the person tried or points at, which
+    /// the hint names and which gives the hint its line.
+    refused: Cell<Option<OrderRefused>>,
+    /// The row that Move up or Move down moved, which the next view keeps
+    /// in sight.
+    moved: Cell<Option<OperationId>>,
 }
 
 /// Where the files that an operation copies or moves came from.
@@ -218,93 +192,54 @@ pub(super) enum FilesSource {
     Drop(AsyncDrop),
 }
 
-/// An operation that waits for the window.
-enum Next {
-    /// Prepared, so the person answers the conflicts, if any.
-    Answer {
-        id: OperationId,
-        request: Arc<Request>,
-        prepared: Prepared,
-    },
-    /// Ended, so the window reports what failed, if anything.
-    Report {
-        id: OperationId,
-        request: Arc<Request>,
-        outcome: Arc<Outcome>,
-    },
+impl FilesSource {
+    pub(super) fn kind(&self) -> Source {
+        match self {
+            FilesSource::Paste(files) => Source::Paste { cut: files.cut },
+            FilesSource::Drop(_) => Source::Drop,
+        }
+    }
 }
 
 impl FileOperations {
-    /// Creates the queue, whose saved operations are in `saved`, and the
-    /// window, hidden; it shows itself when an operation starts, or at once
-    /// when the saved file holds interrupted operations.
-    pub(super) fn open(
+    /// Opens the queue, whose saved operations are in `saved`, and has
+    /// `owner` read them at once, so interrupted ones show. The window opens
+    /// the first time it shows; `error_log` gets the reason when it cannot.
+    pub(super) fn new(
         owner: Hwnd,
         saved: &Path,
         strings: Strings,
-    ) -> windows::core::Result<FileOperations> {
-        window::register_class::<Window>(WINDOW_CLASS, crate::core::ids::IconId::Gozler.id())?;
-        let window = Rc::new(Window {
-            hwnd: Cell::new(None),
+        error_log: PathBuf,
+    ) -> FileOperations {
+        let waker = OpenWaker::posting(owner, QUEUE_CHANGED);
+        let wakes = waker.clone();
+        let queue = Queue::new(saved, move || wakes.deliver(|| true));
+        owner.post(QUEUE_CHANGED);
+        FileOperations {
             owner,
-            queue: OnceCell::new(),
-            waker: OnceCell::new(),
+            queue: Rc::new(ManuallyDrop::new(queue)),
+            waker,
             strings: RefCell::new(strings),
-            numbers: RefCell::new(WindowsNumbers::new()),
-            controls: OnceCell::new(),
-            fonts: RefCell::new(None),
-            layout: Cell::new(Layout::default()),
-            meters: RefCell::new(HashMap::new()),
-            folders: RefCell::new(HashMap::new()),
-            known: RefCell::new(HashSet::new()),
-            started: RefCell::new(HashMap::new()),
-            hidden: RefCell::new(HashSet::new()),
-            last_ended: RefCell::new(None),
-            numbered: RefCell::new(HashSet::new()),
-            status: RefCell::new(None),
-            view: RefCell::new(None),
-            selected: Cell::new(None),
-            queue_open: Cell::new(true),
-            drag: Cell::new(None),
-            taken: RefCell::new(Arc::default()),
-            taskbar: TaskbarProgress::new(owner),
-            asking: Cell::new(false),
-            pastes: RefCell::new(HashMap::new()),
-            drops: RefCell::new(HashMap::new()),
-            reported: RefCell::new(HashSet::new()),
-            ended: RefCell::new(Vec::new()),
-            told: RefCell::new(HashSet::new()),
-        });
-        let hwnd = window::create_owned_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
-        window.hwnd.set(Some(hwnd));
-        window::set_modeless(Some(hwnd));
-        let waker = OpenWaker::new(hwnd);
-        let _ = window.waker.set(waker.clone());
-        let queue = Queue::new(saved, move || waker.deliver(|| true));
-        let _ = window.queue.set(queue);
-        window.create_controls(hwnd)?;
-        window.apply_fonts(hwnd);
-        window.apply_strings();
-        let metrics = window.metrics(hwnd);
-        set_client_size(
-            hwnd,
-            Size {
-                width: px(OPEN_WIDTH, hwnd),
-                height: Layout::height(metrics, true, false),
-            },
-        );
-        window.refresh(hwnd);
-        window.select_first_interrupted();
-        Ok(FileOperations { window })
+            window: OnceCell::new(),
+            error_log,
+            sources: RefCell::new(HashMap::new()),
+            taskbar: OnceCell::new(),
+        }
     }
 
-    /// The entries that deletes and moves take, which the search list
-    /// strikes through. The owner gets [`TAKEN_CHANGED`] after it changes.
+    /// The entries that deletes and moves take, which the lists leave out.
+    /// Read before [`Self::snapshot`], so every operation they have as
+    /// ended is in it.
     pub(super) fn taken(&self) -> Arc<Taken> {
-        Arc::clone(&self.window.taken.borrow())
+        self.queue.taken()
     }
 
-    /// Prepares `request`; the window asks about its conflicts when the
+    /// Every operation in the queue now.
+    pub(super) fn snapshot(&self) -> Vec<Operation> {
+        self.queue.operations()
+    }
+
+    /// Prepares `request`; the main window asks about its conflicts when the
     /// count is ready, and then submits it. `source` is where the files
     /// that the request copies or moves came from, which hears what became
     /// of them.
@@ -314,123 +249,196 @@ impl FileOperations {
         settings: SpeedSettings,
         source: Option<FilesSource>,
     ) -> OperationId {
-        let id = self.window.queue().prepare(request, settings);
-        match source {
-            Some(FilesSource::Paste(paste)) => {
-                self.window.pastes.borrow_mut().insert(id, paste);
-            }
-            Some(FilesSource::Drop(dropped)) => {
-                self.window.drops.borrow_mut().insert(id, dropped);
-            }
-            None => {}
+        let id = self.queue.prepare(request, settings);
+        if let Some(source) = source {
+            self.sources.borrow_mut().insert(id, source);
         }
         id
     }
 
-    /// Cancels the operation `id`, as the status bar's Cancel does.
-    pub(super) fn cancel(&self, id: OperationId) {
-        if let Some(hwnd) = self.window.hwnd.get() {
-            self.window.act(hwnd, id, QueueAction::Cancel);
-        }
-    }
-
-    /// The operation the owner's status bar shows, after
-    /// [`OPERATION_CHANGED`].
-    pub(super) fn status(&self) -> Option<StatusOperation> {
-        self.window.status.borrow().clone()
-    }
-
-    /// The operations of every kind that ended since the last call, each
-    /// with its request, which the owner's lists compare with what they
-    /// show. The owner takes them with the taken entries it then shows, after
-    /// [`TAKEN_CHANGED`].
-    pub(super) fn take_ended(&self) -> Vec<(OperationId, Arc<Request>)> {
-        std::mem::take(&mut self.window.ended.borrow_mut())
-    }
-
-    /// Removes the reported deletes and moves that no list keeps, as
-    /// `keeps` says, and has the owner read the taken entries again. One
-    /// the owner has not taken yet stays, because no list has decided
-    /// whether it keeps it.
-    pub(super) fn release(&self, keeps: impl Fn(OperationId) -> bool) {
-        let released: Vec<OperationId> = {
-            let untold = self.window.ended.borrow();
-            let keeps = |id: OperationId| keeps(id) || untold.iter().any(|(e, _)| *e == id);
-            let mut reported = self.window.reported.borrow_mut();
-            let released = reported.iter().copied().filter(|id| !keeps(*id)).collect();
-            reported.retain(|id| keeps(*id));
-            released
-        };
-        if released.is_empty() {
-            return;
-        }
-        for id in released {
-            self.window.queue().remove(id);
-        }
-        // As `refresh` does, so an operation that ended since then reaches
-        // the lists before a snapshot shows it as ended.
-        self.window.read_taken();
-        self.window.read_ended(&self.window.queue().operations());
-    }
-
-    /// The operations that run, and those that wait, which Exit stops
-    /// (file-manager-spec.md: File operations, step 8).
-    pub(super) fn running_and_waiting(&self) -> (u64, u64) {
-        let mut counts = (0, 0);
-        for entry in self.window.queue().operations() {
-            match entry.state {
-                State::Running(_) => counts.0 += 1,
-                State::Preparing | State::Prepared(_) | State::Waiting { .. } => counts.1 += 1,
-                State::Ended(_) | State::Interrupted => {}
+    /// Runs `step` on the queue. Returns whether the queue accepted it,
+    /// which only a submit can refuse.
+    pub(super) fn run(&self, step: QueueStep) -> bool {
+        match step {
+            QueueStep::Submit { id, choice } => self.queue.submit(id, choice).is_ok(),
+            QueueStep::Cancel(id) => {
+                self.queue.cancel(id);
+                true
+            }
+            QueueStep::Remove(id) => {
+                self.queue.remove(id);
+                true
             }
         }
-        counts
     }
 
-    /// Exit: stops every operation so that Continue finishes it at the next
-    /// start. The caller then ends the process without dropping `self`,
-    /// because dropping the queue waits for every Windows copy, and a copy
-    /// that Windows stops deletes its file.
-    pub(super) fn stop_all(&self) {
-        self.window.queue().close();
+    /// Tells an operation's source what `step` says became of its files.
+    /// Calls the source, which can be another program.
+    pub(super) fn tell_source(&self, step: SourceStep) {
+        match step {
+            SourceStep::Pasted { id, moved } => {
+                let source = self.sources.borrow_mut().remove(&id);
+                if let Some(FilesSource::Paste(files)) = source
+                    && moved
+                {
+                    files.moved(self.owner);
+                }
+            }
+            SourceStep::Ended { id, succeeded } => {
+                let source = self.sources.borrow_mut().remove(&id);
+                if let Some(FilesSource::Drop(dropped)) = source {
+                    dropped.end(succeeded);
+                }
+            }
+        }
     }
 
-    /// Shows the window in front, as View > File operations does.
-    pub(super) fn show(&self) {
-        if let Some(hwnd) = self.window.hwnd.get() {
+    /// Shows the window with `snapshot`, whose operations' source folders
+    /// are in `folders`, and with `select` selected; `front` brings it to
+    /// the front, as View > File operations does.
+    pub(super) fn show(
+        &self,
+        snapshot: &[Operation],
+        folders: &HashMap<OperationId, Option<String>>,
+        select: Option<OperationId>,
+        front: bool,
+    ) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let Some(hwnd) = window.hwnd.get() else {
+            return;
+        };
+        if select.is_some() {
+            window.selected.set(select);
+        }
+        window.show_snapshot(hwnd, snapshot, folders);
+        if front {
             hwnd.bring_to_front();
+        } else {
+            hwnd.set_visible(true);
         }
     }
 
-    /// Reads the queue again, after a command changed it.
-    pub(super) fn refresh(&self) {
-        if let Some(hwnd) = self.window.hwnd.get() {
-            self.window.refresh(hwnd);
+    /// Shows `snapshot` in the window, if it was made.
+    pub(super) fn refresh(
+        &self,
+        snapshot: &[Operation],
+        folders: &HashMap<OperationId, Option<String>>,
+    ) {
+        if let Some(window) = self.made()
+            && let Some(hwnd) = window.hwnd.get()
+        {
+            window.show_snapshot(hwnd, snapshot, folders);
         }
     }
 
-    /// Words the window in the language of `strings`.
+    /// Whether the window is on the screen.
+    pub(super) fn is_shown(&self) -> bool {
+        (self.made().and_then(|window| window.hwnd.get())).is_some_and(Hwnd::is_visible)
+    }
+
+    pub(super) fn hide(&self) {
+        if let Some(hwnd) = self.made().and_then(|window| window.hwnd.get()) {
+            hwnd.hide();
+        }
+    }
+
+    /// Shows `state` on the owner's taskbar button.
+    pub(super) fn show_taskbar(&self, state: Taskbar) {
+        if state == Taskbar::None && self.taskbar.get().is_none() {
+            return;
+        }
+        (self.taskbar)
+            .get_or_init(|| TaskbarProgress::new(self.owner))
+            .show(state);
+    }
+
+    /// Explorer made the owner's taskbar button again, which shows no
+    /// progress until the next [`Self::show_taskbar`].
+    pub(super) fn forget_taskbar(&self) {
+        if let Some(taskbar) = self.taskbar.get() {
+            taskbar.forget();
+        }
+    }
+
+    /// Words the window in the language of `strings`; the operations' own
+    /// texts follow at the next [`Self::refresh`].
     pub(super) fn set_strings(&self, strings: Strings) {
-        self.window.strings.replace(strings);
-        self.window.apply_strings();
+        self.strings.replace(strings.clone());
+        let Some(window) = self.made() else {
+            return;
+        };
+        window.strings.replace(strings);
+        window.apply_strings();
         // The labels and Hide are as wide as their new words.
-        if let Some(hwnd) = self.window.hwnd.get() {
-            self.window.layout(hwnd);
+        if let Some(hwnd) = window.hwnd.get() {
+            window.layout(hwnd);
         }
-        self.refresh();
     }
 
     /// Shows or hides Hide's icon, after icons were shown or hidden.
     pub(super) fn apply_glyphs(&self) {
-        self.window.apply_glyphs();
+        if let Some(window) = self.made() {
+            window.apply_glyphs();
+        }
     }
 
-    /// Destroys the window.
+    /// The owner's `WM_DESTROY`: no wake reaches the owner any more, every
+    /// operation stops so that Continue finishes it at the next start, and
+    /// the window goes. The process then ends without dropping the queue.
     pub(super) fn close(&self) {
-        if let Some(hwnd) = self.window.hwnd.take() {
+        self.waker.close();
+        self.queue.close();
+        if let Some(hwnd) = self.made().and_then(|window| window.hwnd.take()) {
             hwnd.destroy();
         }
     }
+
+    /// The window, made now if it was not.
+    fn window(&self) -> Option<&Rc<Window>> {
+        let made = self.window.get_or_init(|| {
+            let strings = self.strings.borrow().clone();
+            match Window::open(self.owner, Rc::clone(&self.queue), strings) {
+                Ok(window) => Some(window),
+                Err(error) => {
+                    super::write_log(
+                        &self.error_log,
+                        &format!("The File operations window did not open: {error}"),
+                    );
+                    None
+                }
+            }
+        });
+        made.as_ref()
+    }
+
+    /// The window, if it was made.
+    fn made(&self) -> Option<&Rc<Window>> {
+        self.window.get().and_then(Option::as_ref)
+    }
+}
+
+/// Shows what failed in an ended operation: the failure dialog, or a
+/// message box when nothing is listed. It runs its own message loop.
+pub(super) fn show_failure(owner: Hwnd, strings: &Strings, failure: Failure) {
+    if failure.rows.is_empty() {
+        // A refusal, or a full disk before any entry failed, lists
+        // nothing, so the message stands alone.
+        let text = format!("{}\n\n{}", failure.instruction, failure.body);
+        dialog::error_box(Some(owner), &text, &failure.title);
+        return;
+    }
+    let mut captions = DialogCaptions::new(DialogId::FileOperationsFailed, strings);
+    captions.title.clone_from(&failure.title);
+    let dialog = FailureDialog {
+        failure,
+        columns: [
+            strings.text("file_operations.column_item").to_owned(),
+            strings.text("file_operations.column_reason").to_owned(),
+        ],
+    };
+    let _ = dialog::run_modal(owner, DialogId::FileOperationsFailed, &captions, &dialog);
 }
 
 /// `dip` at the DPI of `hwnd`.
@@ -442,8 +450,45 @@ fn px(dip: i32, hwnd: Hwnd) -> Px {
 }
 
 impl Window {
-    fn queue(&self) -> &Queue {
-        self.queue.get().expect("open sets the queue")
+    /// Creates the window, hidden, owned by `owner`.
+    fn open(
+        owner: Hwnd,
+        queue: Rc<ManuallyDrop<Queue>>,
+        strings: Strings,
+    ) -> windows::core::Result<Rc<Window>> {
+        window::register_class::<Window>(WINDOW_CLASS, crate::core::ids::IconId::Gozler.id())?;
+        let window = Rc::new(Window {
+            hwnd: Cell::new(None),
+            queue,
+            owner,
+            strings: RefCell::new(strings),
+            numbers: RefCell::new(WindowsNumbers::new()),
+            controls: OnceCell::new(),
+            fonts: RefCell::new(None),
+            layout: Cell::new(Layout::default()),
+            meters: RefCell::new(HashMap::new()),
+            view: RefCell::new(None),
+            selected: Cell::new(None),
+            queue_open: Cell::new(true),
+            drag: Cell::new(None),
+            refused: Cell::new(None),
+            moved: Cell::new(None),
+        });
+        let hwnd = window::create_owned_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
+        window.hwnd.set(Some(hwnd));
+        window::set_modeless(Some(hwnd));
+        window.create_controls(hwnd)?;
+        window.apply_fonts(hwnd);
+        window.apply_strings();
+        let metrics = window.metrics(hwnd);
+        set_client_size(
+            hwnd,
+            Size {
+                width: px(OPEN_WIDTH, hwnd),
+                height: Layout::height(metrics, true, false),
+            },
+        );
+        Ok(window)
     }
 
     fn controls(&self) -> &Controls {
@@ -723,20 +768,23 @@ impl Window {
         hwnd.invalidate();
     }
 
-    /// Reads the queue's states and shows them.
-    fn refresh(&self, hwnd: Hwnd) {
-        self.read_taken();
-        let entries = self.queue().operations();
-        self.read_ended(&entries);
+    /// Shows `snapshot`, whose operations' source folders are in
+    /// `folders`, with the speeds of the running ones from the counts the
+    /// window saw before.
+    fn show_snapshot(
+        &self,
+        hwnd: Hwnd,
+        snapshot: &[Operation],
+        folders: &HashMap<OperationId, Option<String>>,
+    ) {
         let now = Instant::now();
         {
             let mut meters = self.meters.borrow_mut();
             meters.retain(|id, _| {
-                entries
-                    .iter()
+                (snapshot.iter())
                     .any(|entry| entry.id == *id && matches!(entry.state, State::Running(_)))
             });
-            for entry in &entries {
+            for entry in snapshot {
                 if let State::Running(running) = &entry.state {
                     let meter = meters.entry(entry.id).or_default();
                     if running.paused {
@@ -748,20 +796,12 @@ impl Window {
             }
         }
         let view = {
-            let mut folders = self.folders.borrow_mut();
-            folders.retain(|id, _| entries.iter().any(|entry| entry.id == *id));
-            for entry in &entries {
-                folders
-                    .entry(entry.id)
-                    .or_insert_with(|| file_operations::sources_folder(&entry.request));
-            }
-            let operations: Vec<file_operations::Operation> = entries
-                .iter()
+            let operations: Vec<file_operations::Operation> = (snapshot.iter())
                 .map(|entry| file_operations::Operation {
                     id: entry.id,
                     request: &entry.request,
                     state: &entry.state,
-                    folder: folders[&entry.id].as_deref(),
+                    folder: folders.get(&entry.id).and_then(Option::as_deref),
                 })
                 .collect();
             file_operations::view(
@@ -771,241 +811,14 @@ impl Window {
                 &self.meters.borrow(),
             )
         };
-        let interrupted = {
-            let mut known = self.known.borrow_mut();
-            let interrupted = entries.iter().any(|entry| {
-                matches!(entry.state, State::Interrupted) && !known.contains(&entry.id)
-            });
-            *known = entries.iter().map(|entry| entry.id).collect();
-            interrupted
-        };
-        let due = self.open_due(&entries, now);
-        let status = {
-            let last_ended = self.last_ended.borrow();
-            let mut numbered = self.numbered.borrow_mut();
-            numbered.retain(|id| {
-                entries.iter().any(|entry| entry.id == *id)
-                    || last_ended.as_ref().is_some_and(|(last, ..)| last == id)
-            });
-            StatusOperation::of(
-                &entries,
-                last_ended.as_ref(),
-                &self.reported.borrow(),
-                &numbered,
-            )
-        };
-        if *self.status.borrow() != status {
-            self.status.replace(status);
-            self.owner.post(OPERATION_CHANGED);
-        }
-        let running = view.card.is_some();
-        let empty = view.card.is_none() && view.rows.is_empty();
         self.show_view(hwnd, view);
-        if running {
-            hwnd.set_timer(POLL, POLL_MS);
-        } else {
-            hwnd.kill_timer(POLL);
-        }
-        // The window opens when an operation still runs 2 seconds after it
-        // started, so a short one shows only in the owner's status bar, and
-        // closes when the last one ends; the person can hide it at any time
-        // (file-manager-spec.md: File operations, step 5).
-        hwnd.kill_timer(OPEN);
-        if empty {
-            hwnd.hide();
-        } else if !hwnd.is_visible() {
-            match due {
-                _ if interrupted => hwnd.set_visible(true),
-                Some(due) if due <= now => hwnd.set_visible(true),
-                Some(due) => {
-                    let wait = due.duration_since(now).as_millis();
-                    hwnd.set_timer(OPEN, u32::try_from(wait).unwrap_or(u32::MAX).max(1));
-                }
-                None => {}
-            }
-        }
-        self.handle_next(hwnd);
     }
 
-    /// The moment the earliest live operation that the person did not hide
-    /// has run for [`OPEN_AFTER`], after the start moments are brought up to
-    /// date with `entries`; `None` when none is live.
-    fn open_due(&self, entries: &[gozler_fileops::Operation], now: Instant) -> Option<Instant> {
-        let mut started = self.started.borrow_mut();
-        let mut hidden = self.hidden.borrow_mut();
-        hidden.retain(|id| entries.iter().any(|entry| entry.id == *id));
-        let live: HashSet<OperationId> = entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.state,
-                    State::Preparing | State::Waiting { .. } | State::Running(_)
-                )
-            })
-            .map(|entry| entry.id)
-            .collect();
-        started.retain(|id, _| live.contains(id));
-        for id in live {
-            started.entry(id).or_insert(now);
-        }
-        started
-            .iter()
-            .filter(|(id, _)| !hidden.contains(id))
-            .map(|(_, at)| *at + OPEN_AFTER)
-            .min()
-    }
-
-    /// Hides the window; the operations that have not ended now do not show
-    /// it again, also one whose conflict question is open, which starts
-    /// after the answer, and a later one does.
+    /// Hides the window, and tells the owner, whose operations that have
+    /// not ended then do not show it again.
     fn hide(&self, hwnd: Hwnd) {
-        let unended = (self.queue().operations().into_iter())
-            .filter(|entry| !matches!(entry.state, State::Ended(_)))
-            .map(|entry| entry.id);
-        self.hidden.borrow_mut().extend(unended);
-        hwnd.kill_timer(OPEN);
         hwnd.hide();
-    }
-
-    /// Answers each prepared operation and reports each ended one, one at a
-    /// time, because each may open a modal dialog.
-    fn handle_next(&self, hwnd: Hwnd) {
-        if self.asking.replace(true) {
-            return;
-        }
-        let mut handled = false;
-        while let Some(next) = self.next() {
-            handled = true;
-            match next {
-                Next::Answer {
-                    id,
-                    request,
-                    prepared,
-                } => self.answer(id, &request, prepared),
-                Next::Report {
-                    id,
-                    request,
-                    outcome,
-                } => self.report(id, &request, &outcome),
-            }
-        }
-        self.asking.set(false);
-        if handled {
-            self.refresh(hwnd);
-        }
-    }
-
-    fn next(&self) -> Option<Next> {
-        let reported = self.reported.borrow();
-        self.queue()
-            .operations()
-            .into_iter()
-            .find_map(|entry| match entry.state {
-                State::Prepared(prepared) => Some(Next::Answer {
-                    id: entry.id,
-                    request: entry.request,
-                    prepared,
-                }),
-                State::Ended(outcome) if !reported.contains(&entry.id) => Some(Next::Report {
-                    id: entry.id,
-                    request: entry.request,
-                    outcome,
-                }),
-                _ => None,
-            })
-    }
-
-    /// Asks the conflict question when prepare found conflicts, then
-    /// submits the operation with the answer, or cancels it.
-    fn answer(&self, id: OperationId, request: &Request, prepared: Prepared) {
-        let question = file_operations::conflict_question(
-            &self.strings.borrow(),
-            &*self.numbers.borrow(),
-            request,
-            &prepared,
-        );
-        let choice = match question {
-            None => None,
-            // The question runs its own message loop, so nothing is
-            // borrowed here.
-            Some(question) => match win::dialog::choose(self.owner, &question) {
-                Some(index) => file_operations::conflict_choice(index),
-                None => {
-                    self.queue().cancel(id);
-                    return;
-                }
-            },
-        };
-        let submitted = self.queue().submit(id, choice).is_ok();
-        if submitted && choice == Some(Choice::KeepBoth) {
-            self.numbered.borrow_mut().insert(id);
-        }
-        let paste = self.pastes.borrow_mut().remove(&id);
-        if let Some(paste) = paste
-            && submitted
-            && paste.cut
-            && matches!(request, Request::Move { .. })
-        {
-            paste.moved(self.owner);
-        }
-    }
-
-    /// Shows what failed in an ended operation, then removes it, unless it
-    /// deleted or moved entries, which the owner's lists may still keep
-    /// struck through or blank; the owner then decides
-    /// ([`FileOperations::release`]).
-    fn report(&self, id: OperationId, request: &Arc<Request>, outcome: &Arc<Outcome>) {
-        // An operation that ended after the last read is told here, before
-        // a copy leaves the queue.
-        self.tell_ended(id, request);
-        self.last_ended
-            .replace(Some((id, Arc::clone(request), Arc::clone(outcome))));
-        self.pastes.borrow_mut().remove(&id);
-        let dropped = self.drops.borrow_mut().remove(&id);
-        if let Some(dropped) = dropped {
-            dropped.end(outcome.end == End::Complete && outcome.listed.is_empty());
-        }
-        let failure = file_operations::failure(
-            &self.strings.borrow(),
-            &*self.numbers.borrow(),
-            request,
-            outcome,
-            &|code| win::error_text(&std::io::Error::from_raw_os_error(code as i32)),
-        );
-        if let Some(failure) = failure.as_ref().filter(|failure| failure.rows.is_empty()) {
-            // A refusal, or a full disk before any entry failed, lists
-            // nothing, so the message stands alone.
-            let text = format!("{}\n\n{}", failure.instruction, failure.body);
-            dialog::error_box(Some(self.owner), &text, &failure.title);
-        } else if let Some(failure) = failure {
-            let strings = self.strings.borrow();
-            let mut captions = DialogCaptions::new(DialogId::FileOperationsFailed, &strings);
-            captions.title.clone_from(&failure.title);
-            let dialog = FailureDialog {
-                failure,
-                columns: [
-                    strings.text("file_operations.column_item").to_owned(),
-                    strings.text("file_operations.column_reason").to_owned(),
-                ],
-            };
-            drop(strings);
-            // The dialog runs its own message loop, so nothing is borrowed
-            // here.
-            let _ = dialog::run_modal(
-                self.owner,
-                DialogId::FileOperationsFailed,
-                &captions,
-                &dialog,
-            );
-        }
-        let took =
-            outcome.items > 0 && matches!(**request, Request::Delete { .. } | Request::Move { .. });
-        if took {
-            self.reported.borrow_mut().insert(id);
-            self.owner.post(TAKEN_CHANGED);
-        } else {
-            self.queue().remove(id);
-        }
+        tell_hidden(self.owner);
     }
 
     fn show_view(&self, hwnd: Hwnd, view: View) {
@@ -1107,24 +920,18 @@ impl Window {
         {
             self.selected.set(None);
         }
-        self.taskbar.show(match view.taskbar {
-            Taskbar::None => TaskbarState::None,
-            Taskbar::Moving => TaskbarState::Moving,
-            Taskbar::Measured(m) => TaskbarState::Measured {
-                done: m.done,
-                total: m.total,
-            },
-            Taskbar::Paused(m) => TaskbarState::Paused {
-                done: m.done,
-                total: m.total,
-            },
-        });
+        let moved =
+            (self.moved.take()).and_then(|id| view.rows.iter().position(|row| row.id == id));
         drop(strings);
         // Stored first: the list reports the selection it is given at once,
         // and the window reads the row it selects from the view.
         self.view.replace(Some(view));
         self.show_tiles();
         self.update_queue_buttons();
+        if let Some(index) = moved {
+            // The moved row stays in view where the list scrolls.
+            c.list.ensure_visible(index);
+        }
     }
 
     /// Shows the view's rows in the list, with the selected row selected.
@@ -1175,38 +982,6 @@ impl Window {
         show(width);
     }
 
-    /// Puts each operation that ended since the last read in `ended`, and
-    /// tells the owner. They are read after the taken entries, so each
-    /// operation that those show ended is among them.
-    fn read_ended(&self, entries: &[gozler_fileops::Operation]) {
-        self.told
-            .borrow_mut()
-            .retain(|id| entries.iter().any(|entry| entry.id == *id));
-        for entry in entries {
-            if matches!(entry.state, State::Ended(_)) {
-                self.tell_ended(entry.id, &entry.request);
-            }
-        }
-    }
-
-    /// Puts the ended operation `id` in `ended`, once, and tells the owner.
-    fn tell_ended(&self, id: OperationId, request: &Arc<Request>) {
-        if self.told.borrow_mut().insert(id) {
-            self.ended.borrow_mut().push((id, Arc::clone(request)));
-            self.owner.post(TAKEN_CHANGED);
-        }
-    }
-
-    /// Reads the queue's taken entries, and tells the owner when they
-    /// changed.
-    fn read_taken(&self) {
-        let taken = self.queue().taken();
-        if !Arc::ptr_eq(&taken, &self.taken.borrow()) {
-            self.taken.replace(taken);
-            self.owner.post(TAKEN_CHANGED);
-        }
-    }
-
     /// The selected row, as the window shows it.
     fn selected_row<T>(&self, use_row: impl FnOnce(&Row, &[Row]) -> T) -> Option<T> {
         let view = self.view.borrow();
@@ -1216,55 +991,14 @@ impl Window {
         Some(use_row(row, rows))
     }
 
-    /// Where a row dropped at `gap`, a place between the rows, lands: the
-    /// gap before the first waiting row from there, which it goes before,
-    /// or else the gap after the last waiting row, with `None` for the end
-    /// of the waiting operations. The queue lists the running operations
-    /// first and the waiting ones next, and moves only the waiting ones.
-    fn landing(rows: &[Row], gap: usize) -> (usize, Option<OperationId>) {
-        let waiting = |row: &&Row| row.phase == RowPhase::Waiting;
-        match rows
-            .iter()
-            .enumerate()
-            .skip(gap)
-            .find(|(_, row)| waiting(row))
-        {
-            Some((index, row)) => (index, Some(row.id)),
-            None => {
-                let after = rows
-                    .iter()
-                    .rposition(|row| waiting(&row))
-                    .map_or(gap, |last| last + 1);
-                (after, None)
-            }
-        }
-    }
-
-    /// The place before which Move up or Move down puts the waiting row
-    /// `id`, or `None` when it is first or last among the waiting rows
-    /// already. The inner `None` is the end of the queue.
-    fn step(rows: &[Row], id: OperationId, up: bool) -> Option<Option<OperationId>> {
-        let waiting: Vec<OperationId> = rows
-            .iter()
-            .filter(|row| row.phase == RowPhase::Waiting)
-            .map(|row| row.id)
-            .collect();
-        let index = waiting.iter().position(|w| *w == id)?;
-        if up {
-            Some(Some(*waiting.get(index.checked_sub(1)?)?))
-        } else {
-            waiting.get(index + 1)?;
-            Some(waiting.get(index + 2).copied())
-        }
-    }
-
     /// Whether the queue lets the selected row move up or down, and the
     /// hint that names why not.
     fn can_step(&self, up: bool) -> Result<bool, OrderRefused> {
-        let step =
-            self.selected_row(|row, rows| Window::step(rows, row.id, up).map(|b| (row.id, b)));
+        let step = self.selected_row(|row, rows| {
+            file_operations::move_step(rows, row.id, up).map(|before| (row.id, before))
+        });
         match step.flatten() {
-            Some((id, before)) => self.queue().check_move(id, before).map(|()| true),
+            Some((id, before)) => self.queue.check_move(id, before).map(|()| true),
             None => Ok(false),
         }
     }
@@ -1272,27 +1006,6 @@ impl Window {
     /// The selected row, and what the queue's header buttons do to it.
     fn selected_buttons(&self) -> Option<(OperationId, RowButtons)> {
         self.selected_row(|row, _| (row.id, row.phase.buttons()))
-    }
-
-    /// Selects the first interrupted row while no operation runs, so its
-    /// Continue and Dismiss show at once when the window opens.
-    fn select_first_interrupted(&self) {
-        let first = self
-            .view
-            .borrow()
-            .as_ref()
-            .filter(|view| view.card.is_none())
-            .and_then(|view| {
-                view.rows
-                    .iter()
-                    .find(|row| row.phase == RowPhase::Interrupted)
-                    .map(|row| row.id)
-            });
-        if first.is_some() {
-            self.selected.set(first);
-            self.show_tiles();
-            self.update_queue_buttons();
-        }
     }
 
     /// Enables the queue's buttons for the selected row, shows the hint
@@ -1329,59 +1042,57 @@ impl Window {
 
     /// Shows why the queue refused a move, or clears the hint.
     fn show_hint(&self, refused: Option<OrderRefused>) {
-        let text = refused
-            .and_then(|refused| {
-                let OrderRefused::Overlaps { other, side } = refused else {
-                    // The queue changed since the window last read it; the
-                    // next refresh shows the change.
-                    return None;
-                };
-                let view = self.view.borrow();
-                let strings = self.strings.borrow();
-                let other = view.as_ref()?.rows.iter().find(|row| row.id == other)?;
-                let key = match side {
-                    Side::After => "file_operations.must_stay_after",
-                    Side::Before => "file_operations.must_stay_before",
-                };
-                let fonts = self.fonts.borrow();
-                let Some(meter) = fonts.as_ref().map(|fonts| TextMeter::new(&fonts.ui)) else {
-                    return Some(strings.format(key, &[&other.title.whole(&strings)]));
-                };
-                // The operation's paths give way in their middle until the
-                // sentence fits the hint's line.
-                let width = self.controls().hint.hwnd().client_size().width;
-                let mut room = width;
-                loop {
-                    let title = other.title.fitted(
-                        &strings,
-                        room,
-                        &|text| meter.plain_width(text),
-                        &|path, width| meter.compact_path(path, width),
-                    );
-                    let text = strings.format(key, &[&title]);
-                    if room.0 <= 0 || meter.plain_width(&text) <= width {
-                        return Some(text);
-                    }
-                    room = Px(room.0 * 9 / 10);
-                }
-            })
-            .unwrap_or_default();
         let shown = self.hint_shown();
-        self.controls().hint.hwnd().set_text(&text);
-        if shown != !text.is_empty()
+        self.refused.set(refused);
+        let text = self.hint_text();
+        if text.is_none() {
+            self.refused.set(None);
+        }
+        self.controls()
+            .hint
+            .hwnd()
+            .set_text(text.as_deref().unwrap_or_default());
+        if shown != self.hint_shown()
             && let Some(hwnd) = self.hwnd.get()
         {
             self.fit_height(hwnd);
         }
     }
 
-    /// Does `action` to the operation `id`.
-    fn act(&self, hwnd: Hwnd, id: OperationId, action: QueueAction) {
-        let queue = self.queue();
-        let rows_step = |up| {
-            self.selected_row(|_, rows| Window::step(rows, id, up))
-                .flatten()
+    /// The hint's sentence for [`Self::refused`], whose operation's paths
+    /// give way in their middle so that the sentence fits the hint's line.
+    /// `None` when the refusal names no row: the queue changed since the
+    /// window last read it, and the next view shows the change.
+    fn hint_text(&self) -> Option<String> {
+        let OrderRefused::Overlaps { other, side } = self.refused.get()? else {
+            return None;
         };
+        let view = self.view.borrow();
+        let strings = self.strings.borrow();
+        let other = view.as_ref()?.rows.iter().find(|row| row.id == other)?;
+        let key = match side {
+            Side::After => "file_operations.must_stay_after",
+            Side::Before => "file_operations.must_stay_before",
+        };
+        let fonts = self.fonts.borrow();
+        let Some(meter) = fonts.as_ref().map(|fonts| TextMeter::new(&fonts.ui)) else {
+            return Some(strings.format(key, &[&other.title.whole(&strings)]));
+        };
+        let width = self.controls().hint.hwnd().client_size().width;
+        let room = width - meter.plain_width(&strings.format(key, &[""]));
+        let title = other.title.fitted(
+            &strings,
+            room,
+            &|text| meter.plain_width(text),
+            &|path, width| meter.compact_path(path, width),
+        );
+        Some(strings.format(key, &[&title]))
+    }
+
+    /// Does `action` to the operation `id`. The queue then wakes the owner,
+    /// which shows what changed.
+    fn act(&self, id: OperationId, action: QueueAction) {
+        let queue = &self.queue;
         match action {
             QueueAction::Pause => queue.set_paused(id, true),
             QueueAction::Resume => queue.set_paused(id, false),
@@ -1393,20 +1104,16 @@ impl Window {
                 let _ = queue.dismiss(id);
             }
             QueueAction::MoveUp | QueueAction::MoveDown => {
-                if let Some(before) = rows_step(action == QueueAction::MoveUp) {
+                let up = action == QueueAction::MoveUp;
+                let step = self.selected_row(|_, rows| file_operations::move_step(rows, id, up));
+                if let Some(before) = step.flatten() {
                     let refused = queue.move_waiting(id, before).err();
+                    if refused.is_none() {
+                        self.moved.set(Some(id));
+                    }
                     self.show_hint(refused);
                 }
             }
-        }
-        self.refresh(hwnd);
-        if matches!(action, QueueAction::MoveUp | QueueAction::MoveDown)
-            && let Some(index) = self
-                .selected_row(|_, rows| rows.iter().position(|row| row.id == id))
-                .flatten()
-        {
-            // The moved row stays in view where the list scrolls.
-            self.controls().list.ensure_visible(index);
         }
     }
 
@@ -1424,11 +1131,11 @@ impl Window {
                 } else {
                     QueueAction::Pause
                 };
-                self.act(hwnd, id, action);
+                self.act(id, action);
             }
         } else if c.cancel.clicked(event) {
             if let Some((id, _)) = card {
-                self.act(hwnd, id, QueueAction::Cancel);
+                self.act(id, QueueAction::Cancel);
             }
         } else if c.toggle.clicked(event) {
             self.toggle_queue(hwnd);
@@ -1436,15 +1143,15 @@ impl Window {
             self.hide(hwnd);
         } else if let Some((id, buttons)) = self.selected_buttons() {
             if c.queue_cancel.clicked(event) {
-                self.act(hwnd, id, buttons.end);
+                self.act(id, buttons.end);
             } else if c.run.clicked(event) {
                 if let Some(run) = buttons.run {
-                    self.act(hwnd, id, run);
+                    self.act(id, run);
                 }
             } else if c.up.clicked(event) {
-                self.act(hwnd, id, QueueAction::MoveUp);
+                self.act(id, QueueAction::MoveUp);
             } else if c.down.clicked(event) {
-                self.act(hwnd, id, QueueAction::MoveDown);
+                self.act(id, QueueAction::MoveDown);
             }
         }
     }
@@ -1466,7 +1173,7 @@ impl Window {
 
     /// Whether the hint shows a refusal, which gives it a line.
     fn hint_shown(&self) -> bool {
-        !self.controls().hint.hwnd().text().is_empty()
+        self.refused.get().is_some()
     }
 
     /// Gives the window its [`Self::fitted_height`] and places the
@@ -1535,7 +1242,7 @@ impl Window {
         // The menu runs its own message loop, so nothing is borrowed here.
         let chosen = Menu::track_popup(hwnd, &items, point, &states, None);
         if let Some(action) = chosen.and_then(QueueAction::from_id) {
-            self.act(hwnd, id, action);
+            self.act(id, action);
         }
     }
 
@@ -1572,22 +1279,17 @@ impl Window {
         let gap = list.gap_at(point);
         let checked = gap.and_then(|gap| {
             self.selected_row(|_, rows| {
-                let (gap, before) = Window::landing(rows, gap);
-                // Just before itself, or before the waiting row after it,
-                // is where it already is.
-                let next = rows
-                    .iter()
-                    .filter(|row| row.phase == RowPhase::Waiting)
-                    .skip_while(|row| row.id != drag.id)
-                    .nth(1)
-                    .map(|row| row.id);
-                let unchanged = before == Some(drag.id) || before == next;
-                (gap, before, unchanged)
+                let (gap, before) = file_operations::landing(rows, gap);
+                (
+                    gap,
+                    before,
+                    file_operations::stays_in_place(rows, drag.id, before),
+                )
             })
         });
         let (gap, refused) = match checked {
             Some((_, _, true)) | None => (None, None),
-            Some((gap, before, false)) => match self.queue().check_move(drag.id, before) {
+            Some((gap, before, false)) => match self.queue.check_move(drag.id, before) {
                 Ok(()) => (Some(gap), None),
                 Err(refused) => (None, Some(refused)),
             },
@@ -1609,11 +1311,10 @@ impl Window {
         self.controls().list.set_insert_mark(None);
         if let Some(gap) = drag.gap {
             let before = self
-                .selected_row(|_, rows| Window::landing(rows, gap).1)
+                .selected_row(|_, rows| file_operations::landing(rows, gap).1)
                 .flatten();
-            let refused = self.queue().move_waiting(drag.id, before).err();
+            let refused = self.queue.move_waiting(drag.id, before).err();
             self.show_hint(refused);
-            self.refresh(hwnd);
         }
     }
 
@@ -1751,7 +1452,7 @@ impl WindowProc for Window {
                         if let Some((id, buttons)) = self.selected_buttons()
                             && buttons.end == QueueAction::Cancel
                         {
-                            self.act(hwnd, id, QueueAction::Cancel);
+                            self.act(id, QueueAction::Cancel);
                         }
                         None
                     }
@@ -1798,10 +1499,6 @@ impl WindowProc for Window {
                 self.drag_scroll(hwnd);
                 Some(LRESULT(0))
             }
-            Message::Timer(POLL | OPEN) | Message::Wake => {
-                self.refresh(hwnd);
-                Some(LRESULT(0))
-            }
             Message::SysColorChange => {
                 self.apply_fonts(hwnd);
                 hwnd.invalidate();
@@ -1812,13 +1509,7 @@ impl WindowProc for Window {
                 Some(LRESULT(0))
             }
             Message::Destroy => {
-                if let Some(waker) = self.waker.get() {
-                    waker.close();
-                }
                 window::set_modeless(None);
-                hwnd.kill_timer(POLL);
-                hwnd.kill_timer(OPEN);
-                self.taskbar.show(TaskbarState::None);
                 None
             }
             _ => None,

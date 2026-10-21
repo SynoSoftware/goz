@@ -9,8 +9,10 @@ use super::controls::{ProgressBar, child, send, send_pointer};
 use super::gdi::{EraseDc, glyph_list, high_contrast, system_color};
 use super::notify::Notification;
 use super::{Hwnd, to_rect, wide};
+use crate::core::file_operations::Taskbar;
 use crate::core::glyph::Glyph;
 use crate::core::layout::{Px, Rect, Size};
+use std::cell::Cell;
 use windows::Win32::Foundation::{LRESULT, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, CreatePen, CreateSolidBrush,
@@ -42,13 +44,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
-/// The message the File operations window posts to its owner after the
-/// entries that deletes and moves take changed, or an operation ended.
-pub(crate) const TAKEN_CHANGED: u32 = super::wake::WAKE + 5;
+/// The message the file operations' queue posts to the main window after
+/// an operation's state changed.
+pub(crate) const QUEUE_CHANGED: u32 = super::wake::WAKE + 5;
 
-/// The message the File operations window posts to its owner after the
-/// operation that the owner's status bar shows changed.
-pub(crate) const OPERATION_CHANGED: u32 = super::wake::WAKE + 8;
+/// The message the File operations window sends its owner when the person
+/// hides it.
+pub(crate) const HIDDEN: u32 = super::wake::WAKE + 8;
+
+/// Sends [`HIDDEN`] to `owner`, which handles it before this returns, so no
+/// later wake shows the window again before the owner knows.
+pub(crate) fn tell_hidden(owner: Hwnd) {
+    send(owner, HIDDEN, 0, 0);
+}
 
 /// One line of a path that loses its middle when it is too long
 /// (`SS_PATHELLIPSIS`), so its drive and its last part stay. It notifies its
@@ -562,23 +570,9 @@ impl QueueList {
 pub(crate) struct TaskbarProgress {
     window: Hwnd,
     taskbar: Option<ITaskbarList3>,
-}
-
-/// What the taskbar button shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TaskbarState {
-    None,
-    /// `done` of `total`.
-    Measured {
-        done: u64,
-        total: u64,
-    },
-    /// Moving, with no total, as a delete runs.
-    Moving,
-    Paused {
-        done: u64,
-        total: u64,
-    },
+    /// What the button shows, as last sent, so a poll that changes nothing
+    /// sends nothing; `None` until the first send.
+    shown: Cell<Option<Taskbar>>,
 }
 
 impl TaskbarProgress {
@@ -589,27 +583,44 @@ impl TaskbarProgress {
             unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER) }.ok();
         // SAFETY: HrInit is the call the interface needs before any other.
         let taskbar = taskbar.filter(|taskbar| unsafe { taskbar.HrInit() }.is_ok());
-        TaskbarProgress { window, taskbar }
+        TaskbarProgress {
+            window,
+            taskbar,
+            shown: Cell::new(None),
+        }
     }
 
-    pub(crate) fn show(&self, state: TaskbarState) {
+    pub(crate) fn show(&self, state: Taskbar) {
         let Some(taskbar) = &self.taskbar else {
             return;
         };
+        if self.shown.replace(Some(state)) == Some(state) {
+            return;
+        }
         let hwnd = self.window.0;
         // SAFETY: plain values on a window of this process; a failure
         // leaves the button as it was.
         unsafe {
             let _ = match state {
-                TaskbarState::None => taskbar.SetProgressState(hwnd, TBPF_NOPROGRESS),
-                TaskbarState::Moving => taskbar.SetProgressState(hwnd, TBPF_INDETERMINATE),
-                TaskbarState::Measured { done, total } => taskbar
-                    .SetProgressState(hwnd, TBPF_NORMAL)
-                    .and_then(|()| taskbar.SetProgressValue(hwnd, done, total.max(1))),
-                TaskbarState::Paused { done, total } => taskbar
-                    .SetProgressState(hwnd, TBPF_PAUSED)
-                    .and_then(|()| taskbar.SetProgressValue(hwnd, done, total.max(1))),
+                Taskbar::None => taskbar.SetProgressState(hwnd, TBPF_NOPROGRESS),
+                Taskbar::Moving => taskbar.SetProgressState(hwnd, TBPF_INDETERMINATE),
+                Taskbar::Measured(measure) => {
+                    taskbar.SetProgressState(hwnd, TBPF_NORMAL).and_then(|()| {
+                        taskbar.SetProgressValue(hwnd, measure.done, measure.total.max(1))
+                    })
+                }
+                Taskbar::Paused(measure) => {
+                    taskbar.SetProgressState(hwnd, TBPF_PAUSED).and_then(|()| {
+                        taskbar.SetProgressValue(hwnd, measure.done, measure.total.max(1))
+                    })
+                }
             };
         }
+    }
+
+    /// Forgets what the button shows, after Explorer made the button again
+    /// (`TaskbarButtonCreated`), so the next [`Self::show`] sends it.
+    pub(crate) fn forget(&self) {
+        self.shown.set(None);
     }
 }
