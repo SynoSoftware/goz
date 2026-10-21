@@ -417,6 +417,9 @@ pub(super) struct Transfer {
     selected: (usize, usize),
     /// The active panel's folder, which a relative path is in.
     folder: String,
+    /// The other panel's folder that the box opens with, which
+    /// [`typed::destination`] keeps unexpanded.
+    other: String,
     /// The name of the one entry it acts on; `None` for several.
     one: Option<String>,
     title: String,
@@ -434,6 +437,7 @@ pub(super) struct TransferStart {
     pub(super) text: String,
     pub(super) selected: (usize, usize),
     pub(super) folder: String,
+    pub(super) other: String,
     pub(super) one: Option<String>,
 }
 
@@ -444,6 +448,7 @@ impl Transfer {
             start: start.text,
             selected: start.selected,
             folder: start.folder,
+            other: start.other,
             one: start.one,
             title: start.title,
             characters: strings.text("name.characters").to_owned(),
@@ -496,10 +501,13 @@ impl DialogProc for Transfer {
                 let Some(path) = Transfer::path(dialog) else {
                     return true;
                 };
-                let resolved =
-                    typed::destination(&path.text(), &self.folder, self.one.as_deref(), |name| {
-                        std::env::var(name).ok()
-                    });
+                let resolved = typed::destination(
+                    &path.text(),
+                    &self.folder,
+                    &self.other,
+                    self.one.as_deref(),
+                    |name| std::env::var(name).ok(),
+                );
                 match resolved {
                     Ok(Some(destination)) => {
                         self.chosen.replace(Some(destination));

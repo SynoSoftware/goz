@@ -1682,8 +1682,9 @@ impl MainWindow {
             Some((name, _)) => strings.format(name_line, &[name]),
             None => strings.count(items_line, chosen.len() as u64, &*numbers, &[]),
         };
-        let mut text =
+        let other =
             (other.destination()).map_or_else(String::new, |folder| panel::join(folder, ""));
+        let mut text = other.clone();
         let units = |text: &str| text.encode_utf16().count();
         let selected = match &one {
             Some((name, folder)) if moves && !text.is_empty() => {
@@ -1707,6 +1708,7 @@ impl MainWindow {
             text,
             selected,
             folder,
+            other,
             one: one.map(|(name, _)| name),
         })
     }

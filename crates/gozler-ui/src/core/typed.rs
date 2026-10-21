@@ -44,17 +44,22 @@ pub(crate) fn folder_name(typed: &str) -> Result<String, Refusal> {
 
 /// Where Copy to folder… or Move to folder… writes, from the box's text:
 /// environment variables expanded and a relative path joined to `folder`,
-/// the active panel's, as in the path box. `one` is the name of the one
-/// entry it acts on, or `None` for several. `None` for an empty text.
+/// the active panel's, as in the path box. `other` is the other panel's
+/// folder that the box opened with, a real path, so a text that starts
+/// with it expands only what follows, and a folder named `%USERNAME%`
+/// stays so. `one` is the name of the one entry it acts on, or `None` for
+/// several. `None` for an empty text.
 ///
 /// A text that ends in `\` or `/`, or any text for several entries, names a
 /// folder. For one entry, a path that ends in the entry's own name, case
-/// included, as `F6` fills the box, names the folder that holds it, so a
-/// folder of the same name there is merged and not entered; any other path
-/// is decided by the engine, which knows whether it is a folder.
+/// and trailing dots included, as `F6` fills the box, names the folder that
+/// holds it, so a folder of the same name there is merged and not entered;
+/// any other path is decided by the engine, which knows whether it is a
+/// folder.
 pub(crate) fn destination(
     typed: &str,
     folder: &str,
+    other: &str,
     one: Option<&str>,
     var: impl Fn(&str) -> Option<String>,
 ) -> Result<Option<Destination>, Refusal> {
@@ -62,15 +67,20 @@ pub(crate) fn destination(
     if typed.is_empty() {
         return Ok(None);
     }
-    let expanded = expand(typed, var);
+    let expanded = match typed.strip_prefix(other) {
+        Some(rest) if !other.is_empty() => other.to_owned() + &expand(rest, var),
+        _ => expand(typed, var),
+    };
     // `absolute` drops the trailing separator, which decides the result.
     let into = expanded.ends_with(['\\', '/']);
+    let named = expanded.rsplit(['\\', '/']).next().unwrap_or_default();
     let path = absolute(&checked(&expanded)?, folder);
-    let named = path.rsplit_once('\\').map_or("", |(_, name)| name);
     Ok(Some(match one {
         _ if into => Destination::Folder(path.into()),
         None => Destination::Folder(path.into()),
-        Some(own) if named == own => Destination::Folder(PathBuf::from(parent_of(&path))),
+        Some(own) if named == own || trimmed(named) == own => {
+            Destination::Folder(PathBuf::from(parent_of(&path)))
+        }
         Some(_) => Destination::Typed(path.into()),
     }))
 }
@@ -126,7 +136,7 @@ mod tests {
     use super::*;
 
     fn resolve(typed: &str, one: Option<&str>) -> Result<Option<Destination>, Refusal> {
-        destination(typed, r"C:\Work", one, |name| {
+        destination(typed, r"C:\Work", r"D:\%BACKUP%\", one, |name| {
             (name == "BACKUP").then(|| r"D:\Backup".to_owned())
         })
     }
@@ -180,5 +190,18 @@ mod tests {
             Ok(Some(Destination::Typed(r"C:\Work\report-old.pdf".into())))
         );
         assert_eq!(resolve("  ", Some("report.pdf")), Ok(None));
+    }
+
+    /// The box opens with the other panel's folder, a real path, which a
+    /// folder named `%BACKUP%` keeps, and `F6` on `notes.` with the box left
+    /// as it opened moves `notes.` there, not renamed to `notes` (#111).
+    #[test]
+    fn the_folder_and_the_name_the_box_opens_with_are_kept() {
+        let folder = |path: &str| Some(Destination::Folder(path.into()));
+        assert_eq!(
+            resolve(r"D:\%BACKUP%\notes.", Some("notes.")),
+            Ok(folder(r"D:\%BACKUP%"))
+        );
+        assert_eq!(resolve(r"D:\%BACKUP%\", None), Ok(folder(r"D:\%BACKUP%")));
     }
 }

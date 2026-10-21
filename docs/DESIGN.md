@@ -1063,6 +1063,7 @@ The engine opens paths with `\\?\`, which turns off Windows' own trimming and it
 - A device name, `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9`, also with an extension such as `nul.txt`, is refused with a message box: "Windows uses the name NUL for a device. Choose another name."
 - A character that no name holds, `< > : " | ? *` or a control character, is refused with a message box that says what the balloon of New folder says, also when it was pasted. In the Copy and Move box, `\` and `/` separate the names, and `:` may follow a drive letter.
 - The Copy and Move box reads a trailing `\` or `/` after it expands the environment variables, and before it removes the separators that end a path, so `%BACKUP%\2026\` names a folder, not a file `2026`.
+- The other panel's folder that the Copy and Move box opens with is a real path, so a text that starts with it expands only what follows, and a folder named `%USERNAME%` stays so. The entry's own name is compared before it is trimmed, so `F6` left as it opened on `notes.` moves `notes.` and does not rename it to `notes`.
 
 ### New folder
 
