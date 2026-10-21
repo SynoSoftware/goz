@@ -1268,6 +1268,9 @@ impl Panel {
                     last.insert(name, Now::Gone);
                 }
                 FolderChange::Renamed { from, to } => {
+                    if is_short_name(&from) {
+                        gone_short.push(from.clone());
+                    }
                     last.insert(from, Now::Gone);
                     last.insert(to.name.clone(), Now::Added(to));
                 }
@@ -3476,6 +3479,21 @@ pub(crate) mod tests {
 
         panels.await_name(Side::Left, "d.txt", None, true, OperationId::for_tests(3));
         assert_eq!(panels.show_awaited(Side::Left), None);
+    }
+
+    /// A watch can name an entry by its short name, which no row shows, so
+    /// a rename from one must read the folder again, or the row under its
+    /// long name would stay (#111).
+    #[test]
+    fn a_rename_from_a_short_name_reads_the_folder_again() {
+        let mut panels = showing(r"C:\f", vec![file("Long report.txt", 1, 0)]);
+        let renamed = FolderChange::Renamed {
+            from: wide("LONGRE~1.TXT"),
+            to: file("new.txt", 1, 0),
+        };
+        let (_, again) =
+            (panels.apply_changes(Side::Left, vec![renamed], None)).expect("a folder shows");
+        assert!(again);
     }
 
     /// `F6` to a name a row shows and Replace brings the focus to that row

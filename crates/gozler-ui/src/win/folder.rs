@@ -31,8 +31,10 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HANDLE;
+use std::time::Duration;
+use windows::Win32::Foundation::{
+    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
+};
 use windows::Win32::Storage::FileSystem::{GetLogicalDrives, GetVolumeInformationW};
 use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEVICE_NOTIFY_WINDOW_HANDLE, HDEVNOTIFY,
@@ -44,10 +46,17 @@ use windows::core::HSTRING;
 /// share's watch takes.
 const PAGE_WORDS: usize = 64 * 1024 / 8;
 
-/// A first wait on a watch that fails sooner than this failed because
-/// Windows cannot watch the folder, as on some network shares, so the panel
-/// does not read it again in a loop.
-const UNWATCHABLE: Duration = Duration::from_millis(100);
+/// The errors with which a first wait on a watch says that Windows cannot
+/// watch the folder, as on some network shares: the panel then does not
+/// read it again in a loop. Any other error, as when the folder is deleted,
+/// loses the watch, and the panel reads the folder again. A time does not
+/// tell them apart, because a share can refuse late and a delete can come
+/// at once.
+const UNWATCHABLE: [u32; 3] = [
+    ERROR_INVALID_FUNCTION.0,
+    ERROR_NOT_SUPPORTED.0,
+    ERROR_INVALID_PARAMETER.0,
+];
 
 /// How often a quiet watch checks that its folder's path still names the
 /// folder, because a rename of the folder itself shows only in its parent.
@@ -694,14 +703,13 @@ fn follow(
 ) {
     let mut watched = false;
     loop {
-        let waited = Instant::now();
         let read = watch.next(signal, MOVED_CHECK);
         if stop.stopped() {
             return;
         }
         match read {
             Ok(WatchEvent::Stopped) => return,
-            Err(_) if !watched && waited.elapsed() < UNWATCHABLE => return,
+            Err(error) if !watched && UNWATCHABLE.contains(&error.code) => return,
             Err(_) | Ok(WatchEvent::Changes([])) => return deliver(Followed::Lost),
             Ok(WatchEvent::Changes(bytes)) => match changes(folder, bytes) {
                 Some(changes) => deliver(Followed::Changes(changes)),
