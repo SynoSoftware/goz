@@ -351,7 +351,6 @@ impl MainWindow {
         for ((button, id), (key, word, tip)) in
             controls.key_bar.iter().zip(KEY_BAR).zip(&captions.key_bar)
         {
-            // What screen readers say; the window draws the button.
             button.hwnd().set_text(&format!("{key} {word}"));
             if let Some(tip) = tip {
                 controls.key_tips.set_area_text(id.id(), tip);

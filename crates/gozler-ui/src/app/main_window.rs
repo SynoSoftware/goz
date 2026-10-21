@@ -4221,17 +4221,6 @@ impl WindowProc for MainWindow {
                     self.drive_menu(hwnd, side);
                     return Some(LRESULT(0));
                 }
-                {
-                    let key_bar = captions::key_bar(self.model.borrow().strings());
-                    let fonts = self.created().fonts.borrow();
-                    for (button, (key, word, _)) in controls.key_bar.iter().zip(&key_bar) {
-                        if let Some(answer) =
-                            button.draw_key(&notification, key, word, (&fonts.ui, &fonts.bold))
-                        {
-                            return Some(answer);
-                        }
-                    }
-                }
                 if let Some(side) = self.panel_list(notification.sender()) {
                     let list = self.panel(side).list.notification(notification)?;
                     return self.on_panel_notify(hwnd, side, list);

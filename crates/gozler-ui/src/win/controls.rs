@@ -483,8 +483,7 @@ impl Button {
     }
 
     /// A key bar button, which `Tab` does not reach, because `Tab` switches
-    /// panels (file-manager-spec.md: The key bar). Its parent draws it
-    /// ([`Button::draw_key`]).
+    /// panels (file-manager-spec.md: The key bar).
     pub(crate) fn create_key(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
         child(
             parent,
