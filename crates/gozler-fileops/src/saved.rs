@@ -24,12 +24,14 @@ use crate::settings::{
 pub(crate) struct Saved {
     kind: Kind,
     sources: Vec<SavedPath>,
+    /// The folder a copy or move keeps the entries' names in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     destination: Option<SavedPath>,
-    /// The one entry's new name in `destination`. No key: the entries keep
-    /// their names in the folder `destination`.
+    /// The one entry's folder and new name, instead of `destination`, so
+    /// v0.4.0, which reads no `named` and needs `destination`, leaves the
+    /// operation out instead of continuing it under the entry's old name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<SavedPath>,
+    named: Option<SavedNamed>,
     /// No key: the person was not asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     choice: Option<SavedChoice>,
@@ -74,11 +76,14 @@ impl Saved {
             Request::Delete { sources } => (Kind::Delete, paths(sources), None),
             Request::NewFolder { .. } => return None,
         };
-        let (destination, name) = match destination {
+        let (destination, named) = match destination {
             Some(Destination::Folder(folder)) => (Some(SavedPath::new(folder)), None),
             Some(Destination::Named { folder, name }) => (
-                Some(SavedPath::new(folder)),
-                Some(SavedPath::new(Path::new(name))),
+                None,
+                Some(SavedNamed {
+                    folder: SavedPath::new(folder),
+                    name: SavedPath::new(Path::new(name)),
+                }),
             ),
             Some(Destination::Typed(_)) => return None,
             None => (None, None),
@@ -87,7 +92,7 @@ impl Saved {
             kind,
             sources,
             destination,
-            name,
+            named,
             choice: choice.map(SavedChoice::from),
             started: Some(started),
             settings: SavedSettings::from(settings),
@@ -100,15 +105,14 @@ impl Saved {
     pub(crate) fn restore(&self) -> Option<Restored> {
         let settings = SpeedSettings::try_from(&self.settings).ok()?;
         let sources: Vec<PathBuf> = self.sources.iter().map(SavedPath::path).collect();
-        let folder = self.destination.as_ref().map(SavedPath::path);
-        let destination = match (folder, &self.name) {
-            (Some(folder), None) => Some(Destination::Folder(folder)),
-            (Some(folder), Some(name)) if sources.len() == 1 => Some(Destination::Named {
-                folder,
-                name: name.path().into_os_string(),
+        let destination = match (&self.destination, &self.named) {
+            (Some(folder), None) => Some(Destination::Folder(folder.path())),
+            (None, Some(named)) if sources.len() == 1 => Some(Destination::Named {
+                folder: named.folder.path(),
+                name: named.name.path().into_os_string(),
             }),
-            (Some(_), Some(_)) => return None,
-            (None, _) => None,
+            (Some(_), Some(_)) | (None, Some(_)) => return None,
+            (None, None) => None,
         };
         let request = match (self.kind, destination) {
             (Kind::Copy, Some(destination)) => Request::Copy {
@@ -119,7 +123,7 @@ impl Saved {
                 sources,
                 destination,
             },
-            (Kind::Delete, _) if self.name.is_some() => return None,
+            (Kind::Delete, _) if self.named.is_some() => return None,
             (Kind::Delete, _) => Request::Delete { sources },
             (Kind::Copy | Kind::Move, None) => return None,
         };
@@ -166,6 +170,13 @@ impl From<SavedChoice> for Choice {
             SavedChoice::KeepBoth => Choice::KeepBoth,
         }
     }
+}
+
+/// A copy or move of one entry to a new name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedNamed {
+    folder: SavedPath,
+    name: SavedPath,
 }
 
 /// A path as text, or as its UTF-16 units when it holds an unpaired
@@ -392,7 +403,8 @@ mod tests {
 
     /// One entry's new name reads back, so Continue writes the file it
     /// wrote; a new name for two entries, as a hand-edited file can hold,
-    /// is refused.
+    /// is refused. It has no `destination`, so v0.4.0, which ignores the new
+    /// name, leaves it out instead of writing the entry's old name (#111).
     #[test]
     fn a_new_name_is_saved() {
         let settings = SpeedSettings::automatic();
@@ -405,6 +417,7 @@ mod tests {
         };
         let saved = Saved::new(&request, None, 1, &settings).expect("saved");
         let text = serde_json::to_string(&saved).expect("serialize");
+        assert!(!text.contains(r#""destination""#), "{text}");
         let read: Saved = serde_json::from_str(&text).expect("parse");
         assert_eq!(read.restore().expect("restore").request, request);
 

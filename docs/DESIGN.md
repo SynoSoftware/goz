@@ -1157,6 +1157,7 @@ A crash, a power loss or a forced exit does not mean the person changed their mi
 
 - **The engine saves each running operation** before it changes a file. The window gives it the file `%LOCALAPPDATA%\Gozler\operations.json`, or the same name in the `--data-dir` folder.
 - **At the next start,** the File operations window shows each saved operation as "Interrupted", with Continue and Dismiss.
+- **A copy or move to a new name is saved without `destination`,** under `named`, so v0.4.0, which knows no new name and needs `destination`, leaves it out instead of continuing it under the entry's old name, which Replace would overwrite.
 - **Waiting operations are not saved:** they have changed no file, and the Exit question says they will not run.
 - **Another window offers no file operations.** When "Allow only one Gozler window at a time" is off, a second window shows Delete, Cut, Paste, Copy to folder…, Move to folder… and New folder… disabled and accepts no drop, as it shows no tray icon, because the first window's queue owns the saved file (one queue for each user session).
 
