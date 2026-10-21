@@ -508,7 +508,7 @@
     "unsupported": "Deze toets kan niet in een sneltoets worden gebruikt. Kies een letter, een cijfer of een functietoets, zoals Ctrl+K of F3.",
     "shortcut_taken": "Een ander programma gebruikt {0}. Kies een andere sneltoets.",
     "shortcut_failed": "Kan {0} niet gebruiken. {1}",
-    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met een letter, cijfer, komma of punt. Een sneltoets op deze toetsen werkt alleen in Zoeken."
+    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met een letter, cijfer, komma of punt. Een sneltoets op een van deze toetsen werkt alleen in Zoeken."
   },
   "settings_file_operations": {
     "speed": "Sne&lheidsinstellingen:",
@@ -796,7 +796,7 @@
     "look_in": "&Zoeken in:",
     "this_folder": "Deze map en submappen",
     "all_drives": "Alle stations",
-    "type_here": "Typ een naam om {0} en de submappen te doorzoeken.",
+    "type_here": "Typ een naam om in {0} en de submappen ervan te zoeken.",
     "type_everywhere": "Typ een naam om alle geïndexeerde stations te doorzoeken.",
     "search_not_indexed": "{0} is niet geïndexeerd, dus Gozler kan er niet in zoeken.\nKies Alle stations bij Zoeken in om de geïndexeerde stations te doorzoeken.",
     "try_all_drives": "Kies Alle stations bij Zoeken in om elk geïndexeerd station te doorzoeken.",
