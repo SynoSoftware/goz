@@ -48,7 +48,7 @@ Gozler-UI, its app, searches the same way, and copies, moves and deletes what yo
 
 ### Command line
 
-- **Scriptable.** Native `--json` output and a subset of `es.exe`-compatible options with matching exit codes, so it drops into existing Everything workflows.
+- **Scriptable.** A script written for Everything's `es.exe` needs only the program name changed to `gozler`. `--json` prints the results as JSON, and each outcome has its own exit code.
 - **Folder sizes.** A folder's size is the total of the files below it, in `-size`, the exports, `size:` and the size sort.
 - **Starts with an overview.** `gozler` alone shows the version, whether the service runs, and how to start it. `-h` prints help that fits on one screen.
 
@@ -95,23 +95,25 @@ Open Gozler from the Start menu, type, and open what it finds. Help > Search syn
 
 To copy, move or delete what it finds, select the results and choose File > Copy to folder…, Move to folder… or Delete. Edit > Cut and Paste work too, and so does dropping files on a folder row. View > File operations shows each operation's progress and lets you pause, cancel or reorder it. A delete is permanent: Gozler does not use the Recycle Bin.
 
-Or query the running daemon from any terminal:
+Or search from any terminal. `gozler` alone shows whether the service runs and how to start. `gozler -h` prints a quick help that fits on one screen, and `gozler --help` the full reference: every option, search function and exit code.
 
 ```
-# search everywhere
-gozler report.pdf
-
-# scope to a folder, cap results, add columns, sort, export
-gozler -path C:\Users\me invoice -n 50 -size -dm -sort-path -export-csv out.csv
-
-# machine-readable output
-gozler --json kernel32.dll
-
-# index and daemon status
-gozler --status
+gozler report                      # names that contain report
+gozler readme*.txt                 # .txt files that start with readme
+gozler report !draft               # names with report but not draft
+gozler C:\repo\ *.cs               # .cs files anywhere in C:\repo
+gozler *.log dm:7days              # .log files changed in the last 7 days
+gozler "size:>1gb"                 # files and folders larger than 1 GB
+gozler *.iso -sort size -n 10      # the 10 largest .iso files
+gozler -n all report               # every match, not just the first 20
+gozler -export-csv out.csv ext:cs  # save the .cs files to out.csv
+gozler --json report               # the matches as JSON
+gozler --status                    # whether the index is ready
 ```
 
-`gozler` accepts a subset of `es.exe` options (`-path`, `-n` / `-max-results`, the `-sort` family, `-size`, `-dm`, `-export-csv`, and the CSV-shape options) and keeps `es.exe`'s exit codes 4 to 9; codes 1, 2, 3 and 10 are its own, and `gozler --help` lists them all. Unsupported options exit `6`, the same as `es.exe`.
+gozler shows 20 results unless you pass `-n`. Put quotes around a term that contains `|`, `<`, `>` or `;`. gozler exits 0 when it is done, 2 when results may be incomplete, and 10 when the limit left some out.
+
+A script written for Everything's `es.exe` or for goz 0.2.0 needs only the program name changed to `gozler`: every option keeps its name and purpose. gozler's own options start with `--`, as `--json` does.
 
 ## Performance
 
