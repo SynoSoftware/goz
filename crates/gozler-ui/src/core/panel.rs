@@ -762,6 +762,9 @@ struct Awaited {
     name: Name,
     /// The renamed entry was selected, so its new name is too.
     select: bool,
+    /// The name of the entry it renames: while a row shows it, the rename
+    /// has not happened, as when it waits for the answer to a conflict.
+    from: Option<Name>,
     operation: OperationId,
     /// The moment the operation's end was seen: a listing started after it
     /// that lacks the name means the operation did not create it.
@@ -812,6 +815,16 @@ impl Panel {
 
     pub(crate) fn view(&self) -> &View {
         &self.view
+    }
+
+    /// The folder that `F5` and `F6` offer to copy or move to when this is
+    /// the other panel: the open folder, also while it is still read; none
+    /// for a search, a drive that is not ready or a folder not yet open.
+    pub(crate) fn destination(&self) -> Option<&str> {
+        match self.view {
+            View::Reading | View::Folder if !self.folder.is_empty() => Some(&self.folder),
+            _ => None,
+        }
     }
 
     pub(crate) fn sort(&self) -> SortSpec {
@@ -974,6 +987,13 @@ impl Panel {
 
     /// The row with exactly `name`, as an operation of this window
     /// creates it.
+    /// The row that shows `awaited`'s name, once no row shows the entry it
+    /// renames.
+    fn awaited_row(&self, awaited: &Awaited) -> Option<u64> {
+        let renamed = (awaited.from.as_ref()).is_some_and(|from| self.row_named(from).is_some());
+        self.row_named(&awaited.name).filter(|_| !renamed)
+    }
+
     fn row_named(&self, name: &Name) -> Option<u64> {
         (self.up_rows()..self.count()).find(|row| {
             self.entry(*row)
@@ -2237,7 +2257,7 @@ impl Panels {
                 panel.note_folder();
                 if let Some(awaited) = &panel.awaited
                     && awaited.ended.is_some_and(|ended| ended < read.generation)
-                    && panel.row_named(&awaited.name).is_none()
+                    && panel.awaited_row(awaited).is_none()
                 {
                     panel.awaited = None;
                 }
@@ -2417,17 +2437,20 @@ impl Panels {
     }
 
     /// The operation `operation` gives an entry of `side`'s folder the name
-    /// `name`: the focus goes to it when a row shows it, and with `select`
-    /// it is selected, because Gozler's own rename keeps the selection on
-    /// the renamed entry, which a rename by another program does not.
-    /// Another folder, or a listing after the operation's end without the
-    /// name, forgets it. A name that a row shows exactly now is not
-    /// awaited: the operation does not create it, as when a move goes into
-    /// a folder of that name or a conflict keeps the entry already there.
+    /// `name`, renaming the entry `from` if it is a rename: the focus goes
+    /// to it when a row shows it and none shows `from`, and with `select` it
+    /// is selected, because Gozler's own rename keeps the selection on the
+    /// renamed entry, which a rename by another program does not. Another
+    /// folder, or a listing after the operation's end without the name or
+    /// still with `from`, forgets it. A name that a row shows exactly now
+    /// is awaited only for a rename that may replace it: otherwise the
+    /// operation does not create it, as when a move goes into a folder of
+    /// that name.
     pub(crate) fn await_name(
         &mut self,
         side: Side,
         name: &str,
+        from: Option<&str>,
         select: bool,
         operation: OperationId,
     ) {
@@ -2436,16 +2459,16 @@ impl Panels {
             return;
         }
         let name = Name::of(name.encode_utf16().collect());
+        let from = from.map(|from| Name::of(from.encode_utf16().collect()));
         let panel = self.panel_mut(side);
-        panel.awaited = match panel.row_named(&name) {
-            Some(_) => None,
-            None => Some(Awaited {
-                name,
-                select,
-                operation,
-                ended: None,
-            }),
-        };
+        let replaces = (from.as_ref()).is_some_and(|from| panel.row_named(from).is_some());
+        panel.awaited = (replaces || panel.row_named(&name).is_none()).then_some(Awaited {
+            name,
+            select,
+            from,
+            operation,
+            ended: None,
+        });
     }
 
     /// The place that shows `side`'s awaited name, once a row shows it,
@@ -2454,7 +2477,7 @@ impl Panels {
     pub(crate) fn show_awaited(&mut self, side: Side) -> Option<Place> {
         let panel = self.panel_mut(side);
         let awaited = panel.awaited.as_ref()?;
-        let row = panel.row_named(&awaited.name)?;
+        let row = panel.awaited_row(awaited)?;
         let select = awaited.select;
         panel.awaited = None;
         panel.gone_focus = None;
@@ -3422,7 +3445,13 @@ pub(crate) mod tests {
         let mut panels = showing(r"C:\f", vec![file("a.txt", 1, 0), file("b.txt", 1, 0)]);
         // `..`, a.txt, b.txt: a.txt selected and focused.
         panels.set_selected(Side::Left, vec![1..2]);
-        panels.await_name(Side::Left, "c.txt", true, OperationId::for_tests(1));
+        panels.await_name(
+            Side::Left,
+            "c.txt",
+            Some("a.txt"),
+            true,
+            OperationId::for_tests(1),
+        );
         let renamed = FolderChange::Renamed {
             from: wide("a.txt"),
             to: file("c.txt", 1, 0),
@@ -3437,7 +3466,7 @@ pub(crate) mod tests {
         assert_eq!(panels.show_awaited(Side::Left), None, "it is shown once");
 
         let id = OperationId::for_tests(2);
-        panels.await_name(Side::Left, "d.txt", false, id);
+        panels.await_name(Side::Left, "d.txt", None, false, id);
         panels.operations_ended(&[(id, delete(&[r"C:\other\x"]))]);
         let ask = panels.read_again(Side::Left).expect("a folder shows");
         complete(&mut panels, &ask, r"C:\f", vec![file("b.txt", 1, 0)]);
@@ -3445,7 +3474,42 @@ pub(crate) mod tests {
         complete(&mut panels, &ask, r"C:\f", vec![file("d.txt", 1, 0)]);
         assert_eq!(panels.show_awaited(Side::Left), None);
 
-        panels.await_name(Side::Left, "d.txt", true, OperationId::for_tests(3));
+        panels.await_name(Side::Left, "d.txt", None, true, OperationId::for_tests(3));
+        assert_eq!(panels.show_awaited(Side::Left), None);
+    }
+
+    /// `F6` to a name a row shows and Replace brings the focus to that row
+    /// once the renamed entry is gone (#111); Skip, which keeps the entry,
+    /// forgets the name at the listing after the end, so the row never
+    /// takes the focus.
+    #[test]
+    fn a_rename_that_replaces_takes_the_focus_once_done() {
+        let entries = vec![file("a.txt", 1, 0), file("b.txt", 1, 0)];
+        let mut panels = showing(r"C:\f", entries.clone());
+        panels.set_selected(Side::Left, vec![1..2]);
+        panels.await_name(
+            Side::Left,
+            "b.txt",
+            Some("a.txt"),
+            true,
+            OperationId::for_tests(1),
+        );
+        assert_eq!(panels.show_awaited(Side::Left), None, "the rename waits");
+        let renamed = FolderChange::Renamed {
+            from: wide("a.txt"),
+            to: file("b.txt", 1, 0),
+        };
+        panels.apply_changes(Side::Left, vec![renamed], Some(1));
+        let place = panels.show_awaited(Side::Left).expect("b.txt replaced");
+        assert_eq!((place.focused, place.selected), (Some(1), vec![1..2]));
+
+        let mut panels = showing(r"C:\f", entries.clone());
+        let id = OperationId::for_tests(2);
+        panels.await_name(Side::Left, "b.txt", Some("a.txt"), false, id);
+        panels.operations_ended(&[(id, delete(&[r"C:\other\x"]))]);
+        let ask = panels.read_again(Side::Left).expect("a folder shows");
+        complete(&mut panels, &ask, r"C:\f", entries);
+        panels.apply_changes(Side::Left, vec![FolderChange::Gone(wide("a.txt"))], None);
         assert_eq!(panels.show_awaited(Side::Left), None);
     }
 
@@ -3535,6 +3599,22 @@ pub(crate) mod tests {
             ReadChange::Refused { .. }
         ));
         assert!(matches!(panels.panel(Side::Left).view(), View::Reading));
+    }
+
+    /// `F5` and `F6` offer the other panel's folder as soon as it opens,
+    /// not only once its listing, which takes long on a large folder or a
+    /// share, has completed (#111).
+    #[test]
+    fn a_folder_still_read_is_the_destination() {
+        let mut panels = Panels::new(&SavedPanels::default());
+        let ask = panels.go(Side::Left, r"C:\a".to_owned(), None);
+        assert_eq!(panels.panel(Side::Left).destination(), None);
+        let opened = ReadEvent::Opened {
+            generation: ask.generation,
+            folder: r"C:\a".to_owned(),
+        };
+        panels.accept_read(Side::Left, opened, None);
+        assert_eq!(panels.panel(Side::Left).destination(), Some(r"C:\a"));
     }
 
     /// More changes than go in one by one rebuild the entries, which must

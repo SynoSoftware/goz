@@ -370,8 +370,13 @@ impl FileReader {
         }
     }
 
-    /// Everything the thread found, without waiting.
+    /// Everything the thread found, without waiting; nothing after a
+    /// [`release`](Self::release), whose page a page found before it would
+    /// replace.
     pub(crate) fn drain(&self) -> Vec<ViewerEvent> {
+        if self.stop.stopped() {
+            return Vec::new();
+        }
         self.events.try_iter().collect()
     }
 

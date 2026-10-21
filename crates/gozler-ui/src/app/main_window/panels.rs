@@ -1617,10 +1617,10 @@ impl MainWindow {
             return;
         };
         let renamed = match (&destination, one) {
-            (Destination::Typed(path), Some(_)) if moves => {
+            (Destination::Typed(path), Some(from)) if moves => {
                 let path = path.to_string_lossy().into_owned();
                 (panel::same_folder(&parent_of(&path), &folder))
-                    .then(|| panel::last_name(&path).to_owned())
+                    .then(|| (panel::last_name(&path).to_owned(), from))
             }
             _ => None,
         };
@@ -1638,11 +1638,11 @@ impl MainWindow {
         // Submitting clears the selection (DESIGN.md: Copy and Move); Gozler's
         // own rename selects the renamed entry again.
         self.panel(side).list.set_selected(&[]);
-        if let (Some(name), Some(id)) = (renamed, id) {
+        if let (Some((name, from)), Some(id)) = (renamed, id) {
             self.model
                 .borrow_mut()
                 .panels_mut()
-                .await_name(side, &name, selected, id);
+                .await_name(side, &name, Some(&from), selected, id);
         }
     }
 
@@ -1682,10 +1682,8 @@ impl MainWindow {
             Some((name, _)) => strings.format(name_line, &[name]),
             None => strings.count(items_line, chosen.len() as u64, &*numbers, &[]),
         };
-        let mut text = match other.view() {
-            View::Folder if !other.folder().is_empty() => panel::join(other.folder(), ""),
-            _ => String::new(),
-        };
+        let mut text =
+            (other.destination()).map_or_else(String::new, |folder| panel::join(folder, ""));
         let units = |text: &str| text.encode_utf16().count();
         let selected = match &one {
             Some((name, folder)) if moves && !text.is_empty() => {
@@ -1734,7 +1732,7 @@ impl MainWindow {
             self.model
                 .borrow_mut()
                 .panels_mut()
-                .await_name(side, &name, false, id);
+                .await_name(side, &name, None, false, id);
         }
     }
 

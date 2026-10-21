@@ -1189,9 +1189,11 @@ impl StatusOperation {
     ) -> Option<StatusOperation> {
         let newest = |running: bool| {
             (operations.iter())
-                .filter(|operation| match operation.state {
+                .filter(|operation| match &operation.state {
                     State::Running(_) => running,
-                    State::Ended(_) => !running && !reported.contains(&operation.id),
+                    State::Ended(outcome) => {
+                        !running && !reported.contains(&operation.id) && !did_nothing(outcome)
+                    }
                     _ => false,
                 })
                 .max_by_key(|operation| operation.id)
@@ -1383,6 +1385,13 @@ fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> St
             strings.format("file_operations.status_creating", &[&text_of(path)])
         }
     }
+}
+
+/// Whether the person cancelled the operation before it finished or failed
+/// any item, as Cancel at its conflict question does. It then shows no
+/// line and leaves the line of the operation that ended before it.
+pub(crate) fn did_nothing(outcome: &Outcome) -> bool {
+    matches!(outcome.end, End::Cancelled) && outcome.items == 0
 }
 
 /// What an ended operation did, with the count of the items it finished

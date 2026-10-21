@@ -405,7 +405,9 @@ impl Operations {
         };
         let took =
             outcome.items > 0 && matches!(**request, Request::Delete { .. } | Request::Move { .. });
-        self.last_ended = Some((id, Arc::clone(request), Arc::clone(outcome)));
+        if !file_operations::did_nothing(outcome) {
+            self.last_ended = Some((id, Arc::clone(request), Arc::clone(outcome)));
+        }
         if took {
             *phase = Phase::Kept;
             None
@@ -657,7 +659,8 @@ mod tests {
     /// The status bar shows the running operation, else the newest that
     /// ended and is not reported yet, whose dialog is about to say what
     /// failed, else the one reported last, which after Hide is the only
-    /// sign that it finished.
+    /// sign that it finished; one cancelled before it did anything counts
+    /// as neither.
     #[test]
     fn the_status_shows_running_then_unreported_then_last_reported() {
         let mut operations = Operations::default();
@@ -676,6 +679,13 @@ mod tests {
         ];
         assert_eq!(shown(&operations, &with_running), Some(id(3)));
         operations.reported(id(1));
+        assert_eq!(shown(&operations, &[]), Some(id(1)));
+        // Cancel at a conflict question did nothing, so it leaves the line
+        // of the operation before it (#111).
+        let cancelled = [op(4, copy(), ended(End::Cancelled, 0, false))];
+        operations.accept(&cancelled, Instant::now());
+        assert_eq!(shown(&operations, &cancelled), Some(id(1)));
+        operations.reported(id(4));
         assert_eq!(shown(&operations, &[]), Some(id(1)));
     }
 

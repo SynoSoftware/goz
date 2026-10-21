@@ -597,9 +597,10 @@ impl Viewer {
 
     /// Activates the main window, which keeps its focused row, so `F3`,
     /// `Esc`, `Down`, `F3` walks through the files; Windows would
-    /// otherwise activate whichever window was behind the Viewer.
+    /// otherwise activate whichever window was behind the Viewer. A main
+    /// window the person minimized stays minimized.
     fn close(&self, hwnd: Hwnd) {
-        if self.main.is_visible() {
+        if self.main.is_on_screen() {
             self.main.bring_to_front();
         }
         hwnd.destroy();
