@@ -10,12 +10,12 @@ fn interned_shared_names_are_found() {
     };
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
-        frn: Frn(u128::from(frn) | (1 << 48)),
-        parent_frn: Frn(if parent < 100 {
-            NTFS_ROOT_FRN.0
+        frn: Frn::ntfs(frn, 1),
+        parent_frn: if parent < 100 {
+            NTFS_ROOT_FRN
         } else {
-            u128::from(parent) | (1 << 48)
-        }),
+            Frn::ntfs(parent, 1)
+        },
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
@@ -61,12 +61,12 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
 
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     let rec = |frn: u64, parent: u64, name: &str, is_dir: bool| ParsedUsnRecord {
-        frn: Frn(u128::from(frn) | (1 << 48)),
-        parent_frn: Frn(if parent < 100 {
-            NTFS_ROOT_FRN.0
+        frn: Frn::ntfs(frn, 1),
+        parent_frn: if parent < 100 {
+            NTFS_ROOT_FRN
         } else {
-            u128::from(parent) | (1 << 48)
-        }),
+            Frn::ntfs(parent, 1)
+        },
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),

@@ -26,6 +26,7 @@
 //! [`zerocopy`] views; the parser contains no `unsafe` code.
 
 use crate::types::{Frn, MAX_NAME_UTF16_BYTES};
+use crate::usn::record::FILE_ATTRIBUTE_DIRECTORY;
 use crate::wtf8;
 use zerocopy::little_endian::{I64, U32, U64};
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
@@ -90,9 +91,6 @@ pub const FILE_LAYOUT_NAME_ENTRY_PRIMARY: u32 = 0x0000_0001;
 /// name already fits 8.3 rules).
 pub const FILE_LAYOUT_NAME_ENTRY_DOS: u32 = 0x0000_0002;
 
-/// `FILE_ATTRIBUTE_DIRECTORY`: directories report `size: None`.
-const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
-
 /// UTF-16LE bytes of `"::$DATA"`. NTFS identifies the unnamed data stream
 /// either by an empty `StreamIdentifier` or by this exact spelling
 /// (wimlib: "The unnamed data stream may be given as an empty string rather
@@ -149,6 +147,12 @@ pub struct LayoutFile {
     /// Every hard-link name of this file, in chain order (including DOS-only
     /// aliases, marked via [`LayoutName::dos_only`]).
     pub names: Vec<LayoutName>,
+}
+
+impl LayoutFile {
+    pub fn is_dir(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
 }
 
 /// Structural corruption detected while walking a layout buffer.
@@ -410,28 +414,15 @@ fn parse_file(
         )?;
         loop {
             let raw: RawNameEntry = read_struct(buf, name_off, "FILE_LAYOUT_NAME_ENTRY")?;
-            let name_len = raw.file_name_length.get();
-            // Cap before allocating; see `LayoutWalkError::NameTooLong`.
-            if name_len as usize > MAX_NAME_UTF16_BYTES {
-                return Err(LayoutWalkError::NameTooLong {
-                    what: "FILE_LAYOUT_NAME_ENTRY.FileName",
-                    offset: name_off,
-                    len: name_len,
-                    max: MAX_NAME_UTF16_BYTES as u32,
-                });
-            }
-            if !name_len.is_multiple_of(2) {
-                return Err(LayoutWalkError::OddUtf16Length {
-                    what: "FILE_LAYOUT_NAME_ENTRY.FileNameLength",
-                    offset: name_off,
-                    len: name_len,
-                });
-            }
-            let name_bytes = read_bytes(
+            let name_bytes = read_name(
                 buf,
-                name_off + size_of::<RawNameEntry>(),
-                name_len as usize,
-                "FILE_LAYOUT_NAME_ENTRY.FileName",
+                name_off,
+                size_of::<RawNameEntry>(),
+                raw.file_name_length.get(),
+                (
+                    "FILE_LAYOUT_NAME_ENTRY.FileNameLength",
+                    "FILE_LAYOUT_NAME_ENTRY.FileName",
+                ),
             )?;
             let flags = raw.flags.get();
             names.push(LayoutName {
@@ -575,6 +566,35 @@ pub(super) fn follow_offset(
         });
     }
     Ok(abs)
+}
+
+/// Reads the UTF-16LE name that follows the `fixed` bytes of the structure at
+/// `offset`, whose `FileNameLength` is `len`. The length is capped before
+/// anything is read; see [`LayoutWalkError::NameTooLong`]. The last argument
+/// names the length field and the name field, for the error.
+pub(super) fn read_name<'b>(
+    buf: &'b [u8],
+    offset: usize,
+    fixed: usize,
+    len: u32,
+    (length_field, name_field): (&'static str, &'static str),
+) -> Result<&'b [u8], LayoutWalkError> {
+    if len as usize > MAX_NAME_UTF16_BYTES {
+        return Err(LayoutWalkError::NameTooLong {
+            what: name_field,
+            offset,
+            len,
+            max: MAX_NAME_UTF16_BYTES as u32,
+        });
+    }
+    if !len.is_multiple_of(2) {
+        return Err(LayoutWalkError::OddUtf16Length {
+            what: length_field,
+            offset,
+            len,
+        });
+    }
+    read_bytes(buf, offset + fixed, len as usize, name_field)
 }
 
 /// Borrows `need` bytes at `offset`, distinguishing "offset itself is outside

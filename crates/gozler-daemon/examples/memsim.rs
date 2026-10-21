@@ -108,7 +108,7 @@ fn main() {
             }
         };
         let is_dir = dirs.contains(p.as_str());
-        let my_rec = u128::from(next_rec) | (1 << 48);
+        let my_rec = Frn::ntfs(next_rec, 1).0;
         next_rec += 1;
         if is_dir {
             rec_of.insert(p.clone(), my_rec);
@@ -132,7 +132,7 @@ fn main() {
     let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
     for (rec_no, row) in (1000_u64..).zip(rows.iter()) {
         let r = ParsedUsnRecord {
-            frn: Frn(u128::from(rec_no) | (1 << 48)),
+            frn: Frn::ntfs(rec_no, 1),
             parent_frn: Frn(row.parent_rec),
             reason: USN_REASON_FILE_CREATE,
             attributes: if row.is_dir {
@@ -159,7 +159,7 @@ fn main() {
         let mut name = row.name.clone();
         name.push(b'~');
         let r = ParsedUsnRecord {
-            frn: Frn(u128::from(rec_no) | (1 << 48)),
+            frn: Frn::ntfs(rec_no, 1),
             parent_frn: Frn(row.parent_rec),
             reason: USN_REASON_FILE_CREATE,
             attributes: 0,

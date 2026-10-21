@@ -29,7 +29,7 @@ const L3: u64 = 12;
 const FILES_PER_LEAF: u64 = 60; // ~200k files, enough to make the copy real
 
 fn frn(rec: u64) -> Frn {
-    Frn(u128::from(rec) | (1 << 48))
+    Frn::ntfs(rec, 1)
 }
 
 fn rec(f: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> ParsedUsnRecord {

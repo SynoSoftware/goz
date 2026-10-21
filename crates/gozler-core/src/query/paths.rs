@@ -547,7 +547,7 @@ mod tests {
         let mut parent = NTFS_ROOT_FRN;
         let mut entries = Vec::new();
         let rec = |frn: u64, parent: Frn, name: String, dir: bool| ParsedUsnRecord {
-            frn: Frn(u128::from(frn) | (1 << 48)),
+            frn: Frn::ntfs(frn, 1),
             parent_frn: parent,
             reason: USN_REASON_FILE_CREATE,
             attributes: if dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },

@@ -28,7 +28,7 @@ const L4: u64 = 10;
 const FILES_PER_LEAF: u64 = 52; // 24*14*12*10*52 ~= 2.1M files at depth 5+
 
 fn frn(rec: u64) -> Frn {
-    Frn(u128::from(rec) | (1 << 48))
+    Frn::ntfs(rec, 1)
 }
 
 fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {

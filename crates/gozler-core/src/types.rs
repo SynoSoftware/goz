@@ -32,6 +32,16 @@ impl Frn {
         (self.0 as u64 >> 48) as u16
     }
 
+    /// The NTFS file ID of MFT record `record` at `sequence`.
+    #[inline]
+    pub const fn ntfs(record: u64, sequence: u16) -> Self {
+        debug_assert!(
+            record <= 0x0000_FFFF_FFFF_FFFF,
+            "a record number has 48 bits"
+        );
+        Frn(((sequence as u128) << 48) | record as u128)
+    }
+
     /// Whether the ID needs more than 64 bits, as a ReFS ID does.
     #[inline]
     pub fn is_wide(self) -> bool {
@@ -188,8 +198,8 @@ mod tests {
 
     #[test]
     fn frn_slot_reuse_yields_distinct_values() {
-        let dead = Frn((3 << 48) | 42);
-        let next_tenant = Frn((4 << 48) | 42);
+        let dead = Frn::ntfs(42, 3);
+        let next_tenant = Frn::ntfs(42, 4);
         assert_eq!(dead.record_number(), next_tenant.record_number());
         assert_ne!(dead, next_tenant);
     }

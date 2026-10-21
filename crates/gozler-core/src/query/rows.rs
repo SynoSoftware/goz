@@ -1146,7 +1146,7 @@ mod tests {
 
     fn volume(files: &[File]) -> VolumeIndex {
         let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
-        let frn = |n: usize| Frn((n as u128 + 100) | (1 << 48));
+        let frn = |n: usize| Frn::ntfs(n as u64 + 100, 1);
         let rec = |f: Frn, parent: Frn, name: &str, is_dir: bool| ParsedUsnRecord {
             frn: f,
             parent_frn: parent,
@@ -1538,7 +1538,7 @@ mod tests {
         let rows = ResultRows::search(vec![volume.clone()], &query, None, spec).expect("no scope");
         let (snapshot, kept) = rows.into_snapshot().expect("one volume");
         // b.txt, the second file the helper makes after the folders.
-        let b = Frn((FOLDERS.len() as u128 + 1 + 100) | (1 << 48));
+        let b = Frn::ntfs(FOLDERS.len() as u64 + 1 + 100, 1);
         let mut changed = volume.index.write().expect("no test panics holding it");
         changed.apply_batch(&[ParsedUsnRecord {
             frn: b,

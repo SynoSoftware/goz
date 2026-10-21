@@ -1246,10 +1246,8 @@ impl FrnMap {
     pub(crate) fn densify_if_smaller(&mut self) {
         let FrnMap::Sparse(m) = self else { return };
         let Some(&max) = m.keys().max() else { return };
-        let per_bucket = (size_of::<(u64, EntryIdx)>() + 1) as u128;
-        let buckets = ((m.capacity() as u128 * 8) / 7).next_power_of_two();
-        let dense_bytes = (max as u128 + 1) * size_of::<EntryIdx>() as u128;
-        if dense_bytes < buckets * per_bucket {
+        let dense_bytes = (u128::from(max) + 1) * size_of::<EntryIdx>() as u128;
+        if dense_bytes < u128::from(hash_map_memory(m).allocated) {
             let mut v = vec![NIL; max as usize + 1];
             for (&record, &idx) in m.iter() {
                 v[record as usize] = idx;

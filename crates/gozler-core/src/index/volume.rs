@@ -28,7 +28,7 @@ use crate::attributes::{Attributes, PackedAttributes};
 use crate::include::VolumeRules;
 use crate::layout::LayoutFile;
 use crate::types::{EntryIdx, Frn, NIL};
-use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, USN_REASON_RENAME_NEW_NAME};
+use crate::usn::record::USN_REASON_RENAME_NEW_NAME;
 use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -42,7 +42,7 @@ use include::Screen;
 /// each volume's root ID from the volume, and gives this one only to the
 /// empty index of a volume not built yet; tests and benches build
 /// NTFS-shaped indexes with it.
-pub const NTFS_ROOT_FRN: Frn = Frn(0x0005_0000_0000_0005);
+pub const NTFS_ROOT_FRN: Frn = Frn::ntfs(5, 5);
 
 /// Synthetic name for the lost+found root (never collides: `$` names are NTFS
 /// metafiles, and this FRN is unreachable).
@@ -282,11 +282,10 @@ impl VolumeIndex {
         let mut entries = EntryTable::new(ids);
         let mut names = NameStore::new();
         let mut by_frn = FrnMap::new(ids);
-        let root_frn = root;
 
         let root_name = names.intern(b"");
-        let root = entries.alloc(
-            root_frn,
+        let root_idx = entries.alloc(
+            root,
             NIL,
             root_name,
             EntryFlags::DIR,
@@ -295,7 +294,7 @@ impl VolumeIndex {
             PackedAttributes::default(),
             NIL,
         );
-        by_frn.set(root_frn, root);
+        by_frn.set(root, root_idx);
 
         // Lost+found: synthetic, not in the FRN map (never a USN target).
         let lf_name = names.intern(LOST_FOUND_NAME);
@@ -314,7 +313,7 @@ impl VolumeIndex {
             entries,
             names,
             by_frn,
-            root,
+            root: root_idx,
             lost_found,
             instance: next_instance(),
             generation: 0,
@@ -326,7 +325,7 @@ impl VolumeIndex {
             include: None,
             left_out: FxHashSet::default(),
         };
-        this.link_same_name(root, root_name);
+        this.link_same_name(root_idx, root_name);
         this.link_same_name(lost_found, lf_name);
         this
     }
@@ -388,7 +387,7 @@ impl VolumeIndex {
     /// Applies FILE_LAYOUT enrichment: sets size/mtime and attributes and
     /// reconciles the file's hard-link names (dropping 8.3 DOS-only aliases).
     pub fn enrich(&mut self, file: &LayoutFile) {
-        let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        let is_dir = file.is_dir();
 
         // Enrichment is ADD-ONLY: it never tombstones or replaces an existing
         // entry. This is critical: the entry may be a directory that already
@@ -440,7 +439,7 @@ impl VolumeIndex {
     /// enriches the root that [`Self::new`] made, because taking its name and
     /// parent would make the root its own parent and leave no entry a path.
     pub fn insert_layout(&mut self, file: &LayoutFile) {
-        let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        let is_dir = file.is_dir();
         let first_name = file.names.iter().find(|n| !n.dos_only);
         if let Some(name) = first_name.filter(|n| n.parent_frn != file.frn) {
             self.upsert_link(file.frn, name.parent_frn, &name.name, is_dir);
@@ -458,11 +457,10 @@ impl VolumeIndex {
     /// placeholder takes the listed name and folder, because its own record
     /// never reached the index.
     pub fn insert_listed(&mut self, file: &LayoutFile) {
-        if self.head_of(file.frn).is_none_or(|h| self.is_synthetic(h))
+        if self.lacks(file.frn)
             && let Some(name) = file.names.first()
         {
-            let is_dir = file.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-            self.upsert_link(file.frn, name.parent_frn, &name.name, is_dir);
+            self.upsert_link(file.frn, name.parent_frn, &name.name, file.is_dir());
         }
         self.enrich(file);
     }
@@ -508,7 +506,7 @@ impl VolumeIndex {
                         // same way when it comes back.
                         let missed = (rec.reason & USN_REASON_RENAME_NEW_NAME != 0
                             || screen == Screen::Missed)
-                            && self.head_of(frn).is_none_or(|h| self.is_synthetic(h));
+                            && self.lacks(frn);
                         if let UpsertResult::NeedsReconcile =
                             self.upsert_link(frn, rec.parent_frn, &rec.name, rec.is_dir())
                         {
@@ -791,6 +789,12 @@ impl VolumeIndex {
         idx == self.root
             || idx == self.lost_found
             || self.entries.flags(idx).contains(EntryFlags::PLACEHOLDER)
+    }
+
+    /// Whether the index holds no real entry of `frn`: none at all, or only a
+    /// placeholder that a child's record left.
+    fn lacks(&self, frn: Frn) -> bool {
+        self.head_of(frn).is_none_or(|h| self.is_synthetic(h))
     }
 
     /// Forces an entry's parent link. Test-only: the public API never

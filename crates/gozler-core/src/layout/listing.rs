@@ -11,15 +11,13 @@
 //! the only end marker.
 
 use super::parse::{
-    LayoutFile, LayoutName, LayoutWalkError, follow_offset, read_bytes, read_struct,
+    LayoutFile, LayoutName, LayoutWalkError, follow_offset, read_name, read_struct,
 };
-use crate::types::{Frn, MAX_NAME_UTF16_BYTES};
+use crate::types::Frn;
+use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT};
 use crate::wtf8;
 use zerocopy::little_endian::{I64, U32, U128};
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
-
-const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// `FILE_ID_EXTD_DIR_INFO` fixed part (88 bytes); `FileName` (UTF-16LE,
 /// `FileNameLength` bytes, not null-terminated) follows.
@@ -62,27 +60,15 @@ pub fn walk_listing_buffer(folder: Frn, buf: &[u8]) -> Result<Vec<LayoutFile>, L
     loop {
         let raw: RawDirEntry = read_struct(buf, entry_off, "FILE_ID_EXTD_DIR_INFO")?;
         let name_len = raw.file_name_length.get();
-        // Cap before allocating, as the layout parser does.
-        if name_len as usize > MAX_NAME_UTF16_BYTES {
-            return Err(LayoutWalkError::NameTooLong {
-                what: "FILE_ID_EXTD_DIR_INFO.FileName",
-                offset: entry_off,
-                len: name_len,
-                max: MAX_NAME_UTF16_BYTES as u32,
-            });
-        }
-        if !name_len.is_multiple_of(2) {
-            return Err(LayoutWalkError::OddUtf16Length {
-                what: "FILE_ID_EXTD_DIR_INFO.FileNameLength",
-                offset: entry_off,
-                len: name_len,
-            });
-        }
-        let name_bytes = read_bytes(
+        let name_bytes = read_name(
             buf,
-            entry_off + size_of::<RawDirEntry>(),
-            name_len as usize,
-            "FILE_ID_EXTD_DIR_INFO.FileName",
+            entry_off,
+            size_of::<RawDirEntry>(),
+            name_len,
+            (
+                "FILE_ID_EXTD_DIR_INFO.FileNameLength",
+                "FILE_ID_EXTD_DIR_INFO.FileName",
+            ),
         )?;
         let name = wtf8::from_utf16le(name_bytes);
         if name != b"." && name != b".." {
@@ -170,26 +156,15 @@ pub fn walk_full_listing_buffer(buf: &[u8]) -> Result<Vec<FolderEntry>, LayoutWa
     loop {
         let raw: RawFullDirEntry = read_struct(buf, entry_off, "FILE_FULL_DIR_INFO")?;
         let name_len = raw.file_name_length.get();
-        if name_len as usize > MAX_NAME_UTF16_BYTES {
-            return Err(LayoutWalkError::NameTooLong {
-                what: "FILE_FULL_DIR_INFO.FileName",
-                offset: entry_off,
-                len: name_len,
-                max: MAX_NAME_UTF16_BYTES as u32,
-            });
-        }
-        if !name_len.is_multiple_of(2) {
-            return Err(LayoutWalkError::OddUtf16Length {
-                what: "FILE_FULL_DIR_INFO.FileNameLength",
-                offset: entry_off,
-                len: name_len,
-            });
-        }
-        let name_bytes = read_bytes(
+        let name_bytes = read_name(
             buf,
-            entry_off + size_of::<RawFullDirEntry>(),
-            name_len as usize,
-            "FILE_FULL_DIR_INFO.FileName",
+            entry_off,
+            size_of::<RawFullDirEntry>(),
+            name_len,
+            (
+                "FILE_FULL_DIR_INFO.FileNameLength",
+                "FILE_FULL_DIR_INFO.FileName",
+            ),
         )?;
         let (units, _) = name_bytes.as_chunks::<2>();
         let name: Vec<u16> = units.iter().map(|&unit| u16::from_le_bytes(unit)).collect();
@@ -226,6 +201,7 @@ pub fn walk_full_listing_buffer(buf: &[u8]) -> Result<Vec<FolderEntry>, LayoutWa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::MAX_NAME_UTF16_BYTES;
     use proptest::prelude::*;
 
     /// One `FILE_ID_EXTD_DIR_INFO` entry, as the fixture builder writes it.

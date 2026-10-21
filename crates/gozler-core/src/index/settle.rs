@@ -32,11 +32,9 @@ use std::collections::{HashSet, VecDeque};
 use crate::index::{Anomaly, ApplyOutcome, LinkTarget, VolumeIndex};
 use crate::layout::LayoutFile;
 use crate::types::Frn;
-use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_RENAME_NEW_NAME};
-
-/// `FILE_ATTRIBUTE_REPARSE_POINT`: a folder with it, such as a junction, is
-/// indexed but not entered, so the walk cannot loop or leave the volume.
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+use crate::usn::record::{
+    FILE_ATTRIBUTE_REPARSE_POINT, ParsedUsnRecord, USN_REASON_RENAME_NEW_NAME,
+};
 
 /// What the walk and the settle read from the volume.
 pub trait VolumeReads {
@@ -135,7 +133,8 @@ pub enum Walk {
 ///
 /// A folder that is gone when the walk lists it is skipped: the journal's
 /// delete record removes it. Any other failure fails the walk. A folder
-/// reparse point, such as a junction, is listed but not entered.
+/// reparse point, such as a junction, is listed but not entered, so the walk
+/// cannot loop or leave the volume.
 ///
 /// Each folder is listed once. A folder that moved during the walk can be met
 /// again, and the journal records every change after its first listing; a
@@ -165,10 +164,7 @@ pub fn walk_folders<R: VolumeReads>(
                 folders.extend(
                     files
                         .iter()
-                        .filter(|f| {
-                            f.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-                                && f.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                        })
+                        .filter(|f| f.is_dir() && f.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0)
                         .map(|f| f.frn),
                 );
                 insert(files);
@@ -329,15 +325,14 @@ pub fn settle_batch<R: VolumeReads>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Batch, FILE_ATTRIBUTE_REPARSE_POINT, FileLink, FileStat, VolumeReads, Walk, WalkFailed,
-        settle_batch, walk_folders,
+        Batch, FileLink, FileStat, VolumeReads, Walk, WalkFailed, settle_batch, walk_folders,
     };
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::layout::{LayoutFile, LayoutName};
     use crate::types::Frn;
     use crate::usn::record::{
-        FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
-        USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, ParsedUsnRecord,
+        USN_REASON_FILE_CREATE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
     };
     use std::cell::RefCell;
     use std::collections::{BTreeSet, HashMap};
@@ -345,7 +340,7 @@ mod tests {
     const ROOT: Frn = NTFS_ROOT_FRN;
 
     fn id(n: u64) -> Frn {
-        Frn(u128::from(n) | (1 << 48))
+        Frn::ntfs(n, 1)
     }
 
     fn attributes(is_dir: bool) -> u32 {

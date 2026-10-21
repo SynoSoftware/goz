@@ -688,7 +688,7 @@ mod tests {
 
         let root = gozler_core::index::NTFS_ROOT_FRN;
         let mut index = VolumeIndex::new(root);
-        let frn = |n: u128| Frn(n | 1 << 48);
+        let frn = |n: u64| Frn::ntfs(n, 1);
         let (docs, read, unread) = (frn(100), frn(101), frn(102));
         for (frn, parent, name, attributes) in [
             (docs, root, "docs", FILE_ATTRIBUTE_DIRECTORY),

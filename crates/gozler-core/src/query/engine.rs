@@ -1772,7 +1772,7 @@ mod tests {
     }
 
     fn frn(rec: u64) -> Frn {
-        Frn(u128::from(rec) | (1 << 48))
+        Frn::ntfs(rec, 1)
     }
 
     fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {

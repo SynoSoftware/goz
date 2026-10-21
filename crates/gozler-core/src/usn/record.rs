@@ -51,6 +51,8 @@ pub const USN_REASON_HARD_LINK_CHANGE: u32 = 0x0001_0000;
 pub const USN_REASON_CLOSE: u32 = 0x8000_0000;
 /// The `FILE_ATTRIBUTE_DIRECTORY` bit of `FileAttributes`.
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+/// The `FILE_ATTRIBUTE_REPARSE_POINT` bit of `FileAttributes`.
+pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 /// Byte length of the leading `USN`/FRN value at the start of every ENUM or
 /// READ output buffer.

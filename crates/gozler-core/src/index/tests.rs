@@ -17,11 +17,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// FRN with sequence 1 for record number `rec`.
 fn frn(rec: u64) -> Frn {
-    Frn(u128::from(rec) | (1 << 48))
+    Frn::ntfs(rec, 1)
 }
 /// FRN with an explicit sequence, for slot-reuse tests.
 fn frn_seq(rec: u64, seq: u16) -> Frn {
-    Frn(u128::from(rec) | (u128::from(seq) << 48))
+    Frn::ntfs(rec, seq)
 }
 
 fn root_frn() -> Frn {

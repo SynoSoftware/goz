@@ -86,7 +86,7 @@ const LEAVES_PER_BRANCH: u64 = 200;
 const FILES_PER_LEAF: u64 = 9;
 
 fn frn(record: u64) -> Frn {
-    Frn(u128::from(record) | (1 << 48))
+    Frn::ntfs(record, 1)
 }
 
 fn create(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
