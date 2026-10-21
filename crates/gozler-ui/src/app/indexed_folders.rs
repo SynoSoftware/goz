@@ -4,6 +4,7 @@
 //! its own copy of the Include settings, which OK gives back to the page.
 
 use super::main_window::MainWindow;
+use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::include::{IncludeDrive, SummaryRow};
 use crate::core::text::Strings;
@@ -12,11 +13,20 @@ use crate::win::controls::{FolderTree, ReportList, TreeItem};
 use crate::win::dialog::{DialogMessage, DialogProc, Opened, TreeChange};
 use gozler_core::include::IndexSettings;
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::time::{Duration, Instant};
 
-/// The dialog's timer, which adds the folders listed on other threads.
-const LISTED_TIMER: usize = 1;
-const LISTED_POLL_MS: u32 = 50;
+/// The dialog's timer, which adds the folders listed on other threads and
+/// sets the check boxes after a click, a slice at a time.
+const WORK_TIMER: usize = 1;
+const WORK_POLL_MS: u32 = 15;
+/// The longest one slice of that work keeps the dialog from the person.
+/// Each tree item that is added or changes its check box raises an
+/// accessibility event, which costs up to a few tenths of a millisecond
+/// while another program listens for them, so `C:\Windows\WinSxS`, with
+/// tens of thousands of subfolders, takes seconds.
+const SLICE: Duration = Duration::from_millis(15);
 
 /// One folder the tree shows: a drive's root, as an empty path, or a folder
 /// below it.
@@ -32,7 +42,28 @@ enum Listing {
     NotListed,
     /// A thread lists them.
     Pending,
+    /// They are in the tree, or wait in [`IndexedFolders::jobs`].
     Listed,
+}
+
+/// Work that the dialog's timer does a slice at a time.
+enum Job {
+    Add(Adding),
+    /// The items whose check boxes, and their children's, are still to be
+    /// set from the settings after a click; the next one is last.
+    Recheck(Vec<TreeItem>),
+}
+
+/// Listed subfolders of `item`, the folder `path` of `drive`, that the tree
+/// does not show yet.
+struct Adding {
+    item: TreeItem,
+    drive: usize,
+    path: String,
+    folders: std::vec::IntoIter<(String, bool)>,
+    /// Whether the tree has opened `item`, which it does once the first of
+    /// them show.
+    opened: bool,
 }
 
 pub(super) struct IndexedFolders<'a> {
@@ -44,6 +75,14 @@ pub(super) struct IndexedFolders<'a> {
     nodes: RefCell<Vec<Node>>,
     /// The folders a thread lists, and where its subfolders arrive.
     pending: RefCell<Vec<(TreeItem, Receiver<Subfolders>)>>,
+    /// The work that waits, the newest last. The timer does the newest
+    /// first, so a folder the person opens, or a click, does not wait
+    /// behind a large folder that is still being added.
+    jobs: RefCell<Vec<Job>>,
+    /// The folder of a summary row that the tree opens down to once the
+    /// folders on the way are in it: the deepest folder reached, and the
+    /// names of the folders below it.
+    revealing: RefCell<Option<(TreeItem, VecDeque<String>)>>,
     /// The summary's rows.
     rows: RefCell<Vec<SummaryRow>>,
     /// Whether the dialog is setting check boxes or rows, whose
@@ -65,6 +104,8 @@ impl<'a> IndexedFolders<'a> {
             settings: RefCell::new(settings),
             nodes: RefCell::new(Vec::new()),
             pending: RefCell::new(Vec::new()),
+            jobs: RefCell::new(Vec::new()),
+            revealing: RefCell::new(None),
             rows: RefCell::new(Vec::new()),
             filling: Cell::new(false),
         }
@@ -113,13 +154,26 @@ impl<'a> IndexedFolders<'a> {
             });
             nodes.len() - 1
         };
-        // A new item gets the control's own check box state, which must not
-        // read as a click.
-        self.filling(|| {
-            let item = tree.insert(parent, text, data, may_have_children)?;
-            tree.set_check(item, check);
-            Some(item)
-        })
+        // A new item's check box must not read as a click.
+        self.filling(|| tree.insert(parent, text, data, may_have_children, check))
+    }
+
+    /// Adds the folder `name` below `item`, the folder `path` of `drive`.
+    fn add_below(&self, tree: FolderTree, item: TreeItem, adding: &Adding, folder: (String, bool)) {
+        let (name, may_have_children) = folder;
+        let below = if adding.path.is_empty() {
+            name.clone()
+        } else {
+            format!(r"{}\{name}", adding.path)
+        };
+        self.add(
+            tree,
+            Some(item),
+            adding.drive,
+            below,
+            &name,
+            may_have_children,
+        );
     }
 
     /// The drive and folder of `item`; `None` for an item the dialog did
@@ -143,9 +197,9 @@ impl<'a> IndexedFolders<'a> {
         Some(format!("{root}{}", node.path))
     }
 
-    /// Lists the subfolders of `item` the first time it opens, on a thread
-    /// of its own, because a folder such as `C:\Windows\WinSxS` takes long
-    /// to list; the dialog's timer adds them. They come from the drive, not
+    /// Lists the subfolders of `item`, unless it was, on a thread of its
+    /// own, because a folder such as `C:\Windows\WinSxS` takes long to list;
+    /// the dialog's timer adds them. They come from the drive, not
     /// from the index, so a folder that is left out can be checked again.
     fn list_later(&self, dialog: Hwnd, tree: FolderTree, item: TreeItem) {
         let Some(folder) = self.start_listing(tree, item) else {
@@ -157,94 +211,137 @@ impl<'a> IndexedFolders<'a> {
             let _ = sender.send(subfolders(&folder));
         });
         self.pending.borrow_mut().push((item, listed));
-        dialog.set_timer(LISTED_TIMER, LISTED_POLL_MS);
+        dialog.set_timer(WORK_TIMER, WORK_POLL_MS);
     }
 
-    /// Lists the subfolders of `item` now, unless they are in the tree,
-    /// waiting for the thread that lists them.
-    fn list_now(&self, tree: FolderTree, item: TreeItem) {
-        let folders = match self.start_listing(tree, item) {
-            Some(folder) => subfolders(&folder),
-            None => {
-                let position = self
-                    .pending
-                    .borrow()
-                    .iter()
-                    .position(|(pending, _)| *pending == item);
-                let Some(position) = position else {
-                    return;
-                };
-                let (_, listed) = self.pending.borrow_mut().remove(position);
-                listed.recv().unwrap_or_default()
-            }
+    /// Records that `item`'s subfolders, `folders`, were listed, and gives
+    /// them to add, or shows that it has none.
+    fn listed(&self, tree: FolderTree, item: TreeItem, folders: Subfolders) -> Option<Adding> {
+        let (drive, path) = {
+            let mut nodes = self.nodes.borrow_mut();
+            let node = nodes.get_mut(tree.data(item))?;
+            node.listing = Listing::Listed;
+            (node.drive, node.path.clone())
         };
-        self.add_folders(tree, item, folders);
+        if folders.is_empty() {
+            tree.set_childless(item);
+            return None;
+        }
+        Some(Adding {
+            item,
+            drive,
+            path,
+            folders: folders.into_iter(),
+            opened: false,
+        })
     }
 
-    /// Adds the folders that the threads have listed, and stops the timer
-    /// once none lists any.
-    fn add_listed(&self, dialog: Hwnd) {
+    /// Takes the folders that the threads have listed, then does one slice
+    /// of the work that waits, and stops the timer once nothing waits.
+    fn work(&self, dialog: Hwnd) {
+        let Some(tree) = Self::tree(dialog) else {
+            return;
+        };
         let mut listed = Vec::new();
-        {
-            let mut pending = self.pending.borrow_mut();
-            pending.retain(|(item, folders)| match folders.try_recv() {
+        self.pending
+            .borrow_mut()
+            .retain(|(item, folders)| match folders.try_recv() {
                 Err(TryRecvError::Empty) => true,
                 answer => {
                     listed.push((*item, answer.unwrap_or_default()));
                     false
                 }
             });
-            if pending.is_empty() {
-                dialog.kill_timer(LISTED_TIMER);
+        for (item, folders) in listed {
+            if let Some(adding) = self.listed(tree, item, folders) {
+                self.jobs.borrow_mut().push(Job::Add(adding));
             }
         }
-        let Some(tree) = Self::tree(dialog) else {
-            return;
-        };
-        for (item, folders) in listed {
-            self.add_folders(tree, item, folders);
-            // The tree opened the item while it had no folders yet.
+        if !self.jobs.borrow().is_empty() {
+            let end = Instant::now() + SLICE;
+            // A tree that draws itself updates its scroll bar for each item.
+            tree.hwnd().draw_once_after(|| {
+                self.recheck_visible(tree);
+                self.work_until(tree, end);
+            });
+        }
+        self.reveal_more(dialog, tree);
+        if self.pending.borrow().is_empty() && self.jobs.borrow().is_empty() {
+            dialog.kill_timer(WORK_TIMER);
+        } else {
+            dialog.set_timer(WORK_TIMER, WORK_POLL_MS);
+        }
+    }
+
+    /// Does the newest job until `end`, then the one before it, and opens
+    /// each folder whose first subfolders it added, because the tree opened
+    /// it while it had none.
+    fn work_until(&self, tree: FolderTree, end: Instant) {
+        let mut opened = Vec::new();
+        while Instant::now() < end {
+            let mut jobs = self.jobs.borrow_mut();
+            match jobs.last_mut() {
+                None => break,
+                Some(Job::Add(adding)) => match adding.folders.next() {
+                    Some(folder) => {
+                        if !adding.opened {
+                            adding.opened = true;
+                            opened.push(adding.item);
+                        }
+                        self.add_below(tree, adding.item, adding, folder);
+                    }
+                    None => drop(jobs.pop()),
+                },
+                Some(Job::Recheck(items)) => match items.pop() {
+                    Some(item) => {
+                        self.recheck(tree, item);
+                        // Reversed, so the walk goes down the tree as it
+                        // shows.
+                        items.extend(tree.children(Some(item)).into_iter().rev());
+                    }
+                    None => drop(jobs.pop()),
+                },
+            }
+        }
+        for item in opened {
             tree.expand(item);
         }
     }
 
-    /// Adds `folders`, the subfolders of `item`, below it.
-    fn add_folders(&self, tree: FolderTree, item: TreeItem, folders: Subfolders) {
-        let (drive, path) = {
-            let mut nodes = self.nodes.borrow_mut();
-            let Some(node) = nodes.get_mut(tree.data(item)) else {
-                return;
-            };
-            node.listing = Listing::Listed;
-            (node.drive, node.path.clone())
-        };
-        if folders.is_empty() {
-            tree.set_childless(item);
-        }
-        for (name, may_have_children) in folders {
-            let below = if path.is_empty() {
-                name.clone()
-            } else {
-                format!(r"{path}\{name}")
-            };
-            self.add(tree, Some(item), drive, below, &name, may_have_children);
+    /// Sets the check boxes of the rows in view from the settings while a
+    /// click's are still being set, so the person sees, and clicks, what
+    /// the settings hold.
+    fn recheck_visible(&self, tree: FolderTree) {
+        let rechecking = (self.jobs.borrow().iter()).any(|job| matches!(job, Job::Recheck(_)));
+        if rechecking {
+            for item in tree.visible_items() {
+                self.recheck(tree, item);
+            }
         }
     }
 
-    /// Sets every check box the tree shows from the settings.
-    fn refresh_checks(&self, tree: FolderTree) {
-        let settings = self.settings.borrow();
+    /// Sets `item`'s check box from the settings.
+    fn recheck(&self, tree: FolderTree, item: TreeItem) {
         let nodes = self.nodes.borrow();
-        let mut items = tree.children(None);
-        self.filling(|| {
-            while let Some(item) = items.pop() {
-                if let Some(node) = nodes.get(tree.data(item)) {
-                    let check = settings.folder_check(&self.drives[node.drive].volume, &node.path);
-                    tree.set_check(item, check);
-                }
-                items.extend(tree.children(Some(item)));
-            }
-        });
+        if let Some(node) = nodes.get(tree.data(item)) {
+            let check =
+                (self.settings.borrow()).folder_check(&self.drives[node.drive].volume, &node.path);
+            self.filling(|| tree.set_check(item, check));
+        }
+    }
+
+    /// Sets every check box the tree shows from the settings, a slice at a
+    /// time, because a click changes the folders above and below it as well.
+    /// The walk starts again from the top, so it replaces an earlier click's.
+    fn refresh_checks(&self, dialog: Hwnd, tree: FolderTree) {
+        let mut tops = tree.children(None);
+        tops.reverse();
+        {
+            let mut jobs = self.jobs.borrow_mut();
+            jobs.retain(|job| !matches!(job, Job::Recheck(_)));
+            jobs.push(Job::Recheck(tops));
+        }
+        self.work(dialog);
     }
 
     fn fill_summary(&self, dialog: Hwnd) {
@@ -275,15 +372,33 @@ impl<'a> IndexedFolders<'a> {
         else {
             return;
         };
-        let Some(mut item) = tree
+        let Some(item) = tree
             .children(None)
             .into_iter()
             .find(|&item| self.node(tree, item).is_some_and(|(d, _)| d == drive))
         else {
             return;
         };
-        for name in path.split('\\').filter(|name| !name.is_empty()) {
-            self.list_now(tree, item);
+        let names = path.split('\\').filter(|name| !name.is_empty());
+        self.revealing
+            .replace(Some((item, names.map(str::to_owned).collect())));
+        self.reveal_more(dialog, tree);
+    }
+
+    /// Opens the tree toward the folder that [`Self::revealing`] names, as
+    /// far as the folders on the way are in the tree, and selects it once
+    /// there. A folder on the way that is still listed or added stops it
+    /// until the timer calls it again.
+    fn reveal_more(&self, dialog: Hwnd, tree: FolderTree) {
+        let Some((mut item, mut names)) = self.revealing.take() else {
+            return;
+        };
+        while let Some(name) = names.front() {
+            self.list_later(dialog, tree, item);
+            if self.adds_children(tree, item) {
+                self.revealing.replace(Some((item, names)));
+                return;
+            }
             tree.expand(item);
             let child = tree.children(Some(item)).into_iter().find(|&child| {
                 self.node(tree, child).is_some_and(|(_, path)| {
@@ -292,12 +407,28 @@ impl<'a> IndexedFolders<'a> {
                 })
             });
             match child {
-                Some(child) => item = child,
+                Some(child) => {
+                    item = child;
+                    names.pop_front();
+                }
                 // The folder is gone from the drive; show the nearest one.
                 None => break,
             }
         }
         tree.select(item);
+    }
+
+    /// Whether a thread lists `item`'s subfolders or the timer still adds
+    /// them.
+    fn adds_children(&self, tree: FolderTree, item: TreeItem) -> bool {
+        let listing = self
+            .nodes
+            .borrow()
+            .get(tree.data(item))
+            .map(|node| node.listing);
+        listing == Some(Listing::Pending)
+            || (self.jobs.borrow().iter())
+                .any(|job| matches!(job, Job::Add(adding) if adding.item == item))
     }
 }
 
@@ -338,13 +469,11 @@ impl DialogProc for IndexedFolders<'_> {
                     &drive.name,
                     drive.root.is_some(),
                 );
-                // Each drive opens one level deep, so the folders to
-                // uncheck are in view.
-                if let Some(item) = item
-                    && drive.root.is_some()
-                {
-                    self.list_now(tree, item);
-                    tree.expand(item);
+                // Each drive opens one level deep once listed, so the
+                // folders to uncheck are in view. A thread lists it, because
+                // a sleeping disk takes seconds to wake.
+                if let Some(item) = item {
+                    self.list_later(dialog, tree, item);
                 }
             }
         }
@@ -387,8 +516,8 @@ impl DialogProc for IndexedFolders<'_> {
                 }
                 true
             }
-            DialogMessage::Timer { id: LISTED_TIMER } => {
-                self.add_listed(dialog);
+            DialogMessage::Timer { id: WORK_TIMER } => {
+                self.work(dialog);
                 true
             }
             DialogMessage::Tree {
@@ -405,9 +534,8 @@ impl DialogProc for IndexedFolders<'_> {
                     self.settings
                         .borrow_mut()
                         .toggle_folder(&self.drives[drive].volume, &path);
-                    // The control changed the check box itself, and a click
-                    // changes the folders above and below it as well.
-                    self.refresh_checks(tree);
+                    // The control changed the check box itself.
+                    self.refresh_checks(dialog, tree);
                     self.fill_summary(dialog);
                 }
                 true
@@ -417,6 +545,15 @@ impl DialogProc for IndexedFolders<'_> {
                     self.reveal(dialog);
                 }
                 true
+            }
+            // The dialog ends without waiting for the tree's items to go.
+            DialogMessage::Command { id }
+                if id == DialogItem::Ok.id() || id == DialogItem::Cancel.id() =>
+            {
+                if let Some(tree) = Self::tree(dialog) {
+                    tree.destroy_later();
+                }
+                false
             }
             DialogMessage::Command { .. }
             | DialogMessage::Edited { .. }
