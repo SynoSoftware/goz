@@ -112,6 +112,43 @@ impl Wildcard {
         }
         (!best.is_empty()).then_some(best)
     }
+
+    /// What this pattern needs of a full path when one name of the path
+    /// decides it: a `*`, then characters without a `\`, `*` or `?`, and
+    /// perhaps a last `*`. `None` for every other pattern, because its `?`
+    /// or a `*` between characters can match a `\`.
+    pub(super) fn one_name(&self) -> Option<OneName> {
+        let [GlobTok::AnyRun, rest @ ..] = self.tokens.as_slice() else {
+            return None;
+        };
+        let (literal, open_end) = match rest {
+            [literal @ .., GlobTok::AnyRun] => (literal, true),
+            literal => (literal, false),
+        };
+        let mut bytes = Vec::new();
+        for token in literal {
+            match token {
+                GlobTok::Lit(cp) if *cp != u32::from(b'\\') => {
+                    crate::wtf8::encode_code_point(*cp, &mut bytes);
+                }
+                _ => return None,
+            }
+        }
+        Some(if open_end {
+            OneName::Inside(bytes)
+        } else {
+            OneName::Last
+        })
+    }
+}
+
+/// Which name of a full path decides a pattern; see [`Wildcard::one_name`].
+pub(super) enum OneName {
+    /// `*text`: the full path ends with the text exactly when its last name
+    /// does, so the pattern can test the name instead.
+    Last,
+    /// `*text*`: the text, as WTF-8 bytes, lies inside one name of the path.
+    Inside(Vec<u8>),
 }
 
 /// Iterative glob match with backtracking on `*` (linear-ish; patterns and

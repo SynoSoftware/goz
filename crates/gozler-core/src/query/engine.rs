@@ -21,7 +21,7 @@ use super::order::{
 use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
 use super::paths::{ComponentBits, DirPaths, FolderCopy, NameForm, ResultNames, root_name};
 use super::rows::VolumeRows;
-use super::wildcard::{CodePointBuf, Wildcard};
+use super::wildcard::{CodePointBuf, OneName, Wildcard};
 use crate::attributes::PackedAttributes;
 use crate::fold::fold;
 use crate::index::store::NameId;
@@ -326,6 +326,24 @@ impl CompiledQuery {
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
 
+        // A path wildcard that one name decides needs no full path: `*.dll`
+        // tests the name, which the prefilter below then scans for, and
+        // `*report*` is a path term that the components below decide.
+        for term in clauses.iter_mut().flat_map(|clause| &mut clause.terms) {
+            let Check::Text(target @ Target::Path, Matcher::Wildcard(wildcard)) = &mut term.check
+            else {
+                continue;
+            };
+            match wildcard.one_name() {
+                Some(OneName::Last) => *target = Target::Name,
+                Some(OneName::Inside(text)) => {
+                    let finder = memmem::Finder::new(&text).into_owned();
+                    term.check = Check::Text(Target::Path, Matcher::Contains(finder));
+                }
+                None => {}
+            }
+        }
+
         // Every match contains the prefilter, so scanning for it yields a
         // superset of the matches that the clauses then verify. The first of
         // equally long literals wins.
@@ -495,6 +513,15 @@ impl Check {
             }
         };
         let finder = |s: &str| memmem::Finder::new(&text(s)).into_owned();
+        // A term that starts with a character that is not a letter or digit,
+        // such as `.dll`, starts its own word, so it matches wherever it is.
+        let word_start = |s: &str| {
+            if is_word(s.chars().next().map(u32::from)) {
+                Matcher::WordStart(finder(s))
+            } else {
+                Matcher::Contains(finder(s))
+            }
+        };
         let wildcard = |s: &str| Wildcard::compile(&text(s));
         let regex = |pattern: &str| {
             RegexBuilder::new(pattern)
@@ -509,8 +536,8 @@ impl Check {
             Test::Path(s) => Check::Text(Target::Path, Matcher::Contains(finder(s))),
             Test::NameWholeWord(s) => Check::Text(Target::Name, Matcher::WholeWord(finder(s))),
             Test::PathWholeWord(s) => Check::Text(Target::Path, Matcher::WholeWord(finder(s))),
-            Test::NameWordStart(s) => Check::Text(Target::Name, Matcher::WordStart(finder(s))),
-            Test::PathWordStart(s) => Check::Text(Target::Path, Matcher::WordStart(finder(s))),
+            Test::NameWordStart(s) => Check::Text(Target::Name, word_start(s)),
+            Test::PathWordStart(s) => Check::Text(Target::Path, word_start(s)),
             Test::NameStart(s) => Check::Text(Target::Name, Matcher::Start(text(s))),
             Test::PathStart(s) => Check::Text(Target::Path, Matcher::Start(text(s))),
             Test::NameWildcard(s) => Check::Text(Target::Name, Matcher::Wildcard(wildcard(s))),
@@ -2214,8 +2241,10 @@ mod tests {
     }
 
     /// A word starts at the start of the name or after a character that is
-    /// not a letter or digit, and `startwith:` matches only at the start of
-    /// the name; with `-p`, both read the full path, which starts with `C:`.
+    /// not a letter or digit, a term that starts with such a character, as
+    /// `.txt` does, starts its own word, and `startwith:` matches only at
+    /// the start of the name; with `-p`, both read the full path, which
+    /// starts with `C:`.
     /// The name terms drive the folded-arena scan, and `-case` the full scan.
     #[test]
     fn word_start_and_name_start_read_where_the_name_or_a_word_starts() {
@@ -2246,6 +2275,10 @@ mod tests {
         assert_eq!(in_names("wordstart:c"), [r"C:\docs\comparator.txt"]);
         assert_eq!(in_names("startwith:para"), pills);
         assert_eq!(in_names("wordstart:report"), [r"C:\docs\my report.txt"]);
+        assert_eq!(
+            in_names("wordstart:.txt"),
+            [r"C:\docs\comparator.txt", r"C:\docs\my report.txt"]
+        );
         assert!(in_names("startwith:report").is_empty());
         assert_eq!(in_names("wordstart:PARA"), pills);
         assert!(found("wordstart:PARA", true, false).is_empty());
@@ -3435,7 +3468,8 @@ mod tests {
         }
 
         /// With -p, terms without a separator, negated or not, of AND and OR
-        /// clauses, in each match mode that one path component decides, find
+        /// clauses, in each match mode that one path component decides, and
+        /// wildcards, which one name decides only as `*a` or `*a*`, find
         /// exactly the entries whose full path, built by walking to the root,
         /// passes them. The root's name `C:` holds `c`, folders hold the
         /// matches below them, and orphans have no path, so a component walk
@@ -3444,7 +3478,7 @@ mod tests {
         fn match_path_terms_agree_with_a_test_of_the_full_path(
             parents in prop::collection::vec(0usize..14, 1..80),
             names in prop::collection::vec("[a-cA-C ]{1,3}", 80),
-            query in "!?[a-cA-C]{1,2}([ |]!?[a-cA-C]{1,2}){0,2}",
+            query in "!?[a-cA-C*?]{1,3}([ |]!?[a-cA-C*?]{1,3}){0,2}",
             term_match in prop::sample::select(
                 &[TermMatch::Anywhere, TermMatch::WholeWords, TermMatch::WordStart][..]
             ),
