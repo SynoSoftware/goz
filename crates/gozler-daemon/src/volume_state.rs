@@ -68,6 +68,9 @@ pub(crate) struct VolumeState {
 struct Rules {
     rules: Arc<VolumeRules>,
     changed: bool,
+    /// A new tail was started to build the volume for changed rules, and no
+    /// build has begun since, so the index follows older ones.
+    unapplied: bool,
 }
 
 /// An index and the facts of the build that made it, installed together.
@@ -166,6 +169,7 @@ impl VolumeState {
             rules: Mutex::new(Rules {
                 rules,
                 changed: false,
+                unapplied: false,
             }),
         }
     }
@@ -184,6 +188,7 @@ impl VolumeState {
             *slot = Rules {
                 rules,
                 changed: true,
+                unapplied: slot.unapplied,
             };
         }
     }
@@ -193,6 +198,23 @@ impl VolumeState {
     pub(crate) fn take_new_rules(&self) -> Option<Arc<VolumeRules>> {
         let mut slot = self.rules.lock();
         std::mem::take(&mut slot.changed).then(|| slot.rules.clone())
+    }
+
+    /// Takes the rules set since the last build began, for the build of a
+    /// new tail, which a volume without a running tail needs to apply them:
+    /// a snapshot, or one given up on. Until that build begins, the volume
+    /// reads as not complete, because its index follows the old rules. Call
+    /// it only when no tail runs.
+    pub(crate) fn take_rules_for_rebuild(&self) -> bool {
+        {
+            let mut slot = self.rules.lock();
+            if !std::mem::take(&mut slot.changed) {
+                return false;
+            }
+            slot.unapplied = true;
+        }
+        self.apply(Event::RulesChanged);
+        true
     }
 
     /// Where the volume is mounted.
@@ -270,7 +292,11 @@ impl VolumeState {
     /// The tail starts building the index. Read the rules for the build after
     /// this call: it marks the rules set so far as applied.
     pub(crate) fn begin_build(&self) -> Building<'_> {
-        self.rules.lock().changed = false;
+        {
+            let mut slot = self.rules.lock();
+            slot.changed = false;
+            slot.unapplied = false;
+        }
         let first = !self.indexed.read().built;
         self.apply(Event::BuildStarted { first });
         Building { state: self, first }
@@ -305,9 +331,11 @@ impl VolumeState {
     /// it only after the tail's pulse reads `Retired`, or when no tail
     /// started.
     pub(crate) fn give_up(&self, last_failure: Option<&str>, attempts: u32) {
+        let rules_unapplied = self.rules.lock().unapplied;
         self.apply(Event::GaveUp {
             last_failure,
             attempts,
+            rules_unapplied,
         });
     }
 
@@ -341,6 +369,7 @@ impl VolumeState {
             rules: Mutex::new(Rules {
                 rules: Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
                 changed: false,
+                unapplied: false,
             }),
         }
     }
@@ -367,9 +396,14 @@ enum Event<'a> {
     ReadsRecovered,
     Failed(String),
     TailRetired,
+    /// A new tail starts to build a volume that no tail ran, for changed
+    /// Include rules.
+    RulesChanged,
     GaveUp {
         last_failure: Option<&'a str>,
         attempts: u32,
+        /// The tails started for changed Include rules never began a build.
+        rules_unapplied: bool,
     },
 }
 
@@ -405,6 +439,11 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         // hardware cannot extend a false Live indefinitely.
         (Live | Rescanning, Event::TailRetired) => Offline,
         (Bootstrapping | Offline | Failed { .. } | Snapshot, Event::TailRetired) => phase.clone(),
+        // The index follows the old Include rules until the new tail's build
+        // begins, so the results are flagged incomplete until then, as a
+        // built volume that nothing tails. A volume given up on already is.
+        (Snapshot, Event::RulesChanged) => Offline,
+        (Failed { .. }, Event::RulesChanged) => phase.clone(),
         // The tail never started or never finished the first build. Without
         // Failed the volume would claim to be indexing forever.
         (Bootstrapping, Event::GaveUp { last_failure, .. }) => Failed {
@@ -418,6 +457,22 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         (Live | Rescanning, Event::GaveUp { .. }) => Failed {
             reason: "tail thread kept dying; live updates stopped".into(),
         },
+        // The tails started to apply changed Include settings never built
+        // the volume, so its index still follows the old ones.
+        (
+            Offline,
+            Event::GaveUp {
+                last_failure,
+                rules_unapplied: true,
+                ..
+            },
+        )
+        | (Snapshot, Event::GaveUp { last_failure, .. }) => Failed {
+            reason: format!(
+                "the changed Include settings were not applied: {}",
+                last_failure.unwrap_or("its tail kept stopping")
+            ),
+        },
         // Retrying has stopped, and a volume that is no longer retried is
         // Failed, not Offline.
         (Offline, Event::GaveUp { attempts, .. }) => Failed {
@@ -425,14 +480,6 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         },
         // The tail's own exit already set this reason, and logged it.
         (Failed { .. }, Event::GaveUp { .. }) => phase.clone(),
-        // The tails started to apply changed Include settings never built
-        // the volume, so its index still follows the old ones.
-        (Snapshot, Event::GaveUp { last_failure, .. }) => Failed {
-            reason: format!(
-                "the changed Include settings were not applied: {}",
-                last_failure.unwrap_or("its tail kept stopping")
-            ),
-        },
         _ => return None,
     };
     Some(to)
@@ -597,6 +644,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A snapshot volume given changed Include rules has no tail to apply
+    /// them, and a build by a new tail must. Until that build begins, its
+    /// index follows the old rules, so it must not read as complete, also
+    /// while the new tail fails to start; giving up then says the settings
+    /// were not applied.
+    #[test]
+    fn a_snapshot_with_unapplied_rules_reads_incomplete_until_its_build() {
+        let snapshot = || {
+            let indexed = Indexed {
+                index: VolumeIndex::new(NTFS_ROOT_FRN),
+                metadata_pending: false,
+                journal_max_bytes: None,
+                built: true,
+            };
+            let volume = VolumeState::in_state(r"D:\", indexed, VolumePhase::Snapshot);
+            let settings = gozler_core::include::IncludeSettings {
+                exclude_hidden: true,
+                ..Default::default()
+            };
+            volume.set_rules(Arc::new(settings.rules_for("")));
+            volume
+        };
+        let volume = snapshot();
+        assert!(volume.take_rules_for_rebuild());
+        assert!(!volume.read().phase().is_complete());
+        volume.tail_retired();
+        assert!(!volume.phase().is_complete(), "a start that failed");
+        volume.give_up(Some("open failed"), 3);
+        assert_eq!(
+            volume.phase(),
+            VolumePhase::Failed {
+                reason: "the changed Include settings were not applied: open failed".into()
+            }
+        );
+
+        let volume = snapshot();
+        assert!(volume.take_rules_for_rebuild());
+        let rebuild = volume.begin_build();
+        rebuild.finish(built(1, false), &JournalSetup::Refused);
+        assert_eq!(volume.phase(), VolumePhase::Snapshot);
+        assert!(!volume.take_rules_for_rebuild(), "the build applied them");
     }
 
     /// A volume whose first build failed was still never indexed, so the

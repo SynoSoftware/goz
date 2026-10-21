@@ -390,7 +390,7 @@ impl Fleet {
         for state in self.volumes.current().iter() {
             state.set_rules(Arc::new(settings.rules_for(&state.guid)));
             if !self.supervised.iter().any(|s| s.state.guid == state.guid)
-                && state.take_new_rules().is_some()
+                && state.take_rules_for_rebuild()
             {
                 tracing::info!(
                     volume = %state.mount_prefix(),
@@ -747,7 +747,7 @@ impl Supervised {
             // The tail built the index and found that the volume has no
             // journal and never will: the index is complete and there is
             // nothing to tail, so reviving it would only rebuild it again.
-            if self.state.take_new_rules().is_none() {
+            if !self.state.take_rules_for_rebuild() {
                 return false;
             }
             // Unless the Include settings changed during the build, which
