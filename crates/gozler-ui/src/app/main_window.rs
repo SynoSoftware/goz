@@ -2322,9 +2322,13 @@ impl MainWindow {
     /// enabled, because the state can change while a menu is open (DESIGN.md:
     /// T11).
     fn run(&self, hwnd: Hwnd, item: MenuItem) {
-        // F5 right after Insert acts on the row Insert selected.
-        if self.model.borrow().mode() == Mode::TwoPanels {
-            self.read_panel_selection();
+        // The command acts on the rows just selected, such as F5 right after
+        // Insert. The read calls `apply`, which can move the focus
+        // (DESIGN.md: window rule 1), so it comes before `focus`.
+        let mode = self.model.borrow().mode();
+        match mode {
+            Mode::Search => self.read_list_selection(hwnd),
+            Mode::TwoPanels => self.read_panel_selection(),
         }
         let focus = self.focus();
         let enabled = {
@@ -2337,7 +2341,6 @@ impl MainWindow {
         if !enabled {
             return;
         }
-        let mode = self.model.borrow().mode();
         if mode == Mode::TwoPanels {
             // Any key or command closes the box first, so F5 after a
             // quick search copies the focused row.
@@ -3109,7 +3112,6 @@ impl MainWindow {
         } else if let Some(button) = self.command_button_clicked(event) {
             // The button runs its menu item's command (DESIGN.md:
             // window rule 9).
-            self.read_list_selection(hwnd);
             return self.run(hwnd, MenuItem::Run(button.command));
         } else if controls.status.cancel_clicked(event) {
             return self.cancel_job(hwnd);
@@ -3424,7 +3426,6 @@ impl MainWindow {
                 None
             }
             ListNotify::Activated => {
-                self.read_list_selection(hwnd);
                 self.run(hwnd, MenuItem::Run(CommandId::Open));
                 None
             }
@@ -3571,10 +3572,7 @@ impl MainWindow {
         };
         let controls = &self.created().controls;
         match action {
-            KeyAction::Run(command) => {
-                self.read_list_selection(hwnd);
-                self.run(hwnd, MenuItem::Run(command));
-            }
+            KeyAction::Run(command) => self.run(hwnd, MenuItem::Run(command)),
             // The focus moves to the first row (DESIGN.md: Search box).
             KeyAction::FocusList => {
                 let count = self.model.borrow().search_list().results().count();
@@ -3650,7 +3648,6 @@ impl MainWindow {
             list.select_only(Some(0));
             list.ensure_visible(0);
         }
-        self.read_list_selection(hwnd);
         self.run(hwnd, MenuItem::Run(CommandId::Open));
     }
 

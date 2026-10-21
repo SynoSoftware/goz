@@ -8,7 +8,7 @@ plan lists what is still to build.
 
 ## Schedule
 
-**Not scheduled.** The owner decides when. Stages A, B, E and G are built:
+**Not scheduled.** The owner decides when. Stages A, B, E, F and G are built:
 
 - A: a wake opens no dialog until every reply and panel event drained with it
   is applied (DESIGN.md: window rule 13); a new or failed search cancels its
@@ -17,6 +17,8 @@ plan lists what is still to build.
   operations window is made on first use; core decides the taskbar state.
 - E: the "Use local" decision is in `core::programs`; a check that timed out
   runs once more.
+- F: `run` reads the pending selection of both modes (DESIGN.md: The
+  selection).
 - G: a `WH_MSGFILTER` hook gives the File operations window and the Viewers
   their keys while a dialog of the main window is open.
 
@@ -93,13 +95,6 @@ sizing fields by hand.
    and DESIGN.md's "A panel" ("fit their content") to say so. A longer
    extension ends in "…". Check whether the label tip shows it whole for
    owner-drawn panel rows.
-
-## F. Run reads the pending selection
-
-`run` already reads the panels' pending selection before `focus`. Search's
-four callers (the command button, `KeyAction::Run`, `open_first_or_selected`
-and `ListNotify::Activated`) still read it themselves. Move Search's read
-into `run`, in its own statement before `focus`, and remove the four calls.
 
 ## C3. The Include page's count
 
