@@ -244,7 +244,8 @@ enum Check {
     Text(Target, Matcher),
     /// A path text test that one component of the full path decides, read
     /// as this bit of the entry's [`ComponentBits`]; its matcher is in
-    /// [`CompiledQuery::components`]. See [`Matcher::component_needle`].
+    /// [`CompiledQuery::components`]. See [`Matcher::component_needle`] and
+    /// [`Matcher::is_first_component_start`].
     Component(u8),
 }
 
@@ -355,7 +356,7 @@ impl CompiledQuery {
         for clause in &mut clauses {
             let decided = clause.terms.iter().all(|term| {
                 matches!(&term.check, Check::Text(Target::Path, matcher)
-                    if matcher.component_needle().is_some())
+                    if matcher.component_needle().is_some() || matcher.is_first_component_start())
             });
             if !decided || components.len() + clause.terms.len() > MAX_COMPONENT_TERMS {
                 continue;
@@ -406,15 +407,38 @@ impl CompiledQuery {
     }
 
     /// The bits of the [`Check::Component`] terms that `text`, one path
-    /// component in the form the query compares, matches.
-    fn component_bits(&self, text: &[u8], code_points: &mut CodePointBuf) -> u64 {
+    /// component in the form the query compares, matches; a start only when
+    /// the component is the path's `first`.
+    fn component_bits(&self, text: &[u8], first: bool, code_points: &mut CodePointBuf) -> u64 {
         let mut bits = 0;
         for (bit, matcher) in self.components.iter().enumerate() {
-            if matcher.matches(text, code_points) {
+            let decides = first || !matches!(matcher, Matcher::Start(_));
+            if decides && matcher.matches(text, code_points) {
                 bits |= 1 << bit;
             }
         }
         bits
+    }
+
+    /// Whether `root`, the name of a volume's root in the form the query
+    /// compares, fails a clause of one positive start that it alone decides,
+    /// so that nothing on the volume matches. A root mounted nowhere has no
+    /// name, and decides nothing.
+    fn root_fails(&self, root: &[u8]) -> bool {
+        !root.is_empty()
+            && self
+                .clauses
+                .iter()
+                .any(|clause| match clause.terms.as_slice() {
+                    [
+                        CompiledTerm {
+                            negated: false,
+                            check: Check::Component(bit),
+                        },
+                    ] => matches!(&self.components[usize::from(*bit)],
+                    Matcher::Start(start) if !root.starts_with(start)),
+                    _ => false,
+                })
     }
 }
 
@@ -676,6 +700,15 @@ impl Matcher {
             }
             Matcher::Start(_) | Matcher::Wildcard(_) | Matcher::Regex(_) => None,
         }
+    }
+
+    /// Whether this is a start without a separator, which the first
+    /// component of a full path decides: the path starts with the text
+    /// exactly when that component does, because the `\` after it is in no
+    /// such text. So with Match path, each word of Start of name, a
+    /// `startwith:` of the full path, needs no path.
+    fn is_first_component_start(&self) -> bool {
+        matches!(self, Matcher::Start(start) if !start.contains(&b'\\'))
     }
     /// Appends to `parts` each part of `text` that this matcher matches, as
     /// a byte range, with the occurrence rules of [`Check::test`], so the
@@ -1192,6 +1225,17 @@ fn scan<'q, 'i>(
     scope: Option<EntryIdx>,
 ) -> Scan<'q, 'i> {
     let mut scan = Scan::new(index, mount_prefix, query);
+    // A start that the root's name fails, as each word of Start of name
+    // with Match path does on every volume, matches nothing here.
+    let root = root_name(mount_prefix);
+    let root = if query.match_case {
+        root.to_vec()
+    } else {
+        fold(root)
+    };
+    if query.root_fails(&root) {
+        return scan;
+    }
     // The volume root (`-path C:\`) holds the whole volume, so it is no scope;
     // as one it would walk the capped subtree and then pay an ancestry walk
     // per match for nothing.
@@ -1359,8 +1403,8 @@ impl<'q, 'i> Scan<'q, 'i> {
             index,
             query,
             component_bits: (!query.components.is_empty()).then(|| {
-                ComponentBits::new(index, form, mount_prefix, |text| {
-                    query.component_bits(text, &mut scratch.code_points)
+                ComponentBits::new(index, form, mount_prefix, |text, first| {
+                    query.component_bits(text, first, &mut scratch.code_points)
                 })
             }),
             query_paths: (query.path_clauses < query.clauses.len())
@@ -1406,8 +1450,9 @@ impl<'q, 'i> Scan<'q, 'i> {
                 .as_mut()
                 .expect("a component literal is a component term's");
             let code_points = &mut self.scratch.code_points;
-            let above =
-                bits.parent_bits(index, idx, |text| query.component_bits(text, code_points));
+            let above = bits.parent_bits(index, idx, |text, first| {
+                query.component_bits(text, first, code_points)
+            });
             // Without a path nothing matches, and the folder above that
             // passes the term is walked, which visits this entry. So each
             // entry is visited once, and no loop in the parent links, which
@@ -1493,8 +1538,9 @@ impl<'q, 'i> Scan<'q, 'i> {
         if let Some(bits) = &mut self.component_bits {
             let code_points = &mut self.scratch.code_points;
             // An entry without a path matches no path test.
-            let found =
-                bits.entry_bits(index, idx, |text| query.component_bits(text, code_points))?;
+            let found = bits.entry_bits(index, idx, |text, first| {
+                query.component_bits(text, first, code_points)
+            })?;
             subject.components = Some(found);
             if !component_clauses
                 .iter()
@@ -3543,21 +3589,26 @@ mod tests {
         }
 
         /// With -p, terms without a separator, negated or not, of AND and OR
-        /// clauses, in each match mode that one path component decides, and
-        /// wildcards, which one name decides only as `*a` or `*a*`, find
-        /// exactly the entries whose full path, built by walking to the root,
-        /// passes them. The root's name `C:` holds `c`, folders hold the
-        /// matches below them, and orphans have no path, so a component walk
-        /// or a test of the components that misses any of them fails.
+        /// clauses, in each match mode, and wildcards, which one name decides
+        /// only as `*a` or `*a*`, find exactly the entries whose full path,
+        /// built by walking to the root, passes them. The root's name `C:`
+        /// holds `c` and starts every path, a root mounted nowhere leaves the
+        /// path to start with the name below it, folders hold the matches
+        /// below them, and orphans have no path, so a component walk or a
+        /// test of the components that misses any of them fails.
         #[test]
         fn match_path_terms_agree_with_a_test_of_the_full_path(
             parents in prop::collection::vec(0usize..14, 1..80),
             names in prop::collection::vec("[a-cA-C ]{1,3}", 80),
             query in "!?[a-cA-C*?]{1,3}([ |]!?[a-cA-C*?]{1,3}){0,2}",
-            term_match in prop::sample::select(
-                &[TermMatch::Anywhere, TermMatch::WholeWords, TermMatch::WordStart][..]
-            ),
+            term_match in prop::sample::select(&[
+                TermMatch::Anywhere,
+                TermMatch::WholeWords,
+                TermMatch::WordStart,
+                TermMatch::NameStart,
+            ][..]),
             match_case: bool,
+            mount_prefix in prop::sample::select(&[r"C:\", ""][..]),
         ) {
             let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
             for (i, &p) in parents.iter().enumerate() {
@@ -3576,7 +3627,7 @@ mod tests {
             };
             let parsed = parse_query_with(&query, options).unwrap();
             let compiled = CompiledQuery::new(&parsed).unwrap();
-            let out = run_query(&idx, r"C:\", &compiled, None, SortSpec::default(), None);
+            let out = run_query(&idx, mount_prefix, &compiled, None, SortSpec::default(), None);
             let engine: BTreeSet<String> = texts(&out).into_iter().collect();
 
             let mut code_points = CodePointBuf::new();
@@ -3586,7 +3637,7 @@ mod tests {
                 if idx.path_of(e, &mut rel) != crate::index::PathStatus::Ok {
                     continue;
                 }
-                let full = [b"C:\\".as_slice(), &rel].concat();
+                let full = [mount_prefix.as_bytes(), &rel].concat();
                 let text = if match_case { full.clone() } else { crate::fold::fold(&full) };
                 let passes = parsed.clauses.iter().all(|clause| {
                     clause.terms.iter().any(|term| {

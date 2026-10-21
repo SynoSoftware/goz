@@ -214,8 +214,15 @@ impl DirPaths {
 /// [`DirPaths::folder_path_into`]. Each folder's bits take the same space
 /// whatever its depth, so the cache needs no limit beyond the folders of the
 /// index.
+///
+/// The bits of a component tell whether it is the path's first, where a
+/// term that matches only at the start of the path is decided: the root's
+/// name, or for a root mounted nowhere, which has none, the name below it.
 pub(crate) struct ComponentBits {
     form: NameForm,
+    /// The root has no name, so the names directly below it are the first
+    /// components of their paths.
+    unnamed_root: bool,
     /// Each folder's bits and its depth, counted as [`DirPaths`] counts it,
     /// and `None` for a folder known to have no path.
     memo: FxHashMap<EntryIdx, Option<(u64, usize)>>,
@@ -224,19 +231,28 @@ pub(crate) struct ComponentBits {
 impl ComponentBits {
     /// The bits of `index`'s entries under `mount_prefix` (`C:\`; empty for a
     /// path within the volume). `bits` gives the bits of one name in `form`,
-    /// and of the root's name: the mount prefix without its last separator.
+    /// and of the root's name: the mount prefix without its last separator;
+    /// its flag says whether the name is the first component of the path.
     pub(crate) fn new(
         index: &VolumeIndex,
         form: NameForm,
         mount_prefix: &str,
-        mut bits: impl FnMut(&[u8]) -> u64,
+        mut bits: impl FnMut(&[u8], bool) -> u64,
     ) -> Self {
+        let root = form.root_name_of(mount_prefix);
+        let unnamed_root = root.is_empty();
         let mut memo = FxHashMap::default();
-        memo.insert(
-            index.root(),
-            Some((bits(&form.root_name_of(mount_prefix)), 1)),
-        );
-        Self { form, memo }
+        memo.insert(index.root(), Some((bits(&root, !unnamed_root), 1)));
+        Self {
+            form,
+            unnamed_root,
+            memo,
+        }
+    }
+
+    /// Whether `idx`'s name is the first component of its path.
+    fn is_first(&self, index: &VolumeIndex, idx: EntryIdx) -> bool {
+        self.unnamed_root && index.entry(idx).parent() == index.root()
     }
 
     /// The bits of entry `idx`, or `None` when the entry has no path.
@@ -244,10 +260,11 @@ impl ComponentBits {
         &mut self,
         index: &VolumeIndex,
         idx: EntryIdx,
-        mut bits: impl FnMut(&[u8]) -> u64,
+        mut bits: impl FnMut(&[u8], bool) -> u64,
     ) -> Option<u64> {
         let folder = self.parent_bits(index, idx, &mut bits)?;
-        Some(folder | bits(self.form.name_of(index, idx)))
+        let first = self.is_first(index, idx);
+        Some(folder | bits(self.form.name_of(index, idx), first))
     }
 
     /// The bits of the folder that holds entry `idx`, or `None` when the
@@ -256,7 +273,7 @@ impl ComponentBits {
         &mut self,
         index: &VolumeIndex,
         idx: EntryIdx,
-        mut bits: impl FnMut(&[u8]) -> u64,
+        mut bits: impl FnMut(&[u8], bool) -> u64,
     ) -> Option<u64> {
         match self.folder_bits(index, index.entry(idx).parent(), &mut bits) {
             // The entry's own walk is one entry longer than its folder's.
@@ -271,7 +288,7 @@ impl ComponentBits {
         &mut self,
         index: &VolumeIndex,
         dir: EntryIdx,
-        bits: &mut impl FnMut(&[u8]) -> u64,
+        bits: &mut impl FnMut(&[u8], bool) -> u64,
     ) -> Option<(u64, usize)> {
         let mut chain: SmallVec<[EntryIdx; 32]> = SmallVec::new();
         let mut cur = dir;
@@ -304,7 +321,10 @@ impl ComponentBits {
                 }
                 return None;
             }
-            found |= bits(self.form.name_of(index, folder));
+            found |= bits(
+                self.form.name_of(index, folder),
+                self.is_first(index, folder),
+            );
             self.memo.insert(folder, Some((found, depth)));
         }
         Some((found, depth))
@@ -589,10 +609,10 @@ mod tests {
             let mut dirs = DirPaths::new(&index, NameForm::Raw, r"C:\");
             let mut names = ResultNames::default();
             let mut copy = FolderCopy::new(&index, r"C:\", &mut names);
-            let mut bits = ComponentBits::new(&index, NameForm::Raw, r"C:\", |_| 0);
+            let mut bits = ComponentBits::new(&index, NameForm::Raw, r"C:\", |_, _| 0);
             for idx in order {
                 assert_eq!(
-                    bits.entry_bits(&index, idx, |_| 0).is_some(),
+                    bits.entry_bits(&index, idx, |_, _| 0).is_some(),
                     expected(idx).is_some(),
                     "bits of entry {idx}"
                 );

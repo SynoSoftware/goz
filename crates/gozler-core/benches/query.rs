@@ -138,7 +138,8 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
     // With -p every term tests the full path. `kernel32` lies in file names,
     // `module_group_007` in folder names, so their subtrees match too,
     // `bin_x64_03` in folder names that 210,000 files are below, and
-    // `report` in nearly every file name.
+    // `report` in nearly every file name. Start of name makes each word a
+    // `startwith:` of the full path, which only the root's name decides.
     let match_path = ParseOptions {
         match_path: true,
         ..ParseOptions::default()
@@ -148,6 +149,7 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
         ("match-path(module_group_007)", "module_group_007"),
         ("match-path(bin_x64_03 kernel32)", "bin_x64_03 kernel32"),
         ("match-path(report)", "report"),
+        ("match-path(startwith:kernel32)", "startwith:kernel32"),
     ] {
         let parsed = CompiledQuery::new(&parse_query_with(query, match_path).unwrap()).unwrap();
         group.bench_function(label, |b| {
