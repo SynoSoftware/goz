@@ -238,7 +238,7 @@ pub(crate) struct StatusWidest {
     pub(crate) done: Vec<String>,
     /// The right group's texts in Two panels, which the layout sizes the
     /// group for at the bar's right end, so the middle group has the rest
-    /// (file-manager-spec.md: The status bar in Two panels).
+    /// (DESIGN.md: The status bar in Two panels).
     pub(crate) panel_index: Vec<String>,
 }
 
@@ -1846,7 +1846,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
 /// The window's title: the typed search and the product's name, as Windows
 /// titles a document window, or the name alone while the search is empty or
 /// Two panels shows, because a title that named one panel's folder would be
-/// wrong for the other (file-manager-spec.md: The window).
+/// wrong for the other (DESIGN.md: Two panels' window).
 pub(crate) fn title(model: &Model) -> String {
     let strings = model.strings();
     let text = model.search_list().text().trim();
@@ -1875,8 +1875,8 @@ fn joined(strings: &Strings, first: String, second: String) -> String {
 }
 
 /// The list whose search the status bar describes: Search's, or in Two
-/// panels the active panel's while it searches (file-manager-spec.md: The
-/// status bar in Two panels).
+/// panels the active panel's while it searches (DESIGN.md: The status bar in
+/// Two panels).
 fn status_list(model: &Model) -> Option<List> {
     match model.mode() {
         Mode::Search => Some(List::Search),
@@ -1988,8 +1988,8 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// The file operation's line, with its bar while it runs (file-manager-spec.md:
-/// File operations, steps 5 and 6).
+/// The file operation's line, with its bar while it runs (DESIGN.md: File
+/// operations).
 fn operation_status(model: &Model, numbers: &dyn Numbers) -> (String, JobProgress) {
     let Some(operation) = model.operation() else {
         return (String::new(), JobProgress::None);
@@ -2289,7 +2289,7 @@ pub(crate) fn index_status(model: &Model) -> String {
 }
 
 /// Why the active panel's folder sizes may be unknown, as the status bar's
-/// right group says it in Two panels (file-manager-spec.md: Folder sizes).
+/// right group says it in Two panels (DESIGN.md: Folder sizes).
 fn panel_index_status(model: &Model) -> Option<String> {
     let strings = model.strings();
     let coverage = model.panel_coverage()?;
@@ -2302,7 +2302,7 @@ fn panel_index_status(model: &Model) -> Option<String> {
         .then(|| strings.format("panel.indexing", &[volume.mounted().display_prefix()]))
 }
 
-/// What a panel shows besides its rows (file-manager-spec.md: A panel).
+/// What a panel shows besides its rows (DESIGN.md: A panel).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PanelCaptions {
     pub(crate) drive: String,
@@ -2378,8 +2378,8 @@ impl PanelCaptions {
 /// then its total and where it searched, also "0 results in …" beside the
 /// list's no-results message, or how many of them are selected and their
 /// size once read; nothing while the list shows another message
-/// (file-manager-spec.md: Search in a panel). The count is gozlerd's total,
-/// as Search's is, also past the rows the list reaches.
+/// (DESIGN.md: Search in a panel). The count is gozlerd's total, as Search's
+/// is, also past the rows the list reaches.
 fn search_counts(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -2415,8 +2415,8 @@ fn search_counts(
 }
 
 /// What a search panel's list area says instead of rows, if anything: why
-/// it shows no results and how to search on (file-manager-spec.md: Search
-/// in a panel). Retry never shows in a search panel.
+/// it shows no results and how to search on (DESIGN.md: Search in a panel).
+/// Retry never shows in a search panel.
 pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
     let strings = model.strings();
     let panel = model.panels().panel(side);
@@ -2469,11 +2469,10 @@ fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> Str
     joined(strings, count, size)
 }
 
-/// A cell of `panel`'s `row` (file-manager-spec.md: A panel), with sizes
-/// in the format `sizes`, as Search's Size column shows them. A search
-/// panel's result shows as Search's results list shows it, and its Folder
-/// cell the folder below the searched one, or the full folder while it
-/// searches all drives.
+/// A cell of `panel`'s `row` (DESIGN.md: A panel), with sizes in the format
+/// `sizes`, as Search's Size column shows them. A search panel's result shows
+/// as Search's results list shows it, and its Folder cell the folder below the
+/// searched one, or the full folder while it searches all drives.
 pub(crate) fn panel_cell(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -2532,7 +2531,7 @@ pub(crate) fn panel_headers(strings: &Strings, columns: &[PanelColumn]) -> Vec<S
 }
 
 /// The key bar's buttons: each key and its word, and the tooltip where the
-/// word alone cannot say what it does (file-manager-spec.md: The key bar).
+/// word alone cannot say what it does (DESIGN.md: The key bar).
 pub(crate) fn key_bar(strings: &Strings) -> [(String, String, Option<String>); 6] {
     let tip = |key: &str| Some(strings.text(key).to_owned());
     let word = |key: &str| strings.text(key).to_owned();

@@ -262,8 +262,8 @@ BEGIN
 END
 
 // Settings > File operations: a preset of the speed settings, the sentence
-// that says what it does, and each of its values (file-manager-spec.md:
-// Speed settings).
+// that says what it does, and each of its values (DESIGN.md: The File
+// operations page).
 IDD_SETTINGS_FILE_OPERATIONS DIALOGEX 0, 0, 309, 276
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -375,7 +375,7 @@ BEGIN
 END
 
 // Two panels' Copy to folder and Move to folder: what they act on, then the
-// destination as text (file-manager-spec.md: Copy and Move).
+// destination as text (DESIGN.md: Copy and Move).
 IDD_TRANSFER DIALOGEX 0, 0, 280, 58
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -386,8 +386,7 @@ BEGIN
     PUSHBUTTON      "", IDCANCEL, 223, 37, 50, 14
 END
 
-// Two panels' New folder: the new folder's name (file-manager-spec.md: New
-// folder).
+// Two panels' New folder: the new folder's name (DESIGN.md: New folder).
 IDD_NEW_FOLDER DIALOGEX 0, 0, 220, 58
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 FONT 9, "Segoe UI", 400, 0, 0x1

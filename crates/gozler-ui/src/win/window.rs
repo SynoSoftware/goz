@@ -484,10 +484,9 @@ pub(crate) fn set_modeless(window: Option<Hwnd>) {
 
 /// Names `window`, a top-level window besides the main one, as one that
 /// takes its own keys, or, with `own` false, no longer, as a Viewer does
-/// while it is open (file-manager-spec.md: The Viewer). The message loop
-/// offers each key pressed in it to the window first, as
-/// [`Message::KeyDown`], then to its `IsDialogMessageW` for `Tab` and the
-/// access keys among its controls.
+/// while it is open (DESIGN.md: The Viewer). The message loop offers each key
+/// pressed in it to the window first, as [`Message::KeyDown`], then to its
+/// `IsDialogMessageW` for `Tab` and the access keys among its controls.
 pub(crate) fn own_keys(window: Hwnd, own: bool) {
     OWN_KEYS.with_borrow_mut(|windows| {
         windows.retain(|named| *named != window.0);

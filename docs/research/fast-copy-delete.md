@@ -32,7 +32,7 @@ No code from these tools is copied into gozler.
 | 2026-10-18 | TinyTorrent2, commit `0d6e588` | `Payload::Move` and `Payload::Delete` were built with `CopyFile2` and parallel POSIX delete. The plan (`git show 0d6e588^:docs/plans/payload-move-plan.md`) was deleted into the engine contract. |
 | 2026-10-19 | TinyTorrent2, `docs/plans/14-removed-torrents-plan.md` (issue SynoSoftware/TinyTorrent2#540) | Five models redesigned how a removed torrent leaves the list while its files are busy. Its lessons are in "Lessons from TinyTorrent2" below. |
 | 2026-10-19 | gozler | The owner asked for copy, move and delete "as fast as possible", then for a Norton Commander style mode, operations in the background with a queue, and a UI that never waits for disk work. Where the research does not show which method is faster, Gozler builds both and the person chooses. |
-| 2026-10-19 | gozler | The window's coordinator session reported why the window's plan took about 18.5 hours against about 5.6 hours for the es superset; `AGENTS.md` ("Writing a plan") and [the file manager spec](../plans/file-manager-spec.md) hold the lessons. |
+| 2026-10-19 | gozler | The window's coordinator session reported why the window's plan took about 18.5 hours against about 5.6 hours for the es superset; `AGENTS.md` ("Writing a plan") holds the lessons. |
 | 2026-10-19 | gozler | This record. Then an adversarial review of the specs by the window's session, and the code-review skill's `plan2` review. |
 | 2026-10-19 | gozler | Owner ruling: a copy writes straight to the final name and resumes an interrupted file inside it, with no cost to a copy that is not interrupted. "Resuming inside a file" below holds what the tools do. |
 | 2026-10-19 | gozler | Owner ruling: no Recycle Bin. Gozler is the tool for speed, every delete is permanent, and a person who wants the Recycle Bin uses File Explorer. The `IFileOperation` rows below stay as evidence of what was not used. |
@@ -298,7 +298,7 @@ Each row names where the engine spec applies it.
 
 | Lesson | Applied in |
 | --- | --- |
-| An item being deleted leaves the visible list at once. A "deleted" flag on the item made 44 readers remember to skip it, and one forgot. | File manager spec, "The person never waits for the disk" |
+| An item being deleted leaves the visible list at once. A "deleted" flag on the item made 44 readers remember to skip it, and one forgot. | DESIGN.md, "The person never waits for the disk" |
 | Never delete a file that something may still write; the wait belongs inside the engine, not with the person | Engine spec, D14 |
 | Make the file list when the deletion runs: a design that copied names at the request was rejected, because renames still running changed them | Engine spec, D11 |
 | Protecting a path is not permission to delete it | Engine spec, D13 |

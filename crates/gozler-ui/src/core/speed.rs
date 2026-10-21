@@ -1,7 +1,7 @@
 //! The speed settings that Settings > File operations edits and `ui.json`
-//! keeps (file-manager-spec.md: Speed settings). The engine's setting types
-//! own every range, so a damaged value in `ui.json` falls back to the
-//! default instead of reaching an operation.
+//! keeps (DESIGN.md: The File operations page). The engine's setting types own
+//! every range, so a damaged value in `ui.json` falls back to the default
+//! instead of reaching an operation.
 
 use gozler_fileops::{
     CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, Preset, RingBlock, RingBuffer,

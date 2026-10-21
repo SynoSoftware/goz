@@ -1,8 +1,7 @@
 //! The Win32 parts of the File operations window that the other windows
-//! lack (file-manager-spec.md: File operations, step 5): a path line that
-//! loses its middle, the queue list in tile view with the line where a
-//! dragged row goes, a progress bar's paused state, and the progress on the
-//! taskbar button.
+//! lack (DESIGN.md: File operations): a path line that loses its middle, the
+//! queue list in tile view with the line where a dragged row goes, a progress
+//! bar's paused state, and the progress on the taskbar button.
 
 use super::controls::{ProgressBar, child, send, send_pointer};
 use super::gdi::{glyph_list, system_color};

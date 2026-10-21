@@ -1,8 +1,8 @@
-//! Two panels' controls and handlers (file-manager-spec.md: Two panels).
-//! `core::panel` decides what each panel shows; these handlers read each
-//! list's [`Place`], start the disk threads of `win::folder`, and show what
-//! the model then says. The list owns the focus and the selection, as
-//! Search's list does (DESIGN.md: The selection).
+//! Two panels' controls and handlers (DESIGN.md: Two panels). `core::panel`
+//! decides what each panel shows; these handlers read each list's [`Place`],
+//! start the disk threads of `win::folder`, and show what the model then says.
+//! The list owns the focus and the selection, as Search's list does (DESIGN.md:
+//! The selection).
 
 use super::super::dialogs::{NewFolder, Transfer, TransferStart};
 use super::{MainWindow, SAVE_DELAY_MS, timer};
@@ -49,8 +49,7 @@ struct Refusal {
 }
 
 /// A panel asks gozlerd for its folder sizes and reads its free space this
-/// long after the last change in its folder (file-manager-spec.md: Folder
-/// sizes).
+/// long after the last change in its folder (DESIGN.md: Folder sizes).
 const SETTLE_MS: u32 = 500;
 
 /// gozlerd applies a change from the volume's journal after the disk has
@@ -80,7 +79,7 @@ fn widest() -> impl Iterator<Item = Entry> {
 const DRIVE_IDS: u16 = 0x900;
 const FOLDER_IDS: u16 = 0x940;
 
-/// The key bar's buttons, `F3` to `F8` (file-manager-spec.md: The key bar).
+/// The key bar's buttons, `F3` to `F8` (DESIGN.md: The key bar).
 pub(super) const KEY_BAR: [ControlId; 6] = [
     ControlId::KeyF3,
     ControlId::KeyF4,
@@ -97,7 +96,7 @@ pub(super) const KEY_TIPS: [usize; 2] = [1, 3];
 /// One panel's controls, created in Tab order. The message and Retry come
 /// before the list, so they lie above it (`ListView::create`). A search
 /// panel shows its search box and Look in in the path box's place
-/// (file-manager-spec.md: Search in a panel).
+/// (DESIGN.md: Search in a panel).
 pub(super) struct PanelControls {
     pub(super) drive: Button,
     pub(super) path: Edit,
@@ -288,7 +287,7 @@ fn show_text(control: Hwnd, text: &str) {
 
 /// The folder a panel that saved none shows the first time: Documents on
 /// the left and Downloads on the right, the two folders a person copies
-/// between most (file-manager-spec.md: A panel).
+/// between most (DESIGN.md: A panel).
 fn first_folder(side: Side) -> String {
     let folder = match side {
         Side::Left => shell::documents(),
@@ -483,7 +482,7 @@ impl MainWindow {
     }
 
     /// Enables each key bar button as its command is, on the active panel's
-    /// state (file-manager-spec.md: The key bar).
+    /// state (DESIGN.md: The key bar).
     fn update_key_bar(&self) {
         let enabled: Vec<bool> = {
             let model = self.model.borrow();
@@ -545,7 +544,7 @@ impl MainWindow {
     /// Sizes each panel's columns to its list: Ext, Size and Date modified
     /// fit the widest text they show, in a selected row's font, and Name
     /// takes the rest, or shares it with a search panel's Folder
-    /// (file-manager-spec.md: A panel, Search in a panel).
+    /// (DESIGN.md: A panel, Search in a panel).
     pub(super) fn fill_panel_columns(&self) {
         let created = self.created();
         let dpi = created.metrics.get().dpi;
@@ -638,7 +637,7 @@ impl MainWindow {
     }
 
     /// Starts reading both panels' folders, or a search panel's search,
-    /// when Two panels shows (file-manager-spec.md: The window).
+    /// when Two panels shows (DESIGN.md: Two panels' window).
     pub(super) fn start_panels(&self, hwnd: Hwnd) {
         for side in Side::BOTH {
             let ask = self
@@ -861,7 +860,7 @@ impl MainWindow {
 
     /// The message box for a folder that could not be opened, after which
     /// the path box keeps a typed path for the person to correct
-    /// (file-manager-spec.md: A panel).
+    /// (DESIGN.md: A panel).
     fn refuse(&self, hwnd: Hwnd, refusal: Refusal) {
         let Refusal {
             side,
@@ -979,7 +978,7 @@ impl MainWindow {
     /// Find in Two panels: the active panel becomes a search panel of its
     /// folder, which ends its reading and its folder's requests, and its
     /// search box takes the focus with its text selected
-    /// (file-manager-spec.md: Search in a panel).
+    /// (DESIGN.md: Search in a panel).
     pub(super) fn find_in_panel(&self, hwnd: Hwnd) {
         let side = self.model.borrow().panels().active();
         self.close_quick_search_of(side);
@@ -1039,7 +1038,7 @@ impl MainWindow {
     }
 
     /// Closes the active panel's quick search box, before a command runs
-    /// (file-manager-spec.md: Quick search).
+    /// (DESIGN.md: Quick search).
     pub(super) fn close_quick_search(&self) {
         let side = self.model.borrow().panels().active();
         self.close_quick_search_of(side);
@@ -1051,9 +1050,8 @@ impl MainWindow {
         }
     }
 
-    /// A key of a panel's list or path box (file-manager-spec.md: Moving
-    /// around, Selecting entries, Quick search). Returns whether the
-    /// window took it.
+    /// A key of a panel's list or path box (DESIGN.md: Moving around, Selecting
+    /// entries, Quick search). Returns whether the window took it.
     pub(super) fn on_panel_key(
         &self,
         hwnd: Hwnd,
@@ -1223,8 +1221,8 @@ impl MainWindow {
         }
     }
 
-    /// A character typed in a panel's list: quick search (file-manager-spec.md:
-    /// Quick search). Returns whether the window took it.
+    /// A character typed in a panel's list: quick search (DESIGN.md: Quick
+    /// search). Returns whether the window took it.
     pub(super) fn on_panel_char(&self, target: Hwnd, character: char, alt: bool) -> bool {
         let Some(side) = self.panel_list(target) else {
             return false;
@@ -1256,7 +1254,7 @@ impl MainWindow {
     pub(super) fn run_panel_action(&self, hwnd: Hwnd, action: PanelAction) {
         match action {
             // A search panel's search box stands in its path box's place
-            // (file-manager-spec.md: Search in a panel).
+            // (DESIGN.md: Search in a panel).
             PanelAction::PathBox => {
                 let side = self.model.borrow().panels().active();
                 let c = self.panel(side);
@@ -1273,7 +1271,7 @@ impl MainWindow {
     }
 
     /// The drive menu of `side`, under its drive button
-    /// (file-manager-spec.md: The drive menu).
+    /// (DESIGN.md: The drive menu).
     pub(super) fn drive_menu(&self, hwnd: Hwnd, side: Side) {
         self.activate_panel(side, false);
         let c = self.panel(side);
@@ -1318,7 +1316,7 @@ impl MainWindow {
             (nodes, states, folders)
         };
         // The menu opens on the panel's own drive, so the arrow keys start
-        // from it (file-manager-spec.md: The drive menu).
+        // from it (DESIGN.md: The drive menu).
         let own = states.iter().position(|(_, _, own)| *own).unwrap_or(0);
         let button = c.drive.hwnd().screen_rect();
         let chosen = win::menu::Menu::track_popup_highlighted(
@@ -1399,7 +1397,7 @@ impl MainWindow {
                 None
             }
             // A click anywhere in the list, or the focus leaving it, closes
-            // the quick search box (file-manager-spec.md: Quick search).
+            // the quick search box (DESIGN.md: Quick search).
             ListNotify::Clicked | ListNotify::Unfocused => {
                 self.close_quick_search_of(side);
                 None
@@ -1489,10 +1487,9 @@ impl MainWindow {
         self.show_panel(side);
     }
 
-    /// The context menu of `side`'s list (file-manager-spec.md: Menus in
-    /// Two panels): an entry's, at the row the person right-clicked or at
-    /// the focused row for the Menu key, else the empty area's. The header
-    /// shows none.
+    /// The context menu of `side`'s list (DESIGN.md: Menus in Two panels): an
+    /// entry's, at the row the person right-clicked or at the focused row for
+    /// the Menu key, else the empty area's. The header shows none.
     pub(super) fn panel_menu(&self, hwnd: Hwnd, side: Side, point: Option<(i32, i32)>) {
         let list = self.panel(side).list;
         if point.is_some_and(|point| list.header().screen_rect().contains(point)) {
@@ -1550,9 +1547,9 @@ impl MainWindow {
     }
 
     /// `F5` and `F6`: the destination as text, then the operation
-    /// (file-manager-spec.md: Copy and Move). Gozler's own rename in the
-    /// panel's folder keeps the focus, and the selection, on the renamed
-    /// entry, which a rename by another program does not.
+    /// (DESIGN.md: Copy and Move). Gozler's own rename in the panel's folder
+    /// keeps the focus, and the selection, on the renamed entry, which a rename
+    /// by another program does not.
     pub(super) fn transfer(&self, hwnd: Hwnd, moves: bool) {
         let sources = self.selected_paths();
         let Some(start) = self.transfer_start(moves) else {
@@ -1605,8 +1602,8 @@ impl MainWindow {
             },
         };
         let id = self.start_operation(request, None);
-        // Submitting clears the selection (file-manager-spec.md: Copy and
-        // Move); Gozler's own rename selects the renamed entry again.
+        // Submitting clears the selection (DESIGN.md: Copy and Move); Gozler's
+        // own rename selects the renamed entry again.
         self.panel(side).list.set_selected(&[]);
         if let (Some(name), Some(id)) = (renamed, id) {
             self.model
@@ -1618,9 +1615,8 @@ impl MainWindow {
 
     /// What the Copy and Move dialog opens with: the other panel's folder,
     /// with the entry's name for `F6` on one entry, selected without its
-    /// extension (file-manager-spec.md: Copy and Move, step 1). A rename
-    /// keeps a search panel's result in its own folder. `None` when no
-    /// entry is chosen.
+    /// extension (DESIGN.md: Copy and Move). A rename keeps a search panel's
+    /// result in its own folder. `None` when no entry is chosen.
     fn transfer_start(&self, moves: bool) -> Option<TransferStart> {
         let model = self.model.borrow();
         let strings = model.strings();
@@ -1685,7 +1681,7 @@ impl MainWindow {
     }
 
     /// `F7`: the new folder's name, then the operation, after which the
-    /// focus goes to the folder (file-manager-spec.md: New folder).
+    /// focus goes to the folder (DESIGN.md: New folder).
     pub(super) fn new_folder(&self, hwnd: Hwnd) {
         let (side, folder) = {
             let model = self.model.borrow();
@@ -1710,9 +1706,8 @@ impl MainWindow {
     }
 
     /// After a delete is submitted, the focus moves to the first row after
-    /// the deleted ones, and the selection is cleared (file-manager-spec.md:
-    /// Delete). A search panel's rows stay in place, blank, so its focus
-    /// stays.
+    /// the deleted ones, and the selection is cleared (DESIGN.md: Delete). A
+    /// search panel's rows stay in place, struck through, so its focus stays.
     pub(super) fn focus_after_chosen(&self) {
         let side = self.model.borrow().panels().active();
         let row = {
@@ -1765,8 +1760,8 @@ impl MainWindow {
 
     /// Has the list draw `row` of `side` in grey when it is a hidden or
     /// system entry, or struck through in grey when a delete or a move took
-    /// it (file-manager-spec.md: Selecting entries); the list draws every
-    /// other row as it is.
+    /// it (DESIGN.md: Selecting entries); the list draws every other row as it
+    /// is.
     fn draw_panel_row(&self, side: Side, draw: &mut CustomDraw, row: u64) -> DrawAnswer {
         let (taken, dimmed) = {
             let model = self.model.borrow();
@@ -1790,7 +1785,7 @@ impl MainWindow {
 
     /// The colors of a path box: the system highlight for the active
     /// panel's while it does not have the focus, as Total Commander shows
-    /// its active path (file-manager-spec.md: A panel).
+    /// its active path (DESIGN.md: A panel).
     pub(super) fn path_box_colors(&self, colors: StaticColors, control: Hwnd) -> Option<LRESULT> {
         let side = self.panel_path(control)?;
         let active = self.model.borrow().panels().active() == side;
@@ -1798,8 +1793,7 @@ impl MainWindow {
     }
 
     /// Windows asks to remove, or removed, the drive whose watch it names
-    /// with `notification` (file-manager-spec.md: A USB drive can always be
-    /// removed).
+    /// with `notification` (DESIGN.md: A panel).
     pub(super) fn on_device_removal(&self, removal: Removal, notification: isize) {
         let threads = &self.created().panel_threads;
         let Some(side) = threads.removal(notification, removal) else {
@@ -1898,7 +1892,7 @@ fn icon_of(row: Row) -> RowIcon {
 
 /// `side`'s row at `index` with its text, also when a delete or a move took
 /// a search panel's result, which then shows struck through, as Search's
-/// list shows it (file-manager-spec.md: Search in a panel).
+/// list shows it (DESIGN.md: Search in a panel).
 fn shown_or_taken(panels: &Panels, side: Side, index: u64) -> Option<Row<'_>> {
     match panels.search(side) {
         Some(search) => search.list.results().row(index).map(Row::Result),

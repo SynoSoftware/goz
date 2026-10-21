@@ -1,7 +1,7 @@
-//! The File operations window's decisions (file-manager-spec.md: File
-//! operations, step 5): which operation the card shows, every text of the
-//! card and of the queue list, and the speed, which the window works out
-//! from the counts it polls, because the engine reports counts only.
+//! The File operations window's decisions (DESIGN.md: File operations): which
+//! operation the card shows, every text of the card and of the queue list, and
+//! the speed, which the window works out from the counts it polls, because the
+//! engine reports counts only.
 //!
 //! The engine's queue owns the operations, their order and which ones wait;
 //! this module only words what the queue reports.
@@ -443,7 +443,7 @@ pub(crate) fn glyph_of(request: &Request) -> Glyph {
 
 /// The entry and its new name when `request` moves one entry to a new name
 /// in its own folder, which renames it, as `F6` with a new name does
-/// (file-manager-spec.md: Copy and Move).
+/// (DESIGN.md: Copy and Move).
 fn renamed(request: &Request) -> Option<(String, String)> {
     let Request::Move {
         sources,
@@ -1108,8 +1108,7 @@ pub(crate) type LastEnded = (OperationId, Arc<Request>, Arc<Outcome>);
 /// The file operation the status bar's middle group shows in both modes:
 /// the newest running one, else the one that ended last, which stays until
 /// another starts, because after Hide it is the only sign that the
-/// operation finished (file-manager-spec.md: File operations, steps 5 and
-/// 6).
+/// operation finished (DESIGN.md: File operations).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum StatusOperation {
     Running {
@@ -1465,8 +1464,7 @@ fn relative_to<'a>(path: &'a str, from: &str) -> &'a str {
 }
 
 /// A question with several answers, of which the person picks one or
-/// cancels: the conflict question (file-manager-spec.md: File operations,
-/// step 3).
+/// cancels: the conflict question (DESIGN.md: File operations).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Choices {
     pub(crate) title: String,
@@ -1544,9 +1542,8 @@ pub(crate) fn conflict_question(
     })
 }
 
-/// The Delete question (file-manager-spec.md: File operations, step 2): the
-/// one entry's name, or the count, because Select all reaches rows the
-/// person never saw.
+/// The Delete question (DESIGN.md: File operations): the one entry's name, or
+/// the count, because Select all reaches rows the person never saw.
 pub(crate) fn delete_question(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -1568,9 +1565,9 @@ pub(crate) fn delete_question(
     }
 }
 
-/// The Exit question while operations run or wait (file-manager-spec.md:
-/// File operations, step 8): `running` operations stop and are offered
-/// again as Interrupted, and `waiting` ones, which are not saved, never run.
+/// The Exit question while operations run or wait (DESIGN.md: File operations):
+/// `running` operations stop and are offered again as Interrupted, and
+/// `waiting` ones, which are not saved, never run.
 pub(crate) fn exit_question(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -1604,9 +1601,9 @@ pub(crate) fn exit_question(
     }
 }
 
-/// What the failure dialog shows (file-manager-spec.md: File operations,
-/// step 7): each entry that failed or was skipped, with its reason, and how
-/// many items were done, so the person knows that the result is partial.
+/// What the failure dialog shows (DESIGN.md: File operations): each entry that
+/// failed or was skipped, with its reason, and how many items were done, so the
+/// person knows that the result is partial.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Failure {
     pub(crate) title: String,
@@ -1909,8 +1906,7 @@ mod tests {
 
     /// After Hide the middle group's line is the only sign that an
     /// operation finished, so it counts what the operation did, apart from
-    /// what failed or was skipped (file-manager-spec.md: File operations,
-    /// step 6).
+    /// what failed or was skipped (DESIGN.md: File operations).
     #[test]
     fn an_ended_operation_counts_what_it_did_and_what_failed() {
         let ended = StatusOperation::Ended {

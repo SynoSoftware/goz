@@ -749,7 +749,7 @@ struct Created {
     images: Option<ImageList>,
     /// The inspector's icons; their indexes are those of `images`.
     large_images: Option<ImageList>,
-    /// The panels' disk threads (file-manager-spec.md: A panel).
+    /// The panels' disk threads (DESIGN.md: A panel).
     panel_threads: PanelThreads,
 }
 
@@ -858,9 +858,9 @@ pub(crate) struct MainWindow {
     select_search: Cell<bool>,
     update: Arc<Mutex<UpdateCheck>>,
     /// The File operations window and its queue, which only the first
-    /// window has (file-manager-spec.md: Interrupted operations).
+    /// window has (DESIGN.md: Interrupted operations).
     file_operations: RefCell<Option<FileOperations>>,
-    /// The open Viewers (file-manager-spec.md: The Viewer).
+    /// The open Viewers (DESIGN.md: The Viewer).
     viewers: Viewers,
     /// What each panel's list changed since the panel last read it; a
     /// [`Message::Deferred`] is posted to read it.
@@ -2376,8 +2376,8 @@ impl MainWindow {
                 CommandId::Delete => return self.delete_selected(hwnd),
                 CommandId::NewFolder => return self.new_folder(hwnd),
                 CommandId::View => return self.view_focused(hwnd),
-                // Not available in this version (file-manager-spec.md:
-                // Commands in Two panels).
+                // Not available in this version (DESIGN.md: Commands in Two
+                // panels).
                 CommandId::Edit => return,
                 CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
                 CommandId::Paste => return self.paste(),
@@ -3800,7 +3800,7 @@ impl MainWindow {
     }
 
     /// `F3`: opens a Viewer of the active panel's focused file
-    /// (file-manager-spec.md: The Viewer).
+    /// (DESIGN.md: The Viewer).
     fn view_focused(&self, hwnd: Hwnd) {
         let (path, strings) = {
             let model = self.model.borrow();
@@ -3887,7 +3887,7 @@ impl MainWindow {
     }
 
     /// Copy to folder… and Move to folder…: the folder picker, at the folder
-    /// chosen last, then the operation (file-manager-spec.md: Search mode).
+    /// chosen last, then the operation (DESIGN.md: File operations).
     fn copy_to_folder(&self, hwnd: Hwnd, moves: bool) {
         let sources = self.selected_paths();
         if sources.is_empty() {
@@ -3919,8 +3919,7 @@ impl MainWindow {
     }
 
     /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete
-    /// question, then the permanent delete (file-manager-spec.md: File
-    /// operations, step 2).
+    /// question, then the permanent delete (DESIGN.md: File operations).
     fn delete_selected(&self, hwnd: Hwnd) {
         let sources = self.selected_paths();
         if sources.is_empty() {
@@ -3941,8 +3940,7 @@ impl MainWindow {
     }
 
     /// Paste on one selected folder: copies the files on the clipboard into
-    /// it, or moves them when they were cut (file-manager-spec.md: Search
-    /// mode).
+    /// it, or moves them when they were cut (DESIGN.md: Copy).
     fn paste(&self) {
         let folder = self.selected_paths();
         let [destination] = folder.as_slice() else {
@@ -4078,7 +4076,7 @@ impl MainWindow {
     /// Brings the window forward with the search box focused and its text
     /// selected, so the person types the next search at once (DESIGN.md: Window
     /// lifetime, C24), or in Two panels with the left panel's list focused
-    /// (file-manager-spec.md: The window). While a dialog is open, the dialog
+    /// (DESIGN.md: Two panels' window). While a dialog is open, the dialog
     /// keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
         // The columns fill when the window shows (DESIGN.md: Results list),
@@ -4153,10 +4151,9 @@ impl MainWindow {
 
     /// Saves the settings and ends Gozler (DESIGN.md: C7, T14). While file
     /// operations run or wait, it asks first, and stops them
-    /// (file-manager-spec.md: File operations, step 8), over the window,
-    /// which comes forward from the notification area or another start's
-    /// request. Returns whether Gozler ends; `false` when the person kept
-    /// the operations.
+    /// (DESIGN.md: File operations), over the window, which comes forward from
+    /// the notification area or another start's request. Returns whether Gozler
+    /// ends; `false` when the person kept the operations.
     fn exit(&self, hwnd: Hwnd) -> bool {
         let counts = self
             .file_operations
@@ -4774,7 +4771,7 @@ fn windows_reason(failure: WriteFailure) -> String {
 
 /// Files dragged from File Explorer, another program or the list itself
 /// onto a folder row, which the engine copies or moves into it, as Paste
-/// does (file-manager-spec.md: Search mode).
+/// does (DESIGN.md: Dragging).
 impl DropHandler for MainWindow {
     fn drag_enter(&self, files: Vec<PathBuf>) {
         self.drag_in.replace(Some(DragIn {
@@ -4792,8 +4789,8 @@ impl DropHandler for MainWindow {
         allowed: SourceEffects,
     ) -> Option<DropEffect> {
         let list = self.created().controls.list;
-        // Two panels accepts no drop (file-manager-spec.md: Search mode),
-        // and the hidden Search list keeps its place and its rows.
+        // Two panels accepts no drop (DESIGN.md: Not planned), and the hidden
+        // Search list keeps its place and its rows.
         let search = self.model.borrow().mode() == Mode::Search;
         let row = (search && list.hwnd().screen_rect().contains(point) && !self.on_header(point))
             .then(|| list.row_at(point))
@@ -5284,7 +5281,7 @@ impl WindowProc for MainWindow {
             }
             // A second start with `--location`, such as from Total Commander
             // or a script (DESIGN.md: Window lifetime), shows Search, whose
-            // filter Location is (file-manager-spec.md: The window).
+            // filter Location is (DESIGN.md: Two panels' window).
             Message::CopyData { tag, text } if tag == self.show_message as usize => {
                 let accepted = self.model.borrow_mut().show_mode(Mode::Search);
                 self.apply(hwnd, accepted);

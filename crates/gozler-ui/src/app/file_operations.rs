@@ -1,7 +1,7 @@
-//! The File operations window (file-manager-spec.md: File operations, step
-//! 5): a window of its own, which the main window owns, with a card for the
-//! running operation and the queue list under it. It never blocks Gozler:
-//! closing it only hides it, and the operations go on.
+//! The File operations window (DESIGN.md: File operations): a window of its
+//! own, which the main window owns, with a card for the running operation and
+//! the queue list under it. It never blocks Gozler: closing it only hides it,
+//! and the operations go on.
 //!
 //! It owns the engine's queue. The queue calls its wake function on an
 //! engine thread after each change of an operation's state; the wake only
@@ -378,7 +378,7 @@ impl FileOperations {
     }
 
     /// The operations that run, and those that wait, which Exit stops
-    /// (file-manager-spec.md: File operations, step 8).
+    /// (DESIGN.md: File operations).
     pub(super) fn running_and_waiting(&self) -> (u64, u64) {
         let mut counts = (0, 0);
         for entry in self.window.queue().operations() {
@@ -806,7 +806,7 @@ impl Window {
         // The window opens when an operation still runs 2 seconds after it
         // started, so a short one shows only in the owner's status bar, and
         // closes when the last one ends; the person can hide it at any time
-        // (file-manager-spec.md: File operations, step 5).
+        // (DESIGN.md: File operations).
         hwnd.kill_timer(OPEN);
         if empty {
             hwnd.hide();
@@ -1624,9 +1624,8 @@ impl Window {
     }
 }
 
-/// The failure dialog (file-manager-spec.md: File operations, step 7):
-/// what went wrong, how many items were done, and each entry that failed
-/// or was skipped with its reason.
+/// The failure dialog (DESIGN.md: File operations): what went wrong, how many
+/// items were done, and each entry that failed or was skipped with its reason.
 struct FailureDialog {
     failure: Failure,
     columns: [String; 2],

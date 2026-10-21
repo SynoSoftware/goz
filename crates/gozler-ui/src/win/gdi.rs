@@ -843,8 +843,7 @@ impl StaticColors {
     }
 
     /// The system highlight colours, as the active panel's path box shows
-    /// them while it does not have the focus (file-manager-spec.md: A
-    /// panel).
+    /// them while it does not have the focus (DESIGN.md: A panel).
     pub(crate) fn highlight(self) -> LRESULT {
         self.on(COLOR_HIGHLIGHTTEXT, COLOR_HIGHLIGHT)
     }

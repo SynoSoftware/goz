@@ -1,7 +1,7 @@
-//! The Viewer window's decisions (file-manager-spec.md: The Viewer) on top
-//! of [`super::viewer`]'s: which blocks of the file it keeps, the first
-//! shown row, the page of rows that the window paints, the scroll bar, the
-//! keys, the menus and the status bar.
+//! The Viewer window's decisions (DESIGN.md: The Viewer) on top of
+//! [`super::viewer`]'s: which blocks of the file it keeps, the first shown row,
+//! the page of rows that the window paints, the scroll bar, the keys, the menus
+//! and the status bar.
 //!
 //! The window owns the file and its reading thread. It gives a [`Document`]
 //! each block that the thread reads, and reads the block that

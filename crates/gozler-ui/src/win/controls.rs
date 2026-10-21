@@ -616,7 +616,7 @@ impl Button {
     }
 
     /// A key bar button, which `Tab` does not reach, because `Tab` switches
-    /// panels (file-manager-spec.md: The key bar).
+    /// panels (DESIGN.md: The key bar).
     pub(crate) fn create_key(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
         child(
             parent,
@@ -1536,7 +1536,7 @@ impl ListView {
     }
 
     /// The focused row, which a panel moves without the selection
-    /// (file-manager-spec.md: Selecting entries).
+    /// (DESIGN.md: Selecting entries).
     pub(crate) fn focused(self) -> Option<u64> {
         u64::try_from(send(
             self.0,

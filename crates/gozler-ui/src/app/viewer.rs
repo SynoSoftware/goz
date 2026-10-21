@@ -1,8 +1,8 @@
-//! The Viewer windows (file-manager-spec.md: The Viewer): each `F3` on a
-//! file in a panel opens one, a top-level window that no window owns.
-//! `core::viewer_window` decides what a Viewer shows; this module gives it
-//! the blocks that the reading thread of `win::viewer` reads, and asks for
-//! the next block that the page or a move waits for, one at a time.
+//! The Viewer windows (DESIGN.md: The Viewer): each `F3` on a file in a panel
+//! opens one, a top-level window that no window owns. `core::viewer_window`
+//! decides what a Viewer shows; this module gives it the blocks that the
+//! reading thread of `win::viewer` reads, and asks for the next block that the
+//! page or a move waits for, one at a time.
 
 use crate::core::captions::ButtonIcon;
 use crate::core::ids::{ControlId, IconId};
@@ -496,8 +496,8 @@ impl Viewer {
         }
     }
 
-    /// Windows asks `removal` of the file's drive (file-manager-spec.md:
-    /// The Viewer); `false` when `notification` is not this Viewer's.
+    /// Windows asks `removal` of the file's drive (DESIGN.md: The Viewer);
+    /// `false` when `notification` is not this Viewer's.
     fn removal(&self, hwnd: Hwnd, notification: isize, removal: Removal) -> bool {
         let ours = self
             .reader

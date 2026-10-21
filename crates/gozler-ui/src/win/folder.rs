@@ -1,12 +1,12 @@
-//! The panels' disk threads (file-manager-spec.md: A panel): each panel's
-//! reading of its folder, which then watches it, the free space and the
-//! drive labels. Each runs on a thread of its own that the window never
-//! joins or waits for, because a network share that stopped answering can
-//! hold a call for a minute: a newer reading ends the older one with its
-//! stop signal and `CancelSynchronousIo`, as the engine's threads are ended,
-//! and a thread wakes the window only while the window is open (DESIGN.md:
-//! window rule 5). The threads answer with the core's plain values, which
-//! `core::panel::Panels` applies.
+//! The panels' disk threads (DESIGN.md: A panel): each panel's reading of its
+//! folder, which then watches it, the free space and the drive labels. Each
+//! runs on a thread of its own that the window never joins or waits for,
+//! because a network share that stopped answering can hold a call for a minute:
+//! a newer reading ends the older one with its stop signal and
+//! `CancelSynchronousIo`, as the engine's threads are ended, and a thread wakes
+//! the window only while the window is open (DESIGN.md: window rule 5). The
+//! threads answer with the core's plain values, which `core::panel::Panels`
+//! applies.
 //!
 //! A reading opens the watch before it lists the folder, so Windows keeps
 //! every change from before the listing on, and the thread reports them

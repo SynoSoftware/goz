@@ -1361,8 +1361,8 @@ pub(crate) enum Body {
     /// Boxed, because Search's controls take far more room than two lists.
     Search(Box<SearchLayout>),
     /// The left and the right panel, each half of the window, and the key
-    /// bar under them (file-manager-spec.md: The window). The panels are
-    /// boxed, as Search is, so the two variants take about the same room.
+    /// bar under them (DESIGN.md: Two panels' window). The panels are boxed, as
+    /// Search is, so the two variants take about the same room.
     TwoPanels {
         panels: Box<[PanelLayout; 2]>,
         key_bar: [Rect; 6],
@@ -1371,8 +1371,8 @@ pub(crate) enum Body {
 
 /// One panel's controls, from the top: the drive button and the path box,
 /// or a search panel's search box and Look in, the list, and the status
-/// line (file-manager-spec.md: A panel, Search in a panel). The list's
-/// message lies over the list, as Search's does.
+/// line (DESIGN.md: A panel, Search in a panel). The list's message lies over
+/// the list, as Search's does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PanelLayout {
     pub(crate) drive: Rect,
@@ -1446,10 +1446,9 @@ impl Layout {
     }
 
     /// The two panels side by side from the menu bar to the key bar, with a
-    /// divider between them and no splitter (file-manager-spec.md: Choices
-    /// this spec makes, 10), and the key bar's buttons sharing its width.
-    /// The status bar has no left group, because each panel's status line
-    /// shows its drive's free space.
+    /// divider between them and no splitter (DESIGN.md: Two panels' window),
+    /// and the key bar's buttons sharing its width. The status bar has no left
+    /// group, because each panel's status line shows its drive's free space.
     fn compute_two_panels(
         client: Size,
         dpi: Dpi,

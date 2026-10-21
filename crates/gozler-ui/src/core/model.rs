@@ -92,7 +92,7 @@ pub(crate) struct Model {
     last_generation: u64,
     /// Whether this window offers the file operations: only the first
     /// window does, because its queue owns the saved operations
-    /// (file-manager-spec.md: Interrupted operations).
+    /// (DESIGN.md: Interrupted operations).
     file_operations: bool,
     /// Whether the clipboard holds files, which Paste copies or moves.
     clipboard_files: bool,
@@ -795,7 +795,7 @@ impl Model {
     }
 
     /// The request for `side`'s folder sizes, when it shows a folder with
-    /// subfolders (file-manager-spec.md: Folder sizes).
+    /// subfolders (DESIGN.md: Folder sizes).
     pub(crate) fn ask_sizes(&mut self, side: Side) -> Option<Fetch> {
         let generation = self.generation();
         let ask = self.panels.ask_sizes(side, generation)?;
@@ -834,7 +834,7 @@ impl Model {
     /// The person typed `text` in `list`'s search box; its search runs once
     /// they pause, or in Search with search as you type off, when they
     /// press `Enter` (DESIGN.md: C6). A search panel always searches as the
-    /// person types (file-manager-spec.md: Search in a panel).
+    /// person types (DESIGN.md: Search in a panel).
     pub(crate) fn set_typed_search(&mut self, list: List, text: String) -> Accepted {
         let Some(shown) = self.list_mut(list) else {
             return Accepted::only(Change::Nothing);
@@ -945,7 +945,7 @@ impl Model {
     }
 
     /// Shows `mode`. Each mode keeps its state while the other shows
-    /// (file-manager-spec.md: The window).
+    /// (DESIGN.md: Two panels' window).
     pub(crate) fn show_mode(&mut self, mode: Mode) -> Accepted {
         let window = &mut self.settings.window;
         if window.mode == mode {
@@ -1058,12 +1058,11 @@ impl Model {
         self.show_message(List::Search, message)
     }
 
-    /// A search panel's search (file-manager-spec.md: Search in a panel):
-    /// its typed text in Start of words, without Search's match controls,
-    /// filters or sort, in the panel's folder and its subfolders or on all
-    /// drives, in the panel's sort. A folder that gozlerd does not index
-    /// says so before anything is typed, and an empty text asks the person
-    /// to type.
+    /// A search panel's search (DESIGN.md: Search in a panel): its typed text
+    /// in Start of words, without Search's match controls, filters or sort, in
+    /// the panel's folder and its subfolders or on all drives, in the panel's
+    /// sort. A folder that gozlerd does not index says so before anything is
+    /// typed, and an empty text asks the person to type.
     fn start_panel_search(&mut self, side: Side, query_start: &QueryStart) -> Accepted {
         let list = List::Panel(side);
         let panel = self.panels.panel(side);
@@ -2229,7 +2228,7 @@ pub(crate) mod tests {
     }
 
     /// T6: a panel's search takes none of Search's controls and leaves
-    /// Search's sort alone (file-manager-spec.md: Search in a panel).
+    /// Search's sort alone (DESIGN.md: Search in a panel).
     #[test]
     fn a_panel_search_asks_with_the_default_match_and_the_panel_sort() {
         let mut model = model();
@@ -3073,7 +3072,7 @@ pub(crate) mod tests {
     /// The middle group shows one job: the newest of the running ones, so
     /// an export started during a copy shows, and the copy shows again
     /// when the export ends only if it started later (DESIGN.md: Status
-    /// bar; file-manager-spec.md: File operations, step 5).
+    /// bar; DESIGN.md: File operations).
     #[test]
     fn the_newest_running_job_shows() {
         let mut model = showing(10);
