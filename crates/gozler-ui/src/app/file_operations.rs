@@ -11,8 +11,9 @@
 
 use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
-    self, Bar, CARD_CORNER, CARD_ICON, Failure, Layout, Meter, Metrics, OPEN_WIDTH, QueueAction,
-    ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
+    self, Bar, CARD_CORNER, CARD_ICON, Failure, LastEnded, Layout, Meter, Metrics, OPEN_WIDTH,
+    QueueAction, ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, StatusOperation,
+    Taskbar, View, icon_index,
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
@@ -22,8 +23,9 @@ use crate::win::clipboard::ClipboardFiles;
 use crate::win::controls::{Button, Label, ProgressBar, ReportList, Tooltip};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
 use crate::win::file_operations::{
-    ERASE_BACKGROUND, PathLabel, QueueList, QueueNotify, TAKEN_CHANGED, TaskbarProgress,
-    TaskbarState, Tile, paint_card, set_client_size, show_drag_cursor, show_paused, window_size,
+    ERASE_BACKGROUND, OPERATION_CHANGED, PathLabel, QueueList, QueueNotify, TAKEN_CHANGED,
+    TaskbarProgress, TaskbarState, Tile, paint_card, set_client_size, show_drag_cursor,
+    show_paused, window_size,
 };
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::WindowsNumbers;
@@ -33,14 +35,15 @@ use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_fileops::{
-    OperationId, OrderRefused, Outcome, Prepared, Queue, Request, Side, SpeedSettings, State, Taken,
+    Choice, OperationId, OrderRefused, Outcome, Prepared, Queue, Request, Side, SpeedSettings,
+    State, Taken,
 };
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.file_operations";
@@ -49,6 +52,12 @@ const WINDOW_CLASS: &str = "gozler.ui.file_operations";
 const POLL: usize = 1;
 /// Twice a second, as the engine's counters expect to be read.
 const POLL_MS: u32 = 500;
+
+/// Opens the window when an operation still runs [`OPEN_AFTER`] after it
+/// started.
+const OPEN: usize = 3;
+
+const OPEN_AFTER: Duration = Duration::from_secs(2);
 
 /// The timer that scrolls the queue list while a dragged row is held above
 /// or below it.
@@ -153,8 +162,24 @@ struct Window {
     meters: RefCell<HashMap<OperationId, Meter>>,
     /// Each operation's [`file_operations::Operation::folder`].
     folders: RefCell<HashMap<OperationId, Option<String>>>,
-    /// The operations the window has shown, so a new one shows the window.
+    /// The operations the window has seen, so an interrupted one shows the
+    /// window at once.
     known: RefCell<HashSet<OperationId>>,
+    /// When each live operation started, which the window opens 2 seconds
+    /// after. An operation whose conflict question is open has none, so the
+    /// time the person takes to answer does not count.
+    started: RefCell<HashMap<OperationId, Instant>>,
+    /// The operations that were live when the person hid the window, which
+    /// do not show it again.
+    hidden: RefCell<HashSet<OperationId>>,
+    /// The operation that ended last, with its request and outcome, which
+    /// the owner's status bar shows after the queue let it go.
+    last_ended: RefCell<Option<LastEnded>>,
+    /// The operations whose conflict question Keep both answered, whose
+    /// status line cannot name an entry's numbered name.
+    numbered: RefCell<HashSet<OperationId>>,
+    /// What the owner's status bar shows, as the window last told it.
+    status: RefCell<Option<StatusOperation>>,
     /// What the window shows now.
     view: RefCell<Option<View>>,
     selected: Cell<Option<OperationId>>,
@@ -219,6 +244,11 @@ impl FileOperations {
             meters: RefCell::new(HashMap::new()),
             folders: RefCell::new(HashMap::new()),
             known: RefCell::new(HashSet::new()),
+            started: RefCell::new(HashMap::new()),
+            hidden: RefCell::new(HashSet::new()),
+            last_ended: RefCell::new(None),
+            numbered: RefCell::new(HashSet::new()),
+            status: RefCell::new(None),
             view: RefCell::new(None),
             selected: Cell::new(None),
             queue_open: Cell::new(true),
@@ -269,11 +299,25 @@ impl FileOperations {
         request: Request,
         settings: SpeedSettings,
         paste: Option<ClipboardFiles>,
-    ) {
+    ) -> OperationId {
         let id = self.window.queue().prepare(request, settings);
         if let Some(paste) = paste {
             self.window.pastes.borrow_mut().insert(id, paste);
         }
+        id
+    }
+
+    /// Cancels the operation `id`, as the status bar's Cancel does.
+    pub(super) fn cancel(&self, id: OperationId) {
+        if let Some(hwnd) = self.window.hwnd.get() {
+            self.window.act(hwnd, id, QueueAction::Cancel);
+        }
+    }
+
+    /// The operation the owner's status bar shows, after
+    /// [`OPERATION_CHANGED`].
+    pub(super) fn status(&self) -> Option<StatusOperation> {
+        self.window.status.borrow().clone()
     }
 
     /// The operations of every kind that ended since the last call, each
@@ -668,13 +712,33 @@ impl Window {
                 &self.meters.borrow(),
             )
         };
-        let appeared = {
+        let interrupted = {
             let mut known = self.known.borrow_mut();
-            let ids: HashSet<OperationId> = entries.iter().map(|entry| entry.id).collect();
-            let appeared = ids.iter().any(|id| !known.contains(id));
-            *known = ids;
-            appeared
+            let interrupted = entries.iter().any(|entry| {
+                matches!(entry.state, State::Interrupted) && !known.contains(&entry.id)
+            });
+            *known = entries.iter().map(|entry| entry.id).collect();
+            interrupted
         };
+        let due = self.open_due(&entries, now);
+        let status = {
+            let last_ended = self.last_ended.borrow();
+            let mut numbered = self.numbered.borrow_mut();
+            numbered.retain(|id| {
+                entries.iter().any(|entry| entry.id == *id)
+                    || last_ended.as_ref().is_some_and(|(last, ..)| last == id)
+            });
+            StatusOperation::of(
+                &entries,
+                last_ended.as_ref(),
+                &self.reported.borrow(),
+                &numbered,
+            )
+        };
+        if *self.status.borrow() != status {
+            self.status.replace(status);
+            self.owner.post(OPERATION_CHANGED);
+        }
         let running = view.card.is_some();
         let empty = view.card.is_none() && view.rows.is_empty();
         self.show_view(hwnd, view);
@@ -683,14 +747,65 @@ impl Window {
         } else {
             hwnd.kill_timer(POLL);
         }
-        // The window opens when an operation starts and closes when the
-        // last one ends; the person can hide it at any time.
+        // The window opens when an operation still runs 2 seconds after it
+        // started, so a short one shows only in the owner's status bar, and
+        // closes when the last one ends; the person can hide it at any time
+        // (file-manager-spec.md: File operations, step 5).
+        hwnd.kill_timer(OPEN);
         if empty {
             hwnd.hide();
-        } else if appeared && !hwnd.is_visible() {
-            hwnd.set_visible(true);
+        } else if !hwnd.is_visible() {
+            match due {
+                _ if interrupted => hwnd.set_visible(true),
+                Some(due) if due <= now => hwnd.set_visible(true),
+                Some(due) => {
+                    let wait = due.duration_since(now).as_millis();
+                    hwnd.set_timer(OPEN, u32::try_from(wait).unwrap_or(u32::MAX).max(1));
+                }
+                None => {}
+            }
         }
         self.handle_next(hwnd);
+    }
+
+    /// The moment the earliest live operation that the person did not hide
+    /// has run for [`OPEN_AFTER`], after the start moments are brought up to
+    /// date with `entries`; `None` when none is live.
+    fn open_due(&self, entries: &[gozler_fileops::Operation], now: Instant) -> Option<Instant> {
+        let mut started = self.started.borrow_mut();
+        let mut hidden = self.hidden.borrow_mut();
+        hidden.retain(|id| entries.iter().any(|entry| entry.id == *id));
+        let live: HashSet<OperationId> = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    State::Preparing | State::Waiting { .. } | State::Running(_)
+                )
+            })
+            .map(|entry| entry.id)
+            .collect();
+        started.retain(|id, _| live.contains(id));
+        for id in live {
+            started.entry(id).or_insert(now);
+        }
+        started
+            .iter()
+            .filter(|(id, _)| !hidden.contains(id))
+            .map(|(_, at)| *at + OPEN_AFTER)
+            .min()
+    }
+
+    /// Hides the window; the operations that have not ended now do not show
+    /// it again, also one whose conflict question is open, which starts
+    /// after the answer, and a later one does.
+    fn hide(&self, hwnd: Hwnd) {
+        let unended = (self.queue().operations().into_iter())
+            .filter(|entry| !matches!(entry.state, State::Ended(_)))
+            .map(|entry| entry.id);
+        self.hidden.borrow_mut().extend(unended);
+        hwnd.kill_timer(OPEN);
+        hwnd.hide();
     }
 
     /// Answers each prepared operation and reports each ended one, one at a
@@ -763,6 +878,9 @@ impl Window {
             },
         };
         let submitted = self.queue().submit(id, choice).is_ok();
+        if submitted && choice == Some(Choice::KeepBoth) {
+            self.numbered.borrow_mut().insert(id);
+        }
         let paste = self.pastes.borrow_mut().remove(&id);
         if let Some(paste) = paste
             && submitted
@@ -776,10 +894,12 @@ impl Window {
     /// Shows what failed in an ended operation, then removes it, unless it
     /// deleted or moved entries, which the owner's lists may still keep
     /// blank; the owner then decides ([`FileOperations::release`]).
-    fn report(&self, id: OperationId, request: &Arc<Request>, outcome: &Outcome) {
+    fn report(&self, id: OperationId, request: &Arc<Request>, outcome: &Arc<Outcome>) {
         // An operation that ended after the last read is told here, before
         // a copy leaves the queue.
         self.tell_ended(id, request);
+        self.last_ended
+            .replace(Some((id, Arc::clone(request), Arc::clone(outcome))));
         self.pastes.borrow_mut().remove(&id);
         let failure = file_operations::failure(
             &self.strings.borrow(),
@@ -1259,7 +1379,7 @@ impl Window {
         } else if c.toggle.clicked(event) {
             self.toggle_queue(hwnd);
         } else if c.hide.clicked(event) {
-            hwnd.hide();
+            self.hide(hwnd);
         } else if let Some((id, buttons)) = self.selected_buttons() {
             if c.queue_cancel.clicked(event) {
                 self.act(hwnd, id, buttons.end);
@@ -1556,7 +1676,7 @@ impl WindowProc for Window {
                 if self.drag.get().is_some() {
                     window::release_mouse();
                 } else {
-                    hwnd.hide();
+                    self.hide(hwnd);
                 }
                 Some(LRESULT(0))
             }
@@ -1676,7 +1796,7 @@ impl WindowProc for Window {
                 self.drag_scroll(hwnd);
                 Some(LRESULT(0))
             }
-            Message::Timer(POLL) | Message::Wake => {
+            Message::Timer(POLL | OPEN) | Message::Wake => {
                 self.refresh(hwnd);
                 Some(LRESULT(0))
             }
@@ -1686,7 +1806,7 @@ impl WindowProc for Window {
                 None
             }
             Message::Close => {
-                hwnd.hide();
+                self.hide(hwnd);
                 Some(LRESULT(0))
             }
             Message::Destroy => {
@@ -1695,6 +1815,7 @@ impl WindowProc for Window {
                 }
                 window::set_modeless(None);
                 hwnd.kill_timer(POLL);
+                hwnd.kill_timer(OPEN);
                 self.taskbar.show(TaskbarState::None);
                 None
             }

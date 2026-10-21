@@ -1,7 +1,7 @@
 //! What the window asks the queue for, and what it reads back.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -10,24 +10,56 @@ use std::sync::{Arc, Condvar, Mutex};
 /// moment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    /// Copies the entries into the folder `destination`.
+    /// Copies the entries to `destination`.
     Copy {
         sources: Vec<PathBuf>,
-        destination: PathBuf,
+        destination: Destination,
     },
-    /// Moves the entries into the folder `destination`: a rename on one
-    /// volume, a copy and a delete across volumes.
+    /// Moves the entries to `destination`: a rename on one volume, a copy
+    /// and a delete across volumes.
     Move {
         sources: Vec<PathBuf>,
-        destination: PathBuf,
+        destination: Destination,
     },
     /// Deletes the entries permanently.
     Delete { sources: Vec<PathBuf> },
-    /// Renames the entry `path` to `name` in its folder; an existing name is
-    /// refused, never replaced.
-    Rename { path: PathBuf, name: OsString },
     /// Creates the folder `path`; an existing name is refused.
     NewFolder { path: PathBuf },
+}
+
+/// Where a copy or a move writes. Prepare decides what the window cannot
+/// without reading the disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    /// Into the folder `0`. Prepare creates it, with its missing parents,
+    /// when it does not exist.
+    Folder(PathBuf),
+    /// One entry's destination as the person typed it: the folder `0` when
+    /// it exists and is not the entry itself, otherwise the entry's new
+    /// full path. Prepare replaces it with [`Destination::Folder`] or
+    /// [`Destination::Named`], so it never runs or is saved.
+    Typed(PathBuf),
+    /// One entry's new full path: `name` in `folder`.
+    Named { folder: PathBuf, name: OsString },
+}
+
+impl Destination {
+    /// The path the person sees: the folder, or the entry's new full path.
+    pub fn path(&self) -> PathBuf {
+        match self {
+            Destination::Folder(path) | Destination::Typed(path) => path.clone(),
+            Destination::Named { folder, name } => folder.join(name),
+        }
+    }
+
+    /// The folder it writes into; for [`Destination::Typed`], which prepare
+    /// has not decided, the typed path.
+    pub fn folder(&self) -> &Path {
+        match self {
+            Destination::Folder(path) | Destination::Typed(path) => path,
+            Destination::Named { folder, .. } => folder,
+        }
+    }
 }
 
 /// Names an operation in the queue.
@@ -208,7 +240,8 @@ pub enum End {
 pub enum Refusal {
     #[error("the destination is inside a selected folder")]
     DestinationInsideSource,
-    #[error("the destination does not exist")]
+    /// No folder above the destination exists, as when its drive is gone.
+    #[error("no folder above the destination exists")]
     DestinationMissing,
     #[error("the destination cannot be read: Windows error {0}")]
     DestinationUnreadable(u32),

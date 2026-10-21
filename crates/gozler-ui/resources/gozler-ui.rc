@@ -340,3 +340,27 @@ BEGIN
     CONTROL         "", IDC_FAILED_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 7, 44, 366, 158
     DEFPUSHBUTTON   "", IDCANCEL, 323, 209, 50, 14
 END
+
+// Two panels' Copy to folder and Move to folder: what they act on, then the
+// destination as text (file-manager-spec.md: Copy and Move).
+IDD_TRANSFER DIALOGEX 0, 0, 280, 58
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "", IDC_TRANSFER_LINE, 7, 7, 266, 8, SS_NOPREFIX | SS_ENDELLIPSIS
+    EDITTEXT        IDC_TRANSFER_PATH, 7, 17, 266, 14, ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "", IDOK, 169, 37, 50, 14
+    PUSHBUTTON      "", IDCANCEL, 223, 37, 50, 14
+END
+
+// Two panels' New folder: the new folder's name (file-manager-spec.md: New
+// folder).
+IDD_NEW_FOLDER DIALOGEX 0, 0, 220, 58
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "", IDC_NEW_FOLDER_LABEL, 7, 7, 206, 8
+    EDITTEXT        IDC_NEW_FOLDER_NAME, 7, 17, 206, 14, ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "", IDOK, 109, 37, 50, 14
+    PUSHBUTTON      "", IDCANCEL, 163, 37, 50, 14
+END

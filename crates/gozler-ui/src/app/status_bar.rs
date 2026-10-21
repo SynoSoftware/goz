@@ -114,12 +114,13 @@ impl StatusBar {
     }
 
     /// Shows every group of `captions` as the main window's, which draws
-    /// the right group from `captions.right`, so its icons show. Returns
-    /// what [`Self::show_work`] returns.
-    pub(super) fn show(&self, captions: &StatusCaptions) -> bool {
+    /// the right group from `captions.right`, so its icons show, with the
+    /// job's text shown as `job_text`. Returns what [`Self::show_work`]
+    /// returns.
+    pub(super) fn show(&self, captions: &StatusCaptions, job_text: &str) -> bool {
         self.show_view(&captions.view);
         self.bar.redraw_owner_drawn(SERVICE_GROUP);
-        self.show_job(&captions.job)
+        self.show_job(&captions.job, job_text)
     }
 
     pub(super) fn show_view(&self, text: &str) {
@@ -128,16 +129,16 @@ impl StatusBar {
 
     /// Shows the job and the service as the Settings dialog does. Returns
     /// what [`Self::show_job`] returns.
-    pub(super) fn show_work(&self, job: &JobCaption, service: &str) -> bool {
+    pub(super) fn show_work(&self, job: &JobCaption, job_text: &str, service: &str) -> bool {
         self.bar.set_text(SERVICE_GROUP, service);
-        self.show_job(job)
+        self.show_job(job, job_text)
     }
 
-    /// Shows the job, with its progress bar and Cancel. Returns whether
-    /// Cancel had the focus when it was hidden, so the parent gives the
-    /// focus to another control.
-    fn show_job(&self, job: &JobCaption) -> bool {
-        self.bar.set_text(JOB_GROUP, &job.text);
+    /// Shows the job as `text`, with its progress bar and Cancel. Returns
+    /// whether Cancel had the focus when it was hidden, so the parent gives
+    /// the focus to another control.
+    fn show_job(&self, job: &JobCaption, text: &str) -> bool {
+        self.bar.set_text(JOB_GROUP, text);
         // A long result ends in an ellipsis, so the tooltip shows it whole.
         self.bar.set_tip(JOB_GROUP, &job.text);
         match job.progress {

@@ -15,8 +15,8 @@ use super::settings::SettingsDialog;
 use super::status_bar::StatusBar;
 use crate::core::captions::{
     self, ATTRIBUTES_ROW, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions,
-    InspectorCaptions, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart,
-    WindowCaptions,
+    InspectorCaptions, JobCaption, JobProgress, ListCaption, MODIFIED_ROW, StatusCaptions,
+    StatusWidest, ValuePart, WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
 use crate::core::commands::{
@@ -24,7 +24,7 @@ use crate::core::commands::{
     INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, MenuItem, SHOW_DETAILS, State,
 };
 use crate::core::fetch::{DaemonFailure, Fetch, Purpose, WriteFailure};
-use crate::core::file_operations::{delete_question, exit_question};
+use crate::core::file_operations::{StatusOperation, delete_question, exit_question};
 use crate::core::fixer::{FixEvent, SetupEvent, SetupResult};
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId, IconId};
@@ -57,7 +57,7 @@ use crate::win::controls::{
     Tooltip,
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
-use crate::win::file_operations::TAKEN_CHANGED;
+use crate::win::file_operations::{OPERATION_CHANGED, TAKEN_CHANGED};
 use crate::win::folder::PanelThreads;
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
@@ -74,7 +74,7 @@ use crate::win::{self, Hwnd};
 use gozler_core::include::IncludeSettings;
 use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortSpec};
-use gozler_fileops::Request;
+use gozler_fileops::{Destination, OperationId, Request};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::OsString;
 use std::io;
@@ -200,16 +200,11 @@ impl Controls {
             key_tips: Tooltip::create(parent, &[])?,
             status: StatusBar::for_window(parent)?,
         };
-        // F4 and F6 have tips; their texts and areas come later. Every key
-        // bar command arrives in a later stage of the file manager, so the
-        // buttons stay disabled until then.
+        // F4 and F6 have tips; their texts and areas come later.
         for index in [1, 3] {
             controls
                 .key_tips
                 .add_area(KEY_BAR[index].id(), Rect::default(), "");
-        }
-        for button in controls.key_bar {
-            button.hwnd().set_enabled(false);
         }
         controls.message.hwnd().set_visible(false);
         // The search box starts empty; its changes enable Clear.
@@ -761,9 +756,9 @@ pub(crate) struct MainWindow {
     /// The File operations window and its queue, which only the first
     /// window has (file-manager-spec.md: Interrupted operations).
     file_operations: RefCell<Option<FileOperations>>,
-    /// Each panel whose list's selection changed since the panel last read
-    /// it; a [`Message::Deferred`] is posted to read it.
-    panel_selection_pending: [Cell<bool>; 2],
+    /// What each panel's list changed since the panel last read it; a
+    /// [`Message::Deferred`] is posted to read it.
+    panel_changed: [Cell<panels::ListChanged>; 2],
     /// The text typed in each panel's path box, which it shows again when
     /// the typed path cannot be opened.
     panel_typed: RefCell<[Option<String>; 2]>,
@@ -822,7 +817,7 @@ impl MainWindow {
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
             file_operations: RefCell::new(None),
-            panel_selection_pending: Default::default(),
+            panel_changed: Default::default(),
             panel_typed: RefCell::new([None, None]),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
@@ -1284,19 +1279,39 @@ impl MainWindow {
     fn show_status(&self, status: &StatusCaptions) {
         let controls = &self.created().controls;
         self.status_right.replace(status.right.clone());
+        let job_text = self.job_text(&status.job);
         // Cancel hides when the job ends, and a hidden control would keep
         // the focus but take no key.
-        if controls.status.show(status) {
+        if controls.status.show(status, &job_text) {
             self.home().focus();
         }
         if let Some(OpenSettings {
             dialog,
             status: Some(bar),
         }) = self.settings.get()
-            && bar.show_work(&status.job, &status.service)
+            && bar.show_work(&status.job, &job_text, &status.service)
             && let Some(pages) = win::dialog::item(dialog, ControlId::SettingsPages.id())
         {
             pages.focus();
+        }
+    }
+
+    /// The middle group's text as the status bar shows it. The status bar
+    /// cuts a long text only at the group's end, past a running job's
+    /// progress bar and Cancel, so a running line that names a long path
+    /// loses the path's middle, and its last folder and its percent stay.
+    fn job_text(&self, job: &JobCaption) -> String {
+        let created = self.created();
+        let room = created
+            .layout
+            .borrow()
+            .as_ref()
+            .map(|l| l.status.running_text);
+        match room {
+            Some(room) if job.progress != JobProgress::None => {
+                TextMeter::new(&created.fonts.borrow().ui).compact_path(&job.text, room)
+            }
+            _ => job.text.clone(),
         }
     }
 
@@ -1336,6 +1351,15 @@ impl MainWindow {
             Job::Fix => {
                 let accepted = self.model.borrow_mut().cancel_fix();
                 self.apply(hwnd, accepted);
+            }
+            Job::Operation => {
+                let running = match self.model.borrow().operation() {
+                    Some(StatusOperation::Running { id, .. }) => Some(*id),
+                    _ => None,
+                };
+                if let (Some(id), Some(operations)) = (running, &*self.file_operations.borrow()) {
+                    operations.cancel(id);
+                }
             }
         }
     }
@@ -1942,6 +1966,7 @@ impl MainWindow {
     /// selection of the action that opened the menu is read.
     fn update_menu(&self, hwnd: Hwnd) {
         self.read_list_selection(hwnd);
+        self.read_panel_selection();
         let Some(bar) = win::menu::Menu::of(hwnd) else {
             return;
         };
@@ -1977,6 +2002,10 @@ impl MainWindow {
     /// enabled, because the state can change while a menu is open (DESIGN.md:
     /// T11).
     fn run(&self, hwnd: Hwnd, item: MenuItem) {
+        // F5 right after Insert acts on the row Insert selected.
+        if self.model.borrow().mode() == Mode::TwoPanels {
+            self.read_panel_selection();
+        }
         let focus = self.focus();
         let enabled = {
             let model = self.model.borrow();
@@ -2007,6 +2036,7 @@ impl MainWindow {
                     self.open_dialog(hwnd, DialogId::About, &about);
                     return;
                 }
+                CommandId::Open if mode == Mode::TwoPanels => return self.open_panel_entries(hwnd),
                 CommandId::Open => return self.open_selected(hwnd),
                 CommandId::OpenFileLocation => return self.show_selected(hwnd),
                 CommandId::Explore => return self.explore_selected(hwnd),
@@ -2070,9 +2100,16 @@ impl MainWindow {
                 CommandId::ClearFilters => self.model.borrow_mut().clear_filters(),
                 CommandId::Settings => return self.open_settings(hwnd),
                 CommandId::ShowWindow => return self.show_window(hwnd),
+                CommandId::CopyToFolder | CommandId::MoveToFolder if mode == Mode::TwoPanels => {
+                    return self.transfer(hwnd, command == CommandId::MoveToFolder);
+                }
                 CommandId::CopyToFolder => return self.copy_to_folder(hwnd, false),
                 CommandId::MoveToFolder => return self.copy_to_folder(hwnd, true),
                 CommandId::Delete => return self.delete_selected(hwnd),
+                CommandId::NewFolder => return self.new_folder(hwnd),
+                // Not available in this version (file-manager-spec.md: The
+                // Viewer).
+                CommandId::View | CommandId::Edit => return,
                 CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
                 CommandId::Paste => return self.paste(),
                 CommandId::FileOperations => {
@@ -2616,11 +2653,11 @@ impl MainWindow {
             .find(|side| self.panel(*side).drive.clicked(event))
         {
             return self.drive_menu(hwnd, side);
-        } else if controls.key_bar.iter().any(|button| button.clicked(event)) {
+        } else if let Some(index) = controls.key_bar.iter().position(|b| b.clicked(event)) {
             // The buttons take no focus, so it goes back to the panel.
             let active = self.model.borrow().panels().active();
             self.panel(active).list.hwnd().focus();
-            return;
+            return self.run(hwnd, MenuItem::Run(commands::key_bar_command(index)));
         } else {
             return self.on_filter(hwnd, event);
         };
@@ -2841,6 +2878,7 @@ impl MainWindow {
             ListNotify::Focused
             | ListNotify::Unfocused
             | ListNotify::Clicked
+            | ListNotify::FocusChanged
             | ListNotify::Other => None,
         }
     }
@@ -2996,9 +3034,20 @@ impl MainWindow {
         list.hwnd().is_visible() && list.header().screen_rect().contains(point)
     }
 
-    /// The selected entries.
+    /// The entries a file command acts on: Search's selected entries, or the
+    /// active panel's chosen ones.
     fn selected_entries(&self) -> Vec<Selected> {
         let model = self.model.borrow();
+        if model.mode() == Mode::TwoPanels {
+            let panels = model.panels();
+            let panel = panels.panel(panels.active());
+            return (panel.chosen().into_iter())
+                .map(|entry| Selected {
+                    path: panel.wide_path_of(&entry.name),
+                    is_folder: entry.is_folder(),
+                })
+                .collect();
+        }
         model
             .selected_files()
             .unwrap_or_default()
@@ -3008,6 +3057,19 @@ impl MainWindow {
                 is_folder: file.is_dir,
             })
             .collect()
+    }
+
+    /// The entries a file command acts on that still exist, and the first
+    /// that does not ([`present`]). A panel's rows come from a listing, and
+    /// Windows reports a missing entry itself, so Two panels checks none:
+    /// the check reads the disk on the window thread, where a share that
+    /// stopped answering would hang the window.
+    fn present_entries(&self) -> (Vec<Selected>, Option<Vec<u16>>) {
+        let entries = self.selected_entries();
+        match self.model.borrow().mode() {
+            Mode::TwoPanels => (entries, None),
+            Mode::Search => present(entries),
+        }
     }
 
     /// Drags the selected entries out of the window, as File Explorer drags
@@ -3045,7 +3107,7 @@ impl MainWindow {
     /// Opens each selected entry with the Open folders or Open files
     /// command, or as File Explorer does when it is empty (DESIGN.md: C1).
     fn open_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = present(self.selected_entries());
+        let (present, missing) = self.present_entries();
         let (folders, files) = {
             let model = self.model.borrow();
             let choices = model.choices();
@@ -3069,7 +3131,7 @@ impl MainWindow {
     /// one File Explorer window for each folder, or runs the Open file
     /// location command for each entry (DESIGN.md: C2).
     fn show_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = present(self.selected_entries());
+        let (present, missing) = self.present_entries();
         let command = self.model.borrow().choices().open_file_location.clone();
         if command.trim().is_empty() {
             show_in_folders(present);
@@ -3089,7 +3151,7 @@ impl MainWindow {
     /// commands say: a folder opens, and a file's folder opens with the
     /// file selected (DESIGN.md: C26).
     fn explore_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = present(self.selected_entries());
+        let (present, missing) = self.present_entries();
         let (folders, files): (Vec<Selected>, Vec<Selected>) =
             present.into_iter().partition(|entry| entry.is_folder);
         for folder in &folders {
@@ -3116,7 +3178,7 @@ impl MainWindow {
 
     /// The shell's Properties of the selected entry (DESIGN.md: C3).
     fn show_properties(&self, hwnd: Hwnd) {
-        let (present, missing) = present(self.selected_entries());
+        let (present, missing) = self.present_entries();
         for entry in &present {
             shell::properties(hwnd, &entry.path);
         }
@@ -3179,22 +3241,23 @@ impl MainWindow {
             .set_clipboard_holds_files(clipboard::holds_files());
     }
 
-    /// Prepares `request` in the queue, with the speed settings.
-    fn start_operation(&self, request: Request, paste: Option<ClipboardFiles>) {
+    /// Prepares `request` in the queue, with the speed settings; `None` in
+    /// a window that owns no file operations.
+    fn start_operation(
+        &self,
+        request: Request,
+        paste: Option<ClipboardFiles>,
+    ) -> Option<OperationId> {
         let settings = self.model.borrow().choices().speed.settings();
-        if let Some(operations) = self.file_operations.borrow().as_ref() {
-            operations.start(request, settings, paste);
-        }
+        let operations = self.file_operations.borrow();
+        Some(operations.as_ref()?.start(request, settings, paste))
     }
 
-    /// The selected entries' full paths, as Windows names them.
+    /// The full paths of the entries a file command acts on, as Windows
+    /// names them.
     fn selected_paths(&self) -> Vec<PathBuf> {
-        self.model
-            .borrow()
-            .selected_files()
-            .unwrap_or_default()
-            .iter()
-            .map(|file| PathBuf::from(OsString::from_wide(&wide_path(file))))
+        (self.selected_entries().into_iter())
+            .map(|entry| PathBuf::from(OsString::from_wide(&entry.path)))
             .collect()
     }
 
@@ -3226,7 +3289,7 @@ impl MainWindow {
         self.model
             .borrow_mut()
             .set_destination_folder(folder.clone());
-        let destination = PathBuf::from(folder);
+        let destination = Destination::Folder(PathBuf::from(folder));
         let request = if moves {
             Request::Move {
                 sources,
@@ -3257,6 +3320,9 @@ impl MainWindow {
         // here.
         if win::dialog::ask(hwnd, &question) {
             self.start_operation(Request::Delete { sources }, None);
+            if self.model.borrow().mode() == Mode::TwoPanels {
+                self.focus_after_chosen();
+            }
         }
     }
 
@@ -3271,7 +3337,8 @@ impl MainWindow {
         let Some(files) = clipboard::read_files() else {
             return;
         };
-        let (sources, destination) = (files.paths.clone(), destination.clone());
+        let sources = files.paths.clone();
+        let destination = Destination::Folder(destination.clone());
         let request = if files.cut {
             Request::Move {
                 sources,
@@ -4235,6 +4302,11 @@ impl WindowProc for MainWindow {
                 self.row_menu(hwnd, point);
                 Some(LRESULT(0))
             }
+            Message::ContextMenu { from, point } if self.panel_list(from).is_some() => {
+                let side = self.panel_list(from).expect("the guard found the panel");
+                self.panel_menu(hwnd, side, point);
+                Some(LRESULT(0))
+            }
             Message::ContextMenu { .. } => None,
             Message::KeyDown { target, keystroke } => {
                 Some(LRESULT(isize::from(self.on_key(hwnd, target, keystroke))))
@@ -4453,6 +4525,16 @@ impl WindowProc for MainWindow {
             }
             Message::Other(TAKEN_CHANGED) => {
                 self.show_taken(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::Other(OPERATION_CHANGED) => {
+                let operation = self
+                    .file_operations
+                    .borrow()
+                    .as_ref()
+                    .and_then(FileOperations::status);
+                self.model.borrow_mut().set_operation(operation);
+                self.update_status();
                 Some(LRESULT(0))
             }
             Message::Other(msg) if msg == self.taskbar_created => {

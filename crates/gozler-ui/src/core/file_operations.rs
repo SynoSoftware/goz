@@ -10,12 +10,15 @@ use super::captions::{Guard, Question, QuestionBody};
 use super::commands::{Mark, MenuNode};
 use super::glyph::Glyph;
 use super::layout::{Dpi, Px, Rect};
+use super::panel::same_folder;
 use super::text::{Numbers, Strings, bytes, name_of, without_access_key};
 use gozler_fileops::{
-    Choice, End, OperationId, Outcome, Prepared, Reason, Refusal, Request, Running, State, Total,
+    Choice, Destination, End, Listed, OperationId, Outcome, Prepared, Reason, Refusal, Request,
+    RingCounts, Running, State, Total,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How far back the speed looks: long enough that one slow file does not
@@ -430,12 +433,31 @@ pub(crate) fn row_menu(strings: &Strings, phase: RowPhase) -> Vec<MenuNode> {
 /// The icon of an operation of the kind of `request`.
 pub(crate) fn glyph_of(request: &Request) -> Glyph {
     match request {
+        _ if renamed(request).is_some() => Glyph::Rename,
         Request::Copy { .. } => Glyph::Copy,
         Request::Move { .. } => Glyph::MoveToFolder,
         Request::Delete { .. } => Glyph::Delete,
-        Request::Rename { .. } => Glyph::Rename,
         Request::NewFolder { .. } => Glyph::Folder,
     }
+}
+
+/// The entry and its new name when `request` moves one entry to a new name
+/// in its own folder, which renames it, as `F6` with a new name does
+/// (file-manager-spec.md: Copy and Move).
+fn renamed(request: &Request) -> Option<(String, String)> {
+    let Request::Move {
+        sources,
+        destination: Destination::Named { folder, name },
+    } = request
+    else {
+        return None;
+    };
+    let [source] = sources.as_slice() else {
+        return None;
+    };
+    let source = text_of(source);
+    (same_folder(parent_of(&source), &text_of(folder)))
+        .then(|| (source, name.to_string_lossy().into_owned()))
 }
 
 /// The icons the queue list shows, in the order [`icon_index`] numbers.
@@ -475,6 +497,12 @@ fn kind_of(request: &Request) -> Kind {
         waiting_for,
     };
     match request {
+        _ if renamed(request).is_some() => kind(
+            "file_operations.rename",
+            "file_operations.renaming",
+            "file_operations.row_rename",
+            "file_operations.waiting_for_rename",
+        ),
         Request::Copy { .. } => kind(
             "file_operations.copy",
             "file_operations.copying",
@@ -492,12 +520,6 @@ fn kind_of(request: &Request) -> Kind {
             "file_operations.deleting",
             "file_operations.row_delete",
             "file_operations.waiting_for_delete",
-        ),
-        Request::Rename { .. } => kind(
-            "file_operations.rename",
-            "file_operations.renaming",
-            "file_operations.row_rename",
-            "file_operations.waiting_for_rename",
         ),
         Request::NewFolder { .. } => kind(
             "file_operations.new_folder",
@@ -541,6 +563,13 @@ fn ends_of(strings: &Strings, operation: &Operation) -> Ends {
             "file_operations.several_folders_inline",
         ),
     };
+    if let Some((path, name)) = renamed(operation.request) {
+        let to = joined(parent_of(&path), &name);
+        return Ends {
+            from: path,
+            to: Some(to),
+        };
+    }
     match operation.request {
         Request::Copy {
             sources,
@@ -551,20 +580,12 @@ fn ends_of(strings: &Strings, operation: &Operation) -> Ends {
             destination,
         } => Ends {
             from: entries(sources),
-            to: Some(text_of(destination)),
+            to: Some(text_of(&destination.path())),
         },
         Request::Delete { sources } => Ends {
             from: entries(sources),
             to: None,
         },
-        Request::Rename { path, name } => {
-            let path = text_of(path);
-            let to = joined(parent_of(&path), &name.to_string_lossy());
-            Ends {
-                from: path,
-                to: Some(to),
-            }
-        }
         Request::NewFolder { path } => Ends {
             from: text_of(path),
             to: None,
@@ -577,13 +598,14 @@ fn ends_of(strings: &Strings, operation: &Operation) -> Ends {
 /// rename and a new folder.
 pub(crate) fn sources_folder(request: &Request) -> Option<String> {
     match request {
+        _ if renamed(request).is_some() => None,
         Request::Copy { sources, .. }
         | Request::Move { sources, .. }
         | Request::Delete { sources } => {
             let paths: Vec<String> = sources.iter().map(|path| text_of(path)).collect();
             common_folder(paths.iter().map(String::as_str))
         }
-        Request::Rename { .. } | Request::NewFolder { .. } => None,
+        Request::NewFolder { .. } => None,
     }
 }
 
@@ -603,7 +625,7 @@ fn card_ends(strings: &Strings, operation: &Operation) -> Ends {
     match operation.request {
         Request::Copy { destination, .. } | Request::Move { destination, .. } => Ends {
             from: from(),
-            to: Some(text_of(destination)),
+            to: Some(text_of(&destination.path())),
         },
         Request::Delete { .. } => Ends {
             from: from(),
@@ -808,7 +830,7 @@ fn card(
                     [one] => text_of(one),
                     _ => String::new(),
                 },
-                Request::Rename { .. } | Request::NewFolder { .. } => String::new(),
+                Request::NewFolder { .. } => String::new(),
             };
             (
                 relative_to(&one, &ends.from).to_owned(),
@@ -1043,6 +1065,7 @@ fn size_of_total(
     total: Option<Total>,
 ) -> String {
     match (total, request) {
+        (None, _) if renamed(request).is_some() => String::new(),
         (Some(total), _) if total.bytes > 0 => strings.count(
             "file_operations.size_items_bytes",
             total.items,
@@ -1061,7 +1084,7 @@ fn size_of_total(
             numbers,
             &[],
         ),
-        (None, Request::Rename { .. } | Request::NewFolder { .. }) => String::new(),
+        (None, Request::NewFolder { .. }) => String::new(),
     }
 }
 
@@ -1070,12 +1093,316 @@ fn size_of_total(
 /// one step.
 fn items_done(strings: &Strings, numbers: &dyn Numbers, request: &Request, items: u64) -> String {
     let key = match request {
+        _ if renamed(request).is_some() => return String::new(),
         Request::Copy { .. } => "file_operations.copied",
         Request::Move { .. } => "file_operations.moved",
         Request::Delete { .. } => "file_operations.deleted",
-        Request::Rename { .. } | Request::NewFolder { .. } => return String::new(),
+        Request::NewFolder { .. } => return String::new(),
     };
     strings.count(key, items, numbers, &[])
+}
+
+/// The operation that ended last, with its request and its outcome.
+pub(crate) type LastEnded = (OperationId, Arc<Request>, Arc<Outcome>);
+
+/// The file operation the status bar's middle group shows in both modes:
+/// the newest running one, else the one that ended last, which stays until
+/// another starts, because after Hide it is the only sign that the
+/// operation finished (file-manager-spec.md: File operations, steps 5 and
+/// 6).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum StatusOperation {
+    Running {
+        id: OperationId,
+        request: Arc<Request>,
+        running: Running,
+    },
+    Ended {
+        id: OperationId,
+        request: Arc<Request>,
+        outcome: Arc<Outcome>,
+        /// Keep both answered its conflict question, so an entry may have
+        /// a numbered name, which the window does not know.
+        numbered: bool,
+    },
+}
+
+impl StatusOperation {
+    pub(crate) fn id(&self) -> OperationId {
+        match self {
+            StatusOperation::Running { id, .. } | StatusOperation::Ended { id, .. } => *id,
+        }
+    }
+
+    /// The newest of the running `operations`, else the newest that ended
+    /// and is not `reported`, such as one whose failures the window is about
+    /// to report, else `ended`, the one reported last. A delete or a move
+    /// stays in the queue after its report while a list keeps it, so only
+    /// `ended` tells which operation ended last. Each operation in
+    /// `numbered` was answered with Keep both.
+    pub(crate) fn of(
+        operations: &[gozler_fileops::Operation],
+        ended: Option<&LastEnded>,
+        reported: &HashSet<OperationId>,
+        numbered: &HashSet<OperationId>,
+    ) -> Option<StatusOperation> {
+        let newest = |running: bool| {
+            (operations.iter())
+                .filter(|operation| match operation.state {
+                    State::Running(_) => running,
+                    State::Ended(_) => !running && !reported.contains(&operation.id),
+                    _ => false,
+                })
+                .max_by_key(|operation| operation.id)
+        };
+        let ended_status =
+            |id, request: &Arc<Request>, outcome: &Arc<Outcome>| StatusOperation::Ended {
+                id,
+                request: Arc::clone(request),
+                outcome: Arc::clone(outcome),
+                numbered: numbered.contains(&id),
+            };
+        match newest(true).or_else(|| newest(false)) {
+            Some(operation) => match &operation.state {
+                State::Running(running) => Some(StatusOperation::Running {
+                    id: operation.id,
+                    request: Arc::clone(&operation.request),
+                    running: running.clone(),
+                }),
+                State::Ended(outcome) => {
+                    Some(ended_status(operation.id, &operation.request, outcome))
+                }
+                _ => None,
+            },
+            None => ended.map(|(id, request, outcome)| ended_status(*id, request, outcome)),
+        }
+    }
+}
+
+/// The middle group's line for `operation`, with the bar beside a running
+/// one: "Copying Projects to D:\Backup · 38 %", or "Copied 3,310 items to
+/// D:\Backup". A refused operation, and one the full disk stopped, show no
+/// line, because their message box already said why.
+pub(crate) fn status_line(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    operation: &StatusOperation,
+) -> (String, Option<Bar>) {
+    match operation {
+        StatusOperation::Running {
+            request, running, ..
+        } => {
+            let (text, bar) = running_line(strings, numbers, request, running);
+            (text, Some(bar))
+        }
+        StatusOperation::Ended {
+            request,
+            outcome,
+            numbered,
+            ..
+        } => (
+            ended_line(strings, numbers, request, outcome, *numbered),
+            None,
+        ),
+    }
+}
+
+/// A running operation's line: what it does, how far it is, and whether it
+/// is paused.
+fn running_line(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    request: &Request,
+    running: &Running,
+) -> (String, Bar) {
+    let measure = measure_of(running);
+    let progress = match measure {
+        Some(measure) => {
+            strings.format("file_operations.percent", &[&measure.percent().to_string()])
+        }
+        None => items_done(strings, numbers, request, running.items),
+    };
+    let paused = running
+        .paused
+        .then(|| strings.text("file_operations.paused").to_owned());
+    let text = joined_parts(
+        strings,
+        [doing_line(strings, numbers, request), progress]
+            .into_iter()
+            .chain(paused),
+    );
+    (text, measure.map_or(Bar::Moving, Bar::Measured))
+}
+
+/// The middle group's lines at their widest, running and ended, with
+/// `total` items, which the layout sizes the group for. The paths are
+/// short samples, because the window shortens a long one to fit.
+pub(crate) fn status_widest(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    total: u64,
+) -> [Vec<String>; 2] {
+    let one = || vec![PathBuf::from(r"C:\Users\Projects")];
+    let several = || vec![PathBuf::new(); 2];
+    let destination = || Destination::Folder(PathBuf::from(r"D:\Backup"));
+    let requests = [
+        Request::Copy {
+            sources: one(),
+            destination: destination(),
+        },
+        Request::Move {
+            sources: several(),
+            destination: destination(),
+        },
+        Request::Delete { sources: several() },
+        Request::Move {
+            sources: one(),
+            destination: Destination::Named {
+                folder: PathBuf::from(r"C:\Users"),
+                name: "Projects 2026".into(),
+            },
+        },
+        Request::NewFolder {
+            path: PathBuf::from(r"D:\Backup\Projects 2026"),
+        },
+    ];
+    let running = requests.iter().flat_map(|request| {
+        let measured = Some(Total {
+            items: total,
+            bytes: total,
+        });
+        [measured, None].map(|known| {
+            let running = Running {
+                items: total,
+                bytes: total,
+                passed: 0,
+                total: known,
+                renames: false,
+                paused: true,
+                current: None,
+            };
+            running_line(strings, numbers, request, &running).0
+        })
+    });
+    let skipped = Listed {
+        path: PathBuf::new(),
+        reason: Reason::Skipped,
+    };
+    let ended = requests.iter().flat_map(|request| {
+        // One skipped item is enough for the failed part's widest form:
+        // its count is the same digits as the done count's.
+        [(End::Complete, 0), (End::Complete, 1), (End::Cancelled, 1)].map(|(end, failed)| {
+            let outcome = Outcome {
+                end,
+                items: total,
+                bytes: 0,
+                listed: vec![skipped.clone(); failed],
+                ring: RingCounts::default(),
+            };
+            ended_line(strings, numbers, request, &outcome, false)
+        })
+    });
+    [running.collect(), ended.collect()]
+}
+
+/// What a running operation does: "Copying Projects to D:\Backup",
+/// "Deleting 12 items".
+fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> String {
+    let what = |sources: &[PathBuf]| match sources {
+        [one] => name_of(&text_of(one)).to_owned(),
+        _ => strings.count(
+            "file_operations.size_items",
+            sources.len() as u64,
+            numbers,
+            &[],
+        ),
+    };
+    if let Some((path, name)) = renamed(request) {
+        return strings.format("file_operations.status_renaming", &[name_of(&path), &name]);
+    }
+    match request {
+        Request::Copy {
+            sources,
+            destination,
+        } => strings.format(
+            "file_operations.status_copying",
+            &[&what(sources), &text_of(&destination.path())],
+        ),
+        Request::Move {
+            sources,
+            destination,
+        } => strings.format(
+            "file_operations.status_moving",
+            &[&what(sources), &text_of(&destination.path())],
+        ),
+        Request::Delete { sources } => {
+            strings.format("file_operations.status_deleting", &[&what(sources)])
+        }
+        Request::NewFolder { path } => {
+            strings.format("file_operations.status_creating", &[&text_of(path)])
+        }
+    }
+}
+
+/// What an ended operation did, with the count of the items it finished
+/// and, after them, how many failed or were skipped; `numbered` as
+/// [`StatusOperation::Ended`] has it.
+fn ended_line(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    request: &Request,
+    outcome: &Outcome,
+    numbered: bool,
+) -> String {
+    let cancelled = match outcome.end {
+        End::Complete => false,
+        End::Cancelled => true,
+        End::DiskFull | End::Refused(_) => return String::new(),
+    };
+    let failed = (outcome.listed.iter())
+        .filter(|listed| matches!(listed.reason, Reason::Failed(_) | Reason::Skipped))
+        .count() as u64;
+    let done = outcome.items.saturating_sub(failed);
+    let count = |key: &str, to: &[&str]| strings.count(key, done, numbers, to);
+    // A rename and a new folder are one step, which succeeded or failed;
+    // cancelled, it did nothing, as the person chose, so it shows no line.
+    if let Some((path, name)) = renamed(request) {
+        return match (cancelled, failed, numbered) {
+            (true, ..) => String::new(),
+            (false, 0, false) => {
+                strings.format("file_operations.ended_rename", &[name_of(&path), &name])
+            }
+            (false, 0, true) => {
+                strings.format("file_operations.ended_rename_numbered", &[name_of(&path)])
+            }
+            (false, _, _) => strings.format("file_operations.rename_failed", &[name_of(&path)]),
+        };
+    }
+    let line = match request {
+        Request::Copy { destination, .. } | Request::Move { destination, .. } => {
+            let moves = matches!(request, Request::Move { .. });
+            let key = match (moves, cancelled) {
+                (false, false) => "file_operations.ended_copy",
+                (false, true) => "file_operations.cancelled_copy",
+                (true, false) => "file_operations.ended_move",
+                (true, true) => "file_operations.cancelled_move",
+            };
+            count(key, &[&text_of(&destination.path())])
+        }
+        Request::Delete { .. } if cancelled => count("file_operations.cancelled_delete", &[]),
+        Request::Delete { .. } => count("file_operations.ended_delete", &[]),
+        Request::NewFolder { .. } if cancelled => return String::new(),
+        Request::NewFolder { path } => {
+            let key = match failed {
+                0 => "file_operations.ended_new_folder",
+                _ => "file_operations.new_folder_failed",
+            };
+            return strings.format(key, &[&text_of(path)]);
+        }
+    };
+    let failed =
+        (failed > 0).then(|| strings.count("file_operations.ended_failed", failed, numbers, &[]));
+    joined_parts(strings, std::iter::once(line).chain(failed))
 }
 
 /// The parent folder of a Windows path, without its last `\`; a drive's
@@ -1174,7 +1501,7 @@ pub(crate) fn conflict_question(
     let (key, destination) = match request {
         Request::Copy { destination, .. } => ("file_operations.conflict_copying", destination),
         Request::Move { destination, .. } => ("file_operations.conflict_moving", destination),
-        Request::Delete { .. } | Request::Rename { .. } | Request::NewFolder { .. } => {
+        Request::Delete { .. } | Request::NewFolder { .. } => {
             return None;
         }
     };
@@ -1183,7 +1510,7 @@ pub(crate) fn conflict_question(
         sources_folder(request).as_deref(),
         "file_operations.several_folders_inline",
     );
-    let to = text_of(destination);
+    let to = text_of(&destination.path());
     let items = prepared
         .total
         .map_or(prepared.entries as u64, |total| total.items);
@@ -1590,7 +1917,125 @@ impl Layout {
 mod tests {
     use super::*;
     use crate::core::text::tests::{English, english};
-    use gozler_fileops::Conflicts;
+    use gozler_fileops::{Conflicts, Destination};
+
+    /// After Hide the middle group's line is the only sign that an
+    /// operation finished, so it counts what the operation did, apart from
+    /// what failed or was skipped (file-manager-spec.md: File operations,
+    /// step 6).
+    #[test]
+    fn an_ended_operation_counts_what_it_did_and_what_failed() {
+        let ended = StatusOperation::Ended {
+            id: OperationId::for_tests(1),
+            request: Arc::new(Request::Copy {
+                sources: vec![PathBuf::from(r"C:\f\a"), PathBuf::from(r"C:\f\b")],
+                destination: Destination::Folder(PathBuf::from(r"D:\Backup")),
+            }),
+            outcome: Arc::new(Outcome {
+                end: End::Complete,
+                items: 3_311,
+                bytes: 0,
+                listed: vec![Listed {
+                    path: PathBuf::from(r"C:\f\a\x"),
+                    reason: Reason::Failed(5),
+                }],
+                ring: RingCounts::default(),
+            }),
+            numbered: false,
+        };
+        assert_eq!(
+            status_line(&english(), &English, &ended),
+            (
+                r"Copied 3,310 items to D:\Backup · 1 failed or skipped".to_owned(),
+                None
+            )
+        );
+    }
+
+    /// `F6` renames by moving the entry to a new name in its own folder, and
+    /// the window has no other rename, so only that move can read as one.
+    /// A cancelled rename did nothing, and Keep both may have written a
+    /// numbered name that the window does not know, so neither line names
+    /// the new name.
+    #[test]
+    fn a_move_to_a_new_name_in_its_own_folder_is_a_rename() {
+        let move_to = |folder: &str| {
+            Arc::new(Request::Move {
+                sources: vec![PathBuf::from(r"C:\f\report.pdf")],
+                destination: Destination::Named {
+                    folder: PathBuf::from(folder),
+                    name: "report-old.pdf".into(),
+                },
+            })
+        };
+        let ended = |folder, end, numbered| StatusOperation::Ended {
+            id: OperationId::for_tests(1),
+            request: move_to(folder),
+            outcome: Arc::new(Outcome {
+                end,
+                items: 1,
+                bytes: 0,
+                listed: Vec::new(),
+                ring: RingCounts::default(),
+            }),
+            numbered,
+        };
+        let line = |folder, end, numbered| {
+            status_line(&english(), &English, &ended(folder, end, numbered)).0
+        };
+        assert_eq!(
+            line(r"C:\F\", End::Complete, false),
+            "Renamed report.pdf to report-old.pdf"
+        );
+        assert_eq!(line(r"C:\f", End::Complete, true), "Renamed report.pdf");
+        assert_eq!(line(r"C:\f", End::Cancelled, false), "");
+        assert_eq!(
+            line(r"D:\g", End::Complete, false),
+            r"Moved 1 item to D:\g\report-old.pdf"
+        );
+    }
+
+    /// An operation stays in the queue until the window reports it, and a
+    /// delete or a move also after its report while a list keeps it. The
+    /// middle group shows the operation that ended last: the one not yet
+    /// reported, else the one reported last, whatever their ids.
+    #[test]
+    fn the_status_shows_the_operation_that_ended_last() {
+        let outcome = Arc::new(Outcome {
+            end: End::Complete,
+            items: 1,
+            bytes: 0,
+            listed: Vec::new(),
+            ring: RingCounts::default(),
+        });
+        let request = Arc::new(Request::Delete {
+            sources: vec![PathBuf::from(r"C:\f\a")],
+        });
+        let queued = |id| gozler_fileops::Operation {
+            id: OperationId::for_tests(id),
+            request: Arc::clone(&request),
+            state: State::Ended(Arc::clone(&outcome)),
+        };
+        let last = |id| {
+            (
+                OperationId::for_tests(id),
+                Arc::clone(&request),
+                Arc::clone(&outcome),
+            )
+        };
+        let shown = |queued_id, reported: &[u64], ended| {
+            let reported = reported.iter().map(|&id| OperationId::for_tests(id));
+            StatusOperation::of(
+                &[queued(queued_id)],
+                Some(&last(ended)),
+                &reported.collect(),
+                &HashSet::new(),
+            )
+            .map(|status| status.id())
+        };
+        assert_eq!(shown(2, &[], 1), Some(OperationId::for_tests(2)));
+        assert_eq!(shown(7, &[7], 5), Some(OperationId::for_tests(5)));
+    }
 
     #[test]
     fn the_speed_counts_the_last_seconds_once_a_second_has_run() {
@@ -1681,7 +2126,7 @@ mod tests {
                 PathBuf::from(r"C:\Users\user\Photos\2026\a.jpg"),
                 PathBuf::from(r"C:\Users\user\Photos\2026\b.jpg"),
             ],
-            destination: PathBuf::from(r"V:\Backup\Photos"),
+            destination: Destination::Folder(PathBuf::from(r"V:\Backup\Photos")),
         };
         let prepared = Prepared {
             entries: 2,
@@ -1711,7 +2156,7 @@ mod tests {
         let strings = english();
         let request = Request::Copy {
             sources: vec![PathBuf::from(r"C:\Users\user\Photos")],
-            destination: PathBuf::from(r"V:\Backup"),
+            destination: Destination::Folder(PathBuf::from(r"V:\Backup")),
         };
         let prepared = Prepared {
             entries: 1,

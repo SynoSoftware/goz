@@ -508,7 +508,7 @@ reads the states. It posts only while a flag that the window clears in
 by up to 3 seconds, and a message to a destroyed window handle can reach a
 new window that reuses it.
 
-1. **Prepare** takes the kind (copy, move, delete, rename or new folder), the
+1. **Prepare** takes the kind (copy, move, delete or new folder), the
    speed settings, the sources and the destination, and returns an id at once.
    On a queue thread it applies "What an operation receives" and ends
    prepared, or ended with a typed refusal: a destination inside a source,
@@ -672,8 +672,9 @@ opened with no access rights; a volume can span disks). A network share
 counts as one disk, named by its server. A volume whose disks cannot be read
 counts as a disk of its own.
 
-**Rename and new folder** go through the queue like the others. A rename
-reads and writes its old and new names, and a new folder writes its own
+**Rename and new folder** go through the queue like the others. A rename,
+which prepare makes of a move of one entry to another spelling of its name
+in its own folder, reads and writes its old and new names, and a new folder writes its own
 name, so each waits only for an operation on those paths. A rename uses
 `MoveFileExW` without a replace flag, and a new folder `CreateDirectoryW`,
 so an existing name is refused, never replaced.

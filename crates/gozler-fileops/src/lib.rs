@@ -77,8 +77,8 @@ mod win32;
 
 pub use conflicts::Choice;
 pub use operation::{
-    Conflicts, Current, End, Listed, Operation, OperationId, OrderRefused, Outcome, Prepared,
-    Reason, Refusal, Request, RingCounts, Running, Side, State, Total, Wait,
+    Conflicts, Current, Destination, End, Listed, Operation, OperationId, OrderRefused, Outcome,
+    Prepared, Reason, Refusal, Request, RingCounts, Running, Side, State, Total, Wait,
 };
 #[cfg(windows)]
 pub use queue::{NotInterrupted, NotPrepared, Queue};

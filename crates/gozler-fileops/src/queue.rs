@@ -10,14 +10,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use gozler_winfs::{Existing, create_folder, rename, system_time};
+use gozler_winfs::{Access, Existing, Reparse, create_folder, open_entry, rename, system_time};
 
 use crate::conflicts::{Choice, Rule, Run};
-use crate::copy::{Copied, Copying, copy};
+use crate::copy::{Copied, Copying, copy, is_folder_path};
 use crate::delete::walk;
 use crate::io_threads::IoThreads;
-use crate::listing::{BACKSLASH, LISTING_WORDS};
+use crate::listing::{BACKSLASH, LISTING_WORDS, join, read_names};
 use crate::moves::{Moving, move_by_rename};
+use crate::names::Names;
 use crate::operation::{
     Current, CurrentFile, End, Listed, Operation, OperationId, OrderRefused, Outcome, Pause,
     Progress, Request, RingCounts, Running, State, Total, Wait,
@@ -30,7 +31,7 @@ use crate::settings::SpeedSettings;
 use crate::taken::Taken;
 use crate::totals::{Counting, Gozlerd, Index};
 use crate::waits::{Plan, reorder, waits};
-use crate::win32::ERROR_FILE_NOT_FOUND;
+use crate::win32::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND};
 
 /// `ERROR_INVALID_NAME`: a new name that is empty or holds a separator,
 /// which would move the entry instead of renaming it.
@@ -537,13 +538,21 @@ impl Shared {
                         (thread.wake)();
                         return;
                     }
-                    Ok(ready) => match continuing {
-                        Some(rule) => thread.enqueue(&mut operations, id, ready, rule.choice),
-                        None => {
-                            operation.phase = Phase::Prepared(Box::new(ready));
-                            Vec::new()
+                    Ok(mut ready) => {
+                        // The decided destination stands for the asked one
+                        // from here on, in the window's texts and the saved
+                        // file.
+                        if let Some(resolved) = ready.resolved.take() {
+                            operation.request = Arc::new(resolved);
                         }
-                    },
+                        match continuing {
+                            Some(rule) => thread.enqueue(&mut operations, id, ready, rule.choice),
+                            None => {
+                                operation.phase = Phase::Prepared(Box::new(ready));
+                                Vec::new()
+                            }
+                        }
+                    }
                 }
             };
             thread.start(starts);
@@ -781,7 +790,7 @@ fn run(
             failures.extend(walk::delete(entries, workers, cancel, pause, progress, io));
         }
         Work::Transfer(transfer) => {
-            match run_transfer(transfer, rule, cancel, closing, pause, progress, io) {
+            match run_transfer(*transfer, rule, cancel, closing, pause, progress, io) {
                 Ok(copied) => {
                     failures.extend(copied.listed);
                     disk_full = copied.disk_full;
@@ -850,6 +859,7 @@ fn run_transfer(
 ) -> Result<Copied, End> {
     let Transfer {
         destination,
+        name: new_name,
         missing,
         renamed,
         copied,
@@ -864,22 +874,44 @@ fn run_transfer(
         check_space(&destination, needed).map_err(End::Refused)?;
     }
     let mut page = vec![0u64; LISTING_WORDS];
-    let names = (destination.names(&mut page))
-        .map_err(|error| End::Refused(crate::Refusal::DestinationUnreadable(error)))?;
+    let unreadable = |error| End::Refused(crate::Refusal::DestinationUnreadable(error));
+    // The missing destination folders, the top one first. One that another
+    // operation made meanwhile is used as it is, as a folder the walk meets.
+    let mut made = false;
+    let mut verbatim = destination.verbatim.clone();
+    for name in &destination.missing {
+        verbatim = join(&verbatim, name);
+        made = match create_folder(&verbatim, None) {
+            Ok(()) => true,
+            Err(error) if error.code == ERROR_ALREADY_EXISTS && is_folder_path(&verbatim) => false,
+            Err(error) => return Err(unreadable(error.code)),
+        };
+    }
+    let names = if made {
+        Names::default()
+    } else if destination.missing.is_empty() {
+        destination.names(&mut page).map_err(unreadable)?
+    } else {
+        (open_entry(&verbatim, Access::List, Reparse::Follow))
+            .map_err(|error| error.code)
+            .and_then(|folder| read_names(&folder, &mut page))
+            .map_err(unreadable)?
+    };
     let target = Arc::new(Target {
-        verbatim: destination.verbatim,
+        verbatim,
         names: Mutex::new(names),
-        made: false,
+        made,
     });
     let mut listed = Vec::new();
     for path in missing {
         // After a crash Continue meets exactly the entries that already
         // moved; on a first run the engine knows it moved nothing, so a
         // source gone meanwhile is never reported as moved.
-        let name = path
-            .rsplit(|&unit| unit == BACKSLASH)
-            .next()
-            .unwrap_or(&path);
+        let name = new_name.as_deref().unwrap_or_else(|| {
+            path.rsplit(|&unit| unit == BACKSLASH)
+                .next()
+                .unwrap_or(&path)
+        });
         let names = target.names.lock().expect("no worker panics");
         let keep_both = rule.choice == Some(Choice::KeepBoth);
         let numbered = |is_folder| names.numbered(name, is_folder).next().is_some();

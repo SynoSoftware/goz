@@ -49,7 +49,10 @@
     "move_to_folder": "&Mover a la carpeta…",
     "file_operations": "Operaciones &de archivo",
     "two_panels": "Dos pa&neles",
-    "clear_selection": "&Quitar selección"
+    "clear_selection": "&Quitar selección",
+    "view": "&Ver",
+    "edit": "&Editar",
+    "new_folder": "&Nueva carpeta…"
   },
   "column": {
     "name": "&Nombre",
@@ -703,7 +706,7 @@
     "column_item": "Elemento",
     "column_reason": "Motivo",
     "refused_inside": "El destino está dentro de una carpeta seleccionada.",
-    "refused_missing": "La carpeta de destino ya no existe.",
+    "refused_missing": "La unidad de destino no está disponible.",
     "refused_unreadable": "No se puede leer la carpeta de destino. {0}",
     "refused_space": "Necesita {0}, pero el destino solo tiene {1} libres.",
     "disk_full": "El disco de destino está lleno, así que la operación se detuvo.",
@@ -728,7 +731,31 @@
     "delete_body_other": "No irán a la Papelera de reciclaje y no podrás deshacerlo.",
     "delete_button": "&Eliminar",
     "copy_to_title": "Copiar en la carpeta",
-    "move_to_title": "Mover a la carpeta"
+    "move_to_title": "Mover a la carpeta",
+    "status_copying": "Copiando {0} en {1}",
+    "status_moving": "Moviendo {0} a {1}",
+    "status_deleting": "Eliminando {0}",
+    "status_renaming": "Cambiando el nombre de {0} a {1}",
+    "status_creating": "Creando {0}",
+    "ended_copy_one": "Se copió {0} elemento en {1}",
+    "ended_copy_other": "Se copiaron {0} elementos en {1}",
+    "cancelled_copy_one": "Copia en {1} cancelada después de {0} elemento",
+    "cancelled_copy_other": "Copia en {1} cancelada después de {0} elementos",
+    "ended_move_one": "Se movió {0} elemento a {1}",
+    "ended_move_other": "Se movieron {0} elementos a {1}",
+    "cancelled_move_one": "Movimiento a {1} cancelado después de {0} elemento",
+    "cancelled_move_other": "Movimiento a {1} cancelado después de {0} elementos",
+    "ended_delete_one": "Se eliminó {0} elemento",
+    "ended_delete_other": "Se eliminaron {0} elementos",
+    "cancelled_delete_one": "Eliminación cancelada después de {0} elemento",
+    "cancelled_delete_other": "Eliminación cancelada después de {0} elementos",
+    "ended_rename": "Se cambió el nombre de {0} a {1}",
+    "ended_rename_numbered": "Se cambió el nombre de {0}",
+    "rename_failed": "No se pudo cambiar el nombre de {0}",
+    "ended_new_folder": "Se creó {0}",
+    "new_folder_failed": "No se pudo crear {0}",
+    "ended_failed_one": "{0} falló o se omitió",
+    "ended_failed_other": "{0} fallaron o se omitieron"
   },
   "panel": {
     "items_one": "{0} elemento",
@@ -770,5 +797,22 @@
     "open_failed": "No se pudo iniciar {0}. {1} Revisa el comando en Archivo > Configuración > Menú contextual.",
     "shortcut_taken": "Otro programa usa {0}, así que ya no muestra Gozler. Elige otro método abreviado en Archivo > Configuración > Teclado.",
     "registry_failed": "No se pudo guardar \"{0}\" en el Registro. {1}"
+  },
+  "transfer": {
+    "copy_name": "Copiar {0} en:",
+    "copy_items_one": "Copiar {0} elemento en:",
+    "copy_items_other": "Copiar {0} elementos en:",
+    "move_name": "Mover {0} a:",
+    "move_items_one": "Mover {0} elemento a:",
+    "move_items_other": "Mover {0} elementos a:"
+  },
+  "new_folder": {
+    "name": "&Nombre:",
+    "create": "Crear",
+    "exists": "{0} ya está en esta carpeta. Elija otro nombre."
+  },
+  "name": {
+    "characters": "Un nombre de archivo no puede contener ninguno de los caracteres siguientes: \\ / : * ? \" < > |",
+    "reserved": "Windows usa el nombre {0} para un dispositivo. Elija otro nombre."
   }
 }

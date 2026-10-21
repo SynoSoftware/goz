@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -17,7 +17,7 @@ use crate::copy::{Source, TargetVolume};
 use crate::identity::Identity;
 use crate::listing::BACKSLASH;
 use crate::names::fold;
-use crate::operation::{Listed, Prepared, Refusal, Request, Total};
+use crate::operation::{Destination as Asked, Listed, Prepared, Refusal, Request, Total};
 use crate::receive::{Destination, Selected, receive, verbatim};
 use crate::ring_plan::Layout;
 use crate::settings::SpeedSettings;
@@ -25,6 +25,7 @@ use crate::survey::{Surveying, survey};
 use crate::totals::Index;
 use crate::volumes::{CopyPlan, VolumeClass, read_volume};
 use crate::waits::Plan;
+use crate::win32::FILE_ATTRIBUTE_DIRECTORY;
 use crate::win32::{
     COPY_FILE_22H2_BUILD, FILE_SUPPORTS_BLOCK_REFCOUNTING, FILE_SUPPORTS_SPARSE_FILES,
 };
@@ -36,6 +37,10 @@ pub(crate) struct Ready {
     pub(crate) work: Work,
     /// Selected entries whose identity cannot be read.
     pub(crate) failures: Vec<Listed>,
+    /// The request with prepare's decision for a [`Asked::Typed`]
+    /// destination, which the queue keeps and saves instead of the asked
+    /// one, so Continue after a crash writes where the run wrote.
+    pub(crate) resolved: Option<Request>,
 }
 
 pub(crate) enum Work {
@@ -44,7 +49,7 @@ pub(crate) enum Work {
         /// Selected entries that no longer exist, which count as deleted.
         missing: u64,
     },
-    Transfer(Transfer),
+    Transfer(Box<Transfer>),
     Rename {
         /// As the window gave it, for the result.
         path: Vec<u16>,
@@ -61,6 +66,8 @@ pub(crate) enum Work {
 /// A copy or a move.
 pub(crate) struct Transfer {
     pub(crate) destination: Destination,
+    /// The new name of the one entry of a [`Asked::Named`] destination.
+    pub(crate) name: Option<Vec<u16>>,
     /// Selected entries that no longer exist, as the window gave them.
     pub(crate) missing: Vec<Vec<u16>>,
     /// A move's entries on the destination's volume, which are renamed.
@@ -105,46 +112,43 @@ pub(crate) fn prepare(
                     entries: received.entries,
                     missing: received.missing.len() as u64,
                 },
+                resolved: None,
             })
         }
         Request::Copy {
             sources,
             destination,
-        } => transfer(sources, destination, false, settings, rule, index, cancel),
-        Request::Move {
+        }
+        | Request::Move {
             sources,
             destination,
-        } => transfer(sources, destination, true, settings, rule, index, cancel),
-        Request::Rename { path, name } => {
-            let path: Vec<u16> = path.as_os_str().encode_wide().collect();
-            let name: Vec<u16> = name.encode_wide().collect();
-            let from = verbatim(&path);
-            let folder = from.iter().rposition(|&unit| unit == BACKSLASH);
-            let to = folder.map_or_else(Vec::new, |at| {
-                let mut to = from[..=at].to_vec();
-                to.extend_from_slice(&name);
-                to
-            });
-            // A rename reads and writes its old and new names.
-            let mut plan = Plan::default();
-            let identity = open_entry(&from, Access::Inspect, Reparse::Open)
-                .and_then(|entry| entry.final_path())
-                .map(Identity::new);
-            if let Ok(identity) = identity {
-                if let Some(parent) = identity.parent() {
-                    plan.writes.insert(&parent.child(&name));
+        } => {
+            let moving = matches!(request, Request::Move { .. });
+            let decided = match destination {
+                Asked::Typed(path) => Some(decide_typed(sources, path)),
+                Asked::Folder(_) | Asked::Named { .. } => None,
+            };
+            let destination = decided.as_ref().unwrap_or(destination);
+            let renamed = moving.then(|| rename_in_place(sources, destination));
+            let mut ready = match renamed.flatten() {
+                Some(rename) => rename,
+                None => transfer(sources, destination, moving, settings, rule, index, cancel)?,
+            };
+            ready.resolved = decided.map(|destination| {
+                let sources = sources.clone();
+                if moving {
+                    Request::Move {
+                        sources,
+                        destination,
+                    }
+                } else {
+                    Request::Copy {
+                        sources,
+                        destination,
+                    }
                 }
-                plan.writes.insert(&identity);
-            }
-            Ok(one(
-                plan,
-                Work::Rename {
-                    path,
-                    from,
-                    to,
-                    name,
-                },
-            ))
+            });
+            Ok(ready)
         }
         Request::NewFolder { path } => {
             let path: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -173,29 +177,125 @@ fn one(plan: Plan, work: Work) -> Ready {
         plan,
         work,
         failures: Vec::new(),
+        resolved: None,
     }
 }
 
+/// Renames the entry `path`, as the window gave it, to `name` in its
+/// folder.
+fn rename(path: Vec<u16>, name: Vec<u16>) -> Ready {
+    let from = verbatim(&path);
+    let folder = from.iter().rposition(|&unit| unit == BACKSLASH);
+    let to = folder.map_or_else(Vec::new, |at| {
+        let mut to = from[..=at].to_vec();
+        to.extend_from_slice(&name);
+        to
+    });
+    // A rename reads and writes its old and new names.
+    let mut plan = Plan::default();
+    let identity = open_entry(&from, Access::Inspect, Reparse::Open)
+        .and_then(|entry| entry.final_path())
+        .map(Identity::new);
+    if let Ok(identity) = identity {
+        if let Some(parent) = identity.parent() {
+            plan.writes.insert(&parent.child(&name));
+        }
+        plan.writes.insert(&identity);
+    }
+    one(
+        plan,
+        Work::Rename {
+            path,
+            from,
+            to,
+            name,
+        },
+    )
+}
+
+/// Decides a typed destination for the one entry `sources` holds: the
+/// folder `path` when it is a folder and not the entry itself, otherwise
+/// the entry's new full path. The attribute decides, because a folder's
+/// open also opens a file.
+fn decide_typed(sources: &[PathBuf], path: &Path) -> Asked {
+    let identity = |path: &Path, reparse| {
+        let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        open_entry(&verbatim(&units), Access::Inspect, reparse)
+            .and_then(|entry| Ok((entry.attribute_tag()?, entry.final_path()?)))
+    };
+    let entry = sources
+        .first()
+        .and_then(|source| identity(source, Reparse::Open).ok());
+    if let Ok((tag, typed)) = identity(path, Reparse::Follow)
+        && tag.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+        && entry.is_none_or(|(_, entry)| Identity::new(entry) != Identity::new(typed))
+    {
+        return Asked::Folder(path.to_path_buf());
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(folder), Some(name)) => Asked::Named {
+            folder: folder.to_path_buf(),
+            name: name.to_owned(),
+        },
+        // A root has no name to write the entry under.
+        _ => Asked::Folder(path.to_path_buf()),
+    }
+}
+
+/// A move of one entry to a new name in its own folder that differs from
+/// its name only in case, which is a rename: as a move, the new name would
+/// meet the entry itself in its folder's names.
+fn rename_in_place(sources: &[PathBuf], destination: &Asked) -> Option<Ready> {
+    let (Asked::Named { folder, name }, [source]) = (destination, sources) else {
+        return None;
+    };
+    let own = source.file_name()?;
+    let name: Vec<u16> = name.encode_wide().collect();
+    let own: Vec<u16> = own.encode_wide().collect();
+    if name == own || fold(&name) != fold(&own) {
+        return None;
+    }
+    let same_folder = |path: &Path| {
+        let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        open_entry(&verbatim(&units), Access::Inspect, Reparse::Follow)
+            .and_then(|entry| entry.final_path())
+            .map(Identity::new)
+    };
+    let parent = same_folder(source.parent()?).ok()?;
+    if same_folder(folder).ok()? != parent {
+        return None;
+    }
+    let path: Vec<u16> = source.as_os_str().encode_wide().collect();
+    Some(rename(path, name))
+}
+
 fn transfer(
-    sources: &[std::path::PathBuf],
-    destination: &Path,
+    sources: &[PathBuf],
+    asked: &Asked,
     moving: bool,
     settings: &SpeedSettings,
     rule: Rule,
     index: &dyn Index,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Ready, Refusal> {
-    let (received, destination) = receive(sources, Some(destination), cancel)?;
+    let (received, destination) = receive(sources, Some(asked.folder()), cancel)?;
     let destination = destination.expect("a destination was given");
+    let new_name: Option<Vec<u16>> = match asked {
+        Asked::Named { name, .. } => Some(name.encode_wide().collect()),
+        Asked::Folder(_) | Asked::Typed(_) => None,
+    };
+    let name_of = |selected: &Selected| {
+        (new_name.clone()).unwrap_or_else(|| selected.identity.name().to_vec())
+    };
     let mut plan = Plan::default();
     let mut renamed = Vec::new();
     let mut copied = Vec::new();
     let mut named: HashMap<Vec<u16>, usize> = HashMap::new();
     for selected in &received.entries {
-        *named.entry(fold(selected.identity.name())).or_default() += 1;
+        *named.entry(fold(&name_of(selected))).or_default() += 1;
     }
     for selected in received.entries {
-        let name = selected.identity.name().to_vec();
+        let name = name_of(&selected);
         plan.writes
             .insert_named(&destination.identity, &name, selected.folder());
         if moving {
@@ -203,12 +303,16 @@ fn transfer(
         } else {
             plan.reads.insert(&selected.identity);
         }
-        let own_folder = selected.identity.parent().as_ref() == Some(&destination.identity);
+        // Left alone only under its own name; a new name in its own folder
+        // is a copy or a rename beside it.
+        let own_folder = selected.identity.parent().as_ref() == Some(&destination.identity)
+            && fold(&name) == fold(selected.identity.name());
         let same_volume = selected.identity.volume() == destination.identity.volume();
         let source = Source {
-            selected,
-            own_folder,
             shared: named[&fold(&name)] > 1,
+            selected,
+            name,
+            own_folder,
         };
         if moving && same_volume {
             renamed.push(source);
@@ -300,8 +404,10 @@ fn transfer(
         },
         plan,
         failures: received.failures,
-        work: Work::Transfer(Transfer {
+        resolved: None,
+        work: Work::Transfer(Box::new(Transfer {
             destination,
+            name: new_name,
             missing: received.missing,
             renamed,
             copied,
@@ -309,7 +415,7 @@ fn transfer(
             plan: CopyPlan::new(pair, settings, layout),
             target,
             needed,
-        }),
+        })),
     })
 }
 

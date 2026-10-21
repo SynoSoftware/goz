@@ -84,7 +84,7 @@ pub(crate) fn survey(
                 entry_total.map(|entry| entry.bytes)
             }
         };
-        let name = selected.identity.name();
+        let name = &source.name[..];
         let wanted = Wanted {
             kind: kind(selected.tag.attributes, selected.tag.reparse_tag),
             size: selected.stat.size,

@@ -1660,6 +1660,9 @@ pub(crate) struct StatusLayout {
     /// The widths of the left and middle groups; the right group takes the
     /// rest.
     pub(crate) groups: [Px; 2],
+    /// The width of a running job's text, which ends before its progress
+    /// bar.
+    pub(crate) running_text: Px,
     /// A running job's progress bar and Cancel, at the middle group's
     /// right end.
     pub(crate) progress: Rect,
@@ -1723,6 +1726,7 @@ impl StatusLayout {
             show_details.map(|show| (show.x - px(STATUS_INSET) - groups[0] - groups[1]).max(Px(0)));
         StatusLayout {
             groups,
+            running_text: widths.running,
             progress,
             cancel,
             show_details,

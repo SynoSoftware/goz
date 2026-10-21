@@ -16,6 +16,7 @@ use super::commands::{
     INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, MenuNode, SHOW_DETAILS,
 };
 use super::fetch::{Beside, DaemonFailure, Local, LocalService, ProgramFile, Programs};
+use super::file_operations::{self, Bar};
 use super::fixer::{
     CommandFix, CommandResult, CommandStep, FixState, Fixer, SetupFix, SetupResult, SetupStep,
 };
@@ -532,6 +533,17 @@ impl CaptionTable {
                 ],
                 plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
             },
+            // Move to folder's title and button are the dialog's own.
+            DialogId::Transfer => CaptionTable {
+                title: "file_operations.copy_to_title",
+                keyed: &[],
+                plain: &[(Ok, "file_operations.copy"), (Cancel, "button.cancel")],
+            },
+            DialogId::NewFolder => CaptionTable {
+                title: "file_operations.new_folder",
+                keyed: &[(Control(C::NewFolderLabel), "new_folder.name")],
+                plain: &[(Ok, "new_folder.create"), (Cancel, "button.cancel")],
+            },
             DialogId::Settings => CaptionTable {
                 title: "settings.title",
                 keyed: &[
@@ -861,6 +873,8 @@ impl CaptionTable {
             | DialogId::SearchSyntax
             | DialogId::CustomDate
             | DialogId::CustomSize
+            | DialogId::Transfer
+            | DialogId::NewFolder
             | DialogId::Settings
             | DialogId::IndexedFolders
             | DialogId::ServiceReport
@@ -1250,6 +1264,7 @@ impl StatusCaptions {
                     cancel: model.exporting(),
                 },
                 Job::Fix => fix_status(model.strings(), numbers, model.fix()),
+                Job::Operation => operation_status(model, numbers),
             },
             right: joined_parts(
                 model.strings(),
@@ -1637,6 +1652,8 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
         strings.text("status.searching").to_owned(),
     ];
     let [fix_running, fix_ended] = fix_widest(strings, numbers, &sizes);
+    let [operation_running, operation_ended] =
+        file_operations::status_widest(strings, numbers, WIDEST_TOTAL);
     StatusWidest {
         view: results
             .iter()
@@ -1648,6 +1665,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
             .collect(),
         running: std::iter::once(strings.count("status.exporting", WIDEST_TOTAL, numbers, &[]))
             .chain(fix_running)
+            .chain(operation_running)
             .collect(),
         done: std::iter::once(strings.count(
             "status.exported",
@@ -1656,6 +1674,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
             &["results.csv"],
         ))
         .chain(fix_ended)
+        .chain(operation_ended)
         .collect(),
         panel_index: vec![
             strings.format("panel.not_indexed", &["C:\\"]),
@@ -1807,6 +1826,31 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
             let path = path.to_string_lossy();
             strings.count("status.exported", *rows, numbers, &[text::name_of(&path)])
         }
+    }
+}
+
+/// The file operation's line, with its bar and Cancel while it runs
+/// (file-manager-spec.md: File operations, steps 5 and 6).
+fn operation_status(model: &Model, numbers: &dyn Numbers) -> JobCaption {
+    let Some(operation) = model.operation() else {
+        return JobCaption {
+            text: String::new(),
+            progress: JobProgress::None,
+            cancel: false,
+        };
+    };
+    let (text, bar) = file_operations::status_line(model.strings(), numbers, operation);
+    JobCaption {
+        text,
+        progress: match bar {
+            None => JobProgress::None,
+            Some(Bar::Moving) => JobProgress::Unmeasured,
+            Some(Bar::Measured(measure)) => JobProgress::Measured {
+                done: measure.done,
+                total: measure.total,
+            },
+        },
+        cancel: bar.is_some(),
     }
 }
 

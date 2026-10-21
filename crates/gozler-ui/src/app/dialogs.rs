@@ -7,11 +7,13 @@ use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
 use crate::core::text::Strings;
+use crate::core::typed::{self, Refusal};
 use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::Font;
 use crate::win::{self, Hwnd};
-use std::cell::{Cell, OnceCell};
+use gozler_fileops::Destination;
+use std::cell::{Cell, OnceCell, RefCell};
 
 /// The About Gozler dialog (DESIGN.md: C23).
 pub(super) struct About {
@@ -384,6 +386,260 @@ impl DialogProc for CustomSize {
                     // OK is disabled then.
                     Err(SizeRangeError::Neither) => {}
                 }
+                true
+            }
+            DialogMessage::Command { .. }
+            | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
+            | DialogMessage::Other => false,
+        }
+    }
+}
+
+/// Two panels' Copy to folder… and Move to folder…: the destination as
+/// text, which only the text decides, so the dialog closes at once
+/// (file-manager-spec.md: Copy and Move).
+pub(super) struct Transfer {
+    line: String,
+    /// The box's text when it opens, and the part of it selected.
+    start: String,
+    selected: (usize, usize),
+    /// The active panel's folder, which a relative path is in.
+    folder: String,
+    /// The name of the one entry it acts on; `None` for several.
+    one: Option<String>,
+    title: String,
+    characters: String,
+    reserved: String,
+    chosen: RefCell<Option<Destination>>,
+}
+
+/// What [`Transfer`] opens with.
+pub(super) struct TransferStart {
+    /// The dialog's title, which names its command.
+    pub(super) title: String,
+    /// What it acts on, such as "Copy report.pdf to:".
+    pub(super) line: String,
+    pub(super) text: String,
+    pub(super) selected: (usize, usize),
+    pub(super) folder: String,
+    pub(super) one: Option<String>,
+}
+
+impl Transfer {
+    pub(super) fn new(strings: &Strings, start: TransferStart) -> Transfer {
+        Transfer {
+            line: start.line,
+            start: start.text,
+            selected: start.selected,
+            folder: start.folder,
+            one: start.one,
+            title: start.title,
+            characters: strings.text("name.characters").to_owned(),
+            reserved: strings.text("name.reserved").to_owned(),
+            chosen: RefCell::new(None),
+        }
+    }
+
+    /// The destination Copy or Move chose.
+    pub(super) fn chosen(&self) -> Option<Destination> {
+        self.chosen.take()
+    }
+
+    fn path(dialog: Hwnd) -> Option<Edit> {
+        Edit::of_dialog(dialog, ControlId::TransferPath.id())
+    }
+
+    /// Copy or Move stays disabled while the box is empty.
+    fn update_ok(dialog: Hwnd) {
+        let empty = Transfer::path(dialog).is_none_or(|path| path.text().trim().is_empty());
+        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
+            ok.set_enabled(!empty);
+        }
+    }
+}
+
+impl DialogProc for Transfer {
+    fn init(&self, dialog: Hwnd) -> Opened {
+        if let Some(line) = dialog::item(dialog, ControlId::TransferLine.id()) {
+            line.set_text(&self.line);
+        }
+        if let Some(path) = Transfer::path(dialog) {
+            path.hwnd().set_text(&self.start);
+            path.select(self.selected.0, self.selected.1);
+        }
+        Transfer::update_ok(dialog);
+        Opened {
+            focus: ControlId::TransferPath.id(),
+            fonts: Vec::new(),
+        }
+    }
+
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        match message {
+            DialogMessage::Edited { .. } => {
+                Transfer::update_ok(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
+                let Some(path) = Transfer::path(dialog) else {
+                    return true;
+                };
+                let resolved =
+                    typed::destination(&path.text(), &self.folder, self.one.as_deref(), |name| {
+                        std::env::var(name).ok()
+                    });
+                match resolved {
+                    Ok(Some(destination)) => {
+                        self.chosen.replace(Some(destination));
+                        dialog::end(dialog, DialogEnd::Ok);
+                    }
+                    // Copy or Move is disabled then.
+                    Ok(None) => {}
+                    Err(refusal) => {
+                        let text = refusal_text(&refusal, &self.characters, &self.reserved);
+                        dialog::error_box(Some(dialog), &text, &self.title);
+                        path.hwnd().focus();
+                    }
+                }
+                true
+            }
+            DialogMessage::Command { .. }
+            | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
+            | DialogMessage::Other => false,
+        }
+    }
+}
+
+/// What a message box says about a typed name that Windows refuses.
+fn refusal_text(refusal: &Refusal, characters: &str, reserved: &str) -> String {
+    match refusal {
+        Refusal::Characters => characters.to_owned(),
+        Refusal::Reserved(name) => reserved.replace("{0}", name),
+    }
+}
+
+/// Two panels' New folder…: the new folder's name (file-manager-spec.md:
+/// New folder).
+pub(super) struct NewFolder<'a> {
+    /// The name of the panel's row that shows a name, without regard to
+    /// case.
+    shown_name: &'a dyn Fn(&str) -> Option<String>,
+    title: String,
+    characters: String,
+    reserved: String,
+    exists: String,
+    balloon: OnceCell<Balloon>,
+    chosen: RefCell<Option<String>>,
+}
+
+impl<'a> NewFolder<'a> {
+    pub(super) fn new(
+        strings: &Strings,
+        shown_name: &'a dyn Fn(&str) -> Option<String>,
+    ) -> NewFolder<'a> {
+        NewFolder {
+            shown_name,
+            title: strings.text("file_operations.new_folder").to_owned(),
+            characters: strings.text("name.characters").to_owned(),
+            reserved: strings.text("name.reserved").to_owned(),
+            exists: strings.text("new_folder.exists").to_owned(),
+            balloon: OnceCell::new(),
+            chosen: RefCell::new(None),
+        }
+    }
+
+    /// The name Create chose, trimmed as Windows trims it.
+    pub(super) fn chosen(&self) -> Option<String> {
+        self.chosen.take()
+    }
+
+    fn name(dialog: Hwnd) -> Option<Edit> {
+        Edit::of_dialog(dialog, ControlId::NewFolderName.id())
+    }
+
+    /// Create stays disabled while the box holds no name.
+    fn update_ok(dialog: Hwnd) {
+        let empty =
+            NewFolder::name(dialog).is_none_or(|name| typed::trimmed(&name.text()).is_empty());
+        if let Some(ok) = dialog::item(dialog, DialogItem::Ok.id()) {
+            ok.set_enabled(!empty);
+        }
+    }
+
+    /// Takes out the characters that no name holds as they are typed, and
+    /// says why in the balloon, as File Explorer does.
+    fn refuse_characters(&self, name: Edit) {
+        let text = name.text();
+        if text.chars().all(typed::allowed_in_name) {
+            return;
+        }
+        // The caret stays after the characters before it that are kept.
+        let caret = name.selection().1;
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let refused_before = char::decode_utf16(units[..caret.min(units.len())].iter().copied())
+            .filter(|c| c.as_ref().is_ok_and(|c| !typed::allowed_in_name(*c)))
+            .count();
+        let kept: String = text
+            .chars()
+            .filter(|c| typed::allowed_in_name(*c))
+            .collect();
+        name.hwnd().set_text(&kept);
+        let caret = caret - refused_before;
+        name.select(caret, caret);
+        if let Some(balloon) = self.balloon.get() {
+            balloon.show(name.hwnd(), &self.characters);
+        }
+    }
+}
+
+impl DialogProc for NewFolder<'_> {
+    fn init(&self, dialog: Hwnd) -> Opened {
+        if let Ok(balloon) = Balloon::create(dialog) {
+            let _ = self.balloon.set(balloon);
+        }
+        NewFolder::update_ok(dialog);
+        Opened {
+            focus: ControlId::NewFolderName.id(),
+            fonts: Vec::new(),
+        }
+    }
+
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        match message {
+            DialogMessage::Edited { .. } => {
+                if let Some(name) = NewFolder::name(dialog) {
+                    self.refuse_characters(name);
+                }
+                NewFolder::update_ok(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
+                let Some(name) = NewFolder::name(dialog) else {
+                    return true;
+                };
+                // A pasted name reaches here with any character.
+                let text = match typed::folder_name(&name.text()) {
+                    Ok(chosen) => match (self.shown_name)(&chosen) {
+                        Some(shown) => self.exists.replace("{0}", &shown),
+                        None => {
+                            self.chosen.replace(Some(chosen));
+                            dialog::end(dialog, DialogEnd::Ok);
+                            return true;
+                        }
+                    },
+                    Err(refusal) => refusal_text(&refusal, &self.characters, &self.reserved),
+                };
+                dialog::error_box(Some(dialog), &text, &self.title);
+                name.hwnd().focus();
+                name.select_all();
                 true
             }
             DialogMessage::Command { .. }

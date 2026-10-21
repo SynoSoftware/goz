@@ -28,4 +28,5 @@ pub(crate) mod settings;
 pub(crate) mod shortcuts;
 pub(crate) mod speed;
 pub(crate) mod text;
+pub(crate) mod typed;
 pub(crate) mod update;

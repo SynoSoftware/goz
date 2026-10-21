@@ -4,11 +4,16 @@
 //! the model then says. The list owns the focus and the selection, as
 //! Search's list does (DESIGN.md: The selection).
 
+use super::super::dialogs::{NewFolder, Transfer, TransferStart};
 use super::{MainWindow, timer};
 use crate::core::captions::{self, PanelCaptions};
-use crate::core::commands::{Key, Keystroke, Mark, MenuNode, PanelAction, PanelKey};
+use crate::core::captions::{DialogCaptions, DialogItem};
+use crate::core::commands::{
+    self, CommandId, Focus, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey, State,
+};
 use crate::core::fetch::Purpose;
 use crate::core::ids::ControlId;
+use crate::core::ids::DialogId;
 use crate::core::layout::{self, ColumnFit, PanelLayout, Px, Rect};
 use crate::core::model::Column;
 use crate::core::open;
@@ -18,6 +23,7 @@ use crate::core::panel::{
 };
 use crate::core::settings::Mode;
 use crate::win::controls::{Button, Edit, Label, ListColumn, ListView};
+use crate::win::dialog::DialogEnd;
 use crate::win::folder::{self, PanelEvent, Removal};
 use crate::win::gdi::{StaticColors, TextMeter};
 use crate::win::notify::{
@@ -25,6 +31,8 @@ use crate::win::notify::{
 };
 use crate::win::{self, Hwnd, shell};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
+use gozler_fileops::{Destination, Request};
+use std::path::PathBuf;
 use windows::Win32::Foundation::LRESULT;
 
 /// The panels' columns, in order: each one's Search column, whose default
@@ -176,6 +184,17 @@ impl PanelControls {
     }
 }
 
+/// What a panel's list changed since the panel last read it: a change of
+/// the selection also reads the focus, so the later variant includes the
+/// earlier ([`MainWindow::read_selection`]).
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum ListChanged {
+    #[default]
+    Nothing,
+    Focus,
+    Selection,
+}
+
 /// Whether showing a panel's rows scrolls its focused row into view.
 #[derive(Clone, Copy)]
 enum Scroll {
@@ -246,8 +265,13 @@ impl MainWindow {
             Scroll::ToFocus => list.set_focused(place.focused),
             Scroll::Keep => list.focus_in_place(place.focused),
         }
-        // The list wrote its own selection, which the panel already has.
-        self.panel_selection_pending[side.index()].set(false);
+        // The list wrote its own selection, which the panel already has,
+        // and its focus.
+        self.panel_changed[side.index()].set(ListChanged::Nothing);
+        self.model
+            .borrow_mut()
+            .panels_mut()
+            .set_focused(side, list.focused());
         list.redraw_rows(list.visible_rows());
         self.show_panel_sort(side);
         // A vertical scroll bar that came or went changed the room.
@@ -279,6 +303,27 @@ impl MainWindow {
             .hwnd()
             .set_visible(shown && captions.message.is_some());
         c.retry.hwnd().set_visible(shown && captions.retry);
+        self.update_key_bar();
+    }
+
+    /// Enables each key bar button as its command is, on the active panel's
+    /// state (file-manager-spec.md: The key bar).
+    fn update_key_bar(&self) {
+        let enabled: Vec<bool> = {
+            let model = self.model.borrow();
+            let state = State {
+                model: &model,
+                focus: Focus::Panel,
+            };
+            (0..KEY_BAR.len())
+                .map(|index| (commands::key_bar_command(index).row().enabled)(&state))
+                .collect()
+        };
+        for (button, enabled) in self.created().controls.key_bar.iter().zip(enabled) {
+            if button.hwnd().is_enabled() != enabled {
+                button.hwnd().set_enabled(enabled);
+            }
+        }
     }
 
     /// The sort arrow on `side`'s header.
@@ -504,6 +549,7 @@ impl MainWindow {
             return;
         };
         self.show_place(side, &shown, &place, Scroll::Keep);
+        self.show_awaited(side, &place);
         self.show_panel(side);
         hwnd.set_timer(timer::PANEL_SETTLE[side.index()], SETTLE_MS);
         if again {
@@ -533,6 +579,7 @@ impl MainWindow {
             } => {
                 let scroll = if again { Scroll::Keep } else { Scroll::ToFocus };
                 self.show_place(side, &shown, &place, scroll);
+                self.show_awaited(side, &place);
                 if stale {
                     let ask = self.model.borrow_mut().panels_mut().read_again(side);
                     self.read(side, ask);
@@ -598,6 +645,15 @@ impl MainWindow {
                 c.path.select_to_end();
             }
             None => c.list.hwnd().focus(),
+        }
+    }
+
+    /// Focuses the name that this window's operation gave an entry of
+    /// `side`, once its list, which shows `shown`, has a row for it.
+    fn show_awaited(&self, side: Side, shown: &Place) {
+        let place = self.model.borrow_mut().panels_mut().show_awaited(side);
+        if let Some(place) = place {
+            self.show_place(side, shown, &place, Scroll::ToFocus);
         }
     }
 
@@ -986,10 +1042,14 @@ impl MainWindow {
                 DrawStage::Row if self.draw_panel_row(side, &draw) => DrawAnswer::Drawn,
                 DrawStage::Row | DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
             })),
+            // Read later, because the list tells them while the window may
+            // hold the model.
             ListNotify::SelectionChanged => {
-                if !self.panel_selection_pending[side.index()].replace(true) {
-                    hwnd.post(super::DEFERRED);
-                }
+                self.list_changed(hwnd, side, ListChanged::Selection);
+                None
+            }
+            ListNotify::FocusChanged => {
+                self.list_changed(hwnd, side, ListChanged::Focus);
                 None
             }
             // A click anywhere in the list, or the focus leaving it, closes
@@ -1019,21 +1079,39 @@ impl MainWindow {
         }
     }
 
-    /// Reads `side`'s selection when its list changed it. `..` cannot be
-    /// selected, and a change of the selection, such as a click, closes
-    /// the quick search box.
-    fn read_selection(&self, side: Side) {
-        if !self.panel_selection_pending[side.index()].replace(false) {
-            return;
+    /// Notes that `side`'s list changed `change`, which the panel reads on
+    /// the next [`super::DEFERRED`].
+    fn list_changed(&self, hwnd: Hwnd, side: Side, change: ListChanged) {
+        let changed = &self.panel_changed[side.index()];
+        if changed.get() == ListChanged::Nothing {
+            hwnd.post(super::DEFERRED);
         }
+        changed.set(changed.get().max(change));
+    }
+
+    /// Reads `side`'s selection and focused row when its list changed them;
+    /// a change of the focus alone reads only the focused row, because an
+    /// arrow key moves it and the selection can hold every row.
+    /// `..` cannot be selected, and a change of the selection, such as a
+    /// click, closes the quick search box.
+    fn read_selection(&self, side: Side) {
         let list = self.panel(side).list;
+        match self.panel_changed[side.index()].replace(ListChanged::Nothing) {
+            ListChanged::Nothing => return,
+            ListChanged::Focus => {
+                (self.model.borrow_mut().panels_mut()).set_focused(side, list.focused());
+                self.update_key_bar();
+                return;
+            }
+            ListChanged::Selection => {}
+        }
         let up = matches!(
             self.model.borrow().panels().panel(side).row(0),
             Some(Row::Up)
         );
         if up && list.row_state(0).1 {
             list.select(0, false);
-            self.panel_selection_pending[side.index()].set(false);
+            self.panel_changed[side.index()].set(ListChanged::Nothing);
         }
         let selected = list.selected();
         {
@@ -1042,8 +1120,230 @@ impl MainWindow {
             if panels.set_selected(side, selected) {
                 panels.close_quick(side);
             }
+            panels.set_focused(side, list.focused());
         }
         self.show_panel(side);
+    }
+
+    /// The context menu of `side`'s list (file-manager-spec.md: Menus in
+    /// Two panels): an entry's, at the row the person right-clicked or at
+    /// the focused row for the Menu key, else the empty area's. The header
+    /// shows none.
+    pub(super) fn panel_menu(&self, hwnd: Hwnd, side: Side, point: Option<(i32, i32)>) {
+        let list = self.panel(side).list;
+        if point.is_some_and(|point| list.header().screen_rect().contains(point)) {
+            return;
+        }
+        self.activate_panel(side, false);
+        // The right-click focused and selected its row a moment ago.
+        self.read_selection(side);
+        let (point, row) = match point {
+            Some(point) => (point, list.row_at(point)),
+            None => match list.focused_row_point() {
+                Some(point) => (point, list.focused()),
+                None => {
+                    let rect = list.hwnd().screen_rect();
+                    ((rect.x.0, rect.y.0), None)
+                }
+            },
+        };
+        let entry = row.is_some_and(|row| {
+            let model = self.model.borrow();
+            model.panels().panel(side).entry(row).is_some()
+        });
+        let (groups, default) = match entry {
+            true => (
+                commands::panel_row_menu(),
+                Some(MenuItem::Run(CommandId::Open)),
+            ),
+            false => (commands::panel_menu(), None),
+        };
+        self.context_menu(hwnd, &groups, point, default);
+    }
+
+    /// Open in Two panels: one folder shows in the panel, as `Enter` shows
+    /// it; files open as Search opens them.
+    pub(super) fn open_panel_entries(&self, hwnd: Hwnd) {
+        let folder = {
+            let model = self.model.borrow();
+            let panels = model.panels();
+            match panels.panel(panels.active()).chosen().as_slice() {
+                [entry] if entry.is_folder() => Some(entry.name.clone()),
+                _ => None,
+            }
+        };
+        match folder {
+            Some(name) => {
+                let side = self.model.borrow().panels().active();
+                let ask = {
+                    let mut model = self.model.borrow_mut();
+                    let panels = model.panels_mut();
+                    let path = panels.panel(side).path_of(&name);
+                    panels.go(side, path, None)
+                };
+                self.read(side, Some(ask));
+            }
+            None => self.open_selected(hwnd),
+        }
+    }
+
+    /// `F5` and `F6`: the destination as text, then the operation
+    /// (file-manager-spec.md: Copy and Move). Gozler's own rename in the
+    /// panel's folder keeps the focus, and the selection, on the renamed
+    /// entry, which a rename by another program does not.
+    pub(super) fn transfer(&self, hwnd: Hwnd, moves: bool) {
+        let sources = self.selected_paths();
+        let Some(start) = self.transfer_start(moves) else {
+            return;
+        };
+        let side = self.model.borrow().panels().active();
+        let folder = start.folder.clone();
+        let one = start.one.clone();
+        let selected = {
+            let model = self.model.borrow();
+            model.panels().panel(side).has_selection()
+        };
+        let (dialog, captions) = {
+            let model = self.model.borrow();
+            let strings = model.strings();
+            let mut captions = DialogCaptions::new(DialogId::Transfer, strings);
+            // Move to folder's title and button; the table has Copy's.
+            if moves {
+                captions.title = start.title.clone();
+                let ok = captions
+                    .items
+                    .iter_mut()
+                    .find(|(id, _)| *id == DialogItem::Ok.id());
+                if let Some((_, text)) = ok {
+                    *text = strings.text("file_operations.move").to_owned();
+                }
+            }
+            (Transfer::new(strings, start), captions)
+        };
+        let ended = win::dialog::run_modal(hwnd, DialogId::Transfer, &captions, &dialog);
+        let Some(destination) = ended.ok().and_then(|_| dialog.chosen()) else {
+            return;
+        };
+        let renamed = match (&destination, one) {
+            (Destination::Typed(path), Some(_)) if moves => {
+                let path = path.to_string_lossy().into_owned();
+                (panel::same_folder(&gozler_core::winpath::parent_of(&path), &folder))
+                    .then(|| panel::last_name(&path).to_owned())
+            }
+            _ => None,
+        };
+        let request = match moves {
+            true => Request::Move {
+                sources,
+                destination,
+            },
+            false => Request::Copy {
+                sources,
+                destination,
+            },
+        };
+        let id = self.start_operation(request, None);
+        if let (Some(name), Some(id)) = (renamed, id) {
+            self.model
+                .borrow_mut()
+                .panels_mut()
+                .await_name(side, &name, selected, id);
+        }
+    }
+
+    /// What the Copy and Move dialog opens with: the other panel's folder,
+    /// with the entry's name for `F6` on one entry, selected without its
+    /// extension (file-manager-spec.md: Copy and Move, step 1). `None`
+    /// when no entry is chosen.
+    fn transfer_start(&self, moves: bool) -> Option<TransferStart> {
+        let model = self.model.borrow();
+        let strings = model.strings();
+        let numbers = self.numbers.borrow();
+        let panels = model.panels();
+        let active = panels.panel(panels.active());
+        let other = panels.panel(panels.active().other());
+        let chosen = active.chosen();
+        let one = match chosen.as_slice() {
+            [] => return None,
+            [entry] => Some((entry.display_name(), entry.is_folder())),
+            _ => None,
+        };
+        let (title, name_line, items_line) = match moves {
+            false => (
+                "file_operations.copy_to_title",
+                "transfer.copy_name",
+                "transfer.copy_items",
+            ),
+            true => (
+                "file_operations.move_to_title",
+                "transfer.move_name",
+                "transfer.move_items",
+            ),
+        };
+        let line = match &one {
+            Some((name, _)) => strings.format(name_line, &[name]),
+            None => strings.count(items_line, chosen.len() as u64, &*numbers, &[]),
+        };
+        let mut text = match other.view() {
+            View::Folder if !other.folder().is_empty() => panel::join(other.folder(), ""),
+            _ => String::new(),
+        };
+        let units = |text: &str| text.encode_utf16().count();
+        let selected = match &one {
+            Some((name, folder)) if moves && !text.is_empty() => {
+                let start = units(&text);
+                text.push_str(name);
+                let stem = match name.rfind('.') {
+                    Some(dot) if dot > 0 && !folder => &name[..dot],
+                    _ => name,
+                };
+                (start, start + units(stem))
+            }
+            _ => (0, units(&text)),
+        };
+        Some(TransferStart {
+            title: strings.text(title).to_owned(),
+            line,
+            text,
+            selected,
+            folder: active.folder().to_owned(),
+            one: one.map(|(name, _)| name),
+        })
+    }
+
+    /// `F7`: the new folder's name, then the operation, after which the
+    /// focus goes to the folder (file-manager-spec.md: New folder).
+    pub(super) fn new_folder(&self, hwnd: Hwnd) {
+        let (side, folder) = {
+            let model = self.model.borrow();
+            let side = model.panels().active();
+            (side, model.panels().panel(side).folder().to_owned())
+        };
+        let shown_name = |name: &str| self.model.borrow().panels().panel(side).shown_name(name);
+        let dialog = NewFolder::new(self.model.borrow().strings(), &shown_name);
+        if self.open_dialog(hwnd, DialogId::NewFolder, &dialog) != Some(DialogEnd::Ok) {
+            return;
+        }
+        let Some(name) = dialog.chosen() else {
+            return;
+        };
+        let path = PathBuf::from(panel::join(&folder, &name));
+        if let Some(id) = self.start_operation(Request::NewFolder { path }, None) {
+            self.model
+                .borrow_mut()
+                .panels_mut()
+                .await_name(side, &name, false, id);
+        }
+    }
+
+    /// After a delete is submitted, the focus moves to the first row after
+    /// the deleted ones (file-manager-spec.md: Delete).
+    pub(super) fn focus_after_chosen(&self) {
+        let side = self.model.borrow().panels().active();
+        let row = self.model.borrow().panels().panel(side).row_after_chosen();
+        if let Some(row) = row {
+            self.panel(side).list.set_focused(Some(row));
+        }
     }
 
     /// The cell's text and the row's icon of `side`'s list, which screen

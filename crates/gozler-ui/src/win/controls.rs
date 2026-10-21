@@ -308,6 +308,19 @@ impl Edit {
         send(self.0, EM_SETSEL, 0, -1);
         send(self.0, EM_SCROLLCARET, 0, 0);
     }
+
+    /// Selects the UTF-16 units `start..end` of the text, with the caret at
+    /// `end`.
+    pub(crate) fn select(self, start: usize, end: usize) {
+        send(self.0, EM_SETSEL, start, end as isize);
+        send(self.0, EM_SCROLLCARET, 0, 0);
+    }
+
+    /// The selected UTF-16 units of the text; the caret is at its end.
+    pub(crate) fn selection(self) -> (usize, usize) {
+        let selection = send(self.0, EM_GETSEL, 0, 0) as usize;
+        (selection & 0xffff, (selection >> 16) & 0xffff)
+    }
 }
 
 /// A static text, such as a label before its control.

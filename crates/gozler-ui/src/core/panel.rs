@@ -591,6 +591,25 @@ pub(crate) struct Panel {
     /// The focused name that a change took away, while the focus shows on
     /// a neighbouring row ([`Panels::apply_changes`]).
     gone_focus: Option<GoneFocus>,
+    /// The list's focused row as it last told it, which the commands act
+    /// on when no entry is selected.
+    focused: Option<u64>,
+    /// The name that Gozler's own New folder or rename gives an entry in
+    /// the shown folder, which the focus goes to when a row shows it.
+    awaited: Option<Awaited>,
+}
+
+/// A name that an operation of this window creates in the shown folder
+/// ([`Panels::await_name`]).
+#[derive(Debug)]
+struct Awaited {
+    name: Name,
+    /// The renamed entry was selected, so its new name is too.
+    select: bool,
+    operation: OperationId,
+    /// The moment the operation's end was seen: a listing started after it
+    /// that lacks the name means the operation did not create it.
+    ended: Option<u64>,
 }
 
 /// A focused name that a change took away, to which the focus returns when
@@ -625,6 +644,8 @@ impl Panel {
             saved: saved.folder.clone(),
             folder_sort: None,
             gone_focus: None,
+            focused: None,
+            awaited: None,
         }
     }
 
@@ -737,6 +758,18 @@ impl Panel {
         join(&self.folder, &String::from_utf16_lossy(name))
     }
 
+    /// The full path of the entry `name` in the shown folder as raw
+    /// UTF-16, which a file operation opens, unlike [`Panel::path_of`]'s
+    /// text.
+    pub(crate) fn wide_path_of(&self, name: &[u16]) -> Vec<u16> {
+        let mut path: Vec<u16> = self.folder.encode_utf16().collect();
+        if path.last() != Some(&u16::from(b'\\')) {
+            path.push(u16::from(b'\\'));
+        }
+        path.extend_from_slice(name);
+        path
+    }
+
     /// The row that holds `name`: the one with exactly that name, else one
     /// whose name differs only in case, because a case-sensitive folder can
     /// hold both. `near` limits the search to a row and how far from it the
@@ -760,9 +793,64 @@ impl Panel {
         })
     }
 
+    /// The row with exactly `name`, as an operation of this window
+    /// creates it.
+    fn row_named(&self, name: &Name) -> Option<u64> {
+        (self.up_rows()..self.count()).find(|row| {
+            self.entry(*row)
+                .is_some_and(|e| e.hash == name.hash && e.name == name.raw)
+        })
+    }
+
     /// Whether an entry is selected.
     pub(crate) fn has_selection(&self) -> bool {
         !self.selected.is_empty()
+    }
+
+    /// The entries a file command acts on: the selected ones, else the
+    /// focused one; never `..` (file-manager-spec.md: Selecting entries).
+    pub(crate) fn chosen(&self) -> Vec<&Entry> {
+        if self.selected.is_empty() {
+            return self
+                .focused
+                .and_then(|row| self.entry(row))
+                .into_iter()
+                .collect();
+        }
+        (self.selected.iter())
+            .flat_map(Clone::clone)
+            .filter_map(|row| self.entry(row))
+            .collect()
+    }
+
+    /// The first row after the chosen entries, which the focus moves to
+    /// when a delete takes them; `None` when they are the last rows.
+    pub(crate) fn row_after_chosen(&self) -> Option<u64> {
+        let last = match self.selected.last() {
+            Some(range) => range.end - 1,
+            None => self.focused.filter(|row| self.entry(*row).is_some())?,
+        };
+        (last + 1 < self.count()).then_some(last + 1)
+    }
+
+    /// How many entries [`Panel::chosen`] holds, without a pass over them.
+    fn chosen_count(&self) -> usize {
+        match self.selected.as_slice() {
+            [] => usize::from(self.focused.and_then(|row| self.entry(row)).is_some()),
+            selected => selected.iter().map(|r| (r.end - r.start) as usize).sum(),
+        }
+    }
+
+    /// The name of the row that shows `name`, without regard to case, as
+    /// New folder checks it (file-manager-spec.md: New folder). A row that
+    /// a delete or a move takes does not show.
+    pub(crate) fn shown_name(&self, name: &str) -> Option<String> {
+        let name = Name::of(name.encode_utf16().collect());
+        if self.view != View::Folder {
+            return None;
+        }
+        let row = self.row_of(&name, None)?;
+        self.entry(row).map(Entry::display_name)
     }
 
     /// What the status line counts: from the kept totals while every entry
@@ -1228,6 +1316,11 @@ fn folder_key(folder: &str) -> Vec<u8> {
     fold(folder.trim_end_matches('\\').as_bytes())
 }
 
+/// Whether `a` and `b` name the same folder, as Windows compares names.
+pub(crate) fn same_folder(a: &str, b: &str) -> bool {
+    folder_key(a) == folder_key(b)
+}
+
 /// Whether `path` is `folder` or below it.
 fn is_within(path: &str, folder: &str) -> bool {
     let path = folder_key(path);
@@ -1271,16 +1364,15 @@ pub(crate) fn join(folder: &str, name: &str) -> String {
 }
 
 /// The name at the end of `path`.
-fn last_name(path: &str) -> &str {
+pub(crate) fn last_name(path: &str) -> &str {
     path.trim_end_matches('\\')
         .rsplit_once('\\')
         .map_or(path, |(_, name)| name)
 }
 
 /// What the person typed in the path box, as a full path: environment
-/// variables expanded as File Explorer expands them, `%NAME%` that `var`
-/// knows, and a relative path joined to `folder` (file-manager-spec.md: A
-/// panel). `None` for an empty text.
+/// variables expanded ([`expand`]), and a relative path joined to `folder`
+/// (file-manager-spec.md: A panel). `None` for an empty text.
 pub(crate) fn typed_path(
     typed: &str,
     folder: &str,
@@ -1290,6 +1382,12 @@ pub(crate) fn typed_path(
     if typed.is_empty() {
         return None;
     }
+    Some(absolute(&expand(typed, var), folder))
+}
+
+/// `typed` with each `%NAME%` that `var` knows replaced by its value, as
+/// File Explorer expands environment variables.
+pub(crate) fn expand(typed: &str, var: impl Fn(&str) -> Option<String>) -> String {
     let mut expanded = String::new();
     let mut rest = typed;
     while let Some(open) = rest.find('%') {
@@ -1310,19 +1408,19 @@ pub(crate) fn typed_path(
         }
     }
     expanded.push_str(rest);
-    Some(absolute(&expanded, folder))
+    expanded
 }
 
 /// Whether `request`'s end makes a panel that shows `folder` read it again:
 /// its destination is the folder or a path in it, such as a new name or a
-/// created folder, or a source is in the folder, is it or holds it
-/// (file-manager-spec.md: The person never waits for the disk).
+/// created folder, also one created below a folder it created, or a source
+/// is in the folder, is it or holds it (file-manager-spec.md: The person
+/// never waits for the disk).
 pub(crate) fn ends_in(request: &Request, folder: &str) -> bool {
     let text = |path: &Path| path.to_string_lossy().into_owned();
     let lands = |path: &Path| {
         let path = text(path);
-        folder_key(&path) == folder_key(folder)
-            || folder_key(&parent_of(&path)) == folder_key(folder)
+        folder_key(&parent_of(&path)) == folder_key(folder) || is_within(&path, folder)
     };
     let takes = |path: &Path| {
         let path = text(path);
@@ -1337,11 +1435,10 @@ pub(crate) fn ends_in(request: &Request, folder: &str) -> bool {
             sources,
             destination,
         } => {
-            lands(destination)
+            lands(&destination.path())
                 || matches!(request, Request::Move { .. }) && sources.iter().any(|s| takes(s))
         }
         Request::Delete { sources } => sources.iter().any(|s| takes(s)),
-        Request::Rename { path, .. } => takes(path),
         Request::NewFolder { path } => lands(path),
     }
 }
@@ -1359,9 +1456,9 @@ pub(crate) fn changes_sizes(request: &Request, folder: &str) -> bool {
         | Request::Move {
             sources,
             destination,
-        } => below(destination) || sources.iter().any(|s| below(s)),
+        } => below(&destination.path()) || sources.iter().any(|s| below(s)),
         Request::Delete { sources } => sources.iter().any(|s| below(s)),
-        Request::Rename { path, .. } | Request::NewFolder { path } => below(path),
+        Request::NewFolder { path } => below(path),
     }
 }
 
@@ -1474,10 +1571,12 @@ impl Panels {
         self.moment += 1;
         let generation = self.moment;
         let panel = self.panel_mut(side);
-        // Another folder closes the quick search box; the shown one read
-        // again keeps it, so a change does not end the person's typing.
+        // Another folder closes the quick search box and forgets the
+        // awaited name; the shown one read again keeps them, so a change
+        // does not end the person's typing.
         if matches!(kind, ReadKind::Go { .. }) {
             panel.quick = None;
+            panel.awaited = None;
         }
         let sort = panel.sort;
         let sizes = if folder_key(&path) == folder_key(&panel.folder) {
@@ -1729,6 +1828,12 @@ impl Panels {
                 let stale = panel.release(read.generation);
                 panel.filter(&taken);
                 panel.note_folder();
+                if let Some(awaited) = &panel.awaited
+                    && awaited.ended.is_some_and(|ended| ended < read.generation)
+                    && panel.row_named(&awaited.name).is_none()
+                {
+                    panel.awaited = None;
+                }
                 let place = match remembered {
                     Some(remembered) => panel.place_of(remembered, None),
                     None => {
@@ -1812,6 +1917,68 @@ impl Panels {
     /// Whether the active panel has a selected entry.
     pub(crate) fn has_selection(&self) -> bool {
         self.panel(self.active).has_selection()
+    }
+
+    /// The list's focused row, as it tells it.
+    pub(crate) fn set_focused(&mut self, side: Side, focused: Option<u64>) {
+        self.panel_mut(side).focused = focused;
+    }
+
+    /// How many entries the active panel's file commands act on
+    /// ([`Panel::chosen`]).
+    pub(crate) fn chosen_count(&self) -> usize {
+        self.panel(self.active).chosen_count()
+    }
+
+    /// The operation `operation` gives an entry of `side`'s folder the name
+    /// `name`: the focus goes to it when a row shows it, and with `select`
+    /// it is selected, because Gozler's own rename keeps the selection on
+    /// the renamed entry, which a rename by another program does not.
+    /// Another folder, or a listing after the operation's end without the
+    /// name, forgets it. A name that a row shows exactly now is not
+    /// awaited: the operation does not create it, as when a move goes into
+    /// a folder of that name or a conflict keeps the entry already there.
+    pub(crate) fn await_name(
+        &mut self,
+        side: Side,
+        name: &str,
+        select: bool,
+        operation: OperationId,
+    ) {
+        let name = Name::of(name.encode_utf16().collect());
+        let panel = self.panel_mut(side);
+        panel.awaited = match panel.row_named(&name) {
+            Some(_) => None,
+            None => Some(Awaited {
+                name,
+                select,
+                operation,
+                ended: None,
+            }),
+        };
+    }
+
+    /// The place that shows `side`'s awaited name, once a row shows it,
+    /// after its list showed a change or a listing; it is then forgotten.
+    /// `None` while no row shows it.
+    pub(crate) fn show_awaited(&mut self, side: Side) -> Option<Place> {
+        let panel = self.panel_mut(side);
+        let awaited = panel.awaited.as_ref()?;
+        let row = panel.row_named(&awaited.name)?;
+        let select = awaited.select;
+        panel.awaited = None;
+        panel.gone_focus = None;
+        if select {
+            let mut rows: Vec<u64> = panel.selected.iter().flat_map(Clone::clone).collect();
+            rows.push(row);
+            rows.sort_unstable();
+            rows.dedup();
+            panel.select(ranges(&rows));
+        }
+        Some(Place {
+            focused: Some(row),
+            selected: panel.selected.clone(),
+        })
     }
 
     /// Applies the watching thread's `changes` to `side`, whose list has
@@ -1939,6 +2106,11 @@ impl Panels {
             let mut again = false;
             let mut sizes = false;
             for (id, request) in ended {
+                if let Some(awaited) = &mut panel.awaited
+                    && awaited.operation == *id
+                {
+                    awaited.ended = Some(moment);
+                }
                 if panel.folder.is_empty() {
                     continue;
                 }
@@ -2178,7 +2350,7 @@ pub(crate) struct SavedPanels {
     clippy::single_range_in_vec_init,
     reason = "a selection is a list of row ranges"
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
@@ -2186,7 +2358,7 @@ mod tests {
         name.encode_utf16().collect()
     }
 
-    fn file(name: &str, size: u64, modified: i64) -> Entry {
+    pub(crate) fn file(name: &str, size: u64, modified: i64) -> Entry {
         Entry::new(wide(name), 0x20, size, modified)
     }
 
@@ -2213,7 +2385,7 @@ mod tests {
 
     /// Reads `folder` again in the left panel and lists `entries`, as the
     /// reading thread answers; returns the list's new place.
-    fn list(panels: &mut Panels, folder: &str, entries: Vec<Entry>) -> Place {
+    pub(crate) fn list(panels: &mut Panels, folder: &str, entries: Vec<Entry>) -> Place {
         let ask = panels.go(Side::Left, folder.to_owned(), None);
         complete(panels, &ask, folder, entries)
     }
@@ -2683,6 +2855,59 @@ mod tests {
         let changes = vec![FolderChange::Modified(file("README.TXT", 2, 0))];
         panels.apply_changes(Side::Left, changes, None);
         assert_eq!(names(&panels, Side::Left), ["..", "Readme.txt"]);
+    }
+
+    /// A rename by another program carries neither the focus nor the
+    /// selection, so Gozler's own `F6` rename brings both to the new name
+    /// itself. A listing after an end that did not create the name forgets
+    /// it, so a later file of that name does not take the focus. A name
+    /// that a row shows already, such as a folder that `F6` moves the entry
+    /// into, is not awaited, so that row never takes the focus.
+    #[test]
+    fn gozler_s_own_rename_keeps_the_focus_and_the_selection() {
+        let mut panels = showing(r"C:\f", vec![file("a.txt", 1, 0), file("b.txt", 1, 0)]);
+        // `..`, a.txt, b.txt: a.txt selected and focused.
+        panels.set_selected(Side::Left, vec![1..2]);
+        panels.await_name(Side::Left, "c.txt", true, OperationId::for_tests(1));
+        let renamed = FolderChange::Renamed {
+            from: wide("a.txt"),
+            to: file("c.txt", 1, 0),
+        };
+        let (place, _) = panels
+            .apply_changes(Side::Left, vec![renamed], Some(1))
+            .expect("a folder shows");
+        assert!(place.selected.is_empty());
+        let place = panels.show_awaited(Side::Left).expect("c.txt shows");
+        assert_eq!(names(&panels, Side::Left), ["..", "b.txt", "c.txt"]);
+        assert_eq!((place.focused, place.selected), (Some(2), vec![2..3]));
+        assert_eq!(panels.show_awaited(Side::Left), None, "it is shown once");
+
+        let id = OperationId::for_tests(2);
+        panels.await_name(Side::Left, "d.txt", false, id);
+        panels.operations_ended(&[(id, delete(&[r"C:\other\x"]))]);
+        let ask = panels.read_again(Side::Left).expect("a folder shows");
+        complete(&mut panels, &ask, r"C:\f", vec![file("b.txt", 1, 0)]);
+        let ask = panels.read_again(Side::Left).expect("a folder shows");
+        complete(&mut panels, &ask, r"C:\f", vec![file("d.txt", 1, 0)]);
+        assert_eq!(panels.show_awaited(Side::Left), None);
+
+        panels.await_name(Side::Left, "d.txt", true, OperationId::for_tests(3));
+        assert_eq!(panels.show_awaited(Side::Left), None);
+    }
+
+    /// New folder refuses a name that a row shows in any case, and names
+    /// the row's own spelling, but not one that only a row taken by a
+    /// delete shows, because the person does not see that row
+    /// (file-manager-spec.md: New folder).
+    #[test]
+    fn new_folder_checks_the_names_the_rows_show() {
+        let mut panels = showing(r"C:\f", vec![folder("Photos"), file("x.txt", 1, 0)]);
+        let shown = |panels: &Panels, name| panels.panel(Side::Left).shown_name(name);
+        assert_eq!(shown(&panels, "PHOTOS").as_deref(), Some("Photos"));
+        let mut taken = Taken::default();
+        taken.insert(OperationId::for_tests(1), Path::new(r"C:\f\x.txt"), false);
+        panels.set_taken(Arc::new(taken), [None; 2]);
+        assert_eq!(shown(&panels, "x.txt"), None);
     }
 
     /// More changes than go in one by one rebuild the entries, which must

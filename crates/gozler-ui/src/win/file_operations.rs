@@ -55,6 +55,10 @@ pub(crate) const ERASE_BACKGROUND: u32 = WM_ERASEBKGND;
 /// entries that deletes and moves take changed, or an operation ended.
 pub(crate) const TAKEN_CHANGED: u32 = super::wake::WAKE + 5;
 
+/// The message the File operations window posts to its owner after the
+/// operation that the owner's status bar shows changed.
+pub(crate) const OPERATION_CHANGED: u32 = super::wake::WAKE + 8;
+
 /// One line of a path that loses its middle when it is too long
 /// (`SS_PATHELLIPSIS`), so its drive and its last part stay. It notifies its
 /// parent of clicks (`SS_NOTIFY`), without which it lets the mouse through

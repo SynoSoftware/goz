@@ -49,7 +49,10 @@
     "move_to_folder": "Verplaa&tsen naar map…",
     "file_operations": "&Bestandsbewerkingen",
     "two_panels": "&Twee panelen",
-    "clear_selection": "Selectie &wissen"
+    "clear_selection": "Selectie &wissen",
+    "view": "&Weergeven",
+    "edit": "&Bewerken",
+    "new_folder": "&Nieuwe map…"
   },
   "column": {
     "name": "&Naam",
@@ -703,7 +706,7 @@
     "column_item": "Item",
     "column_reason": "Reden",
     "refused_inside": "De bestemming ligt in een geselecteerde map.",
-    "refused_missing": "De doelmap bestaat niet meer.",
+    "refused_missing": "Het doelstation is niet beschikbaar.",
     "refused_unreadable": "Kan de doelmap niet lezen. {0}",
     "refused_space": "Er is {0} nodig, maar de bestemming heeft maar {1} vrij.",
     "disk_full": "De doelschijf is vol, dus de bewerking is gestopt.",
@@ -728,7 +731,31 @@
     "delete_body_other": "Ze gaan niet naar de Prullenbak en u kunt dit niet ongedaan maken.",
     "delete_button": "&Verwijderen",
     "copy_to_title": "Kopiëren naar map",
-    "move_to_title": "Verplaatsen naar map"
+    "move_to_title": "Verplaatsen naar map",
+    "status_copying": "Kopiëren van {0} naar {1}",
+    "status_moving": "Verplaatsen van {0} naar {1}",
+    "status_deleting": "Verwijderen van {0}",
+    "status_renaming": "Naam van {0} wijzigen in {1}",
+    "status_creating": "Maken van {0}",
+    "ended_copy_one": "{0} item gekopieerd naar {1}",
+    "ended_copy_other": "{0} items gekopieerd naar {1}",
+    "cancelled_copy_one": "Kopiëren naar {1} geannuleerd na {0} item",
+    "cancelled_copy_other": "Kopiëren naar {1} geannuleerd na {0} items",
+    "ended_move_one": "{0} item verplaatst naar {1}",
+    "ended_move_other": "{0} items verplaatst naar {1}",
+    "cancelled_move_one": "Verplaatsen naar {1} geannuleerd na {0} item",
+    "cancelled_move_other": "Verplaatsen naar {1} geannuleerd na {0} items",
+    "ended_delete_one": "{0} item verwijderd",
+    "ended_delete_other": "{0} items verwijderd",
+    "cancelled_delete_one": "Verwijderen geannuleerd na {0} item",
+    "cancelled_delete_other": "Verwijderen geannuleerd na {0} items",
+    "ended_rename": "Naam van {0} gewijzigd in {1}",
+    "ended_rename_numbered": "Naam van {0} gewijzigd",
+    "rename_failed": "Kan de naam van {0} niet wijzigen",
+    "ended_new_folder": "{0} gemaakt",
+    "new_folder_failed": "Kan {0} niet maken",
+    "ended_failed_one": "{0} mislukt of overgeslagen",
+    "ended_failed_other": "{0} mislukt of overgeslagen"
   },
   "panel": {
     "items_one": "{0} item",
@@ -770,5 +797,22 @@
     "open_failed": "Kan {0} niet starten. {1} Controleer de opdracht in Bestand > Instellingen > Snelmenu.",
     "shortcut_taken": "Een ander programma gebruikt {0}, dus deze sneltoets geeft Gozler niet meer weer. Kies een andere sneltoets in Bestand > Instellingen > Toetsenbord.",
     "registry_failed": "Kan \"{0}\" niet opslaan in het register. {1}"
+  },
+  "transfer": {
+    "copy_name": "{0} kopiëren naar:",
+    "copy_items_one": "{0} item kopiëren naar:",
+    "copy_items_other": "{0} items kopiëren naar:",
+    "move_name": "{0} verplaatsen naar:",
+    "move_items_one": "{0} item verplaatsen naar:",
+    "move_items_other": "{0} items verplaatsen naar:"
+  },
+  "new_folder": {
+    "name": "&Naam:",
+    "create": "Maken",
+    "exists": "{0} staat al in deze map. Kies een andere naam."
+  },
+  "name": {
+    "characters": "Een bestandsnaam mag geen van de volgende tekens bevatten: \\ / : * ? \" < > |",
+    "reserved": "Windows gebruikt de naam {0} voor een apparaat. Kies een andere naam."
   }
 }

@@ -31,9 +31,9 @@ use crate::saved::{self, Saved};
 use crate::totals::Index;
 use crate::volumes::{CopyPlan, VolumeClass};
 use crate::{
-    Choice, Conflicts, Count, End, LargeFileLimit, Listed, OperationId, Outcome, Preset, Queue,
-    Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk, RingSsd,
-    SpeedSettings, State, Total,
+    Choice, Conflicts, Count, Destination, End, LargeFileLimit, Listed, OperationId, Outcome,
+    Preset, Queue, Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk,
+    RingSsd, SpeedSettings, State, Total,
 };
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -308,6 +308,7 @@ fn copy_listed(
     });
     let sources = (received.entries.into_iter())
         .map(|selected| Source {
+            name: selected.identity.name().to_vec(),
             selected,
             own_folder: false,
             shared: false,
@@ -619,7 +620,7 @@ fn each_choice_applies_to_its_conflicts() {
         let watched = Watched::new(&scratch.saved());
         let (id, prepared) = watched.prepared(Request::Copy {
             sources: vec![same.clone(), clash.clone()],
-            destination: out.clone(),
+            destination: Destination::Folder(out.clone()),
         });
         assert_eq!(prepared.conflicts.expect("counted").files, 1);
         watched.queue.submit(id, Some(choice)).expect("prepared");
@@ -658,7 +659,7 @@ fn a_conflict_after_prepare_is_skipped() {
     let watched = Watched::new(&scratch.saved());
     let (id, prepared) = watched.prepared(Request::Copy {
         sources: vec![source.clone()],
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     });
     assert_eq!(prepared.conflicts.expect("counted").files, 0);
     scratch.write(r"out\a.txt", b"someone's");
@@ -681,7 +682,7 @@ fn gozlerds_totals_count_and_refuse_too_little_space() {
     fs::create_dir(&out).expect("a destination");
     let copy = |sources: Vec<PathBuf>| Request::Copy {
         sources,
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     };
     {
         let below = Total {
@@ -720,7 +721,7 @@ fn a_merge_is_counted() {
     let watched = Watched::new(&scratch.saved());
     let (_, prepared) = watched.prepared(Request::Copy {
         sources: vec![docs],
-        destination: scratch.path("out"),
+        destination: Destination::Folder(scratch.path("out")),
     });
     let merge = Conflicts {
         files: 0,
@@ -961,7 +962,7 @@ fn files_of_two_merged_folders_never_replace_each_other() {
     let watched = Watched::new(&scratch.saved());
     let (id, _) = watched.prepared(Request::Copy {
         sources: vec![scratch.path(r"one\a"), scratch.path(r"two\a")],
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     });
     watched
         .queue
@@ -986,7 +987,7 @@ fn a_cancelled_copy_leaves_no_partial_file() {
     let watched = Watched::new(&scratch.saved());
     let (id, _) = watched.prepared(Request::Copy {
         sources: vec![source],
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     });
     watched.queue.submit(id, None).expect("prepared");
     // Progress wakes nothing, so this reads it until it moves.
@@ -1195,7 +1196,7 @@ fn continue_copies_only_what_is_not_done() {
     set_modified(&numbered, modified(&kept));
     let request = Request::Copy {
         sources: vec![unfinished, done, kept],
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     };
     save(&scratch, &request, Some(Choice::KeepBoth), started);
 
@@ -1295,7 +1296,7 @@ fn continue_resumes_every_unfinished_file() {
     let out = scratch.path("out");
     let request = Request::Copy {
         sources,
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     };
     save(&scratch, &request, None, started);
 
@@ -1330,7 +1331,7 @@ fn continue_never_writes_over_a_copy_of_another_source_of_its_name() {
     let out = scratch.path("out");
     let request = Request::Copy {
         sources: vec![first_source, second_source],
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     };
     save(&scratch, &request, Some(Choice::KeepBoth), started);
 
@@ -1356,7 +1357,7 @@ fn a_resumed_file_with_another_stream_is_copied_again() {
     fs::write(&extra, b"not the source's").expect("write a stream");
     let request = Request::Copy {
         sources: vec![source],
-        destination: scratch.path("out"),
+        destination: Destination::Folder(scratch.path("out")),
     };
     save(&scratch, &request, None, started);
 
@@ -1385,7 +1386,7 @@ fn an_unfinished_file_is_resumed_whatever_the_choice() {
         scratch.write(r"out\new.txt", b"new");
         let request = Request::Copy {
             sources: vec![old.clone(), new],
-            destination: scratch.path("out"),
+            destination: Destination::Folder(scratch.path("out")),
         };
         save(&scratch, &request, choice, started);
 
@@ -1543,7 +1544,7 @@ fn continue_counts_what_already_moved() {
     fs::rename(&first, out.join("first.txt")).expect("the half that moved");
     let request = Request::Move {
         sources: vec![first, second.clone()],
-        destination: out.clone(),
+        destination: Destination::Folder(out.clone()),
     };
     save(&scratch, &request, None, system_time());
     let outcome = resume(&scratch);
@@ -1573,7 +1574,7 @@ fn continue_counts_what_already_moved() {
     let watched = Watched::new(&scratch.saved());
     let (id, _) = watched.prepared(Request::Move {
         sources: vec![lost.clone()],
-        destination: out,
+        destination: Destination::Folder(out),
     });
     fs::remove_file(&lost).expect("another program deletes it");
     watched.queue.submit(id, None).expect("prepared");
@@ -1606,7 +1607,7 @@ fn a_move_on_one_volume_renames_and_merges() {
     let outcome = watched.run(
         Request::Move {
             sources: vec![file, folder.clone()],
-            destination: out.clone(),
+            destination: Destination::Folder(out.clone()),
         },
         None,
     );
@@ -1650,7 +1651,7 @@ fn an_unfinished_operation_is_offered_again() {
     fs::create_dir(&out).expect("a destination");
     let copy = Request::Copy {
         sources: vec![held],
-        destination: out,
+        destination: Destination::Folder(out),
     };
     for cancelled in [false, true] {
         let watched = Watched::new(&scratch.saved());
@@ -1890,4 +1891,115 @@ fn a_cancelled_ring_copy_leaves_no_partial_file() {
     assert_eq!(copied.listed, []);
     let left: Vec<_> = fs::read_dir(&out).expect("list").collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// The Copy and Move table's rows that prepare decides (file-manager-spec.md:
+/// Copy and Move): a typed path that is a folder takes the entry in; a
+/// missing folder is created with its parents, for one entry or several;
+/// any other typed path is the entry's new full path, where a file already
+/// there is a conflict and not a folder to enter.
+#[test]
+fn a_typed_destination_is_a_folder_or_a_new_name() {
+    let scratch = Scratch::new("typed");
+    let a = scratch.write(r"src\a.txt", b"a");
+    let b = scratch.write(r"src\b.txt", b"b");
+    let out = scratch.path("out");
+    fs::create_dir(&out).expect("a destination");
+    let copy = |sources: &[&PathBuf], destination| Request::Copy {
+        sources: sources.iter().map(|&source| source.clone()).collect(),
+        destination,
+    };
+    let watched = Watched::new(&scratch.saved());
+    let outcome = watched.run(copy(&[&a], Destination::Typed(out.clone())), None);
+    assert_eq!(outcome.end, End::Complete);
+    assert_eq!(fs::read(out.join("a.txt")).expect("in the folder"), b"a");
+
+    let deep = scratch.path(r"new\deep");
+    let outcome = watched.run(copy(&[&a, &b], Destination::Folder(deep.clone())), None);
+    assert_eq!(outcome.end, End::Complete);
+    assert_eq!(
+        fs::read(deep.join("b.txt")).expect("in the new folder"),
+        b"b"
+    );
+
+    let renamed = out.join("a-old.txt");
+    let outcome = watched.run(copy(&[&a], Destination::Typed(renamed.clone())), None);
+    assert_eq!(outcome.end, End::Complete);
+    assert_eq!(fs::read(&renamed).expect("under the new name"), b"a");
+    let (_, prepared) = watched.prepared(copy(&[&b], Destination::Typed(renamed)));
+    assert_eq!(prepared.conflicts.expect("counted").files, 1);
+}
+
+/// `F6` on the folder `Photos` with `photos` typed renames it in its
+/// folder, because the folder that the typed path opens is the entry
+/// itself.
+#[test]
+fn a_move_that_changes_only_the_case_renames() {
+    let scratch = Scratch::new("case");
+    let photos = scratch.path(r"src\Photos");
+    scratch.file(r"src\Photos\a.jpg");
+    let watched = Watched::new(&scratch.saved());
+    let (id, _) = watched.prepared(Request::Move {
+        sources: vec![photos],
+        destination: Destination::Typed(scratch.path(r"src\photos")),
+    });
+    // The window words the queued move from its decided destination.
+    let queued = (watched.queue.operations().into_iter())
+        .find(|operation| operation.id == id)
+        .expect("queued");
+    assert!(matches!(
+        &*queued.request,
+        Request::Move { destination: Destination::Named { name, .. }, .. } if name == "photos"
+    ));
+    watched.queue.submit(id, None).expect("prepared");
+    assert_eq!(watched.ended(id).end, End::Complete);
+    let names: Vec<_> = (fs::read_dir(scratch.path("src")).expect("list"))
+        .map(|entry| entry.expect("an entry").file_name())
+        .collect();
+    assert_eq!(names, ["photos"]);
+}
+
+/// Two copies prepared into one missing folder both run: the second finds
+/// the folder the first made and writes into it.
+#[test]
+fn two_copies_into_one_new_folder_both_run() {
+    let scratch = Scratch::new("two-new");
+    let a = scratch.write(r"src\a.txt", b"a");
+    let b = scratch.write(r"src\b.txt", b"b");
+    let new = scratch.path(r"out\new");
+    let watched = Watched::new(&scratch.saved());
+    let copy = |source: &PathBuf| Request::Copy {
+        sources: vec![source.clone()],
+        destination: Destination::Folder(new.clone()),
+    };
+    let (first, _) = watched.prepared(copy(&a));
+    let (second, _) = watched.prepared(copy(&b));
+    watched.queue.submit(first, None).expect("prepared");
+    watched.queue.submit(second, None).expect("prepared");
+    assert_eq!(watched.ended(first).end, End::Complete);
+    assert_eq!(watched.ended(second).end, End::Complete);
+    assert_eq!(fs::read(new.join("a.txt")).expect("copied"), b"a");
+    assert_eq!(fs::read(new.join("b.txt")).expect("copied"), b"b");
+}
+
+/// A destination with no existing folder above it, as on a drive that is
+/// gone, is refused before anything is written. A volume GUID that no
+/// machine has stands for the drive, because a drive letter may be mapped.
+#[test]
+fn a_destination_without_a_folder_above_is_refused() {
+    let scratch = Scratch::new("no-volume");
+    let a = scratch.file(r"src\a.txt");
+    let gone = PathBuf::from(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\Backup");
+    let watched = Watched::new(&scratch.saved());
+    let id = watched.queue.prepare(
+        Request::Copy {
+            sources: vec![a],
+            destination: Destination::Folder(gone),
+        },
+        SpeedSettings::automatic(),
+    );
+    assert_eq!(
+        watched.ended(id).end,
+        End::Refused(Refusal::DestinationMissing)
+    );
 }

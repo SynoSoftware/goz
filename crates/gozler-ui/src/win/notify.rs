@@ -26,13 +26,13 @@ use windows::Win32::UI::Controls::{
     CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED, CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT,
     CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, CloseThemeData,
     DrawThemeBackground, DrawThemeParentBackground, HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE,
-    LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT,
-    LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK,
-    LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED,
-    NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMCUSTOMDRAW, NMHDR,
-    NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE,
-    NMMOUSE, OpenThemeData, PBS_DISABLED, PBS_HOT, PBS_NORMAL, PBS_PRESSED, TP_BUTTON, TS_HOT,
-    TS_PRESSED,
+    LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
+    LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
+    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
+    LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS,
+    NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW,
+    NMLVODSTATECHANGE, NMMOUSE, OpenThemeData, PBS_DISABLED, PBS_HOT, PBS_NORMAL, PBS_PRESSED,
+    TP_BUTTON, TS_HOT, TS_PRESSED,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use windows::core::{PWSTR, w};
@@ -117,6 +117,8 @@ pub(crate) enum ListNotify<'a> {
     /// a Shift+click. The handler reads the selection from the list once
     /// per user action (DESIGN.md: The selection).
     SelectionChanged,
+    /// The focused row changed, and the selection did not.
+    FocusChanged,
     /// A double-click on a row.
     Activated,
     /// The person starts dragging the selected rows, with either button.
@@ -176,10 +178,13 @@ impl ListView {
                 }
                 LVN_ITEMCHANGED => {
                     let change = &*pointer.cast::<NMLISTVIEW>();
-                    if change.uChanged.contains(LVIF_STATE)
-                        && selection_changed(change.uNewState, change.uOldState)
-                    {
+                    let changed = change.uNewState ^ change.uOldState;
+                    if !change.uChanged.contains(LVIF_STATE) {
+                        ListNotify::Other
+                    } else if selection_changed(change.uNewState, change.uOldState) {
                         ListNotify::SelectionChanged
+                    } else if changed & LVIS_FOCUSED.0 != 0 {
+                        ListNotify::FocusChanged
                     } else {
                         ListNotify::Other
                     }

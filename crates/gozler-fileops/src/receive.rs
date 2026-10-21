@@ -8,10 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gozler_winfs::{Access, AttributeTag, Entry, EntryStat, Reparse, open_entry};
 
 use crate::identity::{Identity, PathTrie, outermost};
-use crate::listing::read_names;
+use crate::listing::{BACKSLASH, read_names};
 use crate::names::Names;
 use crate::operation::{Listed, Reason, Refusal};
 use crate::win32::{FILE_ATTRIBUTE_DIRECTORY, is_gone};
+
+/// Windows' "The directory name is invalid", for a destination that is a
+/// file.
+const ERROR_DIRECTORY: u32 = 267;
 
 /// A selected entry that exists and whose identity was read.
 #[derive(Debug)]
@@ -33,19 +37,30 @@ impl Selected {
     }
 }
 
-/// The folder a copy or a move writes into, opened following links.
+/// The folder a copy or a move writes into, opened following links: the
+/// destination, or the nearest folder above it that exists, below which the
+/// run creates the missing folders.
 pub(crate) struct Destination {
+    /// The folder that opened.
     pub(crate) verbatim: Vec<u16>,
-    /// The target's identity, when the destination is a link.
+    /// The destination's identity: the target's when the folder that opened
+    /// is a link, with the missing folders' names.
     pub(crate) identity: Identity,
+    /// The folder that opened, whose volume prepare checks.
     pub(crate) entry: Entry,
+    /// The names of the folders that do not exist yet, the top one first.
+    pub(crate) missing: Vec<Vec<u16>>,
 }
 
 impl Destination {
-    /// Its names now. Each call lists it through a handle of its own,
-    /// because a handle's listing goes on where its last read stopped, so a
-    /// second listing of one handle would find the folder empty.
+    /// Its names now; none while it does not exist. Each call lists it
+    /// through a handle of its own, because a handle's listing goes on where
+    /// its last read stopped, so a second listing of one handle would find
+    /// the folder empty.
     pub(crate) fn names(&self, page: &mut [u64]) -> Result<Names, u32> {
+        if !self.missing.is_empty() {
+            return Ok(Names::default());
+        }
         let folder = self
             .entry
             .reopen(Access::List)
@@ -111,20 +126,47 @@ pub(crate) fn receive(
 }
 
 /// The destination is a folder the person chose, so it is opened following
-/// links, and its identity is its target's.
+/// links, and its identity is its target's. A folder that does not exist is
+/// opened at the nearest folder above it that exists; any other error
+/// refuses, and so does a file in its place.
 fn open_destination(destination: &Path, sources: &PathTrie) -> Result<Destination, Refusal> {
     let path: Vec<u16> = destination.as_os_str().encode_wide().collect();
-    let verbatim = verbatim(&path);
-    let unreadable = |code| {
-        if is_gone(code) {
-            Refusal::DestinationMissing
-        } else {
-            Refusal::DestinationUnreadable(code)
+    let mut verbatim = verbatim(&path);
+    while verbatim.last() == Some(&BACKSLASH) && !is_volume_root(&verbatim) {
+        verbatim.pop();
+    }
+    let mut missing = Vec::new();
+    let entry = loop {
+        match open_entry(&verbatim, Access::List, Reparse::Follow) {
+            Ok(entry) => break entry,
+            Err(error) if is_gone(error.code) => {
+                let parent = (verbatim.iter().rposition(|&unit| unit == BACKSLASH))
+                    .filter(|_| !is_volume_root(&verbatim));
+                let Some(at) = parent else {
+                    return Err(Refusal::DestinationMissing);
+                };
+                missing.push(verbatim.split_off(at)[1..].to_vec());
+                // A root opens as a folder only with its backslash.
+                if is_volume_root(&verbatim) {
+                    verbatim.push(BACKSLASH);
+                }
+            }
+            Err(error) => return Err(Refusal::DestinationUnreadable(error.code)),
         }
     };
-    let entry = open_entry(&verbatim, Access::List, Reparse::Follow)
-        .map_err(|error| unreadable(error.code))?;
-    let identity = Identity::new(entry.final_path().map_err(|error| unreadable(error.code))?);
+    missing.reverse();
+    let tag = entry
+        .attribute_tag()
+        .map_err(|error| Refusal::DestinationUnreadable(error.code))?;
+    if tag.attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(Refusal::DestinationUnreadable(ERROR_DIRECTORY));
+    }
+    let mut identity = Identity::new(
+        (entry.final_path()).map_err(|error| Refusal::DestinationUnreadable(error.code))?,
+    );
+    for name in &missing {
+        identity = identity.child(name);
+    }
     if sources.covers(&identity) {
         return Err(Refusal::DestinationInsideSource);
     }
@@ -132,7 +174,20 @@ fn open_destination(destination: &Path, sources: &PathTrie) -> Result<Destinatio
         verbatim,
         identity,
         entry,
+        missing,
     })
+}
+
+/// Whether the verbatim path is a volume's root, which has no folder above
+/// it: `\\?\C:\`, `\\?\UNC\server\share`, or `\\?\Volume{…}\`.
+fn is_volume_root(verbatim: &[u16]) -> bool {
+    let units = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    let trimmed = verbatim.strip_suffix(&[BACKSLASH]).unwrap_or(verbatim);
+    if let Some(share) = trimmed.strip_prefix(&units(r"\\?\UNC\")[..]) {
+        return share.iter().filter(|&&unit| unit == BACKSLASH).count() <= 1;
+    }
+    let rest = trimmed.strip_prefix(&units(r"\\?\")[..]).unwrap_or(trimmed);
+    !rest.contains(&BACKSLASH)
 }
 
 /// `path` with the prefix that lets Windows take it longer than `MAX_PATH`.

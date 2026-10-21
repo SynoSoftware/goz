@@ -11,6 +11,7 @@ use super::fetch::{
     Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Local, Outcome, Programs,
     Purpose, WriteFailure, inside,
 };
+use super::file_operations::StatusOperation;
 use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
@@ -62,8 +63,10 @@ pub(crate) struct Model {
     pub(super) selection: Selection,
     pub(super) export: Export,
     fix: Fixer,
-    /// The job started last.
-    newest_job: Job,
+    /// The file operation the middle group shows.
+    operation: Option<StatusOperation>,
+    /// The jobs in the order they last started, the newest last.
+    started_jobs: Vec<Job>,
     /// How the latest request for the results or the status failed; `None`
     /// once the service answers.
     failure: Option<DaemonFailure>,
@@ -263,6 +266,8 @@ pub(crate) enum Export {
 pub(crate) enum Job {
     Export,
     Fix,
+    /// A file operation ([`Model::operation`]).
+    Operation,
 }
 
 /// The formats Export results… offers, in the save dialog's order.
@@ -367,7 +372,8 @@ impl Model {
             selection: Selection::None,
             export: Export::Idle,
             fix: Fixer::Idle,
-            newest_job: Job::Export,
+            operation: None,
+            started_jobs: Vec::new(),
             failure: None,
             status_asked: None,
             program_asked: None,
@@ -1157,7 +1163,7 @@ impl Model {
             path: path.clone(),
             rows: 0,
         };
-        self.newest_job = Job::Export;
+        self.job_started(Job::Export);
         Accepted {
             change: Change::Export,
             then: Some(Then::Fetch(Fetch {
@@ -1199,14 +1205,40 @@ impl Model {
     }
 
     /// The job the status bar's middle group shows: the newest running
-    /// one, or the one started last when none or both run (DESIGN.md:
-    /// Status bar).
+    /// one, or the one started last when none runs (DESIGN.md: Status bar).
     pub(crate) fn job(&self) -> Job {
-        match (self.exporting(), self.fix.running()) {
-            (true, false) => Job::Export,
-            (false, true) => Job::Fix,
-            (true, true) | (false, false) => self.newest_job,
+        let runs = |job: &Job| match job {
+            Job::Export => self.exporting(),
+            Job::Fix => self.fix.running(),
+            Job::Operation => matches!(self.operation, Some(StatusOperation::Running { .. })),
+        };
+        let mut started = self.started_jobs.iter().rev();
+        (started.clone().find(|job| runs(job)))
+            .or_else(|| started.next())
+            .copied()
+            .unwrap_or(Job::Export)
+    }
+
+    fn job_started(&mut self, job: Job) {
+        self.started_jobs.retain(|started| *started != job);
+        self.started_jobs.push(job);
+    }
+
+    /// The file operation the File operations window last reported for the
+    /// middle group ([`StatusOperation`]).
+    pub(crate) fn operation(&self) -> Option<&StatusOperation> {
+        self.operation.as_ref()
+    }
+
+    /// The File operations window reported `operation`: another
+    /// operation than the one shown is the newest job, also one that ended
+    /// before the window saw it run.
+    pub(crate) fn set_operation(&mut self, operation: Option<StatusOperation>) {
+        let id = |operation: &Option<StatusOperation>| operation.as_ref().map(StatusOperation::id);
+        if id(&operation).is_some() && id(&operation) != id(&self.operation) {
+            self.job_started(Job::Operation);
         }
+        self.operation = operation;
     }
 
     pub(crate) fn fix(&self) -> &Fixer {
@@ -1247,7 +1279,7 @@ impl Model {
         let Some(work) = self.fix.start(fix) else {
             return Accepted::only(Change::Nothing);
         };
-        self.newest_job = Job::Fix;
+        self.job_started(Job::Fix);
         Accepted {
             change: Change::Fix,
             then: Some(Then::RunFix(work)),
@@ -2579,6 +2611,38 @@ pub(crate) mod tests {
             generation: fetch.generation,
             ask: Ask::Rows(ask.clone()),
         }
+    }
+
+    /// The middle group shows one job: the newest of the running ones, so
+    /// an export started during a copy shows, and the copy shows again
+    /// when the export ends only if it started later (DESIGN.md: Status
+    /// bar; file-manager-spec.md: File operations, step 5).
+    #[test]
+    fn the_newest_running_job_shows() {
+        let mut model = showing(10);
+        let running = |id| {
+            Some(StatusOperation::Running {
+                id: OperationId::for_tests(id),
+                request: Arc::new(Request::Delete {
+                    sources: vec![r"C:\f\a.txt".into()],
+                }),
+                running: gozler_fileops::Running {
+                    items: 0,
+                    bytes: 0,
+                    passed: 0,
+                    total: None,
+                    renames: false,
+                    paused: false,
+                    current: None,
+                },
+            })
+        };
+        model.set_operation(running(1));
+        assert_eq!(model.job(), Job::Operation);
+        export(&mut model);
+        assert_eq!(model.job(), Job::Export);
+        model.set_operation(running(2));
+        assert_eq!(model.job(), Job::Operation);
     }
 
     /// T9: the person must learn that the file was not written, and may

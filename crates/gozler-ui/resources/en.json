@@ -49,7 +49,10 @@
     "move_to_folder": "&Move to folder…",
     "file_operations": "File &operations",
     "two_panels": "&Two panels",
-    "clear_selection": "&Clear selection"
+    "clear_selection": "&Clear selection",
+    "view": "&View",
+    "edit": "&Edit",
+    "new_folder": "&New folder…"
   },
   "column": {
     "name": "&Name",
@@ -703,7 +706,7 @@
     "column_item": "Item",
     "column_reason": "Reason",
     "refused_inside": "The destination is inside a selected folder.",
-    "refused_missing": "The destination folder no longer exists.",
+    "refused_missing": "The destination drive isn't available.",
     "refused_unreadable": "Can't read the destination folder. {0}",
     "refused_space": "It needs {0}, but the destination has only {1} free.",
     "disk_full": "The destination disk is full, so the operation stopped.",
@@ -728,7 +731,31 @@
     "delete_body_other": "They won't go to the Recycle Bin, and you can't undo this.",
     "delete_button": "&Delete",
     "copy_to_title": "Copy to folder",
-    "move_to_title": "Move to folder"
+    "move_to_title": "Move to folder",
+    "status_copying": "Copying {0} to {1}",
+    "status_moving": "Moving {0} to {1}",
+    "status_deleting": "Deleting {0}",
+    "status_renaming": "Renaming {0} to {1}",
+    "status_creating": "Creating {0}",
+    "ended_copy_one": "Copied {0} item to {1}",
+    "ended_copy_other": "Copied {0} items to {1}",
+    "cancelled_copy_one": "Copy to {1} cancelled after {0} item",
+    "cancelled_copy_other": "Copy to {1} cancelled after {0} items",
+    "ended_move_one": "Moved {0} item to {1}",
+    "ended_move_other": "Moved {0} items to {1}",
+    "cancelled_move_one": "Move to {1} cancelled after {0} item",
+    "cancelled_move_other": "Move to {1} cancelled after {0} items",
+    "ended_delete_one": "Deleted {0} item",
+    "ended_delete_other": "Deleted {0} items",
+    "cancelled_delete_one": "Delete cancelled after {0} item",
+    "cancelled_delete_other": "Delete cancelled after {0} items",
+    "ended_rename": "Renamed {0} to {1}",
+    "ended_rename_numbered": "Renamed {0}",
+    "rename_failed": "Couldn't rename {0}",
+    "ended_new_folder": "Created {0}",
+    "new_folder_failed": "Couldn't create {0}",
+    "ended_failed_one": "{0} failed or skipped",
+    "ended_failed_other": "{0} failed or skipped"
   },
   "panel": {
     "items_one": "{0} item",
@@ -770,5 +797,22 @@
     "open_failed": "Couldn't start {0}. {1} Check the command in File > Settings > Context menu.",
     "shortcut_taken": "Another program uses {0}, so it no longer shows Gozler. Choose another shortcut in File > Settings > Keyboard.",
     "registry_failed": "Couldn't save \"{0}\" in the registry. {1}"
+  },
+  "transfer": {
+    "copy_name": "Copy {0} to:",
+    "copy_items_one": "Copy {0} item to:",
+    "copy_items_other": "Copy {0} items to:",
+    "move_name": "Move {0} to:",
+    "move_items_one": "Move {0} item to:",
+    "move_items_other": "Move {0} items to:"
+  },
+  "new_folder": {
+    "name": "&Name:",
+    "create": "Create",
+    "exists": "{0} is already in this folder. Choose another name."
+  },
+  "name": {
+    "characters": "A file name can't contain any of the following characters: \\ / : * ? \" < > |",
+    "reserved": "Windows uses the name {0} for a device. Choose another name."
   }
 }

@@ -84,9 +84,12 @@ pub(crate) struct Copied {
     pub(crate) ring: RingCounts,
 }
 
-/// A selected entry, and whether it is copied into its own folder.
+/// A selected entry, the name it takes in the destination, and whether it
+/// is copied into its own folder under its own name.
 pub(crate) struct Source {
     pub(crate) selected: Selected,
+    /// Its own name, or the new name of a [`crate::Destination::Named`].
+    pub(crate) name: Vec<u16>,
     pub(crate) own_folder: bool,
     /// Another selected entry has its name ([`Wanted::shared`]).
     pub(crate) shared: bool,
@@ -318,6 +321,7 @@ impl Walk<'_> {
     ) {
         let Source {
             selected,
+            name,
             own_folder,
             shared,
         } = source;
@@ -327,7 +331,6 @@ impl Walk<'_> {
             Ok(opened) => opened,
             Err(error) => return self.fail(&selected.path, error.code, None),
         };
-        let name = selected.identity.name().to_vec();
         if !is_folder(tag.attributes, tag.reparse_tag) {
             let stat = match entry.stat() {
                 Ok(stat) => stat,
@@ -959,7 +962,7 @@ impl Snapshot {
     }
 }
 
-fn is_folder_path(path: &[u16]) -> bool {
+pub(crate) fn is_folder_path(path: &[u16]) -> bool {
     path_attributes(path).is_ok_and(|attributes| {
         attributes.is_some_and(|attributes| attributes & FILE_ATTRIBUTE_DIRECTORY != 0)
     })

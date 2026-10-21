@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::conflicts::Choice;
-use crate::operation::Request;
+use crate::operation::{Destination, Request};
 use crate::settings::{
     CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, RingBlock, RingBuffer, RingHardDisk,
     RingSsd, SettingError, SpeedSettings,
@@ -26,6 +26,10 @@ pub(crate) struct Saved {
     sources: Vec<SavedPath>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     destination: Option<SavedPath>,
+    /// The one entry's new name in `destination`. No key: the entries keep
+    /// their names in the folder `destination`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<SavedPath>,
     /// No key: the person was not asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     choice: Option<SavedChoice>,
@@ -48,7 +52,8 @@ pub(crate) struct Restored {
 
 impl Saved {
     /// `None` for a rename or a new folder, which are one call each, so
-    /// nothing of them is left to continue.
+    /// nothing of them is left to continue, and for a typed destination,
+    /// which prepare decides before any run.
     pub(crate) fn new(
         request: &Request,
         choice: Option<Choice>,
@@ -60,26 +65,28 @@ impl Saved {
             Request::Copy {
                 sources,
                 destination,
-            } => (
-                Kind::Copy,
-                paths(sources),
-                Some(SavedPath::new(destination)),
-            ),
+            } => (Kind::Copy, paths(sources), Some(destination)),
             Request::Move {
                 sources,
                 destination,
-            } => (
-                Kind::Move,
-                paths(sources),
-                Some(SavedPath::new(destination)),
-            ),
+            } => (Kind::Move, paths(sources), Some(destination)),
             Request::Delete { sources } => (Kind::Delete, paths(sources), None),
-            Request::Rename { .. } | Request::NewFolder { .. } => return None,
+            Request::NewFolder { .. } => return None,
+        };
+        let (destination, name) = match destination {
+            Some(Destination::Folder(folder)) => (Some(SavedPath::new(folder)), None),
+            Some(Destination::Named { folder, name }) => (
+                Some(SavedPath::new(folder)),
+                Some(SavedPath::new(Path::new(name))),
+            ),
+            Some(Destination::Typed(_)) => return None,
+            None => (None, None),
         };
         Some(Saved {
             kind,
             sources,
             destination,
+            name,
             choice: choice.map(SavedChoice::from),
             started: Some(started),
             settings: SavedSettings::from(settings),
@@ -87,11 +94,21 @@ impl Saved {
     }
 
     /// `None` when the settings are out of their ranges, as a hand-edited
-    /// file can make them, or a copy or move has no destination.
+    /// file can make them, a copy or move has no destination, or a new name
+    /// is not for exactly one copied or moved entry.
     pub(crate) fn restore(&self) -> Option<Restored> {
         let settings = SpeedSettings::try_from(&self.settings).ok()?;
         let sources: Vec<PathBuf> = self.sources.iter().map(SavedPath::path).collect();
-        let destination = self.destination.as_ref().map(SavedPath::path);
+        let folder = self.destination.as_ref().map(SavedPath::path);
+        let destination = match (folder, &self.name) {
+            (Some(folder), None) => Some(Destination::Folder(folder)),
+            (Some(folder), Some(name)) if sources.len() == 1 => Some(Destination::Named {
+                folder,
+                name: name.path().into_os_string(),
+            }),
+            (Some(_), Some(_)) => return None,
+            (None, _) => None,
+        };
         let request = match (self.kind, destination) {
             (Kind::Copy, Some(destination)) => Request::Copy {
                 sources,
@@ -101,6 +118,7 @@ impl Saved {
                 sources,
                 destination,
             },
+            (Kind::Delete, _) if self.name.is_some() => return None,
             (Kind::Delete, _) => Request::Delete { sources },
             (Kind::Copy | Kind::Move, None) => return None,
         };
@@ -348,7 +366,7 @@ mod tests {
         settings.delete_workers = DeleteWorkers::Fixed(Count::new(8).expect("in range"));
         let request = Request::Move {
             sources: vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\b c")],
-            destination: PathBuf::from(r"D:\out"),
+            destination: Destination::Folder(PathBuf::from(r"D:\out")),
         };
         const STARTED: i64 = 134_000_000_000_000_000;
         let saved =
@@ -369,5 +387,29 @@ mod tests {
         assert_ne!(older, text);
         let older: Saved = serde_json::from_str(&older).expect("parse the older entry");
         assert_eq!(older.restore().expect("restore").started, None);
+    }
+
+    /// One entry's new name reads back, so Continue writes the file it
+    /// wrote; a new name for two entries, as a hand-edited file can hold,
+    /// is refused.
+    #[test]
+    fn a_new_name_is_saved() {
+        let settings = SpeedSettings::automatic();
+        let request = Request::Copy {
+            sources: vec![PathBuf::from(r"C:\report.pdf")],
+            destination: Destination::Named {
+                folder: PathBuf::from(r"D:\out"),
+                name: "report-old.pdf".into(),
+            },
+        };
+        let saved = Saved::new(&request, None, 1, &settings).expect("saved");
+        let text = serde_json::to_string(&saved).expect("serialize");
+        let read: Saved = serde_json::from_str(&text).expect("parse");
+        assert_eq!(read.restore().expect("restore").request, request);
+
+        let two = text.replace(r#""C:\\report.pdf""#, r#""C:\\a","C:\\b""#);
+        assert_ne!(two, text);
+        let two: Saved = serde_json::from_str(&two).expect("parse");
+        assert_eq!(two.restore(), None);
     }
 }

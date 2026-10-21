@@ -6,7 +6,7 @@
 use super::glyph::Glyph;
 use super::ids::ControlId;
 use super::model::{Column, Model};
-use super::panel::{Side, Step};
+use super::panel::{Side, Step, View};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
 use super::selection::OPEN_LIMIT;
 use super::settings::{ContextItem, ContextMenu, Mode};
@@ -54,10 +54,13 @@ pub(crate) enum CommandId {
     FileOperations,
     TwoPanels,
     ClearSelection,
+    View,
+    Edit,
+    NewFolder,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 34] = [
+    pub(crate) const ALL: [CommandId; 37] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::Explore,
@@ -92,6 +95,9 @@ impl CommandId {
         CommandId::FileOperations,
         CommandId::TwoPanels,
         CommandId::ClearSelection,
+        CommandId::View,
+        CommandId::Edit,
+        CommandId::NewFolder,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -230,6 +236,19 @@ impl CommandId {
                     |s| s.model.panels().has_selection(),
                     None,
                 ),
+                // The Viewer comes in stage 6 of file-manager-spec.md.
+                C::View => ("command.view", &[], never, None),
+                C::Edit => ("command.edit", &[], never, None),
+                C::NewFolder => (
+                    "command.new_folder",
+                    &[],
+                    |s| {
+                        s.model.offers_file_operations()
+                            && *s.model.panels().panel(s.model.panels().active()).view()
+                                == View::Folder
+                    },
+                    None,
+                ),
             };
         Command {
             label,
@@ -267,6 +286,9 @@ impl CommandId {
             C::Delete => Glyph::Delete,
             C::Cut => Glyph::Cut,
             C::Paste => Glyph::Paste,
+            C::View => Glyph::View,
+            C::Edit => Glyph::Edit,
+            C::NewFolder => Glyph::NewFolder,
             C::CancelExport
             | C::FileOperations
             | C::Filters
@@ -298,11 +320,10 @@ impl CommandId {
             | C::SelectAll
             | C::Refresh
             | C::SortBy => true,
-            C::ClearSelection => mode == Mode::TwoPanels,
-            C::Open
-            | C::OpenFileLocation
+            C::Open | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => true,
+            C::ClearSelection | C::View | C::Edit | C::NewFolder => mode == Mode::TwoPanels,
+            C::OpenFileLocation
             | C::Explore
-            | C::Properties
             | C::ExportResults
             | C::CancelExport
             | C::Copy
@@ -316,9 +337,6 @@ impl CommandId {
             | C::Find
             | C::Match
             | C::ClearFilters
-            | C::CopyToFolder
-            | C::MoveToFolder
-            | C::Delete
             | C::Cut
             | C::Paste => mode == Mode::Search,
         }
@@ -373,6 +391,10 @@ fn always(_: &State) -> bool {
     true
 }
 
+fn never(_: &State) -> bool {
+    false
+}
+
 /// Refresh runs the shown search again (DESIGN.md: C17); in Two panels it
 /// reads the active panel's folder again.
 fn searched(state: &State) -> bool {
@@ -384,28 +406,32 @@ fn files(state: &State) -> bool {
     state.model.selected_files().is_some()
 }
 
+/// How many entries a file command acts on: Search's selected files, once
+/// read, or the active panel's selected entries, else its focused entry
+/// (file-manager-spec.md: Commands in Two panels).
+fn chosen(state: &State) -> usize {
+    match state.model.mode() {
+        Mode::Search => state.model.selected_files().map_or(0, <[_]>::len),
+        Mode::TwoPanels => state.model.panels().chosen_count(),
+    }
+}
+
 /// Open, Open file location and Explore (DESIGN.md: C1, C2, C26).
 fn open(state: &State) -> bool {
-    state
-        .model
-        .selected_files()
-        .is_some_and(|files| files.len() <= OPEN_LIMIT)
+    (1..=OPEN_LIMIT).contains(&chosen(state))
 }
 
 /// Properties shows one entry, and Search in this folder searches its
 /// folder (DESIGN.md: C3, C12).
 fn one_file(state: &State) -> bool {
-    state
-        .model
-        .selected_files()
-        .is_some_and(|files| files.len() == 1)
+    chosen(state) == 1
 }
 
-/// Copy to folder…, Move to folder…, Delete and Cut act on the selected
+/// Copy to folder…, Move to folder…, Delete and Cut act on the chosen
 /// entries, in the window that owns the file operations
-/// (file-manager-spec.md: Search mode).
+/// (file-manager-spec.md: Search mode, Commands in Two panels).
 fn file_operation(state: &State) -> bool {
-    state.model.offers_file_operations() && files(state)
+    state.model.offers_file_operations() && chosen(state) > 0
 }
 
 /// Cut acts on the selected files while the list has the focus, as Copy
@@ -790,6 +816,12 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
         (Keystroke::plain(Key::Escape), P(PanelKey::Escape)),
         (Keystroke::plain(Key::Insert), P(PanelKey::Toggle)),
         (Keystroke::plain(Key::Space), P(PanelKey::Toggle)),
+        // As in Search's list.
+        (
+            Keystroke::plain(Key::Delete),
+            KeyAction::Run(CommandId::Delete),
+        ),
+        (shift(Key::Delete), KeyAction::Run(CommandId::Delete)),
         (Keystroke::plain(Key::Up), P(PanelKey::Move(Step::Up))),
         (Keystroke::plain(Key::Down), P(PanelKey::Move(Step::Down))),
         (
@@ -855,21 +887,53 @@ const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
         Keystroke::plain(Key::Function(9)),
         MenuItem::Panel(PanelAction::MenuBar),
     ),
+    (
+        Keystroke::plain(Key::Function(3)),
+        MenuItem::Run(CommandId::View),
+    ),
+    (
+        Keystroke::plain(Key::Function(4)),
+        MenuItem::Run(CommandId::Edit),
+    ),
+    (
+        Keystroke::plain(Key::Function(5)),
+        MenuItem::Run(CommandId::CopyToFolder),
+    ),
+    (
+        Keystroke::plain(Key::Function(6)),
+        MenuItem::Run(CommandId::MoveToFolder),
+    ),
+    (
+        Keystroke::plain(Key::Function(7)),
+        MenuItem::Run(CommandId::NewFolder),
+    ),
+    (
+        Keystroke::plain(Key::Function(8)),
+        MenuItem::Run(CommandId::Delete),
+    ),
 ];
 
+/// The command of the key bar's button at `index` from the left, the one
+/// its key runs: `F3` View first (file-manager-spec.md: The key bar).
+pub(crate) fn key_bar_command(index: usize) -> CommandId {
+    let key = u8::try_from(index).map(|index| Keystroke::plain(Key::Function(3 + index)));
+    (TWO_PANEL_KEYS.iter())
+        .find_map(|(stroke, item)| match item {
+            MenuItem::Run(command) if Ok(*stroke) == key => Some(*command),
+            _ => None,
+        })
+        .expect("F3 to F8 run the key bar's commands")
+}
+
 /// Whether Two panels keeps `keystroke` from the person's shortcuts: its
-/// fixed keys; `F3` to `F8`, which the key bar's commands take; and `Alt`
-/// with a character, which is quick search.
+/// fixed keys, `F3` to `F8` among them, which the key bar's commands take;
+/// and `Alt` with a character, which is quick search.
 fn kept_by_two_panels(keystroke: Keystroke) -> bool {
     let character = matches!(
         keystroke.key,
         Key::Letter(_) | Key::Digit(_) | Key::Comma | Key::Period
     );
     TWO_PANEL_KEYS.iter().any(|(fixed, _)| *fixed == keystroke)
-        || matches!(keystroke.key, Key::Function(3..=8))
-            && !keystroke.ctrl
-            && !keystroke.alt
-            && !keystroke.shift
         || keystroke.alt && !keystroke.ctrl && character
 }
 
@@ -1134,8 +1198,14 @@ fn every_menu() -> Vec<Menu> {
         menu(
             "menu.file",
             vec![
-                run(&[C::Open, C::OpenFileLocation, C::Properties]),
-                run(&[C::CopyToFolder, C::MoveToFolder, C::Delete]),
+                run(&[
+                    C::Open,
+                    C::OpenFileLocation,
+                    C::View,
+                    C::Edit,
+                    C::Properties,
+                ]),
+                run(&[C::CopyToFolder, C::MoveToFolder, C::NewFolder, C::Delete]),
                 run(&[C::ExportResults]),
                 run(&[C::Settings]),
                 run(&[C::Exit]),
@@ -1273,6 +1343,26 @@ pub(crate) fn shown_row_menu(menu: ContextMenu, folder: bool, shift: bool) -> Ve
         })
         .filter(|group| !group.is_empty())
         .collect()
+}
+
+/// A panel row's context menu (file-manager-spec.md: Menus in Two panels).
+/// Its first item, Open, is the default, which `Enter` also runs.
+pub(crate) fn panel_row_menu() -> Vec<Vec<MenuItem>> {
+    use CommandId as C;
+    let run = |commands: &[CommandId]| commands.iter().map(|c| MenuItem::Run(*c)).collect();
+    vec![
+        run(&[C::Open, C::View]),
+        run(&[C::CopyToFolder, C::MoveToFolder, C::Delete]),
+        run(&[C::Properties]),
+    ]
+}
+
+/// The context menu on the empty area of a panel's list.
+pub(crate) fn panel_menu() -> Vec<Vec<MenuItem>> {
+    vec![
+        vec![MenuItem::Run(CommandId::NewFolder)],
+        vec![MenuItem::Run(CommandId::Refresh)],
+    ]
 }
 
 /// The tray icon's menu (DESIGN.md: Window lifetime). Its first item, Show
@@ -1530,7 +1620,8 @@ mod tests {
 
     /// Two panels hides Search's list, so a Search command that ran there,
     /// such as `F5` Refresh or `Ctrl+A` Select all, would act on results the
-    /// person cannot see (file-manager-spec.md: Keys).
+    /// person cannot see; `F5` there is Copy to folder… (file-manager-spec.md:
+    /// Keys).
     #[test]
     fn each_mode_takes_only_its_own_commands_and_keys() {
         let shortcuts = CommandShortcuts::default();
@@ -1546,7 +1637,10 @@ mod tests {
             takes(Mode::Search, refresh),
             Some(MenuItem::Run(CommandId::Refresh))
         );
-        assert_eq!(takes(Mode::TwoPanels, refresh), None);
+        assert_eq!(
+            takes(Mode::TwoPanels, refresh),
+            Some(MenuItem::Run(CommandId::CopyToFolder))
+        );
         for mode in Mode::ALL {
             assert_eq!(
                 takes(mode, settings),
@@ -1614,7 +1708,7 @@ mod tests {
                     }
                 }
             }
-            for menu in [row_menu(), tray_menu()] {
+            for menu in [row_menu(), tray_menu(), panel_row_menu(), panel_menu()] {
                 let labels = menu.into_iter().flatten().map(|item| item.label(&strings));
                 assert_unique(language.tag, labels, &mut HashSet::new());
             }
@@ -1686,6 +1780,49 @@ mod tests {
                 "{command:?} while the selection is read"
             );
         }
+    }
+
+    /// The key bar and the menus offer a command only when it acts on
+    /// something: Copy, Move and Delete on the selected entries, or the
+    /// focused row but never `..`; New folder on a folder that shows; none
+    /// of them in a second window, which owns no file operations
+    /// (file-manager-spec.md: Commands in Two panels).
+    #[test]
+    fn two_panels_file_commands_follow_the_chosen_entries() {
+        use crate::core::model::tests::model;
+        use crate::core::panel::tests::{file, list};
+        let mut model = model();
+        model.show_mode(Mode::TwoPanels);
+        model.offer_file_operations();
+        list(
+            model.panels_mut(),
+            r"C:\f",
+            vec![file("a.txt", 1, 0), file("b.txt", 1, 0)],
+        );
+        let file_commands = [
+            CommandId::CopyToFolder,
+            CommandId::MoveToFolder,
+            CommandId::Delete,
+        ];
+        let offered = |model: &Model| file_commands.map(|command| enabled(model, command));
+        // `..` alone.
+        model.panels_mut().set_focused(Side::Left, Some(0));
+        assert_eq!(offered(&model), [false; 3]);
+        model.panels_mut().set_focused(Side::Left, Some(1));
+        assert_eq!(offered(&model), [true; 3]);
+        model.panels_mut().set_focused(Side::Left, Some(0));
+        model.panels_mut().set_selected(Side::Left, vec![2..3]);
+        assert_eq!(offered(&model), [true; 3]);
+        assert!(enabled(&model, CommandId::NewFolder));
+        model.panels_mut().drive_removed(Side::Left);
+        assert!(!enabled(&model, CommandId::NewFolder));
+
+        let mut second = crate::core::model::tests::model();
+        second.show_mode(Mode::TwoPanels);
+        list(second.panels_mut(), r"C:\f", vec![file("a.txt", 1, 0)]);
+        second.panels_mut().set_focused(Side::Left, Some(1));
+        assert_eq!(offered(&second), [false; 3]);
+        assert!(!enabled(&second, CommandId::NewFolder));
     }
 
     /// A second export would write the same file twice at once.

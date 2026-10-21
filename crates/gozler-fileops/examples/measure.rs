@@ -42,8 +42,8 @@ mod measure {
     use std::time::{Duration, Instant, SystemTime};
 
     use gozler_fileops::{
-        Count, DeleteWorkers, End, LargeFileLimit, Outcome, Preset, Queue, Request, RingBlock,
-        SpeedSettings, State,
+        Count, DeleteWorkers, Destination, End, LargeFileLimit, Outcome, Preset, Queue, Request,
+        RingBlock, SpeedSettings, State,
     };
     use gozler_winfs::{
         CopyOptions, CopySource, Existing, copy_file, empty_standby_list, free_space, is_elevated,
@@ -299,7 +299,7 @@ mod measure {
             let outcome = self.run(
                 Request::Copy {
                     sources: sources.to_vec(),
-                    destination: destination.to_owned(),
+                    destination: Destination::Folder(destination.to_owned()),
                 },
                 settings,
             );
@@ -881,7 +881,7 @@ mod measure {
         let engine = Engine::new(saved);
         let request = Request::Copy {
             sources: vec![source.to_owned()],
-            destination: out.to_owned(),
+            destination: Destination::Folder(out.to_owned()),
         };
         let id = engine.queue.prepare(request, SpeedSettings::automatic());
         engine.wait(id, |state| !matches!(state, State::Preparing));

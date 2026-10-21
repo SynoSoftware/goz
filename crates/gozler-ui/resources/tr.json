@@ -49,7 +49,10 @@
     "move_to_folder": "Klasöre ta&şı…",
     "file_operations": "Dosya &işlemleri",
     "two_panels": "İki &panel",
-    "clear_selection": "Seçimi &kaldır"
+    "clear_selection": "Seçimi &kaldır",
+    "view": "&Görüntüle",
+    "edit": "&Düzenle",
+    "new_folder": "Yeni klasö&r…"
   },
   "column": {
     "name": "&Ad",
@@ -703,7 +706,7 @@
     "column_item": "Öğe",
     "column_reason": "Neden",
     "refused_inside": "Hedef, seçili bir klasörün içinde.",
-    "refused_missing": "Hedef klasör artık yok.",
+    "refused_missing": "Hedef sürücü kullanılamıyor.",
     "refused_unreadable": "Hedef klasör okunamıyor. {0}",
     "refused_space": "{0} gerekiyor, ancak hedefte yalnızca {1} boş alan var.",
     "disk_full": "Hedef disk dolu, bu yüzden işlem durdu.",
@@ -728,7 +731,31 @@
     "delete_body_other": "Geri Dönüşüm Kutusu'na gitmezler ve bu işlemi geri alamazsınız.",
     "delete_button": "&Sil",
     "copy_to_title": "Klasöre kopyala",
-    "move_to_title": "Klasöre taşı"
+    "move_to_title": "Klasöre taşı",
+    "status_copying": "{0}, {1} konumuna kopyalanıyor",
+    "status_moving": "{0}, {1} konumuna taşınıyor",
+    "status_deleting": "{0} siliniyor",
+    "status_renaming": "{0}, {1} olarak yeniden adlandırılıyor",
+    "status_creating": "{0} oluşturuluyor",
+    "ended_copy_one": "{0} öğe {1} konumuna kopyalandı",
+    "ended_copy_other": "{0} öğe {1} konumuna kopyalandı",
+    "cancelled_copy_one": "{1} konumuna kopyalama {0} öğeden sonra iptal edildi",
+    "cancelled_copy_other": "{1} konumuna kopyalama {0} öğeden sonra iptal edildi",
+    "ended_move_one": "{0} öğe {1} konumuna taşındı",
+    "ended_move_other": "{0} öğe {1} konumuna taşındı",
+    "cancelled_move_one": "{1} konumuna taşıma {0} öğeden sonra iptal edildi",
+    "cancelled_move_other": "{1} konumuna taşıma {0} öğeden sonra iptal edildi",
+    "ended_delete_one": "{0} öğe silindi",
+    "ended_delete_other": "{0} öğe silindi",
+    "cancelled_delete_one": "Silme {0} öğeden sonra iptal edildi",
+    "cancelled_delete_other": "Silme {0} öğeden sonra iptal edildi",
+    "ended_rename": "{0}, {1} olarak yeniden adlandırıldı",
+    "ended_rename_numbered": "{0} yeniden adlandırıldı",
+    "rename_failed": "{0} yeniden adlandırılamadı",
+    "ended_new_folder": "{0} oluşturuldu",
+    "new_folder_failed": "{0} oluşturulamadı",
+    "ended_failed_one": "{0} başarısız oldu veya atlandı",
+    "ended_failed_other": "{0} başarısız oldu veya atlandı"
   },
   "panel": {
     "items_one": "{0} öğe",
@@ -770,5 +797,22 @@
     "open_failed": "{0} başlatılamadı. {1} Dosya > Ayarlar > Bağlam menüsü bölümündeki komutu denetleyin.",
     "shortcut_taken": "{0} kısayolunu başka bir program kullanıyor, bu yüzden artık Gozler'i göstermiyor. Dosya > Ayarlar > Klavye bölümünde başka bir kısayol seçin.",
     "registry_failed": "\"{0}\" kayıt defterine kaydedilemedi. {1}"
+  },
+  "transfer": {
+    "copy_name": "{0} şuraya kopyalanacak:",
+    "copy_items_one": "{0} öğe şuraya kopyalanacak:",
+    "copy_items_other": "{0} öğe şuraya kopyalanacak:",
+    "move_name": "{0} şuraya taşınacak:",
+    "move_items_one": "{0} öğe şuraya taşınacak:",
+    "move_items_other": "{0} öğe şuraya taşınacak:"
+  },
+  "new_folder": {
+    "name": "&Ad:",
+    "create": "Oluştur",
+    "exists": "{0} bu klasörde zaten var. Başka bir ad seçin."
+  },
+  "name": {
+    "characters": "Dosya adı şu karakterlerin hiçbirini içeremez: \\ / : * ? \" < > |",
+    "reserved": "Windows {0} adını bir aygıt için kullanıyor. Başka bir ad seçin."
   }
 }

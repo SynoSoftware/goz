@@ -61,7 +61,7 @@ pub(crate) fn move_by_rename(
             }
         };
         let moved = Moved {
-            name: selected.identity.name(),
+            name: &source.name,
             path: &selected.path,
             from: &selected.verbatim,
             entry: &entry,

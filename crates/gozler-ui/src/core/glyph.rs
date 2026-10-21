@@ -85,6 +85,8 @@ pub(crate) enum Glyph {
     MoveToFolder,
     /// Music notes: the Audio kind.
     MusicNote,
+    /// A folder with a star: New folder….
+    NewFolder,
     /// A page with an arrow: Open, and the Context menu page's Open with
     /// group.
     OpenFile,
@@ -135,12 +137,14 @@ pub(crate) enum Glyph {
     Up,
     /// A film camera: the Videos kind.
     Video,
+    /// An eye: View.
+    View,
     /// Four squares: the All kind.
     ViewAll,
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 57] = [
+    pub(crate) const ALL: [Glyph; 59] = [
         Glyph::Accept,
         Glyph::Add,
         Glyph::BackToWindow,
@@ -175,6 +179,7 @@ impl Glyph {
         Glyph::Link,
         Glyph::MoveToFolder,
         Glyph::MusicNote,
+        Glyph::NewFolder,
         Glyph::OpenFile,
         Glyph::OpenPane,
         Glyph::Package,
@@ -197,6 +202,7 @@ impl Glyph {
         Glyph::Undo,
         Glyph::Up,
         Glyph::Video,
+        Glyph::View,
         Glyph::ViewAll,
     ];
 
@@ -237,6 +243,7 @@ impl Glyph {
             Glyph::Link => '\u{E71B}',
             Glyph::MoveToFolder => '\u{E8DE}',
             Glyph::MusicNote => '\u{EC4F}',
+            Glyph::NewFolder => '\u{E8F4}',
             Glyph::OpenFile => '\u{E8E5}',
             Glyph::OpenPane => '\u{E8A0}',
             Glyph::Package => '\u{E7B8}',
@@ -259,6 +266,7 @@ impl Glyph {
             Glyph::Undo => '\u{E7A7}',
             Glyph::Up => '\u{E74A}',
             Glyph::Video => '\u{E714}',
+            Glyph::View => '\u{E890}',
             Glyph::ViewAll => '\u{E8A9}',
         }
     }

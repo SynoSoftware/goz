@@ -600,7 +600,8 @@ the person can give it one.
    Cancel; Copy or Move is disabled while the box is empty. `Enter` starts the operation at once, as in Norton Commander.
 2. **The dialog closes at once,** because it decides nothing from the disk.
    It stays open only for a path that is not valid as text, such as one
-   with `*` or `?`, and then a message box gives the reason. The engine's
+   with `*` or `?`, and then a message box gives the reason. Each name in
+   the path follows "Names the person types" below. The engine's
    prepare, on its own thread, applies this table, so a slow network share
    never holds the dialog:
 
@@ -608,7 +609,7 @@ the person can give it one.
    | --- | --- |
    | an existing folder | the entries go into it |
    | a path ending in `\`, or any path while several entries are selected | a folder; it is created, with its missing parents, when it does not exist, as Total Commander does |
-   | any other path while one entry is selected | the entry's new full path: it is copied or moved under that name. `F6` with a new name in the same folder renames, as Norton Commander's RenMov does |
+   | any other path while one entry is selected | the entry's new full path: it is copied or moved under that name. `F6` with a new name in the same folder renames, as Norton Commander's RenMov does, and the focus and the selection go with the renamed entry |
    | a relative path | joined to the active panel's folder, so `report-old.pdf` copies the file beside itself |
    | a path that Windows refuses when the operation runs | the operation's failure dialog gives Windows' reason (step 7 of "File operations") |
 
@@ -633,18 +634,40 @@ the person can give it one.
    Copy to folder… also creates a chosen folder that was deleted after it
    was chosen, as Total Commander does.
 
+#### Names the person types
+
+The engine opens paths with `\\?\`, which turns off Windows' own trimming
+and its device names, so New folder and the Copy and Move box apply them
+to each name they are given, as File Explorer does:
+
+- Trailing dots and spaces are trimmed: `Photos. ` creates `Photos`.
+- A device name, `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to
+  `LPT9`, also with an extension such as `nul.txt`, is refused with a
+  message box: "Windows uses the name NUL for a device. Choose another
+  name."
+- A character that no name holds, `< > : " | ? *` or a control character,
+  is refused with a message box that says what the balloon of New folder
+  says, also when it was pasted. In the Copy and Move box, `\` and `/`
+  separate the names, and `:` may follow a drive letter.
+- The Copy and Move box reads a trailing `\` or `/` after it expands the
+  environment variables, so `%BACKUP%\2026\` names a folder.
+
 #### New folder
 
 `F7` opens a dialog titled New folder, with "Name:" and an empty edit box,
-and Create and Cancel. Create is disabled while the box is empty.
+and Create and Cancel. Create is disabled while the box holds no name,
+also while it holds only dots and spaces. The name follows "Names the
+person types".
 
 - A character that Windows does not allow in a name is refused as it is
   typed, with File Explorer's balloon: "A file name can't contain any of
   the following characters: \ / : * ? " < > |". So `\` is refused too,
   because the box names one folder.
 - A name that a row of the panel shows, without regard to case: a message
-  box says "D:\Backup\Photos already exists.", and the dialog stays open
-  with the name selected. The check reads the panel's rows in memory, never
+  box says "Photos is already in this folder. Choose another name.", and
+  the dialog stays open with the name selected. It names the row's entry as
+  the row spells it, without its folder, because a long path breaks across
+  the message box's lines. The check reads the panel's rows in memory, never
   the disk, and leaves out the rows that a delete or a move takes, because
   the person does not see them. A name that another program takes
   meanwhile is refused by the engine, which never replaces it, and the
@@ -787,7 +810,13 @@ commands (see "Search mode"), Two panels through `F5`, `F6`, `F7` and
    browsing, searching and starting other operations.
 5. **The File operations window** opens when an operation still runs 2
    seconds after it starts, in both modes, so a short operation shows only
-   in the status bar's middle group (owner, 2026-10-21). It opens without
+   in the status bar's middle group (owner, 2026-10-21). The time its
+   conflict question is open does not count, and an operation that ran when
+   the person hid the window does not open it again; a later one does.
+   While it runs, the middle group shows it as "Copying Projects to
+   D:\Backup · 38 %", with a bar and Cancel; a long path loses its middle,
+   so the line ends before the bar with its last folder and its percent,
+   and the tooltip shows it whole. It opens without
    taking the keyboard focus, so the keys go on acting on the panel. It is
    one window that never blocks Gozler, modelled on Total Commander's copy window
    with its background queue under it (owner, 2026-10-20). At the top, the
@@ -812,7 +841,18 @@ commands (see "Search mode"), Two panels through `F5`, `F6`, `F7` and
    The status bar's middle group then says what was done, such as "Copied
    3,310 items to D:\Backup" or "Deleted 12 items", until another
    operation starts, in both modes, because after Hide it is the only sign
-   that the operation finished (owner, 2026-10-21). A
+   that the operation finished (owner, 2026-10-21). The line counts the
+   items the operation finished, and adds how many failed or were skipped:
+   "Copied 3,310 items to D:\Backup · 1 failed or skipped". A cancelled
+   operation says "Copy to D:\Backup cancelled after 120 items", a rename
+   "Renamed report.pdf to report-old.pdf", and a new folder "Created
+   D:\Backup\Photos", or "Couldn't create D:\Backup\Photos". After Keep
+   both, a rename says "Renamed report.pdf", because the window does not
+   know the numbered name. An operation that the engine refused, or that a
+   full disk stopped, shows no line, because its message box already says
+   why; nor does a cancelled rename or new folder, which did nothing. The
+   line shows the operation that ended last, also when an older one stays
+   in the queue while a list keeps its rows. A
    search list shows the rows that the operation took blank. "The person
    never waits for the disk" says both.
 7. **A failure does not stop the operation.** At its end, a dialog lists

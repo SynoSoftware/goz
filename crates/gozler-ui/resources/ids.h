@@ -272,6 +272,17 @@
 #define IDC_FAILED_BODY 3102
 #define IDC_FAILED_LIST 3103
 
+// Two panels' Copy to folder and Move to folder: what they act on, and the
+// destination as text.
+#define IDD_TRANSFER 116
+#define IDC_TRANSFER_LINE 3301
+#define IDC_TRANSFER_PATH 3302
+
+// Two panels' New folder: the folder's name.
+#define IDD_NEW_FOLDER 117
+#define IDC_NEW_FOLDER_LABEL 3401
+#define IDC_NEW_FOLDER_NAME 3402
+
 // Settings > File operations: the speed settings of copies, moves and
 // deletes.
 #define IDD_SETTINGS_FILE_OPERATIONS 115

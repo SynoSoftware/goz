@@ -167,7 +167,7 @@ fn timing_progress_folder_per_operation() {
             .collect();
         let request = gozler_fileops::Request::Copy {
             sources,
-            destination: PathBuf::from(r"D:\Backup"),
+            destination: gozler_fileops::Destination::Folder(PathBuf::from(r"D:\Backup")),
         };
         time(&format!("common folder, {kind}"), || {
             sources_folder(&request)
