@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Architecture review for gozler</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .seam { border-style: dashed; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #e2e8f0; }
+  .lbl { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+  .diagram { min-height: 300px; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="font-serif text-3xl">Architecture review: gozler-core and gozlerd</h1>
+  <p class="text-sm text-slate-600">2026-10-21 · main at 114d80c · scope: <span class="font-mono">gozler-core</span>, <span class="font-mono">gozler-daemon</span>, <span class="font-mono">gozler-cli</span>. <span class="font-mono">gozler-ui</span> is reviewed in another session. <span class="font-mono">gozler-fileops</span> was not explored.</p>
+  <p class="text-sm text-slate-600">Hot spots by commit count: <span class="font-mono">query/engine.rs</span> (28), <span class="font-mono">daemon/server.rs</span> (20), <span class="font-mono">server/tests/corpus.rs</span> (19), <span class="font-mono">proto/types.rs</span> (18), <span class="font-mono">index/volume.rs</span> (17). Next planned work: visibility, result snapshot, service settings.</p>
+  <div class="rounded-md bg-indigo-50 border border-indigo-200 text-indigo-950 text-sm px-3 py-2"><strong>All five candidates are grilled.</strong> Candidate 1 is built and reviewed, and round 2 is running. Candidates 2, 3 and 4 are written into the plans that will build them, and 5 is dropped. Both defects are committed. Each card shows its state beside its title and its outcome at its end. <a href="#status" class="underline">Status</a> · <a href="#found" class="underline">Defects</a></div>
+  <div class="flex flex-wrap gap-4 text-xs text-slate-600 pt-2">
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border border-slate-500 bg-white"></span>module</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 border-2 border-dashed border-indigo-500"></span>seam</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 border-t-2 border-red-600"></span>leakage</span>
+    <span class="flex items-center gap-2"><span class="inline-block w-5 h-4 deep"></span>deep module</span>
+  </div>
+  <p class="text-sm text-slate-600">The CLI's failure handling (<span class="font-mono">failure.rs</span>, <span class="font-mono">escompat::Answer</span>) is already deep: each exit code has one owner. It has no candidate.</p>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- 1 -->
+<article id="c1" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">1. Move the search's lock sequence from gozlerd into core</h2>
+    <span class="rounded-full bg-indigo-600 text-white text-xs px-2 py-0.5">Grilled · built · reviewed · round 2 running</span>
+    <span class="rounded-full bg-emerald-100 text-emerald-800 text-xs px-2 py-0.5">Strong</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">local-substitutable</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-700 whitespace-pre-wrap">crates/gozler-daemon/src/server.rs        stream_rows, totals, run_on_volumes, VolScope
+crates/gozler-core/src/query/engine.rs    find_matches, Matches::order, OrderedMatches::read_rows, run_totals, resolve_scope
+crates/gozler-core/src/query/rows.rs      Reply, run_query
+crates/gozler-core/src/index/settle.rs    SharedIndex (the existing lock seam)
+crates/gozler-daemon/examples/deep_export.rs</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <div class="lbl text-slate-500 mb-2">Before: four callers repeat one sequence</div>
+      <pre class="mermaid">
+flowchart TB
+  S[server::stream_rows]:::leak
+  Q[rows::run_query]:::leak
+  P[rows proptest]:::leak
+  D[deep_export.rs]:::leak
+  S & Q & P & D --> R1[resolve_scope<br/>under read lock]
+  R1 --> F[find_matches<br/>under read lock]
+  F --> O[Matches::order<br/>no lock]
+  O --> RR[read_rows<br/>under read lock]
+  RR --> RP[Reply::fill<br/>locks per page, VolumeSet order]
+  S -. per_vol_limit = offset + limit .-> RP
+  S -. sums, without_sizes .-> RP
+  S -. IndexChanged → volumes_incomplete .-> RP
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  linkStyle 8,9,10 stroke:#dc2626,stroke-width:2px;
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <div class="lbl text-slate-500 mb-2">After: one deep search module, two adapters</div>
+      <pre class="mermaid">
+flowchart TB
+  C1[gozlerd page encoder]
+  C2[run_query / benches / examples]
+  C1 & C2 --> SM
+  subgraph SM[core search module]
+    direction TB
+    i1[scope from path, same lock window]
+    i2[3 lock windows in order]
+    i3[per-volume limit]
+    i4[sums and index-changed rule]
+  end
+  SM -. lock-window seam .-> A1[VolumeState adapter<br/>parking_lot, VolumeSet order]
+  SM -. lock-window seam .-> A2[plain / RefCell index<br/>tests, Ubuntu CI]
+  style SM fill:#0f172a,color:#e2e8f0,stroke:#0f172a
+      </pre>
+    </div>
+  </div>
+  <p><strong>Problem.</strong> To run one search, a caller must know a long interface: three lock holds in a fixed order, which volumes each page locks, the per-volume limit <span class="font-mono">offset + limit</span>, how to add the sums, and that the scope folder must be resolved under the same lock as the scan. <span class="font-mono">stream_rows</span>, <span class="font-mono">run_query</span>, a proptest and <span class="font-mono">deep_export.rs</span> each write this sequence again.</p>
+  <p><strong>Solution.</strong> A core module takes the compiled query, the scope path, the sort and the rows request, and returns pages or totals. It reaches each volume through a lock-window seam, as <span class="font-mono">index::settle::SharedIndex</span> already does. gozlerd becomes one adapter that locks in <span class="font-mono">VolumeSet</span> order, plus the page encoder.</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>Locality: each search rule gets one owner</li>
+    <li>Leverage: one interface for gozlerd, benches, examples</li>
+    <li>Two adapters make the seam real</li>
+    <li>Golden corpus can run on Ubuntu CI</li>
+    <li>Visibility threads <span class="font-mono">SeenBy</span> in one place</li>
+    <li>Result snapshot stays inside core</li>
+  </ul>
+  <p class="text-sm text-slate-600">Evidence: the <span class="font-mono">find_matches</span> doc states the three-hold rule. <span class="font-mono">server.rs</span> computes <span class="font-mono">per_vol_limit</span> and maps <span class="font-mono">IndexChanged</span>. <span class="font-mono">server/tests/corpus.rs</span> is in the daemon, and the daemon's modules are <span class="font-mono">#[cfg(windows)]</span>. <span class="font-mono">docs/DESIGN.md</span> ("Rows on demand") already says that the daemon should only take the locks and send the pages.</p>
+  <div class="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-950 text-sm px-4 py-3 space-y-1">
+    <div class="lbl text-emerald-700">Grilling outcome: settled</div>
+    <ul class="list-disc pl-5 space-y-1">
+      <li><span class="font-mono">ResultRows&lt;V&gt;</span> in <span class="font-mono">query/rows.rs</span>: <span class="font-mono">ResultRows::search</span> and <span class="font-mono">query::search_totals</span>. The answer owns its volumes. The page call locks, fills one page, releases the locks, and only then returns.</li>
+      <li>Trait <span class="font-mono">IndexedVolume</span>: a read guard (<span class="font-mono">HeldVolume</span>, which gives the index, whether the phase is complete, and <span class="font-mono">metadata_pending</span>, from one call), plus the mounts. Two adapters: <span class="font-mono">Arc&lt;VolumeState&gt;</span> and a plain index. <span class="font-mono">SharedIndex</span> stays separate.</li>
+      <li>Coverage is read once, during the scan, as today. Reading it on every page would mark rows from a complete index as incomplete.</li>
+      <li><span class="font-mono">query</span> does not import <span class="font-mono">proto</span>. <span class="font-mono">proto</span> converts <span class="font-mono">Rows</span> and encodes the frame in one function, which replaces the closure in <span class="font-mono">stream_rows</span> and the copy in <span class="font-mono">deep_export.rs</span>.</li>
+      <li>Errors: <span class="font-mono">NotIndexed</span> for rows; <span class="font-mono">NotIndexed | Overflow</span> for totals. The corpus moves to core and runs on Ubuntu.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 2 -->
+<article id="c2" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">2. Give the stale-row check one owner</h2>
+    <span class="rounded-full bg-slate-600 text-white text-xs px-2 py-0.5">Grilled · design written into result-snapshot.md</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">in-process</span>
+  </div>
+  <p class="text-sm text-slate-600">This check asks whether a row that a search remembered still names the same file.</p>
+  <pre class="font-mono text-sm text-slate-700 whitespace-pre-wrap">crates/gozler-core/src/query/engine.rs   Origin, OrderedMatches::read_rows, Scan::evaluate
+crates/gozler-core/src/query/rows.rs     VolumeReader::begin_page, find_head, Reply::fill, Live
+crates/gozler-core/src/query/paths.rs    FolderCopy::entry_folder
+crates/gozler-core/src/index/volume.rs   instance, is_live, holds, reuse_mark, reused_since</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <div class="lbl text-slate-500 mb-2">Before: three callers, five accessors</div>
+      <pre class="mermaid">
+flowchart LR
+  RR[read_rows] --> a1[instance] & a2[reused_since] & a3[is_live]
+  BP[begin_page] --> a1 & a4[holds]
+  FH[find_head<br/>+ total -= 1<br/>+ offset skip<br/>+ merge] --> a4 & a5[in_scope] & a6[entry_folder]
+  EV[Scan::evaluate<br/>copies the no-path rule] -.-> a6
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class FH,EV leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <div class="lbl text-slate-500 mb-2">After: one verdict, two callers</div>
+      <pre class="mermaid">
+flowchart TB
+  IX[index: which file is this row now?<br/>typed verdict]
+  RC[query row check<br/>scope + visibility, once]
+  IX --> RC
+  RC --> RP[Reply<br/>leaves the row out]
+  RC --> SN[snapshot reader<br/>marks the row gone, keeps position, seeks]
+  style RC fill:#0f172a,color:#e2e8f0
+  style IX fill:#1e293b,color:#e2e8f0
+      </pre>
+    </div>
+  </div>
+  <p><strong>Problem.</strong> Three functions do this check with five <span class="font-mono">pub(crate)</span> index accessors. <span class="font-mono">Scan::evaluate</span> copies the no-path rule from <span class="font-mono">Reply</span>. Its comment says so, "so the two cannot drift". <span class="font-mono">find_head</span> mixes the check with the total, the offset skip and the merge. <span class="font-mono">Reply</span> cannot seek: rows store no sort keys, and the merge reads the current values. A skipped offset row costs the same as a sent row.</p>
+  <p><strong>Solution.</strong> The index answers one question with a typed verdict: which file is this row now, or why is it gone. The query module adds the scope check and the visibility check once. <span class="font-mono">Reply</span> and a result snapshot reader are two callers of that check, with different outcomes.</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>Locality: one owner for each row rule</li>
+    <li>Interface shrinks: five accessors become one verdict</li>
+    <li>Tests assert verdicts, not page output</li>
+    <li>Visibility adds one check, not two</li>
+  </ul>
+  <div class="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2">The result snapshot plan's "Not measured" section says a read of 16,384 rows "reads its rows as a page does today, without the scan". With today's <span class="font-mono">Reply</span>, a read at a far offset also walks every earlier row under the locks (<span class="font-mono">Reply::fill</span> counts rows "sent or skipped for the offset"). The plan's time estimate does not count that walk.</div>
+  <div class="rounded-md bg-slate-100 border border-slate-300 text-slate-900 text-sm px-4 py-3 space-y-1">
+    <div class="lbl text-slate-600">Grilling outcome: downgraded; do it with visibility stage 2 or the result snapshot</div>
+    <ul class="list-disc pl-5 space-y-1">
+      <li>The reuse-mark check in <span class="font-mono">read_rows</span> stays. <span class="font-mono">SortRecord</span> is asserted to be 16 bytes and has no room for a file ID. <span class="font-mono">Scan::evaluate</span> already shares <span class="font-mono">in_scope</span> and <span class="font-mono">entry_folder</span>. The page-time check has one caller today.</li>
+      <li>The page-time check becomes an <span class="font-mono">Option&lt;FolderId&gt;</span>, not a four-case enum, because neither caller handles the reasons differently.</li>
+      <li>Only <span class="font-mono">past_cut</span> changes in <span class="font-mono">VolumeRows</span> during a reply. If it moves into the reader, the rows can be shared by a snapshot.</li>
+      <li>A snapshot jumps to an offset by storing the merged order: 1 byte per row, plus a marker every 4,096 rows (about 6 % more memory). It holds its volumes through <span class="font-mono">Weak</span>, and checks them with <span class="font-mono">Arc::ptr_eq</span> against the current <span class="font-mono">VolumeSet</span>.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 3 -->
+<article id="c3" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">3. Separate the journal read policy from tail_loop's I/O</h2>
+    <span class="rounded-full bg-slate-600 text-white text-xs px-2 py-0.5">Grilled · written into service-settings.md (Rebuild index)</span>
+    <span class="rounded-full bg-slate-200 text-slate-700 text-xs px-2 py-0.5">Speculative</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">in-process</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-700 whitespace-pre-wrap">crates/gozler-daemon/src/tail.rs         tail_loop, bounded_rescan, ReadFailures, DEGRADE_AFTER, ESCALATE_AFTER, MAX_RESCANS
+crates/gozler-daemon/src/supervisor.rs   assess (the existing pattern)</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram space-y-1">
+      <div class="lbl text-slate-500 mb-2">Before: one ~200-line loop</div>
+      <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2 text-sm">tail_loop: read journal (I/O)</div>
+      <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2 text-sm">+ which error means rescan, which means retry</div>
+      <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2 text-sm">+ degrade after 5 s, escalate after 30 s, error 87</div>
+      <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2 text-sm">+ backoff doubling, reads_recovered</div>
+      <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2 text-sm">+ rescan budget, reset by a good batch</div>
+      <div class="border-l-4 border-red-500 bg-red-50 px-3 py-2 text-sm">+ Include change is not a journal fault</div>
+      <div class="text-xs text-slate-500 pt-2">Tests pin only the constants: "the loop itself … cannot be unit-tested".</div>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram space-y-2">
+      <div class="lbl text-slate-500 mb-2">After: thin I/O loop + a deep decision</div>
+      <div class="border border-slate-400 px-3 py-2 text-sm">tail_loop: read, then do what the decision says</div>
+      <div class="border-2 border-dashed border-indigo-500 px-3 py-1 text-xs text-indigo-700 text-center">seam: (read outcome, time) → next action</div>
+      <div class="deep rounded px-3 py-4 text-sm space-y-1">
+        <div class="lbl text-slate-300">journal read policy</div>
+        <div>apply · idle · retry after sleep · degrade · rescan(reason) · give up</div>
+        <div class="text-slate-400 text-xs">owns ReadFailures and the rescan budget; same shape as supervisor::assess</div>
+      </div>
+    </div>
+  </div>
+  <p><strong>Problem.</strong> <span class="font-mono">tail_loop</span> mixes journal I/O with every retry, degrade, escalate and rescan decision. No test reaches the decisions, because the loop needs a real <span class="font-mono">VolumeHandle</span>.</p>
+  <p><strong>Solution.</strong> A pure state machine takes a classified read outcome and the time, and returns the next action. The loop keeps only the I/O. <span class="font-mono">supervisor::assess</span> already works this way.</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>Tests reach the real policy</li>
+    <li>Locality: each rescan trigger in one table</li>
+    <li>Follows an existing pattern in the crate</li>
+    <li>Rebuild index stays outside the rescan budget</li>
+  </ul>
+  <div class="rounded-md bg-slate-100 border border-slate-300 text-slate-900 text-sm px-4 py-3 space-y-1">
+    <div class="lbl text-slate-600">Grilling outcome: Speculative; only while Rebuild index edits the loop</div>
+    <ul class="list-disc pl-5 space-y-1">
+      <li>It fails the deletion test: one caller, about 30 lines, and no defect in the policy. If it is done, only <span class="font-mono">ReadFailures</span> becomes a type, with <span class="font-mono">now: Instant</span>. Four tests replace <span class="font-mono">retry_policy_is_bounded_and_degrades</span>.</li>
+      <li>Rebuild index is a <span class="font-mono">rescan</span> that does not count against the rescan budget. A rules change and a rebuild request share one "next build" value, which <span class="font-mono">begin_build</span> clears, so two requests that arrive together cause one build. The request goes through the supervisor.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 4 -->
+<article id="c4" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 opacity-70">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">4. One owner for service settings and one context for the pipe server</h2>
+    <span class="rounded-full bg-red-700 text-white text-xs px-2 py-0.5">Grilled · dropped</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">ports &amp; adapters</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-700 whitespace-pre-wrap">crates/gozler-daemon/src/include.rs   Include, read_saved, reload
+crates/gozler-daemon/src/server.rs    run → accept_loop → handle_connection → serve; Request::SettingsSaved
+crates/gozler-core/src/include.rs     SETTINGS_KEY, INCLUDE_VALUE
+docs/plans/service-settings.md, docs/plans/visibility-plan.md ("The stored list")</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <div class="lbl text-slate-500 mb-2">Before: each setting is its own mechanism</div>
+      <pre class="mermaid">
+flowchart TB
+  run --> accept_loop --> handle_connection --> serve
+  V[(volumes)] -.-> run
+  I[(include)] -.-> run
+  VR[(view registry<br/>planned)]:::leak -.-> run
+  ST[(snapshot table<br/>planned)]:::leak -.-> run
+  HK[HKLM\SOFTWARE\Gozler<br/>Include, Dates created] --> I
+  SP[Services\gozler\Parameters<br/>see every file, read per request]:::leak --> VR
+  classDef leak stroke:#dc2626,stroke-width:2px;
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <div class="lbl text-slate-500 mb-2">After: one settings module, one context</div>
+      <pre class="mermaid">
+flowchart TB
+  CTX[daemon context] --> serve
+  subgraph SET[service settings module]
+    direction TB
+    s1[read + validate]
+    s2[reload on SettingsSaved]
+    s3[sections: Include, Dates created, see every file]
+  end
+  CTX --> SET
+  SET -. seam .-> R1[registry adapter]
+  SET -. seam .-> R2[fake reader in tests]
+  SET --> sup[supervisor / tail / view registry]
+  style SET fill:#0f172a,color:#e2e8f0
+      </pre>
+    </div>
+  </div>
+  <p><strong>Problem.</strong> <span class="font-mono">Include</span> is written for one registry value. The service settings plan and the visibility plan each add a separate way to save and read a setting, in different registry keys. The visibility plan states the conflict itself. Each new piece of daemon-wide state is passed through four functions and five test calls of <span class="font-mono">serve</span>.</p>
+  <p><strong>Solution.</strong> One daemon module owns the saved service settings: it reads them, checks them, reloads them on <span class="font-mono">SettingsSaved</span>, and tells the parts that use them. Include becomes one section. The pipe server receives one context.</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>Locality: one reload path</li>
+    <li>Two adapters: registry and test fake</li>
+    <li>New setting changes one module</li>
+  </ul>
+  <div class="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-3 py-2">The visibility plan reads its value on every request on purpose, so that it needs no notification code. If one module already sends a notification for each change, that reason no longer applies. Decide this before stage 1 of the visibility plan.</div>
+  <div class="rounded-md bg-slate-100 border border-slate-300 text-slate-900 text-sm px-4 py-3 space-y-1">
+    <div class="lbl text-slate-600">Grilling outcome: dropped; one placement decision remains</div>
+    <ul class="list-disc pl-5 space-y-1">
+      <li>The two registry keys stay, each for its own reason: uninstall drops the visibility list on purpose. The list keeps its read on every search. A settings module that held both would share nothing.</li>
+      <li>Dates created becomes a field of the existing Include value: one administrator save and the same way to apply a change. Conditions: <span class="font-mono">rules_key</span> includes the field, <span class="font-mono">VolumeRules</span> carries it, and <span class="font-mono">#[serde(default)]</span> sets it off. Rename <span class="font-mono">IncludeSettings</span> to <span class="font-mono">IndexSettings</span> in that change. The wire and saved data do not change.</li>
+      <li>The context struct comes with <span class="font-mono">ViewRegistry</span>, not before. A <span class="font-mono">dc:</span> search while Dates created is off is refused, with a message that names the setting.</li>
+    </ul>
+  </div>
+</article>
+
+<!-- 5 -->
+<article id="c5" class="rounded-xl border border-slate-200 bg-white p-6 space-y-5 opacity-70">
+  <div class="flex flex-wrap items-center gap-2">
+    <h2 class="font-serif text-2xl mr-2">5. One sum of a scan, two projections</h2>
+    <span class="rounded-full bg-red-700 text-white text-xs px-2 py-0.5">Grilled · dropped</span>
+    <span class="rounded-full bg-slate-100 text-slate-700 text-xs px-2 py-0.5">in-process</span>
+  </div>
+  <pre class="font-mono text-sm text-slate-700 whitespace-pre-wrap">crates/gozler-core/src/query/engine.rs   MatchSums, match_sums, Totals, run_totals, SizeOverflow
+crates/gozler-daemon/src/server.rs       totals, sums in stream_rows</pre>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 p-3 diagram">
+      <div class="lbl text-slate-500 mb-2">Before: two rules for one scan</div>
+      <table class="text-sm w-full">
+        <thead><tr class="text-left text-slate-500"><th></th><th>Totals (CLI)</th><th>MatchSums (window)</th></tr></thead>
+        <tbody>
+          <tr class="border-t"><td class="py-1 pr-2">Unknown size</td><td>adds 0</td><td class="text-red-700">sum = None</td></tr>
+          <tr class="border-t"><td class="py-1 pr-2">Overflow</td><td>error, exit 1</td><td class="text-red-700">None</td></tr>
+          <tr class="border-t"><td class="py-1 pr-2">Sizes pending</td><td>flag beside total</td><td class="text-red-700">daemon applies without_sizes</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="rounded-lg border border-slate-200 p-3 diagram flex flex-col gap-3 justify-center">
+      <div class="lbl text-slate-500">After</div>
+      <div class="deep rounded px-3 py-4 text-sm">scan aggregate: known sum + "a size was unknown" + overflow</div>
+      <div class="grid grid-cols-2 gap-2 text-sm">
+        <div class="border border-slate-400 px-2 py-1">QueryTotals projection</div>
+        <div class="border border-slate-400 px-2 py-1">page sums projection</div>
+      </div>
+    </div>
+  </div>
+  <p><strong>Problem.</strong> The command line and the window add up the same matches with different rules for an unknown size and for overflow. <span class="font-mono">Totals</span> is almost a projection of <span class="font-mono">MatchSums</span>.</p>
+  <p><strong>Solution.</strong> The scan makes one aggregate. Each caller projects what it prints from that aggregate.</p>
+  <ul class="list-disc pl-6 text-sm space-y-1">
+    <li>One rule for unknown sizes</li>
+    <li>One fewer place for visibility</li>
+    <li>Small gain; fold into candidate 1</li>
+  </ul>
+  <div class="rounded-md bg-slate-100 border border-slate-300 text-slate-900 text-sm px-4 py-3 space-y-1">
+    <div class="lbl text-slate-600">Grilling outcome: dropped</div>
+    <p>The two sums follow two contracts that <span class="font-mono">docs/DESIGN.md</span> documents. A shared total would add two fields to <span class="font-mono">MatchSums</span>, which crosses the wire, to remove about 15 lines. Candidate 1 already puts both sums in one module.</p>
+  </div>
+</article>
+
+</section>
+
+<section id="found" class="rounded-xl border border-red-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">Defects found while grilling</h2>
+  <p class="text-sm text-slate-600">Both were found by reading the code. Neither was run. A separate session is fixing both now (see Status).</p>
+  <div class="space-y-1">
+    <h3 class="font-semibold">Changed Include settings never reach a volume without a journal thread</h3>
+    <p class="text-sm"><span class="font-mono">Fleet::apply_settings</span> only calls <span class="font-mono">set_rules</span>, which sets a flag. Only <span class="font-mono">tail_loop</span> reads that flag (<span class="font-mono">take_new_rules</span>). A snapshot volume and a volume the supervisor gave up on have no journal thread. So if you uncheck a folder on such a volume, gozler still finds its entries until gozlerd restarts. Leaving out a whole volume works, because <span class="font-mono">reconcile</span> handles it. The fix: the supervisor starts a journal thread for such a volume, and that thread's first build reads the current rules. Rebuild index and Dates created use the same route.</p>
+  </div>
+  <div class="space-y-1">
+    <h3 class="font-semibold">The window's sums can be larger than the result count</h3>
+    <p class="text-sm"><span class="font-mono">match_sums</span> runs once, during the scan. The page total then drops for each row that <span class="font-mono">read_rows</span> and <span class="font-mono">find_head</span> leave out, but the sums do not drop. <span class="font-mono">docs/DESIGN.md</span> says that the totals "agree with the result count". The difference is only the rows that changed between the scan and their page.</p>
+  </div>
+</section>
+
+<section id="owner" class="rounded-xl border border-emerald-200 bg-emerald-50 p-6 space-y-2">
+  <h2 class="font-serif text-2xl">Owner decisions: settled</h2>
+  <ol class="list-decimal pl-6 text-sm space-y-1">
+    <li>Candidate 1 lands before stage 2 of the visibility plan. Otherwise stage 2 changes five signatures that candidate 1 then rewrites.</li>
+    <li>Both defects are fixed now, by a separate session.</li>
+  </ol>
+</section>
+
+<section id="status" class="rounded-xl border border-slate-200 bg-white p-6 space-y-3">
+  <h2 class="font-serif text-2xl">Status, 2026-10-21</h2>
+  <table class="text-sm w-full">
+    <thead><tr class="text-left text-slate-500"><th class="pr-3">Item</th><th class="pr-3">State</th><th>Next step</th></tr></thead>
+    <tbody>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Both defects</td><td class="pr-3 text-emerald-700">Done</td><td>Committed as <span class="font-mono">6def2f6</span>. An adversarial review passed, and their tests passed in the full build.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Candidate 1</td><td class="pr-3 text-amber-700">Written, check pending</td><td>Built green once; two reviews found no behaviour defect. Round 2 (review fixes, three tests) is written. The full check waits for gozler-ui to compile (a UI session's live edits). Commit after it passes.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Candidate 2</td><td class="pr-3 text-amber-700">Refactoring written, check pending</td><td>The refactoring in <span class="font-mono">rows.rs</span> is written: <span class="font-mono">past_cut</span> in the reader, one row check <span class="font-mono">row_folder</span>. The rest of its design is in <span class="font-mono">docs/plans/result-snapshot.md</span>.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Candidate 3</td><td class="pr-3 text-amber-700">Written, check pending</td><td><span class="font-mono">ReadFailures</span> moved in <span class="font-mono">tail.rs</span>, with four tests. They have not run yet.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Known sizes</td><td class="pr-3 text-amber-700">Written, check pending</td><td>Owner ruling: give the partial answer, not the excuse. Totals add the known sizes and count the unknown ones; folder sizes are summed after a pass that stopped; <span class="font-mono">gozler --status</span> prints the known total. Protocol 10.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">path-term bench</td><td class="pr-3 text-amber-700">Measuring</td><td>The first comparison showed the tree 30–50 % slower, within the noise of the same binary. It is being measured again with separate build folders.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Candidate 4</td><td class="pr-3 text-emerald-700">Written into its plan</td><td>Dropped as a module. Its placement of Dates created (a field of the <span class="font-mono">Include</span> value, three conditions, the rename to <span class="font-mono">IndexSettings</span>, <span class="font-mono">dc:</span> refused while off) is in <span class="font-mono">service-settings.md</span>. The context struct is not needed: the visibility plan no longer adds a third shared object.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Candidate 5</td><td class="pr-3">Dropped</td><td>Nothing to do.</td></tr>
+      <tr class="border-t align-top"><td class="py-1 pr-3">Visibility plan</td><td class="pr-3 text-emerald-700">Updated</td><td>It now names <span class="font-mono">ResultRows::search</span>, <span class="font-mono">page</span>, <span class="font-mono">run_held</span> and <span class="font-mono">search_totals</span>, and takes visibility as a <span class="font-mono">may_list</span> closure, because core holds no token.</td></tr>
+    </tbody>
+  </table>
+  <p class="text-sm text-slate-600">The three plan documents are edited but not committed. They are committed with candidate 1, because they describe its interface.</p>
+</section>
+
+<section id="top-recommendation" class="rounded-xl deep p-8 space-y-3">
+  <div class="lbl text-slate-300">Top recommendation · settled · next to implement</div>
+  <h2 class="font-serif text-2xl"><a href="#c1" class="underline decoration-dashed">1. Move the search's lock sequence from gozlerd into core</a></h2>
+  <p class="text-slate-300">The visibility plan and the result snapshot plan both change this sequence. Today they must change it in four places, through five signatures. After the change, each plan changes one core module, and tests can reach it through the seam that <span class="font-mono">SharedIndex</span> already proves. Candidates 2 and 5 fit inside the same module, so do them after it.</p>
+</section>
+
+</main>
+</body>
+</html>

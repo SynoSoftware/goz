@@ -1,0 +1,36 @@
+cargo bench --workspace --bench * --no-run
+    Finished `bench` profile [optimized] target(s) in 0.78s
+  Executable benches\compact.rs (target\release\deps\compact-c1dfa6edb704c2a8.exe)
+  Executable benches\query.rs (target\release\deps\query-b721921ee0f4da62.exe)
+cargo bench --workspace --bench * two-term|path-term
+    Finished `bench` profile [optimized] target(s) in 0.53s
+     Running benches\compact.rs (target\release\deps\compact-c1dfa6edb704c2a8.exe)
+Gnuplot not found, using plotters backend
+     Running benches\query.rs (target\release\deps\query-b721921ee0f4da62.exe)
+Gnuplot not found, using plotters backend
+built index: 2096640 files, 2141354 live entries
+Benchmarking query_2M/two-term(report txt)
+Benchmarking query_2M/two-term(report txt): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 7.2s, or reduce sample count to 10.
+Benchmarking query_2M/two-term(report txt): Collecting 20 samples in estimated 7.1966 s (20 iterations)
+Benchmarking query_2M/two-term(report txt): Analyzing
+query_2M/two-term(report txt)
+                        time:   [631.27 Mcycles 659.19 Mcycles 691.76 Mcycles]
+                        change: [-39.522% -36.424% -33.024%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking query_2M/path-term(group_007\bin_x64_03)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 5.7s, or reduce sample count to 10.
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Collecting 20 samples in estimated 5.6962 s (20 iterations)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Analyzing
+query_2M/path-term(group_007\bin_x64_03)
+                        time:   [529.26 Mcycles 570.53 Mcycles 616.09 Mcycles]
+                        change: [-31.625% -25.593% -18.595%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

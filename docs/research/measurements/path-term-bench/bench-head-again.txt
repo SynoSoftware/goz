@@ -1,0 +1,156 @@
+cargo bench --workspace --bench * --no-run
+    Blocking waiting for file lock on build directory
+    Finished `bench` profile [optimized] target(s) in 33.25s
+  Executable benches\compact.rs (target\release\deps\compact-c1dfa6edb704c2a8.exe)
+  Executable benches\query.rs (target\release\deps\query-b721921ee0f4da62.exe)
+cargo bench --workspace --bench * query_2M
+    Finished `bench` profile [optimized] target(s) in 0.62s
+     Running benches\compact.rs (target\release\deps\compact-c1dfa6edb704c2a8.exe)
+Gnuplot not found, using plotters backend
+     Running benches\query.rs (target\release\deps\query-b721921ee0f4da62.exe)
+Gnuplot not found, using plotters backend
+built index: 2096640 files, 2141354 live entries
+Benchmarking query_2M/rare(kernel32)
+Benchmarking query_2M/rare(kernel32): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 5.2s, enable flat sampling, or reduce sample count to 10.
+Benchmarking query_2M/rare(kernel32): Collecting 20 samples in estimated 5.2197 s (210 iterations)
+Benchmarking query_2M/rare(kernel32): Analyzing
+query_2M/rare(kernel32) time:   [33.863 Mcycles 34.262 Mcycles 34.763 Mcycles]
+                        change: [+53.773% +62.381% +71.400%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+Benchmarking query_2M/medium(report)
+Benchmarking query_2M/medium(report): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 8.7s, or reduce sample count to 10.
+Benchmarking query_2M/medium(report): Collecting 20 samples in estimated 8.7359 s (20 iterations)
+Benchmarking query_2M/medium(report): Analyzing
+query_2M/medium(report) time:   [758.41 Mcycles 776.76 Mcycles 796.06 Mcycles]
+                        change: [+2.5628% +8.0834% +14.575%] (p = 0.01 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking query_2M/common(document)
+Benchmarking query_2M/common(document): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 8.5s, or reduce sample count to 10.
+Benchmarking query_2M/common(document): Collecting 20 samples in estimated 8.4648 s (20 iterations)
+Benchmarking query_2M/common(document): Analyzing
+query_2M/common(document)
+                        time:   [612.51 Mcycles 653.47 Mcycles 692.76 Mcycles]
+                        change: [-16.913% -10.118% -3.1744%] (p = 0.01 < 0.05)
+                        Performance has improved.
+Benchmarking query_2M/wildcard(*.dll)
+Benchmarking query_2M/wildcard(*.dll): Warming up for 3.0000 s
+Benchmarking query_2M/wildcard(*.dll): Collecting 20 samples in estimated 6.8607 s (420 iterations)
+Benchmarking query_2M/wildcard(*.dll): Analyzing
+query_2M/wildcard(*.dll)
+                        time:   [22.840 Mcycles 24.054 Mcycles 25.367 Mcycles]
+                        change: [-14.052% -6.0754% +3.1867%] (p = 0.21 > 0.05)
+                        No change in performance detected.
+Benchmarking query_2M/two-term(report txt)
+Benchmarking query_2M/two-term(report txt): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 5.2s, or reduce sample count to 10.
+Benchmarking query_2M/two-term(report txt): Collecting 20 samples in estimated 5.2120 s (20 iterations)
+Benchmarking query_2M/two-term(report txt): Analyzing
+query_2M/two-term(report txt)
+                        time:   [454.65 Mcycles 493.15 Mcycles 539.71 Mcycles]
+                        change: [-20.654% -9.3957% +3.9819%] (p = 0.18 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking query_2M/path-term(group_007\bin_x64_03)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Warming up for 3.0000 s
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Collecting 20 samples in estimated 9.8655 s (40 iterations)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Analyzing
+query_2M/path-term(group_007\bin_x64_03)
+                        time:   [435.59 Mcycles 489.98 Mcycles 544.21 Mcycles]
+                        change: [+9.4347% +23.766% +39.132%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking query_2M/match-path(kernel32)
+Benchmarking query_2M/match-path(kernel32): Warming up for 3.0000 s
+Benchmarking query_2M/match-path(kernel32): Collecting 20 samples in estimated 6.1648 s (420 iterations)
+Benchmarking query_2M/match-path(kernel32): Analyzing
+query_2M/match-path(kernel32)
+                        time:   [26.831 Mcycles 27.790 Mcycles 28.942 Mcycles]
+                        change: [+25.907% +35.069% +45.129%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking query_2M/match-path(module_group_007)
+Benchmarking query_2M/match-path(module_group_007): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 7.7s, enable flat sampling, or reduce sample count to 10.
+Benchmarking query_2M/match-path(module_group_007): Collecting 20 samples in estimated 7.7180 s (210 iterations)
+Benchmarking query_2M/match-path(module_group_007): Analyzing
+query_2M/match-path(module_group_007)
+                        time:   [67.376 Mcycles 71.402 Mcycles 76.235 Mcycles]
+                        change: [+9.8287% +18.282% +27.889%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking query_2M/match-path(bin_x64_03 kernel32)
+Benchmarking query_2M/match-path(bin_x64_03 kernel32): Warming up for 3.0000 s
+Benchmarking query_2M/match-path(bin_x64_03 kernel32): Collecting 20 samples in estimated 5.0436 s (100 iterations)
+Benchmarking query_2M/match-path(bin_x64_03 kernel32): Analyzing
+query_2M/match-path(bin_x64_03 kernel32)
+                        time:   [111.13 Mcycles 121.11 Mcycles 130.07 Mcycles]
+                        change: [+21.566% +35.147% +49.691%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking query_2M/match-path(report)
+Benchmarking query_2M/match-path(report): Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 9.2s, or reduce sample count to 10.
+Benchmarking query_2M/match-path(report): Collecting 20 samples in estimated 9.2035 s (20 iterations)
+Benchmarking query_2M/match-path(report): Analyzing
+query_2M/match-path(report)
+                        time:   [847.12 Mcycles 864.96 Mcycles 884.45 Mcycles]
+                        change: [+6.9097% +18.973% +34.906%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking query_2M/common(document) scope=root
+Benchmarking query_2M/common(document) scope=root: Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 8.4s, or reduce sample count to 10.
+Benchmarking query_2M/common(document) scope=root: Collecting 20 samples in estimated 8.3549 s (20 iterations)
+Benchmarking query_2M/common(document) scope=root: Analyzing
+query_2M/common(document) scope=root
+                        time:   [732.75 Mcycles 750.45 Mcycles 769.14 Mcycles]
+                        change: [-2.1507% +1.1960% +4.5141%] (p = 0.49 > 0.05)
+                        No change in performance detected.
+Benchmarking query_2M/common(document) sort=size
+Benchmarking query_2M/common(document) sort=size: Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 8.4s, or reduce sample count to 10.
+Benchmarking query_2M/common(document) sort=size: Collecting 20 samples in estimated 8.4349 s (20 iterations)
+Benchmarking query_2M/common(document) sort=size: Analyzing
+query_2M/common(document) sort=size
+                        time:   [737.03 Mcycles 747.05 Mcycles 758.17 Mcycles]
+                        change: [+4.3475% +14.758% +27.802%] (p = 0.01 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
+Benchmarking query_2M_broad_none/common(document)
+Benchmarking query_2M_broad_none/common(document): Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 26.3s.
+Benchmarking query_2M_broad_none/common(document): Collecting 10 samples in estimated 26.262 s (10 iterations)
+Benchmarking query_2M_broad_none/common(document): Analyzing
+query_2M_broad_none/common(document)
+                        time:   [4154.6 Mcycles 4268.5 Mcycles 4378.8 Mcycles]
+                        change: [-6.1107% -2.3960% +0.9476%] (p = 0.24 > 0.05)
+                        No change in performance detected.
+Benchmarking query_2M_broad_none/wildcard(*.txt)
+Benchmarking query_2M_broad_none/wildcard(*.txt): Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 36.1s.
+Benchmarking query_2M_broad_none/wildcard(*.txt): Collecting 10 samples in estimated 36.132 s (10 iterations)
+Benchmarking query_2M_broad_none/wildcard(*.txt): Analyzing
+query_2M_broad_none/wildcard(*.txt)
+                        time:   [5101.8 Mcycles 5684.7 Mcycles 6232.3 Mcycles]
+                        change: [-20.951% -11.811% -3.2969%] (p = 0.02 < 0.05)
+                        Performance has improved.
+
+tree exit 0

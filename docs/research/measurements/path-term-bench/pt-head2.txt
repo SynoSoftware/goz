@@ -1,0 +1,22 @@
+cargo bench --workspace --bench * --no-run
+    Finished `bench` profile [optimized] target(s) in 0.48s
+  Executable benches\compact.rs (C:/Users/user/AppData/Local/Temp/claude/C--SynoSoftware-TinyTorrent2-3rdParty-goz/cb994ccb-6b93-4142-9fa6-a0df315b6794/scratchpad/head-target\release\deps\compact-c1dfa6edb704c2a8.exe)
+  Executable benches\query.rs (C:/Users/user/AppData/Local/Temp/claude/C--SynoSoftware-TinyTorrent2-3rdParty-goz/cb994ccb-6b93-4142-9fa6-a0df315b6794/scratchpad/head-target\release\deps\query-b721921ee0f4da62.exe)
+cargo bench --workspace --bench * path-term
+    Finished `bench` profile [optimized] target(s) in 0.36s
+     Running benches\compact.rs (C:/Users/user/AppData/Local/Temp/claude/C--SynoSoftware-TinyTorrent2-3rdParty-goz/cb994ccb-6b93-4142-9fa6-a0df315b6794/scratchpad/head-target\release\deps\compact-c1dfa6edb704c2a8.exe)
+Gnuplot not found, using plotters backend
+     Running benches\query.rs (C:/Users/user/AppData/Local/Temp/claude/C--SynoSoftware-TinyTorrent2-3rdParty-goz/cb994ccb-6b93-4142-9fa6-a0df315b6794/scratchpad/head-target\release\deps\query-b721921ee0f4da62.exe)
+Gnuplot not found, using plotters backend
+built index: 2096640 files, 2141354 live entries
+Benchmarking query_2M/path-term(group_007\bin_x64_03)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Warming up for 3.0000 s
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Collecting 20 samples in estimated 8.9251 s (40 iterations)
+Benchmarking query_2M/path-term(group_007\bin_x64_03): Analyzing
+query_2M/path-term(group_007\bin_x64_03)
+                        time:   [355.61 Mcycles 376.02 Mcycles 398.85 Mcycles]
+                        change: [-47.703% -44.337% -40.380%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+
