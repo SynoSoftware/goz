@@ -5,31 +5,28 @@
 
 use super::Hwnd;
 use super::controls::{Button, IconList, ListView, StatusBar};
-use super::gdi::{Font, ImageList, draw_icon_mark, draw_text, inactive_bar_color, system_color};
+use super::gdi::{Font, ImageList, draw_glyph, draw_text, system_color};
 use crate::core::glyph::Glyph;
-use crate::core::layout::{Px, cell_text_inset};
+use crate::core::layout::Px;
 use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DC_BRUSH,
-    DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, FillRect, FrameRect, GetStockObject, GetSysColor, GetSysColorBrush, HBRUSH,
-    HGDIOBJ, SelectObject, SetBkMode, SetDCBrushColor, SetTextColor, TRANSPARENT,
+    COLOR_GRAYTEXT, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, GetSysColor, HGDIOBJ, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     BCN_DROPDOWN, CDDS_ITEMPOSTPAINT, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM,
     CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
     CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE,
-    LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED,
-    LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
-    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
+    LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED,
+    LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK,
+    LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
     LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS,
-    NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE,
-    NMMOUSE,
+    NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW,
+    NMLVODSTATECHANGE, NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-use windows::core::PWSTR;
 
 /// A `WM_COMMAND`.
 #[derive(Clone, Copy, Debug)]
@@ -224,6 +221,19 @@ impl IconList {
         change.uChanged.contains(LVIF_STATE)
             && change.uNewState & !change.uOldState & LVIS_SELECTED.0 != 0
     }
+
+    /// The request for a row's tooltip that `notification` holds, if this
+    /// list sent it ([`IconList::show_info_tips`]).
+    pub(crate) fn info_tip<'a>(self, notification: &'a mut Notification) -> Option<InfoTip<'a>> {
+        let header = notification.header();
+        if header.hwndFrom != self.hwnd().0 || header.code != LVN_GETINFOTIPW {
+            return None;
+        }
+        // SAFETY: a list view sends LVN_GETINFOTIPW with an NMLVGETINFOTIPW,
+        // valid for the notification's lifetime, which the borrow of
+        // `notification` keeps to one answer.
+        Some(InfoTip(unsafe { &mut *notification.header.cast() }))
+    }
 }
 
 impl Button {
@@ -247,6 +257,34 @@ impl StatusBar {
         // is the part clicked, for the notification's lifetime.
         let mouse = unsafe { &*notification.header.cast::<NMMOUSE>() };
         Some(mouse.dwItemSpec)
+    }
+}
+
+/// `LVN_GETINFOTIPW`: the tooltip of the row under the pointer.
+pub(crate) struct InfoTip<'a>(pub(super) &'a mut NMLVGETINFOTIPW);
+
+impl InfoTip<'_> {
+    pub(crate) fn row(&self) -> Option<usize> {
+        usize::try_from(self.0.iItem).ok()
+    }
+
+    /// Answers with `text`, cut to the room the list gives, and returns
+    /// the notification's answer.
+    pub(crate) fn set(self, text: &str) -> LRESULT {
+        let Ok(room) = usize::try_from(self.0.cchTextMax) else {
+            return LRESULT(0);
+        };
+        if room == 0 {
+            return LRESULT(0);
+        }
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let kept = units.len().min(room - 1);
+        // SAFETY: the list gives pszText with room for cchTextMax
+        // characters, valid while it waits for the answer.
+        let buffer = unsafe { std::slice::from_raw_parts_mut(self.0.pszText.0, room) };
+        buffer[..kept].copy_from_slice(&units[..kept]);
+        buffer[kept] = 0;
+        LRESULT(0)
     }
 }
 
@@ -317,52 +355,6 @@ impl DispInfo<'_> {
     }
 }
 
-/// The bar on a panel's focused row (file-manager-spec.md: Selecting
-/// entries).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RowBar {
-    None,
-    /// The active panel's focused row.
-    Active,
-    /// The other panel's focused row, gray as Windows draws a list's
-    /// selection while the list does not have the focus.
-    Inactive,
-}
-
-/// How a panel's cell fits its text in its column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CellFit {
-    /// From the left, ending in an ellipsis where it does not fit.
-    End,
-    /// From the right, as sizes, so their digits line up.
-    Right,
-    /// A path, which loses its middle, so the drive and the last folder
-    /// stay (`DT_PATH_ELLIPSIS`).
-    Path,
-}
-
-/// One of a panel's rows as the window draws it.
-pub(crate) struct PanelRow<'a> {
-    /// In the order of the list's columns.
-    pub(crate) cells: &'a [String],
-    pub(crate) fits: &'a [CellFit],
-    pub(crate) icon: Option<(ImageList, i32)>,
-    /// `..`, whose folder icon carries an arrow up.
-    pub(crate) up: bool,
-    pub(crate) bar: RowBar,
-    pub(crate) selected: bool,
-    /// A hidden or system entry.
-    pub(crate) dimmed: bool,
-}
-
-/// The fonts of a panel's rows: plain, semibold for a selected row, and
-/// bold for a selected row under the bar.
-pub(crate) struct RowFonts<'a> {
-    pub(crate) plain: &'a Font,
-    pub(crate) selected: &'a Font,
-    pub(crate) selected_on_bar: &'a Font,
-}
-
 /// `clrText` when the list gives the row no colour of its own.
 const CLR_DEFAULT: COLORREF = COLORREF(0xFF00_0000);
 
@@ -386,8 +378,11 @@ pub(crate) enum DrawStage {
         row: u64,
         column: usize,
     },
-    /// After a row that [`DrawAnswer::NewFont`] answered.
-    RowPainted,
+    /// After `row`, which [`DrawAnswer::NewFont`] or
+    /// [`DrawAnswer::AfterRow`] answered.
+    RowPainted {
+        row: u64,
+    },
     Other,
 }
 
@@ -402,23 +397,17 @@ pub(crate) enum DrawAnswer {
     EachCell,
     /// The window drew the cell, and the list draws nothing in it.
     Drawn,
+    /// The list draws the row in the colour that
+    /// [`CustomDraw::draw_row_grey`] set.
+    NewColour,
     /// The list draws the row in the font and colour that
     /// [`CustomDraw::draw_row_struck`] set, and asks again after it.
     NewFont,
+    /// The list draws the row as usual, and asks again after it.
+    AfterRow,
 }
 
 impl CustomDraw<'_> {
-    /// # Safety
-    /// `notification` is an `NM_CUSTOMDRAW` that a list view sent.
-    pub(super) unsafe fn of_list(notification: &Notification) -> Self {
-        CustomDraw {
-            // SAFETY: a list view sends NM_CUSTOMDRAW with an
-            // NMLVCUSTOMDRAW, valid for the notification's lifetime.
-            draw: unsafe { &mut *notification.header.cast() },
-            list: Hwnd(notification.header().hwndFrom),
-        }
-    }
-
     pub(crate) fn stage(&self) -> DrawStage {
         let stage = self.draw.nmcd.dwDrawStage;
         let row = self.draw.nmcd.dwItemSpec as u64;
@@ -432,84 +421,9 @@ impl CustomDraw<'_> {
                 column: usize::try_from(self.draw.iSubItem).unwrap_or(0),
             }
         } else if stage == CDDS_ITEMPOSTPAINT {
-            DrawStage::RowPainted
+            DrawStage::RowPainted { row }
         } else {
             DrawStage::Other
-        }
-    }
-
-    /// Draws the whole row at `DrawStage::Row`, in system colors so that
-    /// high contrast works (file-manager-spec.md: Selecting entries): the
-    /// bar of the focused row, and a selected row's text in the highlight
-    /// color, semibold, or bold under the bar. The answer is then
-    /// [`DrawAnswer::Drawn`].
-    pub(crate) fn draw_panel_row(&self, row: &PanelRow, fonts: &RowFonts) {
-        let dc = self.draw.nmcd.hdc;
-        let text = match row.bar {
-            RowBar::Active => COLOR_HIGHLIGHTTEXT,
-            _ if row.selected => COLOR_HIGHLIGHT,
-            _ if row.dimmed => COLOR_GRAYTEXT,
-            RowBar::Inactive | RowBar::None => COLOR_WINDOWTEXT,
-        };
-        // The inactive bar is a fill between the window and text colours,
-        // or a frame in high contrast.
-        let (ground, frame) = match row.bar {
-            RowBar::Active => (system_color(COLOR_HIGHLIGHT), false),
-            RowBar::Inactive => match inactive_bar_color() {
-                Some(fill) => (fill, false),
-                None => (system_color(COLOR_WINDOW), true),
-            },
-            RowBar::None => (system_color(COLOR_WINDOW), false),
-        };
-        let font = match (row.selected, row.bar) {
-            (false, _) => fonts.plain,
-            (true, RowBar::None) => fonts.selected,
-            (true, RowBar::Active | RowBar::Inactive) => fonts.selected_on_bar,
-        };
-        let bounds = self.part(0, LVIR_BOUNDS);
-        // SAFETY: the list's DC for the length of the message; the font
-        // selected into it is restored before the message returns, and
-        // system brushes are never freed.
-        unsafe {
-            SetDCBrushColor(dc, ground);
-            FillRect(dc, &bounds, HBRUSH(GetStockObject(DC_BRUSH).0));
-            if frame {
-                FrameRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOWTEXT));
-            }
-            if let Some((images, index)) = row.icon {
-                let icon = self.part(0, LVIR_ICON);
-                images.draw(dc, index, icon);
-                if row.up {
-                    // Over the folder's front, below its tab.
-                    let height = icon.bottom - icon.top;
-                    let arrow = RECT {
-                        top: icon.top + height / 4,
-                        ..icon
-                    };
-                    let size = Px(height * 5 / 8);
-                    draw_icon_mark(dc, Glyph::Up, arrow, size, system_color(COLOR_WINDOWTEXT));
-                }
-            }
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, system_color(text));
-            let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
-            for (column, (cell, fit)) in row.cells.iter().zip(row.fits).enumerate() {
-                let label = self.part(column as i32, LVIR_LABEL);
-                let inset = cell_text_inset(column == 0, self.list.dpi());
-                let mut area = RECT {
-                    left: label.left + inset.0,
-                    right: label.right - inset.0,
-                    ..label
-                };
-                let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
-                let flags = match fit {
-                    CellFit::End => flags | DT_END_ELLIPSIS,
-                    CellFit::Right => flags | DT_END_ELLIPSIS | DT_RIGHT,
-                    CellFit::Path => flags | DT_PATH_ELLIPSIS,
-                };
-                draw_text(dc, cell, &mut area, flags);
-            }
-            SelectObject(dc, previous);
         }
     }
 
@@ -519,22 +433,30 @@ impl CustomDraw<'_> {
             DrawAnswer::EachRow => CDRF_NOTIFYITEMDRAW,
             DrawAnswer::EachCell => CDRF_NOTIFYSUBITEMDRAW,
             DrawAnswer::Drawn => CDRF_SKIPDEFAULT,
+            DrawAnswer::NewColour => CDRF_NEWFONT,
             DrawAnswer::NewFont => CDRF_NEWFONT | CDRF_NOTIFYPOSTPAINT,
+            DrawAnswer::AfterRow => CDRF_NOTIFYPOSTPAINT,
         } as isize)
     }
 
-    /// Has the list draw the row at `DrawStage::Row` in `font` and in grey,
-    /// unless the list gives the row a colour of its own, as a selected row
-    /// has in high contrast, where grey on the selection would not read.
-    /// The list then draws every cell, its icon, its alignment and its
-    /// ellipsis as in any row. Answer [`DrawAnswer::NewFont`], and at
-    /// [`DrawStage::RowPainted`] give the DC the list's font back with
-    /// [`Self::restore_font`], because the list does not, and would draw the
-    /// next rows in `font`.
-    pub(crate) fn draw_row_struck(&mut self, font: &Font) {
+    /// Has the list draw the row at `DrawStage::Row` in grey, unless the
+    /// list gives the row a colour of its own, as a selected row has in high
+    /// contrast, where grey on the selection would not read. The list then
+    /// draws every cell, its icon, its alignment and its ellipsis as in any
+    /// row. Answer [`DrawAnswer::NewColour`].
+    pub(crate) fn draw_row_grey(&mut self) {
         if self.draw.clrText == CLR_DEFAULT {
             self.draw.clrText = system_color(COLOR_GRAYTEXT);
         }
+    }
+
+    /// Has the list draw the row at `DrawStage::Row` in `font` and in grey,
+    /// as [`Self::draw_row_grey`] says. Answer [`DrawAnswer::NewFont`], and
+    /// at [`DrawStage::RowPainted`] give the DC the list's font back with
+    /// [`Self::restore_font`], because the list does not, and would draw the
+    /// next rows in `font`.
+    pub(crate) fn draw_row_struck(&mut self, font: &Font) {
+        self.draw_row_grey();
         // SAFETY: the list's DC for the length of its paint; the list's own
         // font goes back into it at the row's post-paint stage.
         unsafe { SelectObject(self.draw.nmcd.hdc, HGDIOBJ(font.handle().0)) };
@@ -545,6 +467,25 @@ impl CustomDraw<'_> {
     pub(crate) fn restore_font(&self, font: &Font) {
         // SAFETY: the list's DC for the length of its paint.
         unsafe { SelectObject(self.draw.nmcd.hdc, HGDIOBJ(font.handle().0)) };
+    }
+
+    /// Draws `glyph` in the window text colour over the lower part of the
+    /// icon of the row at [`DrawStage::RowPainted`], as a badge on it.
+    pub(crate) fn draw_over_icon(&self, glyph: Glyph) {
+        let icon = self.cell_part(LVIR_ICON);
+        let height = icon.bottom - icon.top;
+        let area = RECT {
+            top: icon.top + height / 4,
+            ..icon
+        };
+        let side = Px(height * 9 / 16);
+        draw_glyph(
+            self.draw.nmcd.hdc,
+            glyph,
+            side,
+            system_color(COLOR_WINDOWTEXT),
+            area,
+        );
     }
 
     /// Draws the cell at `DrawStage::Cell` as the list would, with the
@@ -603,32 +544,6 @@ impl CustomDraw<'_> {
         }
     }
 
-    /// Draws the cell at `DrawStage::Cell` as the list would, except that
-    /// its text, a path, loses its middle where it does not fit
-    /// (`DT_PATH_ELLIPSIS`), so the drive and the name stay. The cell keeps
-    /// its whole text, which the list's label tip shows.
-    pub(crate) fn draw_path(&self, inset: Px) {
-        let label = self.cell_part(LVIR_LABEL);
-        let mut area = RECT {
-            left: label.left + inset.0,
-            right: label.right - inset.0,
-            ..label
-        };
-        let dc = self.draw.nmcd.hdc;
-        // SAFETY: the list's DC for the length of the message, which holds
-        // the list's font.
-        unsafe {
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, self.text_colour());
-        }
-        draw_text(
-            dc,
-            &self.cell_text(),
-            &mut area,
-            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_PATH_ELLIPSIS,
-        );
-    }
-
     /// Draws `icon` from its image list where the list puts the first
     /// column's icon; other columns have none.
     fn draw_icon(&self, icon: Option<(ImageList, i32)>) {
@@ -639,12 +554,7 @@ impl CustomDraw<'_> {
 
     /// The part `part`, such as `LVIR_LABEL`, of the cell being drawn.
     fn cell_part(&self, part: u32) -> RECT {
-        self.part(self.draw.iSubItem, part)
-    }
-
-    /// The part `part` of the drawn row's cell in the column at index
-    /// `column`; the first column's `LVIR_BOUNDS` is the whole row.
-    fn part(&self, column: i32, part: u32) -> RECT {
+        let column = self.draw.iSubItem;
         let mut rect = RECT {
             left: part as i32,
             top: column,
@@ -678,35 +588,6 @@ impl CustomDraw<'_> {
                 unsafe { GetSysColor(COLOR_WINDOWTEXT) },
             ),
             colour => colour,
-        }
-    }
-
-    /// The text of the cell being drawn, which the list holds.
-    fn cell_text(&self) -> String {
-        let mut buffer = vec![0u16; 260];
-        loop {
-            let mut item = LVITEMW {
-                iSubItem: self.draw.iSubItem,
-                pszText: PWSTR(buffer.as_mut_ptr()),
-                cchTextMax: buffer.len() as i32,
-                ..Default::default()
-            };
-            // SAFETY: `item` and the buffer it points to outlive the call,
-            // which writes at most `cchTextMax` characters.
-            let length = unsafe {
-                SendMessageW(
-                    self.list.0,
-                    LVM_GETITEMTEXTW,
-                    Some(WPARAM(self.draw.nmcd.dwItemSpec)),
-                    Some(LPARAM(&raw mut item as isize)),
-                )
-            }
-            .0 as usize;
-            // A text that fills the buffer may have been cut off.
-            if length + 1 < buffer.len() {
-                return String::from_utf16_lossy(&buffer[..length]);
-            }
-            buffer.resize(buffer.len() * 2, 0);
         }
     }
 }

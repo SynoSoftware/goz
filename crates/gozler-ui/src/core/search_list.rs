@@ -1,7 +1,7 @@
 //! The state of one list of gozlerd's results: Search's results list, or a
-//! search panel's list (file-manager-spec.md: Search in a panel). Each list
-//! has its own typed text, rows, selection and kept operations, so a search
-//! in one list never changes another.
+//! search panel's list (DESIGN.md: Search in a panel). Each list has its own
+//! typed text, rows, selection and kept operations, so a search in one list
+//! never changes another.
 
 use super::results::Results;
 use super::selection::{Selection, wide_path_into};
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 /// One list of gozlerd's results: its typed text, its rows, its selection
 /// and the ended operations it still shows blank
-/// (file-manager-spec.md: Taken entries).
+/// (DESIGN.md: The person never waits for the disk).
 #[derive(Debug)]
 pub(crate) struct SearchList {
     pub(super) text: String,
@@ -31,8 +31,8 @@ pub(crate) struct SearchList {
 /// The size of `files`, a search panel's selection, as its status line
 /// adds it: each entry once, so a file below a selected folder is left out,
 /// and `None` when a counted size is unknown, as a folder panel's sum
-/// (file-manager-spec.md: Search in a panel). Only the depths at which a
-/// selected folder exists are looked up.
+/// (DESIGN.md: Search in a panel). Only the depths at which a selected folder
+/// exists are looked up.
 fn chosen_bytes(files: &[ResultItem]) -> Option<u64> {
     let folders: HashSet<&str> = (files.iter())
         .filter(|file| file.is_dir)
@@ -88,7 +88,7 @@ impl SearchList {
 
     /// Forgets the rows, the selection and the kept operations, but not the
     /// typed text, while a search panel does not show, because it costs
-    /// memory only while it shows (file-manager-spec.md: Search in a panel).
+    /// memory only while it shows (DESIGN.md: Search in a panel).
     pub(crate) fn drop_rows(&mut self) {
         self.results = Results::new();
         self.selection = Selection::None;

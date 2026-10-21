@@ -2,8 +2,8 @@
 
 `gozler-fileops` copies, moves and deletes files for the window's two modes,
 Two panels and Search. This spec says what the engine does and why each
-method was chosen. [The file manager spec](file-manager-spec.md) owns what
-the person sees.
+method was chosen. [DESIGN.md](../DESIGN.md), in "Two panels" and "File
+operations", owns what the person sees.
 
 Every claim about another tool or a Windows API, with its source and its
 numbers, is in [the research record](../research/fast-copy-delete.md). This
@@ -572,8 +572,8 @@ that the list keeps, compared as Windows compares names, ignoring case. The
 window asks this, and nothing else, to leave those entries out of the panels
 and show them struck through, in grey, in the search results.
 Each list keeps the ended operations it still needs
-([file manager spec](file-manager-spec.md), "The person never waits for the
-disk"): a folder panel keeps an operation whose end makes it read its folder
+([DESIGN.md](../DESIGN.md), "The person never waits for the disk"): a
+folder panel keeps an operation whose end makes it read its folder
 again until its first complete listing started after the end, because the
 change notifications and the end arrive in no fixed order; a search list
 keeps an ended operation only when, at its end, the operation takes a row
@@ -721,8 +721,8 @@ never make a delete fail. TinyTorrent2's mark writer opens without
   selections, a destination inside a source, the overlap test, taken paths,
   the method for a pair of volumes, the ring's block plan) build and test on
   every OS; the disk work is Windows only.
-- **`gozler-ui`:** everything [the file manager spec](file-manager-spec.md)
-  describes. It shows the queue's states and decides nothing about which
+- **`gozler-ui`:** the window that [DESIGN.md](../DESIGN.md) describes. It
+  shows the queue's states and decides nothing about which
   operation waits.
 
 The engine is a crate because `gozler-ui` is a binary only: the measurement

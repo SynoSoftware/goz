@@ -210,9 +210,9 @@ pub(crate) fn local_app_data() -> windows::core::Result<PathBuf> {
 }
 
 /// The user's Documents folder, which the left panel shows the first time
-/// (file-manager-spec.md: A panel). It is not checked, because a folder
-/// redirected to a server that does not answer would hold the window; the
-/// panel's reading finds out.
+/// (DESIGN.md: A panel). It is not checked, because a folder redirected to a
+/// server that does not answer would hold the window; the panel's reading finds
+/// out.
 pub(crate) fn documents() -> windows::core::Result<String> {
     known_folder(&FOLDERID_Documents, KF_FLAG_DONT_VERIFY)
 }
@@ -409,7 +409,7 @@ pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
 
 /// [`pick_folder`] for a destination, with the title `title` and `ok` as
 /// its OK button's caption, such as "Copy to folder" and "Copy"
-/// (file-manager-spec.md: Search mode).
+/// (DESIGN.md: File operations).
 pub(crate) fn pick_destination(
     owner: Hwnd,
     start: Option<&str>,

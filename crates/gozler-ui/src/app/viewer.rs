@@ -1,8 +1,8 @@
-//! The Viewer windows (file-manager-spec.md: The Viewer): each `F3` on a
-//! file in a panel opens one, a top-level window that no window owns.
-//! `core::viewer_window` decides what a Viewer shows; this module gives it
-//! the blocks that the reading thread of `win::viewer` reads, and asks for
-//! the next block that the page or a move waits for, one at a time.
+//! The Viewer windows (DESIGN.md: The Viewer): each `F3` on a file in a panel
+//! opens one, a top-level window that no window owns. `core::viewer_window`
+//! decides what a Viewer shows; this module gives it the blocks that the
+//! reading thread of `win::viewer` reads, and asks for the next block that the
+//! page or a move waits for, one at a time.
 
 use crate::core::captions::ButtonIcon;
 use crate::core::ids::{ControlId, IconId};
@@ -71,7 +71,11 @@ impl Viewers {
         main: Hwnd,
     ) -> windows::core::Result<()> {
         if !self.registered.get() {
-            window::register_class::<Viewer>(WINDOW_CLASS, IconId::Gozler.id())?;
+            window::register_class::<Viewer>(
+                WINDOW_CLASS,
+                IconId::Gozler.id(),
+                window::Background::Window,
+            )?;
             register_area()?;
             self.registered.set(true);
         }
@@ -251,13 +255,6 @@ impl Viewer {
         self.reader
             .replace(Some(FileReader::open(&self.path, hwnd, waker.clone())));
         self.set_shown(hwnd, Shown::Reading);
-    }
-
-    /// Opens the file again where it shows now, or where it showed before
-    /// it was lost, as Retry and a kept drive do.
-    fn reopen(&self, hwnd: Hwnd) {
-        self.remember_place();
-        self.read_file(hwnd);
     }
 
     fn remember_place(&self) {
@@ -484,9 +481,7 @@ impl Viewer {
                     self.set_shown(hwnd, Shown::File(document));
                 }
                 ViewerEvent::Block { index, bytes } => {
-                    if self.in_flight.get() == Some(index) {
-                        self.in_flight.set(None);
-                    }
+                    self.in_flight.set(None);
                     if let Some(document) = self.shown.borrow_mut().document_mut() {
                         document.receive(index, bytes);
                     }
@@ -501,8 +496,8 @@ impl Viewer {
         }
     }
 
-    /// Windows asks `removal` of the file's drive (file-manager-spec.md:
-    /// The Viewer); `false` when `notification` is not this Viewer's.
+    /// Windows asks `removal` of the file's drive (DESIGN.md: The Viewer);
+    /// `false` when `notification` is not this Viewer's.
     fn removal(&self, hwnd: Hwnd, notification: isize, removal: Removal) -> bool {
         let ours = self
             .reader
@@ -518,13 +513,15 @@ impl Viewer {
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
                     reader.release();
                 }
-                self.in_flight.set(None);
                 self.set_shown(hwnd, Shown::Removed);
             }
             // Another program kept the drive, so the file can show again.
             Removal::Failed => self.read_file(hwnd),
+            // A drive pulled out without asking sends only this.
             Removal::Complete => {
+                self.remember_place();
                 self.reader.replace(None);
+                self.set_shown(hwnd, Shown::Removed);
             }
         }
         true
@@ -703,7 +700,7 @@ impl WindowProc for Viewer {
             }
             Message::Command(Command::Control(event)) => {
                 if self.controls.get()?.retry.clicked(event) {
-                    self.reopen(hwnd);
+                    self.read_file(hwnd);
                 }
                 Some(LRESULT(0))
             }

@@ -130,8 +130,8 @@ pub(crate) struct StatusCaptions {
     /// The service and the index, and a newer release, as the Settings
     /// dialog's right group shows them.
     pub(crate) service: String,
-    /// The main window's right group: `service`, then the search's totals,
-    /// each after its icon.
+    /// The main window's right group, a status bar part for each: `service`
+    /// unless it is empty, then the search's totals, each after its icon.
     pub(crate) right: Vec<ValuePart>,
     /// The main window's memory group; `None` while Settings > General
     /// hides it.
@@ -238,7 +238,7 @@ pub(crate) struct StatusWidest {
     pub(crate) done: Vec<String>,
     /// The right group's texts in Two panels, which the layout sizes the
     /// group for at the bar's right end, so the middle group has the rest
-    /// (file-manager-spec.md: The status bar in Two panels).
+    /// (DESIGN.md: The status bar in Two panels).
     pub(crate) panel_index: Vec<String>,
 }
 
@@ -483,24 +483,84 @@ impl DialogItem {
     }
 }
 
-/// The group boxes of the Settings pages, each with the icon before its
-/// caption.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 15] = [
-    (ControlId::GeneralDisplay, Glyph::Globe),
-    (ControlId::GeneralStarting, Glyph::PowerButton),
-    (ControlId::SearchBoxGroup, Glyph::Search),
-    (ControlId::ContextMenuItemGroup, Glyph::BulletedList),
-    (ControlId::ContextMenuOpenGroup, Glyph::OpenFile),
-    (ControlId::KeyboardShowGroup, Glyph::BackToWindow),
-    (ControlId::KeyboardCommandsGroup, Glyph::KeyboardShortcut),
-    (ControlId::IndexDrivesGroup, Glyph::HardDrive),
-    (ControlId::IndexHoldsGroup, Glyph::Library),
-    (ControlId::IndexServiceGroup, Glyph::Processing),
-    (ControlId::IncludeFoldersGroup, Glyph::Folder),
-    (ControlId::IncludeNamesGroup, Glyph::Rename),
-    (ControlId::SpeedCopyingGroup, Glyph::Copy),
-    (ControlId::SpeedRingGroup, Glyph::Sync),
-    (ControlId::SpeedDeleteGroup, Glyph::Delete),
+/// The groups of the Settings pages: each title, the static icon before it
+/// and the icon it shows.
+pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 15] = [
+    (
+        ControlId::GeneralDisplay,
+        ControlId::GeneralDisplayIcon,
+        Glyph::Globe,
+    ),
+    (
+        ControlId::GeneralStarting,
+        ControlId::GeneralStartingIcon,
+        Glyph::PowerButton,
+    ),
+    (
+        ControlId::SearchBoxGroup,
+        ControlId::SearchBoxGroupIcon,
+        Glyph::Search,
+    ),
+    (
+        ControlId::ContextMenuItemGroup,
+        ControlId::ContextMenuItemGroupIcon,
+        Glyph::BulletedList,
+    ),
+    (
+        ControlId::ContextMenuOpenGroup,
+        ControlId::ContextMenuOpenGroupIcon,
+        Glyph::OpenFile,
+    ),
+    (
+        ControlId::KeyboardShowGroup,
+        ControlId::KeyboardShowGroupIcon,
+        Glyph::BackToWindow,
+    ),
+    (
+        ControlId::KeyboardCommandsGroup,
+        ControlId::KeyboardCommandsGroupIcon,
+        Glyph::KeyboardShortcut,
+    ),
+    (
+        ControlId::IndexDrivesGroup,
+        ControlId::IndexDrivesGroupIcon,
+        Glyph::HardDrive,
+    ),
+    (
+        ControlId::IndexHoldsGroup,
+        ControlId::IndexHoldsGroupIcon,
+        Glyph::Library,
+    ),
+    (
+        ControlId::IndexServiceGroup,
+        ControlId::IndexServiceGroupIcon,
+        Glyph::Processing,
+    ),
+    (
+        ControlId::IncludeFoldersGroup,
+        ControlId::IncludeFoldersGroupIcon,
+        Glyph::Folder,
+    ),
+    (
+        ControlId::IncludeNamesGroup,
+        ControlId::IncludeNamesGroupIcon,
+        Glyph::Rename,
+    ),
+    (
+        ControlId::SpeedCopyingGroup,
+        ControlId::SpeedCopyingGroupIcon,
+        Glyph::Copy,
+    ),
+    (
+        ControlId::SpeedRingGroup,
+        ControlId::SpeedRingGroupIcon,
+        Glyph::Sync,
+    ),
+    (
+        ControlId::SpeedDeleteGroup,
+        ControlId::SpeedDeleteGroupIcon,
+        Glyph::Delete,
+    ),
 ];
 
 /// The icon of each push button's caption, by its catalogue key, so a
@@ -1362,14 +1422,14 @@ impl StatusCaptions {
                     cancel: model.can_cancel_job(),
                 }
             },
-            right: joined_parts(
-                model.strings(),
-                std::iter::once(ValuePart::plain(service.clone())).chain(
+            right: std::iter::once(ValuePart::plain(service.clone()))
+                .filter(|part| !part.text.is_empty())
+                .chain(
                     status_list(model)
                         .map(|list| totals_status(model, list, numbers))
                         .unwrap_or_default(),
-                ),
-            ),
+                )
+                .collect(),
             service,
             memory: model
                 .choices()
@@ -1791,7 +1851,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
 /// The window's title: the typed search and the product's name, as Windows
 /// titles a document window, or the name alone while the search is empty or
 /// Two panels shows, because a title that named one panel's folder would be
-/// wrong for the other (file-manager-spec.md: The window).
+/// wrong for the other (DESIGN.md: Two panels' window).
 pub(crate) fn title(model: &Model) -> String {
     let strings = model.strings();
     let text = model.search_list().text().trim();
@@ -1819,23 +1879,9 @@ fn joined(strings: &Strings, first: String, second: String) -> String {
     }
 }
 
-/// `parts` with the dot of [`joined`] between them, and the empty ones left
-/// out.
-fn joined_parts(strings: &Strings, parts: impl Iterator<Item = ValuePart>) -> Vec<ValuePart> {
-    let dot = strings.format("status.view", &["", ""]);
-    let mut joined = Vec::new();
-    for part in parts.filter(|part| !part.text.is_empty()) {
-        if !joined.is_empty() {
-            joined.push(ValuePart::plain(dot.clone()));
-        }
-        joined.push(part);
-    }
-    joined
-}
-
 /// The list whose search the status bar describes: Search's, or in Two
-/// panels the active panel's while it searches (file-manager-spec.md: The
-/// status bar in Two panels).
+/// panels the active panel's while it searches (DESIGN.md: The status bar in
+/// Two panels).
 fn status_list(model: &Model) -> Option<List> {
     match model.mode() {
         Mode::Search => Some(List::Search),
@@ -1971,8 +2017,8 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// The file operation's line, with its bar while it runs (file-manager-spec.md:
-/// File operations, steps 5 and 6).
+/// The file operation's line, with its bar while it runs (DESIGN.md: File
+/// operations).
 fn operation_status(model: &Model, numbers: &dyn Numbers) -> (String, JobProgress) {
     let Some(operation) = model.operation() else {
         return (String::new(), JobProgress::None);
@@ -2272,7 +2318,7 @@ pub(crate) fn index_status(model: &Model) -> String {
 }
 
 /// Why the active panel's folder sizes may be unknown, as the status bar's
-/// right group says it in Two panels (file-manager-spec.md: Folder sizes).
+/// right group says it in Two panels (DESIGN.md: Folder sizes).
 fn panel_index_status(model: &Model) -> Option<String> {
     let strings = model.strings();
     let coverage = model.panel_coverage()?;
@@ -2285,7 +2331,7 @@ fn panel_index_status(model: &Model) -> Option<String> {
         .then(|| strings.format("panel.indexing", &[volume.mounted().display_prefix()]))
 }
 
-/// What a panel shows besides its rows (file-manager-spec.md: A panel).
+/// What a panel shows besides its rows (DESIGN.md: A panel).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PanelCaptions {
     pub(crate) drive: String,
@@ -2361,8 +2407,8 @@ impl PanelCaptions {
 /// then its total and where it searched, also "0 results in …" beside the
 /// list's no-results message, or how many of them are selected and their
 /// size once read; nothing while the list shows another message
-/// (file-manager-spec.md: Search in a panel). The count is gozlerd's total,
-/// as Search's is, also past the rows the list reaches.
+/// (DESIGN.md: Search in a panel). The count is gozlerd's total, as Search's
+/// is, also past the rows the list reaches.
 fn search_counts(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -2398,8 +2444,8 @@ fn search_counts(
 }
 
 /// What a search panel's list area says instead of rows, if anything: why
-/// it shows no results and how to search on (file-manager-spec.md: Search
-/// in a panel). Retry never shows in a search panel.
+/// it shows no results and how to search on (DESIGN.md: Search in a panel).
+/// Retry never shows in a search panel.
 pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
     let strings = model.strings();
     let panel = model.panels().panel(side);
@@ -2434,7 +2480,9 @@ pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
 }
 
 /// The status line's counts: "14 items · 5.2 GB" or "3 of 14 selected ·
-/// 4.2 GB", without the size when a counted folder's is unknown.
+/// 4.2 GB". The known sizes' sum says how many folder sizes are unknown,
+/// as "(3.4 GB, 12 sizes unknown)", and "size unknown" shows only when no
+/// counted entry's size is known.
 fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> String {
     let count = match counts.selected {
         None => strings.count("panel.items", counts.items, numbers, &[]),
@@ -2445,18 +2493,26 @@ fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> Str
             &[&numbers.integer(counts.items)],
         ),
     };
-    let size = counts
-        .bytes
-        .map(|bytes| text::bytes(strings, numbers, bytes))
-        .unwrap_or_default();
+    let counted = counts.selected.unwrap_or(counts.items);
+    let size = match counts.size {
+        None => String::new(),
+        Some(size) if size.unknown == counted => strings.text("status.size_unknown").to_owned(),
+        Some(size) => {
+            let bytes = text::bytes(strings, numbers, size.bytes);
+            if size.unknown == 0 {
+                bytes
+            } else {
+                strings.count("panel.sizes_unknown", size.unknown, numbers, &[&bytes])
+            }
+        }
+    };
     joined(strings, count, size)
 }
 
-/// A cell of `panel`'s `row` (file-manager-spec.md: A panel), with sizes
-/// in the format `sizes`, as Search's Size column shows them. A search
-/// panel's result shows as Search's results list shows it, and its Folder
-/// cell the folder below the searched one, or the full folder while it
-/// searches all drives.
+/// A cell of `panel`'s `row` (DESIGN.md: A panel), with sizes in the format
+/// `sizes`, as Search's Size column shows them. A search panel's result shows
+/// as Search's results list shows it, and its Folder cell the folder below the
+/// searched one, or the full folder while it searches all drives.
 pub(crate) fn panel_cell(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -2515,7 +2571,7 @@ pub(crate) fn panel_headers(strings: &Strings, columns: &[PanelColumn]) -> Vec<S
 }
 
 /// The key bar's buttons: each key and its word, and the tooltip where the
-/// word alone cannot say what it does (file-manager-spec.md: The key bar).
+/// word alone cannot say what it does (DESIGN.md: The key bar).
 pub(crate) fn key_bar(strings: &Strings) -> [(String, String, Option<String>); 6] {
     let tip = |key: &str| Some(strings.text(key).to_owned());
     let word = |key: &str| strings.text(key).to_owned();

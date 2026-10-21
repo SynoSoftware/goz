@@ -18,7 +18,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 /// A list that shows gozlerd's results: Search's results list, or a
-/// search panel's list (file-manager-spec.md: Search in a panel).
+/// search panel's list (DESIGN.md: Search in a panel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum List {
     Search,
@@ -56,8 +56,7 @@ pub(crate) enum Purpose {
     /// the count, so a new count never cancels it.
     SettingsSaved,
     /// A panel's folder sizes, one purpose for each panel, so one panel's
-    /// request never cancels the other's (file-manager-spec.md: Folder
-    /// sizes).
+    /// request never cancels the other's (DESIGN.md: Folder sizes).
     FolderSizes(Side),
 }
 

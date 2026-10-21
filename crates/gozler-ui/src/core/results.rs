@@ -49,8 +49,7 @@ pub(crate) enum ListMessage {
     /// S6); a search panel shows it for every empty search.
     TypeToSearch,
     /// A search panel's folder, on the drive `root`, is on no indexed
-    /// volume, so gozlerd cannot search it (file-manager-spec.md: Search in
-    /// a panel).
+    /// volume, so gozlerd cannot search it (DESIGN.md: Search in a panel).
     NotIndexed {
         root: String,
     },

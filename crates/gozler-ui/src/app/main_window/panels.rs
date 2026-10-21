@@ -1,8 +1,8 @@
-//! Two panels' controls and handlers (file-manager-spec.md: Two panels).
-//! `core::panel` decides what each panel shows; these handlers read each
-//! list's [`Place`], start the disk threads of `win::folder`, and show what
-//! the model then says. The list owns the focus and the selection, as
-//! Search's list does (DESIGN.md: The selection).
+//! Two panels' controls and handlers (DESIGN.md: Two panels). `core::panel`
+//! decides what each panel shows; these handlers read each list's [`Place`],
+//! start the disk threads of `win::folder`, and show what the model then says.
+//! The list owns the focus and the selection, as Search's list does (DESIGN.md:
+//! The selection).
 
 use super::super::dialogs::{NewFolder, Transfer, TransferStart};
 use super::{MainWindow, SAVE_DELAY_MS, timer};
@@ -12,13 +12,14 @@ use crate::core::commands::{
     self, CommandId, Focus, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey, State,
 };
 use crate::core::fetch::{List, Purpose};
+use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
 use crate::core::model::{Column, TakenShown};
 use crate::core::open;
 use crate::core::panel::{
-    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Place, ReadAsk,
+    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels, Place, ReadAsk,
     ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
 };
 use crate::core::settings::Mode;
@@ -26,9 +27,7 @@ use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListVi
 use crate::win::dialog::DialogEnd;
 use crate::win::folder::{self, PanelEvent, Removal};
 use crate::win::gdi::{StaticColors, TextMeter};
-use crate::win::notify::{
-    CellFit, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify, PanelRow, RowBar, RowFonts,
-};
+use crate::win::notify::{CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify};
 use crate::win::{self, Hwnd, shell};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::parent_of;
@@ -37,21 +36,11 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use windows::Win32::Foundation::LRESULT;
 
-/// How a column's cells fit their text.
-fn fit_of(column: PanelColumn) -> CellFit {
-    match column {
-        PanelColumn::Size => CellFit::Right,
-        PanelColumn::Folder => CellFit::Path,
-        PanelColumn::Name | PanelColumn::Ext | PanelColumn::DateModified => CellFit::End,
-    }
-}
-
 /// Where a search panel's list puts its Folder column.
 const FOLDER_COLUMN: usize = 2;
 
 /// A panel asks gozlerd for its folder sizes and reads its free space this
-/// long after the last change in its folder (file-manager-spec.md: Folder
-/// sizes).
+/// long after the last change in its folder (DESIGN.md: Folder sizes).
 const SETTLE_MS: u32 = 500;
 
 /// gozlerd applies a change from the volume's journal after the disk has
@@ -81,7 +70,7 @@ fn widest() -> impl Iterator<Item = Entry> {
 const DRIVE_IDS: u16 = 0x900;
 const FOLDER_IDS: u16 = 0x940;
 
-/// The key bar's buttons, `F3` to `F8` (file-manager-spec.md: The key bar).
+/// The key bar's buttons, `F3` to `F8` (DESIGN.md: The key bar).
 pub(super) const KEY_BAR: [ControlId; 6] = [
     ControlId::KeyF3,
     ControlId::KeyF4,
@@ -98,7 +87,7 @@ pub(super) const KEY_TIPS: [usize; 2] = [1, 3];
 /// One panel's controls, created in Tab order. The message and Retry come
 /// before the list, so they lie above it (`ListView::create`). A search
 /// panel shows its search box and Look in in the path box's place
-/// (file-manager-spec.md: Search in a panel).
+/// (DESIGN.md: Search in a panel).
 pub(super) struct PanelControls {
     pub(super) drive: Button,
     pub(super) path: Edit,
@@ -301,7 +290,7 @@ fn show_text(control: Hwnd, text: &str) {
 
 /// The folder a panel that saved none shows the first time: Documents on
 /// the left and Downloads on the right, the two folders a person copies
-/// between most (file-manager-spec.md: A panel).
+/// between most (DESIGN.md: A panel).
 fn first_folder(side: Side) -> String {
     let folder = match side {
         Side::Left => shell::documents(),
@@ -485,7 +474,7 @@ impl MainWindow {
     }
 
     /// Enables each key bar button as its command is, on the active panel's
-    /// state (file-manager-spec.md: The key bar).
+    /// state (DESIGN.md: The key bar).
     fn update_key_bar(&self) {
         let enabled: Vec<bool> = {
             let model = self.model.borrow();
@@ -547,7 +536,7 @@ impl MainWindow {
     /// Sizes each panel's columns to its list: Ext, Size and Date modified
     /// fit the widest text they show, in a selected row's font, and Name
     /// takes the rest, or shares it with a search panel's Folder
-    /// (file-manager-spec.md: A panel, Search in a panel).
+    /// (DESIGN.md: A panel, Search in a panel).
     pub(super) fn fill_panel_columns(&self) {
         let created = self.created();
         let dpi = created.metrics.get().dpi;
@@ -585,17 +574,11 @@ impl MainWindow {
         let widths: Vec<Px> = {
             let fonts = created.fonts.borrow();
             let plain = TextMeter::new(&fonts.ui);
-            let selected = [TextMeter::new(&fonts.semibold), TextMeter::new(&fonts.bold)];
             samples
                 .iter()
                 .zip(&headers)
                 .map(|(column, header)| {
-                    // Segoe UI's semibold digits are wider than its bold
-                    // ones, so a selected row takes the wider.
-                    let text = column
-                        .iter()
-                        .flat_map(|sample| selected.iter().map(|meter| meter.width(sample)))
-                        .max();
+                    let text = column.iter().map(|sample| plain.width(sample)).max();
                     let cell = layout::cell_width(text.unwrap_or_default(), Px(0), false, dpi);
                     ColumnFit::new(plain.plain_width(header), Some(cell), dpi).width
                 })
@@ -646,7 +629,7 @@ impl MainWindow {
     }
 
     /// Starts reading both panels' folders, or a search panel's search,
-    /// when Two panels shows (file-manager-spec.md: The window).
+    /// when Two panels shows (DESIGN.md: Two panels' window).
     pub(super) fn start_panels(&self, hwnd: Hwnd) {
         for side in Side::BOTH {
             let ask = self
@@ -819,6 +802,7 @@ impl MainWindow {
         }
     }
 
+    /// Applies `event` of `side`'s reading.
     fn on_read(&self, hwnd: Hwnd, side: Side, event: ReadEvent) {
         let shown = self.place(side);
         let accepted = self
@@ -832,7 +816,7 @@ impl MainWindow {
         let threads = &self.created().panel_threads;
         match accepted.change {
             ReadChange::Stale => return,
-            ReadChange::Opened | ReadChange::NotReady => {
+            ReadChange::Cleared => {
                 self.created().requests.cancel(Purpose::FolderSizes(side));
                 self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
             }
@@ -887,7 +871,7 @@ impl MainWindow {
 
     /// The message box for a folder that could not be opened, after which
     /// the path box takes back a typed path for the person to correct
-    /// (file-manager-spec.md: A panel).
+    /// (DESIGN.md: A panel).
     pub(super) fn refuse(&self, hwnd: Hwnd, refused: Refused) {
         let Refused {
             side,
@@ -1004,7 +988,7 @@ impl MainWindow {
     /// Find in Two panels: the active panel becomes a search panel of its
     /// folder, which ends its reading and its folder's requests, and its
     /// search box takes the focus with its text selected
-    /// (file-manager-spec.md: Search in a panel).
+    /// (DESIGN.md: Search in a panel).
     pub(super) fn find_in_panel(&self, hwnd: Hwnd) {
         let side = self.model.borrow().panels().active();
         self.close_quick_search_of(side);
@@ -1044,7 +1028,7 @@ impl MainWindow {
     }
 
     /// Makes `side` the active panel, and with `focus` gives its list the
-    /// focus. The path boxes and the focused rows show which is active.
+    /// focus. The path boxes show which is active.
     pub(super) fn activate_panel(&self, side: Side, focus: bool) {
         let changed = self.model.borrow_mut().panels_mut().activate(side);
         // A click in the other panel closes this one's quick search box.
@@ -1054,18 +1038,14 @@ impl MainWindow {
         }
         if changed {
             for side in Side::BOTH {
-                let c = self.panel(side);
-                c.path.hwnd().invalidate();
-                if let Some(row) = c.list.focused() {
-                    c.list.redraw_rows(row..row + 1);
-                }
+                self.panel(side).path.hwnd().invalidate();
             }
             self.update_status();
         }
     }
 
     /// Closes the active panel's quick search box, before a command runs
-    /// (file-manager-spec.md: Quick search).
+    /// (DESIGN.md: Quick search).
     pub(super) fn close_quick_search(&self) {
         let side = self.model.borrow().panels().active();
         self.close_quick_search_of(side);
@@ -1077,9 +1057,8 @@ impl MainWindow {
         }
     }
 
-    /// A key of a panel's list or path box (file-manager-spec.md: Moving
-    /// around, Selecting entries, Quick search). Returns whether the
-    /// window took it.
+    /// A key of a panel's list or path box (DESIGN.md: Moving around, Selecting
+    /// entries, Quick search). Returns whether the window took it.
     pub(super) fn on_panel_key(
         &self,
         hwnd: Hwnd,
@@ -1094,6 +1073,10 @@ impl MainWindow {
         else {
             return false;
         };
+        // The list never sees the keys the window takes, so it does not
+        // show its focus outline, which Windows hides until the keyboard
+        // is used.
+        hwnd.show_focus_cues();
         let c = self.panel(side);
         let quick = self
             .model
@@ -1245,8 +1228,8 @@ impl MainWindow {
         }
     }
 
-    /// A character typed in a panel's list: quick search (file-manager-spec.md:
-    /// Quick search). Returns whether the window took it.
+    /// A character typed in a panel's list: quick search (DESIGN.md: Quick
+    /// search). Returns whether the window took it.
     pub(super) fn on_panel_char(&self, target: Hwnd, character: char, alt: bool) -> bool {
         let Some(side) = self.panel_list(target) else {
             return false;
@@ -1278,7 +1261,7 @@ impl MainWindow {
     pub(super) fn run_panel_action(&self, hwnd: Hwnd, action: PanelAction) {
         match action {
             // A search panel's search box stands in its path box's place
-            // (file-manager-spec.md: Search in a panel).
+            // (DESIGN.md: Search in a panel).
             PanelAction::PathBox => {
                 let side = self.model.borrow().panels().active();
                 let c = self.panel(side);
@@ -1295,7 +1278,7 @@ impl MainWindow {
     }
 
     /// The drive menu of `side`, under its drive button
-    /// (file-manager-spec.md: The drive menu).
+    /// (DESIGN.md: The drive menu).
     pub(super) fn drive_menu(&self, hwnd: Hwnd, side: Side) {
         self.activate_panel(side, false);
         let c = self.panel(side);
@@ -1340,7 +1323,7 @@ impl MainWindow {
             (nodes, states, folders)
         };
         // The menu opens on the panel's own drive, so the arrow keys start
-        // from it (file-manager-spec.md: The drive menu).
+        // from it (DESIGN.md: The drive menu).
         let own = states.iter().position(|(_, _, own)| *own).unwrap_or(0);
         let button = c.drive.hwnd().screen_rect();
         let chosen = win::menu::Menu::track_popup_highlighted(
@@ -1401,15 +1384,17 @@ impl MainWindow {
                 }
                 Some(LRESULT(0))
             }
-            ListNotify::CustomDraw(draw) => Some(CustomDraw::answer(match draw.stage() {
+            ListNotify::CustomDraw(mut draw) => Some(CustomDraw::answer(match draw.stage() {
                 DrawStage::Paint => DrawAnswer::EachRow,
-                DrawStage::Row { row } if self.draw_panel_row(side, &draw, row) => {
-                    DrawAnswer::Drawn
+                DrawStage::Row { row } => self.draw_panel_row(side, &mut draw, row),
+                DrawStage::RowPainted { row } => {
+                    draw.restore_font(&self.created().fonts.borrow().ui);
+                    if matches!(self.model.borrow().panels().row(side, row), Some(Row::Up)) {
+                        draw.draw_over_icon(Glyph::Up);
+                    }
+                    DrawAnswer::Default
                 }
-                DrawStage::Row { .. }
-                | DrawStage::Cell { .. }
-                | DrawStage::RowPainted
-                | DrawStage::Other => DrawAnswer::Default,
+                DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
             })),
             // Read later, because the list tells them while the window may
             // hold the model.
@@ -1422,7 +1407,7 @@ impl MainWindow {
                 None
             }
             // A click anywhere in the list, or the focus leaving it, closes
-            // the quick search box (file-manager-spec.md: Quick search).
+            // the quick search box (DESIGN.md: Quick search).
             ListNotify::Clicked | ListNotify::Unfocused => {
                 self.close_quick_search_of(side);
                 None
@@ -1485,12 +1470,14 @@ impl MainWindow {
             list.select(0, false);
             self.panel_changed[side.index()].set(ListChanged::Nothing);
         }
-        // Ctrl+A or a drag also selects a search panel's blank taken rows.
+        // Each read sends a message per selected row, so it runs again only
+        // when Ctrl+A or a drag also selected a search panel's taken rows.
+        let mut selected = list.selected();
         let searching = self.model.borrow().panels().search(side).is_some();
-        if searching && self.deselect_taken(List::Panel(side)) {
+        if searching && self.deselect_taken(List::Panel(side), &selected) {
             self.panel_changed[side.index()].set(ListChanged::Nothing);
+            selected = list.selected();
         }
-        let selected = list.selected();
         let focused = list.focused();
         let search = {
             let mut model = self.model.borrow_mut();
@@ -1512,10 +1499,9 @@ impl MainWindow {
         self.show_panel(side);
     }
 
-    /// The context menu of `side`'s list (file-manager-spec.md: Menus in
-    /// Two panels): an entry's, at the row the person right-clicked or at
-    /// the focused row for the Menu key, else the empty area's. The header
-    /// shows none.
+    /// The context menu of `side`'s list (DESIGN.md: Menus in Two panels): an
+    /// entry's, at the row the person right-clicked or at the focused row for
+    /// the Menu key, else the empty area's. The header shows none.
     pub(super) fn panel_menu(&self, hwnd: Hwnd, side: Side, point: Option<(i32, i32)>) {
         let list = self.panel(side).list;
         if point.is_some_and(|point| list.header().screen_rect().contains(point)) {
@@ -1573,9 +1559,9 @@ impl MainWindow {
     }
 
     /// `F5` and `F6`: the destination as text, then the operation
-    /// (file-manager-spec.md: Copy and Move). Gozler's own rename in the
-    /// panel's folder keeps the focus, and the selection, on the renamed
-    /// entry, which a rename by another program does not.
+    /// (DESIGN.md: Copy and Move). Gozler's own rename in the panel's folder
+    /// keeps the focus, and the selection, on the renamed entry, which a rename
+    /// by another program does not.
     pub(super) fn transfer(&self, hwnd: Hwnd, moves: bool) {
         let sources = self.selected_paths();
         let Some(start) = self.transfer_start(moves) else {
@@ -1612,7 +1598,7 @@ impl MainWindow {
         let renamed = match (&destination, one) {
             (Destination::Typed(path), Some(_)) if moves => {
                 let path = path.to_string_lossy().into_owned();
-                (panel::same_folder(&gozler_core::winpath::parent_of(&path), &folder))
+                (panel::same_folder(&parent_of(&path), &folder))
                     .then(|| panel::last_name(&path).to_owned())
             }
             _ => None,
@@ -1628,8 +1614,8 @@ impl MainWindow {
             },
         };
         let id = self.start_operation(request, None);
-        // Submitting clears the selection (file-manager-spec.md: Copy and
-        // Move); Gozler's own rename selects the renamed entry again.
+        // Submitting clears the selection (DESIGN.md: Copy and Move); Gozler's
+        // own rename selects the renamed entry again.
         self.panel(side).list.set_selected(&[]);
         if let (Some(name), Some(id)) = (renamed, id) {
             self.model
@@ -1641,9 +1627,8 @@ impl MainWindow {
 
     /// What the Copy and Move dialog opens with: the other panel's folder,
     /// with the entry's name for `F6` on one entry, selected without its
-    /// extension (file-manager-spec.md: Copy and Move, step 1). A rename
-    /// keeps a search panel's result in its own folder. `None` when no
-    /// entry is chosen.
+    /// extension (DESIGN.md: Copy and Move). A rename keeps a search panel's
+    /// result in its own folder. `None` when no entry is chosen.
     fn transfer_start(&self, moves: bool) -> Option<TransferStart> {
         let model = self.model.borrow();
         let strings = model.strings();
@@ -1708,7 +1693,7 @@ impl MainWindow {
     }
 
     /// `F7`: the new folder's name, then the operation, after which the
-    /// focus goes to the folder (file-manager-spec.md: New folder).
+    /// focus goes to the folder (DESIGN.md: New folder).
     pub(super) fn new_folder(&self, hwnd: Hwnd) {
         let (side, folder) = {
             let model = self.model.borrow();
@@ -1733,9 +1718,8 @@ impl MainWindow {
     }
 
     /// After a delete is submitted, the focus moves to the first row after
-    /// the deleted ones, and the selection is cleared (file-manager-spec.md:
-    /// Delete). A search panel's rows stay in place, blank, so its focus
-    /// stays.
+    /// the deleted ones, and the selection is cleared (DESIGN.md: Delete). A
+    /// search panel's rows stay in place, struck through, so its focus stays.
     pub(super) fn focus_after_chosen(&self) {
         let side = self.model.borrow().panels().active();
         let row = {
@@ -1752,8 +1736,8 @@ impl MainWindow {
         list.set_selected(&[]);
     }
 
-    /// The cell's text and the row's icon of `side`'s list, which screen
-    /// readers and the list's label tips read; the window draws the rows.
+    /// The cell's text and the row's icon of `side`'s list, which the list
+    /// draws.
     fn fill_panel_cell(&self, side: Side, info: &mut DispInfo) {
         let (text, icon) = {
             let model = self.model.borrow();
@@ -1761,7 +1745,10 @@ impl MainWindow {
             let panels = model.panels();
             let sizes = model.choices().size_format;
             let columns = self.panel(side).columns();
-            match (panels.row(side, info.row()), columns.get(info.column())) {
+            match (
+                shown_or_taken(panels, side, info.row()),
+                columns.get(info.column()),
+            ) {
                 (Some(row), Some(column)) => (
                     info.wants_text().then(|| {
                         let panel = panels.panel(side);
@@ -1776,66 +1763,45 @@ impl MainWindow {
             info.set_text(text.as_deref().unwrap_or_default());
         }
         if info.wants_image() {
-            info.set_image(icon.map(|(name, is_folder)| self.icons.index(&name, is_folder)));
+            info.set_image(icon.map(|icon| match icon {
+                RowIcon::Up => self.icons.index("", true),
+                RowIcon::Item(name, is_folder) => self.icons.index(&name, is_folder),
+            }));
         }
     }
 
-    /// Draws `row` of `draw` in `side`'s list; `false` when the panel no
-    /// longer has it, so the list draws it.
-    fn draw_panel_row(&self, side: Side, draw: &CustomDraw, row: u64) -> bool {
-        let (focused, selected) = self.panel(side).list.row_state(row);
-        let (cells, icon, dimmed, up, active) = {
+    /// Has the list draw `row` of `side` in grey when it is a hidden or
+    /// system entry, or struck through in grey when a delete or a move took
+    /// it (DESIGN.md: Selecting entries), and ask again after `..`, whose
+    /// arrow goes over its folder icon; the list draws every other row as
+    /// it is.
+    fn draw_panel_row(&self, side: Side, draw: &mut CustomDraw, row: u64) -> DrawAnswer {
+        let (taken, dimmed, up) = {
             let model = self.model.borrow();
-            let numbers = self.numbers.borrow();
-            let panels = model.panels();
-            let sizes = model.choices().size_format;
-            let Some(shown) = panels.row(side, row) else {
-                return false;
-            };
-            let panel = panels.panel(side);
-            let cells: Vec<String> = (self.panel(side).columns().iter())
-                .map(|c| captions::panel_cell(model.strings(), &*numbers, sizes, panel, shown, *c))
-                .collect();
-            let dimmed = matches!(shown, Row::Entry(entry) if entry.is_dimmed());
-            let up = matches!(shown, Row::Up);
-            (cells, icon_of(shown), dimmed, up, panels.active() == side)
+            let taken = model.taken_rows(List::Panel(side), &[row..row + 1]);
+            let shown = model.panels().row(side, row);
+            (
+                !taken.is_empty(),
+                matches!(shown, Some(Row::Entry(entry)) if entry.is_dimmed()),
+                matches!(shown, Some(Row::Up)),
+            )
         };
-        let icon = self.icons.index(&icon.0, icon.1);
-        let bar = match (focused, active) {
-            (false, _) => RowBar::None,
-            (true, true) => RowBar::Active,
-            (true, false) => RowBar::Inactive,
-        };
-        let created = self.created();
-        let fonts = created.fonts.borrow();
-        let fits: Vec<CellFit> = self
-            .panel(side)
-            .columns()
-            .iter()
-            .map(|c| fit_of(*c))
-            .collect();
-        draw.draw_panel_row(
-            &PanelRow {
-                cells: &cells,
-                fits: &fits,
-                icon: created.images.map(|images| (images, icon)),
-                up,
-                bar,
-                selected,
-                dimmed,
-            },
-            &RowFonts {
-                plain: &fonts.ui,
-                selected: &fonts.semibold,
-                selected_on_bar: &fonts.bold,
-            },
-        );
-        true
+        if up {
+            DrawAnswer::AfterRow
+        } else if taken {
+            draw.draw_row_struck(&self.created().fonts.borrow().struck);
+            DrawAnswer::NewFont
+        } else if dimmed {
+            draw.draw_row_grey();
+            DrawAnswer::NewColour
+        } else {
+            DrawAnswer::Default
+        }
     }
 
     /// The colors of a path box: the system highlight for the active
     /// panel's while it does not have the focus, as Total Commander shows
-    /// its active path (file-manager-spec.md: A panel).
+    /// its active path (DESIGN.md: A panel).
     pub(super) fn path_box_colors(&self, colors: StaticColors, control: Hwnd) -> Option<LRESULT> {
         let side = self.panel_path(control)?;
         let active = self.model.borrow().panels().active() == side;
@@ -1843,8 +1809,7 @@ impl MainWindow {
     }
 
     /// Windows asks to remove, or removed, the drive whose watch it names
-    /// with `notification` (file-manager-spec.md: A USB drive can always be
-    /// removed).
+    /// with `notification` (DESIGN.md: A panel).
     pub(super) fn on_device_removal(&self, hwnd: Hwnd, removal: Removal, notification: isize) {
         let threads = &self.created().panel_threads;
         let Some(side) = threads.removal(notification, removal) else {
@@ -1920,12 +1885,29 @@ fn drive_id(letter: char) -> u16 {
     DRIVE_IDS + (u32::from(letter) - u32::from('A')) as u16
 }
 
-/// The name and the kind that a row's icon is looked up by: `..` shows a
-/// folder's, which the row draws an arrow over.
-fn icon_of(row: Row) -> (String, bool) {
+/// What a row's icon is looked up by.
+enum RowIcon {
+    /// `..`: a folder's icon, which [`Glyph::Up`] is drawn over after the
+    /// row ([`MainWindow::draw_panel_row`]).
+    Up,
+    /// An entry's or a result's name and whether it is a folder.
+    Item(String, bool),
+}
+
+fn icon_of(row: Row) -> RowIcon {
     match row {
-        Row::Up => (String::new(), true),
-        Row::Entry(entry) => (entry.display_name(), entry.is_folder()),
-        Row::Result(item) => (panel::last_name(&item.path).to_owned(), item.is_dir),
+        Row::Up => RowIcon::Up,
+        Row::Entry(entry) => RowIcon::Item(entry.display_name(), entry.is_folder()),
+        Row::Result(item) => RowIcon::Item(panel::last_name(&item.path).to_owned(), item.is_dir),
+    }
+}
+
+/// `side`'s row at `index` with its text, also when a delete or a move took
+/// a search panel's result, which then shows struck through, as Search's
+/// list shows it (DESIGN.md: Search in a panel).
+fn shown_or_taken(panels: &Panels, side: Side, index: u64) -> Option<Row<'_>> {
+    match panels.search(side) {
+        Some(search) => search.list.results().row(index).map(Row::Result),
+        None => panels.row(side, index),
     }
 }

@@ -51,9 +51,10 @@ pub(crate) struct Restored {
 }
 
 impl Saved {
-    /// `None` for a rename or a new folder, which are one call each, so
-    /// nothing of them is left to continue, and for a typed destination,
-    /// which prepare decides before any run.
+    /// `None` for a new folder, which is one call, so nothing of it is left
+    /// to continue, and for a typed destination, which prepare decides
+    /// before any run. A rename is a move to a named destination, and is
+    /// saved.
     pub(crate) fn new(
         request: &Request,
         choice: Option<Choice>,

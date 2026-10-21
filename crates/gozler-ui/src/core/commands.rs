@@ -317,7 +317,7 @@ impl CommandId {
 
     /// Whether the command belongs to `mode`: only such a command shows in
     /// the menu bar and takes its shortcuts while `mode` shows
-    /// (file-manager-spec.md: Keys).
+    /// (DESIGN.md: Keys).
     pub(crate) fn belongs_to(self, mode: Mode) -> bool {
         use CommandId as C;
         match self {
@@ -391,13 +391,12 @@ pub(crate) enum Focus {
     Value {
         text_selected: bool,
     },
-    /// A panel's list (file-manager-spec.md: Keys).
+    /// A panel's list (DESIGN.md: Keys).
     Panel,
     /// A panel's path box, whose `Enter`, `Esc` and `Tab` the window
     /// takes.
     PathBox,
-    /// A search panel's search box (file-manager-spec.md: Search in a
-    /// panel).
+    /// A search panel's search box (DESIGN.md: Search in a panel).
     PanelSearch,
     /// A search panel's Look in list.
     LookIn,
@@ -425,7 +424,7 @@ fn files(state: &State) -> bool {
 
 /// How many entries a file command acts on: Search's selected files, once
 /// read, or the active panel's selected entries, else its focused entry
-/// (file-manager-spec.md: Commands in Two panels).
+/// (DESIGN.md: Commands in Two panels).
 fn chosen(state: &State) -> usize {
     match state.model.mode() {
         Mode::Search => (state.model.search_list().selection().files()).map_or(0, <[_]>::len),
@@ -446,14 +445,14 @@ fn one_file(state: &State) -> bool {
 
 /// Copy to folder…, Move to folder…, Delete and Cut act on the chosen
 /// entries, in the window that owns the file operations
-/// (file-manager-spec.md: Search mode, Commands in Two panels).
+/// (DESIGN.md: Commands, Commands in Two panels).
 fn file_operation(state: &State) -> bool {
     state.model.offers_file_operations() && chosen(state) > 0
 }
 
 /// Copy to folder… and Move to folder…, which in Two panels also need a
 /// folder to go to, so not while both panels search
-/// (file-manager-spec.md: Search in a panel).
+/// (DESIGN.md: Search in a panel).
 fn transfer(state: &State) -> bool {
     let panels = state.model.panels();
     let both_search = Side::BOTH
@@ -469,8 +468,8 @@ fn cut(state: &State) -> bool {
 }
 
 /// Paste copies or moves the clipboard's files into the one selected
-/// folder while the list has the focus (file-manager-spec.md: Search
-/// mode); the search box pastes text itself.
+/// folder while the list has the focus (DESIGN.md: Copy); the search box pastes
+/// text itself.
 fn paste(state: &State) -> bool {
     state.focus == Focus::List
         && state.model.offers_file_operations()
@@ -743,7 +742,7 @@ pub(crate) enum KeyAction {
     },
     /// `Esc` in the results list: File > Cancel, unless the job is a file
     /// operation, which one stray key must not stop
-    /// (file-manager-spec.md: Keys).
+    /// (DESIGN.md: Keys).
     CancelJob,
     /// `Down` in the search box: the focus moves to the list's first row.
     FocusList,
@@ -754,8 +753,8 @@ pub(crate) enum KeyAction {
     ClearSearch,
     /// `Enter` in a closed Date modified or Size list.
     ChooseCustom,
-    /// A key of a panel's list or path box (file-manager-spec.md: Moving
-    /// around, Selecting entries).
+    /// A key of a panel's list or path box (DESIGN.md: Moving around, Selecting
+    /// entries).
     Panel(PanelKey),
 }
 
@@ -801,7 +800,7 @@ pub(crate) enum PanelKey {
 /// translates a command's shortcut first, so no shortcut reaches this table.
 pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
     if key.key == Key::Tab && !key.ctrl && !key.alt {
-        // In a panel, Tab switches panels (file-manager-spec.md: Keys).
+        // In a panel, Tab switches panels (DESIGN.md: Keys).
         return Some(match focus {
             Focus::Panel | Focus::PathBox | Focus::PanelSearch | Focus::LookIn => {
                 KeyAction::Panel(PanelKey::OtherPanel)
@@ -949,8 +948,7 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
     ]
 };
 
-/// Two panels' fixed keys that run no command (file-manager-spec.md:
-/// Keys).
+/// Two panels' fixed keys that run no command (DESIGN.md: Keys).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PanelAction {
     /// `Ctrl+L`: the active panel's path box, or a search panel's search
@@ -1029,7 +1027,7 @@ const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
 ];
 
 /// The command of the key bar's button at `index` from the left, the one
-/// its key runs: `F3` View first (file-manager-spec.md: The key bar).
+/// its key runs: `F3` View first (DESIGN.md: The key bar).
 pub(crate) fn key_bar_command(index: usize) -> CommandId {
     let key = u8::try_from(index).map(|index| Keystroke::plain(Key::Function(3 + index)));
     (TWO_PANEL_KEYS.iter())
@@ -1147,7 +1145,7 @@ impl MenuItem {
     /// runs it while `mode` shows, from the table its accelerators come
     /// from. In Two panels, Clear selection shows `Esc`, the key of a
     /// panel's list, because the menus there teach the keys
-    /// (file-manager-spec.md: Menus in Two panels).
+    /// (DESIGN.md: Menus in Two panels).
     pub(crate) fn shortcut(self, shortcuts: &CommandShortcuts, mode: Mode) -> Option<Keystroke> {
         let MenuItem::Run(command) = self else {
             return None;
@@ -1460,8 +1458,8 @@ pub(crate) fn shown_row_menu(menu: ContextMenu, folder: bool, shift: bool) -> Ve
         .collect()
 }
 
-/// A panel row's context menu (file-manager-spec.md: Menus in Two panels).
-/// Its first item, Open, is the default, which `Enter` also runs.
+/// A panel row's context menu (DESIGN.md: Menus in Two panels). Its first item,
+/// Open, is the default, which `Enter` also runs.
 pub(crate) fn panel_row_menu() -> Vec<Vec<MenuItem>> {
     use CommandId as C;
     let run = |commands: &[CommandId]| commands.iter().map(|c| MenuItem::Run(*c)).collect();
@@ -1726,8 +1724,7 @@ mod tests {
 
     /// Two panels hides Search's list, so a Search command that ran there,
     /// such as `F5` Refresh or `Ctrl+A` Select all, would act on results the
-    /// person cannot see; `F5` there is Copy to folder… (file-manager-spec.md:
-    /// Keys).
+    /// person cannot see; `F5` there is Copy to folder… (DESIGN.md: Keys).
     #[test]
     fn each_mode_takes_only_its_own_commands_and_keys() {
         let shortcuts = CommandShortcuts::default();
@@ -1753,8 +1750,8 @@ mod tests {
                 Some(MenuItem::Run(CommandId::Settings))
             );
         }
-        // Find starts a search in a panel (file-manager-spec.md: Search in
-        // a panel), with Total Commander's `Alt+F7` besides `Ctrl+F`.
+        // Find starts a search in a panel (DESIGN.md: Search in a panel), with
+        // Total Commander's `Alt+F7` besides `Ctrl+F`.
         let find = Some(MenuItem::Run(CommandId::Find));
         assert_eq!(
             takes(Mode::TwoPanels, Keystroke::alt(Key::Function(7))),
@@ -1780,7 +1777,7 @@ mod tests {
 
     /// Tab in a panel's controls switches panels; otherwise Search's Tab
     /// rule would move the focus to Search's hidden search box or list
-    /// (file-manager-spec.md: Keys).
+    /// (DESIGN.md: Keys).
     #[test]
     fn tab_in_a_panel_switches_panels() {
         let tab = Keystroke::plain(Key::Tab);
@@ -1930,7 +1927,7 @@ mod tests {
     /// something: Copy, Move and Delete on the selected entries, or the
     /// focused row but never `..`; New folder on a folder that shows; none
     /// of them in a second window, which owns no file operations
-    /// (file-manager-spec.md: Commands in Two panels).
+    /// (DESIGN.md: Commands in Two panels).
     #[test]
     fn two_panels_file_commands_follow_the_chosen_entries() {
         use crate::core::model::tests::model;

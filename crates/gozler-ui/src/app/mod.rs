@@ -136,13 +136,17 @@ pub(crate) fn run() {
     let mut model = Model::new(Strings::load(language), settings);
     if let Some(folder) = arguments.location {
         // The window's first search runs with it, in Search, whose filter
-        // Location is (file-manager-spec.md: The window).
+        // Location is (DESIGN.md: Two panels' window).
         let _ = model.show_mode(Mode::Search);
         let _ = model.choose_folder(folder);
     }
 
-    win::window::register_class::<MainWindow>(&window_class, IconId::Gozler.id())
-        .expect("the window class registers");
+    win::window::register_class::<MainWindow>(
+        &window_class,
+        IconId::Gozler.id(),
+        win::window::Background::Window,
+    )
+    .expect("the window class registers");
     win::pane::register().expect("the filter pane's window class registers");
     let (hwnd, window) = MainWindow::open(
         &window_class,

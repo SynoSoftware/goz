@@ -254,8 +254,25 @@ The panel with the focus; commands act on it.
 The panel that is not active; its folder is the destination of Copy to
 folder… and Move to folder….
 
+**Path box**:
+The edit box above a panel's list. It shows the full path of the panel's
+folder, and the person types a path there and presses `Enter` to go to it.
+
+**Drive button**:
+The button left of a panel's path box. It shows the drive, such as `C:`, and
+opens the drive menu.
+
+**Status line**:
+The line under a panel's list: its counts at the left, and the free space of
+its drive at the right.
+
+**Search panel**:
+A panel that shows the results of a search in place of a folder. `Alt+F7` or
+`Ctrl+F` turns the active panel into one, and `Esc` or `Backspace` shows its
+folder again.
+
 **Focused row**:
-The row with the bar, which the arrow keys move.
+The row with the focus outline, which the arrow keys move.
 
 **Selected entries**:
 The entries the person selected in a panel with `Insert`, `Space`, `Shift`
@@ -273,6 +290,11 @@ The row of `F3` to `F8` buttons under the panels.
 **Viewer**:
 The window that `F3` opens, which shows a file as text or as hex.
 
+**Text and Hex**:
+The two ways the Viewer shows a file: Text decodes it into lines, and Hex
+shows each byte. The Viewer chooses from the file's first bytes, and `F4`
+switches.
+
 **File operation**:
 A copy, a move, a delete, a rename or a new folder, which the engine's queue
 runs. Every delete is permanent.
@@ -280,6 +302,15 @@ runs. Every delete is permanent.
 **Queue**:
 The file operations that wait, each for an earlier operation whose paths
 overlap its own or whose copy uses the same hard disk.
+
+**Taken entry**:
+An entry that a waiting or running delete or move takes. It leaves the folder
+panels, and shows struck through in the search lists, at once, before the
+disk work ends.
+
+**File operations window**:
+The window that shows the running operation and the queue. It opens when an
+operation still runs 2 seconds after it starts.
 
 **Color token**:
 What a piece of text means, which decides its color wherever gozler shows it:

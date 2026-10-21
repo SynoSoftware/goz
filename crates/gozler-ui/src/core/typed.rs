@@ -1,9 +1,9 @@
 //! The names and the destinations the person types in Two panels' dialogs
-//! (file-manager-spec.md: Copy and Move, New folder). The engine opens
-//! paths with `\\?\`, which turns off Windows' own trimming and its reserved
-//! names, so the dialogs apply those rules here, as File Explorer does: each
-//! name loses its trailing dots and spaces, and a device name such as `CON`
-//! is refused. Only the text decides, so a dialog closes at once.
+//! (DESIGN.md: Copy and Move, New folder). The engine opens paths with `\\?\`,
+//! which turns off Windows' own trimming and its reserved names, so the dialogs
+//! apply those rules here, as File Explorer does: each name loses its trailing
+//! dots and spaces, and a device name such as `CON` is refused. Only the text
+//! decides, so a dialog closes at once.
 
 use super::panel::expand;
 use gozler_core::winpath::{absolute, parent_of};
@@ -152,10 +152,10 @@ mod tests {
 
     /// `F6` fills the box with the other folder and the entry's name: left
     /// as it is, the entry goes into that folder, merged with a folder of
-    /// its name there, not into that folder (file-manager-spec.md: Copy and
-    /// Move, step 1). Any other name, also one that differs only in case,
-    /// is the engine's to decide, and a trailing `\` names a folder that
-    /// `absolute` would otherwise turn into a new name.
+    /// its name there, not into that folder (DESIGN.md: Copy and Move). Any
+    /// other name, also one that differs only in case, is the engine's to
+    /// decide, and a trailing `\` names a folder that `absolute` would
+    /// otherwise turn into a new name.
     #[test]
     fn the_dialog_decides_what_its_text_alone_decides() {
         let folder = |path: &str| Some(Destination::Folder(path.into()));

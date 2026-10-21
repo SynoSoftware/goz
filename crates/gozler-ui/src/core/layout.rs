@@ -214,13 +214,6 @@ pub(crate) fn cell_text_inset(first_column: bool, dpi: Dpi) -> Px {
     inset.to_px(dpi)
 }
 
-/// Where a list box draws an item's text after the item's left edge,
-/// which a list box the window draws itself keeps, so it reads as one that
-/// Windows draws. Measured against a list box's own drawing at 96 DPI.
-pub(crate) fn list_box_text_inset(dpi: Dpi) -> Px {
-    Dip(2).to_px(dpi)
-}
-
 impl Add for Px {
     type Output = Px;
     fn add(self, other: Px) -> Px {
@@ -348,8 +341,8 @@ impl Default for Panes {
 }
 
 /// What the window measures on its controls, which only Windows knows: the
-/// widths of the toolbars that share a line with other controls, and the
-/// Kind list's rows, an icon and a text.
+/// widths of the toolbars that share a line with other controls, the Kind
+/// list's rows, an icon and a text, and the Location list's rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ControlSizes {
     /// Clear, Match case and Match path, with their separators.
@@ -358,6 +351,8 @@ pub(crate) struct ControlSizes {
     pub(crate) filter_tools: Px,
     /// The height of a Kind row and the width of the widest.
     pub(crate) kind_row: Size,
+    /// The height of a Location row.
+    pub(crate) location_row: Px,
 }
 
 /// The height of the toolbars' buttons, each as tall as the control beside
@@ -511,6 +506,7 @@ struct FilterWidths {
     /// The widest group label.
     labels: Px,
     kind_row: Size,
+    location_row: Px,
     /// The widest Date modified or Size item.
     ranges: Px,
     attribute_names: Px,
@@ -559,6 +555,7 @@ impl CaptionWidths {
                     filters.attributes.clone(),
                 ]),
                 kind_row: controls.kind_row,
+                location_row: controls.location_row,
                 ranges: widest(&filters.ranges_widest),
                 attribute_names: widest(&filters.attribute_names),
                 attribute_choices: widest(&filters.attribute_choices),
@@ -953,7 +950,6 @@ impl FilterLayout {
         let px = |dip: Dip| dip.to_px(dpi);
         let control_height = font_height + px(CONTROL_PADDING);
         let check_height = font_height + px(CHECK_BOX_PADDING);
-        let list_height = |rows: usize| Px(font_height.0 * rows as i32) + px(LIST_BOX_CHROME);
         let mut y = Px(0);
         let mut next = |height: Px, gap: Dip| {
             let rect = Rect {
@@ -977,7 +973,10 @@ impl FilterLayout {
             GROUP,
         );
         let location_label = label(next(font_height, LABEL_GAP));
-        let location = next(list_height(LOCATION_ROWS), RELATED);
+        let location = next(
+            Px(widths.location_row.0 * LOCATION_ROWS as i32) + px(LIST_BOX_CHROME),
+            RELATED,
+        );
         let choose_folder = next(control_height, RELATED);
         let only_directly = next(check_height, GROUP);
         let date_label = label(next(font_height, LABEL_GAP));
@@ -1339,12 +1338,18 @@ impl InspectorLayout {
     }
 }
 
+/// The most dividers a layout has: in Two panels, the line between the
+/// panels, the line above the key bar and the line above each panel's
+/// status line. The window makes a control for each.
+pub(crate) const DIVIDERS: usize = 4;
+
 /// Every control's rectangle in the client area, the status bar's part
 /// widths, and the smallest client size at which every control fits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
     pub(crate) body: Body,
-    /// The one-pixel lines between the panes or the panels.
+    /// The one-pixel lines between the panes or the panels, at most
+    /// [`DIVIDERS`].
     pub(crate) dividers: Vec<Rect>,
     pub(crate) status: StatusLayout,
     pub(crate) min_client: Size,
@@ -1356,8 +1361,8 @@ pub(crate) enum Body {
     /// Boxed, because Search's controls take far more room than two lists.
     Search(Box<SearchLayout>),
     /// The left and the right panel, each half of the window, and the key
-    /// bar under them (file-manager-spec.md: The window). The panels are
-    /// boxed, as Search is, so the two variants take about the same room.
+    /// bar under them (DESIGN.md: Two panels' window). The panels are boxed, as
+    /// Search is, so the two variants take about the same room.
     TwoPanels {
         panels: Box<[PanelLayout; 2]>,
         key_bar: [Rect; 6],
@@ -1366,8 +1371,8 @@ pub(crate) enum Body {
 
 /// One panel's controls, from the top: the drive button and the path box,
 /// or a search panel's search box and Look in, the list, and the status
-/// line (file-manager-spec.md: A panel, Search in a panel). The list's
-/// message lies over the list, as Search's does.
+/// line (DESIGN.md: A panel, Search in a panel). The list's message lies over
+/// the list, as Search's does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PanelLayout {
     pub(crate) drive: Rect,
@@ -1441,10 +1446,9 @@ impl Layout {
     }
 
     /// The two panels side by side from the menu bar to the key bar, with a
-    /// divider between them and no splitter (file-manager-spec.md: Choices
-    /// this spec makes, 10), and the key bar's buttons sharing its width.
-    /// The status bar has no left group, because each panel's status line
-    /// shows its drive's free space.
+    /// divider between them and no splitter (DESIGN.md: Two panels' window),
+    /// and the key bar's buttons sharing its width. The status bar has no left
+    /// group, because each panel's status line shows its drive's free space.
     fn compute_two_panels(
         client: Size,
         dpi: Dpi,
@@ -1820,8 +1824,9 @@ pub(crate) struct StatusLayout {
     /// The main window's memory group, in parts of its own before Show
     /// details and the size grip, while Settings > General shows it.
     pub(crate) memory: Option<MemoryLayout>,
-    /// The right group's width while the memory group or Show details
-    /// follows it.
+    /// The main window's right group's width, which its parts share, to
+    /// the memory group, Show details or the size grip; `None` in the
+    /// Settings dialog, whose right group is one part.
     right: Option<Px>,
     /// What the right end takes from the bar's width: the memory group,
     /// Show details and the size grip.
@@ -1862,14 +1867,7 @@ impl MemoryLayout {
         height: Px,
         dpi: Dpi,
     ) -> MemoryLayout {
-        let part_width = |text: Px| {
-            let icon = if icons {
-                icon_glyph_height(dpi) + glyph_gap(dpi)
-            } else {
-                Px(0)
-            };
-            icon + text + STATUS_PART_PADDING.to_px(dpi)
-        };
+        let part_width = |text: Px| status_part_width(text, icons, dpi);
         let part = |right: Px, width: Px| Rect {
             x: right - width,
             y: Px(0),
@@ -1880,6 +1878,17 @@ impl MemoryLayout {
         let service = part(app.x, part_width(widths.service));
         MemoryLayout { service, app }
     }
+}
+
+/// The width of a status bar part that shows a `text` wide text whole,
+/// after an icon when `icon` is true.
+pub(crate) fn status_part_width(text: Px, icon: bool, dpi: Dpi) -> Px {
+    let icon = if icon {
+        icon_glyph_height(dpi) + glyph_gap(dpi)
+    } else {
+        Px(0)
+    };
+    icon + text + STATUS_PART_PADDING.to_px(dpi)
 }
 
 impl StatusLayout {
@@ -1946,7 +1955,8 @@ impl StatusLayout {
             cancel,
             show_details,
             memory,
-            right: right_end.map(|end| (end - groups[0] - groups[1]).max(Px(0))),
+            right: window_end
+                .map(|end| (right_end.unwrap_or(grip(end)) - groups[0] - groups[1]).max(Px(0))),
             end: window_end
                 .zip(right_end)
                 .map_or(Px(0), |(end, right_end)| end.width - right_end),
@@ -1968,7 +1978,7 @@ impl StatusLayout {
     /// the last part. The running job's progress bar and Cancel stay beside
     /// its text.
     fn give_middle_the_rest(&mut self, right: Px, width: Px, dpi: Dpi) {
-        let end = if self.right.is_some() {
+        let end = if self.followed() {
             self.end
         } else {
             SCROLL_BAR.to_px(dpi)
@@ -1980,19 +1990,52 @@ impl StatusLayout {
         }
     }
 
+    /// Whether a part follows the right group: the memory group's or Show
+    /// details'.
+    fn followed(&self) -> bool {
+        self.memory.is_some() || self.show_details.is_some()
+    }
+
+    /// How many of the right group's parts show, of parts that need
+    /// `widths` to show their texts whole: the first always, cut off where
+    /// it does not fit, and each other only while it fits whole, so a total
+    /// never shows in part (DESIGN.md: Status bar).
+    pub(crate) fn right_parts_shown(&self, widths: &[Px]) -> usize {
+        let Some(room) = self.right else {
+            return widths.len();
+        };
+        let mut used = Px(0);
+        let fitting = widths
+            .iter()
+            .take_while(|width| {
+                used = used + **width;
+                used <= room
+            })
+            .count();
+        fitting.max(1).min(widths.len())
+    }
+
     /// The widths of the status bar's parts but the last, which takes the
-    /// rest: the left and middle groups, then the right group when a part
-    /// follows it, and the memory figures' parts, the app's only when Show
-    /// details has the last part.
-    pub(crate) fn part_widths(&self) -> Vec<Px> {
+    /// rest: the left and middle groups, the right group's shown parts,
+    /// which need `right`, the last taking the rest of the group, and the
+    /// memory figures' parts, the app's only when Show details has the last
+    /// part.
+    pub(crate) fn part_widths(&self, right: &[Px]) -> Vec<Px> {
+        let before_last = right.split_last().map_or(&[][..], |(_, before)| before);
+        // The right group's last part ends where the next part starts.
+        let last = self.right.filter(|_| self.followed()).map(|room| {
+            let used = before_last.iter().fold(Px(0), |used, width| used + *width);
+            (room - used).max(Px(0))
+        });
         let memory = self.memory.map(|memory| {
             let app = self.show_details.map(|_| memory.app.width);
             std::iter::once(memory.service.width).chain(app)
         });
         self.groups
             .iter()
+            .chain(before_last)
             .copied()
-            .chain(self.right)
+            .chain(last)
             .chain(memory.into_iter().flatten())
             .collect()
     }
@@ -2027,6 +2070,32 @@ mod tests {
             fill_widths(&fits, Px(850), dpi),
             [Px(300), Px(400), Px(69), Px(81)]
         );
+    }
+
+    /// A cut-off total would show a partial sum (DESIGN.md: Status bar), so
+    /// a right part after the first shows only while it fits whole, and the
+    /// first shows even when it does not fit.
+    #[test]
+    fn right_group_shows_only_parts_that_fit_whole() {
+        let dpi = Dpi::new(96).expect("96 is not zero");
+        let widths = StatusWidths {
+            view: Px(100),
+            running: Px(100),
+            done: Px(100),
+            panel_index: Px(100),
+        };
+        let end = WindowEnd {
+            width: Px(800),
+            memory: None,
+            icons: true,
+            show_details: false,
+        };
+        let layout = StatusLayout::compute(&widths, Px(60), dpi, Px(15), Px(24), Some(&end));
+        let room = layout
+            .right
+            .expect("the main window's right group has a width");
+        assert_eq!(layout.right_parts_shown(&[room - Px(50), Px(50), Px(1)]), 2);
+        assert_eq!(layout.right_parts_shown(&[room + Px(1), Px(1)]), 1);
     }
 
     /// A row of buttons keeps its right edge and its gap, and the edit box
@@ -2093,6 +2162,7 @@ mod tests {
                 width: widest(&captions.filters.kinds).unwrap_or_default() + Dip(30).to_px(dpi),
                 height: Dip(20).to_px(dpi),
             },
+            location_row: Dip(19).to_px(dpi),
         };
         CaptionWidths::measure(&captions, &measure, controls)
     }
@@ -2172,6 +2242,7 @@ mod tests {
                             search.match_mode,
                             search.list,
                         ];
+                        assert!(layout.dividers.len() <= DIVIDERS);
                         controls.extend(&layout.dividers);
                         if let Some(inspector) = &search.inspector {
                             controls.extend([
@@ -2386,8 +2457,8 @@ mod tests {
                 // group, and Show details does not.
                 assert_eq!(layout.status.memory.is_some(), show_memory);
                 assert_eq!(layout.status.show_details, None);
-                let parts =
-                    (layout.status.part_widths().into_iter()).fold(Px(0), |sum, width| sum + width);
+                let parts = (layout.status.part_widths(&[]).into_iter())
+                    .fold(Px(0), |sum, width| sum + width);
                 assert!(parts <= client.width, "{parts:?} in {client:?}");
             }
         }

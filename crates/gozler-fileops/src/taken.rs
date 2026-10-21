@@ -27,14 +27,39 @@ const BACKSLASH: u16 = b'\\' as u16;
 /// of it at each wake, so a paint never waits for the engine's lock.
 #[derive(Debug, Default, Clone)]
 pub struct Taken {
-    /// Each taken path and the operations that take it: one, or several
-    /// when an operation waited for an earlier one with the same source.
-    paths: HashMap<Vec<u16>, Vec<OperationId>>,
-    /// The operations in `paths` that have ended.
+    /// The operations that take each taken path: one, or several when an
+    /// operation waited for an earlier one with the same source.
+    ids: Vec<Vec<OperationId>>,
+    /// Each folded taken path, with its place in `ids`.
+    paths: HashMap<Vec<u16>, usize>,
+    /// The operations in `ids` that have ended.
     ended: HashSet<OperationId>,
-    /// The folded folder of each taken path, so a folder panel compares
-    /// its entries' paths only in a folder that holds a taken entry.
-    folders: HashSet<Vec<u16>>,
+    /// Each folded folder that holds a taken path, with the name of each
+    /// taken path in it as the operation gave it and its place in `ids`, so
+    /// a folder panel finds its taken entries without folding a name.
+    folders: HashMap<Vec<u16>, HashMap<Box<[u16]>, usize>>,
+}
+
+/// The taken paths directly in one folder ([`Taken::in_folder`]).
+pub struct TakenFolder<'a> {
+    taken: &'a Taken,
+    names: &'a HashMap<Box<[u16]>, usize>,
+}
+
+impl<'a> TakenFolder<'a> {
+    /// The names of the taken paths, as the operations gave them.
+    pub fn names(&self) -> impl Iterator<Item = &'a [u16]> + 'a {
+        self.names.keys().map(|name| &**name)
+    }
+
+    /// Whether the entry `name` is taken, as [`Taken::contains`] says, when
+    /// an operation gave it spelled exactly so. `None` when none did, and
+    /// the caller then compares its path with [`Taken::contains`], which
+    /// ignores case.
+    pub fn takes(&self, name: &[u16], keeps: impl Fn(OperationId) -> bool) -> Option<bool> {
+        let &at = self.names.get(name)?;
+        Some(self.taken.any_takes(&self.taken.ids[at], keeps))
+    }
 }
 
 impl Taken {
@@ -42,11 +67,24 @@ impl Taken {
     /// window's tests build one without a queue.
     #[doc(hidden)]
     pub fn insert(&mut self, id: OperationId, path: &Path, ended: bool) {
-        let path = folded(&units(path));
-        if let Some(at) = path.iter().rposition(|&unit| unit == BACKSLASH) {
-            self.folders.insert(path[..at].to_vec());
-        }
-        self.paths.entry(path).or_default().push(id);
+        let given = units(path);
+        let path = folded(&given);
+        let at = match self.paths.get(&path) {
+            Some(&at) => at,
+            None => {
+                let at = self.ids.len();
+                self.ids.push(Vec::new());
+                if let Some(slash) = path.iter().rposition(|&unit| unit == BACKSLASH) {
+                    // Folding keeps every unit in its place.
+                    let name = &given[slash + 1..path.len()];
+                    (self.folders.entry(path[..slash].to_vec()).or_default())
+                        .insert(name.into(), at);
+                }
+                self.paths.insert(path, at);
+                at
+            }
+        };
+        self.ids[at].push(id);
         if ended {
             self.ended.insert(id);
         }
@@ -58,12 +96,14 @@ impl Taken {
         self.paths.is_empty()
     }
 
-    /// Whether a taken path is directly in the folder `folder`, as UTF-16,
-    /// whichever operation takes it.
-    pub fn holds_in(&self, folder: &[u16]) -> bool {
-        // A drive's root, such as `C:\`, is kept without its backslash.
-        let folder = folder.strip_suffix(&[BACKSLASH]).unwrap_or(folder);
-        !self.folders.is_empty() && self.folders.contains(&folded(folder))
+    /// The taken paths directly in the folder `folder`, as UTF-16,
+    /// whichever operation takes them; `None` when it holds none.
+    pub fn in_folder(&self, folder: &[u16]) -> Option<TakenFolder<'_>> {
+        if self.folders.is_empty() {
+            return None;
+        }
+        let names = self.folders.get(&folded(folder))?;
+        Some(TakenFolder { taken: self, names })
     }
 
     /// Whether `path`, as UTF-16, equals or is below a path that the
@@ -78,8 +118,13 @@ impl Taken {
     /// case. `keeps` answers from the list's own set of the ended
     /// operations whose rows it still leaves out.
     pub fn contains(&self, path: &[u16], keeps: impl Fn(OperationId) -> bool) -> bool {
-        let takes = |id: &OperationId| !self.ended.contains(id) || keeps(*id);
-        self.contains_where(path, |ids| ids.iter().any(takes))
+        self.contains_where(path, |ids| self.any_takes(ids, &keeps))
+    }
+
+    /// Whether one of `ids` takes rows from a list that `keeps` the ended
+    /// operations it says.
+    fn any_takes(&self, ids: &[OperationId], keeps: impl Fn(OperationId) -> bool) -> bool {
+        (ids.iter()).any(|id| !self.ended.contains(id) || keeps(*id))
     }
 
     /// Whether `path` or a folder above it is taken by operations that
@@ -90,7 +135,11 @@ impl Taken {
         }
         let mut path = folded(path);
         loop {
-            if self.paths.get(&path).is_some_and(|ids| taken(ids)) {
+            if self
+                .paths
+                .get(&path)
+                .is_some_and(|&at| taken(&self.ids[at]))
+            {
                 return true;
             }
             match path.iter().rposition(|&unit| unit == BACKSLASH) {

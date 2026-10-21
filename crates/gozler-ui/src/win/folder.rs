@@ -1,12 +1,12 @@
-//! The panels' disk threads (file-manager-spec.md: A panel): each panel's
-//! reading of its folder, which then watches it, the free space and the
-//! drive labels. Each runs on a thread of its own that the window never
-//! joins or waits for, because a network share that stopped answering can
-//! hold a call for a minute: a newer reading ends the older one with its
-//! stop signal and `CancelSynchronousIo`, as the engine's threads are ended,
-//! and a thread wakes the window only while the window is open (DESIGN.md:
-//! window rule 5). The threads answer with the core's plain values, which
-//! `core::panel::Panels` applies.
+//! The panels' disk threads (DESIGN.md: A panel): each panel's reading of its
+//! folder, which then watches it, the free space and the drive labels. Each
+//! runs on a thread of its own that the window never joins or waits for,
+//! because a network share that stopped answering can hold a call for a minute:
+//! a newer reading ends the older one with its stop signal and
+//! `CancelSynchronousIo`, as the engine's threads are ended, and a thread wakes
+//! the window only while the window is open (DESIGN.md: window rule 5). The
+//! threads answer with the core's plain values, which `core::panel::Panels`
+//! applies.
 //!
 //! A reading opens the watch before it lists the folder, so Windows keeps
 //! every change from before the listing on, and the thread reports them
@@ -24,8 +24,8 @@ use crate::core::panel::{
 use gozler_core::layout::{NotifyAction, walk_full_listing_buffer, walk_notify_buffer};
 use gozler_core::winpath::parent_of;
 use gozler_winfs::{
-    Access, FolderWatch, Reparse, Signal, ThreadIoHandle, WatchRelease, WinError,
-    cancel_synchronous_io, current_thread_io_handle, open_entry, watch_folder,
+    Access, FileIdentity, FolderWatch, Reparse, Signal, ThreadIoHandle, WatchEvent, WatchRelease,
+    WinError, cancel_synchronous_io, current_thread_io_handle, open_entry, watch_folder,
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +48,10 @@ const PAGE_WORDS: usize = 64 * 1024 / 8;
 /// Windows cannot watch the folder, as on some network shares, so the panel
 /// does not read it again in a loop.
 const UNWATCHABLE: Duration = Duration::from_millis(100);
+
+/// How often a quiet watch checks that its folder's path still names the
+/// folder, because a rename of the folder itself shows only in its parent.
+const MOVED_CHECK: Duration = Duration::from_secs(2);
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
@@ -272,23 +276,31 @@ impl PanelThreads {
                 shared.notification = notification;
                 true
             };
-            let Some((folder, mut watch)) = read_folder(&ask, &stop, &read, &armed) else {
+            let Some((folder, identity, mut watch)) = read_folder(&ask, &stop, &read, &armed)
+            else {
                 return;
             };
             let Some(signal) = &stop.signal else {
                 return;
             };
-            follow(&folder, &mut watch, signal, &stop, &|event| match event {
-                Followed::Changes(changes) => deliver(PanelEvent::Changes {
-                    side,
-                    reading: generation,
-                    changes,
-                }),
-                Followed::Lost => deliver(PanelEvent::Lost {
-                    side,
-                    reading: generation,
-                }),
-            });
+            follow(
+                &folder,
+                identity,
+                &mut watch,
+                signal,
+                &stop,
+                &|event| match event {
+                    Followed::Changes(changes) => deliver(PanelEvent::Changes {
+                        side,
+                        reading: generation,
+                        changes,
+                    }),
+                    Followed::Lost => deliver(PanelEvent::Lost {
+                        side,
+                        reading: generation,
+                    }),
+                },
+            );
         });
     }
 
@@ -495,15 +507,15 @@ pub(super) fn reason(error: &WinError) -> String {
 /// Opens the folder of `ask`, or the folder of the file it names with the
 /// file to focus, or the nearest folder above it that exists when `ask`
 /// says so, opens its watch and gives it to `armed`, then lists it, sorted
-/// by the panel's sort. Returns the folder and its watch, which then
-/// follows it; `None` when the reading failed or stopped, which `armed`
-/// answers with `false`, or the folder cannot be watched.
+/// by the panel's sort. Returns the folder, its identity and its watch,
+/// which then follows it; `None` when the reading failed or stopped, which
+/// `armed` answers with `false`, or the folder cannot be watched.
 fn read_folder(
     ask: &ReadAsk,
     stop: &Stop,
     deliver: &dyn Fn(ReadEvent),
     armed: &dyn Fn(&FolderWatch) -> bool,
-) -> Option<(String, FolderWatch)> {
+) -> Option<(String, Option<FileIdentity>, FolderWatch)> {
     let generation = ask.generation;
     let failed = |error: &WinError, path: &str| {
         deliver(ReadEvent::Failed {
@@ -595,6 +607,7 @@ fn read_folder(
             Err(error) => return failed(&error, &path),
         }
     }
+    let identity = folder.identity().ok();
     drop(folder);
     if path == ask.path {
         give_sizes(&mut entries, &ask.sizes);
@@ -606,7 +619,7 @@ fn read_folder(
         entries,
         focus,
     });
-    Some((path, watch?))
+    Some((path, identity, watch?))
 }
 
 /// The entry `name` of `folder` as it is now, under its long name when a
@@ -668,10 +681,12 @@ enum Followed {
 }
 
 /// Reports each change of `folder` that `watch` reads, until `signal`
-/// stops it, or until it loses changes, after which the panel reads the
-/// folder again on a new thread.
+/// stops it, or until it loses changes or `folder` names another folder
+/// than the one of `identity`, after which the panel reads the folder again
+/// on a new thread.
 fn follow(
     folder: &str,
+    identity: Option<FileIdentity>,
     watch: &mut FolderWatch,
     signal: &Signal,
     stop: &Stop,
@@ -680,21 +695,36 @@ fn follow(
     let mut watched = false;
     loop {
         let waited = Instant::now();
-        let read = watch.next(signal);
+        let read = watch.next(signal, MOVED_CHECK);
         if stop.stopped() {
             return;
         }
         match read {
-            Ok(None) => return,
+            Ok(WatchEvent::Stopped) => return,
             Err(_) if !watched && waited.elapsed() < UNWATCHABLE => return,
-            Err(_) | Ok(Some([])) => return deliver(Followed::Lost),
-            Ok(Some(bytes)) => match changes(folder, bytes) {
+            Err(_) | Ok(WatchEvent::Changes([])) => return deliver(Followed::Lost),
+            Ok(WatchEvent::Changes(bytes)) => match changes(folder, bytes) {
                 Some(changes) => deliver(Followed::Changes(changes)),
                 None => return deliver(Followed::Lost),
             },
+            Ok(WatchEvent::Quiet) => {}
+        }
+        if moved(folder, identity) {
+            return deliver(Followed::Lost);
         }
         watched = true;
     }
+}
+
+/// Whether `folder` no longer opens the folder of `identity`, as when
+/// another program renamed it, so the panel's rows are another folder's.
+fn moved(folder: &str, identity: Option<FileIdentity>) -> bool {
+    let Some(identity) = identity else {
+        return false;
+    };
+    open_entry(&verbatim(folder), Access::Inspect, Reparse::Follow)
+        .and_then(|entry| entry.identity())
+        .map_or(true, |now| now != identity)
 }
 
 /// Registers `handle`, a watched folder's or a viewed file's, for its

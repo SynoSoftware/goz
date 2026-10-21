@@ -57,7 +57,7 @@ use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
 use crate::win::clipboard::{self as clipboard, ClipboardBlock};
 use crate::win::controls::{
-    Button, CheckBox, DropDownList, Edit, FileIconLabel, IconList, Label, ListBox, ListClosing,
+    Button, CheckBox, Divider, DropDownList, Edit, FileIconLabel, IconList, Label, ListClosing,
     ListColumn, ListView, ScrollEdge, Tooltip,
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
@@ -68,7 +68,7 @@ use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Accelerators;
 use crate::win::notify::{
-    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify,
+    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, InfoTip, ListNotify,
 };
 use crate::win::shell::{self, FileType, PromptOwner};
 use crate::win::shortcut::{self, RegisterError, Registration};
@@ -205,6 +205,8 @@ struct Controls {
     /// messages.
     key_tips: Tooltip,
     status: StatusBar,
+    /// As many as [`layout::DIVIDERS`]; those the layout leaves out hide.
+    dividers: Vec<Divider>,
 }
 
 impl Controls {
@@ -262,6 +264,9 @@ impl Controls {
             ],
             key_tips: Tooltip::create_areas(parent, KEY_TIPS.len())?,
             status: StatusBar::for_window(parent)?,
+            dividers: (0..layout::DIVIDERS)
+                .map(|_| Divider::create(parent))
+                .collect::<windows::core::Result<_>>()?,
         };
         controls.message.hwnd().set_visible(false);
         // The search box starts empty; its changes enable Clear.
@@ -318,9 +323,6 @@ impl Controls {
         self.inspector.heading.hwnd().set_font(&fonts.heading);
         self.filters.title.hwnd().set_font(&fonts.semibold);
         self.filters.tools.hwnd().set_font(&fonts.ui);
-        // Rows as tall as a list's that Windows draws.
-        let height = TextMeter::new(&fonts.ui).height();
-        self.filters.location.set_item_height(height);
     }
 
     /// Gives the buttons and the Kind list their icons, and the toolbars'
@@ -365,6 +367,7 @@ impl Controls {
             search_tools: self.search_tools.width(),
             filter_tools: self.filters.tools.width(),
             kind_row: self.filters.kind.row_size(),
+            location_row: self.filters.location.row_size().height,
         }
     }
 }
@@ -395,7 +398,7 @@ struct FilterPane {
     kind_label: Label,
     kind: IconList,
     location_label: Label,
-    location: ListBox,
+    location: IconList,
     choose_folder: Button,
     only_directly: CheckBox,
     date_label: Label,
@@ -453,7 +456,11 @@ impl FilterPane {
             kind_label: label(ControlId::KindLabel)?,
             kind: IconList::create(pane, ControlId::Kind.id())?,
             location_label: label(ControlId::LocationLabel)?,
-            location: ListBox::create_paths(pane, ControlId::Location.id())?,
+            location: {
+                let list = IconList::create(pane, ControlId::Location.id())?;
+                list.show_info_tips();
+                list
+            },
             choose_folder: Button::create(pane, ControlId::ChooseFolder.id())?,
             only_directly: CheckBox::create(pane, ControlId::OnlyDirectly.id())?,
             date_label: label(ControlId::DateLabel)?,
@@ -752,7 +759,7 @@ struct Created {
     images: Option<ImageList>,
     /// The inspector's icons; their indexes are those of `images`.
     large_images: Option<ImageList>,
-    /// The panels' disk threads (file-manager-spec.md: A panel).
+    /// The panels' disk threads (DESIGN.md: A panel).
     panel_threads: PanelThreads,
 }
 
@@ -809,10 +816,9 @@ pub(crate) struct MainWindow {
     /// What the inspector shows, so a reply that changes none of it sets no
     /// text, and the index of its icon in the system image lists.
     inspector_shown: RefCell<(InspectorCaptions, Option<i32>)>,
-    /// What the status bar's right group shows, which the window draws.
+    /// What the status bar's right group and memory parts show, which a
+    /// new layout fits into parts again.
     status_right: RefCell<Vec<ValuePart>>,
-    /// What the status bar's memory parts show, which they show again when
-    /// the parts change.
     status_memory: RefCell<Option<captions::MemoryCaptions>>,
     /// The tooltip of each toolbar button, by its ID, which a toolbar asks
     /// for when the pointer rests on the button.
@@ -865,10 +871,9 @@ pub(crate) struct MainWindow {
     select_search: Cell<bool>,
     update: Arc<Mutex<UpdateCheck>>,
     /// The file operations' queue and the File operations window, which
-    /// only the first window has (file-manager-spec.md: Interrupted
-    /// operations).
+    /// only the first window has (DESIGN.md: Interrupted operations).
     file_operations: OnceCell<FileOperations>,
-    /// The open Viewers (file-manager-spec.md: The Viewer).
+    /// The open Viewers (DESIGN.md: The Viewer).
     viewers: Viewers,
     /// What each panel's list changed since the panel last read it; a
     /// [`Message::Deferred`] is posted to read it.
@@ -1246,7 +1251,7 @@ impl MainWindow {
             captions.kinds.iter().map(String::as_str).zip(0..).collect();
         pane.kind.set_items(&kinds, positions.kind);
         pane.location
-            .set_items(&captions.locations, positions.location);
+            .set_paths(&captions.locations, positions.location);
         // Only directly in a folder needs a folder.
         pane.only_directly.hwnd().set_enabled(located);
         pane.only_directly.set_checked(only_directly);
@@ -1278,7 +1283,7 @@ impl MainWindow {
             .controls
             .filters
             .location
-            .set_items(&locations, position);
+            .set_paths(&locations, position);
     }
 
     fn match_mode_index(&self) -> usize {
@@ -1515,9 +1520,15 @@ impl MainWindow {
         self.status_right.replace(status.right.clone());
         let job_text = self.job_text(&status.job);
         self.status_memory.replace(status.memory.clone());
+        let layout = self
+            .created()
+            .layout
+            .borrow()
+            .as_ref()
+            .map(|layout| layout.status);
         // Cancel hides when the job ends, and a hidden control would keep
         // the focus but take no key.
-        if controls.status.show(status, &job_text) {
+        if controls.status.show(status, &job_text, layout.as_ref()) {
             self.home().focus();
         }
         if let Some(OpenSettings {
@@ -1874,6 +1885,13 @@ impl MainWindow {
                 moves.push((inspector.note.hwnd(), note));
             }
         }
+        moves.extend(
+            controls
+                .dividers
+                .iter()
+                .map(|divider| divider.hwnd())
+                .zip(layout.dividers.iter().copied()),
+        );
         // The list draws once, after the fill has set its new widths, so a
         // narrower window does not flash its horizontal scroll bar.
         controls.list.hwnd().draw_once_after(|| {
@@ -1883,6 +1901,8 @@ impl MainWindow {
         if let Some(filters) = filters {
             self.place_filters(filters, self.filter_scroll.get());
             pane.kind.fill_column();
+            // The paths are shortened to the list's new width.
+            self.update_locations();
         }
         for control in strip {
             control.set_visible(search.is_some());
@@ -1910,8 +1930,14 @@ impl MainWindow {
         for button in inspector.buttons {
             button.hwnd().set_visible(shown);
         }
+        for (index, divider) in controls.dividers.iter().enumerate() {
+            divider.hwnd().set_visible(index < layout.dividers.len());
+        }
+        let right = self.status_right.borrow().clone();
         let memory = self.status_memory.borrow().clone();
-        controls.status.place(&layout.status, memory.as_ref());
+        controls
+            .status
+            .place_in_window(&layout.status, &right, memory.as_ref());
         let two_panels = search.is_none();
         let inspector_moved = created
             .layout
@@ -2395,8 +2421,8 @@ impl MainWindow {
                 CommandId::Delete => return self.delete_selected(hwnd),
                 CommandId::NewFolder => return self.new_folder(hwnd),
                 CommandId::View => return self.view_focused(hwnd),
-                // Not available in this version (file-manager-spec.md:
-                // Commands in Two panels).
+                // Not available in this version (DESIGN.md: Commands in Two
+                // panels).
                 CommandId::Edit => return,
                 CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
                 CommandId::Paste => return self.paste(),
@@ -3154,6 +3180,39 @@ impl MainWindow {
         }
     }
 
+    /// The Location list selected another item, which the person or the
+    /// window chose, as [`Self::on_kind_selected`] says.
+    fn on_location_selected(&self, hwnd: Hwnd) {
+        let location = {
+            let model = self.model.borrow();
+            let items = model.location_items();
+            self.created()
+                .controls
+                .filters
+                .location
+                .selected()
+                .and_then(|i| items.get(i))
+                .map(|item| item.folder().map(str::to_owned))
+                .filter(|location| *location != model.filters().location)
+        };
+        if let Some(location) = location {
+            self.change_filters(hwnd, |f| f.location = location);
+        }
+    }
+
+    /// Answers the Location list's tooltip request with the row's whole
+    /// path when the row shows it shortened, and with no tip otherwise.
+    fn location_tip(&self, tip: InfoTip) -> LRESULT {
+        let list = self.created().controls.filters.location;
+        let whole = tip.row().and_then(|row| {
+            let path = captions::location_items(&self.model.borrow())
+                .into_iter()
+                .nth(row)?;
+            (path != list.text(row)).then_some(path)
+        });
+        tip.set(whole.as_deref().unwrap_or_default())
+    }
+
     /// A notification of a control in the filter pane.
     fn on_filter(&self, hwnd: Hwnd, event: ControlEvent) {
         let pane = &self.created().controls.filters;
@@ -3163,18 +3222,6 @@ impl MainWindow {
         } else if tool.is_some() {
             // Hide filters, or Show filters in the search row.
             self.run(hwnd, MenuItem::Run(CommandId::Filters));
-        } else if pane.location.selection_changed(event) {
-            let location = {
-                let model = self.model.borrow();
-                let items = model.location_items();
-                pane.location
-                    .selected()
-                    .and_then(|i| items.get(i))
-                    .map(|item| item.folder().map(str::to_owned))
-            };
-            if let Some(location) = location {
-                self.change_filters(hwnd, |f| f.location = location);
-            }
         } else if pane.choose_folder.clicked(event) {
             self.choose_folder(hwnd);
         } else if pane.only_directly.clicked(event) {
@@ -3345,7 +3392,7 @@ impl MainWindow {
                 DrawStage::Paint => DrawAnswer::EachRow,
                 DrawStage::Row { row } => self.draw_row(&mut draw, row),
                 DrawStage::Cell { row, column } => self.draw_cell(&draw, hwnd.dpi(), row, column),
-                DrawStage::RowPainted => {
+                DrawStage::RowPainted { .. } => {
                     draw.restore_font(&self.created().fonts.borrow().ui);
                     DrawAnswer::Default
                 }
@@ -3837,7 +3884,7 @@ impl MainWindow {
     }
 
     /// `F3`: opens a Viewer of the active panel's focused file
-    /// (file-manager-spec.md: The Viewer).
+    /// (DESIGN.md: The Viewer).
     fn view_focused(&self, hwnd: Hwnd) {
         let (path, strings) = {
             let model = self.model.borrow();
@@ -4088,7 +4135,7 @@ impl MainWindow {
     }
 
     /// Copy to folder… and Move to folder…: the folder picker, at the folder
-    /// chosen last, then the operation (file-manager-spec.md: Search mode).
+    /// chosen last, then the operation (DESIGN.md: File operations).
     fn copy_to_folder(&self, hwnd: Hwnd, moves: bool) {
         let sources = self.selected_paths();
         if sources.is_empty() {
@@ -4120,8 +4167,7 @@ impl MainWindow {
     }
 
     /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete
-    /// question, then the permanent delete (file-manager-spec.md: File
-    /// operations, step 2).
+    /// question, then the permanent delete (DESIGN.md: File operations).
     fn delete_selected(&self, hwnd: Hwnd) {
         let sources = self.selected_paths();
         if sources.is_empty() {
@@ -4142,8 +4188,7 @@ impl MainWindow {
     }
 
     /// Paste on one selected folder: copies the files on the clipboard into
-    /// it, or moves them when they were cut (file-manager-spec.md: Search
-    /// mode).
+    /// it, or moves them when they were cut (DESIGN.md: Copy).
     fn paste(&self) {
         let folder = self.selected_paths();
         let [destination] = folder.as_slice() else {
@@ -4175,18 +4220,19 @@ impl MainWindow {
     /// files or is read, so the list may still draw a taken row it selects
     /// highlighted, and deselects each one.
     fn show_list_taken(&self, list: List, deselect: bool) {
-        if deselect {
-            self.deselect_taken(list);
-        }
         let control = self.list_control(list);
+        if deselect {
+            self.deselect_taken(list, &control.selected());
+        }
         control.redraw_rows(control.visible_rows());
     }
 
-    /// Deselects `list`'s selected rows whose entries are taken, which show
-    /// blank and which the selection leaves out. Returns whether any was.
-    fn deselect_taken(&self, list: List) -> bool {
+    /// Deselects the rows of `selected`, `list`'s selected rows, whose
+    /// entries are taken, which the selection leaves out. Returns whether
+    /// any was; none while no operation takes entries.
+    fn deselect_taken(&self, list: List, selected: &[Range<u64>]) -> bool {
         let control = self.list_control(list);
-        let rows = self.model.borrow().taken_rows(list, &control.selected());
+        let rows = self.model.borrow().taken_rows(list, selected);
         // Each deselect notifies the window, so nothing is borrowed here.
         for &row in &rows {
             control.deselect(row);
@@ -4261,7 +4307,7 @@ impl MainWindow {
     /// Brings the window forward with the search box focused and its text
     /// selected, so the person types the next search at once (DESIGN.md: Window
     /// lifetime, C24), or in Two panels with the left panel's list focused
-    /// (file-manager-spec.md: The window). While a dialog is open, the dialog
+    /// (DESIGN.md: Two panels' window). While a dialog is open, the dialog
     /// keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
         // The columns fill when the window shows (DESIGN.md: Results list),
@@ -4336,10 +4382,9 @@ impl MainWindow {
 
     /// Saves the settings and ends Gozler (DESIGN.md: C7, T14). While file
     /// operations run or wait, it asks first, and stops them
-    /// (file-manager-spec.md: File operations, step 8), over the window,
-    /// which comes forward from the notification area or another start's
-    /// request. Returns whether Gozler ends; `false` when the person kept
-    /// the operations.
+    /// (DESIGN.md: File operations), over the window, which comes forward from
+    /// the notification area or another start's request. Returns whether Gozler
+    /// ends; `false` when the person kept the operations.
     fn exit(&self, hwnd: Hwnd) -> bool {
         let snapshot = (self.file_operations.get()).map_or_else(Vec::new, FileOperations::snapshot);
         let question = {
@@ -4950,7 +4995,7 @@ fn windows_reason(failure: WriteFailure) -> String {
 
 /// Files dragged from File Explorer, another program or the list itself
 /// onto a folder row, which the engine copies or moves into it, as Paste
-/// does (file-manager-spec.md: Search mode).
+/// does (DESIGN.md: Dragging).
 impl DropHandler for MainWindow {
     fn drag_enter(&self, files: Vec<PathBuf>) {
         self.drag_in.replace(Some(DragIn {
@@ -4968,8 +5013,8 @@ impl DropHandler for MainWindow {
         allowed: SourceEffects,
     ) -> Option<DropEffect> {
         let list = self.created().controls.list;
-        // Two panels accepts no drop (file-manager-spec.md: Search mode),
-        // and the hidden Search list keeps its place and its rows.
+        // Two panels accepts no drop (DESIGN.md: Not planned), and the hidden
+        // Search list keeps its place and its rows.
         let search = self.model.borrow().mode() == Mode::Search;
         let row = (search && list.hwnd().screen_rect().contains(point) && !self.on_header(point))
             .then(|| list.row_at(point))
@@ -5152,7 +5197,7 @@ impl WindowProc for MainWindow {
                 self.on_control(hwnd, event);
                 None
             }
-            Message::Notify(notification) => {
+            Message::Notify(mut notification) => {
                 let controls = &self.created().controls;
                 if let Some(request) = controls
                     .toolbars()
@@ -5172,6 +5217,13 @@ impl WindowProc for MainWindow {
                 if controls.filters.kind.selection_changed(&notification) {
                     self.on_kind_selected(hwnd);
                     return Some(LRESULT(0));
+                }
+                if controls.filters.location.selection_changed(&notification) {
+                    self.on_location_selected(hwnd);
+                    return Some(LRESULT(0));
+                }
+                if let Some(tip) = controls.filters.location.info_tip(&mut notification) {
+                    return Some(self.location_tip(tip));
                 }
                 if controls.status.service_clicked(&notification) {
                     self.on_status_click(hwnd);
@@ -5390,34 +5442,17 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::CtlColorStatic { colors, control } => {
-                let inspector = &self.created().controls.inspector;
+                let controls = &self.created().controls;
+                let inspector = &controls.inspector;
                 Some(if control == inspector.note.hwnd() {
                     colors.gray_text()
                 } else if control == inspector.age.hwnd() {
                     colors.muted_text()
+                } else if controls.dividers.iter().any(|d| d.hwnd() == control) {
+                    colors.divider()
                 } else {
                     colors.window_background()
                 })
-            }
-            // The status bar's right group, the only part it does not draw.
-            Message::DrawItem(item) if item.control() == self.created().controls.status.hwnd() => {
-                let fonts = self.created().fonts.borrow();
-                item.draw_status_parts(&fonts.ui, &self.status_right.borrow());
-                Some(LRESULT(1))
-            }
-            Message::DrawItem(_) => None,
-            // The class brush paints the background.
-            Message::EraseBackground(_) => None,
-            Message::Paint => {
-                let dividers = self
-                    .created()
-                    .layout
-                    .borrow()
-                    .as_ref()
-                    .map(|l| l.dividers.clone())
-                    .unwrap_or_default();
-                hwnd.paint_window(&dividers);
-                Some(LRESULT(0))
             }
             Message::SettingChange {
                 regional_format: true,
@@ -5479,7 +5514,7 @@ impl WindowProc for MainWindow {
             }
             // A second start with `--location`, such as from Total Commander
             // or a script (DESIGN.md: Window lifetime), shows Search, whose
-            // filter Location is (file-manager-spec.md: The window).
+            // filter Location is (DESIGN.md: Two panels' window).
             Message::CopyData { tag, text } if tag == self.show_message as usize => {
                 let accepted = self.model.borrow_mut().show_mode(Mode::Search);
                 self.apply(hwnd, accepted);

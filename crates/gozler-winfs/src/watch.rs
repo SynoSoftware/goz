@@ -13,10 +13,11 @@
 use core::mem::zeroed;
 use core::ptr;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, ERROR_NOTIFY_ENUM_DIR, ERROR_OPERATION_ABORTED, GetLastError,
-    HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
@@ -88,8 +89,20 @@ pub struct FolderWatch {
     pending: bool,
 }
 
+/// What [`FolderWatch::next`] found.
+pub enum WatchEvent<'a> {
+    /// Names in the folder were added, removed, renamed or written, as a
+    /// chain of `FILE_NOTIFY_INFORMATION` entries. An empty slice means
+    /// Windows lost changes, because they did not fit, so the caller reads
+    /// the folder again.
+    Changes(&'a [u8]),
+    /// Nothing changed for the time the caller gave; the read stays armed.
+    Quiet,
+    /// The caller's stop signal was set.
+    Stopped,
+}
+
 /// Closes a watch's handle from another thread, which ends its pending read.
-#[derive(Clone)]
 pub struct WatchRelease(Shared);
 
 impl WatchRelease {
@@ -192,21 +205,22 @@ impl FolderWatch {
         Ok(())
     }
 
-    /// Waits until a name in the folder is added, removed, renamed or
-    /// written, and returns those changes as a chain of
-    /// `FILE_NOTIFY_INFORMATION` entries; `None` once `stop` is set. An
-    /// empty slice means Windows lost changes, because they did not fit, so
-    /// the caller reads the folder again. The changes that come meanwhile
-    /// wait in Windows until the next call.
-    pub fn next(&mut self, stop: &Signal) -> Result<Option<&[u8]>, WinError> {
+    /// Waits until a name in the folder changes, `stop` is set, or `quiet`
+    /// passes without a change. The changes that come meanwhile wait in
+    /// Windows until the next call.
+    pub fn next(&mut self, stop: &Signal, quiet: Duration) -> Result<WatchEvent<'_>, WinError> {
         if !self.pending {
             self.arm()?;
         }
         let waits = [self.done.0, stop.0.0];
+        let quiet = u32::try_from(quiet.as_millis()).unwrap_or(INFINITE - 1);
         // SAFETY: two live event handles.
-        let waited = unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, INFINITE) };
+        let waited = unsafe { WaitForMultipleObjects(2, waits.as_ptr(), 0, quiet) };
+        if waited == WAIT_TIMEOUT {
+            return Ok(WatchEvent::Quiet);
+        }
         if waited != WAIT_OBJECT_0 {
-            return Ok(None);
+            return Ok(WatchEvent::Stopped);
         }
         let handle = self.handle.lock().unwrap_or_else(PoisonError::into_inner);
         self.pending = false;
@@ -223,7 +237,7 @@ impl FolderWatch {
         if ok == 0 {
             let error = last_error("ReadDirectoryChangesW");
             return if error.code == ERROR_NOTIFY_ENUM_DIR {
-                Ok(Some(&[]))
+                Ok(WatchEvent::Changes(&[]))
             } else {
                 Err(error)
             };
@@ -231,7 +245,7 @@ impl FolderWatch {
         let len = (returned as usize).min(size_of_val(&*self.buffer));
         // SAFETY: the first `len` bytes of the buffer, which the read wrote,
         // borrowed for reading for as long as `self` is.
-        Ok(Some(unsafe {
+        Ok(WatchEvent::Changes(unsafe {
             core::slice::from_raw_parts(self.buffer.as_ptr().cast::<u8>(), len)
         }))
     }

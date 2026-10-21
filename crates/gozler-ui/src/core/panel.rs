@@ -1,5 +1,5 @@
-//! The panels of Two panels (file-manager-spec.md: A panel): what each
-//! panel's list shows, and every decision about it that needs no window.
+//! The panels of Two panels (DESIGN.md: A panel): what each panel's list shows,
+//! and every decision about it that needs no window.
 //!
 //! A panel lists the disk itself, because gozlerd does not index USB,
 //! network and FAT drives; gozlerd gives only the folder sizes. The reading
@@ -34,14 +34,13 @@ use gozler_core::wtf8;
 use gozler_fileops::{OperationId, Request, Taken};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-/// How many folders a panel's drive menu offers (file-manager-spec.md: The
-/// drive menu).
+/// How many folders a panel's drive menu offers (DESIGN.md: The drive menu).
 pub(crate) const HISTORY: usize = 10;
 
 /// The most subfolders whose sizes one request asks gozlerd for.
@@ -97,7 +96,7 @@ pub(crate) struct Entry {
     /// The hash of the name's folded form, made once by the thread that read
     /// the entry. The window finds a name by it and folds a name only when
     /// the hash matches, because a stored folded name would take more than
-    /// the 100 bytes an entry may (file-manager-spec.md: Memory).
+    /// the 100 bytes an entry may (DESIGN.md: Memory budget).
     hash: u64,
     /// Whether `size` holds a folder's size from gozlerd: a flag, because an
     /// `Option` would add 8 bytes to each entry.
@@ -284,7 +283,7 @@ pub(crate) struct Place {
     pub(crate) selected: Vec<Range<u64>>,
 }
 
-/// What a panel's list area shows (file-manager-spec.md: A panel).
+/// What a panel's list area shows (DESIGN.md: A panel).
 #[derive(Debug)]
 pub(crate) enum View {
     /// The folder is open and its listing has not completed.
@@ -295,10 +294,9 @@ pub(crate) enum View {
     NotReady {
         drive: String,
     },
-    /// The panel shows the results of a search (file-manager-spec.md:
-    /// Search in a panel). Leaving the search drops it with its rows, its
-    /// selection and its kept operations, so a reply that arrives later
-    /// finds no list.
+    /// The panel shows the results of a search (DESIGN.md: Search in a panel).
+    /// Leaving the search drops it with its rows, its selection and its kept
+    /// operations, so a reply that arrives later finds no list.
     Search(Box<PanelSearch>),
 }
 
@@ -312,8 +310,7 @@ pub(crate) struct PanelSearch {
     back: Option<Box<[u16]>>,
 }
 
-/// Where a search panel searches (file-manager-spec.md: Search in a
-/// panel).
+/// Where a search panel searches (DESIGN.md: Search in a panel).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum LookIn {
     /// The panel's folder and its subfolders.
@@ -367,8 +364,7 @@ pub(crate) enum TakenRows {
     Search { deselect: bool },
 }
 
-/// A column of a panel's list (file-manager-spec.md: A panel, Search in a
-/// panel).
+/// A column of a panel's list (DESIGN.md: A panel, Search in a panel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PanelColumn {
     Name,
@@ -397,7 +393,7 @@ impl PanelColumn {
     ];
 
     /// What a click on its header sorts by; `None` for Folder, whose
-    /// header does not sort (file-manager-spec.md: The sort).
+    /// header does not sort (DESIGN.md: Search in a panel).
     pub(crate) fn sort_key(self) -> Option<SortKey> {
         match self {
             PanelColumn::Name => Some(SortKey::Name),
@@ -572,8 +568,9 @@ pub(crate) enum ReadEvent {
 pub(crate) enum ReadChange {
     /// An older reading, which changes nothing.
     Stale,
-    /// The new folder opened: the list says "Reading…".
-    Opened,
+    /// The rows went: a new folder opened, and the list says "Reading…",
+    /// or the shown drive is not ready.
+    Cleared,
     /// The listing replaced the rows; the list shows `place`. `again` when
     /// it was the shown folder read again in the same order, whose rows
     /// stay where the person sees them. `stale` when an operation that
@@ -593,8 +590,6 @@ pub(crate) enum ReadChange {
         reason: String,
         typed: bool,
     },
-    /// The shown drive is not ready.
-    NotReady,
 }
 
 /// What a reading's answer did ([`Panels::accept_read`]).
@@ -641,30 +636,30 @@ struct Read {
     sort: SortSpec,
 }
 
-/// What the panel's status line counts (file-manager-spec.md: A panel).
+/// What the panel's status line counts (DESIGN.md: A panel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Counts {
     /// The entries, without `..`.
     pub(crate) items: u64,
     /// The selected entries, when any is.
     pub(crate) selected: Option<u64>,
-    /// The sum of the counted entries' sizes; `None` when a counted
-    /// folder's size is unknown, because a sum that misses a folder would
-    /// promise room that a copy does not have, and in an empty folder.
-    pub(crate) bytes: Option<u64>,
+    /// The counted entries' sizes; `None` in an empty folder.
+    pub(crate) size: Option<Totals>,
 }
 
-/// The sizes of all of a panel's entries, kept as entries come and go, so
-/// the status line never adds up a large folder again.
-#[derive(Clone, Copy, Debug, Default)]
-struct Totals {
-    bytes: u64,
+/// A sum of entries' sizes. A panel keeps the one of all its entries as
+/// entries come and go, so the status line never adds up a large folder
+/// again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Totals {
+    /// The sum of the known sizes.
+    pub(crate) bytes: u64,
     /// The folders whose size is unknown.
-    unknown: u64,
+    pub(crate) unknown: u64,
 }
 
 impl Totals {
-    fn of(entries: &[Entry]) -> Totals {
+    fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Totals {
         let mut totals = Totals::default();
         for entry in entries {
             totals.add(entry);
@@ -747,6 +742,18 @@ pub(crate) struct Panel {
     /// The name that Gozler's own New folder or rename gives an entry in
     /// the shown folder, which the focus goes to when a row shows it.
     awaited: Option<Awaited>,
+    /// The name hashes of the taken entries in the shown folder, which
+    /// [`Panel::filter`] keeps from one change batch to the next.
+    taken_hashes: Option<TakenHashes>,
+}
+
+/// The name hashes of the taken paths in one folder, for one snapshot of
+/// the taken entries.
+#[derive(Debug)]
+struct TakenHashes {
+    taken: Arc<Taken>,
+    folder: String,
+    hashes: HashSet<u64>,
 }
 
 /// A name that an operation of this window creates in the shown folder
@@ -796,6 +803,7 @@ impl Panel {
             gone_focus: None,
             focused: None,
             awaited: None,
+            taken_hashes: None,
         }
     }
 
@@ -1007,8 +1015,8 @@ impl Panel {
     }
 
     /// The name of the row that shows `name`, without regard to case, as
-    /// New folder checks it (file-manager-spec.md: New folder). A row that
-    /// a delete or a move takes does not show.
+    /// New folder checks it (DESIGN.md: New folder). A row that a delete or a
+    /// move takes does not show.
     pub(crate) fn shown_name(&self, name: &str) -> Option<String> {
         let name = Name::of(name.encode_utf16().collect());
         if !matches!(self.view, View::Folder) {
@@ -1028,23 +1036,23 @@ impl Panel {
             .flat_map(|range| range.clone())
             .filter_map(|row| self.entry(row))
             .collect();
-        let (selected, bytes) = if picked.is_empty() {
-            let bytes = match &self.shown {
-                None => (self.totals.unknown == 0).then_some(self.totals.bytes),
-                Some(shown) => (shown.iter())
-                    .map(|&i| self.entries[i as usize].counted_size())
-                    .sum::<Option<u64>>(),
+        let (selected, size) = if picked.is_empty() {
+            let size = match &self.shown {
+                None => self.totals,
+                Some(shown) => Totals::of(shown.iter().map(|&i| &self.entries[i as usize])),
             };
             // An empty folder's line says "0 items" alone.
-            (None, bytes.filter(|_| items > 0))
+            (None, Some(size).filter(|_| items > 0))
         } else {
-            let bytes = picked.iter().map(|e| e.counted_size()).sum::<Option<u64>>();
-            (Some(picked.len() as u64), bytes)
+            (
+                Some(picked.len() as u64),
+                Some(Totals::of(picked.iter().copied())),
+            )
         };
         Counts {
             items,
             selected,
-            bytes,
+            size,
         }
     }
 
@@ -1135,24 +1143,48 @@ impl Panel {
 
     /// Recomputes which entries show, after the entries or the taken
     /// entries changed. Only a folder that a delete or a move takes, or
-    /// one that holds a taken entry, compares its entries' paths, so a
-    /// change in any other folder costs nothing. An entry it hides loses
-    /// its selection mark, because the list's selection loses its row, and
-    /// a mark kept would select it again, unasked, when it shows again.
-    fn filter(&mut self, taken: &Taken) {
+    /// one that holds a taken entry, looks at its entries, so a change in
+    /// any other folder costs nothing. In a folder that holds one, only an
+    /// entry whose name has a taken name's hash is looked up, by its name
+    /// as the operation gave it, so a change batch folds no name; its path
+    /// is compared only when the operation gave its name in another case.
+    /// An entry it hides loses its selection mark, because the list's
+    /// selection loses its row, and a mark kept would select it again,
+    /// unasked, when it shows again.
+    fn filter(&mut self, taken: &Arc<Taken>) {
         let kept = &self.kept;
         let keeps = |id| kept.contains_key(&id);
         if taken.is_empty() {
             self.shown = None;
+            self.taken_hashes = None;
             return;
         }
         let folder: Vec<u16> = self.folder.encode_utf16().collect();
+        let here = taken.in_folder(&folder);
+        if here.is_none() {
+            self.taken_hashes = None;
+        }
         self.shown = if taken.contains(&folder, keeps) {
             for entry in &mut self.entries {
                 entry.selected = false;
             }
             Some(Vec::new())
-        } else if taken.holds_in(&folder) {
+        } else if let Some(here) = here {
+            let known = (self.taken_hashes.as_ref()).is_some_and(|known| {
+                Arc::ptr_eq(&known.taken, taken) && known.folder == self.folder
+            });
+            if !known {
+                let mut folding = Folding::default();
+                self.taken_hashes = Some(TakenHashes {
+                    taken: Arc::clone(taken),
+                    folder: self.folder.clone(),
+                    hashes: here
+                        .names()
+                        .map(|name| name_hash(folding.of(name)))
+                        .collect(),
+                });
+            }
+            let hashes = &self.taken_hashes.as_ref().expect("filled above").hashes;
             let mut path = folder.clone();
             if path.last() != Some(&u16::from(b'\\')) {
                 path.push(u16::from(b'\\'));
@@ -1160,13 +1192,18 @@ impl Panel {
             let base = path.len();
             let mut shown = Vec::new();
             for (i, entry) in self.entries.iter_mut().enumerate() {
-                path.truncate(base);
-                path.extend_from_slice(&entry.name);
-                if taken.contains(&path, keeps) {
-                    entry.selected = false;
-                } else {
-                    shown.push(i as u32);
+                if hashes.contains(&entry.hash) {
+                    let hidden = here.takes(&entry.name, keeps).unwrap_or_else(|| {
+                        path.truncate(base);
+                        path.extend_from_slice(&entry.name);
+                        taken.contains(&path, keeps)
+                    });
+                    if hidden {
+                        entry.selected = false;
+                        continue;
+                    }
                 }
+                shown.push(i as u32);
             }
             Some(shown)
         } else {
@@ -1566,7 +1603,7 @@ pub(crate) fn last_name(path: &str) -> &str {
 
 /// What the person typed in the path box, as a full path: environment
 /// variables expanded ([`expand`]), and a relative path joined to `folder`
-/// (file-manager-spec.md: A panel). `None` for an empty text.
+/// (DESIGN.md: A panel). `None` for an empty text.
 pub(crate) fn typed_path(
     typed: &str,
     folder: &str,
@@ -1608,8 +1645,8 @@ pub(crate) fn expand(typed: &str, var: impl Fn(&str) -> Option<String>) -> Strin
 /// Whether `request`'s end makes a panel that shows `folder` read it again:
 /// its destination is the folder or a path in it, such as a new name or a
 /// created folder, also one created below a folder it created, or a source
-/// is in the folder, is it or holds it (file-manager-spec.md: The person
-/// never waits for the disk).
+/// is in the folder, is it or holds it (DESIGN.md: The person never waits for
+/// the disk).
 pub(crate) fn ends_in(request: &Request, folder: &str) -> bool {
     let text = |path: &Path| path.to_string_lossy().into_owned();
     let lands = |path: &Path| {
@@ -1639,7 +1676,7 @@ pub(crate) fn ends_in(request: &Request, folder: &str) -> bool {
 
 /// Whether `request`'s end changes a folder size that a panel showing
 /// `folder` shows: a source or the destination is in or below it
-/// (file-manager-spec.md: Folder sizes).
+/// (DESIGN.md: Folder sizes).
 pub(crate) fn changes_sizes(request: &Request, folder: &str) -> bool {
     let below = |path: &Path| is_within(&path.to_string_lossy(), folder);
     match request {
@@ -1656,8 +1693,7 @@ pub(crate) fn changes_sizes(request: &Request, folder: &str) -> bool {
     }
 }
 
-/// How a key in a panel's list moves the focus (file-manager-spec.md:
-/// Moving around).
+/// How a key in a panel's list moves the focus (DESIGN.md: Moving around).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     Up,
@@ -1709,10 +1745,11 @@ pub(crate) struct Panels {
     /// Orders the ends of operations and the starts of readings, and
     /// names each reading.
     moment: u64,
-    /// The entries that deletes and moves have taken, which the lists show
-    /// blank and the selections leave out (file-manager-spec.md: The person
-    /// never waits for the disk); one for all lists, Search's too, which
-    /// each decide with their own kept operations.
+    /// The entries that deletes and moves have taken, which the folder
+    /// panels leave out, the search lists show struck through, and the
+    /// selections leave out (DESIGN.md: The person never waits for the disk);
+    /// one for all lists, Search's too, which each decide with their own kept
+    /// operations.
     taken: Arc<Taken>,
     /// The drives' labels as the labels thread last read them, by letter.
     labels: HashMap<char, String>,
@@ -1922,7 +1959,7 @@ impl Panels {
 
     /// `Enter` on `row` of `side`. A search panel's result goes to its
     /// folder with it focused, and a folder result into that folder
-    /// (file-manager-spec.md: Search in a panel).
+    /// (DESIGN.md: Search in a panel).
     pub(crate) fn enter(&mut self, side: Side, row: u64) -> EnterAction {
         let panel = self.panel(side);
         match self.row(side, row) {
@@ -1973,9 +2010,9 @@ impl Panels {
     }
 
     /// Makes `side` a search panel of its folder, with no text yet
-    /// (file-manager-spec.md: Search in a panel). The folder's rows, its
-    /// kept operations and its reading go; the focused name stays for the
-    /// way back. Returns whether it was not a search panel.
+    /// (DESIGN.md: Search in a panel). The folder's rows, its kept operations
+    /// and its reading go; the focused name stays for the way back. Returns
+    /// whether it was not a search panel.
     pub(crate) fn enter_search(&mut self, side: Side) -> bool {
         let panel = self.panel_mut(side);
         if panel.search().is_some() {
@@ -2025,7 +2062,7 @@ impl Panels {
 
     /// `Esc` in `side`'s list, after the quick search box was closed: it
     /// clears a selection first, and only with nothing selected leaves the
-    /// search (file-manager-spec.md: Search in a panel).
+    /// search (DESIGN.md: Search in a panel).
     pub(crate) fn leave_on_escape(&mut self, side: Side) -> Option<ReadAsk> {
         if self.panel(side).has_selection() {
             return None;
@@ -2085,7 +2122,7 @@ impl Panels {
                     panel.view = View::Reading;
                     panel.clear();
                     panel.free = None;
-                    ReadChange::Opened
+                    ReadChange::Cleared
                 }
                 ReadKind::Again => ReadChange::Stale,
             },
@@ -2172,19 +2209,20 @@ impl Panels {
                 ..
             } => {
                 panel.read = None;
+                // A folder that cannot be opened is no state of the panel
+                // (DESIGN.md: A panel): it stays where it was, with its rows,
+                // its search, or another folder that reads or is not ready,
+                // which the window reads again. Only the shown folder itself,
+                // or the first one, is not ready.
+                let elsewhere = matches!(panel.view, View::Folder | View::Search(_))
+                    || !panel.folder.is_empty() && read.path != panel.folder;
                 match read.kind {
-                    // The folder never opened, so its rows or its search's
-                    // still show.
-                    ReadKind::Go { typed, .. }
-                        if matches!(panel.view, View::Folder | View::Search(_)) =>
-                    {
-                        ReadChange::Refused {
-                            path,
-                            failure,
-                            reason,
-                            typed,
-                        }
-                    }
+                    ReadKind::Go { typed, .. } if elsewhere => ReadChange::Refused {
+                        path,
+                        failure,
+                        reason,
+                        typed,
+                    },
                     _ => {
                         panel.view = View::NotReady {
                             drive: drive_root(&read.path),
@@ -2193,7 +2231,7 @@ impl Panels {
                             panel.folder = read.path;
                         }
                         panel.clear();
-                        ReadChange::NotReady
+                        ReadChange::Cleared
                     }
                 }
             }
@@ -2261,9 +2299,9 @@ impl Panels {
     }
 
     /// The entries a file command of `side` acts on: the selected ones,
-    /// else the focused one; never `..` (file-manager-spec.md: Selecting
-    /// entries). A search panel's selected results once they are read, and
-    /// none while they are.
+    /// else the focused one; never `..` (DESIGN.md: Selecting entries). A
+    /// search panel's selected results once they are read, and none while they
+    /// are.
     pub(crate) fn chosen(&self, side: Side) -> Vec<ChosenEntry> {
         let panel = self.panel(side);
         match panel.search() {
@@ -2552,7 +2590,7 @@ impl Panels {
     }
 
     /// The request for `side`'s folder sizes: every direct subfolder of
-    /// its folder, from gozlerd (file-manager-spec.md: Folder sizes).
+    /// its folder, from gozlerd (DESIGN.md: Folder sizes).
     pub(crate) fn ask_sizes(&mut self, side: Side, generation: Generation) -> Option<Ask> {
         let panel = self.panel_mut(side);
         if !matches!(panel.view, View::Folder) || !panel.entries.iter().any(Entry::is_folder) {
@@ -2669,10 +2707,9 @@ impl Panels {
     }
 
     /// A character typed in `side`'s list, which opens the quick search
-    /// box or extends its text (file-manager-spec.md: Quick search). The
-    /// focus goes to the first row whose name starts with the text; a
-    /// character after which no name would match is not added. Returns
-    /// the row to focus.
+    /// box or extends its text (DESIGN.md: Quick search). The focus goes to the
+    /// first row whose name starts with the text; a character after which no
+    /// name would match is not added. Returns the row to focus.
     pub(crate) fn quick_char(&mut self, side: Side, c: char) -> Option<u64> {
         let taken = Arc::clone(&self.taken);
         let panel = self.panel_mut(side);
@@ -2728,7 +2765,7 @@ impl Panels {
 /// name starts with `text`, without regard to case. `..` never matches. A
 /// search panel looks only at its fetched rows that no delete or move has
 /// taken, so the walk never passes the rows the list cannot show
-/// (file-manager-spec.md: Quick search).
+/// (DESIGN.md: Quick search).
 fn first_match(panel: &Panel, taken: &Taken, text: &str, from: u64, down: bool) -> Option<u64> {
     let wanted = fold(text.as_bytes());
     let mut folding = Folding::default();
@@ -3241,7 +3278,8 @@ pub(crate) mod tests {
             }
         );
         panels.set_selected(Side::Left, Vec::new());
-        assert_eq!(panels.panel(Side::Left).counts().bytes, Some(46));
+        let size = panels.panel(Side::Left).counts().size;
+        assert_eq!(size.map(|size| size.bytes), Some(46));
     }
 
     /// An editor that saves through a temporary name and keeps a backup
@@ -3323,7 +3361,7 @@ pub(crate) mod tests {
     /// New folder refuses a name that a row shows in any case, and names
     /// the row's own spelling, but not one that only a row taken by a
     /// delete shows, because the person does not see that row
-    /// (file-manager-spec.md: New folder).
+    /// (DESIGN.md: New folder).
     #[test]
     fn new_folder_checks_the_names_the_rows_show() {
         let mut panels = showing(r"C:\f", vec![folder("Photos"), file("x.txt", 1, 0)]);
@@ -3352,9 +3390,9 @@ pub(crate) mod tests {
         assert_eq!(names(&panels, Side::Left)[1..], all);
     }
 
-    /// A panel holds about 100 bytes for each entry (file-manager-spec.md:
-    /// Memory): the entry itself, its row's index, and its name on the heap.
-    /// A field that grows the entry would pass every other test.
+    /// A panel holds about 100 bytes for each entry (DESIGN.md: Memory budget):
+    /// the entry itself, its row's index, and its name on the heap. A field
+    /// that grows the entry would pass every other test.
     #[test]
     fn an_entry_fits_the_memory_budget() {
         assert!(size_of::<Entry>() <= 48, "{} bytes", size_of::<Entry>());
@@ -3570,15 +3608,15 @@ pub(crate) mod tests {
             Counts {
                 items: 0,
                 selected: None,
-                bytes: None,
+                size: None,
             }
         );
     }
 
-    /// The status line sums the counted entries, and leaves the sum out
-    /// when a counted folder's size is unknown.
+    /// The status line sums the known sizes of the counted entries, and
+    /// counts the folders whose size is unknown beside the sum.
     #[test]
-    fn the_sum_leaves_out_an_unknown_folder() {
+    fn the_sum_counts_an_unknown_folder() {
         let mut panels = showing(
             r"C:\d",
             vec![folder("Photos"), folder("Old"), file("a", 5, 0)],
@@ -3590,7 +3628,10 @@ pub(crate) mod tests {
             Counts {
                 items: 3,
                 selected: None,
-                bytes: None,
+                size: Some(Totals {
+                    bytes: 105,
+                    unknown: 1,
+                }),
             }
         );
         panels.set_selected(Side::Left, vec![2..4]);
@@ -3599,14 +3640,17 @@ pub(crate) mod tests {
             Counts {
                 items: 3,
                 selected: Some(2),
-                bytes: Some(105),
+                size: Some(Totals {
+                    bytes: 105,
+                    unknown: 0,
+                }),
             }
         );
     }
 
     /// T2: `Esc` and `Backspace` in a search panel must show the searched
     /// folder again with the row that was focused, the way back the spec
-    /// promises (file-manager-spec.md: Search in a panel).
+    /// promises (DESIGN.md: Search in a panel).
     #[test]
     fn leaving_a_search_shows_the_folder_with_its_row_focused() {
         let mut panels = Panels::new(&SavedPanels::default());

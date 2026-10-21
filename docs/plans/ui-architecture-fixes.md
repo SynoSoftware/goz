@@ -90,7 +90,7 @@ sizing fields by hand.
    99,999,999 KB is one digit short of a 100 GiB folder. Ext fits 7
    characters, and Size fits a 10-digit KB figure. The widths stay the same
    in both panels and every folder. Change `fill_panel_columns`' doc comment
-   and file-manager-spec.md's "fit their content" to say so. A longer
+   and DESIGN.md's "A panel" ("fit their content") to say so. A longer
    extension ends in "…". Check whether the label tip shows it whole for
    owner-drawn panel rows.
 

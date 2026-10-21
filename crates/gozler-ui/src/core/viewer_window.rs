@@ -1,7 +1,7 @@
-//! The Viewer window's decisions (file-manager-spec.md: The Viewer) on top
-//! of [`super::viewer`]'s: which blocks of the file it keeps, the first
-//! shown row, the page of rows that the window paints, the scroll bar, the
-//! keys, the menus and the status bar.
+//! The Viewer window's decisions (DESIGN.md: The Viewer) on top of
+//! [`super::viewer`]'s: which blocks of the file it keeps, the first shown row,
+//! the page of rows that the window paints, the scroll bar, the keys, the menus
+//! and the status bar.
 //!
 //! The window owns the file and its reading thread. It gives a [`Document`]
 //! each block that the thread reads, and reads the block that
@@ -265,9 +265,9 @@ impl Document {
         self.task = Task::Jump { offset };
     }
 
-    /// Fits the page to an area of `columns` characters and `height` rows.
+    /// Fits the page to an area of `columns` characters and `height` rows,
+    /// each at least 1, as [`text_room`] gives them.
     pub(crate) fn set_area(&mut self, columns: usize, height: usize) {
-        let (columns, height) = (columns.max(1), height.max(1));
         if (columns, height) == (self.columns, self.height) {
             return;
         }
@@ -721,7 +721,6 @@ impl Document {
 
 /// `text` in rows of `columns` characters.
 fn wrapped(text: String, columns: usize) -> Vec<String> {
-    let columns = columns.max(1);
     if text.chars().nth(columns).is_none() {
         return vec![text];
     }

@@ -777,6 +777,8 @@
   "panel": {
     "items_one": "{0} item",
     "items_other": "{0} items",
+    "sizes_unknown_one": "({1}, {0} size unknown)",
+    "sizes_unknown_other": "({1}, {0} sizes unknown)",
     "selected_one": "{0} of {1} selected",
     "selected_other": "{0} of {1} selected",
     "free": "{0} free",

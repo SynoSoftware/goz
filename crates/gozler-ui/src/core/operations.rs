@@ -1,10 +1,10 @@
 //! The life of each file operation as the window follows it: when the File
 //! operations window opens, which operation asks its conflict question or
 //! reports what failed, which one the status bar shows, and when an ended
-//! one leaves the queue (file-manager-spec.md: File operations, steps 3 to
-//! 7). The engine's queue owns the operations and their states; `app` reads
-//! a snapshot after each of the queue's wakes, and runs the steps that
-//! [`Operations::accept`] returns for it.
+//! one leaves the queue (DESIGN.md: File operations). The engine's queue
+//! owns the operations and their states; `app` reads a snapshot after each
+//! of the queue's wakes, and runs the steps that [`Operations::accept`]
+//! returns for it.
 
 use super::file_operations::{self, Choices, Failure, LastEnded, StatusOperation, Taskbar};
 use super::panel::PanelFollow;
@@ -15,8 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How long an operation runs before the File operations window opens, so
-/// a short one shows only in the status bar (file-manager-spec.md: File
-/// operations, step 5).
+/// a short one shows only in the status bar (DESIGN.md: File operations).
 const OPEN_AFTER: Duration = Duration::from_secs(2);
 
 /// Where the files that a copy or a move acts on came from, which hears
@@ -262,8 +261,7 @@ impl Operations {
     /// The File operations window opens when an operation still runs
     /// [`OPEN_AFTER`] after it started, so a short one shows only in the
     /// status bar, and at once for the interrupted operations of the last
-    /// run; it hides when the last one ends (file-manager-spec.md: File
-    /// operations, step 5).
+    /// run; it hides when the last one ends (DESIGN.md: File operations).
     fn window_step(
         &mut self,
         snapshot: &[Operation],

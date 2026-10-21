@@ -1,8 +1,8 @@
 //! The filter pane's window: a child of the main window that holds the
 //! pane's controls, so they scroll together and are cut off at its edges.
-//! It decides nothing. It draws the items of its path list, and passes what
-//! its controls tell it, and its scroll bar's requests, to the main window,
-//! which handles them as it handles its own controls'.
+//! It decides nothing. It passes what its controls tell it, and its scroll
+//! bar's requests, to the main window, which handles them as it handles its
+//! own controls'.
 
 use super::Hwnd;
 use crate::core::layout::Px;
@@ -13,8 +13,8 @@ use windows::Win32::UI::Controls::SetScrollInfo;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetParent, HMENU, IDC_ARROW, LoadCursorW, RegisterClassExW,
     SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SendMessageW, WM_COMMAND, WM_CTLCOLORSTATIC,
-    WM_DRAWITEM, WM_NOTIFY, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_CONTROLPARENT, WS_VISIBLE, WS_VSCROLL,
+    WM_NOTIFY, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -108,8 +108,6 @@ unsafe extern "system" fn procedure(
     match msg {
         WM_COMMAND | WM_NOTIFY | WM_CTLCOLORSTATIC => forward(lparam),
         WM_VSCROLL => forward(LPARAM(hwnd.0 as isize)),
-        // SAFETY: the lparam is the one Windows passed with WM_DRAWITEM.
-        WM_DRAWITEM if unsafe { super::controls::draw_list_item(lparam) } => LRESULT(1),
         // SAFETY: the parameters are the ones Windows passed.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }

@@ -10,7 +10,6 @@
 
 use super::controls::{Button, TreeItem, has_image};
 use super::gdi::{Font, TextMeter, icons_shown};
-use super::notify::{CustomDraw, DrawAnswer, DrawStage, Notification};
 use super::{Hwnd, wide};
 use crate::core::captions::{ButtonIcon, DialogCaptions, Guard, Question, QuestionBody};
 use crate::core::commands::Keystroke;
@@ -23,11 +22,11 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     DTN_DATETIMECHANGE, EMF_CENTERED, LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED,
-    NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN, NMHDR, NMLVEMPTYMARKUP, NMLVGETINFOTIPW,
-    NMTREEVIEWW, NMTVITEMCHANGE, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0,
-    TASKDIALOGCONFIG_1, TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON,
-    TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW, TDF_USE_COMMAND_LINKS,
-    TVE_EXPAND, TVIS_STATEIMAGEMASK, TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
+    NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR, NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMTREEVIEWW,
+    NMTVITEMCHANGE, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1,
+    TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+    TDF_POSITION_RELATIVE_TO_WINDOW, TDF_USE_COMMAND_LINKS, TVE_EXPAND, TVIS_STATEIMAGEMASK,
+    TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_SELCHANGE, CreateDialogParamW,
@@ -130,12 +129,6 @@ pub(crate) trait DialogProc {
     /// The tooltip of row `row` of the list view `id`, for a list that
     /// shows info tips (`ReportList::show_info_tips`); `None` for none.
     fn info_tip(&self, _id: u16, _row: usize) -> Option<String> {
-        None
-    }
-    /// The column of the list view `id` whose cells are paths, which lose
-    /// their middle where they do not fit, so the drive and the name stay;
-    /// `None` for none.
-    fn path_column(&self, _id: u16) -> Option<usize> {
         None
     }
     /// The captions a push button can show after the dialog opens, each
@@ -291,31 +284,6 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                         buffer[length - 1] = 0;
                     }
                     return 0;
-                }
-                NM_CUSTOMDRAW => {
-                    let Some(column) = running.state.path_column(id) else {
-                        return 0;
-                    };
-                    // SAFETY: the notification is the one Windows passed.
-                    let notification = unsafe { Notification::new(lparam) };
-                    // SAFETY: only a list view has a path column.
-                    let draw = unsafe { CustomDraw::of_list(&notification) };
-                    let answer = match draw.stage() {
-                        DrawStage::Paint => DrawAnswer::EachRow,
-                        DrawStage::Row { .. } => DrawAnswer::EachCell,
-                        DrawStage::Cell { column: drawn, .. } if drawn == column => {
-                            draw.draw_path(layout::cell_text_inset(column == 0, dialog.dpi()));
-                            DrawAnswer::Drawn
-                        }
-                        DrawStage::Cell { .. } | DrawStage::RowPainted | DrawStage::Other => {
-                            DrawAnswer::Default
-                        }
-                    };
-                    // SAFETY: plain values.
-                    unsafe {
-                        SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, CustomDraw::answer(answer).0)
-                    };
-                    return 1;
                 }
                 NM_CLICK | NM_RETURN => DialogMessage::LinkActivated { id },
                 NM_DBLCLK => DialogMessage::DoubleClicked { id },

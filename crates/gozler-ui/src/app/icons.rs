@@ -10,7 +10,9 @@ use std::collections::HashMap;
 type Kind = Option<String>;
 
 #[derive(Default)]
-pub(super) struct Icons(RefCell<HashMap<Kind, i32>>);
+pub(super) struct Icons {
+    kinds: RefCell<HashMap<Kind, i32>>,
+}
 
 impl Icons {
     /// The icon of an item named `name`. A new extension asks Windows with
@@ -22,7 +24,7 @@ impl Icons {
                 .map(|ext| String::from_utf8_lossy(ext).to_lowercase())
                 .unwrap_or_default()
         });
-        if let Some(&index) = self.0.borrow().get(&kind) {
+        if let Some(&index) = self.kinds.borrow().get(&kind) {
             return index;
         }
         let sample = match &kind {
@@ -31,7 +33,7 @@ impl Icons {
             Some(ext) => format!("file.{ext}"),
         };
         let index = ImageList::system_index(&sample, is_folder);
-        self.0.borrow_mut().insert(kind, index);
+        self.kinds.borrow_mut().insert(kind, index);
         index
     }
 }

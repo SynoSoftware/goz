@@ -445,9 +445,9 @@ fn a_drive_root_holds_its_taken_entries() {
         false,
     );
     taken.insert(OperationId::for_tests(2), Path::new(r"C:\b.txt"), false);
-    assert!(taken.holds_in(&units(Path::new(r"c:\data"))));
-    assert!(taken.holds_in(&units(Path::new(r"C:\"))));
-    assert!(!taken.holds_in(&units(Path::new(r"C:\Other"))));
+    assert!(taken.in_folder(&units(Path::new(r"c:\data"))).is_some());
+    assert!(taken.in_folder(&units(Path::new(r"C:\"))).is_some());
+    assert!(taken.in_folder(&units(Path::new(r"C:\Other"))).is_none());
 }
 
 /// FAT refuses POSIX semantics, so its read-only files take the classic
@@ -1893,11 +1893,11 @@ fn a_cancelled_ring_copy_leaves_no_partial_file() {
     assert!(left.is_empty(), "{left:?}");
 }
 
-/// The Copy and Move table's rows that prepare decides (file-manager-spec.md:
-/// Copy and Move): a typed path that is a folder takes the entry in; a
-/// missing folder is created with its parents, for one entry or several;
-/// any other typed path is the entry's new full path, where a file already
-/// there is a conflict and not a folder to enter.
+/// The Copy and Move table's rows that prepare decides (DESIGN.md: Copy and
+/// Move): a typed path that is a folder takes the entry in; a missing folder is
+/// created with its parents, for one entry or several; any other typed path is
+/// the entry's new full path, where a file already there is a conflict and not
+/// a folder to enter.
 #[test]
 fn a_typed_destination_is_a_folder_or_a_new_name() {
     let scratch = Scratch::new("typed");

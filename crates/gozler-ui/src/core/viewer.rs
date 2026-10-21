@@ -1,6 +1,6 @@
-//! The Viewer's decisions (file-manager-spec.md: The Viewer) that need
-//! neither a window nor a disk: Text or Hex, the encoding, decoding, where a
-//! line starts, the text of a hex row and the scroll position of a byte.
+//! The Viewer's decisions (DESIGN.md: The Viewer) that need neither a window
+//! nor a disk: Text or Hex, the encoding, decoding, where a line starts, the
+//! text of a hex row and the scroll position of a byte.
 //!
 //! Every function takes the bytes and the file offsets that the caller has
 //! read, so the reading thread and the window own the file, the font, the

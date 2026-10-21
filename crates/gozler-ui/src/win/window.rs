@@ -16,13 +16,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
-    MonitorFromWindow, ScreenToClient,
+    COLOR_BTNFACE, COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromRect, MonitorFromWindow, ScreenToClient,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL,
@@ -37,18 +36,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
     MSGF_DIALOGBOX, MSGF_MESSAGEBOX, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW,
     SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK,
-    SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON,
-    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer,
-    SetWindowLongPtrW, SetWindowPlacement, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
-    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA,
-    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED,
-    WM_DRAWITEM, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
-    WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
-    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
+    SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED,
+    SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WA_INACTIVE,
+    WH_MSGFILTER, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE,
+    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_QUIT,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
+    WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION,
+    WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -148,8 +146,6 @@ pub(crate) enum Message<'a> {
     /// window's.
     CaptureChanged,
     InitMenuPopup,
-    /// An owner-drawn control asks to be drawn.
-    DrawItem(super::gdi::OwnerDraw<'a>),
     /// A label or check box asks for its colors.
     CtlColorStatic {
         colors: super::gdi::StaticColors,
@@ -168,10 +164,6 @@ pub(crate) enum Message<'a> {
         /// The registration, as `RegisterDeviceNotificationW` returned it.
         notification: isize,
     },
-    /// Windows asks for the background before the window paints, or a
-    /// themed control asks for what lies under its corners.
-    EraseBackground(super::gdi::EraseDc),
-    Paint,
     SettingChange {
         regional_format: bool,
     },
@@ -217,9 +209,23 @@ pub(crate) trait WindowProc: 'static {
     fn message(&self, hwnd: Hwnd, message: Message<'_>) -> Option<LRESULT>;
 }
 
+/// The system colour that a window class fills its windows' background
+/// with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Background {
+    /// The window colour, as File Explorer's views have.
+    Window,
+    /// The dialog colour, as the File operations window has.
+    Dialog,
+}
+
 /// Registers the class `name`, whose windows run `W`'s handler, with the
-/// executable's icon and the window colour as background.
-pub(crate) fn register_class<W: WindowProc>(name: &str, icon: u16) -> windows::core::Result<()> {
+/// executable's icon and `background`.
+pub(crate) fn register_class<W: WindowProc>(
+    name: &str,
+    icon: u16,
+    background: Background,
+) -> windows::core::Result<()> {
     // SAFETY: a null name asks for the executable's own module.
     let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
     let load_icon = |metric| {
@@ -249,7 +255,13 @@ pub(crate) fn register_class<W: WindowProc>(name: &str, icon: u16) -> windows::c
         // SAFETY: IDC_ARROW is a predefined cursor.
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }?,
         // The documented way to name a system colour as a class brush.
-        hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _),
+        hbrBackground: HBRUSH(
+            (match background {
+                Background::Window => COLOR_WINDOW,
+                Background::Dialog => COLOR_BTNFACE,
+            }
+            .0 + 1) as isize as *mut _,
+        ),
         lpszClassName: PCWSTR(name.as_ptr()),
         ..Default::default()
     };
@@ -289,8 +301,7 @@ pub(crate) fn create_window<W: WindowProc>(
             WS_EX_LEFT,
             &HSTRING::from(class),
             PCWSTR::null(),
-            // The window's background and dividers never paint over its
-            // controls.
+            // The window's background never paints over its controls.
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x,
             y,
@@ -477,10 +488,9 @@ pub(crate) fn set_modeless(window: Option<Hwnd>) {
 
 /// Names `window`, a top-level window besides the main one, as one that
 /// takes its own keys, or, with `own` false, no longer, as a Viewer does
-/// while it is open (file-manager-spec.md: The Viewer). The message loop
-/// offers each key pressed in it to the window first, as
-/// [`Message::KeyDown`], then to its `IsDialogMessageW` for `Tab` and the
-/// access keys among its controls.
+/// while it is open (DESIGN.md: The Viewer). The message loop offers each key
+/// pressed in it to the window first, as [`Message::KeyDown`], then to its
+/// `IsDialogMessageW` for `Tab` and the access keys among its controls.
 pub(crate) fn own_keys(window: Hwnd, own: bool) {
     OWN_KEYS.with_borrow_mut(|windows| {
         windows.retain(|named| *named != window.0);
@@ -886,12 +896,6 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_LBUTTONUP => Message::LeftButtonUp,
         WM_CAPTURECHANGED => Message::CaptureChanged,
         WM_INITMENUPOPUP => Message::InitMenuPopup,
-        WM_DRAWITEM => {
-            // SAFETY: WM_DRAWITEM's lparam points to a DRAWITEMSTRUCT that
-            // is valid for the length of the message.
-            let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
-            Message::DrawItem(super::gdi::OwnerDraw(item))
-        }
         WM_CTLCOLORSTATIC => Message::CtlColorStatic {
             colors: super::gdi::StaticColors::from_wparam(wparam),
             control: Hwnd(HWND(lparam.0 as *mut _)),
@@ -927,8 +931,6 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                 None => Message::Other(msg),
             }
         }
-        WM_ERASEBKGND => Message::EraseBackground(super::gdi::EraseDc::from_wparam(wparam)),
-        WM_PAINT => Message::Paint,
         WM_SETTINGCHANGE => Message::SettingChange {
             // SAFETY: WM_SETTINGCHANGE's lparam is null or a NUL-terminated
             // string that names the changed area.

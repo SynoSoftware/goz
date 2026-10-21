@@ -1,7 +1,6 @@
 //! The clipboard: one `GMEM_MOVEABLE` block per copy, which
 //! `SetClipboardData` requires and which Windows owns once it is set
-//! (DESIGN.md: Copy), and the files that Paste reads from it
-//! (file-manager-spec.md: Search mode).
+//! (DESIGN.md: Copy), and the files that Paste reads from it.
 
 use super::Hwnd;
 use crate::core::clipboard::{ClipboardData, ClipboardFormat};

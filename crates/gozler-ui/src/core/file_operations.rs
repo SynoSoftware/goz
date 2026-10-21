@@ -1,7 +1,7 @@
-//! The File operations window's decisions (file-manager-spec.md: File
-//! operations, step 5): which operation the card shows, every text of the
-//! card and of the queue list, and the speed, which the window works out
-//! from the counts it polls, because the engine reports counts only.
+//! The File operations window's decisions (DESIGN.md: File operations): which
+//! operation the card shows, every text of the card and of the queue list, and
+//! the speed, which the window works out from the counts it polls, because the
+//! engine reports counts only.
 //!
 //! The engine's queue owns the operations, their order and which ones wait;
 //! this module only words what the queue reports.
@@ -487,7 +487,7 @@ pub(crate) fn glyph_of(request: &Request) -> Glyph {
 
 /// The entry and its new name when `request` moves one entry to a new name
 /// in its own folder, which renames it, as `F6` with a new name does
-/// (file-manager-spec.md: Copy and Move).
+/// (DESIGN.md: Copy and Move).
 fn renamed(request: &Request) -> Option<(String, String)> {
     let Request::Move {
         sources,
@@ -1150,8 +1150,7 @@ pub(crate) type LastEnded = (OperationId, Arc<Request>, Arc<Outcome>);
 /// The file operation the status bar's middle group shows in both modes:
 /// the newest running one, else the one that ended last, which stays until
 /// another starts, because after Hide it is the only sign that the
-/// operation finished (file-manager-spec.md: File operations, steps 5 and
-/// 6).
+/// operation finished (DESIGN.md: File operations).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum StatusOperation {
     Running {
@@ -1514,8 +1513,7 @@ fn relative_to<'a>(path: &'a str, from: &str) -> &'a str {
 }
 
 /// A question with several answers, of which the person picks one or
-/// cancels: the conflict question (file-manager-spec.md: File operations,
-/// step 3).
+/// cancels: the conflict question (DESIGN.md: File operations).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Choices {
     pub(crate) title: String,
@@ -1597,9 +1595,8 @@ pub(crate) fn conflict_question(
     })
 }
 
-/// The Delete question (file-manager-spec.md: File operations, step 2): the
-/// one entry's name, or the count, because Select all reaches rows the
-/// person never saw.
+/// The Delete question (DESIGN.md: File operations): the one entry's name, or
+/// the count, because Select all reaches rows the person never saw.
 pub(crate) fn delete_question(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -1621,10 +1618,10 @@ pub(crate) fn delete_question(
     }
 }
 
-/// The Exit question while `operations` run or wait (file-manager-spec.md:
-/// File operations, step 8), or `None` while none does: the running ones
-/// stop and are offered again as Interrupted, and the waiting ones, which
-/// are not saved, never run. A prepared operation waits for its answer.
+/// The Exit question while `operations` run or wait (DESIGN.md: File
+/// operations), or `None` while none does: the running ones stop and are
+/// offered again as Interrupted, and the waiting ones, which are not saved,
+/// never run. A prepared operation waits for its answer.
 pub(crate) fn exit_question(
     strings: &Strings,
     numbers: &dyn Numbers,
@@ -1668,9 +1665,9 @@ pub(crate) fn exit_question(
     })
 }
 
-/// What the failure dialog shows (file-manager-spec.md: File operations,
-/// step 7): each entry that failed or was skipped, with its reason, and how
-/// many items were done, so the person knows that the result is partial.
+/// What the failure dialog shows (DESIGN.md: File operations): each entry that
+/// failed or was skipped, with its reason, and how many items were done, so the
+/// person knows that the result is partial.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Failure {
     pub(crate) title: String,
@@ -1772,18 +1769,16 @@ fn px(dip: i32, dpi: Dpi) -> Px {
     Px(dip).rescale(Dpi::new(96).expect("96 is not zero"), dpi)
 }
 
-/// The window's edges, and the card's inner margin.
+/// The window's edges.
 const MARGIN: i32 = 11;
 /// Between related controls, such as the card's lines.
 const RELATED: i32 = 4;
-/// Between groups, such as the card and the queue's header.
+/// Between groups, such as the running operation and the queue's header.
 const GROUP: i32 = 11;
 /// An icon button: the card's Pause and Cancel, and the queue's buttons.
 const ICON_BUTTON: i32 = 28;
 /// The card's icon of the operation's kind.
 pub(crate) const CARD_ICON: i32 = 20;
-/// The card's rounded corners, as Windows 11 rounds a card.
-pub(crate) const CARD_CORNER: i32 = 8;
 const FILE_BAR: i32 = 8;
 const TOTAL_BAR: i32 = 15;
 /// The queue list's icons, about as large as the card's, so they do not
@@ -1819,7 +1814,6 @@ pub(crate) struct Metrics {
 /// Where every control of the window goes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Layout {
-    pub(crate) card: Rect,
     pub(crate) icon: Rect,
     pub(crate) title: Rect,
     pub(crate) status: Rect,
@@ -1863,8 +1857,8 @@ impl Layout {
         let width = client_width - margin - margin;
         let button = d(ICON_BUTTON);
         let line = m.line + d(2);
-        // Between the card's three lines, and between the file line and its
-        // bar.
+        // Between the operation's three lines, and between the file line and
+        // its bar.
         let tight = Px(d(RELATED).0 / 2);
         let rect = |x: Px, y: Px, width: Px, height: Px| Rect {
             x,
@@ -1874,43 +1868,36 @@ impl Layout {
         };
         let mut l = Layout::default();
 
-        // The card: its title row, the three lines, the bar and the counts,
-        // with a group's gap between them.
-        let inner_x = margin + margin;
-        let inner_width = width - margin - margin;
-        let mut y = margin + margin;
+        // The running operation: its title row, the three lines, the bar and
+        // the counts, with a group's gap between them.
+        let mut y = margin;
         let heading = m.title_line + m.line;
         let row = button.max(heading);
         let centred = |height: Px| y + Px((row - height).0 / 2);
         // The icon's left edge lines up with the labels under it.
-        l.icon = rect(inner_x, centred(d(CARD_ICON)), d(CARD_ICON), d(CARD_ICON));
-        l.cancel = rect(
-            inner_x + inner_width - button,
-            centred(button),
-            button,
-            button,
-        );
+        l.icon = rect(margin, centred(d(CARD_ICON)), d(CARD_ICON), d(CARD_ICON));
+        l.cancel = rect(margin + width - button, centred(button), button, button);
         l.pause = rect(l.cancel.x - button, l.cancel.y, button, button);
         let text_x = l.icon.right() + d(RELATED) + d(RELATED);
         let text_width = l.pause.x - d(RELATED) - text_x;
         l.title = rect(text_x, centred(heading), text_width, m.title_line);
         l.status = rect(text_x, l.title.bottom(), text_width, m.line);
         y = y + row + d(GROUP);
-        let value_x = inner_x + m.label_width + d(GROUP);
-        let value_width = inner_x + inner_width - value_x;
-        l.doing = rect(inner_x, y, m.label_width, m.line);
+        let value_x = margin + m.label_width + d(GROUP);
+        let value_width = margin + width - value_x;
+        l.doing = rect(margin, y, m.label_width, m.line);
         l.file = rect(value_x, y, value_width, m.line);
         y = y + m.line + tight;
         l.file_bar = rect(value_x, y, value_width, d(FILE_BAR));
         y = y + d(FILE_BAR) + tight;
-        l.from_label = rect(inner_x, y, m.label_width, m.line);
+        l.from_label = rect(margin, y, m.label_width, m.line);
         l.from = rect(value_x, y, value_width, m.line);
         y = y + m.line + tight;
-        l.to_label = rect(inner_x, y, m.label_width, m.line);
+        l.to_label = rect(margin, y, m.label_width, m.line);
         l.to = rect(value_x, y, value_width, m.line);
         y = y + m.line + d(GROUP);
-        let percent_x = inner_x + inner_width - m.percent_width;
-        l.total_bar = rect(inner_x, y, percent_x - d(RELATED) - inner_x, d(TOTAL_BAR));
+        let percent_x = margin + width - m.percent_width;
+        l.total_bar = rect(margin, y, percent_x - d(RELATED) - margin, d(TOTAL_BAR));
         l.percent = rect(
             percent_x,
             y + Px((d(TOTAL_BAR) - m.line).0 / 2),
@@ -1921,13 +1908,11 @@ impl Layout {
         // The items under the bar's start, and the bytes ending under its
         // end.
         let half = Px(l.total_bar.width.0 / 2);
-        l.items = rect(inner_x, y, half, m.line);
-        l.bytes = rect(inner_x + half, y, l.total_bar.width - half, m.line);
-        y = y + m.line + margin;
-        l.card = rect(margin, margin, width, y - margin);
+        l.items = rect(margin, y, half, m.line);
+        l.bytes = rect(margin + half, y, l.total_bar.width - half, m.line);
+        y = y + m.line + d(GROUP);
 
         // The queue's header: the toggle, the count, then its buttons.
-        y = l.card.bottom() + d(GROUP);
         l.toggle = rect(margin, y, button, button);
         l.queue_cancel = rect(margin + width - button, y, button, button);
         l.down = rect(l.queue_cancel.x - button, y, button, button);
@@ -1994,8 +1979,7 @@ mod tests {
 
     /// After Hide the middle group's line is the only sign that an
     /// operation finished, so it counts what the operation did, apart from
-    /// what failed or was skipped (file-manager-spec.md: File operations,
-    /// step 6).
+    /// what failed or was skipped (DESIGN.md: File operations).
     #[test]
     fn an_ended_operation_counts_what_it_did_and_what_failed() {
         let ended = StatusOperation::Ended {

@@ -93,7 +93,7 @@ pub(crate) struct Choices {
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) shortcuts: CommandShortcuts,
     /// The speed settings that copies, moves and deletes start with
-    /// (file-manager-spec.md: Speed settings).
+    /// (DESIGN.md: The File operations page).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) speed: Speed,
 }
@@ -143,8 +143,8 @@ pub(crate) enum SettingsPage {
     Search,
     ContextMenu,
     Keyboard,
-    /// The speed settings of file operations (file-manager-spec.md: Speed
-    /// settings).
+    /// The speed settings of file operations (DESIGN.md: The File operations
+    /// page).
     FileOperations,
     /// The service's index, which the page shows and does not change yet
     /// (DESIGN.md: Settings dialog).
@@ -435,8 +435,7 @@ impl SettingsDraft {
 }
 
 /// What the window shows: Search's results list, or Norton Commander's two
-/// panels (file-manager-spec.md: Two panels). The window opens in the mode
-/// it closed in.
+/// panels (DESIGN.md: Two panels). The window opens in the mode it closed in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Mode {
@@ -499,8 +498,7 @@ pub(crate) struct WindowState {
     )]
     pub(crate) last_update_check: Option<i64>,
     /// The folder last chosen for Copy to folder… or Move to folder…,
-    /// where their folder picker opens next (file-manager-spec.md: Search
-    /// mode).
+    /// where their folder picker opens next (DESIGN.md: File operations).
     #[serde(
         default,
         deserialize_with = "or_default",
@@ -508,7 +506,7 @@ pub(crate) struct WindowState {
     )]
     pub(crate) destination_folder: Option<String>,
     /// Each panel's folder, sort and recent folders, and which panel is
-    /// active (file-manager-spec.md: A panel).
+    /// active (DESIGN.md: A panel).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) panels: SavedPanels,
     /// The Viewer's size and place, and Wrap long lines.
@@ -556,9 +554,8 @@ pub(crate) struct Placement {
     pub(crate) maximized: bool,
 }
 
-/// What the Viewer remembers (file-manager-spec.md: The Viewer): the size
-/// and place of the Viewer that was moved or closed last, and Wrap long
-/// lines.
+/// What the Viewer remembers (DESIGN.md: The Viewer): the size and place of the
+/// Viewer that was moved or closed last, and Wrap long lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ViewerState {
     #[serde(

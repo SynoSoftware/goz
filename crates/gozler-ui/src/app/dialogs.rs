@@ -409,7 +409,7 @@ impl DialogProc for CustomSize {
 
 /// Two panels' Copy to folder… and Move to folder…: the destination as
 /// text, which only the text decides, so the dialog closes at once
-/// (file-manager-spec.md: Copy and Move).
+/// (DESIGN.md: Copy and Move).
 pub(super) struct Transfer {
     line: String,
     /// The box's text when it opens, and the part of it selected.
@@ -536,8 +536,7 @@ fn refusal_text(refusal: &Refusal, characters: &str, reserved: &str) -> String {
     }
 }
 
-/// Two panels' New folder…: the new folder's name (file-manager-spec.md:
-/// New folder).
+/// Two panels' New folder…: the new folder's name (DESIGN.md: New folder).
 pub(super) struct NewFolder<'a> {
     /// The name of the panel's row that shows a name, without regard to
     /// case.

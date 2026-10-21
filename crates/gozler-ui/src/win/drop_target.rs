@@ -1,8 +1,7 @@
-//! The main window as a drop target for files (file-manager-spec.md: Search
-//! mode, files dropped on a folder row). OLE calls the target on the
-//! window's thread, inside the source's drag loop, so every call returns
-//! at once: the target reads the dragged paths when the drag enters, and
-//! the handler decides the rest from them.
+//! The main window as a drop target for files (DESIGN.md: Dragging). OLE calls
+//! the target on the window's thread, inside the source's drag loop, so every
+//! call returns at once: the target reads the dragged paths when the drag
+//! enters, and the handler decides the rest from them.
 
 use super::Hwnd;
 use super::clipboard;

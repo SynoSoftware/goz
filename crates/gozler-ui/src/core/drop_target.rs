@@ -1,7 +1,6 @@
 //! What files dragged over the results list do when they are dropped
-//! (file-manager-spec.md: Search mode, files dropped on a folder row): the
-//! engine copies or moves them into the folder row under the pointer, and
-//! the effect follows File Explorer's rules.
+//! (DESIGN.md: Dragging): the engine copies or moves them into the folder row
+//! under the pointer, and the effect follows File Explorer's rules.
 //!
 //! Paths are compared as text, ignoring case as Windows does, so the choice
 //! reads no disk and runs on every `DragOver`.

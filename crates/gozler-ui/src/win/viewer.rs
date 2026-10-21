@@ -1,11 +1,10 @@
-//! The Viewer's Win32 parts (file-manager-spec.md: The Viewer): the area
-//! that shows the file's rows, and the thread that reads the file. The
-//! thread reads the blocks the window asks for, one at a time, and the
-//! window never joins or waits for it, because a network share that stopped
-//! answering can hold a read for a minute: closing the Viewer ends the
-//! thread with its stop signal and `CancelSynchronousIo`, as a panel's
-//! reading is ended ([`super::folder`]), and the thread wakes the window
-//! only while the window is open.
+//! The Viewer's Win32 parts (DESIGN.md: The Viewer): the area that shows the
+//! file's rows, and the thread that reads the file. The thread reads the blocks
+//! the window asks for, one at a time, and the window never joins or waits for
+//! it, because a network share that stopped answering can hold a read for a
+//! minute: closing the Viewer ends the thread with its stop signal and
+//! `CancelSynchronousIo`, as a panel's reading is ended ([`super::folder`]),
+//! and the thread wakes the window only while the window is open.
 //!
 //! The file's handle is registered for the removal of its drive, so Windows
 //! asks before Safely Remove takes the drive, and the window then closes
@@ -412,7 +411,6 @@ impl Drop for FileReader {
     /// answering waits for the share.
     fn drop(&mut self) {
         self.stop.stop();
-        self.requests = None;
         let (file, notification) = {
             let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
             (held.file.take(), held.notification.take())
