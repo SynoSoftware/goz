@@ -12,6 +12,13 @@
 ; init_service_tracing in service.rs writes.
 #define AppFolder "{autopf}\Gozler"
 #define LogFolder "{win}\Logs\Gozler"
+; The window's single-instance mutex, window class and exit request, and the
+; answer that it exits: INSTANCE_MUTEX, WINDOW_CLASS, EXIT_MESSAGE and
+; EXIT_CLOSES in gozler-ui's app module.
+#define InstanceMutex "Local\gozler.ui"
+#define WindowClass "gozler.ui"
+#define ExitMessage "gozler.ui.exit"
+#define ExitCloses 1
 
 [Setup]
 AppId=gozler
@@ -28,10 +35,6 @@ DefaultDirName={#AppFolder}
 UsePreviousAppDir=no
 ; Installing the service and the machine PATH entry needs administrator rights.
 PrivilegesRequired=admin
-; The window's single-instance mutex, INSTANCE_MUTEX in gozler-ui's app
-; module. A running window locks gozler-ui.exe and does not exit when the
-; Restart Manager asks it to, so setup and uninstall ask the person to exit it.
-AppMutex=Local\gozler.ui
 ; The x86 setup engine is smaller; the installed binaries stay x64.
 SetupArchitecture=x86
 ArchitecturesAllowed=x64compatible
@@ -52,7 +55,6 @@ ChangesEnvironment=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-SetupAppRunningError=Gozler is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to exit Setup.
 UninstallAppRunningError=Gozler is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
 
 [CustomMessages]
@@ -64,6 +66,7 @@ CleanupText=For each program you select, Setup deletes its files and removes its
 CleanGoz=Remove goz from %1
 CleanOldGozler=Remove the other copy of Gozler from %1
 CleaningUp=Finishing installation...
+WindowStays=Gozler is still running, so Setup can't replace it.%n%nExit Gozler, then select Back and Install again.
 GozFailed=Setup couldn't remove goz (error code %1).%n%nTo remove goz's service, open a terminal as administrator and run:%n  pushd "%2"%n  .\gozd.exe uninstall%n%nIf the command succeeds, delete goz.exe and gozd.exe from that folder.
 
 [Files]
@@ -91,6 +94,8 @@ Type: filesandordirs; Name: "{#LogFolder}"
 [Code]
 const
   EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+  SMTO_ABORTIFHUNG = 2;
+  SMTO_NOTIMEOUTIFNOTHUNG = 8;
 
 type
   // A goz or an earlier gozler that people run: one that a service runs or
@@ -356,10 +361,64 @@ begin
     Log(Format('Could not rename %s%s to %s', [ExtractFilePath(Folder), Actual, Folder]));
 end;
 
+function RegisterWindowMessage(Name: String): Cardinal;
+  external 'RegisterWindowMessageW@user32.dll stdcall';
+function SendMessageTimeout(Window: HWND; Msg: Cardinal; WParam, LParam: Longint;
+  Flags, Timeout: Cardinal; var Answer: Longint): Longint;
+  external 'SendMessageTimeoutW@user32.dll stdcall';
+function GetWindowThreadProcessId(Window: HWND; var ProcessId: Cardinal): Cardinal;
+  external 'GetWindowThreadProcessId@user32.dll stdcall';
+function AllowSetForegroundWindow(ProcessId: Cardinal): BOOL;
+  external 'AllowSetForegroundWindow@user32.dll stdcall';
+
+// A running window locks gozler-ui.exe and does not exit when the Restart
+// Manager asks it to. So this asks it to exit as File > Exit does, the
+// request a start of another build sends (DESIGN.md: Window lifetime): it
+// exits at once, or asks the person first while file operations run. True
+// when no window runs any more.
+function CloseWindow: Boolean;
+var
+  Window: HWND;
+  ProcessId: Cardinal;
+  Answer: Longint;
+  Waited: Integer;
+begin
+  Window := FindWindowByClassName('{#WindowClass}');
+  if Window <> 0 then
+  begin
+    // Lets the window and its Exit question come in front of the setup.
+    GetWindowThreadProcessId(Window, ProcessId);
+    AllowSetForegroundWindow(ProcessId);
+    // No timeout while the window answers other messages, so the person can
+    // take their time over the Exit question.
+    if (SendMessageTimeout(Window, RegisterWindowMessage('{#ExitMessage}'), 0, 0,
+      SMTO_ABORTIFHUNG or SMTO_NOTIMEOUTIFNOTHUNG, 5000, Answer) <> 0) and
+      (Answer = {#ExitCloses}) then
+    begin
+      // The process holds the mutex until it has joined its threads, which
+      // can take longer than its window.
+      Waited := 0;
+      while CheckForMutexes('{#InstanceMutex}') and (Waited < 10000) do
+      begin
+        Sleep(100);
+        Waited := Waited + 100;
+      end;
+    end;
+  end;
+  Result := not CheckForMutexes('{#InstanceMutex}');
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
 begin
+  // Gozler closes when the person selects Install, not when Setup starts. A
+  // failure here keeps Back, so the person can exit Gozler and try again.
+  if not CloseWindow then
+  begin
+    Result := CustomMessage('WindowStays');
+    exit;
+  end;
   // The running daemon locks gozlerd.exe, and "gozlerd install" does not
   // restart a service that already runs, so stop it before the files change.
   // net.exe waits for the stop; its error when nothing runs is expected.
@@ -416,6 +475,13 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  // After the person confirms the uninstall. Abort ends it without a
+  // message.
+  if CurUninstallStep = usAppMutexCheck then
+    while not CloseWindow do
+      if SuppressibleMsgBox(SetupMessage(msgUninstallAppRunningError), mbError,
+        MB_OKCANCEL, IDCANCEL) <> IDOK then
+        Abort;
   if CurUninstallStep = usUninstall then
   begin
     RemoveFolderFromPath(HKLM, EnvironmentKey, ExpandConstant('{app}'));

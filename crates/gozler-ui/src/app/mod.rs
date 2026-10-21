@@ -33,8 +33,10 @@ const WINDOW_CLASS: &str = "gozler.ui";
 /// Asks the first window to come forward with the search box focused.
 const SHOW_MESSAGE: &str = "gozler.ui.show";
 /// Asks the first window to exit as File > Exit does, for a start of
-/// another program. It answers [`EXIT_CLOSES`] or [`EXIT_STAYS`]; a build
-/// from before this message answers 0.
+/// another program and for the setup and uninstaller. It answers
+/// [`EXIT_CLOSES`] or [`EXIT_STAYS`]; a build from before this message
+/// answers 0. `installer\Setup.iss` repeats this name, [`INSTANCE_MUTEX`],
+/// [`WINDOW_CLASS`] and [`EXIT_CLOSES`].
 const EXIT_MESSAGE: &str = "gozler.ui.exit";
 const EXIT_CLOSES: isize = 1;
 /// The person kept the running file operations, or a dialog is open.
