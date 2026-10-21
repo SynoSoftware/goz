@@ -231,8 +231,9 @@ BEGIN
     PUSHBUTTON      "", IDC_KEYBOARD_RESTORE, 259, 262, 50, 14
 END
 
-// Settings > Index: the drives the service indexes, what it holds and the
-// service's state. It changes nothing until the service settings plan.
+// Settings > Index: the drives the service indexes, what it holds, the
+// service's state, and Rebuild, which has the service read every drive
+// again.
 IDD_SETTINGS_INDEX DIALOGEX 0, 0, 309, 276
 STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -256,6 +257,7 @@ BEGIN
     LTEXT           "", IDC_INDEX_BESIDE_PATH, 98, 210, 204, 8, SS_NOPREFIX | SS_PATHELLIPSIS | SS_NOTIFY
     LTEXT           "", IDC_INDEX_BESIDE_BUILD, 98, 220, 204, 8, SS_NOPREFIX | SS_ENDELLIPSIS
     LTEXT           "", IDC_INDEX_NOTE, 7, 232, 295, 16, SS_NOPREFIX
+    PUSHBUTTON      "", IDC_INDEX_REBUILD, 7, 256, 50, 14, WS_DISABLED
     PUSHBUTTON      "", IDC_INDEX_USE_LOCAL, 144, 256, 50, 14, WS_DISABLED
     PUSHBUTTON      "", IDC_INDEX_FIX, 198, 256, 50, 14, WS_DISABLED
     PUSHBUTTON      "", IDC_INDEX_REPORT, 252, 256, 50, 14

@@ -55,6 +55,9 @@ pub(crate) fn run() {
         // The copy that Settings starts as administrator saves and exits.
         std::process::exit(include::save_as_administrator(file));
     }
+    if arguments.rebuild_index {
+        std::process::exit(include::rebuild_as_administrator());
+    }
     let data_dir = arguments.data_dir.clone().unwrap_or_else(|| {
         win::shell::local_app_data()
             .expect("Windows names the local application data folder")
@@ -203,9 +206,10 @@ fn reset_and_start_again(data_dir: &Path, given_data_dir: Option<&Path>) {
 
 /// The command line: `--data-dir <folder>`, `--sign-in`, which the `Run`
 /// value passes, `--location <folder>`, which starts the search in that folder
-/// (DESIGN.md: Window lifetime), and `--save-include
-/// <file>`, which Settings passes to the copy it runs as administrator
-/// (DESIGN.md: The Include page).
+/// (DESIGN.md: Window lifetime), and `--save-include <file>` and
+/// `--rebuild-index`, which Settings passes to the copy it runs as
+/// administrator (DESIGN.md: The Include page, The Drives and service
+/// page).
 struct Arguments {
     /// The folder of `ui.json` and `ui-error.log`; without it, `run` uses
     /// `%LOCALAPPDATA%\Gozler`.
@@ -215,6 +219,7 @@ struct Arguments {
     /// The Include settings to save, which Settings writes to this file
     /// before it starts this copy as administrator.
     save_include: Option<PathBuf>,
+    rebuild_index: bool,
 }
 
 impl Arguments {
@@ -224,6 +229,7 @@ impl Arguments {
             sign_in: false,
             location: None,
             save_include: None,
+            rebuild_index: false,
         };
         let mut args = std::env::args_os().skip(1);
         while let Some(arg) = args.next() {
@@ -233,6 +239,8 @@ impl Arguments {
                 arguments.sign_in = true;
             } else if arg == include::SAVE_ARGUMENT {
                 arguments.save_include = args.next().map(PathBuf::from);
+            } else if arg == include::REBUILD_ARGUMENT {
+                arguments.rebuild_index = true;
             } else if arg == "--location" {
                 arguments.location = args
                     .next()

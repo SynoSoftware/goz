@@ -1,11 +1,12 @@
-//! The Include settings the service applies. An administrator saves them in
-//! the registry, where only administrators and the system can write, so the
-//! service trusts what it reads there and needs no check of its own on who
-//! asked it to read them (`Request::SettingsSaved`).
+//! The Include settings the service applies, and the rebuilds asked of it.
+//! An administrator saves both in the registry, where only administrators
+//! and the system can write, so the service trusts what it reads there and
+//! needs no check of its own on who asked it to read them
+//! (`Request::SettingsSaved`).
 
 use std::sync::Arc;
 
-use gozler_core::include::{INCLUDE_VALUE, IncludeSettings, SETTINGS_KEY};
+use gozler_core::include::{INCLUDE_VALUE, IncludeSettings, REBUILD_VALUE, SETTINGS_KEY};
 use gozler_core::proto::LeftOutVolume;
 use parking_lot::Mutex;
 
@@ -25,21 +26,49 @@ pub(crate) fn read_saved() -> IncludeSettings {
     }
 }
 
+/// The token of the latest rebuild an administrator asked for, `None` when
+/// none was asked or it cannot be read.
+pub(crate) fn read_rebuild() -> Option<String> {
+    gozler_winfs::machine_string(SETTINGS_KEY, REBUILD_VALUE).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "could not read whether a rebuild was asked for");
+        None
+    })
+}
+
 /// The settings the service applies and the volumes they leave out, shared
 /// by the supervisor, which applies them, and the pipe server, which reports
 /// them and reads them again.
 pub(crate) struct Include {
     applied: Mutex<Arc<IncludeSettings>>,
     left_out: Mutex<Vec<LeftOutVolume>>,
-    /// Tells the supervisor that [`Self::applied`] changed.
+    rebuild: Mutex<Rebuild>,
+    /// Tells the supervisor that [`Self::applied`] changed or a rebuild was
+    /// asked for.
     wake: Box<dyn Fn() + Send + Sync>,
 }
 
+struct Rebuild {
+    /// The token read last, so only a new one asks for a rebuild.
+    seen: Option<String>,
+    /// A new token was read and the supervisor has not taken it.
+    asked: bool,
+}
+
 impl Include {
-    pub(crate) fn new(applied: IncludeSettings, wake: Box<dyn Fn() + Send + Sync>) -> Self {
+    /// `rebuild` is the token saved when the service started, which asks
+    /// for nothing, because a start builds every volume anyway.
+    pub(crate) fn new(
+        applied: IncludeSettings,
+        rebuild: Option<String>,
+        wake: Box<dyn Fn() + Send + Sync>,
+    ) -> Self {
         Include {
             applied: Mutex::new(Arc::new(applied)),
             left_out: Mutex::new(Vec::new()),
+            rebuild: Mutex::new(Rebuild {
+                seen: rebuild,
+                asked: false,
+            }),
             wake,
         }
     }
@@ -58,18 +87,38 @@ impl Include {
         *self.left_out.lock() = volumes;
     }
 
-    /// Reads the saved settings and, when they differ from the applied
-    /// ones, has the supervisor apply them.
+    /// Whether a rebuild was asked for since the last call.
+    pub(crate) fn take_rebuild(&self) -> bool {
+        std::mem::take(&mut self.rebuild.lock().asked)
+    }
+
+    /// Reads the saved settings and the rebuild token, and has the
+    /// supervisor apply settings that differ from the applied ones and
+    /// rebuild for a token it has not seen.
     pub(crate) fn reload(&self) {
         let saved = read_saved();
-        {
+        let changed = {
             let mut applied = self.applied.lock();
-            if **applied == saved {
-                return;
+            let changed = **applied != saved;
+            if changed {
+                tracing::info!("the Include settings changed; applying them");
+                *applied = Arc::new(saved);
             }
-            tracing::info!("the Include settings changed; applying them");
-            *applied = Arc::new(saved);
+            changed
+        };
+        let token = read_rebuild();
+        let asked = {
+            let mut rebuild = self.rebuild.lock();
+            let asked = token.is_some() && token != rebuild.seen;
+            if asked {
+                tracing::info!("a rebuild of the index was asked for");
+                rebuild.seen = token;
+                rebuild.asked = true;
+            }
+            asked
+        };
+        if changed || asked {
+            (self.wake)();
         }
-        (self.wake)();
     }
 }

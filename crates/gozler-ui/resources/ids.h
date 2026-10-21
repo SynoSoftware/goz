@@ -257,6 +257,7 @@
 #define IDC_INDEX_DRIVES_GROUP_ICON 1818
 #define IDC_INDEX_HOLDS_GROUP_ICON 1819
 #define IDC_INDEX_SERVICE_GROUP_ICON 1820
+#define IDC_INDEX_REBUILD 1821
 
 // Settings > Include: what the service indexes.
 #define IDD_SETTINGS_INCLUDE 111

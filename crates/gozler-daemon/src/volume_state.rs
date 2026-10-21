@@ -59,18 +59,29 @@ pub(crate) struct VolumeState {
     pub filesystem: Filesystem,
     indexed: RwLock<Indexed>,
     phase: RwLock<VolumePhase>,
-    /// The Include rules a build of the volume applies, and whether they
-    /// changed since the last build began or the tail last took them, so the
-    /// index does not apply them yet. Never held with another lock.
+    /// The Include rules a build of the volume applies, and what the index
+    /// owes since the last build began or the tail last took it. Never held
+    /// with another lock.
     rules: Mutex<Rules>,
 }
 
 struct Rules {
     rules: Arc<VolumeRules>,
-    changed: bool,
-    /// A new tail was started to build the volume for changed rules, and no
-    /// build has begun since, so the index follows older ones.
-    unapplied: bool,
+    next: Owed,
+    /// What a new tail was started to build the volume for, and no build
+    /// has begun since: `Owed::Rules` means the index follows older rules.
+    unbuilt: Owed,
+}
+
+/// What a volume's index owes beyond the journal's changes, each owing more
+/// than the one before, because a build applies the rules too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Owed {
+    Nothing,
+    /// Include rules that the index does not apply yet.
+    Rules,
+    /// A build, which an administrator asked for.
+    Build,
 }
 
 /// An index and the facts of the build that made it, installed together.
@@ -169,8 +180,8 @@ impl VolumeState {
             phase: RwLock::new(VolumePhase::Bootstrapping),
             rules: Mutex::new(Rules {
                 rules,
-                changed: false,
-                unapplied: false,
+                next: Owed::Nothing,
+                unbuilt: Owed::Nothing,
             }),
         }
     }
@@ -186,35 +197,38 @@ impl VolumeState {
     pub(crate) fn set_rules(&self, rules: Arc<VolumeRules>) {
         let mut slot = self.rules.lock();
         if rules.adds_to(&slot.rules) || slot.rules.adds_to(&rules) {
-            *slot = Rules {
-                rules,
-                changed: true,
-                unapplied: slot.unapplied,
-            };
+            slot.rules = rules;
+            slot.next = slot.next.max(Owed::Rules);
         }
     }
 
-    /// The rules set since the last call or the last build began, which the
-    /// index does not apply yet.
-    pub(crate) fn take_new_rules(&self) -> Option<Arc<VolumeRules>> {
-        let mut slot = self.rules.lock();
-        std::mem::take(&mut slot.changed).then(|| slot.rules.clone())
+    /// Has the volume's tail rebuild its index at its next turn, with the
+    /// rules set by then.
+    pub(crate) fn request_build(&self) {
+        self.rules.lock().next = Owed::Build;
     }
 
-    /// Takes the rules set since the last build began, for the build of a
-    /// new tail, which a volume without a running tail needs to apply them:
-    /// a snapshot, or one given up on. Until that build begins, the volume
-    /// reads as not complete, because its index follows the old rules. Call
-    /// it only when no tail runs.
-    pub(crate) fn take_rules_for_rebuild(&self) -> bool {
+    /// What the index owes since the last call or the last build began.
+    pub(crate) fn take_owed(&self) -> Owed {
+        std::mem::replace(&mut self.rules.lock().next, Owed::Nothing)
+    }
+
+    /// Takes what the index owes since the last build began, for the build
+    /// of a new tail, which a volume without a running tail needs: a
+    /// snapshot, or one given up on. Until that build begins, the volume
+    /// reads as not complete, because its index follows the old rules or is
+    /// one an administrator no longer trusts. Call it only when no tail
+    /// runs.
+    pub(crate) fn take_owed_for_new_tail(&self) -> bool {
         {
             let mut slot = self.rules.lock();
-            if !std::mem::take(&mut slot.changed) {
+            let owed = std::mem::replace(&mut slot.next, Owed::Nothing);
+            if owed == Owed::Nothing {
                 return false;
             }
-            slot.unapplied = true;
+            slot.unbuilt = owed;
         }
-        self.apply(Event::RulesChanged);
+        self.apply(Event::BuildOwed);
         true
     }
 
@@ -295,8 +309,8 @@ impl VolumeState {
     pub(crate) fn begin_build(&self) -> Building<'_> {
         {
             let mut slot = self.rules.lock();
-            slot.changed = false;
-            slot.unapplied = false;
+            slot.next = Owed::Nothing;
+            slot.unbuilt = Owed::Nothing;
         }
         let first = !self.indexed.read().built;
         self.apply(Event::BuildStarted { first });
@@ -332,11 +346,11 @@ impl VolumeState {
     /// it only after the tail's pulse reads `Retired`, or when no tail
     /// started.
     pub(crate) fn give_up(&self, last_failure: Option<&str>, attempts: u32) {
-        let rules_unapplied = self.rules.lock().unapplied;
+        let unbuilt = self.rules.lock().unbuilt;
         self.apply(Event::GaveUp {
             last_failure,
             attempts,
-            rules_unapplied,
+            unbuilt,
         });
     }
 
@@ -369,8 +383,8 @@ impl VolumeState {
             phase: RwLock::new(phase),
             rules: Mutex::new(Rules {
                 rules: Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
-                changed: false,
-                unapplied: false,
+                next: Owed::Nothing,
+                unbuilt: Owed::Nothing,
             }),
         }
     }
@@ -398,13 +412,14 @@ enum Event<'a> {
     Failed(String),
     TailRetired,
     /// A new tail starts to build a volume that no tail ran, for changed
-    /// Include rules.
-    RulesChanged,
+    /// Include rules or a rebuild asked for.
+    BuildOwed,
     GaveUp {
         last_failure: Option<&'a str>,
         attempts: u32,
-        /// The tails started for changed Include rules never began a build.
-        rules_unapplied: bool,
+        /// What the tails were started to build, when none began the
+        /// build.
+        unbuilt: Owed,
     },
 }
 
@@ -440,12 +455,13 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         // hardware cannot extend a false Live indefinitely.
         (Live | Rescanning, Event::TailRetired) => Offline,
         (Bootstrapping | Offline | Failed { .. } | Snapshot, Event::TailRetired) => phase.clone(),
-        // The index follows the old Include rules until the new tail's build
-        // begins, so the results are flagged incomplete until then, as a
-        // built volume that nothing tails. A volume never indexed or given
-        // up on already reads as incomplete.
-        (Snapshot, Event::RulesChanged) => Offline,
-        (Bootstrapping | Failed { .. }, Event::RulesChanged) => phase.clone(),
+        // The index follows the old Include rules, or is one an
+        // administrator no longer trusts, until the new tail's build begins,
+        // so the results are flagged incomplete until then, as a built
+        // volume that nothing tails. A volume never indexed or given up on
+        // already reads as incomplete.
+        (Snapshot, Event::BuildOwed) => Offline,
+        (Bootstrapping | Failed { .. }, Event::BuildOwed) => phase.clone(),
         // The tail never started or never finished the first build. Without
         // Failed the volume would claim to be indexing forever.
         (Bootstrapping, Event::GaveUp { last_failure, .. }) => Failed {
@@ -459,19 +475,40 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         (Live | Rescanning, Event::GaveUp { .. }) => Failed {
             reason: "tail thread kept dying; live updates stopped".into(),
         },
-        // The tails started to apply changed Include settings never built
-        // the volume, so its index still follows the old ones.
+        // The tails started for a build owed never built the volume, so its
+        // index still follows the old Include settings, or is the one an
+        // administrator asked to rebuild.
         (
             Offline,
             Event::GaveUp {
                 last_failure,
-                rules_unapplied: true,
+                unbuilt: Owed::Rules,
                 ..
             },
         )
-        | (Snapshot, Event::GaveUp { last_failure, .. }) => Failed {
+        | (
+            Snapshot,
+            Event::GaveUp {
+                last_failure,
+                unbuilt: Owed::Nothing | Owed::Rules,
+                ..
+            },
+        ) => Failed {
             reason: format!(
                 "the changed Include settings were not applied: {}",
+                last_failure.unwrap_or("its tail kept stopping")
+            ),
+        },
+        (
+            Offline | Snapshot,
+            Event::GaveUp {
+                last_failure,
+                unbuilt: Owed::Build,
+                ..
+            },
+        ) => Failed {
+            reason: format!(
+                "the rebuild asked for did not run: {}",
                 last_failure.unwrap_or("its tail kept stopping")
             ),
         },
@@ -519,7 +556,7 @@ impl VolumeRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{Indexed, VolumeState};
+    use super::{Indexed, Owed, VolumeState};
     use crate::bootstrap::{BuiltIndex, Filesystem, JournalSetup};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::types::{Frn, VolumePhase};
@@ -670,7 +707,7 @@ mod tests {
             volume
         };
         let volume = snapshot();
-        assert!(volume.take_rules_for_rebuild());
+        assert!(volume.take_owed_for_new_tail());
         assert!(!volume.read().phase().is_complete());
         volume.tail_retired();
         assert!(!volume.phase().is_complete(), "a start that failed");
@@ -683,11 +720,38 @@ mod tests {
         );
 
         let volume = snapshot();
-        assert!(volume.take_rules_for_rebuild());
+        assert!(volume.take_owed_for_new_tail());
         let rebuild = volume.begin_build();
         rebuild.finish(built(1, false), &JournalSetup::Refused);
         assert_eq!(volume.phase(), VolumePhase::Snapshot);
-        assert!(!volume.take_rules_for_rebuild(), "the build applied them");
+        assert!(!volume.take_owed_for_new_tail(), "the build applied them");
+    }
+
+    /// A rules change and a rebuild that arrive together must cause one
+    /// build, whichever comes first: a rules change after a rebuild that
+    /// lowered what is owed to the rules would apply them in place and skip
+    /// the rebuild that an administrator asked for.
+    #[test]
+    fn a_rebuild_and_a_rules_change_owe_one_build() {
+        let indexed = Indexed {
+            index: VolumeIndex::new(NTFS_ROOT_FRN),
+            metadata_pending: false,
+            journal_max_bytes: None,
+            built: true,
+        };
+        let volume = VolumeState::in_state(r"D:\", indexed, VolumePhase::Live);
+        let hidden = gozler_core::include::IncludeSettings {
+            exclude_hidden: true,
+            ..Default::default()
+        };
+        volume.request_build();
+        volume.set_rules(Arc::new(hidden.rules_for("")));
+        assert_eq!(volume.take_owed(), Owed::Build);
+        assert_eq!(volume.take_owed(), Owed::Nothing);
+
+        volume.request_build();
+        let _ = volume.begin_build();
+        assert_eq!(volume.take_owed(), Owed::Nothing, "the build began");
     }
 
     /// A volume whose first build failed was still never indexed, so the

@@ -1,22 +1,22 @@
 # Service settings
 
-This plan adds the three service settings that the window does not have
-yet, all on the Drives and service page:
+This plan adds the two service settings that the window does not have
+yet, both on the Drives and service page:
 
 - Users and groups who see every file, a list, which the
   [visibility plan](visibility-plan.md) stores;
 - Dates created, a check box, which adds the Date created column and the
-  `dc:` search function;
-- Rebuild index, a button.
+  `dc:` search function.
 
-The last two each need a service request that does not exist yet.
+Rebuild index, the page's third, is built: `docs/DESIGN.md` describes it in
+"Include settings" and "The Drives and service page".
 
 **Stages.** The list is its own stage, the visibility plan's stage 3. It
 starts at once and lands right after that plan's stage 2, ahead of Dates
-created and Rebuild index, because the public release that turns the
+created, because the public release that turns the
 visibility filter on for the other users of a shared PC also carries the
 page where an administrator changes who sees every file (visibility plan,
-"Schedule"). Dates created and Rebuild index follow, scheduled after the
+"Schedule"). Dates created follows, scheduled after the
 Include page, which `docs/DESIGN.md` now describes ("Include settings" and
 "The Include page").
 
@@ -27,13 +27,12 @@ a restart. OK and Apply save every changed service setting through one
 elevated copy of the window, as `gozler-ui --save-include` saves Include
 today, which then writes each changed value; so a setting adds a value or,
 like Dates created, a field of the `Include` value, never a save path of its
-own. The plan owns how a request that acts at once,
-such as Rebuild index, proves that an administrator sent it.
+own.
 
 The approved prototype of these screens, with their English words, is in git
 history: `git show b43f935:docs/plans/ui-prototype.html`, a page that opens in
 a browser. Its Settings dialog shows the Index page, now Drives and service,
-with both controls.
+with Dates created and Rebuild index.
 
 ## The Drives and service page
 
@@ -53,15 +52,9 @@ with both controls.
   service. The page shows the service's memory, so the person sees the cost
   after they turn it on. It is a search feature, so `gozler` gets `dc:` in the
   same change, because the window adds no search feature that `gozler` lacks.
-- **Rebuild index** makes the service read every included drive again, as
-  after a restart. It acts at once, so the button itself has the
-  administrator shield and asks Windows for permission. It is for an index
-  the person no longer trusts; the service keeps itself current without it.
-  While it runs, the drives show "indexing" and searches give incomplete
-  results, as the status bar's service group says.
 
-They take over two of Everything's options, on its Indexes page: Force
-Rebuild becomes Rebuild index, and Index date created becomes Dates created.
+Dates created takes over Everything's Index date created, on its Indexes
+page, as Rebuild index took over Force Rebuild.
 
 ## How the service applies Dates created
 
@@ -94,35 +87,6 @@ changes.
 the setting, as a scope on no indexed volume is refused: an empty answer
 would read as "no such file". It is not the parser's "unknown function"
 (exit 4), because the function exists.
-
-## How the service runs Rebuild index
-
-- **The request goes to the supervisor,** which asks each volume's tail for a
-  new build between journal batches, as it gives a tail changed Include
-  rules, and starts a tail for a volume without one: a snapshot volume, or
-  one it gave up on, which gets a new revival budget, as after a restart.
-  The route for changed Include rules already does this
-  (`Fleet::apply_settings`).
-- **The build is a `RescanReason` of its own** that does not count against
-  the rescan budget (`MAX_RESCANS`), as the build for changed Include rules
-  does not, because the person asked for it.
-- **One value says what the next build must do,** next to the rules in
-  `VolumeState`, and `VolumeState::begin_build` clears it, as it clears the
-  changed-rules flag. So a rules change and a rebuild that arrive together
-  cause one build, and a request that arrives during a build causes one more.
-- **The administrator check** can use the visibility plan's
-  `pipe_client_token` when this lands after that plan's stage 2; before it,
-  this plan needs its own way to read the caller.
-- **The journal read policy.** This change edits `tail_loop` anyway, so it
-  may also move `ReadFailures` into a type of its own that takes the time
-  (`now: Instant`) and returns what to do: retry after a sleep, and whether
-  this failure crossed the degrade line, or escalate. The loop keeps the log
-  lines and the state calls. Its tests replace
-  `retry_policy_is_bounded_and_degrades`, which pins only constants: 15 s of
-  failures never escalate, failures past 30 s escalate, recovery is reported
-  only after a degrade, and the backoff stops at its cap. On its own the move
-  is not worth a change, because the loop is its only caller and the policy
-  works.
 
 ## The Date created column
 

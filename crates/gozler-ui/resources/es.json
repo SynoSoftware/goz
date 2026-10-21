@@ -572,7 +572,10 @@
     "same_as_service": "La misma compilación que el programa del servicio",
     "running_memory": "El servicio se está ejecutando y usa {0} de memoria.",
     "no_drives": "No se pueden mostrar las unidades mientras el servicio no responda.",
-    "report": "&Informe"
+    "report": "&Informe",
+    "rebuild": "Re&construir",
+    "rebuild_tooltip": "El servicio vuelve a leer todas las unidades indexadas y crea un índice nuevo. Las búsquedas dan resultados incompletos hasta que termine.",
+    "not_rebuilt": "No se pudo reconstruir el índice. {0}"
   },
   "settings_include": {
     "admin_note": "Esta configuración se aplica a todos en este equipo. Necesitarás permiso de administrador para cambiarla.",

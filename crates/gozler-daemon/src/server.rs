@@ -711,7 +711,7 @@ mod tests {
 
     /// The default Include settings, which keep everything.
     fn defaults() -> Include {
-        Include::new(IncludeSettings::default(), Box::new(|| {}))
+        Include::new(IncludeSettings::default(), None, Box::new(|| {}))
     }
 
     /// A Snapshot volume must NOT taint results.

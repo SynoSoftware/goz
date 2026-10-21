@@ -30,6 +30,11 @@ pub const SETTINGS_KEY: &str = r"SOFTWARE\Gozler";
 /// The value of [`SETTINGS_KEY`] that holds [`IncludeSettings`] as JSON.
 pub const INCLUDE_VALUE: &str = "Include";
 
+/// The value of [`SETTINGS_KEY`] that the window's Rebuild index sets to a
+/// new token each time an administrator asks; gozlerd rebuilds every
+/// indexed volume when it reads a token it has not seen.
+pub const REBUILD_VALUE: &str = "Rebuild";
+
 /// What gozlerd indexes, as the Include page edits it. A field that is
 /// missing takes its default, so the defaults index everything.
 ///

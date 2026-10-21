@@ -10,7 +10,8 @@
 //! volumes that are gone, so a query never silently leaves out an attached
 //! volume. A volume that the Include settings leave out is not indexed; when
 //! the settings change, the supervisor wakes at once and brings the volumes
-//! and each volume's rules in step with them.
+//! and each volume's rules in step with them. A rebuild an administrator
+//! asks for wakes it the same way.
 //!
 //! For each tail it reads the [`Pulse`] and gives one of three verdicts, one
 //! per pulse state:
@@ -161,9 +162,10 @@ fn accrue_health(
     }
 }
 
-/// What wakes the scan sleep: shutdown, and new Include settings. Teardown
-/// and [`Include::reload`] set their flag under the mutex and wake the
-/// condvar, so neither waits out a full [`SCAN_INTERVAL`].
+/// What wakes the scan sleep: shutdown, and new Include settings or a
+/// rebuild asked for. Teardown and [`Include::reload`] set their flag under
+/// the mutex and wake the condvar, so neither waits out a full
+/// [`SCAN_INTERVAL`].
 struct StopFlag {
     signals: Mutex<Signals>,
     wake: Condvar,
@@ -189,11 +191,13 @@ impl Supervisor {
     /// machine's volumes at startup, that `include` does not leave out, and
     /// starts the supervision thread. Returns as soon as each of those volumes
     /// is in [`Supervisor::volumes`] as `Bootstrapping`, so queries are
-    /// answered, flagged incomplete, while the volumes index. Fails only when
-    /// the OS refuses the thread; nothing would index the volumes then.
+    /// answered, flagged incomplete, while the volumes index. `rebuild` is
+    /// the rebuild token saved at startup ([`Include::new`]). Fails only
+    /// when the OS refuses the thread; nothing would index the volumes then.
     pub(crate) fn spawn(
         enumerated: Vec<VolumeInfo>,
         include: IncludeSettings,
+        rebuild: Option<String>,
     ) -> std::io::Result<Supervisor> {
         let volumes = Arc::new(VolumeRegistry::default());
         let stop = Arc::new(StopFlag {
@@ -203,6 +207,7 @@ impl Supervisor {
         let woken = stop.clone();
         let include = Arc::new(Include::new(
             include,
+            rebuild,
             Box::new(move || {
                 woken.signals.lock().settings_changed = true;
                 woken.wake.notify_all();
@@ -292,8 +297,8 @@ struct Fleet {
     enumerated: Vec<VolumeInfo>,
     /// The indexed volumes that have a tail or may get one. A volume leaves
     /// this list, and stays indexed, when its tail is given up on or when it
-    /// is a snapshot, which needs no tail. Changed Include settings bring it
-    /// back ([`Fleet::apply_settings`]).
+    /// is a snapshot, which needs no tail. Changed Include settings or a
+    /// rebuild bring it back ([`Fleet::start_owed_tail`]).
     supervised: Vec<Supervised>,
     /// Volumes found that gozler does not index, each logged once.
     skipped: HashSet<String>,
@@ -389,15 +394,32 @@ impl Fleet {
         let settings = self.include.applied();
         for state in self.volumes.current().iter() {
             state.set_rules(Arc::new(settings.rules_for(&state.guid)));
-            if !self.supervised.iter().any(|s| s.state.guid == state.guid)
-                && state.take_rules_for_rebuild()
-            {
-                tracing::info!(
-                    volume = %state.mount_prefix(),
-                    "the Include settings changed; indexing the volume again"
-                );
-                self.supervised.push(Supervised::start(state.clone()));
-            }
+            self.start_owed_tail(
+                state,
+                "the Include settings changed; indexing the volume again",
+            );
+        }
+    }
+
+    /// Rebuilds every indexed volume, as an administrator asked: a running
+    /// tail rebuilds its volume at its next turn, and a volume without one
+    /// gets a new tail, as for changed Include settings.
+    fn rebuild_all(&mut self) {
+        for state in self.volumes.current().iter() {
+            state.request_build();
+            self.start_owed_tail(state, "a rebuild was asked for; indexing the volume again");
+        }
+    }
+
+    /// Starts a tail for a volume that has none and whose index owes a
+    /// build or new rules, with a new revival budget, as after a restart;
+    /// `why` is the log line.
+    fn start_owed_tail(&mut self, state: &Arc<VolumeState>, why: &str) {
+        if !self.supervised.iter().any(|s| s.state.guid == state.guid)
+            && state.take_owed_for_new_tail()
+        {
+            tracing::info!(volume = %state.mount_prefix(), "{why}");
+            self.supervised.push(Supervised::start(state.clone()));
         }
     }
 
@@ -627,6 +649,9 @@ fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
             // Only the settings: scanning early would cut short the grace a
             // starting tail gets before its first poll.
             fleet.apply_settings();
+            if fleet.include.take_rebuild() {
+                fleet.rebuild_all();
+            }
             continue;
         }
         let now = awake_secs();
@@ -741,20 +766,20 @@ impl Supervised {
             .as_ref()
             .map_or(Pulse::Retired, |t| t.pulse.load());
         let phase = self.state.phase();
-        // Without a tail, a start for changed Include settings failed, and
-        // it is retried as any start is.
+        // Without a tail, a start for a build owed failed, and it is
+        // retried as any start is.
         if pulse == Pulse::Retired && phase == VolumePhase::Snapshot && self.tail.is_some() {
             // The tail built the index and found that the volume has no
             // journal and never will: the index is complete and there is
             // nothing to tail, so reviving it would only rebuild it again.
-            if !self.state.take_rules_for_rebuild() {
+            if !self.state.take_owed_for_new_tail() {
                 return false;
             }
-            // Unless the Include settings changed during the build, which
-            // applied the old ones.
+            // Unless the Include settings changed or a rebuild was asked
+            // for during the build, which applied the old settings.
             tracing::info!(
                 volume = %self.state.mount_prefix(),
-                "the Include settings changed; indexing the volume again"
+                "the Include settings changed or a rebuild was asked for; indexing the volume again"
             );
             if let Some(retired) = self.tail.take() {
                 retired.shutdown();
@@ -975,6 +1000,8 @@ fn cancel_stuck_io(tail: &TailHandle, stalled_secs: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::volume_state::Indexed;
+    use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 
     const NOW: u64 = 1_752_800_000;
     fn beat_ago(secs: u64) -> Pulse {
@@ -1079,7 +1106,7 @@ mod tests {
         )));
         let mut fleet = Fleet {
             volumes: volumes.clone(),
-            include: Arc::new(Include::new(defaults, Box::new(|| {}))),
+            include: Arc::new(Include::new(defaults, None, Box::new(|| {}))),
             enumerated: Vec::new(),
             supervised: Vec::new(),
             skipped: HashSet::new(),
@@ -1125,7 +1152,7 @@ mod tests {
         };
         let mut fleet = Fleet {
             volumes,
-            include: Arc::new(Include::new(changed, Box::new(|| {}))),
+            include: Arc::new(Include::new(changed, None, Box::new(|| {}))),
             enumerated: vec![VolumeInfo {
                 guid_path: snapshot.into(),
                 mounts: vec![r"S:\".into()],
@@ -1141,6 +1168,44 @@ mod tests {
         fleet.apply_settings();
         let guids: Vec<_> = fleet.supervised.iter().map(|s| &s.state.guid).collect();
         assert_eq!(guids, [snapshot]);
+    }
+
+    /// A snapshot volume has no tail to rebuild it, so a rebuild asked for
+    /// must start one, or the index the administrator no longer trusts
+    /// stays until the daemon restarts.
+    #[test]
+    fn a_rebuild_starts_a_tail_for_a_volume_without_one() {
+        let indexed = Indexed {
+            index: VolumeIndex::new(NTFS_ROOT_FRN),
+            metadata_pending: false,
+            journal_max_bytes: None,
+            built: true,
+        };
+        let state = Arc::new(VolumeState::in_state(
+            r"S:\",
+            indexed,
+            VolumePhase::Snapshot,
+        ));
+        let volumes = Arc::new(VolumeRegistry::default());
+        volumes.add(state.clone());
+        let mut fleet = Fleet {
+            volumes,
+            include: Arc::new(Include::new(
+                IncludeSettings::default(),
+                None,
+                Box::new(|| {}),
+            )),
+            enumerated: Vec::new(),
+            supervised: Vec::new(),
+            skipped: HashSet::new(),
+            discovery: None,
+            starting: None,
+        };
+
+        fleet.rebuild_all();
+        let guids: Vec<_> = fleet.supervised.iter().map(|s| &s.state.guid).collect();
+        assert_eq!(guids, [&state.guid]);
+        assert!(!state.phase().is_complete(), "{:?}", state.phase());
     }
 
     /// A stamp newer than the scan's clock reading (a tail that beat after

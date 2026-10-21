@@ -15,8 +15,12 @@ use crate::{bootstrap, server};
 /// Each volume is `Bootstrapping` until its tail has built its index.
 pub(crate) fn start_engine() -> Result<Supervisor> {
     let enumerated = bootstrap::enumerate_all()?;
-    Supervisor::spawn(enumerated, crate::include::read_saved())
-        .context("starting the volume supervisor")
+    Supervisor::spawn(
+        enumerated,
+        crate::include::read_saved(),
+        crate::include::read_rebuild(),
+    )
+    .context("starting the volume supervisor")
 }
 
 /// Best-effort post-bootstrap memory settling, which the supervisor runs once

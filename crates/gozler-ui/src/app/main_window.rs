@@ -9,7 +9,7 @@ use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
 use super::file_operations::{FileOperations, FilesSource};
 use super::fix_thread::FixThread;
 use super::icons::Icons;
-use super::include::{NotSaved, Saving};
+use super::include::{Elevated, NotSaved, Saving};
 use super::requests::Requests;
 use super::settings::SettingsDialog;
 use super::status_bar::StatusBar;
@@ -865,9 +865,10 @@ pub(crate) struct MainWindow {
     /// The open Settings dialog, from its WM_INITDIALOG until it closes.
     settings: Cell<Option<OpenSettings>>,
     total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
-    /// The save of the Include settings while it runs.
+    /// The save of the Include settings, or the ask for a rebuild, while
+    /// it runs.
     include_saving: RefCell<Option<Saving>>,
-    /// The save's answer, once it arrived, for the Settings dialog.
+    /// Its answer, once it arrived, for the Settings dialog.
     include_saved: RefCell<Option<Result<(), NotSaved>>>,
     /// A Paste whose thread reads the clipboard.
     pasting: RefCell<Option<Pasting>>,
@@ -4921,21 +4922,19 @@ impl MainWindow {
         self.apply(hwnd, accepted);
     }
 
-    /// Starts saving the Include settings as administrator, after Windows
-    /// asks the person for permission over `hwnd`, the window (DESIGN.md:
-    /// The Include page). The Settings dialog starts no second save while
-    /// one runs.
-    pub(super) fn save_include(&self, hwnd: Hwnd, settings: IncludeSettings) {
-        let saving = Saving::start(
-            PromptOwner::new(hwnd),
-            settings,
-            self.created().waker.clone(),
-        );
+    /// Starts saving the Include settings, or asking for a rebuild of the
+    /// index, as administrator, after Windows asks the person for
+    /// permission over `hwnd`, the window (DESIGN.md: The Include page, The
+    /// Drives and service page). The Settings dialog starts no second job
+    /// while one runs.
+    pub(super) fn run_as_administrator(&self, hwnd: Hwnd, job: Elevated) {
+        let saving = Saving::start(PromptOwner::new(hwnd), job, self.created().waker.clone());
         self.include_saving.replace(Some(saving));
     }
 
-    /// Takes the save's answer once it arrived: tells the service, which
-    /// applies saved settings, and the Settings dialog.
+    /// Takes the job's answer once it arrived: tells the service, which
+    /// applies saved settings and rebuilds when asked, and the Settings
+    /// dialog.
     fn finish_include_save(&self) {
         let answer = self
             .include_saving

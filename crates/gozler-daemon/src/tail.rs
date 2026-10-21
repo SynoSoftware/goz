@@ -29,7 +29,7 @@ use gozler_winfs::{
 
 use crate::bootstrap::{self, Disk, Filesystem, JournalSetup};
 use crate::pulse::TailPulse;
-use crate::volume_state::VolumeState;
+use crate::volume_state::{Owed, VolumeState};
 
 /// Reason bits we ask the kernel to report: everything that changes a name,
 /// a hard link, or a file's size/timestamps.
@@ -73,6 +73,9 @@ enum RescanReason {
     /// The Include settings now keep entries the index left out, which only
     /// a read of the volume brings back.
     IncludeChanged,
+    /// An administrator asked for a rebuild (Rebuild index), for an index
+    /// they no longer trust.
+    Asked,
 }
 
 /// 512 KiB journal read buffer.
@@ -321,17 +324,17 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
         pulse.beat();
         // Here, between batches, so a change of the rules never races one.
         // Not a journal fault, so it costs nothing of the rescan budget.
-        if let Some(rules) = state.take_new_rules()
-            && !apply_rules_in_place(state, rules)
-        {
-            let Some(fresh) = rescan(
-                state,
-                handle,
-                pulse,
+        let owed = match state.take_owed() {
+            Owed::Nothing => None,
+            Owed::Rules if apply_rules_in_place(state, state.rules()) => None,
+            Owed::Rules => Some((
                 RescanReason::IncludeChanged,
                 "the Include settings keep entries the index left out",
-                stop,
-            ) else {
+            )),
+            Owed::Build => Some((RescanReason::Asked, "a rebuild was asked for")),
+        };
+        if let Some((reason, detail)) = owed {
+            let Some(fresh) = rescan(state, handle, pulse, reason, detail, stop) else {
                 return;
             };
             pos = fresh;

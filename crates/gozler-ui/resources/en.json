@@ -572,7 +572,10 @@
     "modified": "Modified {0}",
     "same_as_service": "Same build as the service's program",
     "no_drives": "Can't show the drives while the service isn't responding.",
-    "report": "Re&port"
+    "report": "Re&port",
+    "rebuild": "Re&build",
+    "rebuild_tooltip": "Have the service read every indexed drive again and build a new index. Searches give incomplete results until it's done.",
+    "not_rebuilt": "Couldn't rebuild the index. {0}"
   },
   "settings_include": {
     "admin_note": "These settings apply to everyone on this PC. You'll need administrator permission to change them.",

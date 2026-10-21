@@ -839,7 +839,10 @@ impl CaptionTable {
             },
             DialogId::SettingsIndex => CaptionTable {
                 title: "settings.index",
-                keyed: &[(Control(C::IndexReport), "settings_index.report")],
+                keyed: &[
+                    (Control(C::IndexRebuild), "settings_index.rebuild"),
+                    (Control(C::IndexReport), "settings_index.report"),
+                ],
                 plain: &[
                     (Control(C::IndexHeading), "settings.index"),
                     (Control(C::IndexDrivesGroup), "settings_index.drives"),
@@ -2934,7 +2937,8 @@ mod tests {
     /// the captions that `SettingsDialog::later_captions` finds by their
     /// icon, so a push button added to a page template without a key in
     /// `BUTTON_GLYPHS` would be cut off when its page first shows. The fix
-    /// buttons' captions come from `Fix::label_groups`.
+    /// buttons' captions come from `Fix::label_groups`, and Rebuild's is
+    /// listed with its shield.
     #[test]
     fn every_settings_page_button_has_an_icon() {
         let script = include_str!("../../resources/gozler-ui.rc");
@@ -2948,7 +2952,11 @@ mod tests {
             })
         };
         let strings = super::super::text::tests::english();
-        let fixes = [ControlId::IndexUseLocal.id(), ControlId::IndexFix.id()];
+        let shielded = [
+            ControlId::IndexUseLocal.id(),
+            ControlId::IndexFix.id(),
+            ControlId::IndexRebuild.id(),
+        ];
         // Each part but the first starts with a template and ends with the
         // name of the next.
         let parts: Vec<&str> = script.split("DIALOGEX").collect();
@@ -2968,7 +2976,7 @@ mod tests {
                 let name = rest.split(',').nth(1).unwrap_or_default().trim();
                 let id = number(name).unwrap_or_else(|| panic!("ids.h defines {name}"));
                 assert!(
-                    fixes.contains(&id) || glyphs.iter().any(|(item, _)| *item == id),
+                    shielded.contains(&id) || glyphs.iter().any(|(item, _)| *item == id),
                     "{name} on {page:?} has no caption key in BUTTON_GLYPHS"
                 );
             }

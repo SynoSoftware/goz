@@ -572,7 +572,10 @@
     "same_as_service": "Hizmet programıyla aynı derleme",
     "running_memory": "Hizmet çalışıyor ve {0} bellek kullanıyor.",
     "no_drives": "Hizmet yanıt vermediği sürece sürücüler gösterilemez.",
-    "report": "&Rapor"
+    "report": "&Rapor",
+    "rebuild": "&Yeniden oluştur",
+    "rebuild_tooltip": "Hizmet dizinlenen tüm sürücüleri yeniden okur ve yeni bir dizin oluşturur. Bu bitene kadar aramalar eksik sonuç verir.",
+    "not_rebuilt": "Dizin yeniden oluşturulamadı. {0}"
   },
   "settings_include": {
     "admin_note": "Bu ayarlar bu bilgisayardaki herkes için geçerlidir. Değiştirmek için yönetici izniniz olmalıdır.",

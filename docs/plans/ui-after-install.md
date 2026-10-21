@@ -37,6 +37,11 @@ owner has run it, and file an issue for each item that fails.
 - With the Settings dialog open, stop the service: the dialog stays usable,
   its Index page shows the failure, and the main window shows it behind the
   dialog.
+- Settings > Drives and service > Rebuild shows the administrator shield and
+  its tooltip. After Windows' permission prompt, each drive reads Indexing,
+  then Live again, and `gozler --status` shows each rebuilt; saying no to the
+  prompt changes nothing. Clicking it again while the drives index rebuilds
+  them once more, not twice.
 
 ## The selection and its actions
 

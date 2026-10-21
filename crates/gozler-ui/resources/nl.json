@@ -572,7 +572,10 @@
     "same_as_service": "Dezelfde build als het serviceprogramma",
     "running_memory": "De service wordt uitgevoerd en gebruikt {0} geheugen.",
     "no_drives": "Kan de stations niet weergeven zolang de service niet reageert.",
-    "report": "&Rapport"
+    "report": "&Rapport",
+    "rebuild": "Opnieuw &opbouwen",
+    "rebuild_tooltip": "De service leest alle geïndexeerde stations opnieuw en bouwt een nieuwe index. Zoekopdrachten geven onvolledige resultaten totdat dit klaar is.",
+    "not_rebuilt": "Kan de index niet opnieuw opbouwen. {0}"
   },
   "settings_include": {
     "admin_note": "Deze instellingen gelden voor iedereen op deze pc. U hebt beheerdersmachtiging nodig om ze te wijzigen.",

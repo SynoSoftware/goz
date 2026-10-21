@@ -6,7 +6,7 @@
 //! controls this dialog's procedure handles.
 
 use super::dialogs::ServiceReport;
-use super::include::NotSaved;
+use super::include::{Elevated, NotSaved};
 use super::indexed_folders::IndexedFolders;
 use super::main_window::MainWindow;
 use super::status_bar::StatusBar;
@@ -57,6 +57,15 @@ enum AfterSave {
     /// OK was pressed: the dialog applies anything changed since, and
     /// closes.
     Close,
+}
+
+/// What the copy of the window that runs as administrator does for the
+/// dialog.
+enum Awaited {
+    /// Saves these Include settings, after Apply or OK.
+    Include(IncludeSettings, AfterSave),
+    /// Asks the service to rebuild the index, after Rebuild.
+    Rebuild,
 }
 
 /// The page's heading, which shows its name in semibold.
@@ -280,10 +289,10 @@ pub(super) struct SettingsDialog<'a> {
     /// Whether the person confirmed Reset all, which the main window carries
     /// out once the dialog has closed.
     resets: Cell<bool>,
-    /// The Include settings being saved, while Windows asks for permission
-    /// and the copy that saves runs; OK, Cancel, Apply and Reset all wait
-    /// for the answer.
-    saving: RefCell<Option<(IncludeSettings, AfterSave)>>,
+    /// The Include settings being saved, or the rebuild asked for, while
+    /// Windows asks for permission and the copy that runs as administrator
+    /// runs; OK, Cancel, Apply, Reset all and Rebuild wait for the answer.
+    saving: RefCell<Option<Awaited>>,
     /// The Drives and service page's tooltip, whose fix buttons' tips
     /// follow their fix.
     index_tips: OnceCell<Tooltip>,
@@ -728,34 +737,51 @@ impl<'a> SettingsDialog<'a> {
         else {
             return false;
         };
-        self.saving.replace(Some((include.clone(), after)));
-        self.main.save_include(self.window, include);
+        self.saving
+            .replace(Some(Awaited::Include(include.clone(), after)));
+        self.main
+            .run_as_administrator(self.window, Elevated::Include(include));
         true
     }
 
-    /// The Include save's answer, which the main window holds: saved
-    /// settings become applied, and after OK the dialog closes; refused
-    /// ones stay edited, and a failure says why.
+    /// Asks the service to rebuild the index, as administrator (DESIGN.md:
+    /// The Drives and service page).
+    fn rebuild(&self, dialog: Hwnd) {
+        if self.saving.borrow().is_some() {
+            return;
+        }
+        self.saving.replace(Some(Awaited::Rebuild));
+        self.main
+            .run_as_administrator(self.window, Elevated::Rebuild);
+        self.update_apply(dialog);
+    }
+
+    /// The answer of the copy that runs as administrator, which the main
+    /// window holds: saved settings become applied, and after OK the dialog
+    /// closes; refused ones stay edited, and a failure says why. The
+    /// service shows a rebuild in its drives' state.
     fn save_answered(&self, dialog: Hwnd) {
         let Some(answer) = self.main.take_include_saved() else {
             return;
         };
-        let Some((include, after)) = self.saving.take() else {
+        let Some(awaited) = self.saving.take() else {
             return;
         };
-        match answer {
-            Ok(()) => {
+        match (awaited, answer) {
+            (Awaited::Include(include, after), Ok(())) => {
                 self.draft.borrow_mut().include_saved(include);
                 if after == AfterSave::Close && self.apply(dialog, AfterSave::Close) {
                     dialog::end(dialog, DialogEnd::Ok);
                     return;
                 }
             }
-            Err(NotSaved::Declined) => {}
-            Err(NotSaved::Failed(reason)) => {
-                let text = self
-                    .strings
-                    .format("settings_include.not_saved", &[&reason]);
+            (Awaited::Rebuild, Ok(())) | (_, Err(NotSaved::Declined)) => {}
+            (awaited, Err(NotSaved::Failed(reason))) => {
+                let key = match awaited {
+                    Awaited::Include(..) => "settings_include.not_saved",
+                    Awaited::Rebuild => "settings_index.not_rebuilt",
+                };
+                let text = self.strings.format(key, &[&reason]);
                 win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
             }
         }
@@ -905,7 +931,8 @@ impl<'a> SettingsDialog<'a> {
     /// Apply is enabled while a value differs from what was applied
     /// (DESIGN.md: Dialogs), a refused speed included. OK and Apply show
     /// the administrator shield while the Include settings differ, because
-    /// saving them asks Windows for permission.
+    /// saving them asks Windows for permission. Rebuild is enabled while
+    /// the service answers.
     fn update_apply(&self, dialog: Hwnd) {
         let (changed, include_changed) = {
             let draft = self.draft.borrow();
@@ -933,6 +960,13 @@ impl<'a> SettingsDialog<'a> {
             if let Some(button) = Button::of_dialog(dialog, button) {
                 button.set_icon(ButtonIcon::of(key, include_changed));
             }
+        }
+        let answers = self.index.borrow().as_ref().is_some_and(|c| c.has_report);
+        if let Some(rebuild) = self.control(SettingsPage::Index, ControlId::IndexRebuild) {
+            if saving || !answers {
+                focus_off(dialog, rebuild);
+            }
+            rebuild.set_enabled(answers && !saving);
         }
     }
 
@@ -977,6 +1011,11 @@ impl<'a> SettingsDialog<'a> {
         }
         self.set_up_lists(page);
         self.add_tooltips(page, hwnd);
+        if page == SettingsPage::Index
+            && let Some(rebuild) = Button::of_dialog(hwnd, ControlId::IndexRebuild.id())
+        {
+            rebuild.set_icon(Some(ButtonIcon::Shield));
+        }
         self.fill(page);
         let search = dialog::item(dialog, ControlId::SettingsSearch.id())
             .map(Hwnd::text)
@@ -1123,8 +1162,12 @@ impl<'a> SettingsDialog<'a> {
                 text("settings_context_menu.total_commander_tooltip"),
             )],
             SettingsPage::Keyboard => &[(ControlId::KeyboardClear, clear.as_str())],
-            // `refresh_index` gives these their tips.
+            // `refresh_index` gives these their tips, but Rebuild's.
             SettingsPage::Index => &[
+                (
+                    ControlId::IndexRebuild,
+                    text("settings_index.rebuild_tooltip"),
+                ),
                 (ControlId::IndexUseLocal, ""),
                 (ControlId::IndexFix, ""),
                 (ControlId::IndexServiceProgramPath, ""),
@@ -1396,6 +1439,9 @@ impl<'a> SettingsDialog<'a> {
                 focus_off(dialog, report);
             }
             report.set_enabled(captions.has_report);
+        }
+        if shown.is_none_or(|shown| shown.has_report != captions.has_report) {
+            self.update_apply(dialog);
         }
     }
 
@@ -1901,6 +1947,10 @@ impl DialogProc for SettingsDialog<'_> {
                 self.show_report(dialog);
                 return true;
             }
+            DialogMessage::Command { id } if is(id, ControlId::IndexRebuild) => {
+                self.rebuild(dialog);
+                return true;
+            }
             DialogMessage::Command { id } if is(id, ControlId::SettingsClearSearch) => {
                 // The box's change shows every page again.
                 if let Some(search) = dialog::item(dialog, ControlId::SettingsSearch.id()) {
@@ -1994,15 +2044,19 @@ impl DialogProc for SettingsDialog<'_> {
 
     /// Every caption the Service group's fix buttons can show, OK and
     /// Apply with the shield, which they show while Include has changes,
-    /// and every page's push buttons but Clear, because a page is made when
-    /// it first shows. Each of them shows an icon also without the shield
-    /// while icons show.
+    /// Rebuild with its shield, and every page's push buttons but Clear,
+    /// because a page is made when it first shows. Each of them shows an
+    /// icon also without the shield while icons show.
     fn later_captions(&self) -> Vec<(String, bool)> {
         let icons = self.draft.borrow().last_applied().choices.show_icons;
         let mut captions: Vec<(String, bool)> = Fix::label_groups()
             .into_iter()
             .flatten()
-            .chain([("button.ok", true), ("settings.apply", true)])
+            .chain([
+                ("button.ok", true),
+                ("settings.apply", true),
+                ("settings_index.rebuild", true),
+            ])
             .map(|(key, shielded)| (self.strings.text(key).to_owned(), shielded || icons))
             .collect();
         for page in SettingsPage::ALL {
