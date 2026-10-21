@@ -1131,18 +1131,29 @@ impl VolumeIndex {
         name: &[u8],
         is_dir: bool,
     ) -> UpsertResult {
-        let parent_idx = self.resolve_or_placeholder_parent(parent_frn);
+        // Record number reused by a different FRN: reclaim the stale chain
+        // first, so the parent resolved below is never a slot it frees.
+        if let Some(head) = self.by_frn.get(frn)
+            && self.entries.frn(head) != frn
+        {
+            self.reclaim_stale_slot(head);
+        }
+        // A parent with the entry's own record number is that record's
+        // previous tenant, which only corrupt data names: its placeholder
+        // would take the entry's own place in the map, so the entry goes
+        // under lost+found, with no full path.
+        let parent_idx = if parent_frn != frn && self.by_frn.same_key(parent_frn, frn) {
+            self.lost_found
+        } else {
+            self.resolve_or_placeholder_parent(parent_frn)
+        };
 
         if let Some(head) = self.by_frn.get(frn) {
-            if self.entries.frn(head) == frn {
-                if self.entries.next_link(head) == NIL {
-                    self.rewrite_entry(head, parent_idx, name, is_dir);
-                    return UpsertResult::Ok;
-                }
-                return UpsertResult::NeedsReconcile;
+            if self.entries.next_link(head) == NIL {
+                self.rewrite_entry(head, parent_idx, name, is_dir);
+                return UpsertResult::Ok;
             }
-            // Record number reused by a different FRN: reclaim the stale chain.
-            self.reclaim_stale_slot(head);
+            return UpsertResult::NeedsReconcile;
         }
 
         let idx = self.alloc_entry(

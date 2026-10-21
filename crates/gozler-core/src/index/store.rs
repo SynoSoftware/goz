@@ -1189,6 +1189,15 @@ impl FrnMap {
         }
     }
 
+    /// Whether `a` and `b` take one place in the map: the same record
+    /// number in a record-number map, the same ID in a wide one.
+    pub(crate) fn same_key(&self, a: Frn, b: Frn) -> bool {
+        match self {
+            FrnMap::Dense(_) | FrnMap::Sparse(_) => a.record_number() == b.record_number(),
+            FrnMap::Wide(_) => a == b,
+        }
+    }
+
     #[inline]
     pub(crate) fn remove(&mut self, frn: Frn) {
         match self {

@@ -258,6 +258,25 @@ fn parent_slot_reuse_never_leaks_the_stale_chain() {
     );
 }
 
+/// Corrupt data can name an entry's own record's previous tenant as its
+/// parent. Reclaiming that tenant must not leave the entry linked under the
+/// slot it just freed (#77): the entry goes under lost+found, and the
+/// folders' child chains stay those a rebuild makes.
+#[test]
+fn a_parent_that_is_its_own_records_previous_tenant_leaves_no_freed_parent() {
+    let mut idx = new_index();
+    idx.apply_batch(&[create(frn_seq(1003, 1), root_frn(), "a", false)]);
+    // A second name of the same file, so its chain holds two links.
+    idx.insert_listed(&listed(frn_seq(1003, 1), root_frn(), "b", false));
+    idx.apply_batch(&[create(frn_seq(1003, 2), frn_seq(1003, 1), "c", false)]);
+    assert!(idx.child_chains_match_rebuild());
+    assert_eq!(
+        path_of_frn(&idx, frn_seq(1003, 2)),
+        None,
+        "under lost+found"
+    );
+}
+
 /// The same reuse, reached through the FILE_LAYOUT pass.
 ///
 /// A file the MFT enumeration saw is deleted, and NTFS gives its record to a
@@ -1444,18 +1463,6 @@ fn index_change_strategy() -> impl Strategy<Value = IndexChange> {
 }
 
 fn apply_change(idx: &mut VolumeIndex, change: &IndexChange) {
-    // A parent with the entry's own record number and another sequence number
-    // is that record's previous tenant, which only corrupt data names, and
-    // which `upsert_link` frees before it links the entry under it (#77).
-    // Remove this skip when #77 is fixed.
-    if let IndexChange::Create { target, parent, .. }
-    | IndexChange::Rename { target, parent }
-    | IndexChange::Listed { target, parent, .. } = *change
-        && pool_id(target) != pool_parent(parent)
-        && pool_id(target).record_number() == pool_parent(parent).record_number()
-    {
-        return;
-    }
     match *change {
         IndexChange::Create {
             target,
