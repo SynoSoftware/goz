@@ -30,8 +30,7 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Shell::{
     PathCompactPathW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_LARGEICON, SHGFI_SMALLICON,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW,
-    SHGetStockIconInfo, SHSTOCKICONINFO, SIID_FOLDEROPEN,
+    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, HICON, ICONINFO, NONCLIENTMETRICSW, SPI_GETHIGHCONTRAST,
@@ -385,6 +384,22 @@ pub(super) fn glyph_list(glyphs: &[Glyph], side: Px, color: COLORREF) -> Option<
     })
 }
 
+/// Draws `glyph`, `side` pixels square, in `color`, in the middle of `area`,
+/// from the thread's own image list of it ([`glyph_list`]); nothing when the
+/// icon font lacks it or GDI fails.
+pub(super) fn draw_glyph(dc: HDC, glyph: Glyph, side: Px, color: COLORREF, area: RECT) {
+    let Some(images) = glyph_list(&[glyph], side, color) else {
+        return;
+    };
+    let x = area.left + (area.right - area.left - side.0) / 2;
+    let y = area.top + (area.bottom - area.top - side.0) / 2;
+    // SAFETY: the list lives as long as the thread; `dc` is the caller's for
+    // the length of its message.
+    unsafe {
+        let _ = ImageList_Draw(images, 0, dc, x, y, ILD_TRANSPARENT);
+    }
+}
+
 /// The icon of `glyph`, `side` pixels square, in `color`, which lives as
 /// long as the thread, as a status bar part or a static control needs.
 /// `None` when the icon font lacks the glyph or GDI fails.
@@ -616,19 +631,6 @@ impl ImageList {
         // copy it returns is the caller's.
         let icon = unsafe { ImageList_GetIcon(self.0, index, ILD_TRANSPARENT) };
         (!icon.is_invalid()).then_some(Icon(icon))
-    }
-
-    /// The index in the system image lists of Windows' open folder icon,
-    /// which is already there, so nothing is added to the lists that the
-    /// shell keeps in step; `None` when the shell does not say.
-    pub(crate) fn open_folder_index() -> Option<i32> {
-        let mut info = SHSTOCKICONINFO {
-            cbSize: size_of::<SHSTOCKICONINFO>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: `info` is a local with its size set, which the call fills.
-        unsafe { SHGetStockIconInfo(SIID_FOLDEROPEN, SHGSI_SYSICONINDEX, &mut info) }.ok()?;
-        Some(info.iSysImageIndex)
     }
 
     /// Draws the icon `index` in the middle of `area`.

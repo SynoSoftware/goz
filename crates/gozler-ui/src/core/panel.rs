@@ -623,23 +623,23 @@ pub(crate) struct Counts {
     pub(crate) items: u64,
     /// The selected entries, when any is.
     pub(crate) selected: Option<u64>,
-    /// The sum of the counted entries' sizes; `None` when a counted
-    /// folder's size is unknown, because a sum that misses a folder would
-    /// promise room that a copy does not have, and in an empty folder.
-    pub(crate) bytes: Option<u64>,
+    /// The counted entries' sizes; `None` in an empty folder.
+    pub(crate) size: Option<Totals>,
 }
 
-/// The sizes of all of a panel's entries, kept as entries come and go, so
-/// the status line never adds up a large folder again.
-#[derive(Clone, Copy, Debug, Default)]
-struct Totals {
-    bytes: u64,
+/// A sum of entries' sizes. A panel keeps the one of all its entries as
+/// entries come and go, so the status line never adds up a large folder
+/// again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Totals {
+    /// The sum of the known sizes.
+    pub(crate) bytes: u64,
     /// The folders whose size is unknown.
-    unknown: u64,
+    pub(crate) unknown: u64,
 }
 
 impl Totals {
-    fn of(entries: &[Entry]) -> Totals {
+    fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Totals {
         let mut totals = Totals::default();
         for entry in entries {
             totals.add(entry);
@@ -722,6 +722,18 @@ pub(crate) struct Panel {
     /// The name that Gozler's own New folder or rename gives an entry in
     /// the shown folder, which the focus goes to when a row shows it.
     awaited: Option<Awaited>,
+    /// The name hashes of the taken entries in the shown folder, which
+    /// [`Panel::filter`] keeps from one change batch to the next.
+    taken_hashes: Option<TakenHashes>,
+}
+
+/// The name hashes of the taken paths in one folder, for one snapshot of
+/// the taken entries.
+#[derive(Debug)]
+struct TakenHashes {
+    taken: Arc<Taken>,
+    folder: String,
+    hashes: HashSet<u64>,
 }
 
 /// A name that an operation of this window creates in the shown folder
@@ -771,6 +783,7 @@ impl Panel {
             gone_focus: None,
             focused: None,
             awaited: None,
+            taken_hashes: None,
         }
     }
 
@@ -1003,23 +1016,23 @@ impl Panel {
             .flat_map(|range| range.clone())
             .filter_map(|row| self.entry(row))
             .collect();
-        let (selected, bytes) = if picked.is_empty() {
-            let bytes = match &self.shown {
-                None => (self.totals.unknown == 0).then_some(self.totals.bytes),
-                Some(shown) => (shown.iter())
-                    .map(|&i| self.entries[i as usize].counted_size())
-                    .sum::<Option<u64>>(),
+        let (selected, size) = if picked.is_empty() {
+            let size = match &self.shown {
+                None => self.totals,
+                Some(shown) => Totals::of(shown.iter().map(|&i| &self.entries[i as usize])),
             };
             // An empty folder's line says "0 items" alone.
-            (None, bytes.filter(|_| items > 0))
+            (None, Some(size).filter(|_| items > 0))
         } else {
-            let bytes = picked.iter().map(|e| e.counted_size()).sum::<Option<u64>>();
-            (Some(picked.len() as u64), bytes)
+            (
+                Some(picked.len() as u64),
+                Some(Totals::of(picked.iter().copied())),
+            )
         };
         Counts {
             items,
             selected,
-            bytes,
+            size,
         }
     }
 
@@ -1112,38 +1125,60 @@ impl Panel {
     /// entries changed. Only a folder that a delete or a move takes, or
     /// one that holds a taken entry, looks at its entries, so a change in
     /// any other folder costs nothing. In a folder that holds one, only an
-    /// entry whose name has a taken name's hash has its path compared. An
-    /// entry it hides loses its selection mark, because the list's
+    /// entry whose name has a taken name's hash is looked up, by its name
+    /// as the operation gave it, so a change batch folds no name; its path
+    /// is compared only when the operation gave its name in another case.
+    /// An entry it hides loses its selection mark, because the list's
     /// selection loses its row, and a mark kept would select it again,
     /// unasked, when it shows again.
-    fn filter(&mut self, taken: &Taken) {
+    fn filter(&mut self, taken: &Arc<Taken>) {
         let kept = &self.kept;
         let keeps = |id| kept.contains_key(&id);
         if taken.is_empty() {
             self.shown = None;
+            self.taken_hashes = None;
             return;
         }
         let folder: Vec<u16> = self.folder.encode_utf16().collect();
+        let here = taken.in_folder(&folder);
+        if here.is_none() {
+            self.taken_hashes = None;
+        }
         self.shown = if taken.contains(&folder, keeps) {
             for entry in &mut self.entries {
                 entry.selected = false;
             }
             Some(Vec::new())
-        } else if taken.holds_in(&folder) {
+        } else if let Some(here) = here {
+            let known = (self.taken_hashes.as_ref()).is_some_and(|known| {
+                Arc::ptr_eq(&known.taken, taken) && known.folder == self.folder
+            });
+            if !known {
+                let mut folding = Folding::default();
+                self.taken_hashes = Some(TakenHashes {
+                    taken: Arc::clone(taken),
+                    folder: self.folder.clone(),
+                    hashes: here
+                        .names()
+                        .map(|name| name_hash(folding.of(name)))
+                        .collect(),
+                });
+            }
+            let hashes = &self.taken_hashes.as_ref().expect("filled above").hashes;
             let mut path = folder.clone();
             if path.last() != Some(&u16::from(b'\\')) {
                 path.push(u16::from(b'\\'));
             }
             let base = path.len();
-            let names: HashSet<u64> = (taken.names_in(&folder))
-                .map(|name| name_hash(&name_key(name)))
-                .collect();
             let mut shown = Vec::new();
             for (i, entry) in self.entries.iter_mut().enumerate() {
-                if names.contains(&entry.hash) {
-                    path.truncate(base);
-                    path.extend_from_slice(&entry.name);
-                    if taken.contains(&path, keeps) {
+                if hashes.contains(&entry.hash) {
+                    let hidden = here.takes(&entry.name, keeps).unwrap_or_else(|| {
+                        path.truncate(base);
+                        path.extend_from_slice(&entry.name);
+                        taken.contains(&path, keeps)
+                    });
+                    if hidden {
                         entry.selected = false;
                         continue;
                     }
@@ -3200,7 +3235,8 @@ pub(crate) mod tests {
             }
         );
         panels.set_selected(Side::Left, Vec::new());
-        assert_eq!(panels.panel(Side::Left).counts().bytes, Some(46));
+        let size = panels.panel(Side::Left).counts().size;
+        assert_eq!(size.map(|size| size.bytes), Some(46));
     }
 
     /// An editor that saves through a temporary name and keeps a backup
@@ -3529,15 +3565,15 @@ pub(crate) mod tests {
             Counts {
                 items: 0,
                 selected: None,
-                bytes: None,
+                size: None,
             }
         );
     }
 
-    /// The status line sums the counted entries, and leaves the sum out
-    /// when a counted folder's size is unknown.
+    /// The status line sums the known sizes of the counted entries, and
+    /// counts the folders whose size is unknown beside the sum.
     #[test]
-    fn the_sum_leaves_out_an_unknown_folder() {
+    fn the_sum_counts_an_unknown_folder() {
         let mut panels = showing(
             r"C:\d",
             vec![folder("Photos"), folder("Old"), file("a", 5, 0)],
@@ -3549,7 +3585,10 @@ pub(crate) mod tests {
             Counts {
                 items: 3,
                 selected: None,
-                bytes: None,
+                size: Some(Totals {
+                    bytes: 105,
+                    unknown: 1,
+                }),
             }
         );
         panels.set_selected(Side::Left, vec![2..4]);
@@ -3558,7 +3597,10 @@ pub(crate) mod tests {
             Counts {
                 items: 3,
                 selected: Some(2),
-                bytes: Some(105),
+                size: Some(Totals {
+                    bytes: 105,
+                    unknown: 0,
+                }),
             }
         );
     }

@@ -2451,7 +2451,9 @@ pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
 }
 
 /// The status line's counts: "14 items · 5.2 GB" or "3 of 14 selected ·
-/// 4.2 GB", without the size when a counted folder's is unknown.
+/// 4.2 GB". The known sizes' sum says how many folder sizes are unknown,
+/// as "3.4 GB, 12 sizes unknown", and "size unknown" shows only when no
+/// counted entry's size is known.
 fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> String {
     let count = match counts.selected {
         None => strings.count("panel.items", counts.items, numbers, &[]),
@@ -2462,10 +2464,19 @@ fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> Str
             &[&numbers.integer(counts.items)],
         ),
     };
-    let size = counts
-        .bytes
-        .map(|bytes| text::bytes(strings, numbers, bytes))
-        .unwrap_or_default();
+    let counted = counts.selected.unwrap_or(counts.items);
+    let size = match counts.size {
+        None => String::new(),
+        Some(size) if size.unknown == counted => strings.text("status.size_unknown").to_owned(),
+        Some(size) => {
+            let bytes = text::bytes(strings, numbers, size.bytes);
+            if size.unknown == 0 {
+                bytes
+            } else {
+                strings.count("panel.sizes_unknown", size.unknown, numbers, &[&bytes])
+            }
+        }
+    };
     joined(strings, count, size)
 }
 

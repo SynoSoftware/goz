@@ -88,7 +88,7 @@ pub use settings::{
 };
 #[cfg(windows)]
 pub use survey::{Measured, measure};
-pub use taken::Taken;
+pub use taken::{Taken, TakenFolder};
 
 #[cfg(all(test, windows))]
 mod tests;

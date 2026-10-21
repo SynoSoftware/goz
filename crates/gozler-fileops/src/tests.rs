@@ -445,9 +445,9 @@ fn a_drive_root_holds_its_taken_entries() {
         false,
     );
     taken.insert(OperationId::for_tests(2), Path::new(r"C:\b.txt"), false);
-    assert!(taken.holds_in(&units(Path::new(r"c:\data"))));
-    assert!(taken.holds_in(&units(Path::new(r"C:\"))));
-    assert!(!taken.holds_in(&units(Path::new(r"C:\Other"))));
+    assert!(taken.in_folder(&units(Path::new(r"c:\data"))).is_some());
+    assert!(taken.in_folder(&units(Path::new(r"C:\"))).is_some());
+    assert!(taken.in_folder(&units(Path::new(r"C:\Other"))).is_none());
 }
 
 /// FAT refuses POSIX semantics, so its read-only files take the classic
