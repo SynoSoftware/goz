@@ -213,8 +213,9 @@ pub(crate) struct ShownRows {
     /// As the latest chunk says, with `total`.
     sums: Option<MatchSums>,
     chunks: Vec<CachedChunk>,
-    /// `None` when the query's terms do not compile, which the daemon
-    /// refuses before any row is shown.
+    /// `None` until [`Results::mark_matches`], which only Search's list
+    /// asks for, and when the query's terms do not compile, which the
+    /// daemon refuses before any row is shown.
     matched: Option<MatchedParts>,
     /// The order of use, for dropping the chunk used least recently.
     clock: u64,
@@ -543,6 +544,14 @@ impl Results {
         })
     }
 
+    /// Compiles the shown search's terms, so [`Results::matched_parts`]
+    /// finds the parts of a row's path they matched.
+    pub(crate) fn mark_matches(&mut self) {
+        if let Shown::Rows(shown) = &mut self.shown {
+            shown.matched = MatchedParts::new(&shown.ask.search.query).ok();
+        }
+    }
+
     /// Accepts the rows of the request `generation` asked for.
     pub(crate) fn accept(&mut self, generation: Generation, chunk: Chunk) -> RowsChange {
         if !self.awaits(generation) {
@@ -550,13 +559,12 @@ impl Results {
         }
         match self.in_flight.take() {
             Some(InFlight::Search(_, ask)) => {
-                let matched = MatchedParts::new(&ask.search.query).ok();
                 let mut shown = ShownRows {
                     ask,
                     total: chunk.total,
                     sums: chunk.sums,
                     chunks: Vec::new(),
-                    matched,
+                    matched: None,
                     clock: 0,
                 };
                 shown.insert(chunk.start, chunk.rows);

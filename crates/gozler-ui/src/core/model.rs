@@ -15,7 +15,7 @@ use super::file_operations::StatusOperation;
 use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
-use super::panel::{LookIn, Panels, Side, View, drive_root};
+use super::panel::{LookIn, Panels, Side, TakenRows, View, drive_root};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
 use super::search_list::{SearchList, is_taken};
@@ -96,12 +96,6 @@ pub(crate) struct Model {
     file_operations: bool,
     /// Whether the clipboard holds files, which Paste copies or moves.
     clipboard_files: bool,
-    /// The entries that deletes and moves have taken, which Search's list
-    /// shows struck through, a search panel shows blank and the selections
-    /// leave out (file-manager-spec.md: The person never waits for the
-    /// disk); one for all lists, which each decide with their own kept
-    /// operations.
-    taken: Arc<Taken>,
     panels: Panels,
 }
 
@@ -393,7 +387,6 @@ impl Model {
             last_generation: 0,
             file_operations: false,
             clipboard_files: false,
-            taken: Arc::default(),
             panels,
         }
     }
@@ -428,14 +421,19 @@ impl Model {
     /// The row at `index` as `list` shows it: `None` while its chunk has
     /// not arrived, or while a delete or a move has taken its entry.
     pub(crate) fn shown_row(&self, list: List, index: u64) -> Option<&ResultItem> {
-        self.list(list)?.shown_row(index, &self.taken)
+        self.list(list)?.shown_row(index, self.panels.taken())
     }
 
-    /// Whether a delete or a move has taken the entry of `list`'s row at
-    /// `index`.
-    pub(crate) fn row_taken(&self, list: List, index: u64) -> bool {
-        self.list(list)
-            .is_some_and(|shown| shown.row_taken(index, &self.taken))
+    /// The rows of `selected` in `list` whose entries a delete or a move
+    /// has taken; none while no operation takes entries.
+    pub(crate) fn taken_rows(&self, list: List, selected: &[Range<u64>]) -> Vec<u64> {
+        let taken = self.panels.taken();
+        match self.list(list) {
+            Some(shown) if !taken.is_empty() => (selected.iter().cloned().flatten())
+                .filter(|&row| shown.row_taken(row, taken))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// The operations `ended`, which ended since the window last told the
@@ -468,17 +466,23 @@ impl Model {
             || self.panels.keep(id)
     }
 
-    /// Takes the entries of `taken` out of Search's selection; its list
-    /// shows their rows blank once it draws them again. The panels take
-    /// them with [`Panels::set_taken`].
-    pub(crate) fn set_taken(&mut self, taken: Arc<Taken>) -> Accepted {
-        self.taken = taken;
-        let change = if self.search_list.drop_taken(&self.taken) {
+    /// Gives every list the taken entries `taken` at once, so no list's
+    /// deselect pass reads the ones before: the panels as
+    /// [`Panels::set_taken`] says, with `focused` their lists' focused rows,
+    /// and Search's selection loses them, its list showing their rows blank
+    /// once it draws them again.
+    pub(crate) fn set_taken(
+        &mut self,
+        taken: Arc<Taken>,
+        focused: [Option<u64>; 2],
+    ) -> (Accepted, [TakenRows; 2]) {
+        let rows = self.panels.set_taken(taken, focused);
+        let change = if self.search_list.drop_taken(self.panels.taken()) {
             Change::Selection(List::Search)
         } else {
             Change::Nothing
         };
-        Accepted { change, then: None }
+        (Accepted { change, then: None }, rows)
     }
 
     pub(crate) fn strings(&self) -> &Strings {
@@ -1196,7 +1200,7 @@ impl Model {
     /// (DESIGN.md: Inspector pane); a search panel adds up the selection's
     /// size for its status line instead.
     fn select(&mut self, list: List, mut files: Vec<ResultItem>) -> Option<Then> {
-        let taken = Arc::clone(&self.taken);
+        let taken = Arc::clone(self.panels.taken());
         let shown = self.list_mut(list)?;
         files.retain(|file| !is_taken(&taken, &shown.kept, file));
         if files.is_empty() {
@@ -1537,14 +1541,15 @@ impl Model {
             })
     }
 
-    /// Whether `list` shows a failure that ends by itself, so it searches
-    /// again once the service answers.
+    /// Whether `list` shows a failure that ends by itself and is not
+    /// searching again yet, so it searches again once the service answers.
     fn shows_recovering_failure(&self, list: List) -> bool {
         self.list(list).is_some_and(|shown| {
-            matches!(
-                shown.results.shown(),
-                Shown::Message(ListMessage::Failure(failure)) if failure.recovers()
-            )
+            !shown.results.searching()
+                && matches!(
+                    shown.results.shown(),
+                    Shown::Message(ListMessage::Failure(failure)) if failure.recovers()
+                )
         })
     }
 
@@ -1635,6 +1640,10 @@ impl Model {
                         shown.selection = Selection::None;
                         shown.chosen_bytes = None;
                         shown.kept.clear();
+                        // A panel draws no matched parts bold.
+                        if list == List::Search {
+                            shown.results.mark_matches();
+                        }
                         let waits =
                             list == List::Search && std::mem::take(&mut self.open_on_answer);
                         Change::NewSearch {
@@ -2363,6 +2372,11 @@ pub(crate) mod tests {
             model.accept(status(&ask, VolumePhase::Live)).then,
             Some(Then::SearchAgain(vec![List::Search]))
         );
+        // A search that takes longer than the poll would otherwise start
+        // again on every status reply, and never finish.
+        let _again = search(&mut model, "report");
+        let ask = model.status_needed().expect("no status request runs");
+        assert_eq!(model.accept(status(&ask, VolumePhase::Live)).then, None);
 
         let mut model = showing(10);
         let ask = model.status_needed().expect("no status request runs");

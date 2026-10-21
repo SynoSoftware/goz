@@ -504,7 +504,7 @@
     "unsupported": "Deze toets kan niet in een sneltoets worden gebruikt. Kies een letter, een cijfer of een functietoets, zoals Ctrl+K of F3.",
     "shortcut_taken": "Een ander programma gebruikt {0}. Kies een andere sneltoets.",
     "shortcut_failed": "Kan {0} niet gebruiken. {1}",
-    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L en Ctrl+R, en Alt met een letter of een cijfer. Een sneltoets op een van deze toetsen werkt alleen in Zoeken."
+    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met een letter, cijfer, komma of punt. Een sneltoets op deze toetsen werkt alleen in Zoeken."
   },
   "settings_file_operations": {
     "speed": "Sne&lheidsinstellingen:",

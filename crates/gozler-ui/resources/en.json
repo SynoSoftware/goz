@@ -504,7 +504,7 @@
     "unsupported": "This key can't be used in a shortcut. Choose a letter, a digit or a function key, such as Ctrl+K or F3.",
     "shortcut_taken": "Another program uses {0}. Choose another shortcut.",
     "shortcut_failed": "Couldn't use {0}. {1}",
-    "two_panels": "Two panels keeps F3 to F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L and Ctrl+R, and Alt with a letter or a digit. A shortcut on one of these keys works in Search only."
+    "two_panels": "Two panels keeps F3 to F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L and Ctrl+R, and Alt with a letter, a digit, a comma or a period. A shortcut on one of these keys works in Search only."
   },
   "settings_file_operations": {
     "speed": "S&peed settings:",

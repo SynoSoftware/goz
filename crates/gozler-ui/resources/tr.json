@@ -504,7 +504,7 @@
     "unsupported": "Bu tuş bir kısayolda kullanılamaz. Ctrl+K veya F3 gibi bir harf, rakam veya işlev tuşu seçin.",
     "shortcut_taken": "{0} kısayolunu başka bir program kullanıyor. Başka bir kısayol seçin.",
     "shortcut_failed": "{0} kullanılamadı. {1}",
-    "two_panels": "İki panel F3–F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L ve Ctrl+R tuşlarını ve Alt ile bir harf ya da rakamı kendine ayırır. Bu tuşlardan birindeki kısayol yalnızca Arama'da çalışır."
+    "two_panels": "İki panel F3–F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L ve Ctrl+R tuşlarını ve Alt ile bir harf, rakam, virgül ya da noktayı kendine ayırır. Bu tuşlardan birindeki kısayol yalnızca Arama'da çalışır."
   },
   "settings_file_operations": {
     "speed": "&Hız ayarları:",

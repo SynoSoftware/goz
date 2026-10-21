@@ -504,7 +504,7 @@
     "unsupported": "Esta tecla no se puede usar en un método abreviado. Elige una letra, un dígito o una tecla de función, como Ctrl+K o F3.",
     "shortcut_taken": "Otro programa usa {0}. Elige otro método abreviado.",
     "shortcut_failed": "No se pudo usar {0}. {1}",
-    "two_panels": "Dos paneles reserva F3 a F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L y Ctrl+R, y Alt con una letra o un dígito. Un método abreviado en una de estas teclas solo funciona en Búsqueda."
+    "two_panels": "Dos paneles reserva F3 a F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R y Alt con una letra, un dígito, una coma o un punto. Un método abreviado en estas teclas solo funciona en Búsqueda."
   },
   "settings_file_operations": {
     "speed": "Ajustes de &velocidad:",
