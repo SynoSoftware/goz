@@ -993,32 +993,69 @@ pub(crate) fn find_matches(
     sums: bool,
 ) -> Matches {
     let Scan {
-        mut records,
+        records,
         folders,
         folder_names,
         scope,
         ..
     } = scan(index, mount_prefix, query, scope);
-    let sums = sums.then(|| match_sums(index, &records));
+    let origin = Origin {
+        instance: index.instance(),
+        reuse_mark: index.reuse_mark(),
+        scope: scope.map(|s| (s, index.entry(s).frn())),
+        sums: sums.then(|| match_sums(index, &records)),
+        mount_prefix: mount_prefix.to_string(),
+    };
+    key_matches(index, records, (folders, folder_names), sort, limit, origin)
+}
+
+/// Keys `records`, matches an earlier search found on `index` below the
+/// scope folder `scope`, under `sort`, as [`find_matches`] keys its own but
+/// with no scan: how a result snapshot is sorted again. `sums` are the
+/// search's.
+pub(crate) fn key_found(
+    index: &VolumeIndex,
+    mount_prefix: &str,
+    records: Vec<SortRecord>,
+    scope: Option<(EntryIdx, Frn)>,
+    sums: Option<MatchSums>,
+    sort: SortSpec,
+) -> Matches {
+    let mut folder_names = ResultNames::default();
+    let folders = FolderCopy::new(index, mount_prefix, &mut folder_names);
+    let origin = Origin {
+        instance: index.instance(),
+        reuse_mark: index.reuse_mark(),
+        scope,
+        sums,
+        mount_prefix: mount_prefix.to_string(),
+    };
+    key_matches(index, records, (folders, folder_names), sort, None, origin)
+}
+
+/// Keys `records` under `sort` for [`Matches::order`], whose first `limit`
+/// become the rows; a path sort copies the records' folders into `folders`.
+fn key_matches(
+    index: &VolumeIndex,
+    mut records: Vec<SortRecord>,
+    folders: (FolderCopy, ResultNames),
+    sort: SortSpec,
+    limit: Option<u32>,
+    origin: Origin,
+) -> Matches {
     let end = match limit {
         Some(n) => (n as usize).min(records.len()),
         None => records.len(),
     };
     let path_folders = (end > 0)
-        .then(|| key_records(index, &mut records, (folders, folder_names), sort))
+        .then(|| key_records(index, &mut records, folders, sort))
         .flatten();
     Matches {
         records,
         path_folders,
         sort,
         end,
-        origin: Origin {
-            instance: index.instance(),
-            reuse_mark: index.reuse_mark(),
-            scope: scope.map(|s| (s, index.entry(s).frn())),
-            sums,
-            mount_prefix: mount_prefix.to_string(),
-        },
+        origin,
     }
 }
 

@@ -1194,7 +1194,8 @@ mod tests {
         /// Volumes merged, with mount prefixes as the daemon stores them,
         /// ending in `\`, give the order of the result order over the rows
         /// of all of them: `c:\data` starts `c:\data2`, so those volumes'
-        /// paths interleave, and `D:\` follows `C:\`.
+        /// paths interleave, and `D:\` follows `C:\`. A result snapshot
+        /// sorted again into each order with no search gives that order too.
         #[test]
         fn merged_volumes_follow_the_result_order_over_all_their_rows(
             mounts in prop::sample::subsequence(vec![r"C:\", r"C:\Data\", r"C:\Data2\", r"D:\"], 2..=4),
@@ -1215,6 +1216,24 @@ mod tests {
                         .map(move |idx| (v, idx))
                 })
                 .collect();
+            let volumes: Vec<PlainVolume> = indexes
+                .iter()
+                .zip(&mount_lists)
+                .map(|(index, mounts)| PlainVolume {
+                    index,
+                    mounts: VolumeMounts { mounts, guid: "" },
+                })
+                .collect();
+            let first = RowsSpec {
+                sort: SortSpec { key: SortKey::Size, dir: SortDir::Desc },
+                offset: 0,
+                limit: None,
+                sums: false,
+            };
+            let (snapshot, kept) = ResultRows::search(volumes.clone(), &query, None, first)
+                .expect("no scope")
+                .into_snapshot()
+                .expect("at most four volumes");
             for sort in all_sorts() {
                 // Every row of every volume, sorted by the result order.
                 let mut folded: Vec<DirPaths> = held
@@ -1248,16 +1267,8 @@ mod tests {
                     })
                     .collect();
 
-                let volumes: Vec<PlainVolume> = indexes
-                    .iter()
-                    .zip(&mount_lists)
-                    .map(|(index, mounts)| PlainVolume {
-                        index,
-                        mounts: VolumeMounts { mounts, guid: "" },
-                    })
-                    .collect();
                 let spec = RowsSpec { sort, offset: 0, limit: None, sums: false };
-                let mut reply = ResultRows::search(volumes, &query, None, spec).expect("no scope");
+                let mut reply = ResultRows::search(volumes.clone(), &query, None, spec).expect("no scope");
                 let mut merged = Vec::new();
                 while reply.page(usize::MAX, |row, names| {
                     let mut path = Vec::new();
@@ -1266,6 +1277,15 @@ mod tests {
                     true
                 }) {}
                 prop_assert_eq!(&merged, &expected, "{:?} on {:?}", sort, mounts);
+
+                let (sorted, kept_again) = snapshot
+                    .sort_again(kept.clone(), sort)
+                    .expect("no index changed")
+                    .into_snapshot()
+                    .expect("at most four volumes");
+                let read = snapshot_paths(&sorted, kept_again, 0, None).expect("no index changed");
+                let expected: Vec<Option<Vec<u8>>> = expected.into_iter().map(Some).collect();
+                prop_assert_eq!(read, expected, "sorted again {:?} on {:?}", sort, mounts);
             }
         }
     }
@@ -1516,7 +1536,8 @@ mod tests {
 
     /// The window holds a result snapshot's rows by their place, so a file
     /// deleted after the search is a gone row in its place and the total
-    /// stays; once the index is replaced, the rows name other entries, so
+    /// stays; sorted again, it is left out, because its slot has nothing to
+    /// sort by. Once the index is replaced, the rows name other entries, so
     /// the whole result snapshot is gone.
     #[test]
     fn a_deleted_file_is_gone_in_its_place_and_a_new_index_ends_the_snapshot() {
@@ -1554,11 +1575,28 @@ mod tests {
             Ok(vec![path("a.txt"), None, path("c.txt")])
         );
         assert_eq!(snapshot.total(), 3);
+        let by_name_down = SortSpec {
+            key: SortKey::Name,
+            dir: SortDir::Desc,
+        };
+        let sorted = snapshot.sort_again(kept.clone(), by_name_down);
+        let (sorted, kept_again) = sorted
+            .expect("the same index")
+            .into_snapshot()
+            .expect("one volume");
+        assert_eq!(
+            snapshot_paths(&sorted, kept_again, 0, None),
+            Ok(vec![path("c.txt"), path("a.txt")])
+        );
 
         *volume.index.write().expect("no test panics holding it") = super::tests::volume(&files);
         assert_eq!(
-            snapshot_paths(&snapshot, kept, 0, None),
+            snapshot_paths(&snapshot, kept.clone(), 0, None),
             Err(ResultSnapshotGone)
         );
+        assert!(matches!(
+            snapshot.sort_again(kept, by_name_down),
+            Err(ResultSnapshotGone)
+        ));
     }
 }

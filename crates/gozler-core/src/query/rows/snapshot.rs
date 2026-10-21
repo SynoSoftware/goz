@@ -11,6 +11,9 @@
 //! pages are, and a row that could not be sent then is dropped, because a
 //! dead slot has no value to compare.
 //!
+//! [`ResultSnapshot::sort_again`] sorts its rows by another order with no
+//! scan, for a new result snapshot, as a search's matches are sorted.
+//!
 //! [`ResultSnapshot::read`] reads the rows at an offset: it starts at the
 //! checkpoint below the offset and replays at most `CHECKPOINT_ROWS - 1`
 //! bytes, without reading an index. Each row is checked under its volume's
@@ -19,11 +22,12 @@
 //! holds rows by their place. An index replaced since the search makes the
 //! whole result snapshot gone.
 
-use super::{IndexedVolume, ResultRows, RowView, VolumeRows, row_folder};
+use super::{Coverage, IndexedVolume, Reply, ResultRows, RowView, VolumeRows, row_folder};
 use crate::index::VolumeIndex;
-use crate::query::engine::MatchSums;
+use crate::query::engine::{IndexChanged, MatchSums, key_found};
+use crate::query::order::SortRecord;
 use crate::query::paths::{FolderCopy, ResultNames};
-use crate::types::EntryIdx;
+use crate::types::{EntryIdx, SortSpec};
 use rustc_hash::FxHashMap;
 
 /// Rows of the merged order between two checkpoints.
@@ -153,6 +157,73 @@ impl ResultSnapshot {
     /// Every match's sums, when the search asked for them.
     pub fn sums(&self) -> Option<MatchSums> {
         self.sums
+    }
+
+    /// Sorts its rows again by `sort` with no search, from `volumes`: the
+    /// volumes [`ResultRows::into_snapshot`] returned, in that order. Each
+    /// volume's rows are keyed under one hold of its read lock, sorted
+    /// without it, and become rows under a second hold, as a search's
+    /// matches do, so [`ResultRows::into_snapshot`] keeps them as a new
+    /// result snapshot. The rows are this one's: a file made since the
+    /// search is missing, and a file deleted since is left out, because its
+    /// slot has no value to sort by.
+    ///
+    /// # Errors
+    ///
+    /// [`ResultSnapshotGone`] when a volume's index was replaced since the
+    /// search, or its entries got new indexes.
+    ///
+    /// # Panics
+    ///
+    /// When `volumes` holds another number of volumes.
+    pub fn sort_again<V: IndexedVolume>(
+        &self,
+        volumes: Vec<V>,
+        sort: SortSpec,
+    ) -> Result<ResultRows<V>, ResultSnapshotGone> {
+        assert_eq!(
+            volumes.len(),
+            self.answers.len(),
+            "a sort gives the volumes of the search"
+        );
+        let mut answers = Vec::with_capacity(self.answers.len());
+        for (volume, answer) in volumes.iter().zip(&self.answers) {
+            let matches = {
+                let held = volume.read();
+                let index: &VolumeIndex = &held.index;
+                if index.instance() != answer.instance {
+                    return Err(ResultSnapshotGone);
+                }
+                let mut records = Vec::with_capacity(answer.rows.len());
+                records.extend(
+                    (0..answer.rows.len())
+                        .map(|at| answer.rows.get(at))
+                        .filter(|&(idx, frn)| index.holds(idx, frn))
+                        .map(|(idx, _)| SortRecord::new(idx)),
+                );
+                key_found(
+                    index,
+                    &answer.mount_prefix,
+                    records,
+                    answer.scope,
+                    answer.sums,
+                    sort,
+                )
+            };
+            // Without a hold, so the journal does not wait for the sort.
+            let ordered = matches.order();
+            let rows = ordered.read_rows(&volume.read().index);
+            answers.push(rows.map_err(|IndexChanged| ResultSnapshotGone)?);
+        }
+        Ok(ResultRows {
+            volumes,
+            reply: Reply::new(answers, 0, None),
+            sums: self.sums,
+            coverage: Coverage {
+                volumes_incomplete: self.volumes_incomplete,
+                metadata_pending: self.metadata_pending,
+            },
+        })
     }
 
     /// Reads the rows from `offset`, at most `limit` of them, from

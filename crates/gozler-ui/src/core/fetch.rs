@@ -9,7 +9,7 @@ use gozler_core::include::IncludeSettings;
 use gozler_core::output::ResultFormat;
 use gozler_core::proto::{
     DaemonStatus, PROTO_VERSION, QueryTotals, Request, ResultItem, ResultSnapshotId, Returns, Rows,
-    SearchRequest, SnapshotRowsRequest,
+    SearchRequest, SnapshotRowsRequest, SortSnapshotRequest,
 };
 use gozler_core::query::MatchSums;
 use gozler_core::search::Search;
@@ -138,6 +138,9 @@ pub(crate) enum FromSnapshot {
     Make { replaces: Option<ResultSnapshotId> },
     /// From the list's result snapshot.
     Read(ResultSnapshotId),
+    /// From a result snapshot that the request makes by sorting the list's
+    /// one again in the ask's sort, with no search, which replaces it.
+    Sort(ResultSnapshotId),
 }
 
 impl ChunkAsk {
@@ -173,6 +176,7 @@ impl ChunkAsk {
                 want_mtime: rows.want_mtime,
                 want_attributes: rows.want_attributes,
             }),
+            FromSnapshot::Sort(id) => Request::SortResultSnapshot(SortSnapshotRequest { id, rows }),
         }
     }
 }

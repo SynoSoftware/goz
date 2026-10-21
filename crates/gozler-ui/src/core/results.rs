@@ -482,18 +482,27 @@ impl Results {
 
     /// A new search in the order `sort`, whose first chunk `generation`
     /// asks for with the returned ask; the shown rows stay until it arrives.
+    /// When only the sort changed and the list reads a result snapshot, the
+    /// ask sorts that one again instead of searching, so the rows are of
+    /// the search's moment until `F5` (DESIGN.md: Result snapshots).
     pub(crate) fn start_search(
         &mut self,
         generation: Generation,
         search: Search,
         sort: SortSpec,
     ) -> ChunkAsk {
+        let snapshot = match &self.shown {
+            Shown::Rows(shown) if shown.ask.search == search && shown.ask.sort != sort => {
+                shown.snapshot.map_or(FromSnapshot::No, FromSnapshot::Sort)
+            }
+            _ => FromSnapshot::No,
+        };
         let ask = ChunkAsk {
             search,
             sort,
             start: 0,
             len: CHUNK_ROWS,
-            snapshot: FromSnapshot::No,
+            snapshot,
         };
         self.in_flight = Some(InFlight::Search(generation, ask.clone()));
         ask
@@ -614,14 +623,23 @@ impl Results {
         }
         match in_flight {
             Some(InFlight::Search(_, ask)) => {
+                // A sorted result snapshot holds the matches the shown sums
+                // count, and holds no sums when scrolling made it.
+                let sums = match (&self.shown, ask.snapshot) {
+                    (Shown::Rows(shown), FromSnapshot::Sort(_)) => chunk.sums.or(shown.sums),
+                    _ => chunk.sums,
+                };
+                if chunk.made.is_some() {
+                    self.last_snapshot = chunk.made;
+                }
                 let mut shown = ShownRows {
                     ask,
                     total: chunk.total,
-                    sums: chunk.sums,
+                    sums,
                     chunks: Vec::new(),
                     matched: None,
                     clock: 0,
-                    snapshot: None,
+                    snapshot: chunk.made,
                 };
                 shown.insert(chunk.start, chunk.rows, first_page);
                 self.shown = Shown::Rows(shown);
@@ -720,6 +738,7 @@ impl ShownRows {
 pub(crate) mod tests {
     use super::*;
     use gozler_core::query::parse_query;
+    use gozler_core::types::SortKey;
 
     fn search() -> Search {
         Search {
@@ -820,6 +839,49 @@ pub(crate) mod tests {
             asked.map(|a| a.snapshot),
             Some(FromSnapshot::Make { replaces: Some(id) })
         );
+    }
+
+    /// A sort change sorts the list's result snapshot again instead of
+    /// searching, keeps the sums that only the search counted, and reads
+    /// the sorted one from then on, so scrolling after it searches neither.
+    /// `F5`, which asks for the same sort, searches, because it shows the
+    /// disk as it is now.
+    #[test]
+    fn a_sort_change_sorts_the_result_snapshot_again() {
+        let mut results = Results::new();
+        results.start_search(Generation(1), search(), SortSpec::default());
+        let sums = MatchSums {
+            files: 200_000,
+            ..MatchSums::default()
+        };
+        let first = Chunk {
+            sums: Some(sums),
+            ..chunk(0, CHUNK_ROWS, 200_000)
+        };
+        results.accept(Generation(1), first);
+        let id = ResultSnapshotId(7);
+        let asked = results.next_chunk(150_000..150_040, Generation(2));
+        let made = Chunk {
+            made: Some(id),
+            ..chunk(asked.expect("not cached").start, CHUNK_ROWS, 200_000)
+        };
+        results.accept(Generation(2), made);
+
+        let by_size = SortSpec::default_for(SortKey::Size);
+        let asked = results.start_search(Generation(3), search(), by_size);
+        assert_eq!(asked.snapshot, FromSnapshot::Sort(id));
+        let sorted = ResultSnapshotId(8);
+        let made = Chunk {
+            made: Some(sorted),
+            ..chunk(0, CHUNK_ROWS, 199_999)
+        };
+        results.accept(Generation(3), made);
+        assert_eq!(results.sums(), Some(sums));
+        let asked = results.next_chunk(150_000..150_040, Generation(4));
+        assert_eq!(asked.map(|a| a.snapshot), Some(FromSnapshot::Read(sorted)));
+
+        let again = results.start_search(Generation(5), search(), by_size);
+        assert_eq!(again.snapshot, FromSnapshot::No, "F5");
     }
 
     /// A chunk that comes back short, because the service left out a row

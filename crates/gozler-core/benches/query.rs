@@ -3,7 +3,8 @@
 //! Builds a tree resembling a real volume (nested directories, varied file
 //! names, a known fraction containing a rare token) and measures `run_query`
 //! for rare, medium, and wildcard needles, then what keeping folder sizes
-//! costs over the same tree. Run with `cargo bench -p gozler-core`.
+//! costs over the same tree, and what a sort change in the window asks.
+//! Run with `cargo bench -p gozler-core`.
 
 // Measure the effect of a thread-caching allocator on the alloc-heavy broad
 // reconstruction. Toggle by commenting this out to compare against the system heap.
@@ -14,10 +15,15 @@ mod measure;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::query::{CompiledQuery, ParseOptions, parse_query, parse_query_with, run_query};
-use gozler_core::types::{Frn, SortKey, SortSpec};
+use gozler_core::query::{
+    CompiledQuery, HeldVolume, IndexedVolume, ParseOptions, ResultRows, ResultSnapshot, RowsSpec,
+    parse_query, parse_query_with, run_query,
+};
+use gozler_core::scope::VolumeMounts;
+use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::hint::black_box;
+use std::sync::Arc;
 
 // Deep, long-named tree (WinSxS / node_modules-like) so path reconstruction pays
 // a realistic ~6-hop parent walk per file, not the 2-3 hops a flat tree gives.
@@ -226,6 +232,119 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
     broad.finish();
 }
 
+/// The bench's index, searched as gozlerd searches a volume.
+struct BenchVolume<'a> {
+    index: &'a VolumeIndex,
+    mounts: [String; 1],
+}
+
+impl IndexedVolume for BenchVolume<'_> {
+    type Index<'h>
+        = &'h VolumeIndex
+    where
+        Self: 'h;
+
+    fn read(&self) -> HeldVolume<&VolumeIndex> {
+        HeldVolume {
+            index: self.index,
+            complete: true,
+            metadata_pending: false,
+        }
+    }
+
+    fn mounts(&self) -> VolumeMounts<'_> {
+        VolumeMounts {
+            mounts: &self.mounts,
+            guid: "",
+        }
+    }
+}
+
+/// The rows of the window's first chunk.
+const CHUNK_ROWS: u32 = 16_384;
+
+/// Reads every page of `rows`, as gozlerd sends them.
+fn read_pages<V: IndexedVolume>(mut rows: ResultRows<V>) -> u64 {
+    let mut read = 0u64;
+    while rows.page(4096, |row, _| {
+        read += black_box(row.name.len()) as u64;
+        true
+    }) {}
+    read
+}
+
+/// What a sort change asks of gozlerd while the list reads no result
+/// snapshot: a search for the first chunk in the new sort, with the sums.
+#[inline(never)]
+fn sort_by_search(volume: &Arc<BenchVolume>, query: &CompiledQuery, sort: SortSpec) -> u64 {
+    let spec = RowsSpec {
+        sort,
+        offset: 0,
+        limit: Some(CHUNK_ROWS),
+        sums: true,
+    };
+    let rows = ResultRows::search(vec![volume.clone()], query, None, spec).expect("no scope");
+    read_pages(rows)
+}
+
+/// What a sort change asks once the list reads a result snapshot: that one
+/// sorted again, kept as a new one, and its first chunk read.
+#[inline(never)]
+fn sort_snapshot_again(
+    snapshot: &ResultSnapshot,
+    volume: &Arc<BenchVolume>,
+    sort: SortSpec,
+) -> u64 {
+    let sorted = snapshot
+        .sort_again(vec![volume.clone()], sort)
+        .expect("the index stays");
+    let (sorted, volumes) = sorted.into_snapshot().expect("one volume");
+    let mut rows = sorted.read(volumes, 0, Some(CHUNK_ROWS));
+    let mut read = 0u64;
+    while rows
+        .page(4096, |_, _| {
+            read += 1;
+            true
+        })
+        .expect("the index stays")
+    {}
+    read
+}
+
+/// The two requests of a sort change in the window, over the empty search,
+/// which matches every entry.
+fn bench_sort_change(c: &mut Criterion<measure::Measure>) {
+    let (idx, _) = build_index();
+    let volume = Arc::new(BenchVolume {
+        index: &idx,
+        mounts: [r"C:\".to_string()],
+    });
+    let query = compiled("");
+    let by_name = RowsSpec {
+        sort: SortSpec::default(),
+        offset: 0,
+        limit: None,
+        sums: false,
+    };
+    let (snapshot, _) = ResultRows::search(vec![volume.clone()], &query, None, by_name)
+        .expect("no scope")
+        .into_snapshot()
+        .expect("one volume");
+    let by_size = SortSpec {
+        key: SortKey::Size,
+        dir: SortDir::Desc,
+    };
+    let mut group = c.benchmark_group("sort_change_2M");
+    group.sample_size(10);
+    group.bench_function("search by size", |b| {
+        b.iter(|| sort_by_search(&volume, &query, by_size))
+    });
+    group.bench_function("result snapshot sorted by size", |b| {
+        b.iter(|| sort_snapshot_again(&snapshot, &volume, by_size))
+    });
+    group.finish();
+}
+
 /// What folder sizes cost: summing every folder once, when a build's size and
 /// date pass ends, and a file's size change while the folder sizes are still
 /// unknown and once they are kept, which is the extra each journal change
@@ -259,6 +378,6 @@ fn bench_folder_sizes(c: &mut Criterion<measure::Measure>) {
 criterion_group! {
     name = benches;
     config = measure::criterion();
-    targets = bench_query, bench_folder_sizes
+    targets = bench_query, bench_folder_sizes, bench_sort_change
 }
 criterion_main!(benches);

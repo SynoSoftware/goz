@@ -20,8 +20,8 @@ use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
     DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
     ProtoError, Request, Response, ResultSnapshotId, Returns, Rows, SentFolders,
-    SnapshotRowsRequest, VolumeMemory, VolumeStatus, encode_page, encode_response_frame,
-    encode_snapshot_page,
+    SnapshotRowsRequest, SortSnapshotRequest, VolumeMemory, VolumeStatus, encode_page,
+    encode_response_frame, encode_snapshot_page,
 };
 use gozler_core::query::{
     CompiledQuery, HeldVolume, MatchSums, ResultRows, ResultSnapshot, RowsSpec, TotalsError,
@@ -283,6 +283,9 @@ fn serve(
         Ok(Request::ResultSnapshotRows(read)) => {
             return read_snapshot(volumes, snapshots, &read, emit);
         }
+        Ok(Request::SortResultSnapshot(sort)) => {
+            return sort_snapshot(volumes, snapshots, user, &sort, emit);
+        }
         Err(e) => return reply(emit, refusal(format!("malformed request: {e}"))),
     };
     let query = match CompiledQuery::new(&search.query) {
@@ -397,6 +400,34 @@ fn read_snapshot(
         return reply(emit, snapshot_gone());
     };
     stream_snapshot(&snapshot, held, read, None, emit);
+}
+
+/// Sorts the result snapshot that `sort` names again with no search, keeps
+/// the sorted one in its place, answers its id, and streams the rows that
+/// `sort.rows`' offset and limit ask for; or says it is gone.
+fn sort_snapshot(
+    volumes: &VolumeSet,
+    snapshots: &Snapshots,
+    user: &[u8],
+    sort: &SortSnapshotRequest,
+    emit: &mut dyn FnMut(Vec<u8>) -> bool,
+) {
+    let found = snapshots.get(sort.id, Instant::now());
+    let Some((snapshot, held)) = found else {
+        return reply(emit, snapshot_gone());
+    };
+    let Some(held) = live_volumes(&held, volumes) else {
+        return reply(emit, snapshot_gone());
+    };
+    let Ok(sorted) = snapshot.sort_again(held, sort.rows.sort) else {
+        return reply(emit, snapshot_gone());
+    };
+    let made = Made {
+        user,
+        replaces: Some(sort.id),
+        cap: snapshot_cap(volumes),
+    };
+    make_snapshot(snapshots, made, sorted, &sort.rows, emit);
 }
 
 /// Streams the rows of `snapshot` that `read` asks for, from `volumes`, its
@@ -1009,11 +1040,13 @@ mod tests {
 
     /// A result snapshot answers its id and the rows asked for, a later
     /// read by that id answers the rows at its offset with the same total,
-    /// and an id the daemon does not keep answers the gone error, which the
+    /// a sort answers a new one in the new order, which replaces it, and an
+    /// id the daemon no longer keeps answers the gone error, which the
     /// window answers with a new search.
     #[test]
     fn a_result_snapshot_is_read_by_its_id_until_it_is_gone() {
-        use gozler_core::proto::{ResultSnapshotId, SnapshotRowsRequest};
+        use gozler_core::proto::{SnapshotRowsRequest, SortSnapshotRequest};
+        use gozler_core::types::SortDir;
         let vols = set(&[live_volume(r"C:\")]);
         let snapshots = ResultSnapshots::new();
         let made = Request::Search(SearchRequest {
@@ -1064,11 +1097,42 @@ mod tests {
         };
         let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &read(id)));
         assert_eq!(paths(&frames[0]), (2, vec![r"C:\Windows".to_string()]));
-        let frames = decode_frames(&reply_bytes_in(
-            &vols,
-            &snapshots,
-            &read(ResultSnapshotId(0)),
-        ));
+
+        let sort = Request::SortResultSnapshot(SortSnapshotRequest {
+            id,
+            rows: Rows {
+                sort: SortSpec {
+                    key: SortKey::Name,
+                    dir: SortDir::Desc,
+                },
+                offset: 0,
+                limit: None,
+                want_size: false,
+                want_mtime: false,
+                want_attributes: false,
+                want_sums: false,
+            },
+        });
+        let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &sort));
+        let Response::ResultSnapshot {
+            id: sorted,
+            total: 2,
+        } = frames[0]
+        else {
+            panic!("the id of the sorted rows first: {:?}", frames[0])
+        };
+        assert_ne!(sorted, id);
+        assert_eq!(
+            paths(&frames[1]),
+            (
+                2,
+                vec![
+                    r"C:\Windows".to_string(),
+                    r"C:\Windows\System32".to_string()
+                ]
+            )
+        );
+        let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &read(id)));
         assert!(
             matches!(
                 frames[..],

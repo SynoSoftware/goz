@@ -26,5 +26,5 @@ pub use types::{
     DaemonStatus, LeftOutVolume, MAX_CLIENT_FRAME, MAX_SERVER_FRAME, MemPair, OLDEST_PROTO_VERSION,
     PAGE_ROWS, PIPE_NAME, PROTO_VERSION, ProtoError, QueryResults, QueryTotals, Request, Response,
     ResultItem, ResultSnapshotId, Returns, Rows, SERVICE_NAME, SearchRequest, SnapshotRowsRequest,
-    VolumeMemory, VolumeStatus,
+    SortSnapshotRequest, VolumeMemory, VolumeStatus,
 };

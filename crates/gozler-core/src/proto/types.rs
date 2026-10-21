@@ -20,7 +20,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 11;
+pub const PROTO_VERSION: u16 = 12;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -75,6 +75,10 @@ pub enum Request {
     /// Rows of a result snapshot that a [`Returns::ResultSnapshot`] search
     /// made, as [`Response::Results`] pages.
     ResultSnapshotRows(SnapshotRowsRequest),
+    /// The rows of a result snapshot in another order, with no search: a
+    /// new result snapshot of them, answered as a
+    /// [`Returns::ResultSnapshot`] search is, which replaces the one named.
+    SortResultSnapshot(SortSnapshotRequest),
 }
 
 /// The id of a result snapshot: 128 random bits, which only the client that
@@ -111,6 +115,15 @@ pub struct SnapshotRowsRequest {
     pub want_mtime: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_attributes: bool,
+}
+
+/// Which result snapshot a [`Request::SortResultSnapshot`] sorts, and the
+/// rows of it to send: `rows`' sort orders the new result snapshot, and its
+/// offset and limit pick the rows sent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SortSnapshotRequest {
+    pub id: ResultSnapshotId,
+    pub rows: Rows,
 }
 
 /// One search.
@@ -200,8 +213,8 @@ pub enum Response {
     /// Reply to [`Request::SettingsSaved`]: the daemon applies the saved
     /// settings.
     SettingsApplied,
-    /// The result snapshot a [`Returns::ResultSnapshot`] search made; its
-    /// rows' pages follow.
+    /// The result snapshot a [`Returns::ResultSnapshot`] search or a
+    /// [`Request::SortResultSnapshot`] made; its rows' pages follow.
     ResultSnapshot {
         id: ResultSnapshotId,
         /// The rows it holds, a gone row counted.
