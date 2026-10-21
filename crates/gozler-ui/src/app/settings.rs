@@ -956,7 +956,11 @@ impl<'a> SettingsDialog<'a> {
             }
             apply.set_enabled(changed && !saving);
         }
-        for button in [DialogItem::Ok.id(), DialogItem::Cancel.id()] {
+        for button in [
+            DialogItem::Ok.id(),
+            DialogItem::Cancel.id(),
+            ControlId::SettingsResetAll.id(),
+        ] {
             if let Some(button) = dialog::item(dialog, button) {
                 if saving {
                     focus_off(dialog, button);
