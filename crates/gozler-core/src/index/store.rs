@@ -677,9 +677,19 @@ pub(crate) const SIZE_UNKNOWN: u64 = u64::MAX;
 /// Sentinel mtime meaning "unknown".
 pub(crate) const MTIME_UNKNOWN: i64 = i64::MIN;
 
-/// The entries' file IDs. NTFS IDs fit in 64 bits, so the column holds `u64`s
-/// until it stores its first wide ID, as a ReFS volume's root is, and holds
-/// `u128`s from then on, so an NTFS index never pays for the wider ID.
+/// The width of a volume's file IDs, which its filesystem decides: NTFS IDs
+/// fit in 64 bits, keyed by their record number, and ReFS IDs take 128 bits,
+/// whose low bytes repeat across folders, so they are keyed whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdWidth {
+    Narrow,
+    Wide,
+}
+
+/// The entries' file IDs: `u64`s for an index of [`IdWidth::Narrow`] IDs,
+/// so an NTFS index never pays for the wider ID, and `u128`s for one of
+/// [`IdWidth::Wide`] IDs. A narrow column that is given a wide ID, which
+/// only corrupt data holds, widens rather than lose its high half.
 #[derive(Debug)]
 enum FrnColumn {
     Narrow(Vec<u64>),
@@ -808,8 +818,14 @@ struct ReusedSlots {
 }
 
 impl EntryTable {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(ids: IdWidth) -> Self {
+        Self {
+            frn: match ids {
+                IdWidth::Narrow => FrnColumn::Narrow(Vec::new()),
+                IdWidth::Wide => FrnColumn::Wide(Vec::new()),
+            },
+            ..Self::default()
+        }
     }
 
     /// Allocates a slot (reusing a freed one when available). The caller
@@ -1135,14 +1151,13 @@ pub(crate) enum FrnMap {
 }
 
 impl FrnMap {
-    /// An empty map for a volume whose root folder has the ID `root`: `Wide`
-    /// for a wide root, as ReFS has, and otherwise a record-number map, which
-    /// starts sparse because it is safe for any record-number space.
-    pub(crate) fn for_root(root: Frn) -> Self {
-        if root.is_wide() {
-            FrnMap::Wide(FxHashMap::default())
-        } else {
-            FrnMap::Sparse(FxHashMap::default())
+    /// An empty map for IDs `ids` wide: `Wide` for wide IDs, and otherwise a
+    /// record-number map, which starts sparse because it is safe for any
+    /// record-number space.
+    pub(crate) fn new(ids: IdWidth) -> Self {
+        match ids {
+            IdWidth::Wide => FrnMap::Wide(FxHashMap::default()),
+            IdWidth::Narrow => FrnMap::Sparse(FxHashMap::default()),
         }
     }
 

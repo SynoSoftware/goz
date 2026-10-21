@@ -21,7 +21,7 @@
 //!   folder's size costs no memory and no walk of its contents.
 
 use super::store::{
-    CompactedNames, ComponentBytes, EntryFlags, EntryTable, FrnMap, MTIME_UNKNOWN, NameId,
+    CompactedNames, ComponentBytes, EntryFlags, EntryTable, FrnMap, IdWidth, MTIME_UNKNOWN, NameId,
     NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved,
 };
 use crate::attributes::{Attributes, PackedAttributes};
@@ -39,8 +39,9 @@ mod include;
 use include::Screen;
 
 /// NTFS reserves MFT record 5 for the volume root directory. The daemon reads
-/// each volume's root ID from the volume; tests and benches build NTFS-shaped
-/// indexes with this one.
+/// each volume's root ID from the volume, and gives this one only to the
+/// empty index of a volume not built yet; tests and benches build
+/// NTFS-shaped indexes with it.
 pub const NTFS_ROOT_FRN: Frn = Frn(0x0005_0000_0000_0005);
 
 /// Synthetic name for the lost+found root (never collides: `$` names are NTFS
@@ -260,14 +261,27 @@ pub struct VolumeIndex {
 }
 
 impl VolumeIndex {
-    /// Builds an empty index with the volume's root folder, whose file ID is
-    /// `root`, and a lost+found root. A wide root, as ReFS has, makes the FRN
-    /// map key on whole IDs; otherwise it starts sparse, and
-    /// [`Self::optimize_storage`] makes it dense when that is smaller.
+    /// [`Self::with_ids`] with the width of `root`, for a caller with no
+    /// filesystem to go by, such as a test or a bench.
     pub fn new(root: Frn) -> Self {
-        let mut entries = EntryTable::new();
+        let ids = if root.is_wide() {
+            IdWidth::Wide
+        } else {
+            IdWidth::Narrow
+        };
+        Self::with_ids(root, ids)
+    }
+
+    /// Builds an empty index of a volume whose file IDs are `ids` wide, with
+    /// the volume's root folder, whose file ID is `root`, and a lost+found
+    /// root. Narrow IDs take 8 bytes each and an FRN map keyed by record
+    /// number, which starts sparse and which [`Self::optimize_storage`]
+    /// makes dense when that is smaller; wide IDs take 16 bytes and a map
+    /// keyed by the whole ID.
+    pub fn with_ids(root: Frn, ids: IdWidth) -> Self {
+        let mut entries = EntryTable::new(ids);
         let mut names = NameStore::new();
-        let mut by_frn = FrnMap::for_root(root);
+        let mut by_frn = FrnMap::new(ids);
         let root_frn = root;
 
         let root_name = names.intern(b"");

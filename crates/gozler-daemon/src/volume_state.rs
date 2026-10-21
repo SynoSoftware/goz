@@ -145,10 +145,10 @@ impl Building<'_> {
 }
 
 impl VolumeState {
-    /// A volume that is not indexed yet: an empty index, phase `Bootstrapping`.
-    /// The first build replaces the index with one rooted at the volume's own
-    /// root. Until then, `--status` reports the NTFS root's map kind, even on
-    /// ReFS.
+    /// A volume that is not indexed yet: an empty index of the filesystem's
+    /// ID width, phase `Bootstrapping`. The first build replaces the index
+    /// with one rooted at the volume's own root; until then the root, whose
+    /// ID nothing reads, is the NTFS one.
     pub(crate) fn new(
         guid: String,
         mounts: Vec<String>,
@@ -160,7 +160,7 @@ impl VolumeState {
             mounts,
             filesystem,
             indexed: RwLock::new(Indexed {
-                index: VolumeIndex::new(NTFS_ROOT_FRN),
+                index: VolumeIndex::with_ids(NTFS_ROOT_FRN, filesystem.ids()),
                 metadata_pending: false,
                 journal_max_bytes: None,
                 built: false,

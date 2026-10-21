@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use gozler_core::include::VolumeRules;
-use gozler_core::index::VolumeIndex;
 use gozler_core::index::settle::{self, FileLink, FileStat, VolumeReads};
+use gozler_core::index::{IdWidth, VolumeIndex};
 use gozler_core::layout::{
     LayoutFile, RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer, walk_listing_buffer,
 };
@@ -51,6 +51,15 @@ pub(crate) enum Filesystem {
 }
 
 impl Filesystem {
+    /// How wide this filesystem's file IDs are, which the index keeps them
+    /// and keys them by.
+    pub(crate) fn ids(self) -> IdWidth {
+        match self {
+            Self::Ntfs => IdWidth::Narrow,
+            Self::Refs => IdWidth::Wide,
+        }
+    }
+
     /// The journal records that hold this filesystem's file IDs whole.
     pub(crate) fn journal_records(self) -> JournalRecords {
         match self {
@@ -275,7 +284,7 @@ pub(crate) fn build_index(
     // Read from the volume on every filesystem: NTFS gives record 5, and
     // ReFS gives its own, so neither root is assumed.
     let root = Frn(root_folder_id(guid_path).context("reading the root folder's file ID")?);
-    let mut index = VolumeIndex::new(root);
+    let mut index = VolumeIndex::with_ids(root, filesystem.ids());
 
     let read_start = Instant::now();
     if filesystem == Filesystem::Refs {

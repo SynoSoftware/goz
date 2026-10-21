@@ -17,7 +17,7 @@ pub mod volume;
 
 pub mod settle;
 
-pub use store::ComponentBytes;
+pub use store::{ComponentBytes, IdWidth};
 pub use volume::{
     Anomaly, ApplyOutcome, EntryView, IndexMemory, IndexStats, LinkTarget, NTFS_ROOT_FRN,
     PathStatus, VolumeIndex,

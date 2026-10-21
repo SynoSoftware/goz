@@ -126,6 +126,22 @@ fn arb_ids() -> impl Strategy<Value = Ids> {
 
 // -- targeted unit tests -------------------------------------------------
 
+/// The volume's filesystem decides the width of its file IDs, not its root's
+/// ID: an NTFS index keeps 8-byte IDs, not 16-byte ones that would grow
+/// every entry, and a ReFS index keys its map on whole
+/// IDs, whose low bytes repeat across folders, also while it holds the
+/// placeholder root the daemon gives a volume before its first build.
+#[test]
+fn the_filesystem_decides_the_width_of_the_ids() {
+    let mut ntfs = VolumeIndex::with_ids(NTFS_ROOT_FRN, IdWidth::Narrow);
+    ntfs.insert_enum(&create(frn(100), root_frn(), "a", false));
+    assert!(!ntfs.has_wide_ids());
+    assert_eq!(ntfs.memory().frn_map_kind, "sparse");
+    let refs = VolumeIndex::with_ids(NTFS_ROOT_FRN, IdWidth::Wide);
+    assert!(refs.has_wide_ids());
+    assert_eq!(refs.memory().frn_map_kind, "wide");
+}
+
 #[test]
 fn builds_simple_tree_and_reconstructs_paths() {
     let idx = index_from_enum(&[
