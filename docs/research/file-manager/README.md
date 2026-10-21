@@ -25,3 +25,5 @@ GitHub issues the notes name (#104, #106-#114).
 | `final-review-brief.md`, `final-review-fixes.md` | the final adversarial review and its fix round |
 | `memory.txt`, `minwidth.txt` | stage 7's memory budget and minimum window width measurements |
 | `scripts/` | the probe scripts that took the screenshots and the measurements; they expect the `.work` folder layout they ran in |
+| `screenshots/` | the design record: `shots/` the 30 screens of the finished Two panels (prototype screen names), and `stage4/` to `stage7/` the screens each stage added, taken by the probe scripts with sample folders |
+| `issue-121/` | a mock-up of the `..` row's three options for #121, from the real shell icons and the real arrow glyph (`scripts/issue-121-updot.ps1` makes it) |
