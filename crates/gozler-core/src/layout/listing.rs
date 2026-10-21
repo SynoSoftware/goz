@@ -398,6 +398,57 @@ mod tests {
         );
     }
 
+    /// Each check of a listing turns its malformed field into its own
+    /// error, for both parsers: the proptests below only ask for no panic,
+    /// so a check that stopped firing would pass them while a corrupt
+    /// listing read as a shorter one. Both entries put `NextEntryOffset` at
+    /// byte 0 and `FileNameLength` at byte 60.
+    #[test]
+    fn each_malformed_listing_field_is_its_own_error() {
+        let entries = [entry(1, 0x20, 1, "ab"), entry(2, 0x20, 1, "cd")];
+        type Parse<'a> = &'a dyn Fn(&[u8]) -> Result<(), LayoutWalkError>;
+        let parsers: [(Vec<u8>, Parse<'_>); 2] = [
+            (build_listing(&entries), &|buf| {
+                walk_listing_buffer(Frn(0x600 << 64), buf).map(drop)
+            }),
+            (build_full_listing(&entries), &|buf| {
+                walk_full_listing_buffer(buf).map(drop)
+            }),
+        ];
+        for (valid, parse) in parsers {
+            let with = |at: usize, value: u32| {
+                let mut buf = valid.clone();
+                buf[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                parse(&buf)
+            };
+            assert!(parse(&valid).is_ok());
+            assert!(matches!(
+                parse(&valid[..50]),
+                Err(LayoutWalkError::Truncated { offset: 0, .. })
+            ));
+            assert!(matches!(
+                with(60, MAX_NAME_UTF16_BYTES as u32 + 2),
+                Err(LayoutWalkError::NameTooLong { .. })
+            ));
+            assert!(matches!(
+                with(60, 3),
+                Err(LayoutWalkError::OddUtf16Length { len: 3, .. })
+            ));
+            assert!(matches!(
+                with(60, 400),
+                Err(LayoutWalkError::Truncated { need: 400, .. })
+            ));
+            assert!(matches!(
+                with(0, 10_000),
+                Err(LayoutWalkError::OffsetOutOfBounds { .. })
+            ));
+            assert!(matches!(
+                with(0, 8),
+                Err(LayoutWalkError::OffsetCycle { rel: 8, .. })
+            ));
+        }
+    }
+
     fn arb_entry() -> impl Strategy<Value = EntryFixture> {
         (
             any::<u128>(),

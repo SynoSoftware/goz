@@ -471,20 +471,32 @@ fn a_hard_link_change_is_reported_once_per_batch() {
 /// A folder the index lacks that a rename brings in must be walked, even
 /// when it was created through the same handle: reason bits accumulate, so
 /// that rename record carries FILE_CREATE too. A record of the create alone
-/// is a new folder and needs no walk.
+/// is a new folder and needs no walk. Every entry the index missed, file or
+/// folder, is also read for its size and date, which it would otherwise
+/// lack; a rename alone, unlike a create, asks for that only through this
+/// rule.
 #[test]
 fn a_renamed_folder_the_index_lacks_is_reported_for_a_walk() {
     let mut idx = new_index();
     let created = idx.apply_batch(&[create(frn(100), root_frn(), "new", true)]);
     assert!(created.needs_walk.is_empty());
-    let moved_in = idx.apply_batch(&[record(
+    let moved_in = |idx: &mut VolumeIndex, f: Frn, is_dir: bool, reason: u32| {
+        idx.apply_batch(&[record(f, root_frn(), "moved", is_dir, reason)])
+    };
+    let folder = moved_in(
+        &mut idx,
         frn(200),
-        root_frn(),
-        "moved",
         true,
         USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME,
-    )]);
-    assert_eq!(moved_in.needs_walk, vec![frn(200)]);
+    );
+    assert_eq!(folder.needs_walk, vec![frn(200)]);
+    let folder = moved_in(&mut idx, frn(300), true, USN_REASON_RENAME_NEW_NAME);
+    assert_eq!(
+        (folder.needs_walk, folder.needs_stat),
+        (vec![frn(300)], vec![frn(300)])
+    );
+    let file = moved_in(&mut idx, frn(400), false, USN_REASON_RENAME_NEW_NAME);
+    assert_eq!((file.needs_walk, file.needs_stat), (vec![], vec![frn(400)]));
 }
 
 // -- hard links ----------------------------------------------------------
