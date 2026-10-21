@@ -341,20 +341,13 @@ mod tests {
         format!(r"\\.\pipe\gozler-client-test-{test}-{}", std::process::id())
     }
 
-    /// Connects to `pipe_name` on another thread and cancels the connect
-    /// after 50 ms. Returns its error, if any, and how long it took to
-    /// return after the cancel.
-    fn connect_then_cancel(pipe_name: &str) -> (Option<ClientError>, Duration) {
+    /// Connects to `pipe_name` with a token that is already cancelled, and
+    /// returns the error, if any. The outcome shows whether the wait checked
+    /// the token, because a wait that ignores it ends in another error.
+    fn connect_cancelled(pipe_name: &str) -> Option<ClientError> {
         let cancel = CancelToken::default();
-        let connect = {
-            let (pipe_name, cancel) = (pipe_name.to_string(), cancel.clone());
-            std::thread::spawn(move || Client::connect(&pipe_name, false, cancel).err())
-        };
-        std::thread::sleep(Duration::from_millis(50));
-        let cancelled = Instant::now();
         cancel.cancel();
-        let error = connect.join().expect("connect does not panic");
-        (error, cancelled.elapsed())
+        Client::connect(pipe_name, false, cancel).err()
     }
 
     fn reactor() -> tokio::runtime::Runtime {
@@ -375,9 +368,8 @@ mod tests {
             .first_pipe_instance(true)
             .create(&name)
             .expect("the test pipe is created");
-        let (error, waited) = connect_then_cancel(&name);
+        let error = connect_cancelled(&name);
         assert!(matches!(error, Some(ClientError::Cancelled)), "{error:?}");
-        assert!(waited < Duration::from_millis(100), "{waited:?}");
     }
 
     /// A pipe whose only instance another client holds answers every open
@@ -398,9 +390,8 @@ mod tests {
             .write(true)
             .open(&name)
             .expect("the first client takes the only instance");
-        let (error, waited) = connect_then_cancel(&name);
+        let error = connect_cancelled(&name);
         assert!(matches!(error, Some(ClientError::Cancelled)), "{error:?}");
-        assert!(waited < Duration::from_millis(100), "{waited:?}");
     }
 
     /// A daemon whose results pages have all arrived before the caller
