@@ -81,11 +81,6 @@ the main window's and the Viewer's placement; the active panel; a search
 panel's sort; the Viewer's Wrap; the placement saved before the first show;
 a slow folder saved as the old one.
 
-## Not yet reviewed
-
-The new `landing` and `stays_in_place` against the old `drag_to`
-"unchanged" test, and the File operations window's `show_hint`.
-
 ## Decided, nothing to build
 
 - A controller type per list (pattern P1): the panels' lists differ from
