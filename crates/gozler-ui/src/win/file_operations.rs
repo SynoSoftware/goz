@@ -6,34 +6,30 @@
 //! taskbar button.
 
 use super::controls::{ProgressBar, child, send, send_pointer};
-use super::gdi::{Icon, IconFont, draw_lone_glyph, glyph_coverage, high_contrast, system_color};
+use super::gdi::{EraseDc, glyph_list, high_contrast, system_color};
 use super::notify::Notification;
 use super::{Hwnd, to_rect, wide};
 use crate::core::glyph::Glyph;
-use crate::core::layout::{Dpi, Px, Rect, Size};
+use crate::core::layout::{Px, Rect, Size};
 use windows::Win32::Foundation::{LRESULT, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_HIGHLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT,
-    CreatePen, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetSysColorBrush, HDC, HGDIOBJ,
-    MapWindowPoints, PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject,
+    COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, CreatePen, CreateSolidBrush,
+    DeleteObject, FillRect, GetSysColorBrush, HGDIOBJ, MapWindowPoints, PS_SOLID, RoundRect,
+    SelectObject,
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_POSTPAINT, CDDS_PREPAINT, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT,
-    CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT, CloseThemeData, DrawThemeBackground, EMF_CENTERED,
-    HIMAGELIST, ILC_COLOR32, ImageList_Create, ImageList_Destroy, ImageList_ReplaceIcon,
-    LISS_HOTSELECTED, LISS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS, LV_VIEW_TILE, LVCF_WIDTH,
-    LVCOLUMNW, LVHITTESTINFO, LVIF_COLUMNS, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON,
+    EMF_CENTERED, LIST_VIEW_ITEM_STATE_FLAGS, LV_VIEW_TILE, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO,
+    LVIF_COLUMNS, LVIF_IMAGE, LVIF_TEXT, LVIM_AFTER, LVINSERTMARK, LVIR_BOUNDS, LVIR_ICON,
     LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
-    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM, LVM_HITTEST,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SCROLL, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM, LVM_HITTEST, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SCROLL, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETINSERTMARK,
     LVM_SETITEMSTATE, LVM_SETITEMW, LVM_SETTILEVIEWINFO, LVM_SETVIEW, LVN_BEGINDRAG,
-    LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED, LVP_LISTITEM,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSIL_NORMAL,
-    LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE, NM_CUSTOMDRAW,
-    NMCUSTOMDRAW_DRAW_STATE_FLAGS, NMLISTVIEW, NMLVCUSTOMDRAW, NMLVEMPTYMARKUP, NMLVGETINFOTIPW,
-    NMLVKEYDOWN, OpenThemeData, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED, SetWindowTheme,
-    WC_LISTVIEWW,
+    LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED,
+    LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
+    LVSIL_NORMAL, LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE, NMLISTVIEW,
+    NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMLVKEYDOWN, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED,
+    SetWindowTheme, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
@@ -42,14 +38,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, IDC_NO, LoadCursorW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor,
-    SetWindowPos, WINDOW_EX_STYLE, WM_ERASEBKGND, WS_EX_CLIENTEDGE, WS_TABSTOP,
+    SetWindowPos, WINDOW_EX_STYLE, WS_EX_CLIENTEDGE, WS_TABSTOP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
-
-/// `WM_ERASEBKGND`, which the window answers itself: it paints its whole
-/// client area on `WM_PAINT`, so Windows' erase in the class colour would
-/// only flicker.
-pub(crate) const ERASE_BACKGROUND: u32 = WM_ERASEBKGND;
 
 /// The message the File operations window posts to its owner after the
 /// entries that deletes and moves take changed, or an operation ended.
@@ -93,22 +84,29 @@ pub(crate) fn show_paused(bar: ProgressBar, paused: bool) {
     send(bar.hwnd(), PBM_SETSTATE, state as usize, 0);
 }
 
-/// Paints the window's client area in the dialog colour and `card` on it in
-/// the window colour, with a one-pixel border and corners rounded by
-/// `corner`, and `icon` in the text colour.
-pub(crate) fn paint_card(window: Hwnd, card: Rect, corner: Px, icon: Option<(Glyph, Rect, Px)>) {
-    let mut paint = PAINTSTRUCT::default();
+/// Paints the background of `window` on `dc`, as `WM_ERASEBKGND` asks: the
+/// dialog colour, and `card` on it in the window colour, with a one-pixel
+/// border and corners rounded by `corner`. A themed button asks for it too,
+/// to paint its corners in the colour it stands on.
+pub(crate) fn paint_card(window: Hwnd, dc: EraseDc, card: Rect, corner: Px) {
+    let EraseDc(dc) = dc;
+    let client = window.client_size();
+    let ground = to_rect(Rect {
+        x: Px(0),
+        y: Px(0),
+        width: client.width,
+        height: client.height,
+    });
     let border = system_color(if high_contrast() {
         COLOR_WINDOWTEXT
     } else {
         COLOR_3DLIGHT
     });
-    // SAFETY: BeginPaint and EndPaint pair on the same window and
-    // structure. The pen and the brush are this block's own, selected out
-    // of the DC before they are deleted; system brushes are never freed.
+    // SAFETY: the DC is the message's, which Windows holds for it. The pen
+    // and the brush are this block's own, selected out of the DC before
+    // they are deleted; system brushes are never freed.
     unsafe {
-        let dc = BeginPaint(window.0, &mut paint);
-        FillRect(dc, &paint.rcPaint, GetSysColorBrush(COLOR_BTNFACE));
+        FillRect(dc, &ground, GetSysColorBrush(COLOR_BTNFACE));
         let pen = CreatePen(PS_SOLID, 1, border);
         let brush = CreateSolidBrush(system_color(COLOR_WINDOW));
         let old_pen = SelectObject(dc, HGDIOBJ(pen.0));
@@ -127,16 +125,6 @@ pub(crate) fn paint_card(window: Hwnd, card: Rect, corner: Px, icon: Option<(Gly
         SelectObject(dc, old_brush);
         let _ = DeleteObject(HGDIOBJ(pen.0));
         let _ = DeleteObject(HGDIOBJ(brush.0));
-        if let Some((glyph, area, size)) = icon {
-            draw_lone_glyph(
-                dc,
-                glyph,
-                to_rect(area),
-                size,
-                system_color(COLOR_WINDOWTEXT),
-            );
-        }
-        let _ = EndPaint(window.0, &paint);
     }
 }
 
@@ -218,13 +206,8 @@ pub(crate) enum QueueNotify<'a> {
     EmptyText(EmptyText<'a>),
     /// The pointer rests on a row, and the list asks for its tooltip.
     InfoTip(InfoTip<'a>),
-    /// The list paints, and [`QueueList::draw`] answers.
-    CustomDraw(ListDraw<'a>),
     Other,
 }
-
-/// `NM_CUSTOMDRAW` from the queue list.
-pub(crate) struct ListDraw<'a>(&'a mut NMLVCUSTOMDRAW);
 
 /// `LVN_GETINFOTIPW`: the tooltip of the row under the pointer.
 pub(crate) struct InfoTip<'a>(&'a mut NMLVGETINFOTIPW);
@@ -275,7 +258,7 @@ impl QueueList {
         let list = child(
             parent,
             WC_LISTVIEWW,
-            WS_TABSTOP.0 | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            WS_TABSTOP.0 | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
             WS_EX_CLIENTEDGE,
             id,
         )?;
@@ -353,34 +336,12 @@ impl QueueList {
     }
 
     /// Gives the tiles `glyphs` as their icons, `side` pixels square, in
-    /// the text colour, in their order; [`Tile::icon`] indexes them. An
-    /// icon the font lacks shows no icon.
+    /// the text colour of now, in their order; [`Tile::icon`] indexes them.
+    /// An icon the font lacks shows no icon.
     pub(crate) fn set_icons(self, glyphs: &[Glyph], side: Px) {
-        let color = system_color(COLOR_WINDOWTEXT);
-        // SAFETY: plain values; the list copies each icon, and the list
-        // view owns the image list it is given, and destroys it with
-        // itself, so only the list it gives back is destroyed here.
-        unsafe {
-            let images = ImageList_Create(side.0, side.0, ILC_COLOR32, glyphs.len() as i32, 0);
-            if images.is_invalid() {
-                return;
-            }
-            IconFont::with(|icons| {
-                for &glyph in glyphs {
-                    let icon = glyph_coverage(icons, glyph, side)
-                        .and_then(|coverage| Icon::colored(&coverage, side, color));
-                    match icon {
-                        Some(icon) => ImageList_ReplaceIcon(images, -1, icon.0),
-                        // A blank image keeps the indexes of the others.
-                        None => ImageList_ReplaceIcon(images, -1, Default::default()),
-                    };
-                }
-            });
-            let old = send(self.0, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, images.0);
-            if old != 0 {
-                let _ = ImageList_Destroy(Some(HIMAGELIST(old)));
-            }
-        }
+        let images = glyph_list(glyphs, side, system_color(COLOR_WINDOWTEXT)).unwrap_or_default();
+        // The list shares the image list, which `glyph_list` keeps alive.
+        send(self.0, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, images.0);
     }
 
     /// Shows `tiles` in their order, with the row `selected` selected and
@@ -442,10 +403,6 @@ impl QueueList {
         unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
     }
 
-    fn is_selected(self, index: usize) -> bool {
-        send(self.0, LVM_GETITEMSTATE, index, LVIS_SELECTED.0 as isize) != 0
-    }
-
     /// The selected row, if any.
     pub(crate) fn selected(self) -> Option<usize> {
         usize::try_from(send(
@@ -492,8 +449,8 @@ impl QueueList {
 
     /// The gap nearest `point`, in the client coordinates of the list's
     /// parent: 0 before the first row, the row count after the last. The
-    /// list's own insertion mark serves tiles side by side, so it would
-    /// choose by `point`'s x in this one column.
+    /// list's own hit test for its insertion mark serves tiles side by
+    /// side, so it would choose by `point`'s x in this one column.
     pub(crate) fn gap_at(self, point: (i32, i32)) -> Option<usize> {
         let y = self.client_point(point).y;
         let count = self.count();
@@ -507,81 +464,24 @@ impl QueueList {
         })
     }
 
-    /// Answers the list's custom draw: the selected row in File Explorer's
-    /// light blue across its whole tile, also while the list lacks the
-    /// focus, where the list itself would draw it gray; and a line across
-    /// the gap `gap`, as [`QueueList::gap_at`] numbers them, over the rows.
-    pub(crate) fn draw(self, draw: ListDraw, gap: Option<usize>) -> LRESULT {
-        let draw = &mut draw.0.nmcd;
-        let stage = draw.dwDrawStage;
-        let answer = match (stage, gap) {
-            (CDDS_PREPAINT, None) => CDRF_NOTIFYITEMDRAW,
-            (CDDS_PREPAINT, Some(_)) => CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT,
-            (CDDS_ITEMPREPAINT, _) => {
-                let state = draw.uItemState;
-                // The item state the list gives here can call an unselected
-                // tile selected, so the list is asked.
-                if self.is_selected(draw.dwItemSpec)
-                    && let Some(rect) = self.item_rect(draw.dwItemSpec, LVIR_BOUNDS)
-                    && self.draw_selected(draw.hdc, &rect, state.contains(CDIS_HOT))
-                {
-                    // Drawn as not selected, the row keeps the fill.
-                    draw.uItemState =
-                        NMCUSTOMDRAW_DRAW_STATE_FLAGS(state.0 & !(CDIS_SELECTED.0 | CDIS_HOT.0));
-                }
-                CDRF_DODEFAULT
-            }
-            (CDDS_POSTPAINT, Some(gap)) => {
-                let count = self.count();
-                let edge = if gap < count {
-                    self.item_rect(gap, LVIR_BOUNDS)
-                        .map(|rect| (rect, rect.top))
-                } else {
-                    count
-                        .checked_sub(1)
-                        .and_then(|last| self.item_rect(last, LVIR_BOUNDS))
-                        .map(|rect| (rect, rect.bottom))
-                };
-                if let Some((rect, y)) = edge {
-                    let thickness = Px(2)
-                        .rescale(Dpi::new(96).expect("96 is not zero"), self.0.dpi())
-                        .0;
-                    let client = self.0.client_size().height.0;
-                    let top = (y - thickness / 2).clamp(0, (client - thickness).max(0));
-                    let line = RECT {
-                        left: rect.left,
-                        top,
-                        right: rect.right,
-                        bottom: top + thickness,
-                    };
-                    // SAFETY: the list's DC for this paint, and a system
-                    // brush, which is never deleted.
-                    unsafe { FillRect(draw.hdc, &line, GetSysColorBrush(COLOR_HIGHLIGHT)) };
-                }
-                CDRF_DODEFAULT
-            }
-            _ => CDRF_DODEFAULT,
+    /// Shows the list's insertion mark at the gap `gap`, as
+    /// [`QueueList::gap_at`] numbers them, or none.
+    pub(crate) fn set_insert_mark(self, gap: Option<usize>) {
+        let count = self.count();
+        let (item, flags) = match gap {
+            Some(gap) if gap < count => (gap as i32, 0),
+            // After the last row.
+            Some(_) if count > 0 => ((count - 1) as i32, LVIM_AFTER),
+            _ => (-1, 0),
         };
-        LRESULT(answer as isize)
-    }
-
-    /// Fills `rect` on `dc` as File Explorer's list fills a selected row,
-    /// or a selected row under the pointer when `hot`. Returns `false`
-    /// without the theme, as in high contrast, where the list's own
-    /// selection colours serve.
-    fn draw_selected(self, dc: HDC, rect: &RECT, hot: bool) -> bool {
-        let state = if hot { LISS_HOTSELECTED } else { LISS_SELECTED };
-        // SAFETY: the DC is the paint's, which the list holds for the
-        // notification; the theme is closed before the answer.
-        unsafe {
-            let theme = OpenThemeData(Some(self.0.0), w!("ListView"));
-            if theme.is_invalid() {
-                return false;
-            }
-            let drawn = DrawThemeBackground(theme, dc, LVP_LISTITEM.0, state.0, rect, None);
-            let _ = CloseThemeData(theme);
-            drawn.is_ok()
-        }
+        let mark = LVINSERTMARK {
+            cbSize: size_of::<LVINSERTMARK>() as u32,
+            dwFlags: flags,
+            iItem: item,
+            dwReserved: 0,
+        };
+        // SAFETY: `mark` outlives the call, which reads it.
+        unsafe { send_pointer(self.0, LVM_SETINSERTMARK, 0, &raw const mark) };
     }
 
     /// Scrolls the list one row toward `point`, in the client coordinates
@@ -649,7 +549,6 @@ impl QueueList {
                 }
                 LVN_GETEMPTYMARKUP => QueueNotify::EmptyText(EmptyText(&mut *pointer.cast())),
                 LVN_GETINFOTIPW => QueueNotify::InfoTip(InfoTip(&mut *pointer.cast())),
-                NM_CUSTOMDRAW => QueueNotify::CustomDraw(ListDraw(&mut *pointer.cast())),
                 _ => QueueNotify::Other,
             }
         };

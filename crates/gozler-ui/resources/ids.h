@@ -24,6 +24,13 @@
 // Show details, at the right end of the status bar while the inspector is
 // hidden.
 #define IDC_STATUS_SHOW_DETAILS 63
+// The toolbars of the search row (Clear, Match case and Match path) and of
+// the filter pane's header (Clear and Hide filters); a toolbar of one
+// button takes that button's ID.
+#define IDC_SEARCH_TOOLS 64
+#define IDC_FILTER_TOOLS 65
+// The selected entry's file icon, before the inspector's heading.
+#define IDC_INSPECTOR_ICON 66
 // The inspector's Copy name, Copy folder, Explore and the age after Date
 // modified, numbered after the rest.
 #define IDC_INSPECTOR_COPY_NAME 72
@@ -165,6 +172,10 @@
 #define IDC_GENERAL_KEEP_RUNNING 1507
 #define IDC_GENERAL_ONE_WINDOW 1508
 #define IDC_GENERAL_SHOW_ICONS 1509
+#define IDC_GENERAL_SIZES_LABEL 1510
+#define IDC_GENERAL_SIZES 1511
+#define IDC_GENERAL_DISPLAY 1512
+#define IDC_GENERAL_SHOW_MEMORY 1513
 #define IDC_GENERAL_RESTORE 1520
 
 #define IDD_SETTINGS_SEARCH 106
@@ -203,7 +214,6 @@
 #define IDC_KEYBOARD_SHOW_GROUP 1702
 #define IDC_KEYBOARD_SHORTCUT_LABEL 1703
 #define IDC_KEYBOARD_SHORTCUT 1704
-#define IDC_KEYBOARD_WINDOWS_KEY 1705
 #define IDC_KEYBOARD_CLOSED_NOTE 1706
 #define IDC_KEYBOARD_COMMANDS_GROUP 1707
 #define IDC_KEYBOARD_FILTER_LABEL 1708
@@ -360,6 +370,8 @@
 #define IDC_FILE_OPERATIONS_LIST 3023
 #define IDC_FILE_OPERATIONS_HINT 3024
 #define IDC_FILE_OPERATIONS_HIDE 3025
+// The icon of the running operation's kind, at the card's left.
+#define IDC_FILE_OPERATIONS_ICON 3026
 
 // The Viewer, a window of its own for each file it shows: the message and
 // Retry, which lie above the area that shows the file, then the status bar.

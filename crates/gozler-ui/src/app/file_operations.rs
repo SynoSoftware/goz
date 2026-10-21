@@ -20,22 +20,22 @@ use crate::core::ids::{ControlId, DialogId};
 use crate::core::layout::{Px, Rect, Size, button_content, button_room};
 use crate::core::text::Strings;
 use crate::win::clipboard::ClipboardFiles;
-use crate::win::controls::{Button, Label, ProgressBar, ReportList, Tooltip};
+use crate::win::controls::{Button, GlyphLabel, Label, ProgressBar, ReportList, Tooltip};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
+use crate::win::drop_target::AsyncDrop;
 use crate::win::file_operations::{
-    ERASE_BACKGROUND, OPERATION_CHANGED, PathLabel, QueueList, QueueNotify, TAKEN_CHANGED,
-    TaskbarProgress, TaskbarState, Tile, paint_card, set_client_size, show_drag_cursor,
-    show_paused, window_size,
+    OPERATION_CHANGED, PathLabel, QueueList, QueueNotify, TAKEN_CHANGED, TaskbarProgress,
+    TaskbarState, Tile, paint_card, set_client_size, show_drag_cursor, show_paused, window_size,
 };
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Menu;
-use crate::win::notify::{Command, FlatGround};
+use crate::win::notify::Command;
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_fileops::{
-    Choice, OperationId, OrderRefused, Outcome, Prepared, Queue, Request, Side, SpeedSettings,
+    Choice, End, OperationId, OrderRefused, Outcome, Prepared, Queue, Request, Side, SpeedSettings,
     State, Taken,
 };
 use std::cell::{Cell, OnceCell, RefCell};
@@ -75,6 +75,7 @@ pub(super) struct FileOperations {
 }
 
 struct Controls {
+    icon: GlyphLabel,
     title: Label,
     status: Label,
     pause: Button,
@@ -106,8 +107,9 @@ struct Controls {
 impl Controls {
     /// The labels on the card, which draw on the window colour; the
     /// `muted` ones step back in gray.
-    fn card_labels(&self) -> [(Hwnd, bool); 11] {
+    fn card_labels(&self) -> [(Hwnd, bool); 12] {
         [
+            (self.icon.hwnd(), false),
             (self.title.hwnd(), false),
             (self.status.hwnd(), true),
             (self.doing.hwnd(), true),
@@ -192,6 +194,8 @@ struct Window {
     /// The clipboard's files that Paste prepares an operation from, until
     /// it is submitted or ends.
     pastes: RefCell<HashMap<OperationId, ClipboardFiles>>,
+    /// The sources of dropped files that wait for their operation's end.
+    drops: RefCell<HashMap<OperationId, AsyncDrop>>,
     /// Ended deletes and moves whose failures were reported, which stay in
     /// the queue while a list of the window keeps them (fast-copy-delete-spec.md:
     /// Taken entries).
@@ -203,6 +207,15 @@ struct Window {
     ended: RefCell<Vec<(OperationId, Arc<Request>)>>,
     /// The ended operations already put in `ended`, so each goes once.
     told: RefCell<HashSet<OperationId>>,
+}
+
+/// Where the files that an operation copies or moves came from.
+pub(super) enum FilesSource {
+    /// The clipboard, which Paste read; a move of cut files tells it that
+    /// they moved.
+    Paste(ClipboardFiles),
+    /// A drop whose source keeps its files until the operation ends.
+    Drop(AsyncDrop),
 }
 
 /// An operation that waits for the window.
@@ -257,6 +270,7 @@ impl FileOperations {
             taskbar: TaskbarProgress::new(owner),
             asking: Cell::new(false),
             pastes: RefCell::new(HashMap::new()),
+            drops: RefCell::new(HashMap::new()),
             reported: RefCell::new(HashSet::new()),
             ended: RefCell::new(Vec::new()),
             told: RefCell::new(HashSet::new()),
@@ -285,24 +299,30 @@ impl FileOperations {
     }
 
     /// The entries that deletes and moves take, which the search list
-    /// shows blank. The owner gets [`TAKEN_CHANGED`] after it changes.
+    /// strikes through. The owner gets [`TAKEN_CHANGED`] after it changes.
     pub(super) fn taken(&self) -> Arc<Taken> {
         Arc::clone(&self.window.taken.borrow())
     }
 
     /// Prepares `request`; the window asks about its conflicts when the
-    /// count is ready, and then submits it. `paste` holds the clipboard's
-    /// files that the request copies or moves, which a submitted move of
-    /// cut files reports as moved.
+    /// count is ready, and then submits it. `source` is where the files
+    /// that the request copies or moves came from, which hears what became
+    /// of them.
     pub(super) fn start(
         &self,
         request: Request,
         settings: SpeedSettings,
-        paste: Option<ClipboardFiles>,
+        source: Option<FilesSource>,
     ) -> OperationId {
         let id = self.window.queue().prepare(request, settings);
-        if let Some(paste) = paste {
-            self.window.pastes.borrow_mut().insert(id, paste);
+        match source {
+            Some(FilesSource::Paste(paste)) => {
+                self.window.pastes.borrow_mut().insert(id, paste);
+            }
+            Some(FilesSource::Drop(dropped)) => {
+                self.window.drops.borrow_mut().insert(id, dropped);
+            }
+            None => {}
         }
         id
     }
@@ -464,6 +484,7 @@ impl Window {
             ],
         )?;
         let controls = Controls {
+            icon: GlyphLabel::create(hwnd, id(ControlId::FileOperationsIcon))?,
             title: label(ControlId::FileOperationsTitle)?,
             status: label(ControlId::FileOperationsStatus)?,
             pause,
@@ -514,12 +535,50 @@ impl Window {
         self.fonts.replace(Some(Fonts { ui, title }));
     }
 
-    /// Gives Hide its icon, at the window's DPI, in the system colours of
-    /// now and only while icons show.
+    /// Gives each button and the card its icon at the window's DPI and in
+    /// the system colours of now, so a change of either calls this again.
+    /// Hide shows its icon only while icons show; the other buttons show
+    /// only their icon.
     fn apply_glyphs(&self) {
         self.controls()
             .hide
             .set_icon(ButtonIcon::of("file_operations.hide", false));
+        self.show_state_glyphs();
+    }
+
+    /// Gives the card and the buttons whose icon follows the operations,
+    /// such as Pause or Resume, the icon of what the window shows now.
+    fn show_state_glyphs(&self) {
+        let c = self.controls();
+        let card = self
+            .view
+            .borrow()
+            .as_ref()
+            .and_then(|view| view.card.as_ref().map(|card| (card.glyph, card.paused)));
+        if let Some((glyph, _)) = card {
+            c.icon.show_glyph(glyph, px(CARD_ICON, c.icon.hwnd()));
+        }
+        let paused = card.is_some_and(|(_, paused)| paused);
+        let run = self
+            .selected_buttons()
+            .and_then(|(_, buttons)| buttons.run)
+            .map_or(Glyph::Play, QueueAction::glyph);
+        let toggle = if self.queue_open.get() {
+            Glyph::ChevronDown
+        } else {
+            Glyph::ChevronRight
+        };
+        for (button, glyph) in [
+            (c.pause, if paused { Glyph::Play } else { Glyph::Pause }),
+            (c.cancel, Glyph::Cancel),
+            (c.toggle, toggle),
+            (c.run, run),
+            (c.up, Glyph::ChevronUp),
+            (c.down, Glyph::ChevronDown),
+            (c.queue_cancel, Glyph::Cancel),
+        ] {
+            button.set_lone_icon(Some(glyph));
+        }
     }
 
     /// The texts that do not change with the operations.
@@ -562,7 +621,6 @@ impl Window {
         };
         controls.toggle.hwnd().set_text(strings.text(key));
         controls.tips.set(controls.toggle.hwnd(), strings.text(key));
-        controls.toggle.hwnd().invalidate();
     }
 
     fn metrics(&self, hwnd: Hwnd) -> Metrics {
@@ -622,6 +680,7 @@ impl Window {
         let c = self.controls();
         let open = self.queue_open.get();
         let moves = [
+            (c.icon.hwnd(), layout.icon),
             (c.title.hwnd(), layout.title),
             (c.status.hwnd(), layout.status),
             (c.pause.hwnd(), layout.pause),
@@ -893,7 +952,8 @@ impl Window {
 
     /// Shows what failed in an ended operation, then removes it, unless it
     /// deleted or moved entries, which the owner's lists may still keep
-    /// blank; the owner then decides ([`FileOperations::release`]).
+    /// struck through or blank; the owner then decides
+    /// ([`FileOperations::release`]).
     fn report(&self, id: OperationId, request: &Arc<Request>, outcome: &Arc<Outcome>) {
         // An operation that ended after the last read is told here, before
         // a copy leaves the queue.
@@ -901,6 +961,10 @@ impl Window {
         self.last_ended
             .replace(Some((id, Arc::clone(request), Arc::clone(outcome))));
         self.pastes.borrow_mut().remove(&id);
+        let dropped = self.drops.borrow_mut().remove(&id);
+        if let Some(dropped) = dropped {
+            dropped.end(outcome.end == End::Complete && outcome.listed.is_empty());
+        }
         let failure = file_operations::failure(
             &self.strings.borrow(),
             &*self.numbers.borrow(),
@@ -961,6 +1025,7 @@ impl Window {
                 c.to.hwnd().set_text(to);
                 c.tips.set(c.to.hwnd(), to);
                 for control in [
+                    c.icon.hwnd(),
                     c.from_label.hwnd(),
                     c.total_bar.hwnd(),
                     c.pause.hwnd(),
@@ -999,8 +1064,6 @@ impl Window {
                 };
                 c.pause.hwnd().set_text(strings.text(pause));
                 c.tips.set(c.pause.hwnd(), strings.text(pause));
-                // The button draws its glyph, which follows the caption.
-                c.pause.hwnd().invalidate();
             }
             None => {
                 c.title
@@ -1024,6 +1087,7 @@ impl Window {
                 // Only the title stays, so the card shows nothing that
                 // waits for a value.
                 for control in [
+                    c.icon.hwnd(),
                     c.from_label.hwnd(),
                     c.to_label.hwnd(),
                     c.file_bar.hwnd(),
@@ -1055,21 +1119,12 @@ impl Window {
                 total: m.total,
             },
         });
-        let icon_changed = self
-            .view
-            .borrow()
-            .as_ref()
-            .map(|old| old.card.as_ref().map(|card| card.glyph))
-            != Some(view.card.as_ref().map(|card| card.glyph));
         drop(strings);
         // Stored first: the list reports the selection it is given at once,
         // and the window reads the row it selects from the view.
         self.view.replace(Some(view));
         self.show_tiles();
         self.update_queue_buttons();
-        if icon_changed {
-            hwnd.invalidate();
-        }
     }
 
     /// Shows the view's rows in the list, with the selected row selected.
@@ -1240,8 +1295,9 @@ impl Window {
         }
     }
 
-    /// Enables the queue's buttons for the selected row, and shows the
-    /// hint when the queue refuses one of its moves.
+    /// Enables the queue's buttons for the selected row, shows the hint
+    /// when the queue refuses one of its moves, and gives the buttons and
+    /// the card the icons of what the window shows now.
     fn update_queue_buttons(&self) {
         let c = self.controls();
         let buttons = self.selected_buttons().map(|(_, buttons)| buttons);
@@ -1268,9 +1324,7 @@ impl Window {
         if self.drag.get().is_none() {
             self.show_hint(refused);
         }
-        for button in [c.run, c.up, c.down, c.queue_cancel] {
-            button.hwnd().invalidate();
-        }
+        self.show_state_glyphs();
     }
 
     /// Shows why the queue refused a move, or clears the hint.
@@ -1539,7 +1593,7 @@ impl Window {
             },
         };
         if gap != drag.gap {
-            list.hwnd().invalidate();
+            list.set_insert_mark(gap);
         }
         show_drag_cursor(refused.is_some());
         self.show_hint(refused);
@@ -1552,7 +1606,7 @@ impl Window {
         };
         window::release_mouse();
         hwnd.kill_timer(DRAG_SCROLL);
-        self.controls().list.hwnd().invalidate();
+        self.controls().list.set_insert_mark(None);
         if let Some(gap) = drag.gap {
             let before = self
                 .selected_row(|_, rows| Window::landing(rows, gap).1)
@@ -1568,7 +1622,7 @@ impl Window {
             hwnd.kill_timer(DRAG_SCROLL);
         }
         if self.drag.take().is_some() {
-            self.controls().list.hwnd().invalidate();
+            self.controls().list.set_insert_mark(None);
         }
     }
 }
@@ -1644,22 +1698,10 @@ impl WindowProc for Window {
                 self.fit_height(hwnd);
                 Some(LRESULT(0))
             }
-            Message::Paint => {
-                let layout = self.layout.get();
-                let glyph = self
-                    .view
-                    .borrow()
-                    .as_ref()
-                    .and_then(|view| view.card.as_ref().map(|card| card.glyph));
-                paint_card(
-                    hwnd,
-                    layout.card,
-                    px(CARD_CORNER, hwnd),
-                    glyph.map(|glyph| (glyph, layout.icon, px(CARD_ICON, hwnd))),
-                );
-                Some(LRESULT(0))
+            Message::EraseBackground(dc) => {
+                paint_card(hwnd, dc, self.layout.get().card, px(CARD_CORNER, hwnd));
+                Some(LRESULT(1))
             }
-            Message::Other(ERASE_BACKGROUND) => Some(LRESULT(1)),
             Message::CtlColorStatic { colors, control } => {
                 let c = self.controls.get()?;
                 let (_, muted) = c
@@ -1686,43 +1728,6 @@ impl WindowProc for Window {
             }
             Message::Notify(notification) => {
                 let c = self.controls.get()?;
-                let paused = self
-                    .view
-                    .borrow()
-                    .as_ref()
-                    .and_then(|view| view.card.as_ref().map(|card| card.paused))
-                    .unwrap_or(false);
-                let queue_open = self.queue_open.get();
-                let run = self
-                    .selected_buttons()
-                    .and_then(|(_, buttons)| buttons.run)
-                    .map_or(Glyph::Play, QueueAction::glyph);
-                let flat = [
-                    (
-                        c.pause,
-                        if paused { Glyph::Play } else { Glyph::Pause },
-                        FlatGround::Window,
-                    ),
-                    (c.cancel, Glyph::Cancel, FlatGround::Window),
-                    (
-                        c.toggle,
-                        if queue_open {
-                            Glyph::ChevronDown
-                        } else {
-                            Glyph::ChevronRight
-                        },
-                        FlatGround::Face,
-                    ),
-                    (c.run, run, FlatGround::Face),
-                    (c.up, Glyph::ChevronUp, FlatGround::Face),
-                    (c.down, Glyph::ChevronDown, FlatGround::Face),
-                    (c.queue_cancel, Glyph::Cancel, FlatGround::Face),
-                ];
-                for (button, glyph, ground) in flat {
-                    if let Some(answer) = button.draw_flat(&notification, glyph, ground) {
-                        return Some(answer);
-                    }
-                }
                 match c.list.notification(notification)? {
                     QueueNotify::SelectionChanged => {
                         let index = c.list.selected();
@@ -1765,9 +1770,6 @@ impl WindowProc for Window {
                             )
                         });
                         Some(tip.set(&text))
-                    }
-                    QueueNotify::CustomDraw(draw) => {
-                        Some(c.list.draw(draw, self.drag.get().and_then(|drag| drag.gap)))
                     }
                     QueueNotify::Other => None,
                 }

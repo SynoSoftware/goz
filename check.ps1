@@ -13,7 +13,7 @@ param(
     [string] $Test,
     # Runs only the criterion benchmarks whose names match this filter, such as
     # query_2M. --bench '*' selects the bench targets alone; plain cargo bench
-    # would also build every library under the fat-LTO bench profile.
+    # would also build every library as a bench target.
     [string] $Bench,
     # Builds the release executables, which the probe measures, because the
     # memory budget is measured on what ships.

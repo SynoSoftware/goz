@@ -13,8 +13,8 @@ use windows::Win32::UI::Controls::SetScrollInfo;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetParent, HMENU, IDC_ARROW, LoadCursorW, RegisterClassExW,
     SB_VERT, SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SendMessageW, WM_COMMAND, WM_CTLCOLORSTATIC,
-    WM_DRAWITEM, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT,
-    WS_VISIBLE, WS_VSCROLL,
+    WM_DRAWITEM, WM_NOTIFY, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_CONTROLPARENT, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -42,9 +42,9 @@ pub(crate) fn register() -> windows::core::Result<()> {
     Ok(())
 }
 
-/// Creates the pane in `parent`. `Tab` and the access keys reach the
-/// pane's controls, as `WS_EX_CONTROLPARENT` lets `IsDialogMessageW` look
-/// inside it.
+/// Creates the pane in `parent`. The access keys reach the pane's
+/// controls, as `WS_EX_CONTROLPARENT` lets `IsDialogMessageW` look inside
+/// it.
 pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<Hwnd> {
     // SAFETY: a child window with an ID in place of a menu, as Windows
     // documents it.
@@ -86,10 +86,9 @@ impl Hwnd {
     }
 }
 
-/// Draws the Kind and Location lists' items, and passes the controls'
-/// notifications and colour requests to the main window, and the scroll
-/// bar's requests with the pane as their sender, as a scroll bar control
-/// sends them.
+/// Draws the Location list's items, and passes the controls' notifications
+/// and colour requests to the main window, and the scroll bar's requests
+/// with the pane as their sender, as a scroll bar control sends them.
 unsafe extern "system" fn procedure(
     hwnd: HWND,
     msg: u32,
@@ -107,7 +106,7 @@ unsafe extern "system" fn procedure(
         }
     };
     match msg {
-        WM_COMMAND | WM_CTLCOLORSTATIC => forward(lparam),
+        WM_COMMAND | WM_NOTIFY | WM_CTLCOLORSTATIC => forward(lparam),
         WM_VSCROLL => forward(LPARAM(hwnd.0 as isize)),
         // SAFETY: the lparam is the one Windows passed with WM_DRAWITEM.
         WM_DRAWITEM if unsafe { super::controls::draw_list_item(lparam) } => LRESULT(1),

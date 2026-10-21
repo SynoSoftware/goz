@@ -331,6 +331,8 @@ impl DialogProc for IndexedFolders<'_> {
             | DialogMessage::DoubleClicked { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
         }
     }

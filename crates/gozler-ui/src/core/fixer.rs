@@ -281,6 +281,29 @@ impl Fixer {
         )
     }
 
+    /// Whether [`Self::cancel`] would stop the fix in its step.
+    pub(crate) fn can_cancel(&self) -> bool {
+        match self {
+            Fixer::Commands {
+                state: FixState::Running(step),
+                ..
+            } => step.can_cancel(),
+            Fixer::Setup {
+                state: FixState::Running(step),
+                ..
+            } => step.can_cancel(),
+            Fixer::Idle
+            | Fixer::Commands {
+                state: FixState::Ended(_),
+                ..
+            }
+            | Fixer::Setup {
+                state: FixState::Ended(_),
+                ..
+            } => false,
+        }
+    }
+
     pub(crate) fn waits_for_service(&self) -> bool {
         matches!(
             self,

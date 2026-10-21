@@ -34,8 +34,10 @@ const WINDOW_CLASS: &str = "gozler.ui";
 /// Asks the first window to come forward with the search box focused.
 const SHOW_MESSAGE: &str = "gozler.ui.show";
 /// Asks the first window to exit as File > Exit does, for a start of
-/// another program. It answers [`EXIT_CLOSES`] or [`EXIT_STAYS`]; a build
-/// from before this message answers 0.
+/// another program and for the setup and uninstaller. It answers
+/// [`EXIT_CLOSES`] or [`EXIT_STAYS`]; a build from before this message
+/// answers 0. `installer\Setup.iss` repeats this name, [`INSTANCE_MUTEX`],
+/// [`WINDOW_CLASS`] and [`EXIT_CLOSES`].
 const EXIT_MESSAGE: &str = "gozler.ui.exit";
 const EXIT_CLOSES: isize = 1;
 /// The person kept the running file operations, or a dialog is open.
@@ -152,6 +154,46 @@ pub(crate) fn run() {
     );
     win::window::run_message_loop(hwnd, &|| window.accelerators());
     window.close_for_setup(hwnd);
+    if window.resets_settings() {
+        // The new window must find no first one.
+        drop(first);
+        reset_and_start_again(&data_dir, arguments.data_dir.as_deref());
+    }
+}
+
+/// Settings' Reset all, after the window exited: deletes `ui.json` and the
+/// sign-in entry, which a new installation does not have, and starts the
+/// window again with the same data folder (DESIGN.md: Settings dialog).
+fn reset_and_start_again(data_dir: &Path, given_data_dir: Option<&Path>) {
+    let log = data_dir.join("ui-error.log");
+    let settings_file = data_dir.join("ui.json");
+    if let Err(error) = std::fs::remove_file(&settings_file)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        write_log(&log, &format!("Reset all did not delete ui.json: {error}"));
+    }
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(error) => {
+            write_log(
+                &log,
+                &format!("Reset all did not find gozler-ui.exe: {error}"),
+            );
+            return;
+        }
+    };
+    // Settings > General shows the registry, so a failure shows there.
+    let _ = win::shell::set_start_at_sign_in(false, &program);
+    let mut command = std::process::Command::new(&program);
+    if let Some(folder) = given_data_dir {
+        command.arg("--data-dir").arg(folder);
+    }
+    if let Err(error) = command.spawn() {
+        write_log(
+            &log,
+            &format!("Reset all did not start Gozler again: {error}"),
+        );
+    }
 }
 
 /// The command line: `--data-dir <folder>`, `--sign-in`, which the `Run`

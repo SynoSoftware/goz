@@ -1,6 +1,6 @@
 [package]
 name = "gozler-ui"
-description = "gozler-ui: the gozler window, a native Win32 search window over gozlerd"
+description = "gozler-ui: the gozler window, a native Win32 window that searches through gozlerd and copies, moves and deletes files"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

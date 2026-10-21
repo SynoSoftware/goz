@@ -14,7 +14,7 @@ mod measure;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::query::{CompiledQuery, parse_query, run_query};
+use gozler_core::query::{CompiledQuery, ParseOptions, parse_query, parse_query_with, run_query};
 use gozler_core::types::{Frn, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::hint::black_box;
@@ -120,6 +120,36 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
         ),
     ] {
         let parsed = compiled(query);
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                let out = run_query(
+                    black_box(&idx),
+                    r"C:\",
+                    black_box(&parsed),
+                    None,
+                    SortSpec::default(),
+                    Some(100),
+                );
+                black_box(out.total)
+            })
+        });
+    }
+
+    // With -p every term tests the full path. `kernel32` lies in file names,
+    // `module_group_007` in folder names, so their subtrees match too,
+    // `bin_x64_03` in folder names that 210,000 files are below, and
+    // `report` in nearly every file name.
+    let match_path = ParseOptions {
+        match_path: true,
+        ..ParseOptions::default()
+    };
+    for (label, query) in [
+        ("match-path(kernel32)", "kernel32"),
+        ("match-path(module_group_007)", "module_group_007"),
+        ("match-path(bin_x64_03 kernel32)", "bin_x64_03 kernel32"),
+        ("match-path(report)", "report"),
+    ] {
+        let parsed = CompiledQuery::new(&parse_query_with(query, match_path).unwrap()).unwrap();
         group.bench_function(label, |b| {
             b.iter(|| {
                 let out = run_query(

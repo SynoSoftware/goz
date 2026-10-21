@@ -13,11 +13,11 @@ use super::status_bar::StatusBar;
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, IndexCaptions, SETTINGS_GROUPS, failure_text,
 };
-use crate::core::commands::{CommandId, Keystroke};
+use crate::core::commands::{CommandId, Key, Keystroke};
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::SummaryRow;
-use crate::core::layout::{self, Px, Rect, StatusLayout, StatusWidths};
+use crate::core::layout::{Px, Rect, StatusLayout, StatusWidths};
 use crate::core::model::Model;
 use crate::core::open::{browse_command, total_commander_command};
 use crate::core::results::Fix;
@@ -25,16 +25,17 @@ use crate::core::settings::{
     ContextItem, ItemVisibility, SettingsDraft, SettingsPage, SettingsValues,
 };
 use crate::core::shortcuts::{
-    CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows, show_refusal_message,
+    CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows,
 };
 use crate::core::speed::{ENGINES, Speed, SpeedNumber, SpeedPreset, ring_blocks};
-use crate::core::text::{LANGUAGES, LanguageChoice, Strings, without_access_key};
+use crate::core::text::{LANGUAGES, LanguageChoice, SizeFormat, Strings, without_access_key};
 use crate::win::controls::{
-    Balloon, Button, CheckBox, DropDownList, Edit, HotkeyControl, HotkeyValue, ListBox, ReportList,
-    Tooltip, show_group_glyph,
+    Balloon, Button, CheckBox, DropDownList, Edit, HotkeyControl, HotkeyValue, IconList, ListBox,
+    ReportList, Tooltip, show_group_glyph,
 };
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
+use crate::win::shortcut::{self, Capture};
 use crate::win::{self, Hwnd};
 use gozler_core::include::IncludeSettings;
 use gozler_fileops::{DeleteWorkers, Engine, RingBlock, SpeedSettings};
@@ -65,7 +66,7 @@ fn heading(page: SettingsPage) -> ControlId {
 type Field<T> = fn(&mut SettingsValues) -> &mut T;
 
 /// Each check box, its page, and the value it shows.
-const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 9] = [
+const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 10] = [
     (SettingsPage::General, ControlId::GeneralSignIn, |v| {
         &mut v.start_at_sign_in
     }),
@@ -80,6 +81,9 @@ const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 9] = [
     }),
     (SettingsPage::General, ControlId::GeneralShowIcons, |v| {
         &mut v.choices.show_icons
+    }),
+    (SettingsPage::General, ControlId::GeneralShowMemory, |v| {
+        &mut v.choices.show_memory
     }),
     (SettingsPage::Search, ControlId::SearchAsYouType, |v| {
         &mut v.choices.search_as_you_type
@@ -257,6 +261,12 @@ pub(super) struct SettingsDialog<'a> {
     /// change nothing.
     filling: Cell<bool>,
     balloon: OnceCell<Balloon>,
+    /// The keys pressed while the shortcut box has the focus, which reach
+    /// the dialog instead of the box (DESIGN.md: The Keyboard page).
+    capture: Cell<Option<Capture>>,
+    /// Whether the person confirmed Reset all, which the main window carries
+    /// out once the dialog has closed.
+    resets: Cell<bool>,
     /// The Drives and service page's tooltip, whose fix buttons' tips
     /// follow their fix.
     index_tips: OnceCell<Tooltip>,
@@ -291,11 +301,18 @@ impl<'a> SettingsDialog<'a> {
             include_rows: RefCell::new(Vec::new()),
             filling: Cell::new(false),
             balloon: OnceCell::new(),
+            capture: Cell::new(None),
+            resets: Cell::new(false),
             index_tips: OnceCell::new(),
             highlight: OnceCell::new(),
             status: OnceCell::new(),
             status_widths: OnceCell::new(),
         }
+    }
+
+    /// Whether the person confirmed Reset all before the dialog closed.
+    pub(super) fn resets(&self) -> bool {
+        self.resets.get()
     }
 
     /// Adds the status bar below OK, Cancel and Apply and makes the dialog
@@ -331,28 +348,23 @@ impl<'a> SettingsDialog<'a> {
 
     /// Widens the page list to show its longest page name in the dialog's
     /// language whole, after its icon, and the dialog with it, so the pages
-    /// keep their width.
+    /// keep their width; while the list holds every page, before the pages
+    /// are made.
     fn fit_page_list(&self, dialog: Hwnd) {
-        let Some(list) = dialog::item(dialog, ControlId::SettingsPages.id()) else {
+        let Some(list) = self.page_list(dialog) else {
             return;
         };
-        let Ok(font) = Font::of(list) else {
-            return;
-        };
-        let longest = {
-            let meter = TextMeter::new(&font);
-            SettingsPage::ALL
-                .into_iter()
-                .map(|page| meter.plain_width(self.strings.text(page.label())))
-                .max()
-                .unwrap_or_default()
-        };
-        let rect = list.rect_in(dialog);
-        let frame = rect.width - list.client_size().width;
-        let extra = layout::glyph_list_item_width(longest, dialog.dpi()) + frame - rect.width;
+        let rect = list.hwnd().rect_in(dialog);
+        let frame = rect.width - list.hwnd().client_size().width;
+        let extra = list.row_size().width + frame - rect.width;
         if extra > Px(0) {
             dialog::widen(dialog, rect.right(), extra);
         }
+        list.fill_column();
+    }
+
+    fn page_list(&self, dialog: Hwnd) -> Option<IconList> {
+        IconList::of_dialog(dialog, ControlId::SettingsPages.id())
     }
 
     fn page(&self, page: SettingsPage) -> Option<Hwnd> {
@@ -368,8 +380,8 @@ impl<'a> SettingsDialog<'a> {
         CheckBox::of_dialog(self.page(page)?, control.id())
     }
 
-    fn hotkey(&self) -> Option<HotkeyControl> {
-        HotkeyControl::of_dialog(
+    fn shortcut_box(&self) -> Option<Edit> {
+        Edit::of_dialog(
             self.page(SettingsPage::Keyboard)?,
             ControlId::KeyboardShortcut.id(),
         )
@@ -379,6 +391,13 @@ impl<'a> SettingsDialog<'a> {
         DropDownList::of_dialog(
             self.page(SettingsPage::General)?,
             ControlId::GeneralLanguage.id(),
+        )
+    }
+
+    fn size_list(&self) -> Option<DropDownList> {
+        DropDownList::of_dialog(
+            self.page(SettingsPage::General)?,
+            ControlId::GeneralSizes.id(),
         )
     }
 
@@ -415,27 +434,23 @@ impl<'a> SettingsDialog<'a> {
                         check_box.set_checked(*value(&mut values));
                     }
                 }
-                if page == SettingsPage::General
-                    && let Some(list) = self.language_list()
-                {
-                    // A saved tag that no longer ships shows as Windows
-                    // default; it stays saved unless the person chooses.
-                    let place = values.choices.language.shipped();
-                    list.select(place.map_or(0, |index| index + 1));
+                if page == SettingsPage::General {
+                    if let Some(list) = self.language_list() {
+                        // A saved tag that no longer ships shows as Windows
+                        // default; it stays saved unless the person chooses.
+                        let place = values.choices.language.shipped();
+                        list.select(place.map_or(0, |index| index + 1));
+                    }
+                    let format = values.choices.size_format;
+                    let place = SizeFormat::ALL.iter().position(|each| *each == format);
+                    if let (Some(list), Some(place)) = (self.size_list(), place) {
+                        list.select(place);
+                    }
                 }
             }
             SettingsPage::ContextMenu => self.fill_context_menu(&mut values),
             SettingsPage::Keyboard => {
-                let shortcut = values.choices.show_shortcut;
-                let windows = shortcut.is_some_and(ShowShortcut::windows);
-                if let Some(check_box) = self.check_box(page, ControlId::KeyboardWindowsKey) {
-                    check_box.set_checked(windows);
-                }
-                if let Some(hotkey) = self.hotkey() {
-                    hotkey.require_two_modifiers(!windows);
-                    hotkey.set(shortcut.map(ShowShortcut::keystroke));
-                }
-                self.update_clear_shortcut();
+                self.show_shortcut();
                 self.fill_commands(self.selected_command());
             }
             SettingsPage::FileOperations => self.fill_speed(&values.choices.speed),
@@ -553,12 +568,7 @@ impl<'a> SettingsDialog<'a> {
             return;
         };
         if let Some(group) = dialog::item(page, ControlId::ContextMenuItemGroup.id()) {
-            let name = without_access_key(self.strings.text(item.label()));
-            group.set_text(
-                &self
-                    .strings
-                    .format("settings_context_menu.settings_for", &[&name]),
-            );
+            group.set_text(&without_access_key(self.strings.text(item.label())));
         }
         let visibility = values.choices.context_menu.visibility(item);
         for (control, shown) in VISIBILITY_BUTTONS {
@@ -750,7 +760,12 @@ impl<'a> SettingsDialog<'a> {
             .unwrap_or_default();
         let rows = {
             let draft = self.draft.borrow();
-            command_rows(&self.strings, &draft.edited.choices.shortcuts, &filter)
+            command_rows(
+                &self.strings,
+                &draft.edited.choices.shortcuts,
+                self.main.registered_shortcut(),
+                &filter,
+            )
         };
         let index = selected
             .and_then(|command| rows.iter().position(|row| row.command == command))
@@ -770,6 +785,12 @@ impl<'a> SettingsDialog<'a> {
     /// selected.
     fn fill_keys(&self, selected: usize) {
         let keys: Vec<String> = match self.selected_command() {
+            Some(CommandId::ShowWindow) => self
+                .main
+                .registered_shortcut()
+                .map(|show| show.text(&self.strings))
+                .into_iter()
+                .collect(),
             Some(command) => {
                 let draft = self.draft.borrow();
                 draft
@@ -808,8 +829,11 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Add… needs a command; Edit… and Remove need one of its shortcuts.
+    /// Show window's one shortcut is set in the box above the list.
     fn update_key_buttons(&self) {
-        let command = self.selected_command().is_some();
+        let command = self
+            .selected_command()
+            .is_some_and(|command| command != CommandId::ShowWindow);
         let key = self.selected_key().is_some();
         for (control, enabled) in [
             (ControlId::KeyboardAdd, command),
@@ -822,69 +846,38 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// The shortcut to show Gozler that the hotkey control and the Windows
-    /// key check box hold, or the message that says why it cannot be one.
-    fn read_shortcut(&self) -> Result<Option<ShowShortcut>, String> {
-        let windows = self
-            .check_box(SettingsPage::Keyboard, ControlId::KeyboardWindowsKey)
-            .is_some_and(CheckBox::is_checked);
-        match self
-            .hotkey()
-            .map_or(HotkeyValue::Empty, HotkeyControl::value)
-        {
-            HotkeyValue::Empty => Ok(None),
-            HotkeyValue::Unsupported => Err(self
-                .strings
-                .text("settings_keyboard.unsupported")
-                .to_owned()),
-            HotkeyValue::Keys(keystroke) => ShowShortcut::new(windows, keystroke)
-                .map(Some)
-                .map_err(|refusal| {
-                    show_refusal_message(&self.strings, refusal, windows, keystroke)
-                }),
+    /// Shows the shortcut to show Gozler in its box, whose text only this
+    /// sets, and enables Clear while there is one.
+    fn show_shortcut(&self) {
+        let shortcut = self.draft.borrow().edited.choices.show_shortcut;
+        if let Some(shortcut_box) = self.shortcut_box() {
+            let text = shortcut.map_or_else(String::new, |shortcut| shortcut.text(&self.strings));
+            self.filling(|| shortcut_box.set_text_caret_at_end(&text));
+        }
+        if let Some(clear) = self.control(SettingsPage::Keyboard, ControlId::KeyboardClear) {
+            clear.set_enabled(shortcut.is_some());
         }
     }
 
-    /// Keeps the shortcut the controls hold, when it can be one; one that
-    /// cannot is refused when OK or Apply is pressed (DESIGN.md: Dialogs).
-    fn shortcut_changed(&self) {
-        if let Ok(shortcut) = self.read_shortcut() {
-            self.draft.borrow_mut().edited.choices.show_shortcut = shortcut;
-        }
-        self.update_clear_shortcut();
+    /// Keeps the shortcut to show Gozler, and shows it.
+    fn set_shortcut(&self, shortcut: Option<ShowShortcut>) {
+        self.draft.borrow_mut().edited.choices.show_shortcut = shortcut;
+        self.show_shortcut();
     }
 
-    /// Clear is enabled while the shortcut box holds keys.
-    fn update_clear_shortcut(&self) {
-        if let (Some(hotkey), Some(clear)) = (
-            self.hotkey(),
-            self.control(SettingsPage::Keyboard, ControlId::KeyboardClear),
-        ) {
-            clear.set_enabled(hotkey.value() != HotkeyValue::Empty);
+    /// Takes the keys pressed in the shortcut box: `Backspace` alone
+    /// removes the shortcut, as the line under the box says, and keys that
+    /// cannot show Gozler, `Win+L`, leave it as it is.
+    fn keys_captured(&self, windows: bool, keystroke: Keystroke) {
+        if !windows && keystroke == Keystroke::plain(Key::Backspace) {
+            self.set_shortcut(None);
+        } else if let Some(shortcut) = ShowShortcut::pressed(windows, keystroke) {
+            self.set_shortcut(Some(shortcut));
         }
-    }
-
-    /// With the Windows key off, a shortcut needs two of `Ctrl`, `Alt` and
-    /// `Shift`, so the key shown gets `Ctrl+Alt` as the control would give
-    /// it.
-    fn windows_key_changed(&self) {
-        let windows = self
-            .check_box(SettingsPage::Keyboard, ControlId::KeyboardWindowsKey)
-            .is_some_and(CheckBox::is_checked);
-        if let Some(hotkey) = self.hotkey() {
-            hotkey.require_two_modifiers(!windows);
-            if !windows && let HotkeyValue::Keys(keystroke) = hotkey.value() {
-                let fixed = ShowShortcut::two_modifiers(keystroke);
-                if fixed != keystroke {
-                    self.filling(|| hotkey.set(Some(fixed)));
-                }
-            }
-        }
-        self.shortcut_changed();
     }
 
     /// Apply is enabled while a value differs from what was applied
-    /// (DESIGN.md: Dialogs), a refused shortcut included. OK and Apply show
+    /// (DESIGN.md: Dialogs), a refused speed included. OK and Apply show
     /// the administrator shield while the Include settings differ, because
     /// saving them asks Windows for permission.
     fn update_apply(&self, dialog: Hwnd) {
@@ -895,7 +888,7 @@ impl<'a> SettingsDialog<'a> {
                 draft.edited.include != draft.last_applied().include,
             )
         };
-        let changed = changed || self.read_shortcut().is_err() || self.read_speed().is_err();
+        let changed = changed || self.read_speed().is_err();
         if let Some(apply) = dialog::item(dialog, ControlId::SettingsApply.id()) {
             apply.set_enabled(changed);
         }
@@ -940,25 +933,31 @@ impl<'a> SettingsDialog<'a> {
 
     /// Lists the pages that the search keeps, with the shown one selected.
     fn fill_page_list(&self, dialog: Hwnd) {
-        let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) else {
+        let Some(list) = self.page_list(dialog) else {
             return;
         };
-        let (labels, glyphs, index) = {
+        let (items, index) = {
             let listed = self.listed.borrow();
             let shown = self.shown.get();
-            let labels: Vec<&str> = listed
+            // Each page shows its icon, at its place in `SettingsPage::ALL`.
+            let items: Vec<(&str, usize)> = listed
                 .iter()
-                .map(|page| self.strings.text(page.label()))
+                .filter_map(|page| {
+                    let icon = SettingsPage::ALL.iter().position(|p| p == page)?;
+                    Some((self.strings.text(page.label()), icon))
+                })
                 .collect();
-            let glyphs: Vec<Glyph> = listed.iter().map(|page| page.glyph()).collect();
-            (
-                labels,
-                glyphs,
-                listed.iter().position(|page| Some(*page) == shown),
-            )
+            (items, listed.iter().position(|page| Some(*page) == shown))
         };
-        self.filling(|| list.set_items(&labels, index.unwrap_or(0)));
-        list.set_glyphs(glyphs);
+        self.filling(|| list.set_items(&items, index.unwrap_or(0)));
+    }
+
+    /// Gives the page list its pages' icons, again when icons are shown or
+    /// hidden.
+    fn show_page_icons(&self, dialog: Hwnd) {
+        if let Some(list) = self.page_list(dialog) {
+            list.set_icons(&SettingsPage::ALL.map(SettingsPage::glyph));
+        }
     }
 
     /// Keeps the pages that the search box's words find. The shown page
@@ -1159,18 +1158,9 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Gives the edited values to the main window, and answers whether they
-    /// were applied; a shortcut that cannot be one, or that another program
-    /// holds, keeps the dialog open (DESIGN.md: Dialogs).
+    /// were applied; a speed that cannot be one, or a shortcut that another
+    /// program holds, keeps the dialog open (DESIGN.md: Dialogs).
     fn apply(&self, dialog: Hwnd) -> bool {
-        if let Err(message) = self.read_shortcut() {
-            self.refuse(
-                dialog,
-                SettingsPage::Keyboard,
-                ControlId::KeyboardShortcut,
-                &message,
-            );
-            return false;
-        }
         if let Err((control, message)) = self.read_speed() {
             self.refuse(dialog, SettingsPage::FileOperations, control, &message);
             return false;
@@ -1212,6 +1202,9 @@ impl<'a> SettingsDialog<'a> {
                     for page in SettingsPage::ALL {
                         self.fill(page);
                     }
+                } else if edited.choices.show_shortcut != last.choices.show_shortcut {
+                    // Show window's row shows what Windows registered.
+                    self.fill_commands(self.selected_command());
                 }
                 let title = self.strings.text("window.title");
                 for failure in &applied.failures {
@@ -1221,9 +1214,7 @@ impl<'a> SettingsDialog<'a> {
                 if icons_changed {
                     // The page list's rows, the group captions and the
                     // buttons follow.
-                    if let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) {
-                        list.fit_glyph_rows();
-                    }
+                    self.show_page_icons(dialog);
                     self.show_button_glyphs(dialog);
                     self.refresh_index(dialog);
                     dialog.draw_once_after(|| {});
@@ -1231,7 +1222,7 @@ impl<'a> SettingsDialog<'a> {
                 self.show_preview();
                 self.update_apply(dialog);
                 if icons_changed {
-                    let width = dialog::size_buttons(dialog, &self.later_captions());
+                    let width = dialog::size_buttons(dialog, self);
                     self.buttons_sized(dialog, width);
                 }
                 saved
@@ -1374,8 +1365,11 @@ impl<'a> SettingsDialog<'a> {
     /// A control of a page holds another value.
     fn edited(&self, dialog: Hwnd, id: u16) {
         if is(id, ControlId::SettingsPages) {
-            let selected = ListBox::of_dialog(dialog, id)
-                .and_then(ListBox::selected)
+            // A list view also tells of the item that lost the selection,
+            // while none is selected.
+            let selected = self
+                .page_list(dialog)
+                .and_then(IconList::selected)
                 .and_then(|index| self.listed.borrow().get(index).copied());
             if selected.is_some() {
                 self.show_page(dialog, selected);
@@ -1399,8 +1393,18 @@ impl<'a> SettingsDialog<'a> {
                 self.draft.borrow_mut().edited.choices.language =
                     LanguageChoice::at(index.checked_sub(1));
             }
+        } else if is(id, ControlId::GeneralSizes) {
+            let chosen = self
+                .size_list()
+                .and_then(DropDownList::selected)
+                .and_then(|place| SizeFormat::ALL.get(place).copied());
+            if let Some(format) = chosen {
+                self.draft.borrow_mut().edited.choices.size_format = format;
+            }
         } else if is(id, ControlId::KeyboardShortcut) {
-            self.shortcut_changed();
+            // Undoes a paste from the box's context menu: the keys pressed
+            // in it arrive as DialogMessage::KeysCaptured.
+            self.show_shortcut();
         } else if is(id, ControlId::KeyboardFilter) {
             self.fill_commands(self.selected_command());
         } else if is(id, ControlId::KeyboardCommands) {
@@ -1511,15 +1515,12 @@ impl<'a> SettingsDialog<'a> {
             self.fill(SettingsPage::FileOperations);
         } else if is(id, ControlId::IncludeModify) {
             self.modify_folders(dialog);
-        } else if is(id, ControlId::KeyboardWindowsKey) {
-            self.windows_key_changed();
         } else if is(id, ControlId::KeyboardClear) {
             // As Backspace in the box does.
-            if let Some(hotkey) = self.hotkey() {
-                hotkey.set(None);
-                hotkey.hwnd().focus();
+            self.set_shortcut(None);
+            if let Some(shortcut_box) = self.shortcut_box() {
+                shortcut_box.hwnd().focus();
             }
-            self.shortcut_changed();
         } else if is(id, ControlId::KeyboardAdd) {
             self.edit_shortcut(dialog, false);
         } else if is(id, ControlId::KeyboardEdit) {
@@ -1536,6 +1537,11 @@ impl<'a> SettingsDialog<'a> {
 impl DialogProc for SettingsDialog<'_> {
     fn init(&self, dialog: Hwnd) -> Opened {
         let mut fonts = Vec::new();
+        if let Some(list) = self.page_list(dialog) {
+            list.set_up();
+        }
+        self.show_page_icons(dialog);
+        self.fill_page_list(dialog);
         self.fit_page_list(dialog);
         let area =
             dialog::item(dialog, ControlId::SettingsPageArea.id()).map(|a| a.rect_in(dialog));
@@ -1569,9 +1575,6 @@ impl DialogProc for SettingsDialog<'_> {
             pages.push(hwnd);
         }
         self.pages.replace(pages);
-        if let Some(list) = ListBox::of_dialog(dialog, ControlId::SettingsPages.id()) {
-            list.fit_glyph_rows();
-        }
         if let Some(label) = self
             .page(SettingsPage::General)
             .and_then(|page| dialog::item(page, ControlId::GeneralLanguageLabel.id()))
@@ -1592,6 +1595,13 @@ impl DialogProc for SettingsDialog<'_> {
                     .chain(names)
                     .collect();
             list.set_items(&items, 0);
+        }
+        if let Some(list) = self.size_list() {
+            let names: Vec<&str> = SizeFormat::ALL
+                .iter()
+                .map(|format| text(format.label()))
+                .collect();
+            list.set_items(&names, 0);
         }
         if let Some(list) = self.speed_list(ControlId::SpeedPreset) {
             let names: Vec<&str> = SpeedPreset::ALL
@@ -1680,13 +1690,26 @@ impl DialogProc for SettingsDialog<'_> {
             let _ = self.balloon.set(balloon);
         }
         // Reset all and every page's Reset say which settings they restore,
-        // the Use Total Commander link says what it does, and the Service
-        // group's fix buttons say what their fix does. Each page has one
+        // the Use Total Commander link says what it does, the Service
+        // group's fix buttons say what their fix does, and each Clear says
+        // its name, because it can show only its icon. Each page has one
         // tooltip, and Windows destroys the tooltips with the dialog.
-        if let Some(button) = dialog::item(dialog, ControlId::SettingsResetAll.id())
-            && let Ok(tip) = Tooltip::create(dialog, &[button])
-        {
-            tip.set(button, text("settings.reset_all_tooltip"));
+        let clear = without_access_key(text("button.clear"));
+        let tipped: Vec<(Hwnd, &str)> = [
+            (
+                ControlId::SettingsResetAll,
+                text("settings.reset_all_tooltip"),
+            ),
+            (ControlId::SettingsClearSearch, clear.as_str()),
+        ]
+        .into_iter()
+        .filter_map(|(control, tip)| Some((dialog::item(dialog, control.id())?, tip)))
+        .collect();
+        let controls: Vec<Hwnd> = tipped.iter().map(|&(control, _)| control).collect();
+        if let Ok(tips) = Tooltip::create(dialog, &controls) {
+            for (control, tip) in tipped {
+                tips.set(control, tip);
+            }
         }
         for page in SettingsPage::ALL {
             let Some(hwnd) = self.page(page) else {
@@ -1701,6 +1724,7 @@ impl DialogProc for SettingsDialog<'_> {
                     ControlId::ContextMenuTotalCommander,
                     text("settings_context_menu.total_commander_tooltip"),
                 )],
+                SettingsPage::Keyboard => &[(ControlId::KeyboardClear, clear.as_str())],
                 // `refresh_index` gives these their tips.
                 SettingsPage::Index => &[
                     (ControlId::IndexUseLocal, ""),
@@ -1759,11 +1783,10 @@ impl DialogProc for SettingsDialog<'_> {
                 return true;
             }
             DialogMessage::Command { id } if is(id, ControlId::SettingsResetAll) => {
-                self.draft.borrow_mut().edited.restore_all_defaults();
-                for page in SettingsPage::ALL {
-                    self.fill(page);
+                if win::dialog::ask(dialog, &captions::reset_all_question(&self.strings)) {
+                    self.resets.set(true);
+                    dialog::end(dialog, DialogEnd::Cancel);
                 }
-                self.include_changed(dialog);
                 true
             }
             DialogMessage::Command { id } if is(id, ControlId::SettingsApply) => {
@@ -1795,6 +1818,20 @@ impl DialogProc for SettingsDialog<'_> {
                 return true;
             }
             DialogMessage::Command { id } => self.clicked(dialog, id),
+            DialogMessage::Focus { id, focused } if is(id, ControlId::KeyboardShortcut) => {
+                // Dropping a capture removes its hook. Without one, which
+                // only a hook that Windows refuses leaves, the box takes no
+                // keys.
+                self.capture.take();
+                if focused {
+                    self.capture.set(shortcut::capture(dialog).ok());
+                }
+                return true;
+            }
+            DialogMessage::KeysCaptured { windows, keystroke } => {
+                self.keys_captured(windows, keystroke);
+                true
+            }
             // A row's folders are the ones Indexed folders lists in full.
             DialogMessage::DoubleClicked { id } if is(id, ControlId::IncludeFolders) => {
                 let on_row = self
@@ -1825,7 +1862,8 @@ impl DialogProc for SettingsDialog<'_> {
                 self.main.find_total_commander();
                 true
             }
-            DialogMessage::LinkActivated { .. }
+            DialogMessage::Focus { .. }
+            | DialogMessage::LinkActivated { .. }
             | DialogMessage::DoubleClicked { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Tree { .. }
@@ -1849,14 +1887,10 @@ impl DialogProc for SettingsDialog<'_> {
         };
         let dpi = dialog.dpi();
         let height = status.fit(StatusLayout::min_height(dpi, *font_height));
-        status.place(&StatusLayout::compute(
-            widths,
-            width,
-            dpi,
-            *font_height,
-            height,
+        status.place(
+            &StatusLayout::compute(widths, width, dpi, *font_height, height, None),
             None,
-        ));
+        );
     }
 
     /// Every caption the Service group's fix buttons can show, and OK and
@@ -1870,6 +1904,12 @@ impl DialogProc for SettingsDialog<'_> {
             .chain([("button.ok", true), ("settings.apply", true)])
             .map(|(key, shielded)| (self.strings.text(key).to_owned(), shielded || icons))
             .collect()
+    }
+
+    fn clear_glyph(&self, id: u16) -> Option<Glyph> {
+        (is(id, ControlId::SettingsClearSearch) || is(id, ControlId::KeyboardClear))
+            .then(|| captions::button_glyph("button.clear"))
+            .flatten()
     }
 
     fn empty_text(&self, id: u16) -> Option<String> {
@@ -1950,7 +1990,7 @@ impl DialogProc for CommandShortcut<'_> {
             // Any key: the command shortcut rules refuse a key for typing
             // with their message, which the control's own rules would not
             // give.
-            hotkey.require_two_modifiers(false);
+            hotkey.take_any_key();
             hotkey.set(self.replaced);
         }
         if let Ok(balloon) = Balloon::create(dialog) {
@@ -1999,6 +2039,8 @@ impl DialogProc for CommandShortcut<'_> {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Other => false,
         }
     }

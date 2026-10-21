@@ -1,9 +1,8 @@
 # Spec: the file manager
 
 **Status, 2026-10-20.** Stages 1 and 2 are built: the engine, Search mode's
-file commands, the File operations window and the speed settings. Dropping
-files on a folder row in Search is being built. The Two panels mode is not
-built yet. This spec says exactly what it does, so that stages 3 to 8 build
+file commands, dropping files on a folder row, the File operations window
+and the speed settings. The Two panels mode is not built yet. This spec says exactly what it does, so that stages 3 to 8 build
 it without asking. When the owner changes a rule, the rule changes here
 first.
 
@@ -159,7 +158,7 @@ show them.
   | --- | --- |
   | Name | the full name, with the extension's icon, as in Search |
   | Ext | the extension without its dot; empty for a folder |
-  | Size | a file's size, in Search's format (DESIGN.md: Results list); a folder's size from gozlerd, or "Folder" while gozlerd does not know it |
+  | Size | a file's size, in the unit of Settings > General's "Show sizes in", as Search's (DESIGN.md: Results list); a folder's size from gozlerd, or "Folder" while gozlerd does not know it |
   | Date modified | as in Search |
 
   - The first row is `..` in every folder except a drive's root. It has no
@@ -190,8 +189,8 @@ show them.
 
   The size adds the sizes of the counted files and folders, in the short
   form of Search's status bar (DESIGN.md: Status bar), such as "4.2 GB",
-  because the Size column's KB do not compare at a glance with the free
-  space. When a counted folder's size is unknown (see "Folder sizes"), the
+  because the Size column's one unit does not compare at a glance with the
+  free space. When a counted folder's size is unknown (see "Folder sizes"), the
   size is left out, because a sum that misses a folder would promise room
   that the copy does not have: "2 of 14 selected". The free space is read
   on a thread, and again after each change in the panel.
@@ -271,7 +270,7 @@ text, as "A panel" says.
 | `Up`, `Down`, `PgUp`, `PgDn`, `Home`, `End` | move the focus |
 | `Enter`, a double-click | on a folder: show it in the panel. On `..`: show the parent folder. On a file: Open, with Settings' "Open files" command (DESIGN.md: The Context menu page) |
 | `Backspace` | show the parent folder, with the folder the person came from focused |
-| `Tab` | make the other panel active |
+| `Tab`, `Shift+Tab` | make the other panel active, from the list, the path box, the search box and Look in; from any other control, such as a drive button, return to the active panel. Search's controls are hidden, so `Tab` never reaches them |
 | `Alt+F1`, `Alt+F2` | open the left or the right panel's drive menu |
 | `Ctrl+L` | focus the path box |
 | `Ctrl+R` | read the folder again, and ask gozlerd for the folder sizes again |
@@ -480,8 +479,8 @@ Commander's Find File searches from the current folder.
   no destination folder.
 - **Quick search** in a search panel looks only at the rows already
   fetched, because the rest are not in the window.
-- **A result that a delete or a move takes shows blank** (see "The person
-  never waits for the disk").
+- **A result that a delete or a move takes shows struck through, in
+  grey** (see "The person never waits for the disk").
 - **States:** the search panel's list area shows Search's messages for no
   results, a search that does not parse and a failure of the service
   (DESIGN.md: States, S5, S7 and S9), and the "not indexed" state above,
@@ -689,8 +688,9 @@ shows. Each item shows its key, so the menus teach the keys as the key bar
 does.
 
 - **File:** Open, View, Edit, Properties | Copy to folder…, Move to
-  folder…, New folder…, Delete | Settings… | Exit. Edit is disabled, as in
-  the key bar.
+  folder…, New folder…, Delete | Cancel | Settings… | Exit. Edit is
+  disabled, as in the key bar. Cancel stops the job that the status bar
+  shows, as its Cancel does (DESIGN.md: Menus).
 - **Edit:** Select all, Clear selection | Find
 - **View:** Two panels | Sort by ▸ | Refresh | File operations
 - **Help** and **Language** as in Search.
@@ -704,9 +704,13 @@ It has Search's three groups (DESIGN.md: Status bar):
 
 | Group | Shows |
 | --- | --- |
-| Left | empty, because each panel's status line shows its drive's free space |
+| Left | none, because each panel's status line shows its drive's free space |
 | Middle | the running job, as in Search, or what the last operation did ("File operations", step 6) |
 | Right | in a folder panel, the index state when it leaves sizes unknown; in a search panel, the search's totals, as in Search |
+
+The memory group follows the right group while Settings > General shows
+it, as in Search. Show details does not show, because Two panels has no
+inspector.
 
 ### The Viewer
 
@@ -803,7 +807,7 @@ commands (see "Search mode"), Two panels through `F5`, `F6`, `F7` and
 1. **Copy and Move ask first.** Two panels asks with the destination dialog
    of "Copy and Move"; Search asks with the folder picker of "Search mode".
 2. **Delete asks:** "Permanently delete 12 items?" and below it "They won't
-   go to the Recycle Bin, and you can't undo this." Delete and Cancel, with
+   go to the Recycle Bin." Delete and Cancel, with
    Cancel as the default. Gozler never uses the Recycle Bin (owner ruling).
 3. **Conflicts are asked once for the whole operation,** before any file is
    written: Replace the files in the destination, Skip these files, Keep
@@ -856,7 +860,8 @@ commands (see "Search mode"), Two panels through `F5`, `F6`, `F7` and
    why; nor does a cancelled rename or new folder, which did nothing. The
    line shows the operation that ended last, also when an older one stays
    in the queue while a list keeps its rows. A
-   search list shows the rows that the operation took blank. "The person
+   search list shows the rows that the operation took struck through, in
+   grey. "The person
    never waits for the disk" says both.
 7. **A failure does not stop the operation.** At its end, a dialog lists
    each item that failed or was skipped, with Windows' reason. An operation
@@ -881,8 +886,8 @@ to skip it, and one forgot.
 - **Prepare runs off the UI thread too.** The File operations window shows
   "Preparing…", and the conflict question appears when prepare is done.
 - **An entry that a delete or a move takes leaves the panels and shows
-  blank in the search results at once,** before the disk work ends. A row
-  never carries a "being deleted" flag.
+  struck through in the search results at once,** before the disk work
+  ends. A row never carries a "being deleted" flag.
 - **A folder panel's rows** are the folder listing minus the sources of the
   deletes and moves that wait or run, and of those that ended until the
   panel has read its folder again (engine spec, "The interface", taken
@@ -900,18 +905,19 @@ to skip it, and one forgot.
   `Queue::taken()` also holds ended operations, which the window releases
   only on a new search in Search (`release_ended`); stage 4 splits the
   queue's set into the waiting and running sources and the ended ones.
-- **Each search list keeps the ended operations it shows blank,** and
-  releases them on its own next search, or when a search panel leaves its
+- **Each search list keeps the ended operations it shows struck through,**
+  and releases them on its own next search, or when a search panel leaves its
   search in any way (see "Search in a panel") and drops its rows. So one list's new search never makes
-  another list's blank rows show deleted files again. Search's list and
+  another list's struck-through rows show deleted files as present again. Search's list and
   each search panel are separate lists.
-- **A search list shows a taken row blank,** with empty cells, as it shows
-  a row not fetched yet (DESIGN.md, "Rows on demand"), and the selection
-  leaves taken rows out. The list keeps gozlerd's count and positions,
-  because gozlerd renumbers its results when its journal tail applies the
-  delete, and a list that removed rows itself would then map positions to
-  the wrong files. The blank rows go when the person searches again, or when
-  their chunk is fetched again after gozlerd has applied the delete.
+- **A search list shows a taken row struck through, in grey,** with the
+  text and icon it had, so the person sees what the delete or move took,
+  and the selection leaves taken rows out. The list keeps gozlerd's count
+  and positions, because gozlerd renumbers its results when its journal
+  tail applies the delete, and a list that removed rows itself would then
+  map positions to the wrong files. The struck-through rows go when the
+  person searches again, or when their chunk is fetched again after
+  gozlerd has applied the delete.
 - **A rename or a new folder that waits** shows in the File operations
   window; the panel shows the change when the disk has it.
 
@@ -1045,8 +1051,11 @@ picker as the destination:
   its OK button says Copy or Move, and it opens at the last folder chosen
   there.
 - **File menu:** Open, Open file location, Properties | Copy to folder…,
-  Move to folder…, Delete | Export results… or Cancel export | Settings… |
-  Exit. **Edit menu:** Cut and Paste join Copy's group, in File Explorer's
+  Move to folder…, Delete | Export results…, Cancel | Settings… | Exit.
+  Cancel, and `Esc` in the results list, stop the job that the status bar
+  shows (DESIGN.md: Menus), but `Esc` never stops a file operation, because
+  one stray key would leave a copy half done; File > Cancel and the status
+  bar's Cancel do. **Edit menu:** Cut and Paste join Copy's group, in File Explorer's
   order: Cut, Copy, Paste, Copy as path, Copy name. **Context menu:** Cut,
   Copy to folder…, Move to folder… and Delete join the Copy group; Paste
   joins it on a folder row.
@@ -1068,7 +1077,8 @@ picker as the destination:
 - Searching inside files' contents: gozlerd indexes names.
 - Archives as folders, FTP, and compare or synchronize folders.
 - Drag and drop between the panels and out of them: a later plan. Dropping
-  files from other programs onto a folder row in Search is in this plan.
+  files from other programs onto a folder row in Search is in this plan;
+  Two panels accepts no drop.
 - Thumbnails and other views than the report list; choosing the panels'
   columns.
 - A splitter between the panels.
@@ -1112,7 +1122,7 @@ These terms go into `CONTEXT.md` in stage 3, and "Pane" there stops listing
 | Stage | Builds | State |
 | --- | --- | --- |
 | 1 | The engine of [the engine spec](fast-copy-delete-spec.md): delete, copy and move, and the measurement on the owner's machine | built |
-| 2 | Search mode's commands: Delete, Copy to folder…, Move to folder…, Cut and Paste, dropping files onto a folder row, the questions, the File operations window, the taskbar progress and the speed settings page | built; the drop is being built |
+| 2 | Search mode's commands: Delete, Copy to folder…, Move to folder…, Cut and Paste, dropping files onto a folder row, the questions, the File operations window, the taskbar progress and the speed settings page | built |
 | 3 | The prototype, then the restructuring listed under this table: the Two panels shell, with two empty lists. It changes no behavior of Search | built |
 | 4 | The taken entries split, then the panels: reading folders, the columns and sorting, moving around, selecting, quick search, the drive menu, folder sizes, change notifications, removing a USB drive, the status lines, the key bar and the status bar's left group | next |
 | 5 | The panels' commands: Copy to folder… and Move to folder… with their dialog and the two engine changes, New folder…, Delete, the menus and the context menus; in both modes, the File operations window opening after 2 seconds and the status bar's line for an ended operation | |

@@ -800,6 +800,18 @@ function Pane-Selected($process, [string] $id, [bool] $dropDown) {
     [long][GozlerProbe.Win]::SendMessageW((Pane-Hwnd $process $id), ($dropDown ? 0x0147 : 0x0188), 0, 0)
 }
 
+# Selects the Kind list's item at `index` as a click does: the list view
+# selects it (LVIS_FOCUSED | LVIS_SELECTED) and tells the window with
+# LVN_ITEMCHANGED.
+function Select-Kind($process, [int] $index) {
+    [GozlerProbe.Win]::SetItemState((Pane-Hwnd $process $ids.IDC_KIND), $index, 3, 3)
+}
+
+# The Kind list's selected position (LVM_GETNEXTITEM with LVNI_SELECTED).
+function Selected-Kind($process) {
+    [long][GozlerProbe.Win]::SendMessageW((Pane-Hwnd $process $ids.IDC_KIND), 0x100C, [IntPtr](-1), [IntPtr]2)
+}
+
 # The Location list's selected item.
 function Selected-Location($process) {
     $items = [GozlerProbe.Win]::ListItems((Pane-Hwnd $process $ids.IDC_LOCATION))
@@ -972,10 +984,40 @@ function Set-MatchMode($process, [int] $index) {
     [void][GozlerProbe.Win]::SendMessageW($process.MainWindowHandle, 0x0111, $command, $combo)
 }
 
-# Sets the check box `id` to `on` through UI Automation's Toggle, a click.
-function Set-CheckBox($process, [string] $id, [bool] $on) {
-    $box = Child-ById (Window-Element $process) $id
-    if (([GozlerProbe.Ui]::ToggleState($box) -eq 1) -ne $on) { [GozlerProbe.Ui]::Toggle($box) }
+# The search row's toolbar: Clear, Match case and Match path.
+function Search-Tools($process) { Control-Hwnd $process $ids.IDC_SEARCH_TOOLS }
+
+# The filter pane header's toolbar: Clear filters and Hide filters.
+function Filter-Tools($process) { Pane-Hwnd $process $ids.IDC_FILTER_TOOLS }
+
+# Whether the button `id` of the toolbar `toolbar` is checked
+# (TB_ISBUTTONCHECKED) or enabled (TB_ISBUTTONENABLED).
+function Tool-Checked($toolbar, [string] $id) { [long][GozlerProbe.Win]::SendMessageW($toolbar, 0x040A, [IntPtr][int]$id, 0) -ne 0 }
+function Tool-Enabled($toolbar, [string] $id) { [long][GozlerProbe.Win]::SendMessageW($toolbar, 0x0409, [IntPtr][int]$id, 0) -ne 0 }
+
+# The texts of the toolbar `id`'s buttons, which UI Automation gives as
+# their names, without its separators. A toolbar button is not a window,
+# so it has no ID of its own there.
+function Tool-Names($parent, [string] $id) {
+    @([GozlerProbe.Ui]::Children((Child-ById $parent $id)) | Where-Object ControlType -NE ([GozlerProbe.Ui]::Separator) | ForEach-Object Name)
+}
+
+# Clicks the button `id` of the toolbar `toolbar` as a click does: a check
+# button changes its state (TB_CHECKBUTTON), then the window receives
+# WM_COMMAND from the toolbar.
+function Click-Tool($process, $toolbar, [string] $id, [bool] $check) {
+    if ($check) {
+        $on = -not (Tool-Checked $toolbar $id)
+        [void][GozlerProbe.Win]::SendMessageW($toolbar, 0x0402, [IntPtr][int]$id, [IntPtr][int]$on)
+    }
+    [void][GozlerProbe.Win]::SendMessageW($process.MainWindowHandle, 0x0111, [IntPtr][int]$id, $toolbar)
+}
+
+# Sets the search row's check button `id`, Match case or Match path, to
+# `on`, as a click does.
+function Set-MatchButton($process, [string] $id, [bool] $on) {
+    $tools = Search-Tools $process
+    if ((Tool-Checked $tools $id) -ne $on) { Click-Tool $process $tools $id $true }
 }
 
 function Header-Names($process) {
@@ -1117,8 +1159,7 @@ function Inspector-Hwnd($process, [string] $id, [string] $cls) {
 
 # The inspector's heading and its shown fields by label. Each control is read
 # with its own message, and the window can change between two of them, so
-# the controls are read until two reads in a row agree. The fourth value,
-# Attributes, is an owner-drawn Static that still holds its text.
+# the controls are read until two reads in a row agree.
 function Inspector-State($process) {
     $read = {
         $state = [ordered]@{ heading = [GozlerProbe.Win]::ControlText((Inspector-Hwnd $process 'IDC_INSPECTOR_HEADING' 'Static')); fields = [ordered]@{} }
@@ -1126,8 +1167,7 @@ function Inspector-State($process) {
             $label = Inspector-Hwnd $process "IDC_INSPECTOR_LABEL_$n" 'Static'
             if ([GozlerProbe.Win]::IsWindowVisible($label)) {
                 $name = [GozlerProbe.Win]::ControlText($label)
-                $class = $n -eq 4 ? 'Static' : 'Edit'
-                $state.fields[$name] = [GozlerProbe.Win]::ControlText((Inspector-Hwnd $process "IDC_INSPECTOR_VALUE_$n" $class))
+                $state.fields[$name] = [GozlerProbe.Win]::ControlText((Inspector-Hwnd $process "IDC_INSPECTOR_VALUE_$n" 'Edit'))
             }
         }
         $state
@@ -1230,11 +1270,10 @@ $SettingsPages = @{ general = 0; search = 1; context_menu = 2; keyboard = 3; fil
 
 # Shows the Settings page `page` as a click in the page list does.
 function Show-SettingsPage($dialog, [string] $page) {
-    $list = Dialog-Control $dialog 'IDC_SETTINGS_PAGES' 'ListBox'
-    # LB_SETCURSEL, then LBN_SELCHANGE.
-    [void][GozlerProbe.Win]::SendMessageW($list, 0x0186, [IntPtr]$SettingsPages[$page], 0)
-    $command = [IntPtr]((1 -shl 16) -bor [int]$ids.IDC_SETTINGS_PAGES)
-    [void][GozlerProbe.Win]::SendMessageW($dialog, $WM_COMMAND, $command, $list)
+    $list = Dialog-Control $dialog 'IDC_SETTINGS_PAGES' 'SysListView32'
+    # LVIS_FOCUSED | LVIS_SELECTED; the list view tells the dialog with
+    # LVN_ITEMCHANGED.
+    [GozlerProbe.Win]::SetItemState($list, $SettingsPages[$page], 3, 3)
 }
 
 # Sets the check box `id` to `on` through UI Automation's Toggle, a click.
@@ -1457,7 +1496,8 @@ try {
             working_set        = $window.WorkingSet64
         }
         $element = Window-Element $window
-        $results['match controls enabled'] = @($MatchLabelId, $MatchModeId, $MatchCaseId, $MatchPathId | ForEach-Object { (Child-ById $element $_).Enabled })
+        $tools = Search-Tools $window
+        $results['match controls enabled'] = @(@($MatchLabelId, $MatchModeId | ForEach-Object { (Child-ById $element $_).Enabled }) + @($MatchCaseId, $MatchPathId | ForEach-Object { Tool-Enabled $tools $_ }))
 
         # The pseudo-language check compares its status bar groups with these.
         $englishPartWidths = @(Status-Groups (Child-ById $element $StatusBarId) | ForEach-Object { [int]$_.Rect[2] })
@@ -1543,7 +1583,8 @@ try {
             $header = [GozlerProbe.Ui]::HeaderOf($listView)
             [ordered]@{
                 menus       = @([GozlerProbe.Ui]::Children($bar) | ForEach-Object Name)
-                match       = @($MatchLabelId, $MatchCaseId, $MatchPathId | ForEach-Object { (Child-ById $element $_).Name })
+                # The search row's toolbar: Clear, Match case, Match path.
+                match       = @((Child-ById $element $MatchLabelId).Name) + @(Tool-Names $element $ids.IDC_SEARCH_TOOLS)[1..2]
                 filters     = @($ids.IDC_KIND_LABEL, $ids.IDC_LOCATION_LABEL, $ids.IDC_DATE_LABEL, $ids.IDC_SIZE_LABEL, $ids.IDC_ATTRIBUTES_LABEL | ForEach-Object { (Pane-Child $process $_).Name })
                 headers     = @([GozlerProbe.Ui]::Children($header) | ForEach-Object Name)
                 status_bars = @(Status-Groups (Child-ById $element $StatusBarId) | ForEach-Object { [int]$_.Rect[2] })
@@ -1672,7 +1713,7 @@ try {
         $csCount = @(Get-ChildItem -LiteralPath $files -Recurse -Filter '*.cs').Count
         $listHwnd = Control-Hwnd $window $ListId
         $label = @{}
-        foreach ($key in 'open', 'open_file_location', 'properties', 'copy_as_path', 'copy_name', 'export_results', 'cancel_export') {
+        foreach ($key in 'open', 'open_file_location', 'properties', 'copy_as_path', 'copy_name', 'export_results', 'cancel') {
             $label[$key] = Plain (Caption "command.$key")
         }
         $running = (Caption 'status.exporting_other').Split('{')[0]
@@ -1738,8 +1779,8 @@ try {
                     [void](Wait-OwnSearch $window { Set-MatchMode $window $case.mode })
                 }
                 foreach ($box in @(@($MatchCaseId, [bool]$case.case), @($MatchPathId, [bool]$case.path))) {
-                    if (([GozlerProbe.Ui]::ToggleState((Child-ById (Window-Element $window) $box[0])) -eq 1) -ne $box[1]) {
-                        [void](Wait-OwnSearch $window { Set-CheckBox $window $box[0] $box[1] })
+                    if ((Tool-Checked (Search-Tools $window) $box[0]) -ne $box[1]) {
+                        [void](Wait-OwnSearch $window { Set-MatchButton $window $box[0] $box[1] })
                     }
                 }
                 $answer = Search-For $window $case.text
@@ -1752,31 +1793,32 @@ try {
                 }
             }
             Set-MatchMode $window 0
-            Set-CheckBox $window $MatchCaseId $false
-            Set-CheckBox $window $MatchPathId $false
-            Check 'match modes and check boxes' (-not ($matched | Where-Object { $_.window -ne $_.gozler -or $_.gozler -ne $_.fixture })) $matched
+            Set-MatchButton $window $MatchCaseId $false
+            Set-MatchButton $window $MatchPathId $false
+            Check 'match modes and check buttons' (-not ($matched | Where-Object { $_.window -ne $_.gozler -or $_.gozler -ne $_.fixture })) $matched
 
-            # Alt and each access key reach the match controls; a check box's
-            # key also toggles it, and a second press puts it back.
+            # Alt and each access key reach the match controls: the match
+            # mode's focuses its list, and a check button's toggles it, which
+            # a second press puts back. A toolbar button takes no focus.
             if (Is-InFront $window) {
+                $tools = Search-Tools $window
                 $reached = foreach ($control in @{ id = $MatchModeId; key = 'match.label' }, @{ id = $MatchCaseId; key = 'match.case' }, @{ id = $MatchPathId; key = 'match.path' }) {
-                    $box = Child-ById (Window-Element $window) $control.id
-                    $isBox = $control.id -ne $MatchModeId
-                    $before = $isBox ? [GozlerProbe.Ui]::ToggleState($box) : 0
+                    $isTool = $control.id -ne $MatchModeId
+                    $before = $isTool -and (Tool-Checked $tools $control.id)
                     $letter = [uint16][char](AccessKeyOf (Caption $control.key)).ToUpperInvariant()
                     # VK_MENU (Alt), then the letter.
                     [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x12, $letter)
                     Start-Sleep -Milliseconds 300
-                    $after = $isBox ? [GozlerProbe.Ui]::ToggleState($box) : 0
-                    $focused = [GozlerProbe.Win]::Focus($window.MainWindowHandle) -eq [IntPtr]$box.Hwnd
+                    $after = $isTool -and (Tool-Checked $tools $control.id)
+                    $focused = [GozlerProbe.Win]::Focus($window.MainWindowHandle) -eq (Control-Hwnd $window $MatchModeId)
                     if ($after -ne $before) {
                         [void][GozlerProbe.Win]::PressKeys($window.MainWindowHandle, 0x12, $letter)
                         Start-Sleep -Milliseconds 300
                     }
-                    [ordered]@{ key = "Alt+$([char]$letter)"; focused = $focused; toggled = $after -ne $before; wanted_toggle = $isBox }
+                    [ordered]@{ key = "Alt+$([char]$letter)"; focused = $focused; toggled = $after -ne $before; wanted_toggle = $isTool }
                 }
                 [void](Wait-Answer $window)
-                Check 'Alt and an access key reach the match controls' (-not ($reached | Where-Object { -not $_.focused -or $_.toggled -ne $_.wanted_toggle })) $reached
+                Check 'Alt and an access key reach the match controls' (-not ($reached | Where-Object { $_.toggled -ne $_.wanted_toggle -or (-not $_.wanted_toggle -and -not $_.focused) })) $reached
             }
             else { Report 'Alt and an access key reach the match controls' 'not run' 'the window was not in front' }
 
@@ -2073,9 +2115,9 @@ try {
             Check 'Export results writes what gozler writes' (-not ($exported | Where-Object {
                         -not $_.same_bytes -or $_.status -notmatch (Caption-Pattern 'status.exported_other' "$csCount" ([regex]::Escape($_.file))) })) $exported
 
-            # During an export of the empty search, the middle group shows its progress and
-            # File shows Cancel export in place of Export results…; Cancel export
-            # ends it and deletes its file (C5, S11).
+            # During an export of the empty search, the middle group shows its progress,
+            # File's Cancel is enabled and Export results… is not; Cancel ends the
+            # export and deletes its file (C5, S11).
             [void](Search-For $window '')
             $all = Join-Path $exports 'all.csv'
             $closed = Export-To $window $all
@@ -2084,14 +2126,14 @@ try {
             $file = Item-States $window 0
             Save-Screenshot $window.MainWindowHandle 'exporting-en'
             $existed = Test-Path -LiteralPath $all
-            Run-MenuItem $window (Caption 'command.cancel_export')
+            Run-MenuItem $window (Caption 'command.cancel')
             for ($i = 0; $i -lt 20 -and (Test-Path -LiteralPath $all); $i++) { Start-Sleep -Milliseconds 100 }
             $detail = [ordered]@{
-                dialog_closed = $closed; progress = $progress; file_menu = @($file.Keys); cancel_export_enabled = $file[$label.cancel_export]
+                dialog_closed = $closed; progress = $progress; file_menu = $file; cancel_enabled = $file[$label.cancel]
                 file_while_running = $existed; file_after = Test-Path -LiteralPath $all; status_after = Status-Part $window 1
             }
-            Check 'Cancel export' ($closed -and $progress -match (Caption-Pattern 'status.exporting_other') -and $file[$label.cancel_export] -and
-                -not $file.Contains($label.export_results) -and $existed -and -not $detail.file_after -and -not $detail.status_after) $detail
+            Check 'Cancel an export' ($closed -and $progress -match (Caption-Pattern 'status.exporting_other') -and $file[$label.cancel] -and
+                $file.Contains($label.export_results) -and -not $file[$label.export_results] -and $existed -and -not $detail.file_after -and -not $detail.status_after) $detail
 
             # A search runs when an export of the empty search ends: the middle group shows
             # the export's result while the left group says Searching…, and the export
@@ -2455,7 +2497,7 @@ try {
             $filterCases = @(
                 @{ name = 'no filter'; set = {}; reset = {}; cli = @('-path', $files); fixture = $entries.Count }
                 @{
-                    name = 'Kind Documents'; set = { Select-PaneItem $window $ids.IDC_KIND 5 $false }; reset = { Select-PaneItem $window $ids.IDC_KIND 0 $false }
+                    name = 'Kind Documents'; set = { Select-Kind $window 5 }; reset = { Select-Kind $window 0 }
                     cli = @('-path', $files, "ext:$documents")
                     fixture = @($entries | Where-Object $isFile | Where-Object { [System.IO.Path]::GetExtension($_.path).TrimStart('.').ToLowerInvariant() -in $documentList }).Count
                 }
@@ -2493,7 +2535,7 @@ try {
             # pane's Clear filters (C21, S5).
             $clearCaption = Plain (Caption 'command.clear_filters')
             $everywhereCaption = Plain (Caption 'list.search_everywhere')
-            Select-PaneItem $window $ids.IDC_KIND 5 $false
+            Select-Kind $window 5
             [void](Search-For $window "$F zzzz")
             Save-Screenshot $window.MainWindowHandle 'no-results-filtered-en'
             $noResultsMessage = Message-Text $window
@@ -2501,7 +2543,7 @@ try {
             [GozlerProbe.Ui]::Invoke((Child-ById (Window-Element $window) $ids.IDC_MESSAGE_BUTTON_1))
             Start-Sleep -Milliseconds 300
             [void](Wait-Answer $window)
-            $cleared = [ordered]@{ kind = Pane-Selected $window $ids.IDC_KIND $false; location = Selected-Location $window; buttons = @(Message-Buttons $window) }
+            $cleared = [ordered]@{ kind = Selected-Kind $window; location = Selected-Location $window; buttons = @(Message-Buttons $window) }
             Set-Location $window $files
             [void](Wait-Answer $window)
             $locationOffered = @(Message-Buttons $window)
@@ -2509,12 +2551,12 @@ try {
             Start-Sleep -Milliseconds 300
             [void](Wait-Answer $window)
             $everywhere = [ordered]@{ location = Selected-Location $window; buttons = @(Message-Buttons $window) }
-            Select-PaneItem $window $ids.IDC_KIND 5 $false
+            Select-Kind $window 5
             [void](Wait-Answer $window)
-            [GozlerProbe.Ui]::Invoke((Pane-Child $window $ids.IDC_CLEAR_FILTERS))
+            Click-Tool $window (Filter-Tools $window) $ids.IDC_CLEAR_FILTERS $false
             Start-Sleep -Milliseconds 300
             [void](Wait-Answer $window)
-            $paneCleared = [ordered]@{ kind = Pane-Selected $window $ids.IDC_KIND $false; clear_enabled = (Pane-Child $window $ids.IDC_CLEAR_FILTERS).Enabled }
+            $paneCleared = [ordered]@{ kind = Selected-Kind $window; clear_enabled = Tool-Enabled (Filter-Tools $window) $ids.IDC_CLEAR_FILTERS }
             $everywhereItem = Caption 'filter.everywhere'
             Check 'no-results buttons and Clear filters' ($noResultsMessage -eq (Caption 'list.no_results') -and
                 ($offered -join '|') -eq "$clearCaption|$everywhereCaption" -and
@@ -2528,7 +2570,7 @@ try {
             # View > Filters hides the pane, and with a filter set the left group adds
             # "· Filtered" (C13, S10).
             $paneHwnd = Control-Hwnd $window $ids.IDC_FILTER_PANE
-            Select-PaneItem $window $ids.IDC_KIND 5 $false
+            Select-Kind $window 5
             [void](Search-For $window "$F ext:pdf")
             Run-MenuItem $window (Caption 'command.filters')
             Start-Sleep -Milliseconds 300
@@ -2537,7 +2579,7 @@ try {
             Run-MenuItem $window (Caption 'command.filters')
             Start-Sleep -Milliseconds 300
             $shown = [ordered]@{ pane_visible = [GozlerProbe.Win]::IsWindowVisible($paneHwnd); status = Status-Part $window 0 }
-            Select-PaneItem $window $ids.IDC_KIND 0 $false
+            Select-Kind $window 0
             [void](Wait-Answer $window)
             $filteredPattern = Caption-Pattern 'status.filtered'
             Check 'View > Filters and Filtered' (-not $hidden.pane_visible -and $hidden.status -match $filteredPattern -and
@@ -2597,14 +2639,14 @@ try {
             # them in the probe's data folder. Location is one of them.
             Set-Location $window $files
             [void](Wait-Answer $window)
-            Select-PaneItem $window $ids.IDC_KIND 5 $false
+            Select-Kind $window 5
             [GozlerProbe.Ui]::Toggle((Pane-Child $window $ids.IDC_ONLY_DIRECTLY))
             Select-PaneItem $window $ids.IDC_SIZE 5 $true
             Select-PaneItem $window $ids.IDC_HIDDEN 2 $true
             [void](Wait-Answer $window)
             $readChoices = {
                 [ordered]@{
-                    kind = Pane-Selected $window $ids.IDC_KIND $false; location = Selected-Location $window
+                    kind = Selected-Kind $window; location = Selected-Location $window
                     only_directly = [GozlerProbe.Ui]::ToggleState((Pane-Child $window $ids.IDC_ONLY_DIRECTLY))
                     date = Pane-Selected $window $ids.IDC_DATE $true; size = Pane-Selected $window $ids.IDC_SIZE $true
                     hidden = Pane-Selected $window $ids.IDC_HIDDEN $true
@@ -2617,7 +2659,7 @@ try {
             $after = & $readChoices
             Check 'filter choices after a restart' (($before | ConvertTo-Json -Compress) -eq ($after | ConvertTo-Json -Compress) -and
                 $before.kind -eq 5 -and $before.location -eq $files) ([ordered]@{ before = $before; after = $after })
-            [GozlerProbe.Ui]::Invoke((Pane-Child $window $ids.IDC_CLEAR_FILTERS))
+            Click-Tool $window (Filter-Tools $window) $ids.IDC_CLEAR_FILTERS $false
             Start-Sleep -Milliseconds 300
             [void](Wait-Answer $window)
 

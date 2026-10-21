@@ -35,7 +35,7 @@ use super::results::{Fix, LIST_LIMIT, ListButton, ListMessage, Shown};
 use super::search_list::SearchList;
 use super::selection::{FolderContents, Selection, Sums};
 use super::settings::{Mode, SettingsPage};
-use super::text::{self, Numbers, Strings};
+use super::text::{self, Numbers, SizeFormat, Strings};
 use gozler_client::NotRunning;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{Malformed, QueryError};
@@ -78,6 +78,8 @@ pub(crate) struct WindowCaptions {
     /// The status bar's Cancel, which stops the running job.
     pub(crate) status_cancel: String,
     pub(crate) status_widest: StatusWidest,
+    /// `None` while Settings > General hides the memory group.
+    pub(crate) memory_widest: Option<MemoryWidest>,
     pub(crate) message: Option<ListCaption>,
     /// A search panel's Look in label, and its list's items in
     /// [`LookIn::ALL`]'s order.
@@ -131,6 +133,74 @@ pub(crate) struct StatusCaptions {
     /// The main window's right group: `service`, then the search's totals,
     /// each after its icon.
     pub(crate) right: Vec<ValuePart>,
+    /// The main window's memory group; `None` while Settings > General
+    /// hides it.
+    pub(crate) memory: Option<MemoryCaptions>,
+}
+
+/// The status bar's memory group: the working sets of the service and of
+/// the app, each after its icon, with a tooltip for each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryCaptions {
+    pub(crate) service: ValuePart,
+    pub(crate) app: ValuePart,
+    pub(crate) service_tip: String,
+    pub(crate) app_tip: String,
+}
+
+impl MemoryCaptions {
+    fn new(model: &Model, numbers: &dyn Numbers) -> MemoryCaptions {
+        let strings = model.strings();
+        let figure = |bytes: Option<u64>| {
+            bytes.map_or_else(
+                || strings.text("status.memory_unknown").to_owned(),
+                |bytes| text::bytes(strings, numbers, bytes),
+            )
+        };
+        let service = figure(model.service_working_set());
+        let app = figure(model.app_working_set());
+        MemoryCaptions {
+            service: ValuePart {
+                glyph: Some(Glyph::Component),
+                text: strings.format("status.service_memory", &[&service]),
+            },
+            app: ValuePart {
+                glyph: Some(Glyph::Favicon),
+                text: strings.format("status.ui_memory", &[&app]),
+            },
+            service_tip: strings.format("status.service_memory_tooltip", &[&service]),
+            app_tip: strings.format("status.ui_memory_tooltip", &[&app]),
+        }
+    }
+}
+
+/// The memory group's widest texts, which its fixed width fits (DESIGN.md:
+/// Look).
+pub(crate) struct MemoryWidest {
+    pub(crate) service: Vec<String>,
+    pub(crate) app: Vec<String>,
+}
+
+impl MemoryWidest {
+    /// Every form of a figure in MB and in GB, the units a process's
+    /// working set takes, and the unknown figure.
+    fn new(strings: &Strings, numbers: &dyn Numbers) -> MemoryWidest {
+        let figures: Vec<String> = (2..=3)
+            .flat_map(|unit| [9.99, 99.9, 999.0].map(|value| (value * 1024f64.powi(unit)) as u64))
+            .map(|bytes| text::bytes(strings, numbers, bytes))
+            .chain([strings.text("status.memory_unknown").to_owned()])
+            .collect();
+        let all = |key: &str| -> Vec<String> {
+            figures
+                .iter()
+                .map(|figure| strings.format(key, &[figure]))
+                .collect()
+        };
+        MemoryWidest {
+            service: all("status.service_memory"),
+            app: all("status.ui_memory"),
+        }
+    }
 }
 
 /// The status bar's middle group: the running job, or the last job's
@@ -139,7 +209,8 @@ pub(crate) struct StatusCaptions {
 pub(crate) struct JobCaption {
     pub(crate) text: String,
     pub(crate) progress: JobProgress,
-    /// Whether Cancel shows, because the job can stop now.
+    /// Whether Cancel shows, because the job can stop now
+    /// ([`Model::can_cancel_job`]).
     pub(crate) cancel: bool,
 }
 
@@ -414,7 +485,8 @@ impl DialogItem {
 
 /// The group boxes of the Settings pages, each with the icon before its
 /// caption.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 14] = [
+pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 15] = [
+    (ControlId::GeneralDisplay, Glyph::Globe),
     (ControlId::GeneralStarting, Glyph::PowerButton),
     (ControlId::SearchBoxGroup, Glyph::Search),
     (ControlId::ContextMenuItemGroup, Glyph::BulletedList),
@@ -438,8 +510,8 @@ pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 14] = [
 const BUTTON_GLYPHS: [(&str, Glyph); 24] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
-    ("button.close", Glyph::ChromeClose),
-    ("button.clear", Glyph::Clear),
+    ("button.close", Glyph::Cancel),
+    ("button.clear", Glyph::EraseTool),
     ("settings.apply", Glyph::Save),
     ("settings.reset", Glyph::Undo),
     ("settings.reset_all", Glyph::Undo),
@@ -450,10 +522,10 @@ const BUTTON_GLYPHS: [(&str, Glyph); 24] = [
     ("settings_keyboard.edit", Glyph::Edit),
     ("settings_keyboard.remove", Glyph::Remove),
     ("service_report.copy", Glyph::Copy),
-    ("file_operations.hide", Glyph::ChromeMinimize),
-    ("filter.clear", Glyph::Clear),
+    ("file_operations.hide", Glyph::Remove),
+    ("filter.clear", Glyph::EraseTool),
     ("filter.choose_folder", Glyph::FolderOpen),
-    ("command.clear_filters", Glyph::Clear),
+    ("command.clear_filters", Glyph::EraseTool),
     ("list.search_everywhere", Glyph::Search),
     ("fix.download", Glyph::Download),
     ("fix.update", Glyph::Download),
@@ -570,6 +642,7 @@ impl CaptionTable {
                         Control(C::GeneralLanguageLabel),
                         "settings_general.language",
                     ),
+                    (Control(C::GeneralSizesLabel), "settings_general.sizes"),
                     (Control(C::GeneralSignIn), "settings_general.sign_in"),
                     (Control(C::GeneralUpdates), "settings_general.updates"),
                     (
@@ -578,10 +651,15 @@ impl CaptionTable {
                     ),
                     (Control(C::GeneralOneWindow), "settings_general.one_window"),
                     (Control(C::GeneralShowIcons), "settings_general.show_icons"),
+                    (
+                        Control(C::GeneralShowMemory),
+                        "settings_general.show_memory",
+                    ),
                     (Control(C::GeneralRestore), "settings.reset"),
                 ],
                 plain: &[
                     (Control(C::GeneralHeading), "settings.general"),
+                    (Control(C::GeneralDisplay), "settings_general.display"),
                     (Control(C::GeneralStarting), "settings_general.starting"),
                 ],
             },
@@ -670,10 +748,6 @@ impl CaptionTable {
                     (
                         Control(C::KeyboardShortcutLabel),
                         "settings_keyboard.shortcut",
-                    ),
-                    (
-                        Control(C::KeyboardWindowsKey),
-                        "settings_keyboard.windows_key",
                     ),
                     (Control(C::KeyboardFilterLabel), "settings_keyboard.filter"),
                     (Control(C::KeyboardKeysLabel), "settings_keyboard.keys"),
@@ -1056,10 +1130,9 @@ impl IndexCaptions {
             ]
         });
         let drives = indexed.chain(left_out).collect();
-        // 0 is a service that could not read its own memory.
-        let service = match status.process_private_bytes {
-            0 => strings.text("settings_index.running").to_owned(),
-            bytes => strings.format(
+        let service = match model.service_working_set() {
+            None => strings.text("settings_index.running").to_owned(),
+            Some(bytes) => strings.format(
                 "settings_index.running_memory",
                 &[&text::bytes(strings, numbers, bytes)],
             ),
@@ -1238,6 +1311,10 @@ impl WindowCaptions {
             status: StatusCaptions::new(model, numbers),
             status_cancel: strings.text("button.cancel").to_owned(),
             status_widest: status_widest(strings, numbers),
+            memory_widest: model
+                .choices()
+                .show_memory
+                .then(|| MemoryWidest::new(strings, numbers)),
             message: list_message(model),
             look_in_label: strings.text("panel.look_in").to_owned(),
             look_in: LookIn::ALL
@@ -1266,18 +1343,24 @@ impl StatusCaptions {
             } else {
                 String::new()
             },
-            job: match model.job() {
-                Job::Export => JobCaption {
-                    text: export_status(model, numbers),
-                    progress: if model.exporting() {
-                        JobProgress::Unmeasured
-                    } else {
-                        JobProgress::None
-                    },
-                    cancel: model.exporting(),
-                },
-                Job::Fix => fix_status(model.strings(), numbers, model.fix()),
-                Job::Operation => operation_status(model, numbers),
+            job: {
+                let (text, progress) = match model.job() {
+                    Job::Export => (
+                        export_status(model, numbers),
+                        if model.exporting() {
+                            JobProgress::Unmeasured
+                        } else {
+                            JobProgress::None
+                        },
+                    ),
+                    Job::Fix => fix_status(model.strings(), numbers, model.fix()),
+                    Job::Operation => operation_status(model, numbers),
+                };
+                JobCaption {
+                    text,
+                    progress,
+                    cancel: model.can_cancel_job(),
+                }
             },
             right: joined_parts(
                 model.strings(),
@@ -1288,6 +1371,10 @@ impl StatusCaptions {
                 ),
             ),
             service,
+            memory: model
+                .choices()
+                .show_memory
+                .then(|| MemoryCaptions::new(model, numbers)),
         }
     }
 }
@@ -1302,10 +1389,9 @@ const FIELD_LABELS: [&str; 5] = [
     "inspector.total_size",
 ];
 
-/// The rows of [`FIELD_LABELS`] that show more than a text: the age after
-/// Date modified, and Attributes in two colours.
+/// The row of [`FIELD_LABELS`] that shows more than a text: the age after
+/// Date modified.
 pub(crate) const MODIFIED_ROW: usize = 2;
-pub(crate) const ATTRIBUTES_ROW: usize = 3;
 
 /// What the inspector shows for the selection (DESIGN.md: Inspector pane).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1319,30 +1405,21 @@ pub(crate) struct InspectorCaptions {
     /// The one selected entry's modification time, a FILETIME, whose
     /// [`age`] the window shows after it and keeps current.
     pub(crate) modified: Option<i64>,
-    /// The one selected entry's Attributes value in parts, separators
-    /// included; its field's value is their text. Empty for any other
-    /// selection.
-    pub(crate) attributes: Vec<ValuePart>,
     /// The gray hint under the heading, or empty.
     pub(crate) note: String,
 }
 
-/// A part of a value that the window draws in the normal or the muted text
-/// colour, after its icon if it has one.
+/// A part of a value, after its icon if it has one, such as a status bar
+/// figure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ValuePart {
     pub(crate) glyph: Option<Glyph>,
     pub(crate) text: String,
-    pub(crate) muted: bool,
 }
 
 impl ValuePart {
     pub(crate) fn plain(text: String) -> ValuePart {
-        ValuePart {
-            glyph: None,
-            text,
-            muted: false,
-        }
+        ValuePart { glyph: None, text }
     }
 }
 
@@ -1405,39 +1482,26 @@ fn entry(
         }
         None => entry.size.map_or_else(unknown, exact),
     };
-    let plain = |text: String| vec![ValuePart::plain(text)];
-    let attributes = entry.attributes.map_or_else(
-        || plain(unknown()),
-        |attributes| {
-            let mut parts = Vec::new();
-            for letter in attributes.letters().chars() {
-                let Some(key) = attribute_word(letter) else {
-                    continue;
-                };
-                if !parts.is_empty() {
-                    parts.extend(plain(", ".to_owned()));
-                }
-                // Gray for the entries that File Explorer hides by default.
-                parts.push(ValuePart {
-                    glyph: None,
-                    text: strings.text(key).to_owned(),
-                    muted: matches!(letter, 'H' | 'S'),
-                });
-            }
-            if parts.is_empty() {
-                plain(strings.text("inspector.no_attributes").to_owned())
-            } else {
-                parts
-            }
-        },
-    );
+    let attributes = entry.attributes.map_or_else(unknown, |attributes| {
+        let words: Vec<&str> = attributes
+            .letters()
+            .chars()
+            .filter_map(attribute_word)
+            .map(|key| strings.text(key))
+            .collect();
+        if words.is_empty() {
+            strings.text("inspector.no_attributes").to_owned()
+        } else {
+            words.join(", ")
+        }
+    });
     let values = [
         gozler_core::winpath::parent_of(&entry.path),
         size,
         entry
             .mtime_ft
             .map_or_else(unknown, |ft| numbers.date_time_seconds(ft)),
-        attributes.iter().map(|part| part.text.as_str()).collect(),
+        attributes,
     ];
     InspectorCaptions {
         heading: name.to_owned(),
@@ -1448,7 +1512,6 @@ fn entry(
             .map(|(key, value)| (strings.text(key).to_owned(), value))
             .collect(),
         modified: entry.mtime_ft,
-        attributes,
         note: String::new(),
     }
 }
@@ -1637,7 +1700,7 @@ fn fix_widest(strings: &Strings, numbers: &dyn Numbers, sizes: &[u64]) -> [Vec<S
     [running, ended].map(|fixes| {
         fixes
             .iter()
-            .map(|fix| fix_status(strings, numbers, fix).text)
+            .map(|fix| fix_status(strings, numbers, fix).0)
             .collect()
     })
 }
@@ -1797,7 +1860,6 @@ fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValueP
         ValuePart {
             glyph: Some(glyph),
             text: strings.count(key, count, numbers, &[&size]),
-            muted: false,
         }
     };
     [
@@ -1880,50 +1942,34 @@ pub(crate) fn export_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// The file operation's line, with its bar and Cancel while it runs
-/// (file-manager-spec.md: File operations, steps 5 and 6).
-fn operation_status(model: &Model, numbers: &dyn Numbers) -> JobCaption {
+/// The file operation's line, with its bar while it runs (file-manager-spec.md:
+/// File operations, steps 5 and 6).
+fn operation_status(model: &Model, numbers: &dyn Numbers) -> (String, JobProgress) {
     let Some(operation) = model.operation() else {
-        return JobCaption {
-            text: String::new(),
-            progress: JobProgress::None,
-            cancel: false,
-        };
+        return (String::new(), JobProgress::None);
     };
     let (text, bar) = file_operations::status_line(model.strings(), numbers, operation);
-    JobCaption {
-        text,
-        progress: match bar {
-            None => JobProgress::None,
-            Some(Bar::Moving) => JobProgress::Unmeasured,
-            Some(Bar::Measured(measure)) => JobProgress::Measured {
-                done: measure.done,
-                total: measure.total,
-            },
+    let progress = match bar {
+        None => JobProgress::None,
+        Some(Bar::Moving) => JobProgress::Unmeasured,
+        Some(Bar::Measured(measure)) => JobProgress::Measured {
+            done: measure.done,
+            total: measure.total,
         },
-        cancel: bar.is_some(),
-    }
+    };
+    (text, progress)
 }
 
-/// A fix's step, with its progress and whether Cancel stops it, or its
-/// result (DESIGN.md: Service fixes).
-fn fix_status(strings: &Strings, numbers: &dyn Numbers, fix: &Fixer) -> JobCaption {
-    let ended = |text: String| JobCaption {
-        text,
-        progress: JobProgress::None,
-        cancel: false,
-    };
-    let running = |(text, progress), cancel| JobCaption {
-        text,
-        progress,
-        cancel,
-    };
+/// A fix's step, with its progress, or its result (DESIGN.md: Service
+/// fixes).
+fn fix_status(strings: &Strings, numbers: &dyn Numbers, fix: &Fixer) -> (String, JobProgress) {
+    let ended = |text: String| (text, JobProgress::None);
     match fix {
         Fixer::Idle => ended(String::new()),
         Fixer::Commands {
             fix,
             state: FixState::Running(step),
-        } => running(command_step(strings, *fix, step), step.can_cancel()),
+        } => command_step(strings, *fix, step),
         Fixer::Commands {
             fix,
             state: FixState::Ended(result),
@@ -1931,7 +1977,7 @@ fn fix_status(strings: &Strings, numbers: &dyn Numbers, fix: &Fixer) -> JobCapti
         Fixer::Setup {
             state: FixState::Running(step),
             ..
-        } => running(setup_step(strings, numbers, step), step.can_cancel()),
+        } => setup_step(strings, numbers, step),
         Fixer::Setup {
             state: FixState::Ended(result),
             ..
@@ -2069,7 +2115,7 @@ pub(crate) fn setup_question(model: &Model, numbers: &dyn Numbers) -> Option<Que
     let cancel = strings.text("button.cancel").to_owned();
     if fix == SetupFix::Download {
         return Some(Question {
-            title: strings.text("window.title").to_owned(),
+            title: strings.text("fixing.install").to_owned(),
             instruction: strings.format("fixing.install_question", &[&setup.version]),
             body: QuestionBody::Text(strings.format("fixing.install_details", &[&size])),
             footer: None,
@@ -2127,6 +2173,20 @@ pub(crate) fn use_local_question(strings: &Strings, local: &LocalService) -> Que
         confirm: strings.text("fixing.switch").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::None,
+    }
+}
+
+/// The question before Settings' Reset all deletes `ui.json` and opens the
+/// window again (DESIGN.md: Settings dialog).
+pub(crate) fn reset_all_question(strings: &Strings) -> Question {
+    Question {
+        title: text::without_access_key(strings.text("settings.reset_all")),
+        instruction: strings.text("settings.reset_all_question").to_owned(),
+        body: QuestionBody::Text(strings.text("settings.reset_all_body").to_owned()),
+        footer: None,
+        confirm: text::without_access_key(strings.text("settings.reset")),
+        cancel: strings.text("button.cancel").to_owned(),
+        guard: Guard::CancelFirst,
     }
 }
 
@@ -2246,9 +2306,13 @@ impl PanelCaptions {
             .focused()
             .and_then(|row| model.panels().row(side, row));
         let folder = match focused {
-            Some(Row::Result(item)) if all_drives => {
-                text::cell(strings, numbers, Column::Path, item)
-            }
+            Some(Row::Result(item)) if all_drives => text::cell(
+                strings,
+                numbers,
+                model.choices().size_format,
+                Column::Path,
+                item,
+            ),
             _ => String::new(),
         };
         PanelCaptions {
@@ -2358,13 +2422,15 @@ fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> Str
     joined(strings, count, size)
 }
 
-/// A cell of `panel`'s `row` (file-manager-spec.md: A panel). A search
+/// A cell of `panel`'s `row` (file-manager-spec.md: A panel), with sizes
+/// in the format `sizes`, as Search's Size column shows them. A search
 /// panel's result shows as Search's results list shows it, and its Folder
 /// cell the folder below the searched one, or the full folder while it
 /// searches all drives.
 pub(crate) fn panel_cell(
     strings: &Strings,
     numbers: &dyn Numbers,
+    sizes: SizeFormat,
     panel: &Panel,
     row: Row,
     column: PanelColumn,
@@ -2378,7 +2444,7 @@ pub(crate) fn panel_cell(
             if column == PanelColumn::Folder && this_folder {
                 return relative_folder(panel.folder(), &item.path).to_owned();
             }
-            return text::cell(strings, numbers, column.search_column(), item);
+            return text::cell(strings, numbers, sizes, column.search_column(), item);
         }
         Row::Entry(entry) => entry,
     };
@@ -2388,17 +2454,11 @@ pub(crate) fn panel_cell(
         PanelColumn::Folder => String::new(),
         PanelColumn::Size => match (entry.is_folder(), entry.folder_size()) {
             (true, None) => strings.text("panel.folder").to_owned(),
-            (true, Some(size)) | (false, Some(size)) => kilobytes(strings, numbers, size),
-            (false, None) => kilobytes(strings, numbers, entry.size),
+            (true, Some(size)) | (false, Some(size)) => sizes.text(strings, numbers, size),
+            (false, None) => sizes.text(strings, numbers, entry.size),
         },
         PanelColumn::DateModified => numbers.date_time(entry.modified),
     }
-}
-
-/// A size in Search's Size column format, in KB rounded up, so sizes line
-/// up for comparison.
-fn kilobytes(strings: &Strings, numbers: &dyn Numbers, size: u64) -> String {
-    strings.format("size.kb", &[&numbers.integer(size.div_ceil(1024))])
 }
 
 /// A Look in list's item.

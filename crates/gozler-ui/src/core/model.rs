@@ -63,6 +63,9 @@ pub(crate) struct Model {
     pub(super) status: Option<DaemonStatus>,
     /// The gozlerd.exe files, as the latest status reply found them.
     programs: Programs,
+    /// The app's own working set, read when it last asked for status;
+    /// `None` when Windows could not say.
+    app_working_set: Option<u64>,
     pub(super) export: Export,
     fix: Fixer,
     /// The file operation the middle group shows.
@@ -93,10 +96,11 @@ pub(crate) struct Model {
     file_operations: bool,
     /// Whether the clipboard holds files, which Paste copies or moves.
     clipboard_files: bool,
-    /// The entries that deletes and moves have taken, which the lists show
-    /// blank and the selections leave out (file-manager-spec.md: The person
-    /// never waits for the disk); one for all lists, which each decide with
-    /// their own kept operations.
+    /// The entries that deletes and moves have taken, which Search's list
+    /// shows struck through, a search panel shows blank and the selections
+    /// leave out (file-manager-spec.md: The person never waits for the
+    /// disk); one for all lists, which each decide with their own kept
+    /// operations.
     taken: Arc<Taken>,
     panels: Panels,
 }
@@ -158,6 +162,8 @@ pub(crate) enum Then {
     ExplainNoSetup,
     /// Ends the fix's thread.
     StopFix,
+    /// Cancels the running file operation, which the window's queue runs.
+    CancelOperation(OperationId),
     /// Starts the checked setup, and closes the window for it.
     RunSetup(PathBuf),
 }
@@ -180,9 +186,10 @@ pub(crate) enum Change {
     ColumnShown {
         index: usize,
     },
-    /// The column that was at `index` of [`Model::columns`] was removed.
+    /// `column`, which was at `index` of [`Model::columns`], was removed.
     ColumnHidden {
         index: usize,
+        column: Column,
     },
     /// A new search of the list runs; the list keeps its rows.
     Searching(List),
@@ -370,6 +377,7 @@ impl Model {
             open_on_answer: false,
             status: None,
             programs: Programs::UNKNOWN,
+            app_working_set: None,
             export: Export::Idle,
             fix: Fixer::Idle,
             operation: None,
@@ -487,6 +495,27 @@ impl Model {
         (self.status.as_ref(), self.failure.as_ref())
     }
 
+    /// The service's working set, which the status bar and the Drives and
+    /// service page show; `None` while it does not answer, because the
+    /// latest status can be from before it stopped, and when its status
+    /// says 0, because it could not read its own.
+    pub(crate) fn service_working_set(&self) -> Option<u64> {
+        match (&self.status, &self.failure) {
+            (Some(status), None) => Some(status.process_working_set).filter(|&bytes| bytes != 0),
+            _ => None,
+        }
+    }
+
+    /// The app's own working set, which the status bar shows.
+    pub(crate) fn app_working_set(&self) -> Option<u64> {
+        self.app_working_set
+    }
+
+    /// Records the app's own working set, read as it asks for status.
+    pub(crate) fn set_app_working_set(&mut self, bytes: Option<u64>) {
+        self.app_working_set = bytes;
+    }
+
     /// Settings applied `choices`. Showing every file for an empty search
     /// changes what the empty search shows, so it runs again.
     pub(crate) fn set_choices(&mut self, choices: Choices) -> Accepted {
@@ -516,12 +545,6 @@ impl Model {
     /// time, which shows a notification once; from then on, it does not.
     pub(crate) fn first_hide(&mut self) -> bool {
         !std::mem::replace(&mut self.settings.window.tray_notice_shown, true)
-    }
-
-    /// Shows the one-time notices again, as if Gozler had just been
-    /// installed, which Settings' Reset all asks for.
-    pub(crate) fn show_notices_again(&mut self) {
-        self.settings.window.tray_notice_shown = false;
     }
 
     /// Whether Check for updates asks GitHub now, at `now` in seconds
@@ -962,7 +985,7 @@ impl Model {
         Accepted::only(match self.columns.iter().position(|c| *c == column) {
             Some(index) => {
                 self.columns.remove(index);
-                Change::ColumnHidden { index }
+                Change::ColumnHidden { index, column }
             }
             None => {
                 self.columns.push(column);
@@ -1313,17 +1336,20 @@ impl Model {
     }
 
     /// Whether the window must ask for status every 2 seconds: the service
-    /// is not running, not ready or lost, a volume in scope is indexing, or
-    /// Settings shows its Index page. A refused request, a failed owner
-    /// check, an older service and an offline or failed volume end only by
-    /// the person's action, so they start no poll.
-    pub(crate) fn polls_status(&self) -> bool {
+    /// is not running, not ready or lost, a volume in scope is indexing,
+    /// Settings shows its Index page, or the status bar shows memory while
+    /// the window is `on_screen`, not minimized or hidden. A refused
+    /// request, a failed owner check, an older service and an offline or
+    /// failed volume end only by the person's action, so they start no
+    /// poll.
+    pub(crate) fn polls_status(&self, on_screen: bool) -> bool {
         self.failure.as_ref().is_some_and(DaemonFailure::recovers)
             || List::ALL
                 .into_iter()
                 .any(|list| self.indexing_in_scope(list))
             || self.index_page_shown
             || self.fix.waits_for_service()
+            || (self.settings.choices.show_memory && on_screen)
     }
 
     /// The job the status bar's middle group shows: the newest running
@@ -1361,6 +1387,31 @@ impl Model {
             self.job_started(Job::Operation);
         }
         self.operation = operation;
+    }
+
+    /// Whether File > Cancel, and the status bar's Cancel, can stop the job
+    /// that [`Self::job`] says the status bar shows.
+    pub(crate) fn can_cancel_job(&self) -> bool {
+        match self.job() {
+            Job::Export => self.exporting(),
+            Job::Fix => self.fix.can_cancel(),
+            Job::Operation => matches!(self.operation, Some(StatusOperation::Running { .. })),
+        }
+    }
+
+    /// Stops the job that the status bar shows, if it can stop.
+    pub(crate) fn cancel_job(&mut self) -> Accepted {
+        match self.job() {
+            Job::Export => self.cancel_export(),
+            Job::Fix => self.cancel_fix(),
+            Job::Operation => match &self.operation {
+                Some(StatusOperation::Running { id, .. }) => Accepted {
+                    change: Change::Nothing,
+                    then: Some(Then::CancelOperation(*id)),
+                },
+                _ => Accepted::only(Change::Nothing),
+            },
+        }
     }
 
     pub(crate) fn fix(&self) -> &Fixer {
@@ -2324,7 +2375,10 @@ pub(crate) mod tests {
             model.accept(status(&ask, VolumePhase::Live)).then,
             Some(Then::SearchAgain(vec![List::Search]))
         );
-        assert!(!model.polls_status(), "nothing needs the poll any more");
+        assert!(
+            !model.polls_status(false),
+            "nothing needs the poll any more"
+        );
     }
 
     #[test]
@@ -2333,7 +2387,7 @@ pub(crate) mod tests {
         let ask = model.status_needed().expect("no status request runs");
         model.accept(status(&ask, VolumePhase::Live));
         assert_eq!(captions::index_status(&model), "");
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
 
         let ask = model.status_needed().expect("no status request runs");
         let accepted = model.accept(status(&ask, VolumePhase::Rescanning));
@@ -2344,7 +2398,43 @@ pub(crate) mod tests {
             captions::index_status(&model),
             r"C:\ is being indexed. Results might be incomplete."
         );
-        assert!(model.polls_status());
+        assert!(model.polls_status(false));
+    }
+
+    /// The model keeps the latest status while the service does not
+    /// answer, and a service that could not read its memory says 0, so the
+    /// status bar would show a stopped service's old memory, or 0 bytes.
+    #[test]
+    fn the_service_memory_is_unknown_while_the_service_does_not_answer() {
+        let mut model = showing(10);
+        let ask = model.status_needed().expect("no status request runs");
+        model.accept(status(&ask, VolumePhase::Live));
+        assert_eq!(model.service_working_set(), None, "0 is unknown");
+
+        let ask = model.status_needed().expect("no status request runs");
+        let mut answered = status(&ask, VolumePhase::Live);
+        if let Outcome::Status(status, _) = &mut answered.outcome {
+            status.process_working_set = 400_000_000;
+        }
+        model.accept(answered);
+        assert_eq!(model.service_working_set(), Some(400_000_000));
+
+        let ask = model.status_needed().expect("no status request runs");
+        model.accept(failed(&ask, DaemonFailure::Lost));
+        assert_eq!(model.service_working_set(), None);
+    }
+
+    /// The memory figures cost a status request every 2 seconds, which
+    /// only a person who turned them on and can see them pays for.
+    #[test]
+    fn the_memory_figures_poll_only_while_shown_on_screen() {
+        let mut model = showing(10);
+        let ask = model.status_needed().expect("no status request runs");
+        model.accept(status(&ask, VolumePhase::Live));
+        assert!(!model.polls_status(true), "off by default");
+        model.settings.choices.show_memory = true;
+        assert!(model.polls_status(true));
+        assert!(!model.polls_status(false), "minimized or hidden");
     }
 
     /// A results page carries only combined flags, so the status bar would
@@ -2451,7 +2541,7 @@ pub(crate) mod tests {
             message(&model),
             Some((strings.format("query.unknown_function", &["dz:"]), vec![]))
         );
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
     }
 
     /// S8: searching a folder that does not exist would say "No results"
@@ -2479,7 +2569,7 @@ pub(crate) mod tests {
                 ]
             ))
         );
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
     }
 
     /// A failure that ends by itself is polled until the service answers; a
@@ -2500,7 +2590,7 @@ pub(crate) mod tests {
             let mut model = model();
             let fetch = search(&mut model, "report");
             model.accept(failed(&fetch, failure.clone()));
-            assert_eq!(model.polls_status(), polls, "{failure:?}");
+            assert_eq!(model.polls_status(false), polls, "{failure:?}");
         }
         for (phase, polls) in [
             (VolumePhase::Bootstrapping, true),
@@ -2510,7 +2600,7 @@ pub(crate) mod tests {
             let mut model = showing(10);
             let ask = model.status_needed().expect("no status request runs");
             model.accept(status(&ask, phase.clone()));
-            assert_eq!(model.polls_status(), polls, "{phase:?}");
+            assert_eq!(model.polls_status(false), polls, "{phase:?}");
         }
     }
 
@@ -2712,7 +2802,7 @@ pub(crate) mod tests {
             message(&model),
             Some((strings.text("failure.lost").to_owned(), vec![]))
         );
-        assert!(model.polls_status());
+        assert!(model.polls_status(false));
 
         let mut model = showing(50_000);
         model.set_selection(List::Search, vec![40_000..40_001]);
@@ -2826,9 +2916,9 @@ pub(crate) mod tests {
     #[test]
     fn t10_a_failure_while_settings_shows_the_index_page_keeps_the_poll() {
         let mut model = showing(10);
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
         model.show_index_page(true);
-        assert!(model.polls_status(), "the page follows the service");
+        assert!(model.polls_status(false), "the page follows the service");
         let ask = model.status_needed().expect("no status request runs");
         let stopped = DaemonFailure::NotRunning(NotRunning::Stopped);
         assert_eq!(model.accept(failed(&ask, stopped)).change, Change::Status);
@@ -2841,14 +2931,14 @@ pub(crate) mod tests {
             english().text("failure.stopped"),
             "the main window shows the failure behind the dialog"
         );
-        assert!(model.polls_status());
+        assert!(model.polls_status(false));
         assert_eq!(model.search_list.results.count(), 10);
         // The service answers again: the page shows its state, and the
         // poll ends with the page.
         let ask = model.status_needed().expect("no status request runs");
         model.accept(status(&ask, VolumePhase::Live));
         model.show_index_page(false);
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
     }
 
     /// A service that answers again before its commands end stops the
@@ -2867,17 +2957,17 @@ pub(crate) mod tests {
         let other = ListButton::Fix(Fix::Repair(Repair::TurnOnService));
         assert!(!model.list_button_enabled(&other), "one fix runs at a time");
         model.accept_fix(FixEvent::Commands(CommandEvent::Allowed));
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
         let ended = model.accept_fix(FixEvent::Commands(CommandEvent::Succeeded));
         let Some(Then::Fetch(ask)) = ended.then else {
             panic!("the fix asks the service: {ended:?}");
         };
         assert!(
-            model.polls_status(),
+            model.polls_status(false),
             "the poll runs until the service answers"
         );
         model.accept(status(&ask, VolumePhase::Live));
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
         assert_eq!(
             captions::StatusCaptions::new(&model, &English).job.text,
             english().text("fixing.done")
@@ -2941,7 +3031,7 @@ pub(crate) mod tests {
             model.accept(failed(&fetch, DaemonFailure::Lost)).change,
             Change::TotalCommander(Err(DaemonFailure::Lost))
         );
-        assert!(!model.polls_status());
+        assert!(!model.polls_status(false));
         assert_eq!(model.search_list.results.count(), 10);
         let fetch = model.find_total_commander();
         assert_eq!(

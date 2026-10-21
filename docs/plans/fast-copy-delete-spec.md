@@ -570,7 +570,7 @@ that wait, run or ended, and which of them ended. A path is taken when it
 equals or is below a source of a waiting or running one, or of an ended one
 that the list keeps, compared as Windows compares names, ignoring case. The
 window asks this, and nothing else, to leave those entries out of the panels
-and show them blank in the search results.
+and show them struck through, in grey, in the search results.
 Each list keeps the ended operations it still needs
 ([file manager spec](file-manager-spec.md), "The person never waits for the
 disk"): a folder panel keeps an operation whose end makes it read its folder

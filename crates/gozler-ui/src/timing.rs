@@ -8,7 +8,7 @@ use crate::core::clipboard::{ClipboardData, ClipboardFormat};
 use crate::core::file_operations::sources_folder;
 use crate::core::model::Column;
 use crate::core::selection::{Sums, wide_path};
-use crate::core::text::{cell, tests::english};
+use crate::core::text::{SizeFormat, cell, tests::english};
 use crate::win::locale::WindowsNumbers;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{MatchedParts, parse_query};
@@ -126,17 +126,18 @@ fn timing_highlight_per_paint() {
 fn timing_locale_cells_per_paint() {
     let strings = english();
     let numbers = WindowsNumbers::new();
+    let sizes = SizeFormat::Kb;
     let row = row(path("Projects", 9));
     time("size and date cells, 80 cells", || {
         for _ in 0..VISIBLE_ROWS {
-            black_box(cell(&strings, &numbers, Column::Size, &row));
-            black_box(cell(&strings, &numbers, Column::DateModified, &row));
+            black_box(cell(&strings, &numbers, sizes, Column::Size, &row));
+            black_box(cell(&strings, &numbers, sizes, Column::DateModified, &row));
         }
     });
     time("name and path cells, 80 cells", || {
         for _ in 0..VISIBLE_ROWS {
-            black_box(cell(&strings, &numbers, Column::Name, &row));
-            black_box(cell(&strings, &numbers, Column::Path, &row));
+            black_box(cell(&strings, &numbers, sizes, Column::Name, &row));
+            black_box(cell(&strings, &numbers, sizes, Column::Path, &row));
         }
     });
 }

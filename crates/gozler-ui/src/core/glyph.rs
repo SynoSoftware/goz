@@ -19,7 +19,7 @@ pub(crate) enum Glyph {
     BackToWindow,
     /// A bulleted list: the Context menu page and its item group.
     BulletedList,
-    /// A thin cross: cancels a file operation.
+    /// A thin cross: Cancel, Close, Exit, and cancels a file operation.
     Cancel,
     /// A list with check marks: the Include page.
     CheckList,
@@ -31,17 +31,13 @@ pub(crate) enum Glyph {
     ChevronRight,
     /// An arrow head pointing up: shows the inspector from the bottom.
     ChevronUp,
-    /// A window's close cross: Exit.
-    ChromeClose,
-    /// A window's minimize bar: Hide in the File operations window.
-    ChromeMinimize,
-    /// A cross: Clear, and Clear filters.
-    Clear,
     /// An arrow pointing right, out of a bar at the left: shows the filter
     /// pane, which opens from the left.
     ClosePane,
     /// A console window: the Executables kind.
     CommandPrompt,
+    /// A processor chip: the service's memory in the status bar.
+    Component,
     /// Two pages: Copy, a copy in the File operations window, the File
     /// operations page's copying group, and the inspector's copy icons.
     Copy,
@@ -57,8 +53,12 @@ pub(crate) enum Glyph {
     Download,
     /// A pencil: Edit… and Modify….
     Edit,
+    /// An eraser: every Clear, which empties its box, and Clear filters.
+    EraseTool,
     /// An arrow leaving a box: Export results.
     Export,
+    /// A window with a title bar: the app's memory in the status bar.
+    Favicon,
     /// A folder in a window: Explore.
     FileExplorer,
     /// A closed folder: Copy folder, the Folders kind, the folders of the
@@ -66,6 +66,8 @@ pub(crate) enum Glyph {
     Folder,
     /// An open folder: Open file location.
     FolderOpen,
+    /// A globe: the General page's Language and display group.
+    Globe,
     /// A hard drive: the Drives and service page and its drive group.
     HardDrive,
     /// A question mark: Search syntax.
@@ -113,7 +115,7 @@ pub(crate) enum Glyph {
     Processing,
     /// A circular arrow: Refresh.
     Refresh,
-    /// A minus: Remove.
+    /// A minus: Remove, and Hide in the File operations window.
     Remove,
     /// A text cursor in a box: Copy name, and the Include page's name
     /// group.
@@ -144,7 +146,7 @@ pub(crate) enum Glyph {
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 59] = [
+    pub(crate) const ALL: [Glyph; 60] = [
         Glyph::Accept,
         Glyph::Add,
         Glyph::BackToWindow,
@@ -154,11 +156,9 @@ impl Glyph {
         Glyph::ChevronDown,
         Glyph::ChevronRight,
         Glyph::ChevronUp,
-        Glyph::ChromeClose,
-        Glyph::ChromeMinimize,
-        Glyph::Clear,
         Glyph::ClosePane,
         Glyph::CommandPrompt,
+        Glyph::Component,
         Glyph::Copy,
         Glyph::CopyTo,
         Glyph::Cut,
@@ -166,10 +166,13 @@ impl Glyph {
         Glyph::Document,
         Glyph::Download,
         Glyph::Edit,
+        Glyph::EraseTool,
         Glyph::Export,
+        Glyph::Favicon,
         Glyph::FileExplorer,
         Glyph::Folder,
         Glyph::FolderOpen,
+        Glyph::Globe,
         Glyph::HardDrive,
         Glyph::Help,
         Glyph::Info,
@@ -218,11 +221,9 @@ impl Glyph {
             Glyph::ChevronDown => '\u{E70D}',
             Glyph::ChevronRight => '\u{E76C}',
             Glyph::ChevronUp => '\u{E70E}',
-            Glyph::ChromeClose => '\u{E8BB}',
-            Glyph::ChromeMinimize => '\u{E921}',
-            Glyph::Clear => '\u{E894}',
             Glyph::ClosePane => '\u{E89F}',
             Glyph::CommandPrompt => '\u{E756}',
+            Glyph::Component => '\u{E950}',
             Glyph::Copy => '\u{E8C8}',
             Glyph::CopyTo => '\u{F413}',
             Glyph::Cut => '\u{E8C6}',
@@ -230,10 +231,13 @@ impl Glyph {
             Glyph::Document => '\u{E8A5}',
             Glyph::Download => '\u{E896}',
             Glyph::Edit => '\u{E70F}',
+            Glyph::EraseTool => '\u{E75C}',
             Glyph::Export => '\u{EDE1}',
+            Glyph::Favicon => '\u{E737}',
             Glyph::FileExplorer => '\u{EC50}',
             Glyph::Folder => '\u{E8B7}',
             Glyph::FolderOpen => '\u{E838}',
+            Glyph::Globe => '\u{E774}',
             Glyph::HardDrive => '\u{EDA2}',
             Glyph::Help => '\u{E897}',
             Glyph::Info => '\u{E946}',

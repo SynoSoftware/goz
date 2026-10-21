@@ -13,6 +13,7 @@
 use super::model::Column;
 use gozler_core::proto::ResultItem;
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
@@ -450,11 +451,53 @@ pub(crate) fn name_of(path: &str) -> &str {
     &path[path_part(Column::Name, path).expect("Name is a part of the path")]
 }
 
-/// One cell of the results list, as File Explorer shows its columns (DESIGN.md:
-/// Results list).
+/// How the Size column shows a known size, which Settings > General
+/// chooses. Each shows every row in one unit, so sizes line up for
+/// comparison (DESIGN.md: Results list).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SizeFormat {
+    Bytes,
+    #[default]
+    Kb,
+    Mb,
+}
+
+impl SizeFormat {
+    /// The choices of its list on the General page, from the smallest unit
+    /// to the largest.
+    pub(crate) const ALL: [SizeFormat; 3] = [SizeFormat::Bytes, SizeFormat::Kb, SizeFormat::Mb];
+
+    /// The catalogue key of its name in the list.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            SizeFormat::Kb => "unit.kb",
+            SizeFormat::Mb => "unit.mb",
+            SizeFormat::Bytes => "unit.bytes",
+        }
+    }
+
+    /// `size` bytes in this format. KB rounds up, as File Explorer does, and
+    /// MB rounds up to the hundredth, so a file that is not empty never
+    /// shows as 0 KB or 0.00 MB.
+    pub(crate) fn text(self, strings: &Strings, numbers: &dyn Numbers, size: u64) -> String {
+        match self {
+            SizeFormat::Kb => strings.format("size.kb", &[&numbers.integer(size.div_ceil(1024))]),
+            SizeFormat::Mb => {
+                let hundredths = (u128::from(size) * 100).div_ceil(1 << 20);
+                strings.format("size.mb", &[&numbers.decimal(hundredths as f64 / 100.0, 2)])
+            }
+            SizeFormat::Bytes => strings.count("size.bytes", size, numbers, &[]),
+        }
+    }
+}
+
+/// One cell of the results list, as File Explorer shows its columns, with
+/// sizes in `sizes` (DESIGN.md: Results list).
 pub(crate) fn cell(
     strings: &Strings,
     numbers: &dyn Numbers,
+    sizes: SizeFormat,
     column: Column,
     row: &ResultItem,
 ) -> String {
@@ -464,8 +507,7 @@ pub(crate) fn cell(
             [path_part(column, &row.path).expect("Name and Path are parts of the path")]
         .to_owned(),
         Column::Size => match row.size {
-            // In KB, rounded up, so sizes line up for comparison.
-            Some(size) => strings.format("size.kb", &[&numbers.integer(size.div_ceil(1024))]),
+            Some(size) => sizes.text(strings, numbers, size),
             None => strings.text("cell.unknown").to_owned(),
         },
         Column::DateModified => row
@@ -676,10 +718,28 @@ pub(crate) mod tests {
     fn a_size_keeps_three_significant_digits() {
         let strings = english();
         let shown = |n| bytes(&strings, &English, n);
+        let kb = |value| strings.format("size.kb", &[value]);
         // 1.3086 KB and 22.955 KB, whose last digits File Explorer drops.
-        assert_eq!(shown(1_340), "1.30 KB");
-        assert_eq!(shown(23_506), "22.9 KB");
+        assert_eq!(shown(1_340), kb("1.30"));
+        assert_eq!(shown(23_506), kb("22.9"));
         // 1,000 KB moves to the next unit.
-        assert_eq!(shown(1_024_000), "0.97 MB");
+        assert_eq!(shown(1_024_000), strings.format("size.mb", &["0.97"]));
+    }
+
+    /// A size rounded to the nearest, as the decimal formatting does, shows
+    /// a file of a few bytes as 0.00 MB, which reads as empty.
+    #[test]
+    fn the_size_column_rounds_kb_and_mb_up_and_shows_exact_bytes() {
+        let strings = english();
+        let shown = |format: SizeFormat, n| format.text(&strings, &English, n);
+        let kb = |value| strings.format("size.kb", &[value]);
+        let mb = |value| strings.format("size.mb", &[value]);
+        assert_eq!(shown(SizeFormat::Kb, 1), kb("1"));
+        assert_eq!(shown(SizeFormat::Kb, 1_025), kb("2"));
+        assert_eq!(shown(SizeFormat::Mb, 0), mb("0.00"));
+        assert_eq!(shown(SizeFormat::Mb, 1), mb("0.01"));
+        assert_eq!(shown(SizeFormat::Mb, 1_048_576), mb("1.00"));
+        assert_eq!(shown(SizeFormat::Mb, 1_048_577), mb("1.01"));
+        assert!(shown(SizeFormat::Bytes, 41_163_399_668).contains("41,163,399,668"));
     }
 }

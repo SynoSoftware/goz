@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MFT_RIGHTJUSTIFY, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_DATA, MIIM_FTYPE, MIIM_ID,
     MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_CHECKORBMP, MSG, PostMessageW, SetMenu,
     SetMenuDefaultItem, SetMenuInfo, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, TranslateAcceleratorW, WM_KEYDOWN,
+    TrackPopupMenuEx, TranslateAcceleratorW, WM_KEYDOWN, WM_NULL,
 };
 use windows::core::PWSTR;
 
@@ -170,36 +170,6 @@ impl Menu {
         let _ = unsafe { SetMenuItemInfoW(self.handle, u32::from(id), false, &item) };
     }
 
-    /// Replaces the item whose ID is one of `ids`, wherever it is in the
-    /// menu's submenus, with `item`, a [`MenuNode::Item`], so one place of
-    /// a menu shows one of several commands.
-    pub(crate) fn replace_item(self, ids: &[u16], item: &MenuNode) {
-        let MenuNode::Item {
-            id, text, glyph, ..
-        } = item
-        else {
-            return;
-        };
-        let mut text = wide(text);
-        let (bitmap, data) = self.icon(*glyph);
-        let info = MENUITEMINFOW {
-            cbSize: size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_ID | MIIM_STRING | MIIM_BITMAP | MIIM_DATA,
-            wID: u32::from(*id),
-            dwTypeData: PWSTR(text.as_mut_ptr()),
-            hbmpItem: bitmap,
-            dwItemData: data,
-            ..Default::default()
-        };
-        for old in ids {
-            // SAFETY: `info` and its text outlive the call, which copies
-            // them; an ID the menu lacks fails and changes nothing.
-            if unsafe { SetMenuItemInfoW(self.handle, u32::from(*old), false, &info) }.is_ok() {
-                return;
-            }
-        }
-    }
-
     /// Shows `items` as a context menu at `point`, in screen coordinates,
     /// with the item `default` in bold, and returns the ID of the item
     /// chosen. The menu runs its own message loop, so the caller holds no
@@ -258,6 +228,24 @@ impl Menu {
             let _ = unsafe { PostMessageW(Some(owner.0), WM_KEYDOWN, down, LPARAM(0)) };
         }
         Menu::track_popup(owner, items, point, states, None)
+    }
+
+    /// [`Menu::track_popup`] for a window that may not be in front, as under
+    /// the notification area's icon or for a drop from another program. The
+    /// window comes to the front first and is sent a message after, as the
+    /// `Shell_NotifyIconW` documentation requires, so the menu closes on a
+    /// click elsewhere.
+    pub(crate) fn track_popup_in_front(
+        owner: Hwnd,
+        items: &[MenuNode],
+        point: (i32, i32),
+        states: &[(u16, bool, bool)],
+        default: Option<u16>,
+    ) -> Option<u16> {
+        owner.set_foreground();
+        let chosen = Menu::track_popup(owner, items, point, states, default);
+        owner.post(WM_NULL);
+        chosen
     }
 
     /// A popup menu whose items show their check mark or their icon in one

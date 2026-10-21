@@ -935,7 +935,7 @@ impl ViewerCommand {
                 Some(Keystroke::plain(self.key()).text(strings)),
             ),
             mark: self.mark(),
-            glyph: (self == ViewerCommand::Close).then_some(Glyph::ChromeClose),
+            glyph: (self == ViewerCommand::Close).then_some(Glyph::Cancel),
         }
     }
 }

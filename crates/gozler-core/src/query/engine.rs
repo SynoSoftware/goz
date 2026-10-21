@@ -6,9 +6,11 @@
 //! (case-insensitive queries) and tests the cheapest clauses first: kind and
 //! attributes, size and date, then name substrings and wildcards, then ext,
 //! then regular expressions of the name, then (only for survivors) scope
-//! ancestry and the clauses that test the full path. Full paths come from the
-//! `paths` module, which builds each folder's path once per query, so a path
-//! term costs one copy per candidate instead of a walk to the root. A match
+//! ancestry, the path terms that one component of the path decides, and the
+//! clauses that test the full path. The `paths` module answers both from a
+//! cache of each folder built once per query: a component term reads its
+//! folder's bits and its own name, with no path built, and any other path
+//! term costs one copy of the full path per candidate. A match
 //! holds no full path: it becomes a row, its entry and its file ID, which
 //! [`super::Reply`] reads again when a page is built.
 
@@ -17,11 +19,12 @@ use super::order::{
     KeyValue, OrderFields, SortRecord, compare, folder_ranks, packed_folder_rank, primary_key,
 };
 use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, Test};
-use super::paths::{DirPaths, FolderCopy, NameForm, ResultNames};
+use super::paths::{ComponentBits, DirPaths, FolderCopy, NameForm, ResultNames, root_name};
 use super::rows::VolumeRows;
-use super::wildcard::{CodePointBuf, Wildcard};
+use super::wildcard::{CodePointBuf, OneName, Wildcard};
 use crate::attributes::PackedAttributes;
 use crate::fold::fold;
+use crate::index::store::NameId;
 use crate::index::{EntryView, VolumeIndex};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
@@ -185,10 +188,20 @@ const REGEX_CACHE_LIMIT: usize = 1 << 20;
 /// is malformed or compiles past its size limit.
 pub struct CompiledQuery {
     match_case: bool,
-    /// Every clause, cheapest first. The clauses from `path_clauses` on test
-    /// the full path, so they run last, after the scope check.
+    /// Every clause, cheapest first. The clauses from `component_clauses` on
+    /// read the entry's [`ComponentBits`] and those from `path_clauses` on
+    /// the full path, so both run after the scope check, and the path
+    /// clauses last.
     clauses: Vec<CompiledClause>,
+    component_clauses: usize,
     path_clauses: usize,
+    /// The matcher of each [`Check::Component`], by its bit.
+    components: Vec<Matcher>,
+    /// The bit and the needle of the [`Check::Component`] with the longest
+    /// needle that is a clause on its own and not negated: every match has a
+    /// path component that contains it. Drives the component walk of
+    /// [`scan`] when no `prefilter` drives the arena scan.
+    component_literal: Option<(u8, Vec<u8>)>,
     /// The longest literal that every matching name contains, from a clause
     /// of one positive name term, whole-word, word-start or name-start name
     /// term, name wildcard (`.dll` of `*.dll`) or single `ext:` value
@@ -235,6 +248,10 @@ enum Check {
     /// path of the folder that holds the entry must equal.
     Parent(Vec<u8>),
     Text(Target, Matcher),
+    /// A path text test that one component of the full path decides, read
+    /// as this bit of the entry's [`ComponentBits`]; its matcher is in
+    /// [`CompiledQuery::components`]. See [`Matcher::component_needle`].
+    Component(u8),
 }
 
 /// The text a [`Check::Text`] reads, in the form the query compares: folded
@@ -309,6 +326,24 @@ impl CompiledQuery {
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
 
+        // A path wildcard that one name decides needs no full path: `*.dll`
+        // tests the name, which the prefilter below then scans for, and
+        // `*report*` is a path term that the components below decide.
+        for term in clauses.iter_mut().flat_map(|clause| &mut clause.terms) {
+            let Check::Text(target @ Target::Path, Matcher::Wildcard(wildcard)) = &mut term.check
+            else {
+                continue;
+            };
+            match wildcard.one_name() {
+                Some(OneName::Last) => *target = Target::Name,
+                Some(OneName::Inside(text)) => {
+                    let finder = memmem::Finder::new(&text).into_owned();
+                    term.check = Check::Text(Target::Path, Matcher::Contains(finder));
+                }
+                None => {}
+            }
+        }
+
         // Every match contains the prefilter, so scanning for it yields a
         // superset of the matches that the clauses then verify. The first of
         // equally long literals wins.
@@ -319,16 +354,82 @@ impl CompiledQuery {
             }
         }
 
+        // A clause whose every term one component decides reads its bits
+        // instead of the full path. A clause that mixes in another path test
+        // builds the path anyway, so its terms keep their path tests.
+        let mut components = Vec::new();
+        for clause in &mut clauses {
+            let decided = clause.terms.iter().all(|term| {
+                matches!(&term.check, Check::Text(Target::Path, matcher)
+                    if matcher.component_needle().is_some())
+            });
+            if !decided || components.len() + clause.terms.len() > MAX_COMPONENT_TERMS {
+                continue;
+            }
+            for term in &mut clause.terms {
+                let bit = u8::try_from(components.len())
+                    .expect("at most MAX_COMPONENT_TERMS component terms");
+                let Check::Text(_, matcher) =
+                    std::mem::replace(&mut term.check, Check::Component(bit))
+                else {
+                    unreachable!("every term of the clause is a path text term");
+                };
+                components.push(matcher);
+            }
+        }
+        let mut component_literal: Option<(u8, &[u8])> = None;
+        for clause in &clauses {
+            if let [term] = clause.terms.as_slice()
+                && !term.negated
+                && let Check::Component(bit) = term.check
+                && let Some(needle) = components[usize::from(bit)].component_needle()
+                && needle.len() > component_literal.map_or(0, |(_, longest)| longest.len())
+            {
+                component_literal = Some((bit, needle));
+            }
+        }
+        let component_literal = component_literal.map(|(bit, needle)| (bit, needle.to_vec()));
+
         // A stable sort keeps the query's order among clauses of one cost.
         clauses.sort_by_key(CompiledClause::cost);
-        let path_clauses = clauses.partition_point(|clause| !clause.cost().0);
+        let reading = |reads| clauses.partition_point(|clause| clause.cost().0 < reads);
+        let component_clauses = reading(Reads::Components);
+        let path_clauses = reading(Reads::Path);
         Ok(Self {
             match_case,
             clauses,
+            component_clauses,
             path_clauses,
+            components,
+            component_literal,
             prefilter,
         })
     }
+
+    /// The bits of the [`Check::Component`] terms that `text`, one path
+    /// component in the form the query compares, matches.
+    fn component_bits(&self, text: &[u8], code_points: &mut CodePointBuf) -> u64 {
+        let mut bits = 0;
+        for (bit, matcher) in self.components.iter().enumerate() {
+            if matcher.matches(text, code_points) {
+                bits |= 1 << bit;
+            }
+        }
+        bits
+    }
+}
+
+/// The most terms of one query that [`ComponentBits`] decide, one bit each;
+/// the terms past it test the full path.
+const MAX_COMPONENT_TERMS: usize = u64::BITS as usize;
+
+/// What a clause reads of an entry, in the order the scan has it: the
+/// entry's own columns, then its [`ComponentBits`], then its full path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Reads {
+    Entry,
+    Components,
+    Path,
 }
 
 impl CompiledClause {
@@ -359,15 +460,16 @@ impl CompiledClause {
         }
     }
 
-    /// Whether the clause tests the full path, then the cost of its dearest
-    /// term: the order the scan tests clauses in.
-    fn cost(&self) -> (bool, u8) {
-        let needs_path = self
-            .terms
-            .iter()
-            .any(|term| matches!(term.check, Check::Text(Target::Path, _) | Check::Parent(_)));
+    /// What the clause reads, then the cost of its dearest term: the order
+    /// the scan tests clauses in.
+    fn cost(&self) -> (Reads, u8) {
+        let reads = self.terms.iter().map(|term| match term.check {
+            Check::Text(Target::Path, _) | Check::Parent(_) => Reads::Path,
+            Check::Component(_) => Reads::Components,
+            _ => Reads::Entry,
+        });
         let cost = self.terms.iter().map(|term| term.check.cost()).max();
-        (needs_path, cost.unwrap_or(0))
+        (reads.max().unwrap_or(Reads::Entry), cost.unwrap_or(0))
     }
 
     fn passes(&self, subject: &Subject, scratch: &mut Scratch) -> bool {
@@ -385,6 +487,8 @@ struct Subject<'a> {
     entry: EntryView<'a>,
     /// The name as the query compares it: folded unless it matches case.
     name: &'a [u8],
+    /// The entry's [`ComponentBits`]; set before the component clauses run.
+    components: Option<u64>,
     /// The full path in the same form as `name`; set before the path
     /// clauses run.
     path: Option<&'a [u8]>,
@@ -409,6 +513,15 @@ impl Check {
             }
         };
         let finder = |s: &str| memmem::Finder::new(&text(s)).into_owned();
+        // A term that starts with a character that is not a letter or digit,
+        // such as `.dll`, starts its own word, so it matches wherever it is.
+        let word_start = |s: &str| {
+            if is_word(s.chars().next().map(u32::from)) {
+                Matcher::WordStart(finder(s))
+            } else {
+                Matcher::Contains(finder(s))
+            }
+        };
         let wildcard = |s: &str| Wildcard::compile(&text(s));
         let regex = |pattern: &str| {
             RegexBuilder::new(pattern)
@@ -423,8 +536,8 @@ impl Check {
             Test::Path(s) => Check::Text(Target::Path, Matcher::Contains(finder(s))),
             Test::NameWholeWord(s) => Check::Text(Target::Name, Matcher::WholeWord(finder(s))),
             Test::PathWholeWord(s) => Check::Text(Target::Path, Matcher::WholeWord(finder(s))),
-            Test::NameWordStart(s) => Check::Text(Target::Name, Matcher::WordStart(finder(s))),
-            Test::PathWordStart(s) => Check::Text(Target::Path, Matcher::WordStart(finder(s))),
+            Test::NameWordStart(s) => Check::Text(Target::Name, word_start(s)),
+            Test::PathWordStart(s) => Check::Text(Target::Path, word_start(s)),
             Test::NameStart(s) => Check::Text(Target::Name, Matcher::Start(text(s))),
             Test::PathStart(s) => Check::Text(Target::Path, Matcher::Start(text(s))),
             Test::NameWildcard(s) => Check::Text(Target::Name, Matcher::Wildcard(wildcard(s))),
@@ -461,6 +574,7 @@ impl Check {
                 Matcher::Regex(_) => 5,
             },
             Check::Extension(_) => 4,
+            Check::Component(_) => 0,
         }
     }
 
@@ -504,22 +618,45 @@ impl Check {
                     Target::Name => subject.name,
                     Target::Path => path(),
                 };
-                match matcher {
-                    Matcher::Contains(finder) => finder.find(text).is_some(),
-                    Matcher::WholeWord(finder) => contains_whole_word(finder, text),
-                    Matcher::WordStart(finder) => contains_at_word_start(finder, text),
-                    Matcher::Start(start) => text.starts_with(start),
-                    Matcher::Wildcard(wildcard) => {
-                        wildcard.matches_into(text, &mut scratch.code_points)
-                    }
-                    Matcher::Regex(regex) => regex.is_match(text),
-                }
+                matcher.matches(text, &mut scratch.code_points)
+            }
+            Check::Component(bit) => {
+                let bits = subject
+                    .components
+                    .expect("component clauses run after the bits are set");
+                bits & (1 << bit) != 0
             }
         })
     }
 }
 
 impl Matcher {
+    fn matches(&self, text: &[u8], code_points: &mut CodePointBuf) -> bool {
+        match self {
+            Matcher::Contains(finder) => finder.find(text).is_some(),
+            Matcher::WholeWord(finder) => contains_whole_word(finder, text),
+            Matcher::WordStart(finder) => contains_at_word_start(finder, text),
+            Matcher::Start(start) => text.starts_with(start),
+            Matcher::Wildcard(wildcard) => wildcard.matches_into(text, code_points),
+            Matcher::Regex(regex) => regex.is_match(text),
+        }
+    }
+
+    /// The needle of a matcher that one component of a full path decides:
+    /// a text without a separator, matched anywhere, as a whole word or at
+    /// a word start. Such a text cannot span a `\`, and a `\`, like the edge
+    /// of a text, is no letter or digit, so the full path matches it exactly
+    /// when one of its components does. `None` for every other matcher: a
+    /// start or a wildcard matches where the whole path starts or ends, and
+    /// a regular expression can span a separator.
+    fn component_needle(&self) -> Option<&[u8]> {
+        match self {
+            Matcher::Contains(finder) | Matcher::WholeWord(finder) | Matcher::WordStart(finder) => {
+                Some(finder.needle()).filter(|needle| !needle.contains(&b'\\'))
+            }
+            Matcher::Start(_) | Matcher::Wildcard(_) | Matcher::Regex(_) => None,
+        }
+    }
     /// Appends to `parts` each part of `text` that this matcher matches, as
     /// a byte range, with the occurrence rules of [`Check::test`], so the
     /// part a window shows bold is always one that made the entry match.
@@ -1063,71 +1200,104 @@ fn scan<'q, 'i>(
     if !query.match_case
         && let Some(needle) = query.prefilter.as_deref()
     {
-        let driver = memmem::Finder::new(needle);
-        // The haystack holds each distinct name ONCE (names are interned), so
-        // the scan cost is proportional to the unique-name bytes and a hit fans
-        // out to every entry bearing
-        // the name through its same-name chain. The chains are exact, so no
-        // per-candidate staleness guard is needed.
-        let hay = index.folded_bytes();
-        let pairs = index.name_pairs();
-        // Merge-walk: both the `memmem` hits and `pairs[id].folded.off` are
-        // ascending, so a forward cursor maps each hit to its name id in
-        // amortized O(1) with no per-hit binary search (which cache-thrashes
-        // at scale). The first hit seeds the cursor with one binary search so
-        // a rare term whose matches start deep in the arena doesn't pay a
-        // full-length forward scan.
-        let mut cursor = 0usize;
-        let mut seeded = false;
-        // A name is a contiguous NUL-separated region, so repeated hits in
-        // one name are adjacent: a single "same as last" check dedups them.
-        let mut last_id = u32::MAX;
-        for pos in driver.find_iter(hay) {
-            let pos = pos as u32;
-            if pairs.is_empty() {
-                break;
-            }
-            if !seeded {
-                cursor = pairs
-                    .partition_point(|p| p.folded.off <= pos)
-                    .saturating_sub(1);
-                seeded = true;
-            } else {
-                while cursor + 1 < pairs.len() && pairs[cursor + 1].folded.off <= pos {
-                    cursor += 1;
-                }
-            }
-            let id = cursor as u32;
-            if id == last_id {
-                continue; // driver term appears twice in one name
-            }
-            last_id = id;
+        for_each_name_containing(index, needle, |id| {
             for idx in index.name_chain(id) {
-                if index.is_synthetic(idx) {
-                    continue;
+                if !index.is_synthetic(idx) {
+                    scan.visit(idx, scope);
                 }
-                scan.visit(idx, scope);
             }
+            true
+        });
+        return scan;
+    }
+
+    // Component walk: a case-insensitive path term that one component
+    // decides, such as each term of a -p search, matches only in a name that
+    // contains its needle or below a folder whose name does, unless the
+    // root's name holds the needle, which every full path starts with.
+    if !query.match_case
+        && let Some((bit, needle)) = &query.component_literal
+        && memmem::find(&fold(root_name(mount_prefix)), needle).is_none()
+    {
+        if scan.visit_components(*bit, needle, scope) {
+            return scan;
         }
-    } else {
-        // Slow path: case-sensitive, or no name literal (only filters, path
-        // terms or all-wildcard patterns). Iterate every live entry. The
-        // empty search with no scope, as a full export runs, matches every
-        // entry, so its records are reserved once: a list that grows holds
-        // its old and new buffers together. Other scans grow the list, so a
-        // selective one does not commit a record for every entry.
-        if scope.is_none() && query.clauses.is_empty() {
-            scan.records.reserve_exact(index.len());
+        scan.records.clear();
+    }
+
+    // Slow path: case-sensitive, or no name literal (only filters, path
+    // terms or all-wildcard patterns). Iterate every live entry. The empty
+    // search with no scope, as a full export runs, matches every entry, so
+    // its records are reserved once: a list that grows holds its old and new
+    // buffers together. Other scans grow the list, so a selective one does
+    // not commit a record for every entry.
+    if scope.is_none() && query.clauses.is_empty() {
+        scan.records.reserve_exact(index.len());
+    }
+    for idx in index.live_entries() {
+        if index.is_synthetic(idx) {
+            continue;
         }
-        for idx in index.live_entries() {
-            if index.is_synthetic(idx) {
-                continue;
-            }
-            scan.visit(idx, scope);
-        }
+        scan.visit(idx, scope);
     }
     scan
 }
+
+/// Calls `found` with each name of the folded arena that contains `needle`,
+/// once per name, in arena order, until it returns `false`.
+///
+/// The arena holds each distinct name once (names are interned), so the
+/// scan's cost follows the unique-name bytes, and a name fans out to every
+/// entry bearing it through its same-name chain. The chains are exact, so no
+/// per-candidate staleness guard is needed.
+fn for_each_name_containing(
+    index: &VolumeIndex,
+    needle: &[u8],
+    mut found: impl FnMut(NameId) -> bool,
+) {
+    let pairs = index.name_pairs();
+    if pairs.is_empty() {
+        return;
+    }
+    // Merge-walk: both the `memmem` hits and `pairs[id].folded.off` are
+    // ascending, so a forward cursor maps each hit to its name id in
+    // amortized O(1) with no per-hit binary search (which cache-thrashes at
+    // scale). The first hit seeds the cursor with one binary search so a
+    // rare term whose matches start deep in the arena doesn't pay a
+    // full-length forward scan.
+    let mut cursor = 0usize;
+    let mut seeded = false;
+    // A name is a contiguous NUL-separated region, so repeated hits in one
+    // name are adjacent: a single "same as last" check dedups them.
+    let mut last_id = NameId::MAX;
+    for pos in memmem::Finder::new(needle).find_iter(index.folded_bytes()) {
+        let pos = pos as u32;
+        if !seeded {
+            cursor = pairs
+                .partition_point(|p| p.folded.off <= pos)
+                .saturating_sub(1);
+            seeded = true;
+        } else {
+            while cursor + 1 < pairs.len() && pairs[cursor + 1].folded.off <= pos {
+                cursor += 1;
+            }
+        }
+        let id = cursor as NameId;
+        if id == last_id {
+            continue; // the needle appears twice in one name
+        }
+        last_id = id;
+        if !found(id) {
+            return;
+        }
+    }
+}
+
+/// The component walk of [`scan`] gives up past this share of a volume's
+/// entries, as one in this many, and the scan visits every entry instead.
+/// So a walk that gives up adds at most a quarter of a full pass, while one
+/// that finishes visits at most a quarter of the entries.
+const COMPONENT_WALK_SHARE: usize = 4;
 
 /// The state one scan shares across its candidates: memos and scratch
 /// buffers, built once per query instead of once per candidate, and the
@@ -1135,6 +1305,9 @@ fn scan<'q, 'i>(
 struct Scan<'q, 'i> {
     index: &'i VolumeIndex,
     query: &'q CompiledQuery,
+    /// The bits of the query's [`Check::Component`] terms, in the form the
+    /// query compares; `None` when it has none.
+    component_bits: Option<ComponentBits>,
     /// Full paths in the form the query compares, folded unless it matches
     /// case; `None` when no clause tests the path.
     query_paths: Option<DirPaths>,
@@ -1160,16 +1333,22 @@ impl<'q, 'i> Scan<'q, 'i> {
         } else {
             NameForm::Folded
         };
+        let mut scratch = Scratch::default();
         Self {
             index,
             query,
+            component_bits: (!query.components.is_empty()).then(|| {
+                ComponentBits::new(index, form, mount_prefix, |text| {
+                    query.component_bits(text, &mut scratch.code_points)
+                })
+            }),
             query_paths: (query.path_clauses < query.clauses.len())
                 .then(|| DirPaths::new(index, form, mount_prefix)),
             path: Vec::new(),
             folders: FolderCopy::new(index, mount_prefix, &mut folder_names),
             folder_names,
             scope_memo: FxHashMap::default(),
-            scratch: Scratch::default(),
+            scratch,
             records: Vec::new(),
             scope: None,
         }
@@ -1182,10 +1361,63 @@ impl<'q, 'i> Scan<'q, 'i> {
         }
     }
 
+    /// Visits, each once, the candidates of the [`Check::Component`] at
+    /// `bit`: the entries whose name contains its `needle`, and every entry
+    /// below one whose name passes it. Returns `false` when they pass a
+    /// [`COMPONENT_WALK_SHARE`] of the volume, with some visited.
+    fn visit_components(&mut self, bit: u8, needle: &[u8], scope: Option<EntryIdx>) -> bool {
+        let index = self.index;
+        let query = self.query;
+        let most = index.len() / COMPONENT_WALK_SHARE;
+        let mut named = Vec::new();
+        for_each_name_containing(index, needle, |id| {
+            named.extend(index.name_chain(id).filter(|&idx| !index.is_synthetic(idx)));
+            named.len() <= most
+        });
+        if named.len() > most {
+            return false;
+        }
+        let term = &query.components[usize::from(bit)];
+        let mut visited = named.len();
+        for &idx in &named {
+            let bits = self
+                .component_bits
+                .as_mut()
+                .expect("a component literal is a component term's");
+            let code_points = &mut self.scratch.code_points;
+            let above =
+                bits.parent_bits(index, idx, |text| query.component_bits(text, code_points));
+            // Without a path nothing matches, and the folder above that
+            // passes the term is walked, which visits this entry. So each
+            // entry is visited once, and no loop in the parent links, which
+            // has no path, is walked.
+            if above.is_none_or(|above| above & (1 << bit) != 0) {
+                continue;
+            }
+            self.visit(idx, scope);
+            // An entry that the parent links make a parent is walked
+            // through as a folder is, so this does not ask which it is.
+            if term.matches(index.folded_name(idx), &mut self.scratch.code_points) {
+                for below in index.subtree_entries(idx) {
+                    visited += 1;
+                    if visited > most {
+                        return false;
+                    }
+                    if !index.is_synthetic(below) {
+                        self.visit(below, scope);
+                    }
+                }
+            }
+        }
+        true
+    }
+
     fn evaluate(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> Option<SortRecord> {
         let index = self.index;
         let query = self.query;
-        let (entry_clauses, path_clauses) = query.clauses.split_at(query.path_clauses);
+        let (entry_clauses, later) = query.clauses.split_at(query.component_clauses);
+        let (component_clauses, path_clauses) =
+            later.split_at(query.path_clauses - query.component_clauses);
         let entry = index.entry(idx);
         let mut subject = Subject {
             // The precomputed folded name serves a case-insensitive query.
@@ -1195,6 +1427,7 @@ impl<'q, 'i> Scan<'q, 'i> {
                 index.folded_name(idx)
             },
             entry,
+            components: None,
             path: None,
         };
         if !entry_clauses
@@ -1220,14 +1453,33 @@ impl<'q, 'i> Scan<'q, 'i> {
         // applies, so the two cannot drift. Gated on `has_orphans` because an
         // index with nothing under lost+found cannot contain an unpresentable
         // entry, and the walk it guards copies every distinct parent folder,
-        // which a broad limited query would mostly never need.
+        // which a broad limited query would mostly never need. A query that
+        // reads the path skips it too: `ComponentBits::entry_bits` and
+        // `DirPaths::full_path_into` below refuse the same entries by the
+        // same rule, without copying folders.
         if index.has_orphans()
+            && self.component_bits.is_none()
+            && self.query_paths.is_none()
             && self
                 .folders
                 .entry_folder(index, idx, &mut self.folder_names)
                 .is_none()
         {
             return None;
+        }
+
+        if let Some(bits) = &mut self.component_bits {
+            let code_points = &mut self.scratch.code_points;
+            // An entry without a path matches no path test.
+            let found =
+                bits.entry_bits(index, idx, |text| query.component_bits(text, code_points))?;
+            subject.components = Some(found);
+            if !component_clauses
+                .iter()
+                .all(|clause| clause.passes(&subject, &mut self.scratch))
+            {
+                return None;
+            }
         }
 
         if let Some(paths) = &mut self.query_paths {
@@ -1989,8 +2241,10 @@ mod tests {
     }
 
     /// A word starts at the start of the name or after a character that is
-    /// not a letter or digit, and `startwith:` matches only at the start of
-    /// the name; with `-p`, both read the full path, which starts with `C:`.
+    /// not a letter or digit, a term that starts with such a character, as
+    /// `.txt` does, starts its own word, and `startwith:` matches only at
+    /// the start of the name; with `-p`, both read the full path, which
+    /// starts with `C:`.
     /// The name terms drive the folded-arena scan, and `-case` the full scan.
     #[test]
     fn word_start_and_name_start_read_where_the_name_or_a_word_starts() {
@@ -2021,6 +2275,10 @@ mod tests {
         assert_eq!(in_names("wordstart:c"), [r"C:\docs\comparator.txt"]);
         assert_eq!(in_names("startwith:para"), pills);
         assert_eq!(in_names("wordstart:report"), [r"C:\docs\my report.txt"]);
+        assert_eq!(
+            in_names("wordstart:.txt"),
+            [r"C:\docs\comparator.txt", r"C:\docs\my report.txt"]
+        );
         assert!(in_names("startwith:report").is_empty());
         assert_eq!(in_names("wordstart:PARA"), pills);
         assert!(found("wordstart:PARA", true, false).is_empty());
@@ -3203,6 +3461,68 @@ mod tests {
                 let full = [b"C:\\".as_slice(), &rel].concat();
                 let folded = crate::fold::fold(&full);
                 if folded.windows(needle.len()).any(|w| w == needle.as_slice()) {
+                    naive.insert(crate::wtf8::to_string_lossy(&full));
+                }
+            }
+            prop_assert_eq!(engine, naive);
+        }
+
+        /// With -p, terms without a separator, negated or not, of AND and OR
+        /// clauses, in each match mode that one path component decides, and
+        /// wildcards, which one name decides only as `*a` or `*a*`, find
+        /// exactly the entries whose full path, built by walking to the root,
+        /// passes them. The root's name `C:` holds `c`, folders hold the
+        /// matches below them, and orphans have no path, so a component walk
+        /// or a test of the components that misses any of them fails.
+        #[test]
+        fn match_path_terms_agree_with_a_test_of_the_full_path(
+            parents in prop::collection::vec(0usize..14, 1..80),
+            names in prop::collection::vec("[a-cA-C ]{1,3}", 80),
+            query in "!?[a-cA-C*?]{1,3}([ |]!?[a-cA-C*?]{1,3}){0,2}",
+            term_match in prop::sample::select(
+                &[TermMatch::Anywhere, TermMatch::WholeWords, TermMatch::WordStart][..]
+            ),
+            match_case: bool,
+        ) {
+            let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+            for (i, &p) in parents.iter().enumerate() {
+                let parent = match p {
+                    p if p < i => frn(1000 + p as u64),
+                    12 => frn(999), // never inserted: an orphan's parent
+                    _ => NTFS_ROOT_FRN,
+                };
+                idx.insert_enum(&enum_rec(frn(1000 + i as u64), parent, &names[i], i % 3 != 0));
+            }
+            let options = ParseOptions {
+                match_case,
+                match_path: true,
+                term_match,
+                ..ParseOptions::default()
+            };
+            let parsed = parse_query_with(&query, options).unwrap();
+            let compiled = CompiledQuery::new(&parsed).unwrap();
+            let out = run_query(&idx, r"C:\", &compiled, None, SortSpec::default(), None);
+            let engine: BTreeSet<String> = texts(&out).into_iter().collect();
+
+            let mut code_points = CodePointBuf::new();
+            let mut naive = BTreeSet::new();
+            for e in idx.live_entries().filter(|&e| !idx.is_synthetic(e)) {
+                let mut rel = Vec::new();
+                if idx.path_of(e, &mut rel) != crate::index::PathStatus::Ok {
+                    continue;
+                }
+                let full = [b"C:\\".as_slice(), &rel].concat();
+                let text = if match_case { full.clone() } else { crate::fold::fold(&full) };
+                let passes = parsed.clauses.iter().all(|clause| {
+                    clause.terms.iter().any(|term| {
+                        let Ok(Check::Text(Target::Path, matcher)) = Check::new(&term.test, match_case)
+                        else {
+                            panic!("-p makes every term a path text term");
+                        };
+                        matcher.matches(&text, &mut code_points) != term.negated
+                    })
+                });
+                if passes {
                     naive.insert(crate::wtf8::to_string_lossy(&full));
                 }
             }

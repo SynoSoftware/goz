@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.pdb
 /proptest-regressions-tmp
+/.vs
+crates/gozler-core/proptest-regressions/query/engine.txt

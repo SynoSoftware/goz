@@ -1,7 +1,8 @@
 # gozler
 
 gozler finds files and folders on NTFS and ReFS volumes by name, path, size and
-date, from an index of each volume that a daemon keeps current.
+date, from an index of each volume that a daemon keeps current. Its window
+also copies, moves and deletes them.
 
 **Gozler**:
 **Owner ruling.** The product's name wherever a person sees it outside the
@@ -64,11 +65,31 @@ _Avoid_: flags, attribute bits (in prose)
 A file's size or date that gozler did not read, because the size and date pass
 failed or stopped, or could not read that file. A folder's size is unknown
 until its volume's size and date pass completes, and stays unknown when the
-pass failed or stopped.
+pass failed or stopped. For a filtered user, every folder's size is unknown.
 
 **Folder size**:
 The sum of the known sizes of every file below a folder, each hard link
 counted; what `-get-folder-size` gives for that folder.
+
+## Visibility
+
+**Visible entry**:
+An entry a user may see: one in a folder the user may list, or any entry for
+a user who sees every file. A search shows only visible entries, and its
+counts and totals add only them.
+_Avoid_: allowed entry, permitted file
+
+**Users and groups who see every file**:
+The one list, kept for the whole PC, of the accounts and groups whose
+members see every entry, whatever the folder permissions say. Adding
+Everyone turns the filter off for every user. Only an administrator changes
+it.
+_Avoid_: whitelist, exception list, admin list
+
+**Filtered user**:
+A user who does not see every file: they see only visible entries, and no
+folder sizes.
+_Avoid_: restricted user, limited user
 
 ## Command line
 
@@ -137,17 +158,24 @@ The order gozler prints matches in: by the sort key, then folded name, volume,
 file ID, parent file ID and raw name, so the same query over the same index
 prints the same list, and a limited list is the start of the full one.
 
-## Window
+## App
 
-The window uses TinyTorrent2's words where both mean the same thing, so the
+The app uses TinyTorrent2's words where both mean the same thing, so the
 owner's programs read alike.
 
+**App**:
+`gozler-ui`, the desktop app that searches through the service and copies,
+moves and deletes files: its window,
+its dialogs and its notification area icon. The status bar's memory figure
+calls it "UI", as TinyTorrent2 does (owner ruling).
+_Avoid_: GUI
+
 **Window**:
-`gozler-ui`, the desktop window that searches through the service.
-_Avoid_: UI, GUI, app (in text the person reads)
+The app's main window, which shows one of two modes: Search or Two panels.
+_Avoid_: UI, app (for the window)
 
 **Service**:
-`gozlerd` as the window names it, "the Gozler service", and the command line,
+`gozlerd` as the app names it, "the Gozler service", and the command line,
 "the gozler service".
 _Avoid_: daemon (in text the person reads)
 

@@ -25,7 +25,10 @@ pub(crate) enum CommandId {
     Explore,
     Properties,
     ExportResults,
-    CancelExport,
+    /// Stops the job that the status bar shows. Its shortcuts were saved as
+    /// `cancel_export` while it stopped only an export.
+    #[serde(alias = "cancel_export")]
+    Cancel,
     Settings,
     Exit,
     Copy,
@@ -66,7 +69,7 @@ impl CommandId {
         CommandId::Explore,
         CommandId::Properties,
         CommandId::ExportResults,
-        CommandId::CancelExport,
+        CommandId::Cancel,
         CommandId::Settings,
         CommandId::Exit,
         CommandId::Copy,
@@ -125,7 +128,7 @@ impl CommandId {
                     |s| s.model.can_export(),
                     None,
                 ),
-                C::CancelExport => ("command.cancel_export", &[], |s| s.model.exporting(), None),
+                C::Cancel => ("command.cancel", &[], |s| s.model.can_cancel_job(), None),
                 C::Settings => (
                     "command.settings",
                     const { &[Keystroke::ctrl(Key::Comma)] },
@@ -279,7 +282,7 @@ impl CommandId {
             C::Properties => Glyph::Info,
             C::ExportResults => Glyph::Export,
             C::Settings => Glyph::Settings,
-            C::Exit => Glyph::ChromeClose,
+            C::Exit => Glyph::Cancel,
             C::Copy => Glyph::Copy,
             C::CopyName => Glyph::Rename,
             C::CopyFolder => Glyph::Folder,
@@ -298,7 +301,7 @@ impl CommandId {
             C::View => Glyph::View,
             C::Edit => Glyph::Edit,
             C::NewFolder => Glyph::NewFolder,
-            C::CancelExport
+            C::Cancel
             | C::FileOperations
             | C::Filters
             | C::Inspector
@@ -329,13 +332,13 @@ impl CommandId {
             | C::SelectAll
             | C::Refresh
             | C::Find
-            | C::SortBy => true,
+            | C::SortBy
+            | C::Cancel => true,
             C::Open | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => true,
             C::ClearSelection | C::View | C::Edit | C::NewFolder => mode == Mode::TwoPanels,
             C::OpenFileLocation
             | C::Explore
             | C::ExportResults
-            | C::CancelExport
             | C::Copy
             | C::CopyAsPath
             | C::CopyName
@@ -707,10 +710,41 @@ impl Keystroke {
     }
 }
 
+/// A control that `Tab` and `Shift+Tab` move the focus between. Every
+/// other control has an access key, a menu command or a shortcut, so a
+/// person who typed a search reaches the results with one `Tab`
+/// (DESIGN.md: Dialogs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabStop {
+    SearchBox,
+    Results,
+}
+
+/// Where `Tab`, or `Shift+Tab` when `backward`, moves the focus from
+/// `from`, which is `None` for a control outside the cycle: from there
+/// `Tab` goes to the results and `Shift+Tab` to the search box.
+pub(crate) fn tab_stop(from: Option<TabStop>, backward: bool) -> TabStop {
+    match from {
+        Some(TabStop::SearchBox) => TabStop::Results,
+        Some(TabStop::Results) => TabStop::SearchBox,
+        None if backward => TabStop::SearchBox,
+        None => TabStop::Results,
+    }
+}
+
 /// What a key does in the focused control (DESIGN.md: window rule 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyAction {
     Run(CommandId),
+    /// `Tab`, or `Shift+Tab` when `backward`, in any control: the focus
+    /// moves as [`tab_stop`] says.
+    MoveTab {
+        backward: bool,
+    },
+    /// `Esc` in the results list: File > Cancel, unless the job is a file
+    /// operation, which one stray key must not stop
+    /// (file-manager-spec.md: Keys).
+    CancelJob,
     /// `Down` in the search box: the focus moves to the list's first row.
     FocusList,
     /// `Enter` in the search box: the search runs, or the result opens
@@ -766,6 +800,17 @@ pub(crate) enum PanelKey {
 /// `IDCANCEL`, and before the control itself sees the key. The message loop
 /// translates a command's shortcut first, so no shortcut reaches this table.
 pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
+    if key.key == Key::Tab && !key.ctrl && !key.alt {
+        // In a panel, Tab switches panels (file-manager-spec.md: Keys).
+        return Some(match focus {
+            Focus::Panel | Focus::PathBox | Focus::PanelSearch | Focus::LookIn => {
+                KeyAction::Panel(PanelKey::OtherPanel)
+            }
+            _ => KeyAction::MoveTab {
+                backward: key.shift,
+            },
+        });
+    }
     let table: &[(Keystroke, KeyAction)] = match focus {
         Focus::SearchBox { .. } => {
             const {
@@ -805,6 +850,9 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
                         Keystroke::ctrl(Key::Letter(b'V')),
                         KeyAction::Run(CommandId::Paste),
                     ),
+                    // Stops the status bar's job, as Esc in the search box
+                    // empties the box.
+                    (Keystroke::plain(Key::Escape), KeyAction::CancelJob),
                 ]
             }
         }
@@ -820,10 +868,6 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
                     (
                         Keystroke::plain(Key::Escape),
                         KeyAction::Panel(PanelKey::PathEscape),
-                    ),
-                    (
-                        Keystroke::plain(Key::Tab),
-                        KeyAction::Panel(PanelKey::OtherPanel),
                     ),
                 ]
             }
@@ -842,10 +886,6 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
                     (
                         Keystroke::plain(Key::Escape),
                         KeyAction::Panel(PanelKey::LeaveSearch),
-                    ),
-                    (
-                        Keystroke::plain(Key::Tab),
-                        KeyAction::Panel(PanelKey::OtherPanel),
                     ),
                 ]
             }
@@ -879,7 +919,6 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
     &[
         (Keystroke::plain(Key::Enter), P(PanelKey::Enter)),
         (Keystroke::plain(Key::Backspace), P(PanelKey::Back)),
-        (Keystroke::plain(Key::Tab), P(PanelKey::OtherPanel)),
         (Keystroke::plain(Key::Escape), P(PanelKey::Escape)),
         (Keystroke::plain(Key::Insert), P(PanelKey::Toggle)),
         (Keystroke::plain(Key::Space), P(PanelKey::Toggle)),
@@ -1278,7 +1317,7 @@ fn every_menu() -> Vec<Menu> {
                     C::Properties,
                 ]),
                 run(&[C::CopyToFolder, C::MoveToFolder, C::NewFolder, C::Delete]),
-                run(&[C::ExportResults]),
+                run(&[C::ExportResults, C::Cancel]),
                 run(&[C::Settings]),
                 run(&[C::Exit]),
             ],
@@ -1525,16 +1564,6 @@ pub(crate) const SHOW_DETAILS: CommandButton = CommandButton {
     tip: Some("inspector.show"),
 };
 
-/// The item that File shows in Export results…' place: Cancel export while
-/// an export runs (DESIGN.md: Menus).
-pub(crate) fn export_slot(model: &Model) -> MenuItem {
-    MenuItem::Run(if model.exporting() {
-        CommandId::CancelExport
-    } else {
-        CommandId::ExportResults
-    })
-}
-
 /// `groups` as a context menu in the language of `strings`. A context menu
 /// shows no shortcuts, as File Explorer's does (DESIGN.md: Menus).
 pub(crate) fn render_popup(groups: &[Vec<MenuItem>], strings: &Strings) -> Vec<MenuNode> {
@@ -1738,6 +1767,32 @@ mod tests {
         }
     }
 
+    /// Tab in a panel's controls switches panels; otherwise Search's Tab
+    /// rule would move the focus to Search's hidden search box or list
+    /// (file-manager-spec.md: Keys).
+    #[test]
+    fn tab_in_a_panel_switches_panels() {
+        let tab = Keystroke::plain(Key::Tab);
+        let back = Keystroke { shift: true, ..tab };
+        for focus in [
+            Focus::Panel,
+            Focus::PathBox,
+            Focus::PanelSearch,
+            Focus::LookIn,
+        ] {
+            for key in [tab, back] {
+                assert_eq!(
+                    control_key(focus, key),
+                    Some(KeyAction::Panel(PanelKey::OtherPanel))
+                );
+            }
+        }
+        assert_eq!(
+            control_key(Focus::List, back),
+            Some(KeyAction::MoveTab { backward: true })
+        );
+    }
+
     /// An access key that two items of one menu share opens the first only,
     /// and a main-window letter that a menu also uses never opens that menu
     /// (DESIGN.md: Words). Every shipped language chooses its own letters.
@@ -1773,16 +1828,12 @@ mod tests {
                 &mut bar_keys,
             );
             for menu in bar.iter().chain(&menu_bar(Mode::TwoPanels)) {
-                // A submenu's label shares its menu with the items beside it,
-                // and Cancel export shares File with them in Export
-                // results…' place.
+                // A submenu's label shares its menu with the items beside it.
                 let labels = menu.groups.iter().flatten().map(|entry| match entry {
                     Entry::Item(item) => item.label(&strings),
                     Entry::Submenu { label, .. } => strings.text(label).to_owned(),
                 });
-                let cancel = (menu.label == "menu.file")
-                    .then(|| MenuItem::Run(CommandId::CancelExport).label(&strings));
-                assert_unique(language.tag, labels.chain(cancel), &mut HashSet::new());
+                assert_unique(language.tag, labels, &mut HashSet::new());
                 for entry in menu.groups.iter().flatten() {
                     if let Entry::Submenu { groups, .. } = entry {
                         let labels = groups.iter().flatten().map(|item| item.label(&strings));
@@ -1915,8 +1966,7 @@ mod tests {
         let order = model.column_order();
         model.start_export(r"D:\results.csv".into(), ExportFormat::Csv, &order);
         assert!(!enabled(&model, CommandId::ExportResults));
-        assert!(enabled(&model, CommandId::CancelExport));
-        assert_eq!(export_slot(&model), MenuItem::Run(CommandId::CancelExport));
+        assert!(enabled(&model, CommandId::Cancel));
     }
 
     /// T11: a context menu stays open while new results arrive, and its

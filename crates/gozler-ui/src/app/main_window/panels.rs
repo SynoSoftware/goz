@@ -5,7 +5,7 @@
 //! Search's list does (DESIGN.md: The selection).
 
 use super::super::dialogs::{NewFolder, Transfer, TransferStart};
-use super::{MainWindow, timer};
+use super::{MainWindow, SAVE_DELAY_MS, timer};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::captions::{DialogCaptions, DialogItem};
 use crate::core::commands::{
@@ -90,6 +90,10 @@ pub(super) const KEY_BAR: [ControlId; 6] = [
     ControlId::KeyF7,
     ControlId::KeyF8,
 ];
+
+/// The key bar buttons that have a tip, `F4 Edit` and `F6 Move`, by their
+/// tooltip area, which the key bar's tooltip numbers from 0.
+pub(super) const KEY_TIPS: [usize; 2] = [1, 3];
 
 /// One panel's controls, created in Tab order. The message and Retry come
 /// before the list, so they lie above it (`ListView::create`). A search
@@ -531,13 +535,13 @@ impl MainWindow {
             self.show_panel(side);
             self.show_panel_sort(side);
         }
-        for ((button, id), (key, word, tip)) in
-            controls.key_bar.iter().zip(KEY_BAR).zip(&captions.key_bar)
-        {
+        for (button, (key, word, _)) in controls.key_bar.iter().zip(&captions.key_bar) {
             // What screen readers say; the window draws the button.
             button.hwnd().set_text(&format!("{key} {word}"));
-            if let Some(tip) = tip {
-                controls.key_tips.set_area_text(id.id(), tip);
+        }
+        for (area, index) in KEY_TIPS.into_iter().enumerate() {
+            if let (_, _, Some(tip)) = &captions.key_bar[index] {
+                controls.key_tips.set_area(area, tip);
             }
         }
     }
@@ -558,6 +562,7 @@ impl MainWindow {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
             let widest: Vec<Entry> = widest().collect();
+            let sizes = model.choices().size_format;
             let panel = model.panels().panel(Side::Left);
             let samples: Vec<Vec<String>> = (fitted.iter())
                 .map(|column| {
@@ -565,7 +570,14 @@ impl MainWindow {
                         .iter()
                         .map(|entry| {
                             let row = Row::Entry(entry);
-                            captions::panel_cell(model.strings(), &*numbers, panel, row, *column)
+                            captions::panel_cell(
+                                model.strings(),
+                                &*numbers,
+                                sizes,
+                                panel,
+                                row,
+                                *column,
+                            )
                         })
                         .collect()
                 })
@@ -605,7 +617,7 @@ impl MainWindow {
     /// Gives Name the room the other columns leave in `side`'s list, to
     /// its edge or its scroll bar, so the rows reach the divider; a search
     /// panel's Name and Folder share it 1.3 to 1.
-    fn fill_name_column(&self, side: Side) {
+    pub(super) fn fill_name_column(&self, side: Side) {
         let c = self.panel(side);
         let dpi = self.created().metrics.get().dpi;
         let shared =
@@ -687,6 +699,9 @@ impl MainWindow {
         if let Some(ask) = ask {
             self.created().panel_threads.read(side, ask);
             self.show_panel(side);
+            // The panel's folder and sort are saved state, as Search's are.
+            let window = self.panel(side).list.hwnd().parent();
+            window.set_timer(timer::SAVE, SAVE_DELAY_MS);
         }
     }
 
@@ -1362,8 +1377,13 @@ impl MainWindow {
             }
             ListNotify::CustomDraw(draw) => Some(CustomDraw::answer(match draw.stage() {
                 DrawStage::Paint => DrawAnswer::EachRow,
-                DrawStage::Row if self.draw_panel_row(side, &draw) => DrawAnswer::Drawn,
-                DrawStage::Row | DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
+                DrawStage::Row { row } if self.draw_panel_row(side, &draw, row) => {
+                    DrawAnswer::Drawn
+                }
+                DrawStage::Row { .. }
+                | DrawStage::Cell { .. }
+                | DrawStage::RowPainted
+                | DrawStage::Other => DrawAnswer::Default,
             })),
             // Read later, because the list tells them while the window may
             // hold the model.
@@ -1706,12 +1726,13 @@ impl MainWindow {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
             let panels = model.panels();
+            let sizes = model.choices().size_format;
             let columns = self.panel(side).columns();
             match (panels.row(side, info.row()), columns.get(info.column())) {
                 (Some(row), Some(column)) => (
                     info.wants_text().then(|| {
                         let panel = panels.panel(side);
-                        captions::panel_cell(model.strings(), &*numbers, panel, row, *column)
+                        captions::panel_cell(model.strings(), &*numbers, sizes, panel, row, *column)
                     }),
                     Some(icon_of(row)),
                 ),
@@ -1726,21 +1747,21 @@ impl MainWindow {
         }
     }
 
-    /// Draws the row of `draw` in `side`'s list; `false` when the panel no
+    /// Draws `row` of `draw` in `side`'s list; `false` when the panel no
     /// longer has it, so the list draws it.
-    fn draw_panel_row(&self, side: Side, draw: &CustomDraw) -> bool {
-        let row = draw.row();
+    fn draw_panel_row(&self, side: Side, draw: &CustomDraw, row: u64) -> bool {
         let (focused, selected) = self.panel(side).list.row_state(row);
         let (cells, icon, dimmed, up, active) = {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
             let panels = model.panels();
+            let sizes = model.choices().size_format;
             let Some(shown) = panels.row(side, row) else {
                 return false;
             };
             let panel = panels.panel(side);
             let cells: Vec<String> = (self.panel(side).columns().iter())
-                .map(|c| captions::panel_cell(model.strings(), &*numbers, panel, shown, *c))
+                .map(|c| captions::panel_cell(model.strings(), &*numbers, sizes, panel, shown, *c))
                 .collect();
             let dimmed = matches!(shown, Row::Entry(entry) if entry.is_dimmed());
             let up = matches!(shown, Row::Up);
