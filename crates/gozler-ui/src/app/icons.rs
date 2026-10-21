@@ -1,7 +1,6 @@
 //! The system image list's index for each extension, asked of Windows once
 //! per extension (DESIGN.md: Results list), and of the panels' `..`.
 
-use crate::core::glyph::Glyph;
 use crate::win::gdi::ImageList;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -39,22 +38,15 @@ impl Icons {
         index
     }
 
-    /// The icon of a panel's `..` row: an arrow up, as Total Commander
-    /// shows it, added to the system image list once for each set of
-    /// colours ([`Icons::forget_up`]); a folder's when it cannot be added.
+    /// The icon of a panel's `..` row: Windows' open folder, which tells
+    /// it from the folders below it; a folder's when the shell does not
+    /// say.
     pub(super) fn up(&self) -> i32 {
         if let Some(index) = self.up.get() {
             return index;
         }
-        let index = (ImageList::system_small().and_then(|images| images.add_glyph(Glyph::Up)))
-            .unwrap_or_else(|| self.index("", true));
+        let index = ImageList::open_folder_index().unwrap_or_else(|| self.index("", true));
         self.up.set(Some(index));
         index
-    }
-
-    /// The system colours changed, so the next [`Icons::up`] adds the arrow
-    /// in the new text colour.
-    pub(super) fn forget_up(&self) {
-        self.up.set(None);
     }
 }

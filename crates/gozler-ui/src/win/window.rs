@@ -39,12 +39,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateMessage, WA_INACTIVE,
     WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
     WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
-    WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
-    WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION,
-    WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
+    WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_QUIT, WM_SETCURSOR,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -162,10 +162,6 @@ pub(crate) enum Message<'a> {
         /// The registration, as `RegisterDeviceNotificationW` returned it.
         notification: isize,
     },
-    /// Windows asks for the background before the window paints, or a
-    /// themed control asks for what lies under its corners.
-    EraseBackground,
-    Paint,
     SettingChange {
         regional_format: bool,
     },
@@ -854,8 +850,6 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                 None => Message::Other(msg),
             }
         }
-        WM_ERASEBKGND => Message::EraseBackground,
-        WM_PAINT => Message::Paint,
         WM_SETTINGCHANGE => Message::SettingChange {
             // SAFETY: WM_SETTINGCHANGE's lparam is null or a NUL-terminated
             // string that names the changed area.

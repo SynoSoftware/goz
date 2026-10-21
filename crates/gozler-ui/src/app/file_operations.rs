@@ -406,13 +406,6 @@ impl FileOperations {
         }
     }
 
-    /// Reads the queue again, after a command changed it.
-    pub(super) fn refresh(&self) {
-        if let Some(hwnd) = self.window.hwnd.get() {
-            self.window.refresh(hwnd);
-        }
-    }
-
     /// Words the window in the language of `strings`.
     pub(super) fn set_strings(&self, strings: Strings) {
         self.window.strings.replace(strings);
@@ -420,8 +413,8 @@ impl FileOperations {
         // The labels and Hide are as wide as their new words.
         if let Some(hwnd) = self.window.hwnd.get() {
             self.window.layout(hwnd);
+            self.window.refresh(hwnd);
         }
-        self.refresh();
     }
 
     /// Shows or hides Hide's icon, after icons were shown or hidden.

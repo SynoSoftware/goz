@@ -38,6 +38,16 @@ use windows::Win32::Foundation::LRESULT;
 /// Where a search panel's list puts its Folder column.
 const FOLDER_COLUMN: usize = 2;
 
+/// A folder of `side` that could not be opened, as
+/// [`ReadChange::Refused`] says it.
+struct Refusal {
+    side: Side,
+    path: String,
+    failure: ReadFailure,
+    reason: String,
+    typed: bool,
+}
+
 /// A panel asks gozlerd for its folder sizes and reads its free space this
 /// long after the last change in its folder (file-manager-spec.md: Folder
 /// sizes).
@@ -691,6 +701,9 @@ impl MainWindow {
     pub(super) fn on_panel_events(&self, hwnd: Hwnd) {
         let threads = &self.created().panel_threads;
         let mut pending: [Vec<FolderChange>; 2] = Default::default();
+        // A message box runs its own message loop, which wakes this method
+        // again, so it opens only after every drained event applied.
+        let mut refusals = Vec::new();
         for event in threads.drain() {
             match event {
                 PanelEvent::Read { side, event } => {
@@ -699,7 +712,7 @@ impl MainWindow {
                         side,
                         std::mem::take(&mut pending[side.index()]),
                     );
-                    self.on_read(hwnd, side, event);
+                    refusals.extend(self.on_read(side, event));
                 }
                 PanelEvent::Changes {
                     side,
@@ -756,6 +769,9 @@ impl MainWindow {
         for side in Side::BOTH {
             self.apply_panel_changes(hwnd, side, std::mem::take(&mut pending[side.index()]));
         }
+        for refusal in refusals {
+            self.refuse(hwnd, refusal);
+        }
     }
 
     /// Applies one batch of `side`'s changes and shows the rows.
@@ -782,7 +798,9 @@ impl MainWindow {
         }
     }
 
-    fn on_read(&self, hwnd: Hwnd, side: Side, event: ReadEvent) {
+    /// Applies `event` of `side`'s reading; the folder it could not open,
+    /// for the window to say why.
+    fn on_read(&self, side: Side, event: ReadEvent) -> Option<Refusal> {
         let shown = self.place(side);
         let change = self
             .model
@@ -791,8 +809,8 @@ impl MainWindow {
             .accept_read(side, event, shown.focused);
         let threads = &self.created().panel_threads;
         match change {
-            ReadChange::Stale => return,
-            ReadChange::Opened | ReadChange::NotReady => {
+            ReadChange::Stale => return None,
+            ReadChange::Cleared => {
                 self.created().requests.cancel(Purpose::FolderSizes(side));
                 self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
             }
@@ -827,35 +845,41 @@ impl MainWindow {
                 let ask = self.model.borrow_mut().panels_mut().read_again(side);
                 self.read(side, ask);
                 self.show_panel(side);
-                self.refuse(hwnd, side, &path, failure, &reason, typed);
-                return;
+                return Some(Refusal {
+                    side,
+                    path,
+                    failure,
+                    reason,
+                    typed,
+                });
             }
         }
         self.show_panel(side);
         self.update_status();
+        None
     }
 
     /// The message box for a folder that could not be opened, after which
     /// the path box keeps a typed path for the person to correct
     /// (file-manager-spec.md: A panel).
-    fn refuse(
-        &self,
-        hwnd: Hwnd,
-        side: Side,
-        path: &str,
-        failure: ReadFailure,
-        reason: &str,
-        typed: bool,
-    ) {
+    fn refuse(&self, hwnd: Hwnd, refusal: Refusal) {
+        let Refusal {
+            side,
+            path,
+            failure,
+            reason,
+            typed,
+        } = refusal;
         let (title, text) = {
             let model = self.model.borrow();
             let strings = model.strings();
             let text = match failure {
-                ReadFailure::Missing => strings.format("panel.missing", &[path]),
-                ReadFailure::NotReady => {
-                    strings.format("panel.drive_not_ready", &[&panel::drive_root(path), reason])
-                }
-                ReadFailure::Other => strings.format("panel.cannot_open", &[path, reason]),
+                ReadFailure::Missing => strings.format("panel.missing", &[&path]),
+                ReadFailure::NotReady => strings.format(
+                    "panel.drive_not_ready",
+                    &[&panel::drive_root(&path), &reason],
+                ),
+                ReadFailure::Other => strings.format("panel.cannot_open", &[&path, &reason]),
             };
             (strings.text("panel.open_title").to_owned(), text)
         };
@@ -1044,6 +1068,10 @@ impl MainWindow {
         else {
             return false;
         };
+        // The list never sees the keys the window takes, so it does not
+        // show its focus outline, which Windows hides until the keyboard
+        // is used.
+        hwnd.show_focus_cues();
         let c = self.panel(side);
         let quick = self
             .model
@@ -1561,7 +1589,7 @@ impl MainWindow {
         let renamed = match (&destination, one) {
             (Destination::Typed(path), Some(_)) if moves => {
                 let path = path.to_string_lossy().into_owned();
-                (panel::same_folder(&gozler_core::winpath::parent_of(&path), &folder))
+                (panel::same_folder(&parent_of(&path), &folder))
                     .then(|| panel::last_name(&path).to_owned())
             }
             _ => None,
@@ -1854,7 +1882,7 @@ fn drive_id(letter: char) -> u16 {
 
 /// What a row's icon is looked up by.
 enum RowIcon {
-    /// `..`'s arrow ([`Icons::up`](super::super::icons::Icons::up)).
+    /// `..`'s icon ([`Icons::up`](super::super::icons::Icons::up)).
     Up,
     /// An entry's or a result's name and whether it is a folder.
     Item(String, bool),

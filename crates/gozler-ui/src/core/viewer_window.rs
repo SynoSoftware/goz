@@ -265,9 +265,9 @@ impl Document {
         self.task = Task::Jump { offset };
     }
 
-    /// Fits the page to an area of `columns` characters and `height` rows.
+    /// Fits the page to an area of `columns` characters and `height` rows,
+    /// each at least 1, as [`text_room`] gives them.
     pub(crate) fn set_area(&mut self, columns: usize, height: usize) {
-        let (columns, height) = (columns.max(1), height.max(1));
         if (columns, height) == (self.columns, self.height) {
             return;
         }
@@ -721,7 +721,6 @@ impl Document {
 
 /// `text` in rows of `columns` characters.
 fn wrapped(text: String, columns: usize) -> Vec<String> {
-    let columns = columns.max(1);
     if text.chars().nth(columns).is_none() {
         return vec![text];
     }

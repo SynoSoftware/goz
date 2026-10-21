@@ -412,7 +412,6 @@ impl Drop for FileReader {
     /// answering waits for the share.
     fn drop(&mut self) {
         self.stop.stop();
-        self.requests = None;
         let (file, notification) = {
             let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
             (held.file.take(), held.notification.take())

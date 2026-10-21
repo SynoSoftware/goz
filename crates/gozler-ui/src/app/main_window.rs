@@ -5223,8 +5223,6 @@ impl WindowProc for MainWindow {
                     colors.window_background()
                 })
             }
-            // The class brush paints the background.
-            Message::EraseBackground | Message::Paint => None,
             Message::SettingChange {
                 regional_format: true,
             } => {
@@ -5235,12 +5233,6 @@ impl WindowProc for MainWindow {
             Message::SettingChange { .. } => None,
             Message::SysColorChange => {
                 self.apply_glyphs(hwnd.dpi());
-                // The panels' `..` takes the new text colour.
-                self.icons.forget_up();
-                for side in Side::BOTH {
-                    let list = self.panel(side).list;
-                    list.redraw_rows(list.visible_rows());
-                }
                 None
             }
             Message::EndSession { ending: true } => {

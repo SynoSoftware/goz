@@ -66,6 +66,18 @@ impl Taken {
         !self.folders.is_empty() && self.folders.contains(&folded(folder))
     }
 
+    /// The folded names of the taken paths directly in the folder `folder`,
+    /// as UTF-16, whichever operation takes them. It walks every taken path,
+    /// so a caller asks once for a folder, not once for each entry.
+    pub fn names_in<'a>(&'a self, folder: &[u16]) -> impl Iterator<Item = &'a [u16]> + 'a {
+        let mut prefix = folded(folder);
+        prefix.push(BACKSLASH);
+        self.paths.keys().filter_map(move |path| {
+            path.strip_prefix(prefix.as_slice())
+                .filter(|name| !name.contains(&BACKSLASH))
+        })
+    }
+
     /// Whether `path`, as UTF-16, equals or is below a path that the
     /// operation `id` takes.
     pub fn takes(&self, path: &[u16], id: OperationId) -> bool {

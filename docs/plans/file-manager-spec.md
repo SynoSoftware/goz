@@ -162,8 +162,8 @@ show them.
   | Date modified | as in Search |
 
   - The first row is `..` in every folder except a drive's root. Its icon
-    is an arrow up, as Total Commander's. It has no size and no date, and
-    no command acts on it.
+    is Windows' open folder, which tells it from the folders below it. It
+    has no size and no date, and no command acts on it.
   - Folders come first, then files. Each group is sorted by the chosen
     column. Names compare by their folded form, as Search's name sort does,
     so the two modes order names the same.

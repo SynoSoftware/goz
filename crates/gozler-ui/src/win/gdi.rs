@@ -30,7 +30,8 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::Shell::{
     PathCompactPathW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_LARGEICON, SHGFI_SMALLICON,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW,
+    SHGetStockIconInfo, SHSTOCKICONINFO, SIID_FOLDEROPEN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, HICON, ICONINFO, NONCLIENTMETRICSW, SPI_GETHIGHCONTRAST,
@@ -617,20 +618,17 @@ impl ImageList {
         (!icon.is_invalid()).then_some(Icon(icon))
     }
 
-    /// Adds `glyph` as an icon of the list's size in the window text
-    /// colour, and returns its index; `None` when the icon font lacks it or
-    /// GDI fails. The process's system image list keeps it, after the
-    /// shell's own icons, so it has no index in the other size's list.
-    pub(crate) fn add_glyph(self, glyph: Glyph) -> Option<i32> {
-        let (mut width, mut height) = (0, 0);
-        // SAFETY: the system image list lives as long as the process.
-        unsafe {
-            let _ = ImageList_GetIconSize(self.0, Some(&mut width), Some(&mut height));
-        }
-        let icon = glyph_icon(glyph, Px(width), system_color(COLOR_WINDOWTEXT))?;
-        // SAFETY: the list copies `icon`, which stays the thread's.
-        let index = unsafe { ImageList_ReplaceIcon(self.0, -1, icon) };
-        (index >= 0).then_some(index)
+    /// The index in the system image lists of Windows' open folder icon,
+    /// which is already there, so nothing is added to the lists that the
+    /// shell keeps in step; `None` when the shell does not say.
+    pub(crate) fn open_folder_index() -> Option<i32> {
+        let mut info = SHSTOCKICONINFO {
+            cbSize: size_of::<SHSTOCKICONINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `info` is a local with its size set, which the call fills.
+        unsafe { SHGetStockIconInfo(SIID_FOLDEROPEN, SHGSI_SYSICONINDEX, &mut info) }.ok()?;
+        Some(info.iSysImageIndex)
     }
 
     /// Draws the icon `index` in the middle of `area`.

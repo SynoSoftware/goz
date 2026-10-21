@@ -257,13 +257,6 @@ impl Viewer {
         self.set_shown(hwnd, Shown::Reading);
     }
 
-    /// Opens the file again where it shows now, or where it showed before
-    /// it was lost, as Retry and a kept drive do.
-    fn reopen(&self, hwnd: Hwnd) {
-        self.remember_place();
-        self.read_file(hwnd);
-    }
-
     fn remember_place(&self) {
         if let Some(document) = self.shown.borrow().document() {
             self.resume
@@ -488,9 +481,7 @@ impl Viewer {
                     self.set_shown(hwnd, Shown::File(document));
                 }
                 ViewerEvent::Block { index, bytes } => {
-                    if self.in_flight.get() == Some(index) {
-                        self.in_flight.set(None);
-                    }
+                    self.in_flight.set(None);
                     if let Some(document) = self.shown.borrow_mut().document_mut() {
                         document.receive(index, bytes);
                     }
@@ -522,13 +513,15 @@ impl Viewer {
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
                     reader.release();
                 }
-                self.in_flight.set(None);
                 self.set_shown(hwnd, Shown::Removed);
             }
             // Another program kept the drive, so the file can show again.
             Removal::Failed => self.read_file(hwnd),
+            // A drive pulled out without asking sends only this.
             Removal::Complete => {
+                self.remember_place();
                 self.reader.replace(None);
+                self.set_shown(hwnd, Shown::Removed);
             }
         }
         true
@@ -707,7 +700,7 @@ impl WindowProc for Viewer {
             }
             Message::Command(Command::Control(event)) => {
                 if self.controls.get()?.retry.clicked(event) {
-                    self.reopen(hwnd);
+                    self.read_file(hwnd);
                 }
                 Some(LRESULT(0))
             }

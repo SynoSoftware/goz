@@ -34,7 +34,7 @@ use gozler_core::wtf8;
 use gozler_fileops::{OperationId, Request, Taken};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
 use std::ops::Range;
 use std::path::Path;
@@ -561,8 +561,9 @@ pub(crate) enum ReadEvent {
 pub(crate) enum ReadChange {
     /// An older reading, which changes nothing.
     Stale,
-    /// The new folder opened: the list says "Reading…".
-    Opened,
+    /// The rows went: a new folder opened, and the list says "Reading…",
+    /// or the shown drive is not ready.
+    Cleared,
     /// The listing replaced the rows; the list shows `place`. `again` when
     /// it was the shown folder read again in the same order, whose rows
     /// stay where the person sees them. `stale` when an operation that
@@ -582,8 +583,6 @@ pub(crate) enum ReadChange {
         reason: String,
         typed: bool,
     },
-    /// The shown drive is not ready.
-    NotReady,
 }
 
 /// What `Enter` on a row does.
@@ -1115,10 +1114,12 @@ impl Panel {
 
     /// Recomputes which entries show, after the entries or the taken
     /// entries changed. Only a folder that a delete or a move takes, or
-    /// one that holds a taken entry, compares its entries' paths, so a
-    /// change in any other folder costs nothing. An entry it hides loses
-    /// its selection mark, because the list's selection loses its row, and
-    /// a mark kept would select it again, unasked, when it shows again.
+    /// one that holds a taken entry, looks at its entries, so a change in
+    /// any other folder costs nothing. In a folder that holds one, only an
+    /// entry whose name has a taken name's hash has its path compared. An
+    /// entry it hides loses its selection mark, because the list's
+    /// selection loses its row, and a mark kept would select it again,
+    /// unasked, when it shows again.
     fn filter(&mut self, taken: &Taken) {
         let kept = &self.kept;
         let keeps = |id| kept.contains_key(&id);
@@ -1138,15 +1139,20 @@ impl Panel {
                 path.push(u16::from(b'\\'));
             }
             let base = path.len();
+            let names: HashSet<u64> = (taken.names_in(&folder))
+                .map(|name| name_hash(&name_key(name)))
+                .collect();
             let mut shown = Vec::new();
             for (i, entry) in self.entries.iter_mut().enumerate() {
-                path.truncate(base);
-                path.extend_from_slice(&entry.name);
-                if taken.contains(&path, keeps) {
-                    entry.selected = false;
-                } else {
-                    shown.push(i as u32);
+                if names.contains(&entry.hash) {
+                    path.truncate(base);
+                    path.extend_from_slice(&entry.name);
+                    if taken.contains(&path, keeps) {
+                        entry.selected = false;
+                        continue;
+                    }
                 }
+                shown.push(i as u32);
             }
             Some(shown)
         } else {
@@ -1689,10 +1695,11 @@ pub(crate) struct Panels {
     /// Orders the ends of operations and the starts of readings, and
     /// names each reading.
     moment: u64,
-    /// The entries that deletes and moves have taken, which the lists show
-    /// blank and the selections leave out (file-manager-spec.md: The person
-    /// never waits for the disk); one for all lists, Search's too, which
-    /// each decide with their own kept operations.
+    /// The entries that deletes and moves have taken, which the folder
+    /// panels leave out, the search lists show struck through, and the
+    /// selections leave out (file-manager-spec.md: The person never waits
+    /// for the disk); one for all lists, Search's too, which each decide
+    /// with their own kept operations.
     taken: Arc<Taken>,
     /// The drives' labels as the labels thread last read them, by letter.
     labels: HashMap<char, String>,
@@ -2056,7 +2063,7 @@ impl Panels {
                     panel.view = View::Reading;
                     panel.clear();
                     panel.free = None;
-                    ReadChange::Opened
+                    ReadChange::Cleared
                 }
                 ReadKind::Again => ReadChange::Stale,
             },
@@ -2143,19 +2150,20 @@ impl Panels {
                 ..
             } => {
                 panel.read = None;
+                // A folder that cannot be opened is no state of the panel
+                // (file-manager-spec.md: A panel): it stays where it was,
+                // with its rows, its search, or another folder that reads
+                // or is not ready, which the window reads again. Only the
+                // shown folder itself, or the first one, is not ready.
+                let elsewhere = matches!(panel.view, View::Folder | View::Search(_))
+                    || !panel.folder.is_empty() && read.path != panel.folder;
                 match read.kind {
-                    // The folder never opened, so its rows or its search's
-                    // still show.
-                    ReadKind::Go { typed, .. }
-                        if matches!(panel.view, View::Folder | View::Search(_)) =>
-                    {
-                        ReadChange::Refused {
-                            path,
-                            failure,
-                            reason,
-                            typed,
-                        }
-                    }
+                    ReadKind::Go { typed, .. } if elsewhere => ReadChange::Refused {
+                        path,
+                        failure,
+                        reason,
+                        typed,
+                    },
                     _ => {
                         panel.view = View::NotReady {
                             drive: drive_root(&read.path),
@@ -2164,7 +2172,7 @@ impl Panels {
                             panel.folder = read.path;
                         }
                         panel.clear();
-                        ReadChange::NotReady
+                        ReadChange::Cleared
                     }
                 }
             }
