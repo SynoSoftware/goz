@@ -19,8 +19,8 @@ use crate::core::layout::{Body, PanelLayout, Px, Rect};
 use crate::core::model::{Column, TakenShown};
 use crate::core::open;
 use crate::core::panel::{
-    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels, Place,
-    ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
+    self, AddSelected, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels,
+    Place, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
 };
 use crate::core::selection::SELECTION_LIMIT;
 use crate::core::settings::Mode;
@@ -1198,15 +1198,24 @@ impl MainWindow {
             return;
         };
         if select && let Some(from) = from {
-            let rows: Vec<u64> = {
-                let model = self.model.borrow();
-                let panels = model.panels();
-                panel::passed(from, to, count)
-                    .filter(|row| panels.selectable(side, *row))
-                    .collect()
-            };
-            for row in rows {
-                list.select(row, true);
+            let adding = (self.model.borrow().panels())
+                .selectable_ranges(side, panel::passed(from, to, count));
+            match panel::add_selected(&adding, count) {
+                AddSelected::EachRow => {
+                    for row in adding.iter().cloned().flatten() {
+                        list.select(row, true);
+                    }
+                }
+                AddSelected::AllThenClear { span } => {
+                    let selected = list.selected_outside(span);
+                    list.select_all();
+                    for row in panel::clears_after_all(&selected, &adding, count)
+                        .into_iter()
+                        .flatten()
+                    {
+                        list.select(row, false);
+                    }
+                }
             }
         }
         list.set_focused(Some(to));

@@ -1745,6 +1745,52 @@ pub(crate) fn passed(from: u64, to: u64, count: u64) -> Range<u64> {
     }
 }
 
+/// How a list adds rows that `Shift` passed to the rows it selects, with
+/// the fewest writes, because each write notifies the window
+/// ([`add_selected`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AddSelected {
+    /// Selects each added row.
+    EachRow,
+    /// Selects every row in one write, then clears each row that is not
+    /// added and was not selected ([`clears_after_all`]); the list reads
+    /// only its selected rows outside `span`, the added rows' span.
+    AllThenClear { span: Range<u64> },
+}
+
+/// How a list of `count` rows adds `adding`, sorted ranges that do not
+/// touch, to the rows it selects: Shift+End from the top of a large list
+/// passes every row, which one write and a few clears select.
+pub(crate) fn add_selected(adding: &[Range<u64>], count: u64) -> AddSelected {
+    let (Some(first), Some(last)) = (adding.first(), adding.last()) else {
+        return AddSelected::EachRow;
+    };
+    let span = first.start..last.end;
+    let added: u64 = adding.iter().map(|range| range.end - range.start).sum();
+    // Each row outside the span is read when selected or cleared when not,
+    // and each row of the span that is not added is cleared.
+    let after_all = 1 + count - (span.end - span.start) + (span.end - span.start - added);
+    if after_all < added {
+        AddSelected::AllThenClear { span }
+    } else {
+        AddSelected::EachRow
+    }
+}
+
+/// The rows to clear after a list of `count` rows selected every row, so
+/// that it selects `adding` and the rows `selected` it selected before.
+#[allow(
+    clippy::single_range_in_vec_init,
+    reason = "a selection is a list of row ranges"
+)]
+pub(crate) fn clears_after_all(
+    selected: &[Range<u64>],
+    adding: &[Range<u64>],
+    count: u64,
+) -> Vec<Range<u64>> {
+    difference(&difference(&[0..count], selected), adding)
+}
+
 /// Both panels and what they share.
 #[derive(Debug)]
 pub(crate) struct Panels {
@@ -2352,6 +2398,19 @@ impl Panels {
     /// not `..`; any search panel row that no delete or move took. A row
     /// whose chunk has not arrived is selectable, because the selection is
     /// its position.
+    /// The rows of `rows` that [`Panels::selectable`] says `side` can select,
+    /// as sorted ranges that do not touch.
+    pub(crate) fn selectable_ranges(&self, side: Side, rows: Range<u64>) -> Vec<Range<u64>> {
+        let mut ranges: Vec<Range<u64>> = Vec::new();
+        for row in rows.filter(|row| self.selectable(side, *row)) {
+            match ranges.last_mut() {
+                Some(last) if last.end == row => last.end = row + 1,
+                _ => ranges.push(row..row + 1),
+            }
+        }
+        ranges
+    }
+
     pub(crate) fn selectable(&self, side: Side, row: u64) -> bool {
         let panel = self.panel(side);
         match panel.search() {
@@ -3133,6 +3192,26 @@ pub(crate) mod tests {
         assert_eq!(passed(3, 4, 10), 3..4);
         assert_eq!(passed(4, 3, 10), 4..5);
         assert_eq!(passed(9, 9, 10), 9..10);
+    }
+
+    /// Shift+End from the top of 100,000 rows selects every row in one
+    /// write instead of 99,999, and keeps the rows the person selected
+    /// before the span; a short step still selects row by row.
+    #[test]
+    fn shift_across_most_rows_selects_every_row_then_clears() {
+        let count = 100_000;
+        let adding = [1..count];
+        assert_eq!(
+            add_selected(&adding, count),
+            AddSelected::AllThenClear { span: 1..count }
+        );
+        assert_eq!(clears_after_all(&[], &adding, count), [0..1]);
+        let span_inside = [10..20, 30..count];
+        assert_eq!(
+            clears_after_all(&[2..3], &span_inside, count),
+            [0..2, 3..10, 20..30]
+        );
+        assert_eq!(add_selected(&[5..6], count), AddSelected::EachRow);
     }
 
     /// Quick search goes to the first name that starts with the text,

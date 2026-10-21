@@ -920,6 +920,7 @@ A panel has a focused row and selected entries, as Norton Commander has a cursor
 
 - **The selection is cleared** when the panel shows another folder, and when the person submits a copy, a move or a delete of it, as in Total Commander, because the rows of a move or a delete leave the panel.
 - **A search panel uses the same keys and the same list selection.** Its selection is read from gozlerd, as Search's is.
+- **Each row the list selects or clears notifies the window,** so `Shift` with a key that passes more rows than it leaves selects every row in one write and then clears the rows that are neither passed nor were selected, reading only the selected rows outside the passed ones (`panel::add_selected`). `Shift+End` from the top of a million entries is then one write and a clear of `..`.
 
 ### Quick search
 

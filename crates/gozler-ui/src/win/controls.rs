@@ -1681,6 +1681,32 @@ impl ListView {
         ranges
     }
 
+    /// The selected rows outside `span`, as sorted ranges that do not
+    /// touch, read without asking for the rows inside it.
+    pub(crate) fn selected_outside(self, span: Range<u64>) -> Vec<Range<u64>> {
+        let mut ranges: Vec<Range<u64>> = Vec::new();
+        let mut after = -1isize;
+        loop {
+            let next = send(
+                self.0,
+                LVM_GETNEXTITEM,
+                after as usize,
+                LVNI_SELECTED as isize,
+            );
+            let Ok(row) = u64::try_from(next) else { break };
+            if span.contains(&row) {
+                after = span.end as isize - 1;
+                continue;
+            }
+            match ranges.last_mut() {
+                Some(last) if last.end == row => last.end = row + 1,
+                _ => ranges.push(row..row + 1),
+            }
+            after = next;
+        }
+        ranges
+    }
+
     /// The row at `point`, in screen coordinates, if one is there.
     pub(crate) fn row_at(self, point: (i32, i32)) -> Option<u64> {
         let mut hit = LVHITTESTINFO {
