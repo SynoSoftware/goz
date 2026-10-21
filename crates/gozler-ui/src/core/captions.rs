@@ -2734,6 +2734,26 @@ mod tests {
     use std::collections::HashSet;
     use std::path::Path;
 
+    /// A panel's status line gives the known part of its size and says how
+    /// many sizes are unknown, never only "unknown" (DESIGN.md: A panel).
+    #[test]
+    fn a_panel_status_names_its_unknown_sizes() {
+        let strings = super::super::text::tests::english();
+        let numbers = super::super::text::tests::English;
+        let status = |items, bytes, unknown| {
+            let size = Some(super::super::panel::Totals { bytes, unknown });
+            let counts = Counts {
+                items,
+                selected: None,
+                size,
+            };
+            panel_counts(&strings, &numbers, counts)
+        };
+        assert_eq!(status(20, 2 << 30, 12), "20 items · (2.00 GB, 12 unknown)");
+        assert_eq!(status(12, 0, 12), "12 items · (12 unknown)");
+        assert_eq!(status(20, 2 << 30, 0), "20 items · 2.00 GB");
+    }
+
     /// An access key that two controls of a dialog share focuses the first
     /// only, and a label without one leaves its control out of reach of the
     /// keyboard (DESIGN.md: Words). Every shipped language chooses its own

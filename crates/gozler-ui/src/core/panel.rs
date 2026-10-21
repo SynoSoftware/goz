@@ -3374,6 +3374,79 @@ pub(crate) mod tests {
         assert_eq!(shown(&panels, "x.txt"), None);
     }
 
+    /// A change batch in a folder that a delete takes from finds the taken
+    /// entries by the names the delete gave, and one given in another case
+    /// by its path. The panel folds the taken names once for each snapshot,
+    /// so a batch costs nothing per taken name.
+    #[test]
+    fn a_change_batch_keeps_the_taken_names_folded_once() {
+        let mut panels = showing(
+            r"C:\f",
+            vec![
+                file("a.txt", 1, 0),
+                file("B.txt", 1, 0),
+                file("c.txt", 1, 0),
+            ],
+        );
+        let mut taken = Taken::default();
+        taken.insert(OperationId::for_tests(1), Path::new(r"C:\f\a.txt"), false);
+        taken.insert(OperationId::for_tests(1), Path::new(r"C:\f\b.txt"), false);
+        panels.set_taken(Arc::new(taken), [None; 2]);
+        assert_eq!(names(&panels, Side::Left), ["..", "c.txt"]);
+        let folded = |panels: &Panels| {
+            let hashes = panels.panel(Side::Left).taken_hashes.as_ref();
+            hashes
+                .expect("the folder holds taken entries")
+                .folder
+                .as_ptr()
+        };
+        let before = folded(&panels);
+        let changes = vec![FolderChange::Added(file("d.txt", 1, 0))];
+        panels.apply_changes(Side::Left, changes, None);
+        assert_eq!(names(&panels, Side::Left), ["..", "c.txt", "d.txt"]);
+        assert_eq!(folded(&panels), before);
+    }
+
+    /// A folder that cannot be opened while the panel reads another folder,
+    /// or shows a drive that is not ready, is refused: the panel stays as it
+    /// was instead of showing the failed folder's drive as not ready.
+    #[test]
+    fn a_failed_move_from_reading_or_not_ready_is_refused() {
+        let fail = |panels: &mut Panels, path: &str| {
+            let ask = panels.go(Side::Left, path.to_owned(), None);
+            let event = ReadEvent::Failed {
+                generation: ask.generation,
+                path: path.to_owned(),
+                failure: ReadFailure::NotReady,
+                reason: String::new(),
+            };
+            panels.accept_read(Side::Left, event, None).change
+        };
+        let mut panels = Panels::new(&SavedPanels::default());
+        assert_eq!(fail(&mut panels, r"D:\"), ReadChange::Cleared);
+        assert!(matches!(
+            fail(&mut panels, r"E:\x"),
+            ReadChange::Refused { .. }
+        ));
+        assert!(matches!(
+            panels.panel(Side::Left).view(),
+            View::NotReady { drive } if drive == r"D:\"
+        ));
+
+        let mut panels = Panels::new(&SavedPanels::default());
+        let ask = panels.go(Side::Left, r"C:\a".to_owned(), None);
+        let opened = ReadEvent::Opened {
+            generation: ask.generation,
+            folder: r"C:\a".to_owned(),
+        };
+        panels.accept_read(Side::Left, opened, None);
+        assert!(matches!(
+            fail(&mut panels, r"E:\x"),
+            ReadChange::Refused { .. }
+        ));
+        assert!(matches!(panels.panel(Side::Left).view(), View::Reading));
+    }
+
     /// More changes than go in one by one rebuild the entries, which must
     /// put each new entry at its sorted place among the old ones.
     #[test]
