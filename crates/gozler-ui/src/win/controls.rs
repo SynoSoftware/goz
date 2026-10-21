@@ -2333,7 +2333,7 @@ impl ReportList {
         // The vertical scroll bar takes its width when the rows fill the
         // list.
         let width = self.0.client_size().width - scroll_bar_width(dpi);
-        for (column, width) in column_sizing::fill_widths(&fits, width, dpi)
+        for (column, width) in column_sizing::fill_widths(&fits, width)
             .into_iter()
             .enumerate()
         {

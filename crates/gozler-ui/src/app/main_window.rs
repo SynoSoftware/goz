@@ -1998,8 +1998,8 @@ impl MainWindow {
     /// Fills the list's width with its columns when the width changed
     /// ([`ColumnSizing::resized`]).
     fn fill_on_resize(&self) {
-        let (width, dpi) = self.fill_width();
-        let widths = (self.column_sizing.borrow_mut()).resized(width, dpi, || self.column_fits());
+        let width = self.fill_width();
+        let widths = (self.column_sizing.borrow_mut()).resized(width, || self.column_fits());
         if let Some(widths) = widths {
             self.set_column_widths(widths);
         }
@@ -2008,9 +2008,8 @@ impl MainWindow {
     /// The person ended a drag of the window's border or title bar
     /// ([`ColumnSizing::drag_ended`]).
     fn end_sizing(&self) {
-        let (width, dpi) = self.fill_width();
-        let widths =
-            (self.column_sizing.borrow_mut()).drag_ended(width, dpi, || self.column_fits());
+        let width = self.fill_width();
+        let widths = (self.column_sizing.borrow_mut()).drag_ended(width, || self.column_fits());
         if let Some(widths) = widths {
             let list = self.created().controls.list;
             list.hwnd()
@@ -2032,21 +2031,16 @@ impl MainWindow {
         {
             return;
         }
-        let (width, dpi) = self.fill_width();
-        let widths =
-            (self.column_sizing.borrow_mut()).rows_arrived(width, dpi, || self.column_fits());
+        let width = self.fill_width();
+        let widths = (self.column_sizing.borrow_mut()).rows_arrived(width, || self.column_fits());
         if let Some(widths) = widths {
             self.set_column_widths(widths);
         }
     }
 
-    /// The width the list's columns fill, and the DPI it is in.
-    fn fill_width(&self) -> (Px, Dpi) {
-        let created = self.created();
-        (
-            created.controls.list.fill_width(),
-            created.metrics.get().dpi,
-        )
+    /// The width the list's columns fill.
+    fn fill_width(&self) -> Px {
+        self.created().controls.list.fill_width()
     }
 
     /// Gives the columns `widths`, each only when it differs from the
@@ -2068,7 +2062,7 @@ impl MainWindow {
             self.created()
                 .controls
                 .list
-                .set_column_width(index, fit.width);
+                .set_column_width(index, fit.widest);
         }
     }
 
@@ -2095,7 +2089,7 @@ impl MainWindow {
         let label = list.first_label_offset(rows.start).unwrap_or_default();
         // The model is borrowed while the texts are formatted, and the
         // measuring follows.
-        let (headers, cells) = {
+        let (columns, headers, cells) = {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
             let strings = model.strings();
@@ -2129,7 +2123,7 @@ impl MainWindow {
                         .collect()
                 })
                 .collect();
-            (headers, cells)
+            (columns.to_vec(), headers, cells)
         };
         let fonts = created.fonts.borrow();
         let plain = TextMeter::new(&fonts.ui);
@@ -2137,14 +2131,16 @@ impl MainWindow {
         headers
             .iter()
             .zip(cells)
+            .zip(columns)
             .zip(indexes)
-            .map(|((header, cells), index)| {
+            .map(|(((header, cells), column), index)| {
                 let first = index == 0;
                 let label = if first { label } else { Px(0) };
                 let texts = (cells.iter())
                     .filter(|(text, _)| !text.is_empty())
                     .map(|(text, parts)| matched_width(&plain, &bold, text, parts));
                 ColumnFit::of(plain.plain_width(header), texts, label, first, dpi)
+                    .for_column(column)
             })
             .collect()
     }
@@ -2472,7 +2468,7 @@ impl MainWindow {
                     self.created()
                         .controls
                         .list
-                        .set_column_width(index, fit.width);
+                        .set_column_width(index, fit.widest);
                 }
                 return;
             }
@@ -4385,9 +4381,9 @@ impl MainWindow {
         // and a hidden window shows at the width it had, which no resize
         // fills. Filling before it shows draws it once.
         if !hwnd.is_visible() {
-            let (width, dpi) = self.fill_width();
+            let width = self.fill_width();
             let widths =
-                (self.column_sizing.borrow_mut()).window_shown(width, dpi, || self.column_fits());
+                (self.column_sizing.borrow_mut()).window_shown(width, || self.column_fits());
             self.set_column_widths(widths);
         }
         if self.unshown.replace(false) {

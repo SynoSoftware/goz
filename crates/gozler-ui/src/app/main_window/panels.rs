@@ -582,7 +582,7 @@ impl MainWindow {
                 .zip(&headers)
                 .map(|(column, header)| {
                     let texts = column.iter().map(|sample| plain.width(sample));
-                    ColumnFit::of(plain.plain_width(header), texts, Px(0), false, dpi).width
+                    ColumnFit::of(plain.plain_width(header), texts, Px(0), false, dpi).widest
                 })
                 .collect()
         };

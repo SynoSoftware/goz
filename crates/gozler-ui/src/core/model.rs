@@ -2274,6 +2274,7 @@ impl Column {
                 // C15).
                 can_hide: false,
                 right_aligned: false,
+                whole: false,
                 sort_key: Some(SortKey::Name),
                 export_column: None,
             },
@@ -2284,6 +2285,7 @@ impl Column {
                 shown_by_default: true,
                 can_hide: true,
                 right_aligned: false,
+                whole: false,
                 sort_key: Some(SortKey::Path),
                 export_column: None,
             },
@@ -2295,6 +2297,7 @@ impl Column {
                 can_hide: true,
                 // So the digits line up.
                 right_aligned: true,
+                whole: true,
                 sort_key: Some(SortKey::Size),
                 export_column: Some(EsColumn::Size),
             },
@@ -2305,6 +2308,7 @@ impl Column {
                 shown_by_default: true,
                 can_hide: true,
                 right_aligned: false,
+                whole: false,
                 sort_key: Some(SortKey::DateModified),
                 export_column: Some(EsColumn::DateModified),
             },
@@ -2316,6 +2320,7 @@ impl Column {
                 shown_by_default: false,
                 can_hide: true,
                 right_aligned: false,
+                whole: false,
                 sort_key: Some(SortKey::DateCreated),
                 export_column: Some(EsColumn::DateCreated),
             },
@@ -2326,6 +2331,7 @@ impl Column {
                 shown_by_default: false,
                 can_hide: true,
                 right_aligned: false,
+                whole: false,
                 sort_key: Some(SortKey::Extension),
                 export_column: Some(EsColumn::Extension),
             },
@@ -2336,6 +2342,7 @@ impl Column {
                 shown_by_default: false,
                 can_hide: true,
                 right_aligned: false,
+                whole: false,
                 // gozler has no attribute sort.
                 sort_key: None,
                 export_column: Some(EsColumn::Attributes),
@@ -2354,6 +2361,9 @@ pub(crate) struct ColumnRow {
     pub(crate) shown_by_default: bool,
     pub(crate) can_hide: bool,
     pub(crate) right_aligned: bool,
+    /// A fill never cuts its cells, because part of the value is a wrong
+    /// value (DESIGN.md: Results list).
+    pub(crate) whole: bool,
     /// What a click on its header sorts by.
     pub(crate) sort_key: Option<SortKey>,
     /// Its column in an export; Name and Path are parts of the full path,
