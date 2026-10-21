@@ -113,10 +113,28 @@ impl Speed {
 pub(crate) const ENGINES: [Engine; 2] = [Engine::Windows, Engine::Ring];
 
 /// The ring's block sizes, in the order of the lists that show them: each
-/// power of two that [`RingBlock`] accepts, 64 KiB to 64 MiB.
+/// power of two that [`RingBlock`] accepts.
 pub(crate) fn ring_blocks() -> impl Iterator<Item = RingBlock> {
-    (16..=26)
-        .map(|power| RingBlock::from_bytes(1 << power).expect("64 KiB to 64 MiB are ring blocks"))
+    let powers = RingBlock::MIN_BYTES.trailing_zeros()..=RingBlock::MAX_BYTES.trailing_zeros();
+    powers.map(|power| {
+        RingBlock::from_bytes(1 << power).expect("each power of two in its range is a ring block")
+    })
+}
+
+/// Turns one delete worker per logical processor on, or off with the count
+/// the box showed, at most [`Count::MAX`] on a computer with more logical
+/// processors.
+pub(crate) fn set_per_processor(settings: &mut SpeedSettings, on: bool) {
+    settings.delete_workers = if on {
+        DeleteWorkers::PerProcessor
+    } else {
+        fixed_delete_workers(settings.delete_workers.get())
+    };
+}
+
+fn fixed_delete_workers(shown: usize) -> DeleteWorkers {
+    let count = u32::try_from(shown).map_or(Count::MAX, |shown| shown.min(Count::MAX));
+    DeleteWorkers::Fixed(Count::new(count).expect("a shown count is at least one"))
 }
 
 /// The range that refused a number box's text.
@@ -144,6 +162,19 @@ pub(crate) enum SpeedNumber {
 const MIB: u64 = 1024 * 1024;
 
 impl SpeedNumber {
+    /// In the File operations page's order.
+    pub(crate) const ALL: [SpeedNumber; 9] = [
+        SpeedNumber::LargeFileLimit,
+        SpeedNumber::WorkersSsd,
+        SpeedNumber::WorkersUsb,
+        SpeedNumber::WorkersHardDisk,
+        SpeedNumber::WorkersShare,
+        SpeedNumber::RingSsdInFlight,
+        SpeedNumber::RingHardDiskInFlight,
+        SpeedNumber::RingHardDiskBuffer,
+        SpeedNumber::DeleteWorkers,
+    ];
+
     /// The number that `settings` holds, in the unit the box shows; for
     /// one delete worker per logical processor, that many.
     pub(crate) fn get(self, settings: &SpeedSettings) -> u32 {
@@ -315,6 +346,16 @@ fn settings(saved: &SpeedValues) -> Result<SpeedSettings, SettingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Turning one delete worker per logical processor off keeps the count
+    /// the box showed, which on a computer with more logical processors than
+    /// the range's top is the top, so the page never holds a count that the
+    /// engine refuses.
+    #[test]
+    fn per_processor_off_clamps_the_count_to_the_top() {
+        let expected = DeleteWorkers::Fixed(Count::new(Count::MAX).expect("the top is in range"));
+        assert_eq!(fixed_delete_workers(128), expected);
+    }
 
     /// The person's values survive a restart, and a value out of its range
     /// in a hand-edited `ui.json` never reaches an operation.

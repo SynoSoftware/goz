@@ -19,7 +19,7 @@ use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::SummaryRow;
 use crate::core::layout::{Px, Rect, StatusLayout, StatusWidths};
 use crate::core::model::Model;
-use crate::core::open::{browse_command, total_commander_command};
+use crate::core::open::browse_command;
 use crate::core::results::Fix;
 use crate::core::settings::{
     ContextItem, ItemVisibility, SettingsDraft, SettingsPage, SettingsValues,
@@ -27,7 +27,7 @@ use crate::core::settings::{
 use crate::core::shortcuts::{
     CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows,
 };
-use crate::core::speed::{ENGINES, Speed, SpeedNumber, SpeedPreset, ring_blocks};
+use crate::core::speed::{self, ENGINES, Speed, SpeedNumber, SpeedPreset, ring_blocks};
 use crate::core::text::{LANGUAGES, LanguageChoice, SizeFormat, Strings, without_access_key};
 use crate::win::controls::{
     Balloon, Button, CheckBox, DropDownList, Edit, GlyphLabel, HotkeyControl, HotkeyValue,
@@ -485,6 +485,7 @@ impl<'a> SettingsDialog<'a> {
 
     /// Sets the File operations page's controls from `speed`.
     fn fill_speed(&self, speed: &Speed) {
+        self.draft.borrow_mut().speed_shown();
         self.show_preset(speed.preset);
         let page = SettingsPage::FileOperations;
         let mut settings = speed.settings();
@@ -548,23 +549,18 @@ impl<'a> SettingsDialog<'a> {
     /// range refuses, with the message that says the range; such a box is
     /// refused when OK or Apply is pressed (DESIGN.md: Dialogs).
     fn read_speed(&self) -> Result<(), (ControlId, String)> {
-        let mut settings = self.draft.borrow().edited.choices.speed.settings();
-        for (control, number) in SPEED_NUMBERS {
-            let Some(edit) = self
-                .control(SettingsPage::FileOperations, control)
-                .filter(|edit| edit.is_enabled())
-            else {
-                continue;
-            };
-            if let Err(range) = number.set_text(&mut settings, &edit.text()) {
-                let message = self.strings.format(
-                    "settings_file_operations.out_of_range",
-                    &[&range.min.to_string(), &range.max.to_string()],
-                );
-                return Err((control, message));
-            }
-        }
-        Ok(())
+        let Some((number, range)) = self.draft.borrow().refused() else {
+            return Ok(());
+        };
+        let control = SPEED_NUMBERS
+            .into_iter()
+            .find_map(|(control, each)| (each == number).then_some(control))
+            .expect("every speed number has its box");
+        let message = self.strings.format(
+            "settings_file_operations.out_of_range",
+            &[&range.min.to_string(), &range.max.to_string()],
+        );
+        Err((control, message))
     }
 
     /// The item that the Context menu page's list selects.
@@ -913,12 +909,8 @@ impl<'a> SettingsDialog<'a> {
     fn update_apply(&self, dialog: Hwnd) {
         let (changed, include_changed) = {
             let draft = self.draft.borrow();
-            (
-                draft.can_apply(),
-                draft.edited.include != draft.last_applied().include,
-            )
+            (draft.can_apply(), draft.shielded())
         };
-        let changed = changed || self.read_speed().is_err();
         let saving = self.saving.borrow().is_some();
         if let Some(apply) = dialog::item(dialog, ControlId::SettingsApply.id()) {
             if saving {
@@ -1465,6 +1457,7 @@ impl<'a> SettingsDialog<'a> {
         }
         match self.main.apply_settings(self.window, &edited, &last) {
             Err(message) => {
+                self.draft.borrow_mut().window_applied(None);
                 self.refuse(
                     dialog,
                     SettingsPage::Keyboard,
@@ -1475,17 +1468,7 @@ impl<'a> SettingsDialog<'a> {
             }
             Ok(applied) => {
                 let saving = self.save_include(&edited, &last, after);
-                let values = applied.values;
-                let refill = SettingsValues {
-                    include: edited.include.clone(),
-                    ..values.clone()
-                } != edited;
-                {
-                    let mut draft = self.draft.borrow_mut();
-                    draft.applied(values);
-                    // The Include settings stay edited until they are saved.
-                    draft.edited.include.clone_from(&edited.include);
-                }
+                let refill = (self.draft.borrow_mut()).window_applied(Some(applied.values));
                 if refill {
                     for page in SettingsPage::ALL {
                         self.fill(page);
@@ -1561,15 +1544,8 @@ impl<'a> SettingsDialog<'a> {
         );
         let note = match found {
             Ok(Some(path)) => {
-                let command = total_commander_command(&path);
-                let set = {
-                    let choices = &mut self.draft.borrow_mut().edited.choices;
-                    let set = choices.open_folders == command && choices.open_files == command;
-                    choices.open_folders.clone_from(&command);
-                    choices.open_files = command;
-                    set
-                };
-                if !set {
+                let changed = self.draft.borrow_mut().use_total_commander(&path);
+                if changed {
                     self.fill(SettingsPage::ContextMenu);
                     self.update_apply(dialog);
                     return;
@@ -1719,9 +1695,12 @@ impl<'a> SettingsDialog<'a> {
                 .unwrap_or_default();
             // A number out of its range is refused when OK or Apply is
             // pressed.
-            self.change_speed(|settings| {
-                let _ = number.set_text(settings, &text);
-            });
+            let preset = {
+                let mut draft = self.draft.borrow_mut();
+                draft.type_number(number, &text);
+                draft.edited.choices.speed.preset
+            };
+            self.show_preset(preset);
         } else if let Some((control, _, engine)) =
             SPEED_ENGINES.into_iter().find(|(c, ..)| is(id, *c))
         {
@@ -1793,16 +1772,7 @@ impl<'a> SettingsDialog<'a> {
             let per_processor = self
                 .check_box(SettingsPage::FileOperations, ControlId::SpeedPerProcessor)
                 .is_some_and(CheckBox::is_checked);
-            self.change_speed(|settings| {
-                if per_processor {
-                    settings.delete_workers = DeleteWorkers::PerProcessor;
-                } else {
-                    // The count the box showed, at most the range's top on
-                    // a computer with more logical processors.
-                    let shown = SpeedNumber::DeleteWorkers.get(settings);
-                    let _ = SpeedNumber::DeleteWorkers.set(settings, shown.min(64));
-                }
-            });
+            self.change_speed(|settings| speed::set_per_processor(settings, per_processor));
             self.fill(SettingsPage::FileOperations);
         } else if is(id, ControlId::IncludeModify) {
             self.modify_folders(dialog);

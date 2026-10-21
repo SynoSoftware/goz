@@ -8,7 +8,7 @@ plan lists what is still to build.
 
 ## Schedule
 
-**Not scheduled.** The owner decides when. Stages A, B, D, E, F and G and item C3 are built:
+**Not scheduled.** The owner decides when. Stages A, B, D, E, F and G and items C3 and C7 are built:
 
 - A: a wake opens no dialog until every reply and panel event drained with it
   is applied (DESIGN.md: window rule 13); a new or failed search cancels its
@@ -26,6 +26,10 @@ plan lists what is still to build.
   selection).
 - G: a `WH_MSGFILTER` hook gives the File operations window and the Viewers
   their keys while a dialog of the main window is open.
+- C7: `SettingsDraft` holds Apply's outcome, its enabling and shield, the
+  refused number boxes and the Use Total Commander link (DESIGN.md: Settings
+  dialog, The File operations page); `Count::MAX` and `RingBlock`'s range
+  are the engine's.
 
 Still open from B: run the ignored release-only timing test
 `timing_progress_folder_per_operation` once. If 100,000 sources still take
@@ -76,27 +80,6 @@ Defects this fixes: Language or Apply in another window; column reorder;
 the main window's and the Viewer's placement; the active panel; a search
 panel's sort; the Viewer's Wrap; the placement saved before the first show;
 a slow folder saved as the old one.
-
-## C7. Apply's outcome, in core
-
-- `gozler-fileops` exposes `Count::MIN` and `Count::MAX`. The per-processor
-  clamp becomes `shown.min(Count::MAX)`. `ring_blocks` takes its powers from
-  `RingBlock`'s range, not `16..=26`.
-- `SettingsDraft` gets the per-window outcome: a refused shortcut applies
-  nothing, and a failed registry write reverts that value. Use a name other
-  than `include_saved`, and keep `applied()`'s signature. The save as
-  administrator is `include_saved`, from the window-responsiveness work. The
-  dialog's apply calls the new method.
-- The page rules move to core with tests: the Total Commander link, Apply's
-  enabling and its shield, the `read_speed` dependency, and the
-  per-processor clamp.
-- The draft keeps the number boxes that refused their text, by
-  `SpeedNumber` with the text, so whether Apply is enabled is one core rule
-  and not Win32 state.
-
-Tests: a refused shortcut applies nothing; a failed write reverts and refills
-the page; a declined Include save stays edited with the shield; turning
-per-processor off clamps the count to the top.
 
 ## Documents
 

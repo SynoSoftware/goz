@@ -8,13 +8,15 @@ use super::glyph::Glyph;
 use super::ids::DialogId;
 use super::layout::{Dip, Panes};
 use super::model::Column;
+use super::open::total_commander_command;
 use super::panel::SavedPanels;
 use super::query::{Filters, Matching};
 use super::shortcuts::{CommandShortcuts, ShowShortcut};
-use super::speed::Speed;
+use super::speed::{OutOfRange, Speed, SpeedNumber};
 use super::text::{LanguageChoice, SizeFormat};
 use gozler_core::include::IncludeSettings;
 use gozler_core::types::SortSpec;
+use gozler_fileops::DeleteWorkers;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io;
@@ -408,6 +410,9 @@ impl ContextMenu {
 pub(crate) struct SettingsDraft {
     applied: SettingsValues,
     pub(crate) edited: SettingsValues,
+    /// The File operations page's number boxes whose text their range
+    /// refuses, with that text, which the edited values cannot hold.
+    refused: Vec<(SpeedNumber, String)>,
 }
 
 impl SettingsDraft {
@@ -415,11 +420,21 @@ impl SettingsDraft {
         SettingsDraft {
             applied: values.clone(),
             edited: values,
+            refused: Vec::new(),
         }
     }
 
+    /// Whether Apply is enabled: a value differs from what was applied, or
+    /// a number box holds text that Apply then refuses.
     pub(crate) fn can_apply(&self) -> bool {
-        self.edited != self.applied
+        self.edited != self.applied || self.refused().is_some()
+    }
+
+    /// Whether OK and Apply show the administrator shield: the Include
+    /// settings differ from the applied ones, and saving them asks Windows
+    /// for permission.
+    pub(crate) fn shielded(&self) -> bool {
+        self.edited.include != self.applied.include
     }
 
     /// Records `values`, what Apply or OK applied, which can differ from
@@ -429,6 +444,28 @@ impl SettingsDraft {
         self.applied = values;
     }
 
+    /// Records what the main window did with the edited values, and
+    /// answers whether the pages must show other values than the edited
+    /// ones. `None`: Windows refused the shortcut, so the window applied
+    /// nothing and every value stays edited. Otherwise the values now in
+    /// effect, which a registry setting whose write failed keeps at its
+    /// earlier value, become the applied and the edited ones; the Include
+    /// settings stay edited until they are saved
+    /// ([`SettingsDraft::include_saved`]).
+    pub(crate) fn window_applied(&mut self, applied: Option<SettingsValues>) -> bool {
+        let Some(values) = applied else {
+            return false;
+        };
+        let include = self.edited.include.clone();
+        let refill = SettingsValues {
+            include: include.clone(),
+            ..values.clone()
+        } != self.edited;
+        self.applied(values);
+        self.edited.include = include;
+        refill
+    }
+
     pub(crate) fn last_applied(&self) -> &SettingsValues {
         &self.applied
     }
@@ -436,6 +473,57 @@ impl SettingsDraft {
     /// Records `include`, Include settings that were saved, as applied.
     pub(crate) fn include_saved(&mut self, include: IncludeSettings) {
         self.applied.include = Some(include);
+    }
+
+    /// Records the text typed in `number`'s box, which makes the speed
+    /// Custom: a number in its range becomes the value, and any other text
+    /// is kept for Apply to refuse.
+    pub(crate) fn type_number(&mut self, number: SpeedNumber, text: &str) {
+        let mut taken = false;
+        self.edited.choices.speed.change(|settings| {
+            taken = number.set_text(settings, text).is_ok();
+        });
+        self.refused.retain(|(refused, _)| *refused != number);
+        if !taken {
+            self.refused.push((number, text.to_owned()));
+        }
+    }
+
+    /// The first number box, in the page's order, whose text its range
+    /// refuses, with that range. The delete workers' box is off while one
+    /// per logical processor is on, so its text is not checked then.
+    pub(crate) fn refused(&self) -> Option<(SpeedNumber, OutOfRange)> {
+        let settings = self.edited.choices.speed.settings();
+        let per_processor = settings.delete_workers == DeleteWorkers::PerProcessor;
+        SpeedNumber::ALL
+            .into_iter()
+            .filter(|number| !(per_processor && *number == SpeedNumber::DeleteWorkers))
+            .find_map(|number| {
+                let (_, text) = self.refused.iter().find(|(r, _)| *r == number)?;
+                let range = number.set_text(&mut settings.clone(), text).err()?;
+                Some((number, range))
+            })
+    }
+
+    /// The File operations page shows the edited values again, so no box
+    /// holds refused text.
+    pub(crate) fn speed_shown(&mut self) {
+        self.refused.clear();
+    }
+
+    /// The Use Total Commander link: both open commands open Total Commander
+    /// at `path`. Answers whether they changed; when they already did, the
+    /// dialog says so, because the link changed nothing (DESIGN.md: The
+    /// Context menu page).
+    pub(crate) fn use_total_commander(&mut self, path: &str) -> bool {
+        let command = total_commander_command(path);
+        let choices = &mut self.edited.choices;
+        if choices.open_folders == command && choices.open_files == command {
+            return false;
+        }
+        choices.open_folders.clone_from(&command);
+        choices.open_files = command;
+        true
     }
 }
 
@@ -690,6 +778,87 @@ mod tests {
     use crate::core::commands::{CommandId, Key, Keystroke};
     use crate::core::panel::{SavedPanel, Side};
     use crate::core::query::{DateModified, DateRange, Day, Kind, SizeFilter, SizeWord};
+    use crate::core::speed;
+    use gozler_fileops::Count;
+
+    fn values() -> SettingsValues {
+        SettingsValues {
+            choices: Choices::default(),
+            start_at_sign_in: false,
+            include: Some(IncludeSettings::default()),
+        }
+    }
+
+    /// A shortcut that Windows refuses applies nothing, so Apply stays
+    /// enabled for the edited values.
+    #[test]
+    fn a_refused_shortcut_applies_nothing() {
+        let mut draft = SettingsDraft::new(values());
+        draft.edited.choices.show_memory = true;
+        assert!(!draft.window_applied(None));
+        assert_eq!(*draft.last_applied(), values());
+        assert!(draft.edited.choices.show_memory && draft.can_apply());
+    }
+
+    /// A sign-in setting whose registry write failed keeps its earlier
+    /// value, which the page shows again, while the Include settings,
+    /// whose save as administrator the person declined, stay edited with
+    /// the shield on Apply.
+    #[test]
+    fn a_failed_write_reverts_and_unsaved_include_keeps_the_shield() {
+        let mut draft = SettingsDraft::new(values());
+        draft.edited.start_at_sign_in = true;
+        let include = IncludeSettings {
+            exclude_hidden: true,
+            ..IncludeSettings::default()
+        };
+        draft.edited.include = Some(include.clone());
+        // The window applies the Include settings only once they are saved.
+        let in_effect = SettingsValues {
+            start_at_sign_in: false,
+            include: values().include,
+            ..draft.edited.clone()
+        };
+        assert!(draft.window_applied(Some(in_effect)));
+        assert!(!draft.edited.start_at_sign_in);
+        assert_eq!(draft.edited.include, Some(include));
+        assert!(draft.shielded() && draft.can_apply());
+    }
+
+    /// A number box's text out of its range enables Apply, which refuses
+    /// it, until the box is turned off: delete workers' while one per
+    /// logical processor is on.
+    #[test]
+    fn a_turned_off_box_is_not_checked() {
+        let mut draft = SettingsDraft::new(values());
+        draft.edited.choices.speed.change(|settings| {
+            settings.delete_workers = DeleteWorkers::Fixed(Count::new(4).expect("in range"));
+        });
+        draft.applied(draft.edited.clone());
+        draft.type_number(SpeedNumber::DeleteWorkers, "0");
+        assert_eq!(
+            draft.refused().map(|(number, _)| number),
+            Some(SpeedNumber::DeleteWorkers)
+        );
+        assert!(draft.can_apply());
+        draft.edited.choices.speed.change(|settings| {
+            speed::set_per_processor(settings, true);
+        });
+        assert_eq!(draft.refused(), None);
+    }
+
+    /// The Use Total Commander link sets both open commands, and says when
+    /// they already held it, because it then changes nothing.
+    #[test]
+    fn the_total_commander_link_sets_both_open_commands() {
+        let mut draft = SettingsDraft::new(values());
+        let path = r"C:\totalcmd\TOTALCMD64.EXE";
+        assert!(draft.use_total_commander(path));
+        let command = total_commander_command(path);
+        assert_eq!(draft.edited.choices.open_folders, command);
+        assert_eq!(draft.edited.choices.open_files, command);
+        assert!(!draft.use_total_commander(path));
+    }
 
     /// A settings file that breaks a rule of Settings > Keyboard would give
     /// two commands one key, or a key the search box needs; the window

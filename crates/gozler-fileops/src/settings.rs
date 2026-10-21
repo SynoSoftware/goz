@@ -62,8 +62,11 @@ pub enum Engine {
 pub struct Count(u32);
 
 impl Count {
+    pub const MIN: u32 = 1;
+    pub const MAX: u32 = 64;
+
     pub fn new(count: u32) -> Result<Self, SettingError> {
-        in_range("a worker or block count", count, 1, 64).map(Self)
+        in_range("a worker or block count", count, Self::MIN, Self::MAX).map(Self)
     }
 
     pub fn get(self) -> usize {
@@ -86,8 +89,16 @@ pub struct CopyWorkers {
 pub struct RingBlock(u32);
 
 impl RingBlock {
+    pub const MIN_BYTES: u32 = 64 * 1024;
+    pub const MAX_BYTES: u32 = 64 * MIB;
+
     pub fn from_bytes(bytes: u32) -> Result<Self, SettingError> {
-        let bytes = in_range("a ring block in bytes", bytes, 64 * 1024, 64 * MIB)?;
+        let bytes = in_range(
+            "a ring block in bytes",
+            bytes,
+            Self::MIN_BYTES,
+            Self::MAX_BYTES,
+        )?;
         if !bytes.is_power_of_two() {
             return Err(SettingError::BlockNotPowerOfTwo(bytes));
         }
