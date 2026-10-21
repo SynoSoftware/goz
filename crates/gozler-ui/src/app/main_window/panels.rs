@@ -19,8 +19,8 @@ use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
 use crate::core::model::{Column, TakenShown};
 use crate::core::open;
 use crate::core::panel::{
-    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels, Place, ReadAsk,
-    ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
+    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels, Place,
+    ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
 };
 use crate::core::settings::Mode;
 use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListView};

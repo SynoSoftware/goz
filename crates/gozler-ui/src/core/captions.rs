@@ -1826,7 +1826,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
                 strings,
                 total(
                     "status.files",
-                    size_with_unknown(strings, numbers, widest, WIDEST_TOTAL),
+                    size_with_unknown(strings, numbers, Some(widest), WIDEST_TOTAL),
                 ),
                 total("status.folders", size_at_least(strings, numbers, widest)),
             );
@@ -1903,13 +1903,12 @@ fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValueP
     let Some(sums) = results.sums().filter(|_| !results.searching()) else {
         return Vec::new();
     };
-    let file_bytes = if sums.files_without_size == 0 {
-        text::bytes(strings, numbers, sums.file_bytes)
-    } else if sums.files_without_size == sums.files {
-        strings.text("status.size_unknown").to_owned()
-    } else {
-        size_with_unknown(strings, numbers, sums.file_bytes, sums.files_without_size)
-    };
+    let file_bytes = size_with_unknown(
+        strings,
+        numbers,
+        (sums.files_without_size < sums.files).then_some(sums.file_bytes),
+        sums.files_without_size,
+    );
     let folder_bytes = if sums.folder_bytes_at_least {
         size_at_least(strings, numbers, sums.folder_bytes)
     } else {
@@ -1937,19 +1936,26 @@ fn size_at_least(strings: &Strings, numbers: &dyn Numbers, bytes: u64) -> String
     )
 }
 
-/// The known sizes' sum and how many sizes are unknown: "3.4 GB, 12 sizes
-/// unknown".
+/// The sum of the known sizes, `None` when no size is known, and how many
+/// items have no known size: "3.4 GB", "3.4 GB, 12 unknown", or "12
+/// unknown"; the noun beside it says what is counted. It never says only
+/// "unknown" (**Owner ruling**: give the part that is known and say what
+/// is missing).
 fn size_with_unknown(
     strings: &Strings,
     numbers: &dyn Numbers,
-    bytes: u64,
+    known: Option<u64>,
     without_size: u64,
 ) -> String {
-    let unknown = strings.count("status.sizes_unknown", without_size, numbers, &[]);
-    strings.format(
-        "status.size_with_unknown",
-        &[&text::bytes(strings, numbers, bytes), &unknown],
-    )
+    let unknown = || strings.count("status.sizes_unknown", without_size, numbers, &[]);
+    match known {
+        Some(bytes) if without_size == 0 => text::bytes(strings, numbers, bytes),
+        Some(bytes) => strings.format(
+            "status.size_with_unknown",
+            &[&text::bytes(strings, numbers, bytes), &unknown()],
+        ),
+        None => unknown(),
+    }
 }
 
 /// How many results, or that a search runs. A filter that the hidden pane
@@ -2480,9 +2486,9 @@ pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
 }
 
 /// The status line's counts: "14 items · 5.2 GB" or "3 of 14 selected ·
-/// 4.2 GB". The known sizes' sum says how many folder sizes are unknown,
-/// as "(3.4 GB, 12 sizes unknown)", and "size unknown" shows only when no
-/// counted entry's size is known.
+/// 4.2 GB". A panel's files always have their size, so it counts the
+/// folders whose size is unknown: "(3.4 GB, 12 unknown)", or "(12
+/// unknown)" when no size is known.
 fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> String {
     let count = match counts.selected {
         None => strings.count("panel.items", counts.items, numbers, &[]),
@@ -2496,14 +2502,11 @@ fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> Str
     let counted = counts.selected.unwrap_or(counts.items);
     let size = match counts.size {
         None => String::new(),
-        Some(size) if size.unknown == counted => strings.text("status.size_unknown").to_owned(),
+        Some(size) if size.unknown == 0 => text::bytes(strings, numbers, size.bytes),
         Some(size) => {
-            let bytes = text::bytes(strings, numbers, size.bytes);
-            if size.unknown == 0 {
-                bytes
-            } else {
-                strings.count("panel.sizes_unknown", size.unknown, numbers, &[&bytes])
-            }
+            let known = (size.unknown < counted).then_some(size.bytes);
+            let size = size_with_unknown(strings, numbers, known, size.unknown);
+            strings.format("panel.size_with_unknown", &[&size])
         }
     };
     joined(strings, count, size)
