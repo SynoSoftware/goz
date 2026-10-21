@@ -3515,6 +3515,13 @@ impl MainWindow {
     /// selected, so the person types the next search at once (DESIGN.md: Window
     /// lifetime, C24). While a dialog is open, the dialog keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
+        // The columns fill when the window shows (DESIGN.md: Results list),
+        // and a hidden window shows at the width it had, which no resize
+        // fills. Filling before it shows draws it once.
+        if !hwnd.is_visible() {
+            self.sizing_fits.take();
+            self.fill_columns(&self.column_fits());
+        }
         if self.unshown.replace(false) {
             let placement = self.model.borrow().placement();
             win::window::show(hwnd, placement);
