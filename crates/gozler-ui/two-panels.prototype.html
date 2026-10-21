@@ -1,0 +1,522 @@
+<!--
+  PROTOTYPE, throwaway. Not part of gozler-ui; delete after the owner approves.
+  Question: how will Two panels look (docs/plans/file-manager-spec.md)?
+  Screens: the floating bar's left and right arrows, or the keys Left and Right.
+  Variants (?variant=A|B|C): how selected entries differ from the focus bar,
+  the one look the spec leaves to the prototype ("Selecting entries").
+  Every path, name, size and date is sample data.
+-->
+<title>Two panels prototype</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: a Windows 11 desktop at 100 % scale; the window is drawn with the
+   system colors GetSysColor gives in the default light theme, because Gozler
+   has no dark mode (DESIGN.md, owner decision). */
+:root {
+  --window: #ffffff;        /* COLOR_WINDOW */
+  --text: #000000;          /* COLOR_WINDOWTEXT */
+  --face: #f0f0f0;          /* COLOR_BTNFACE */
+  --hl: #0078d7;            /* COLOR_HIGHLIGHT */
+  --hltext: #ffffff;        /* COLOR_HIGHLIGHTTEXT */
+  --gray: #6d6d6d;          /* COLOR_GRAYTEXT */
+  --line: #e5e5e5;          /* one-pixel dividers */
+  --header: #4c607a;        /* list view header text, Explorer theme */
+  --explorer-sel: #cce8ff;  /* list view selection fill, Explorer theme */
+  --desk: #d7dde4;          /* the desktop behind the window */
+  --ui: "Segoe UI", system-ui, sans-serif;
+  --mono: Consolas, "Cascadia Mono", "Courier New", monospace;
+  --icons: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+}
+html, body { margin: 0; background: var(--desk); color: var(--text); font: 12px/1.35 var(--ui); }
+body { padding-block: 16px 84px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.note { max-width: 1060px; margin: 0 auto 12px; display: grid; gap: 4px; }
+.note .tag { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #5a6470; }
+.note h1 { font-size: 18px; font-weight: 600; margin: 0; text-wrap: balance; }
+.note p { margin: 0; max-width: 75ch; font-size: 13px; color: #2b3138; }
+.note kbd { font: 12px var(--ui); background: #eef1f4; border: 1px solid #b9c1ca; border-radius: 3px; padding: 0 4px; }
+.desk { overflow-x: auto; }
+.stage { position: relative; width: 1060px; margin: 0 auto; }
+.ico { font-family: var(--icons); font-style: normal; font-size: 12px; line-height: 1; }
+
+/* Window frame */
+.win { background: var(--window); border: 1px solid #8a8f96; box-shadow: 0 8px 28px rgba(20,30,40,.28); display: flex; flex-direction: column; }
+.titlebar { height: 30px; display: flex; align-items: center; background: #f3f3f3; padding-left: 10px; }
+.titlebar .t { flex: 1; font-size: 12px; }
+.titlebar .cap { width: 46px; height: 30px; display: grid; place-items: center; font-family: var(--icons); font-size: 10px; }
+.menubar { display: flex; gap: 0; padding: 0 2px; height: 20px; align-items: center; border-bottom: 1px solid var(--line); }
+.menubar span { padding: 1px 7px; }
+.menubar span.open { background: #cce8ff; outline: 1px solid #99d1ff; }
+.menubar .right { margin-left: auto; }
+u { text-decoration: underline; text-underline-offset: 1px; }
+
+/* Panels */
+.panels { display: grid; grid-template-columns: 1fr 1fr; flex: 1; min-height: 0; }
+.panel { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
+.panel:last-child { border-right: 0; }
+.pathrow { display: flex; gap: 7px; padding: 7px 7px 7px 11px; align-items: center; }
+.panel:last-child .pathrow { padding-right: 11px; }
+.drive { height: 23px; padding: 0 6px; border: 1px solid #d0d0d0; border-radius: 4px; background: #fdfdfd; display: flex; align-items: center; gap: 4px; font-weight: 600; }
+.drive .ico { font-size: 8px; font-weight: 400; }
+.edit { height: 21px; flex: 1; border: 1px solid #c4c4c4; border-bottom-color: #868686; border-radius: 3px; padding: 0 6px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; background: var(--window); }
+.panel.active .pathrow .edit.path:not(.focus) { background: var(--hl); color: var(--hltext); border-color: var(--hl); }
+.edit.focus { border-bottom: 2px solid var(--hl); }
+.combo { height: 21px; border: 1px solid #c4c4c4; border-radius: 3px; padding: 0 6px; display: flex; align-items: center; gap: 18px; background: #fdfdfd; white-space: nowrap; }
+.combo .ico { font-size: 8px; }
+.lbl { white-space: nowrap; }
+.caret { display: inline-block; width: 1px; height: 13px; background: currentColor; vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
+
+.list { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
+.cols, .row { display: grid; align-items: center; }
+.cols { height: 24px; color: var(--header); border-bottom: 1px solid var(--line); }
+.cols > div { padding: 0 6px; border-right: 1px solid var(--line); position: relative; white-space: nowrap; }
+.cols > div:last-child { border-right: 0; }
+.cols .sort::before { content: "\E70E"; font-family: var(--icons); font-size: 7px; position: absolute; top: -7px; left: 50%; transform: translateX(-50%); }
+.rows { flex: 1; overflow: hidden; }
+.row { height: 22px; }
+.row > div { padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .r { text-align: right; font-variant-numeric: tabular-nums; }
+.row .n { display: flex; align-items: center; gap: 6px; }
+.row.hidden { color: var(--gray); }
+.cols .r { text-align: right; }
+.mark { display: none; }
+.empty-msg { position: absolute; inset: 40px 0 auto; display: grid; justify-items: center; gap: 10px; text-align: center; padding: 0 20px; }
+.status-line { height: 22px; border-top: 1px solid var(--line); padding: 0 11px; display: flex; align-items: center; justify-content: space-between; gap: 12px; position: relative; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.quick { height: 18px; border: 1px solid var(--hl); background: var(--window); padding: 0 6px; display: flex; align-items: center; gap: 4px; flex: 1; margin-left: -4px; }
+.progress { width: 100px; height: 8px; border: 1px solid #bcbcbc; background: #e6e6e6; border-radius: 4px; overflow: hidden; }
+.progress i { display: block; height: 100%; background: #06b025; }
+.sbtn { height: 18px; padding: 0 10px; border: 1px solid #d0d0d0; border-radius: 3px; background: #fdfdfd; display: flex; align-items: center; }
+
+/* Selection variants. A: Commander. B: Explorer. C: marks. */
+body.v-A .panel.active .row.focus { background: var(--hl); color: var(--hltext); }
+body.v-A .panel:not(.active) .row.focus { background: #d9d9d9; }
+body.v-A .row.sel { color: var(--hl); font-weight: 600; }
+body.v-A .panel.active .row.focus.sel { color: var(--hltext); font-weight: 700; }
+body.v-B .row.sel { background: var(--explorer-sel); }
+body.v-B .panel.active .row.focus { box-shadow: inset 0 0 0 1px var(--text); }
+body.v-B .panel:not(.active) .row.focus { box-shadow: inset 0 0 0 1px #a0a0a0; }
+body.v-C .mark { display: block; padding: 0 0 0 6px; font-family: var(--icons); font-size: 11px; color: var(--hl); }
+body.v-C .panel.active .row.focus { background: var(--hl); color: var(--hltext); }
+body.v-C .panel.active .row.focus .mark { color: var(--hltext); }
+body.v-C .panel:not(.active) .row.focus { background: #d9d9d9; }
+
+/* Key bar and status bar */
+.keybar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 7px; padding: 7px 11px; border-top: 1px solid var(--line); position: relative; }
+.btn { height: 23px; border: 1px solid #d0d0d0; border-bottom-color: #b5b5b5; border-radius: 4px; background: #fdfdfd; display: flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.btn b { font-weight: 600; }
+.btn.dis { color: #a0a0a0; border-color: #e0e0e0; background: #f8f8f8; }
+.btn.def { border: 1px solid var(--hl); box-shadow: inset 0 0 0 1px var(--hl); }
+.btn .ico { font-size: 12px; }
+.statusbar { height: 24px; background: var(--face); border-top: 1px solid #dadada; display: grid; grid-template-columns: 260px 1fr auto; align-items: center; font-variant-numeric: tabular-nums; }
+.statusbar > div { padding: 0 8px; border-right: 1px solid #d5d5d5; height: 16px; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
+.statusbar > div:last-child { border-right: 0; }
+
+/* Popups: menus, tooltips, dialogs, balloons */
+.menu { position: absolute; background: #f9f9f9; border: 1px solid #ccc; box-shadow: 2px 3px 8px rgba(0,0,0,.2); padding: 2px; min-width: 230px; z-index: 5; }
+.menu .mi { display: grid; grid-template-columns: 24px 1fr auto 14px; align-items: center; height: 22px; }
+.menu .mi.hot { background: #cce8ff; outline: 1px solid #99d1ff; }
+.menu .mi.dis { color: #a0a0a0; }
+.menu .mi .k { padding-left: 24px; }
+.menu .mi .g { text-align: center; }
+.menu .mi .sub { font-family: var(--icons); font-size: 8px; }
+.menu .sep { height: 1px; background: #d7d7d7; margin: 3px 2px 3px 28px; }
+.tip { position: absolute; background: #ffffff; border: 1px solid #767676; padding: 3px 7px; box-shadow: 1px 2px 4px rgba(0,0,0,.2); white-space: nowrap; z-index: 6; }
+.balloon { position: absolute; background: #fff; border: 1px solid #767676; padding: 8px 10px; width: 260px; box-shadow: 1px 2px 6px rgba(0,0,0,.25); z-index: 6; }
+.balloon::before { content: ""; position: absolute; top: -7px; left: 18px; border: 7px solid transparent; border-top: 0; border-bottom-color: #767676; }
+.dlg { position: absolute; background: var(--face); border: 1px solid #8a8f96; box-shadow: 0 10px 30px rgba(0,0,0,.3); z-index: 7; display: flex; flex-direction: column; }
+.dlg .titlebar { background: #ffffff; height: 30px; }
+.dlg.inactive .titlebar .t { color: #8a8a8a; }
+.dlg .body { padding: 11px; display: grid; gap: 7px; }
+.dlg .buttons { display: flex; justify-content: flex-end; gap: 7px; padding: 0 11px 11px; }
+.dlg .buttons .btn { width: 75px; }
+.msgbox .body { background: #fff; display: flex; gap: 10px; align-items: flex-start; padding: 22px 16px 26px; }
+.msgbox .buttons { padding: 11px; border-top: 1px solid #dfdfdf; }
+.err { width: 32px; height: 32px; border-radius: 50%; background: #c42b1c; color: #fff; display: grid; place-items: center; font-family: var(--icons); font-size: 14px; flex: none; }
+
+/* Viewer */
+.view { flex: 1; display: flex; min-height: 0; font: 13px/18px var(--mono); }
+.view pre { margin: 0; padding: 4px 8px; flex: 1; white-space: pre; overflow: hidden; }
+.vscroll { width: 12px; background: #f3f3f3; position: relative; }
+.vscroll i { position: absolute; left: 3px; width: 6px; border-radius: 3px; background: #8a8a8a; }
+.vscroll.off { background: #f8f8f8; }
+.vscroll.off i { display: none; }
+.view .area-msg { position: absolute; inset: 60px 0 auto; display: grid; justify-items: center; gap: 10px; font: 14px var(--ui); }
+.hexoff { color: var(--gray); }
+
+/* The prototype's own controls, not part of the design */
+.proto-bar { position: fixed; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; background: #14181d; color: #f4f6f8; border-radius: 22px; padding: 6px 8px; box-shadow: 0 6px 18px rgba(0,0,0,.35); font: 13px var(--ui); z-index: 20; max-width: calc(100vw - 32px); flex-wrap: wrap; justify-content: center; }
+.proto-bar button { background: #2a313a; color: inherit; border: 0; border-radius: 14px; padding: 4px 10px; font: inherit; cursor: pointer; }
+.proto-bar button:focus-visible { outline: 2px solid #8fc7ff; }
+.proto-bar button.on { background: #e8eef5; color: #14181d; }
+.proto-bar .lab { min-width: 220px; text-align: center; }
+.proto-bar .sep { width: 1px; height: 18px; background: #3b444f; margin: 0 4px; }
+</style>
+
+<div class="note">
+  <div class="tag">Prototype · sample data · <span id="count"></span></div>
+  <h1 id="title"></h1>
+  <p id="text"></p>
+</div>
+<div class="desk"><div class="stage" id="stage"></div></div>
+
+<div class="proto-bar" role="toolbar" aria-label="Prototype controls">
+  <button id="prev" aria-label="Previous screen">◀</button>
+  <span class="lab" id="lab"></span>
+  <button id="next" aria-label="Next screen">▶</button>
+  <span class="sep"></span>
+  <span>Selection look:</span>
+  <button data-v="A">A Commander</button>
+  <button data-v="B">B Explorer</button>
+  <button data-v="C">C Marks</button>
+</div>
+
+<script>
+const G = { folder: "\uE8B7", up: "\uE74A", file: "\uE8A5", chevron: "\uE70D", check: "\uE73E", right: "\uE76C",
+  min: "\uE921", max: "\uE922", close: "\uE8BB", copy: "\uE8C8", move: "\uE8DE", cancel: "\uE711", add: "\uE710",
+  ok: "\uE8FB", retry: "\uE72C", open: "\uE8E5", view: "\uE890", edit: "\uE70F", info: "\uE946", rename: "\uE8AC",
+  newfolder: "\uE8F4", del: "\uE74D", settings: "\uE713", cut: "\uE8C6", paste: "\uE77F", link: "\uE71B", err: "\uE711",
+  select: "\uE8B3", find: "\uE721", copyto: "\uF413", warn: "\uE7BA", refresh: "\uE72C" };
+
+// Shell icons drawn small: a folder, a file, the folder-up arrow.
+const svgFolder = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M1 3.5h5l1.5 1.5H15v8.5H1z" fill="#e8b54a"/><path d="M1 6h14v7.5H1z" fill="#f8d775"/></svg>';
+const svgFile = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 1.5h6.5L13 5v9.5H3z" fill="#fff" stroke="#8a96a3"/><path d="M9.5 1.5V5H13" fill="#e9eef3" stroke="#8a96a3"/></svg>';
+const svgPdf = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 1.5h6.5L13 5v9.5H3z" fill="#fff" stroke="#8a96a3"/><rect x="2" y="8" width="9" height="5" fill="#d13438"/></svg>';
+const svgXls = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 1.5h6.5L13 5v9.5H3z" fill="#fff" stroke="#8a96a3"/><rect x="2" y="8" width="9" height="5" fill="#107c41"/></svg>';
+const svgUp = '<svg width="16" height="16" viewBox="0 0 16 16"><path d="M1 3.5h5l1.5 1.5H15v8.5H1z" fill="#e8b54a"/><path d="M1 6h14v7.5H1z" fill="#f8d775"/><path d="M8 7.5l-2.5 2.5M8 7.5l2.5 2.5M8 7.5v4.5" stroke="#7a5a10" stroke-width="1.2" fill="none"/></svg>';
+function icon(r) {
+  if (r.kind === "up") return svgUp;
+  if (r.kind === "folder") return svgFolder;
+  if (r.ext === "pdf") return svgPdf;
+  if (r.ext === "xlsx") return svgXls;
+  return svgFile;
+}
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+// Keeps a path's first and last folders when it is longer than `max`.
+const midPath = (path, max) => {
+  if (path.length <= max) return path;
+  const parts = path.split("\\");
+  return parts.length > 2 ? `${parts[0]}\\…\\${parts[parts.length - 1]}` : path;
+};
+// "&Copy" underlines the access key, as Windows draws it.
+const acc = s => esc(s).replace(/&amp;(.)/, "<u>$1</u>");
+
+// Sample folders. Sizes in KB as Search's Size column shows them.
+const docs = [
+  { kind: "up", name: ".." },
+  { kind: "folder", name: "Invoices", size: "1,204 KB", date: "2026-10-12 09:41" },
+  { kind: "folder", name: "Projects", size: "4,404,019 KB", date: "2026-10-20 14:02" },
+  { kind: "folder", name: "Scans", size: "220,512 KB", date: "2026-09-30 17:15" },
+  { kind: "file", name: "budget 2026.xlsx", ext: "xlsx", size: "84 KB", date: "2026-10-18 11:20" },
+  { kind: "file", name: "desktop.ini", ext: "ini", size: "1 KB", date: "2025-03-02 08:00", hidden: true },
+  { kind: "file", name: "notes.txt", ext: "txt", size: "4 KB", date: "2026-10-20 08:55" },
+  { kind: "file", name: "report.pdf", ext: "pdf", size: "812 KB", date: "2026-10-19 16:47" },
+  { kind: "file", name: "report-draft.pdf", ext: "pdf", size: "790 KB", date: "2026-10-17 10:03" },
+  { kind: "file", name: "tax return 2025.pdf", ext: "pdf", size: "2,311 KB", date: "2026-04-28 19:12" },
+];
+const backup = [
+  { kind: "up", name: ".." },
+  { kind: "folder", name: "Old laptop", size: "12,880,004 KB", date: "2026-02-11 21:30" },
+  { kind: "folder", name: "Photos", size: "48,113,220 KB", date: "2026-10-01 18:04" },
+  { kind: "file", name: "notes.txt", ext: "txt", size: "4 KB", date: "2026-09-02 07:44" },
+];
+const backupCopying = [
+  { kind: "up", name: ".." },
+  { kind: "folder", name: "Old laptop", size: "12,880,004 KB", date: "2026-02-11 21:30" },
+  { kind: "folder", name: "Photos", size: "48,113,220 KB", date: "2026-10-01 18:04" },
+  { kind: "folder", name: "Projects", size: "1,673,527 KB", date: "2026-10-20 15:31" },
+  { kind: "file", name: "notes.txt", ext: "txt", size: "4 KB", date: "2026-09-02 07:44" },
+];
+const usb = [
+  { kind: "up", name: ".." },
+  { kind: "folder", name: "DCIM", size: "Folder", date: "2026-08-14 12:00" },
+  { kind: "folder", name: "Music", size: "Folder", date: "2026-05-03 15:22" },
+  { kind: "file", name: "setup.exe", ext: "exe", size: "48,220 KB", date: "2026-07-21 10:10" },
+];
+const downloads = [
+  { kind: "up", name: ".." },
+  { kind: "folder", name: "Gozler setup", size: "6,112 KB", date: "2026-10-18 09:12" },
+  { kind: "file", name: "gozler-0.3.0.msi", ext: "msi", size: "6,104 KB", date: "2026-10-18 09:10" },
+  { kind: "file", name: "invoice 0412.pdf", ext: "pdf", size: "412 KB", date: "2026-10-12 09:38" },
+  { kind: "file", name: "photos.zip", ext: "zip", size: "1,812,204 KB", date: "2026-10-03 21:44" },
+];
+const pick = (rows, opts = {}) => rows.map((r, i) => ({ ...r,
+  sel: (opts.sel || []).includes(i), focus: opts.focus === i }));
+
+const FOLDER_COLS = [["Name", ""], ["Ext", ""], ["Size", "r"], ["Date modified", ""]];
+const SEARCH_COLS = [["Name", ""], ["Ext", ""], ["Folder", ""], ["Size", "r"], ["Date modified", ""]];
+
+function panel(p) {
+  const search = p.mode === "search";
+  const cols = search ? SEARCH_COLS : FOLDER_COLS;
+  const tpl = (search ? "minmax(0,1.3fr) 36px minmax(0,1fr) 92px 112px" : "minmax(0,1fr) 40px 104px 112px");
+  // Only look C shows the marks column; looks A and B hide its cells.
+  const grid = (variant === "C" ? "16px " : "") + tpl;
+  const drive = `<div class="drive">${esc(p.drive)}<span class="ico">${G.chevron}</span></div>`;
+  const head = search
+    ? `${drive}<div class="edit focus">${esc(p.query)}${p.caret ? '<span class="caret"></span>' : ""}</div>
+       <span class="lbl"><u>L</u>ook in:</span><div class="combo">${esc(p.lookIn)}<span class="ico">${G.chevron}</span></div>`
+    : `${drive}<div class="edit path${p.pathFocus ? " focus" : ""}">${p.pathHtml || esc(p.path)}${p.pathFocus ? '<span class="caret"></span>' : ""}</div>`;
+  const colHtml = `<div class="cols" style="grid-template-columns:${grid}"><div class="mark"></div>${cols.map(([c, cl], i) =>
+    `<div class="${cl}${(p.sortCol ?? 0) === i ? " sort" : ""}">${c}</div>`).join("")}</div>`;
+  const rows = (p.rows || []).map(r => {
+    const cls = ["row", r.sel ? "sel" : "", r.focus ? "focus" : "", r.hidden ? "hidden" : ""].join(" ");
+    const name = `<div class="n">${icon(r)}<span>${esc(r.name)}</span></div>`;
+    const cells = search
+      ? [name, `<div>${esc(r.ext || "")}</div>`, `<div>${esc(midPath(r.folder || "", p.folderMax || 20))}</div>`, `<div class="r">${esc(r.size || "")}</div>`, `<div>${esc(r.date || "")}</div>`]
+      : [name, `<div>${r.kind === "file" ? esc(r.ext || "") : ""}</div>`, `<div class="r">${esc(r.size || "")}</div>`, `<div>${esc(r.date || "")}</div>`];
+    return `<div class="${cls}" style="grid-template-columns:${grid}"><div class="mark">${r.sel ? G.check : ""}</div>${cells.join("")}</div>`;
+  }).join("");
+  const msg = p.message ? `<div class="empty-msg"><div>${p.message}</div>${p.button ? `<div class="btn" style="width:auto;padding:0 14px"><span class="ico">${p.button[0]}</span><span>${acc(p.button[1])}</span></div>` : ""}</div>` : "";
+  // The quick search box takes the status line's place while it is open.
+  const status = p.quick
+    ? `<div class="quick">Find: <b style="font-weight:600">${esc(p.quick)}</b><span class="caret"></span></div>`
+    : `<span>${esc(p.status || "")}</span><span>${esc(p.free || "")}</span>`;
+  return `<div class="panel${p.active ? " active" : ""}">
+    <div class="pathrow">${head}</div>
+    <div class="list">${colHtml}<div class="rows">${rows}</div>${msg}</div>
+    <div class="status-line">${status}</div>
+  </div>`;
+}
+
+function titlebar(t) {
+  return `<div class="titlebar"><span class="t">${esc(t)}</span><span class="cap">${G.min}</span><span class="cap">${G.max}</span><span class="cap">${G.close}</span></div>`;
+}
+const KEYS = [["F3", "View"], ["F4", "Edit"], ["F5", "Copy"], ["F6", "Move"], ["F7", "New folder"], ["F8", "Delete"]];
+// o.dis lists the keys whose commands are disabled on the active panel's
+// state; F4 Edit always is.
+function mainWindow(o) {
+  const menus = ["&File", "&Edit", "&View", "&Help"].map(m => `<span class="${o.menuOpen === m ? "open" : ""}">${acc(m)}</span>`).join("");
+  const dis = new Set(["F4", ...(o.dis || [])]);
+  const job = o.job
+    ? `<div style="gap:7px"><span>${esc(o.job.text)}</span><span class="progress"><i style="width:${o.job.percent}%"></i></span><span class="sbtn">Cancel</span></div>`
+    : o.done ? `<div style="gap:6px"><span class="ico" style="color:#0f7b0f">${G.ok}</span><span>${esc(o.done)}</span></div>` : "<div></div>";
+  return `<div class="win" style="height:620px">
+    ${titlebar("Gozler")}
+    <div class="menubar">${menus}<span class="right">${acc("Lan&guage")}</span></div>
+    <div class="panels">${panel(o.left)}${panel(o.right)}</div>
+    <div class="keybar">${KEYS.map(([k, w]) => `<div class="btn${dis.has(k) ? " dis" : ""}"><b>${k}</b><span>${esc(w)}</span></div>`).join("")}${o.f4tip ? `<div class="tip" style="left:200px;top:-22px">Editing is not available yet.</div>` : ""}${o.f6tip ? `<div class="tip" style="left:547px;top:-22px">Move to the other panel, or rename.</div>` : ""}</div>
+    <div class="statusbar" style="grid-template-columns:1fr auto">${job}<div>${esc(o.sRight || "")}</div></div>
+  </div>`;
+}
+
+function menu(items, x, y, opts = {}) {
+  return `<div class="menu" style="left:${x}px;top:${y}px">${items.map(it => {
+    if (it === "-") return '<div class="sep"></div>';
+    const [label, key, glyph, flags = ""] = it;
+    return `<div class="mi${flags.includes("hot") ? " hot" : ""}${flags.includes("dis") ? " dis" : ""}">
+      <span class="g ico">${flags.includes("check") ? G.check : flags.includes("radio") ? "●" : (glyph || "")}</span>
+      <span>${acc(label)}</span><span class="k">${opts.noKeys ? "" : esc(key || "")}</span>
+      <span class="sub">${flags.includes("sub") ? G.right : ""}</span></div>`;
+  }).join("")}</div>`;
+}
+
+function dialog(title, body, buttons, x, y, w, cls = "") {
+  return `<div class="dlg ${cls}" style="left:${x}px;top:${y}px;width:${w}px">
+    <div class="titlebar"><span class="t">${esc(title)}</span><span class="cap">${G.close}</span></div>
+    <div class="body">${body}</div>
+    <div class="buttons">${buttons.map(([g, l, flags = ""]) =>
+      `<div class="btn${flags.includes("def") ? " def" : ""}${flags.includes("dis") ? " dis" : ""}"><span class="ico">${g}</span><span>${acc(l)}</span></div>`).join("")}</div>
+  </div>`;
+}
+
+function viewer(o) {
+  return `<div class="win" style="height:560px;width:860px;margin:0 auto;position:relative">
+    ${titlebar(o.title)}
+    <div class="menubar"><span class="${o.menuOpen === "file" ? "open" : ""}"><u>F</u>ile</span><span class="${o.menuOpen === "view" ? "open" : ""}"><u>V</u>iew</span></div>
+    <div class="view" style="position:relative"><pre>${o.body}</pre>${o.message || ""}<div class="vscroll${o.scrollOff ? " off" : ""}"><i style="top:${o.thumbTop}px;height:${o.thumbH}px"></i></div></div>
+    <div class="statusbar" style="grid-template-columns:1fr auto"><div>${esc(o.sLeft)}</div><div style="min-width:120px;justify-content:flex-end">${esc(o.sRight)}</div></div>
+    ${o.extra || ""}
+  </div>`;
+}
+
+const LEFT = (o = {}) => ({ drive: "C:", path: "C:\\Users\\user\\Documents", active: true, sortCol: 0, free: "120 GB free", ...o });
+const RIGHT = (o = {}) => ({ drive: "D:", path: "D:\\Backup", rows: pick(backup, { focus: 2 }), status: "3 items · 58.2 GB", free: "312 GB free", sortCol: 0, ...o });
+// Projects has the focus bar; budget 2026.xlsx and report.pdf are selected.
+const STD_LEFT = () => LEFT({ rows: pick(docs, { focus: 2, sel: [4, 7] }), status: "2 of 9 selected · 896 KB" });
+const ALL_LEFT = (focus) => LEFT({ rows: pick(docs, { focus }), status: "9 items · 4.42 GB" });
+
+const iniText = `; Sample settings file
+[General]
+ShowHidden=1
+StartIn=D:\\Backup
+Language=en
+
+[Panels]
+Left=C:\\Users\\user\\Documents
+Right=D:\\Backup
+SortLeft=Name
+SortRight=Size descending
+
+[Viewer]
+Wrap=1
+Font=Consolas
+
+[Recent]
+1=C:\\Users\\user\\Documents
+2=D:\\Backup
+3=C:\\SynoSoftware\\TinyTorrent2
+4=E:\\DCIM`;
+
+function hexRows() {
+  const bytes = [0x4D,0x5A,0x90,0x00,0x03,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0xFF,0xFF,0x00,0x00,
+    0xB8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00];
+  for (let i = 0; i < 24; i++) bytes.push(0);
+  bytes.push(0x00,0x01,0x00,0x00,0x0E,0x1F,0xBA,0x0E,0x00,0xB4,0x09,0xCD,0x21,0xB8,0x01,0x4C,0xCD,0x21);
+  const msg = "This program cannot be run in DOS mode.\r\r\n$";
+  for (const c of msg) bytes.push(c.charCodeAt(0));
+  while (bytes.length < 26 * 16) bytes.push((bytes.length * 37 + 11) & 0xFF);
+  const out = [];
+  for (let r = 0; r < 26; r++) {
+    const row = bytes.slice(r * 16, r * 16 + 16);
+    const hex = row.map(b => b.toString(16).toUpperCase().padStart(2, "0"));
+    const chars = row.map(b => b >= 0x20 && b <= 0x7E ? String.fromCharCode(b) : ".").join("");
+    out.push(`<span class="hexoff">${(r * 16).toString(16).toUpperCase().padStart(8, "0")}</span>  ${hex.slice(0, 8).join(" ")}  ${hex.slice(8).join(" ")}  ${esc(chars)}`);
+  }
+  return out.join("\n");
+}
+
+const SCREENS = [
+  { t: "Two panels", d: "Each folder shows its size from gozlerd. The left panel is active: its path box has the highlight colors. Projects has the focus bar; budget 2026.xlsx and report.pdf are selected. Each status line counts its panel and shows its drive's free space, so 896 KB compares with D:'s 312 GB free at a glance. desktop.ini is hidden, so it is gray. F3 View is disabled, because the focus is on a folder; F4 Edit always is, and its tooltip says why.",
+    r: () => mainWindow({ left: STD_LEFT(), right: RIGHT(), dis: ["F3"], f4tip: true }) },
+  { t: "First start", d: "View > Two panels the first time: the left panel shows Documents and the right panel Downloads, the two folders a person copies between most. After that each panel opens where it was. The pointer rests on F6 Move: its tooltip says that F6 also renames, because no menu has Rename.",
+    r: () => mainWindow({ left: ALL_LEFT(1), right: RIGHT({ path: "C:\\Users\\user\\Downloads", drive: "C:", rows: pick(downloads, { focus: 1 }), status: "4 items · 1.74 GB", free: "120 GB free" }), dis: ["F3"], f6tip: true }) },
+  { t: "Way in: Search's View menu", d: "Search's View menu gains Two panels, its only way in; it has no default key, and Settings > Keyboard can give it one. The Search window around the menu is as built and is not drawn here.",
+    r: () => `<div style="position:relative;height:300px">` +
+      menu([["&Two panels", ""], "-", ["&Filters", "", "", "check"], ["&Inspector", "", "", "check"], ["&Columns", "", "", "sub"], "-", ["Sort &by", "", "", "sub"], "-", ["&Refresh", "F5", G.refresh], "-", ["File &operations", ""]], 40, 20) + `</div>` },
+  { t: "Quick search", d: "Alt+R, then E, P in the left list. The box takes the status line's place and shows the typed start, and the focus goes to the first name that starts with it. A character that would match nothing is not added. Up and Down go to the previous and next match; Esc closes the box.",
+    r: () => mainWindow({ left: LEFT({ rows: pick(docs, { focus: 7 }), quick: "rep" }), right: RIGHT() }) },
+  { t: "Drive menu", d: "Alt+F1 opens the left panel's drive menu under its drive button; Alt+F2 the right one's. It opens on the panel's own drive, which has the radio mark. Each drive's letter is its access key, and the panel's last 10 folders follow, with the keys 1 to 9 and 0, without the folder it shows. A label not read yet is left out.",
+    r: () => mainWindow({ left: STD_LEFT(), right: RIGHT(), dis: ["F3"] }) +
+      menu([["&C:", "", "", "radio hot"], ["&D:  Backup", ""], ["&E:  USB stick", ""], ["&Z:  media (\\\\nas)", ""], "-",
+        ["&1  D:\\Backup", ""], ["&2  C:\\SynoSoftware\\TinyTorrent2", ""], ["&3  E:\\DCIM", ""]], 11, 89) },
+  { t: "File menu", d: "The File menu in Two panels, with the keys of this mode, so the menu teaches the keys as the key bar does. View is disabled, because the focus is on a folder; Edit always is. Copy to folder… and Move to folder… are the commands Search has; in Two panels they ask with the edit box of Copy to folder.",
+    r: () => mainWindow({ left: STD_LEFT(), right: RIGHT(), dis: ["F3"], menuOpen: "&File" }) +
+      menu([["&Open", "Enter", G.open], ["&View", "F3", G.view, "dis"], ["&Edit", "F4", G.edit, "dis"], ["P&roperties", "", G.info], "-",
+        ["&Copy to folder…", "F5", G.copyto], ["&Move to folder…", "F6", G.move], ["New &folder…", "F7", G.newfolder], ["&Delete", "F8", G.del], "-",
+        ["&Settings…", "Ctrl+,", G.settings], "-", ["E&xit", "Ctrl+Q", G.close]], 3, 51) },
+  { t: "Edit menu", d: "Edit acts on the selection. Insert, Space, Shift and Ctrl select entries one by one; Select all takes them all. Clear selection, or Esc in the list, drops every selected entry; Esc first closes the quick search box when it is open. Find is the panel's search.",
+    r: () => mainWindow({ left: STD_LEFT(), right: RIGHT(), dis: ["F3"], menuOpen: "&Edit" }) +
+      menu([["Select &all", "Ctrl+A", G.select], ["&Clear selection", "Esc", ""], "-", ["&Find", "Alt+F7", G.find]], 40, 51) },
+  { t: "View menu", d: "View > Two panels switches between Two panels and Search; it is checked here. Sort by is the same as a click on a column header.",
+    r: () => mainWindow({ left: STD_LEFT(), right: RIGHT(), dis: ["F3"], menuOpen: "&View" }) +
+      menu([["&Two panels", "", "", "check"], "-", ["Sort &by", "", "", "sub"], "-", ["&Refresh", "Ctrl+R", G.refresh], "-", ["File &operations", ""]], 77, 51) },
+  { t: "Context menu", d: "A right-click on report.pdf, which is selected: the focus moves to it and the selection stays, as in File Explorer. The commands act on the two selected files. A context menu shows no keys, as File Explorer's does.",
+    r: () => mainWindow({ left: LEFT({ rows: pick(docs, { focus: 7, sel: [4, 7] }), status: "2 of 9 selected · 896 KB" }), right: RIGHT() }) +
+      menu([["&Open", "", G.open], ["&View", "", G.view], "-",
+        ["Copy &to folder…", "", G.copyto], ["&Move to folder…", "", G.move], ["&Delete", "", G.del], "-",
+        ["P&roperties", "", G.info]], 160, 425, { noKeys: true }) },
+  { t: "Context menu: empty area", d: "A right-click below the rows acts on the panel's folder.",
+    r: () => mainWindow({ left: ALL_LEFT(7), right: RIGHT() }) +
+      menu([["New &folder…", "", G.newfolder], "-", ["&Refresh", "", G.refresh]], 200, 520, { noKeys: true }) },
+  { t: "Copy to folder", d: "F5 on Projects, with nothing selected: the copy acts on the focused row. The box holds the other panel's folder, all selected, so Enter copies there, as in Norton Commander. A new name for one entry copies it under that name; a folder that does not exist is created. The dialog closes at once; the engine decides the rest.",
+    r: () => mainWindow({ left: ALL_LEFT(2), right: RIGHT(), dis: ["F3"] }) +
+      dialog("Copy to folder", `<div>Copy Projects to:</div><div class="edit focus"><span style="background:var(--hl);color:#fff">D:\\Backup\\</span></div>`,
+        [[G.copyto, "Copy", "def"], [G.cancel, "Cancel"]], 330, 220, 400) },
+  { t: "Copy one file beside itself", d: "F5 on report.pdf, then a bare name: a relative name is joined to the active panel's folder, so this copies report.pdf next to itself as report-old.pdf.",
+    r: () => mainWindow({ left: ALL_LEFT(7), right: RIGHT() }) +
+      dialog("Copy to folder", `<div>Copy report.pdf to:</div><div class="edit focus">report-old.pdf<span class="caret"></span></div>`,
+        [[G.copyto, "Copy", "def"], [G.cancel, "Cancel"]], 330, 220, 400) },
+  { t: "Rename with F6", d: "F6 on report.pdf, the one entry: the box holds the other panel's folder and the name, with the name selected without its extension, as Total Commander's. Typing a new name keeps the folder and moves the file to D:\\Backup under that name; to rename it where it is, the person types the bare name, which is joined to Documents. Enter as it stands moves report.pdf into D:\\Backup.",
+    r: () => mainWindow({ left: ALL_LEFT(7), right: RIGHT() }) +
+      dialog("Move to folder", `<div>Move report.pdf to:</div><div class="edit focus">D:\\Backup\\<span style="background:var(--hl);color:#fff">report</span>.pdf</div>`,
+        [[G.move, "Move", "def"], [G.cancel, "Cancel"]], 330, 220, 400) },
+  { t: "Copy starting", d: "For its first 2 seconds an operation shows only in the status bar's middle group, so a short copy never opens a window over the panels. The File operations window opens if the copy still runs after that, as the next screen shows.",
+    r: () => mainWindow({ left: LEFT({ rows: pick(docs, { focus: 2 }), status: "9 items · 4.42 GB" }), right: RIGHT({ rows: pick(backupCopying, { focus: 2 }), status: "4 items · 59.8 GB", free: "310 GB free" }),
+      job: { text: "Copying Projects to D:\\Backup · 38 %", percent: 38 } }) },
+  { t: "Copy running", d: "The copy of Projects from the Copy to folder screen. The copy has run past 2 seconds, so the File operations window that Search built opens beside the panels without taking the focus, so Down and Enter go on acting on the panel; it is not drawn here. The status bar's middle group shows the running copy with Cancel. Projects already shows in D:\\Backup, and its size grows as the copy goes.",
+    r: () => mainWindow({ left: LEFT({ rows: pick(docs, { focus: 2 }), status: "9 items · 4.42 GB" }), right: RIGHT({ rows: pick(backupCopying, { focus: 2 }), status: "4 items · 59.8 GB", free: "310 GB free" }),
+      job: { text: "Copying Projects to D:\\Backup · 38 %", percent: 38 } }) },
+  { t: "Copy ended", d: "When the copy ends, the File operations window closes and the middle group says what was done, until another operation starts. After Hide, this line is the only sign that the copy finished.",
+    r: () => mainWindow({ left: LEFT({ rows: pick(docs, { focus: 2 }), status: "9 items · 4.42 GB" }), right: RIGHT({ rows: pick(backupCopying.map(r => r.name === "Projects" ? { ...r, size: "4,404,019 KB" } : r), { focus: 2 }), status: "4 items · 62.4 GB", free: "308 GB free" }),
+      done: "Copied 3,310 items to D:\\Backup" }) },
+  { t: "New folder", d: "F7 asks for the name. Create is disabled while the box is empty. A name that a row of the panel shows is refused with a message box, and the dialog stays open.",
+    r: () => mainWindow({ left: STD_LEFT(), right: RIGHT(), dis: ["F3"] }) +
+      dialog("New folder", `<div style="display:flex;gap:7px;align-items:center"><span class="lbl"><u>N</u>ame:</span><div class="edit focus">Taxes 2026<span class="caret"></span></div></div>`,
+        [[G.newfolder, "Create", "def"], [G.cancel, "Cancel"]], 330, 220, 400) },
+  { t: "Search panel", d: "Alt+F7 turns the left panel into a search panel: the search box and Look in take the path box's place, and the drive button stays. Results come from gozlerd as you type. Folder is the path below the searched folder, so two results with the same name tell apart. Enter goes to the focused result: the panel shows its folder with it focused. Esc or Backspace returns to C:\\Users\\user\\Documents. File > Open opens a file. New folder is disabled here.",
+    r: () => mainWindow({ left: { mode: "search", drive: "C:", active: true, query: "invoice", caret: false, lookIn: "This folder and subfolders", sortCol: 0, status: "5 results in C:\\Users\\user\\Documents", free: "120 GB free",
+      rows: pick([
+        { kind: "folder", name: "Invoices", folder: "", size: "1,204 KB", date: "2026-10-12 09:41" },
+        { kind: "file", name: "invoice 0412.pdf", ext: "pdf", folder: "Invoices", size: "412 KB", date: "2026-10-12 09:40" },
+        { kind: "file", name: "invoice 0398.pdf", ext: "pdf", folder: "Invoices", size: "388 KB", date: "2026-09-14 15:02" },
+        { kind: "file", name: "invoice 0377.pdf", ext: "pdf", folder: "Projects\\Accounts\\2025", size: "401 KB", date: "2026-08-09 11:18" },
+        { kind: "file", name: "invoices.xlsx", ext: "xlsx", folder: "Projects\\Accounts", size: "26 KB", date: "2026-10-02 08:30" },
+      ], { focus: 1 }) }, right: RIGHT(), dis: ["F7"], sRight: "4 files (1.2 MB) · 1 folder (1.2 MB)" }) },
+  { t: "Search panel: before typing", d: "Alt+F7 with nothing typed yet: the list area says what will be searched. Alt+L goes to Look in.",
+    r: () => mainWindow({ left: { mode: "search", drive: "C:", active: true, query: "", caret: true, lookIn: "This folder and subfolders", status: "", free: "120 GB free", rows: [],
+      message: "Type a name to search C:\\Users\\user\\Documents and its subfolders." }, right: RIGHT(), dis: ["F3", "F5", "F6", "F7", "F8"] }) },
+  { t: "Search panel: All drives", d: "Look in set to All drives: Folder is the full path, and a path that does not fit keeps its drive and its last folder. The status line shows the focused result's full folder instead of free space, so two results whose shortened folders look alike tell apart without leaving the search.",
+    r: () => mainWindow({ left: { mode: "search", drive: "C:", active: true, query: "invoice", caret: false, lookIn: "All drives", sortCol: 0, status: "7 results on all indexed drives", free: "D:\\Backup\\Old laptop\\Documents\\Invoices", folderMax: 22,
+      rows: pick([
+        { kind: "folder", name: "Invoices", folder: "C:\\Users\\user\\Documents", size: "1,204 KB", date: "2026-10-12 09:41" },
+        { kind: "file", name: "invoice 0412.pdf", ext: "pdf", folder: "C:\\Users\\user\\Documents\\Invoices", size: "412 KB", date: "2026-10-12 09:40" },
+        { kind: "file", name: "invoice 0412.pdf", ext: "pdf", folder: "C:\\Users\\user\\Downloads", size: "412 KB", date: "2026-10-12 09:38" },
+        { kind: "file", name: "invoice 0412.pdf", ext: "pdf", folder: "D:\\Backup\\Old laptop\\Documents\\Invoices", size: "412 KB", date: "2026-10-12 09:40" },
+        { kind: "file", name: "invoice 0398.pdf", ext: "pdf", folder: "C:\\Users\\user\\Documents\\Invoices", size: "388 KB", date: "2026-09-14 15:02" },
+        { kind: "file", name: "invoice 0377.pdf", ext: "pdf", folder: "C:\\Users\\user\\Documents\\Projects\\Accounts\\2025", size: "401 KB", date: "2026-08-09 11:18" },
+        { kind: "file", name: "invoices.xlsx", ext: "xlsx", folder: "C:\\Users\\user\\Documents\\Projects\\Accounts", size: "26 KB", date: "2026-10-02 08:30" },
+      ], { focus: 3 }) }, right: RIGHT(), dis: ["F7"], sRight: "6 files (2.4 MB) · 1 folder (1.2 MB)" }) },
+  { t: "Search: no results", d: "A search that finds nothing says so in the list area, as Search does, and names All drives, because the file may be outside this folder. Every command that acts on entries is disabled.",
+    r: () => mainWindow({ left: { mode: "search", drive: "C:", active: true, query: "invocie", caret: true, lookIn: "This folder and subfolders", status: "0 results in C:\\Users\\user\\Documents", free: "120 GB free", rows: [],
+      message: "No items match your search.<br>Choose All drives in Look in to search every indexed drive." }, right: RIGHT(), dis: ["F3", "F5", "F6", "F7", "F8"] }) },
+  { t: "Search: drive not indexed", d: "On a drive that gozlerd does not index, This folder and subfolders cannot be searched. The panel says so as soon as Alt+F7 opens it, before anything is typed, and names the choice that works, instead of an empty list that reads as \"no such file\".",
+    r: () => mainWindow({ left: { mode: "search", drive: "E:", active: true, query: "", caret: true, lookIn: "This folder and subfolders", status: "", free: "21.4 GB free", rows: [],
+      message: "E:\\ is not indexed, so Gozler cannot search it.<br>Choose All drives in Look in to search the indexed drives." }, right: RIGHT(), dis: ["F3", "F5", "F6", "F7", "F8"] }) },
+  { t: "USB drive and network share", d: "The left panel shows a USB drive that gozlerd does not index: each folder's size reads Folder, the status line leaves the sum out, because it would miss the folders, and the status bar's right group says why. The right panel is reading a network share.",
+    r: () => mainWindow({ left: { drive: "E:", path: "E:\\", active: true, sortCol: 0, rows: pick(usb.slice(1), { focus: 2 }), status: "3 items", free: "21.4 GB free" },
+      right: { drive: "\\\\", path: "\\\\nas\\media\\Movies", rows: [], status: "", message: "Reading…" }, sRight: "E:\\ is not indexed, so folder sizes are not shown." }) },
+  { t: "Failures", d: "Right: the drive the panel showed was removed, so the panel waits with Retry. F5 and F6 still work; their box starts empty, so the person types the destination. Left: Enter on a folder Windows refuses to open leaves the panel where it was, and a message box says why.",
+    r: () => mainWindow({ left: LEFT({ path: "D:\\", drive: "D:", free: "312 GB free", rows: pick([{ kind: "folder", name: "Backup", size: "61,004,112 KB", date: "2026-10-01 18:04" }, { kind: "folder", name: "Private", size: "Folder", date: "2026-06-11 10:20" }], { focus: 1 }), status: "2 items" }),
+      right: { drive: "E:", path: "E:\\DCIM", rows: [], status: "", message: "Drive E:\\ is not ready. Insert it again, then select Retry.", button: [G.retry, "&Retry"] }, dis: ["F3"] }) +
+      `<div class="dlg msgbox" style="left:300px;top:230px;width:420px">
+        <div class="titlebar"><span class="t">Open</span><span class="cap">${G.close}</span></div>
+        <div class="body"><span class="err">${G.err}</span><div style="padding-top:7px">Windows could not open D:\\Private: Access is denied.</div></div>
+        <div class="buttons"><div class="btn def"><span class="ico">${G.ok}</span><span>OK</span></div></div></div>` },
+  { t: "Copy with no destination", d: "F5 on Backup while the right panel waits for its drive: the box starts empty, so the person types the destination. Copy is disabled while the box is empty, so a reflex Enter does nothing.",
+    r: () => mainWindow({ left: LEFT({ path: "D:\\", drive: "D:", free: "312 GB free", rows: pick([{ kind: "folder", name: "Backup", size: "61,004,112 KB", date: "2026-10-01 18:04" }, { kind: "folder", name: "Private", size: "Folder", date: "2026-06-11 10:20" }], { focus: 0 }), status: "2 items" }),
+      right: { drive: "E:", path: "E:\\DCIM", rows: [], status: "", message: "Drive E:\\ is not ready. Insert it again, then select Retry.", button: [G.retry, "&Retry"] }, dis: ["F3"] }) +
+      dialog("Copy to folder", `<div>Copy Backup to:</div><div class="edit focus"><span class="caret"></span></div>`,
+        [[G.copyto, "Copy", "def dis"], [G.cancel, "Cancel"]], 330, 220, 400) },
+  { t: "Path box", d: "Ctrl+L or a click puts the focus in the path box. While it has the focus it is a plain edit box, so the caret and selected text show. Enter goes to the typed path, Esc puts the folder's path back, and Tab goes to the other panel.",
+    r: () => mainWindow({ left: LEFT({ rows: pick(docs, { focus: 2 }), status: "9 items · 4.42 GB", pathFocus: true, pathHtml: "C:\\Users\\user\\Do" }), right: RIGHT(), dis: ["F3"] }) },
+  { t: "Viewer: Text", d: "F3 opens the Viewer, a window of its own with its own taskbar button. It reads only what it shows, so a file of any size opens at once. The whole file shows, so the scroll bar is disabled. Long lines wrap; F2 switches wrapping, F4 switches to Hex, Esc or F3 closes and returns to the panel with the same focused row.",
+    r: () => viewer({ title: "settings.ini – View", body: esc(iniText), scrollOff: true, thumbTop: 0, thumbH: 0, sLeft: "settings.ini · UTF-8 · 2.4 KB", sRight: "Top" }) },
+  { t: "Viewer: Hex", d: "A file with a zero byte in its first 64 KB opens in Hex: the offset, 16 bytes with a gap after the eighth, and the same bytes as characters. The scroll bar maps to the byte position.",
+    r: () => viewer({ title: "gozler.exe – View", body: hexRows(), thumbTop: 0, thumbH: 18, sLeft: "gozler.exe · 3.1 MB", sRight: "00000000" }) },
+  { t: "Viewer: View menu", d: "Text and Hex are one choice; Wrap long lines is a check. The encoding is detected; the status bar names it.",
+    r: () => viewer({ title: "settings.ini – View", body: esc(iniText), scrollOff: true, thumbTop: 0, thumbH: 0, sLeft: "settings.ini · UTF-8 · 2.4 KB", sRight: "Top", menuOpen: "view",
+      extra: menu([["&Text", "F4", "", "radio"], ["&Hex", "F4"], "-", ["&Wrap long lines", "F2", "", "check"]], 30, 51) }) },
+  { t: "Viewer: cannot open", d: "A file that Windows refuses to open: the Viewer's area says why, with Retry. Esc closes the Viewer.",
+    r: () => viewer({ title: "payroll.xlsx – View", body: "", scrollOff: true, thumbTop: 0, thumbH: 0, sLeft: "payroll.xlsx", sRight: "",
+      message: `<div class="area-msg"><div>Windows could not open payroll.xlsx: Access is denied.</div><div class="btn" style="width:auto;padding:0 14px"><span class="ico">${G.retry}</span><span><u>R</u>etry</span></div></div>` }) },
+];
+
+let screen = 0;
+let variant = new URLSearchParams(location.search).get("variant") || "A";
+try { screen = Math.max(0, SCREENS.findIndex(s => s.t === decodeURIComponent(location.hash.slice(1)))); } catch {}
+function show() {
+  const s = SCREENS[screen];
+  document.body.className = "v-" + variant;
+  document.getElementById("stage").innerHTML = s.r();
+  document.getElementById("title").textContent = s.t;
+  document.getElementById("text").textContent = s.d;
+  document.getElementById("count").textContent = `screen ${screen + 1} of ${SCREENS.length}`;
+  document.getElementById("lab").textContent = `${screen + 1}/${SCREENS.length}  ${s.t}`;
+  document.querySelectorAll("[data-v]").forEach(b => b.classList.toggle("on", b.dataset.v === variant));
+  const url = new URL(location.href);
+  url.searchParams.set("variant", variant);
+  url.hash = encodeURIComponent(s.t);
+  try { history.replaceState(null, "", url); } catch {}
+}
+function go(d) { screen = (screen + d + SCREENS.length) % SCREENS.length; show(); }
+document.getElementById("prev").onclick = () => go(-1);
+document.getElementById("next").onclick = () => go(1);
+document.querySelectorAll("[data-v]").forEach(b => b.onclick = () => { variant = b.dataset.v; show(); });
+addEventListener("keydown", e => {
+  if (e.target.closest("input,textarea,[contenteditable]")) return;
+  if (e.key === "ArrowLeft") go(-1);
+  if (e.key === "ArrowRight") go(1);
+});
+show();
+</script>
