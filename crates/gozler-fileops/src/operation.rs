@@ -34,6 +34,15 @@ pub enum Request {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OperationId(pub(crate) u64);
 
+impl OperationId {
+    /// An id for the tests of the window's lists, which run without a
+    /// queue; an id the queue never gave names no operation.
+    #[doc(hidden)]
+    pub fn for_tests(n: u64) -> OperationId {
+        OperationId(n)
+    }
+}
+
 /// One operation as the window reads it.
 #[derive(Debug, Clone)]
 pub struct Operation {

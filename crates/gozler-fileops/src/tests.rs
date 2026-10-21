@@ -409,6 +409,46 @@ fn a_delete_does_not_wait_for_its_total() {
     drop(release);
 }
 
+/// An ended delete still takes its source from a list that keeps it, and
+/// from no other list, until the window removes it from the queue.
+#[test]
+fn an_ended_delete_is_taken_only_where_kept() {
+    let scratch = Scratch::new("taken");
+    let file = scratch.file("gone.txt");
+    let watched = Watched::new(&scratch.saved());
+
+    watched.run(
+        Request::Delete {
+            sources: vec![file.clone()],
+        },
+        None,
+    );
+    let taken = watched.queue.taken();
+    let id = taken.ended().next().expect("the ended delete");
+    let row = units(&file);
+    assert!(taken.contains(&row, |kept| kept == id));
+    assert!(!taken.contains(&row, |_| false));
+    watched.queue.remove(id);
+    assert!(watched.queue.taken().is_empty());
+}
+
+/// A folder panel compares its entries' paths only where a taken path is
+/// directly in its folder, so a drive's root, whose path ends in a
+/// backslash, must find the taken entries in it.
+#[test]
+fn a_drive_root_holds_its_taken_entries() {
+    let mut taken = crate::Taken::default();
+    taken.insert(
+        OperationId::for_tests(1),
+        Path::new(r"C:\Data\a.txt"),
+        false,
+    );
+    taken.insert(OperationId::for_tests(2), Path::new(r"C:\b.txt"), false);
+    assert!(taken.holds_in(&units(Path::new(r"c:\data"))));
+    assert!(taken.holds_in(&units(Path::new(r"C:\"))));
+    assert!(!taken.holds_in(&units(Path::new(r"C:\Other"))));
+}
+
 /// FAT refuses POSIX semantics, so its read-only files take the classic
 /// delete, which must clear the attribute itself.
 #[test]

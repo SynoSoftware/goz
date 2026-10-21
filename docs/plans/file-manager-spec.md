@@ -143,7 +143,9 @@ show them.
   are expanded, as File Explorer does. A relative path, such as `..\Other`,
   is joined to the panel's folder. A file's path shows its folder with the
   file focused. `Esc` puts the folder's path back and returns the focus to
-  the list. `Tab` goes to the other panel's list, as it does from the list.
+  the list. When the path box loses the focus without `Enter`, such as from
+  a click in the list, it also puts the folder's path back.
+  `Tab` goes to the other panel's list, as it does from the list.
   The path box decides nothing from the disk: the panel's reading thread
   opens the typed path, and the list keeps the old folder's rows until it
   has. A typed path that cannot be opened then leaves the panel in its
@@ -223,7 +225,11 @@ show them.
   is gone, the panel shows its "not ready" state with Retry. When another
   program stops the removal, the panel watches its folder again and reads
   it again, so the list does not silently stop following the disk. Stage 4
-  chooses the Win32 notification and builds it for both.
+  chooses the Win32 notification and builds it for both. A request that
+  arrives while the panel is reading the folder stops the reading, but the
+  reading thread closes its handle a moment later, so Windows may refuse
+  that one request; the next one succeeds. The window never waits for the
+  thread, and never closes a handle that another thread may be using.
 - **A folder that Windows cannot watch,** such as one on some network
   shares, is read again when an operation in it ends and on `Ctrl+R`.
 - **No disk call holds the window or Exit.** The threads that read a folder,
@@ -1151,10 +1157,12 @@ main window.
 
 The engine's two changes in stage 5 get tests on folders that each test
 creates, one for each row of the Copy and Move table; no test touches the
-owner's files. Two Win32 behaviors are checked once in the running window,
-because no unit test reaches them: in stage 4, that releasing `Alt` after a
-quick search does not open the menu bar; in stage 6, that closing a Viewer
-activates the main window with the same focused row.
+owner's files. Two Win32 behaviors are checked in the running window,
+because no unit test reaches them: that releasing `Alt` after a quick
+search does not open the menu bar, which needs the window in front and so
+is on the owner's after-install list (see "How each stage runs"); and in
+stage 6, that closing a Viewer activates the main window with the same
+focused row.
 
 ### How each stage runs
 
@@ -1176,7 +1184,10 @@ activates the main window with the same focused row.
 - No check waits a fixed time or needs the window in front.
 - Nothing waits for the owner. The owner checks these after install: a
   panel on a network share and on a USB drive (no folder sizes, "Folder"
-  shown), Safely Remove of that USB drive while a panel and a Viewer show
-  it, a move between two disks, and the Viewer on a file larger than 4 GB.
+  shown); Safely Remove of that USB drive while a panel and a Viewer show
+  it (Windows removes it without saying it is in use, and the panel then
+  shows "not ready" with Retry); releasing `Alt` after a quick search
+  (the menu bar stays closed); a move between two disks; and the Viewer on
+  a file larger than 4 GB.
 - One `check.ps1` run when the stage is reviewed (`AGENTS.md`, "Before you
   finish").

@@ -167,11 +167,17 @@ struct Window {
     /// The clipboard's files that Paste prepares an operation from, until
     /// it is submitted or ends.
     pastes: RefCell<HashMap<OperationId, ClipboardFiles>>,
-    /// Ended deletes and moves that the search list still shows blank,
-    /// which stay in the queue until the search changes.
-    kept: RefCell<HashSet<OperationId>>,
+    /// Ended deletes and moves whose failures were reported, which stay in
+    /// the queue while a list of the window keeps them (fast-copy-delete-spec.md:
+    /// Taken entries).
+    reported: RefCell<HashSet<OperationId>>,
     /// The queue's taken entries as the window last read them.
     taken: RefCell<Arc<Taken>>,
+    /// Every operation that ended since the owner last took them, with its
+    /// request, which the owner's panels compare with their folders.
+    ended: RefCell<Vec<(OperationId, Arc<Request>)>>,
+    /// The ended operations already put in `ended`, so each goes once.
+    told: RefCell<HashSet<OperationId>>,
 }
 
 /// An operation that waits for the window.
@@ -221,7 +227,9 @@ impl FileOperations {
             taskbar: TaskbarProgress::new(owner),
             asking: Cell::new(false),
             pastes: RefCell::new(HashMap::new()),
-            kept: RefCell::new(HashSet::new()),
+            reported: RefCell::new(HashSet::new()),
+            ended: RefCell::new(Vec::new()),
+            told: RefCell::new(HashSet::new()),
         });
         let hwnd = window::create_owned_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
         window.hwnd.set(Some(hwnd));
@@ -268,17 +276,37 @@ impl FileOperations {
         }
     }
 
-    /// Removes the ended deletes and moves, whose rows a new search no
-    /// longer shows, and has the owner read the taken entries again.
-    pub(super) fn release_ended(&self) {
-        let kept: Vec<OperationId> = self.window.kept.borrow_mut().drain().collect();
-        if kept.is_empty() {
+    /// The operations of every kind that ended since the last call, each
+    /// with its request, which the owner's lists compare with what they
+    /// show. The owner takes them with the taken entries it then shows, after
+    /// [`TAKEN_CHANGED`].
+    pub(super) fn take_ended(&self) -> Vec<(OperationId, Arc<Request>)> {
+        std::mem::take(&mut self.window.ended.borrow_mut())
+    }
+
+    /// Removes the reported deletes and moves that no list keeps, as
+    /// `keeps` says, and has the owner read the taken entries again. One
+    /// the owner has not taken yet stays, because no list has decided
+    /// whether it keeps it.
+    pub(super) fn release(&self, keeps: impl Fn(OperationId) -> bool) {
+        let released: Vec<OperationId> = {
+            let untold = self.window.ended.borrow();
+            let keeps = |id: OperationId| keeps(id) || untold.iter().any(|(e, _)| *e == id);
+            let mut reported = self.window.reported.borrow_mut();
+            let released = reported.iter().copied().filter(|id| !keeps(*id)).collect();
+            reported.retain(|id| keeps(*id));
+            released
+        };
+        if released.is_empty() {
             return;
         }
-        for id in kept {
+        for id in released {
             self.window.queue().remove(id);
         }
+        // As `refresh` does, so an operation that ended since then reaches
+        // the lists before a snapshot shows it as ended.
         self.window.read_taken();
+        self.window.read_ended(&self.window.queue().operations());
     }
 
     /// The operations that run, and those that wait, which Exit stops
@@ -596,6 +624,7 @@ impl Window {
     fn refresh(&self, hwnd: Hwnd) {
         self.read_taken();
         let entries = self.queue().operations();
+        self.read_ended(&entries);
         let now = Instant::now();
         {
             let mut meters = self.meters.borrow_mut();
@@ -693,7 +722,7 @@ impl Window {
     }
 
     fn next(&self) -> Option<Next> {
-        let kept = self.kept.borrow();
+        let reported = self.reported.borrow();
         self.queue()
             .operations()
             .into_iter()
@@ -703,7 +732,7 @@ impl Window {
                     request: entry.request,
                     prepared,
                 }),
-                State::Ended(outcome) if !kept.contains(&entry.id) => Some(Next::Report {
+                State::Ended(outcome) if !reported.contains(&entry.id) => Some(Next::Report {
                     id: entry.id,
                     request: entry.request,
                     outcome,
@@ -745,8 +774,12 @@ impl Window {
     }
 
     /// Shows what failed in an ended operation, then removes it, unless it
-    /// deleted or moved entries that the search list still shows blank.
-    fn report(&self, id: OperationId, request: &Request, outcome: &Outcome) {
+    /// deleted or moved entries, which the owner's lists may still keep
+    /// blank; the owner then decides ([`FileOperations::release`]).
+    fn report(&self, id: OperationId, request: &Arc<Request>, outcome: &Outcome) {
+        // An operation that ended after the last read is told here, before
+        // a copy leaves the queue.
+        self.tell_ended(id, request);
         self.pastes.borrow_mut().remove(&id);
         let failure = file_operations::failure(
             &self.strings.borrow(),
@@ -782,9 +815,10 @@ impl Window {
             );
         }
         let took =
-            outcome.items > 0 && matches!(request, Request::Delete { .. } | Request::Move { .. });
+            outcome.items > 0 && matches!(**request, Request::Delete { .. } | Request::Move { .. });
         if took {
-            self.kept.borrow_mut().insert(id);
+            self.reported.borrow_mut().insert(id);
+            self.owner.post(TAKEN_CHANGED);
         } else {
             self.queue().remove(id);
         }
@@ -964,6 +998,28 @@ impl Window {
             c.list.text_width()
         });
         show(width);
+    }
+
+    /// Puts each operation that ended since the last read in `ended`, and
+    /// tells the owner. They are read after the taken entries, so each
+    /// operation that those show ended is among them.
+    fn read_ended(&self, entries: &[gozler_fileops::Operation]) {
+        self.told
+            .borrow_mut()
+            .retain(|id| entries.iter().any(|entry| entry.id == *id));
+        for entry in entries {
+            if matches!(entry.state, State::Ended(_)) {
+                self.tell_ended(entry.id, &entry.request);
+            }
+        }
+    }
+
+    /// Puts the ended operation `id` in `ended`, once, and tells the owner.
+    fn tell_ended(&self, id: OperationId, request: &Arc<Request>) {
+        if self.told.borrow_mut().insert(id) {
+            self.ended.borrow_mut().push((id, Arc::clone(request)));
+            self.owner.post(TAKEN_CHANGED);
+        }
     }
 
     /// Reads the queue's taken entries, and tells the owner when they

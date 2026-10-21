@@ -87,7 +87,7 @@ fn timing_taken_check_per_paint() {
         let row = row(path);
         time(&format!("taken check, {kind}, 240 cells"), || {
             for _ in 0..VISIBLE_ROWS * COLUMNS {
-                black_box(!taken.is_empty() && taken.contains(&wide_path(&row)));
+                black_box(!taken.is_empty() && taken.contains(&wide_path(&row), |_| false));
             }
         });
     }
@@ -151,7 +151,7 @@ fn timing_large_selection_per_reply() {
     let taken = Taken::default();
     time("set_taken over the selection, 100,000 rows", || {
         rows.iter()
-            .filter(|file| taken.is_empty() || !taken.contains(&wide_path(file)))
+            .filter(|file| taken.is_empty() || !taken.contains(&wide_path(file), |_| false))
             .count()
     });
 }

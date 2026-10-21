@@ -11,8 +11,10 @@ use crate::core::captions::ButtonIcon;
 use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
 use crate::core::layout::{
-    self, ColumnFit, Dpi, Px, glyph_gap, glyph_row_height, icon_glyph_height, list_box_text_inset,
+    self, ColumnFit, Dpi, Px, Rect, glyph_gap, glyph_row_height, icon_glyph_height,
+    list_box_text_inset,
 };
+use crate::core::panel::difference;
 use gozler_core::include::FolderCheck;
 use std::cell::RefCell;
 use std::ops::Range;
@@ -29,9 +31,10 @@ use windows::Win32::Graphics::Gdi::{
     SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BP_GROUPBOX, BST_CHECKED, BUTTON_IMAGELIST,
-    BUTTON_IMAGELIST_ALIGN_LEFT, CloseThemeData, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME,
-    DTM_SETSYSTEMTIME, DrawThemeBackground, EM_GETMARGINS, EM_GETSEL, EM_SETCUEBANNER, EM_SETSEL,
+    BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BCM_SETSPLITINFO, BCSIF_STYLE, BCSS_NOSPLIT,
+    BP_GROUPBOX, BS_SPLITBUTTON, BST_CHECKED, BUTTON_IMAGELIST, BUTTON_IMAGELIST_ALIGN_LEFT,
+    BUTTON_SPLITINFO, CloseThemeData, DRAWITEMSTRUCT, DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME,
+    DrawThemeBackground, EM_GETMARGINS, EM_GETSEL, EM_SCROLLCARET, EM_SETCUEBANNER, EM_SETSEL,
     GBS_DISABLED, GBS_NORMAL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO,
     HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW, HDM_HITTEST, HDM_SETITEMW, HKCOMB_A,
     HKCOMB_C, HKCOMB_NONE, HKCOMB_S, HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT,
@@ -41,21 +44,21 @@ use windows::Win32::UI::Controls::{
     LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO,
     LVIF_TEXT, LVIR_BOUNDS, LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS,
     LVM_DELETECOLUMN, LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH,
-    LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM,
-    LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
+    LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE,
+    LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_REDRAWITEMS, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE,
-    LVM_SETITEMTEXTW, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT,
-    LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR, ODS_FLAGS,
-    ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, ODT_LISTBOX, OpenThemeData, PBM_SETMARQUEE,
-    PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETRECT, SB_SETMINHEIGHT,
-    SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, SBT_OWNERDRAW,
-    STATUSCLASSNAMEW, SetWindowTheme, TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE,
-    TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH,
-    TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX,
-    TTTOOLINFOW, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVGN_ROOT, TVI_LAST, TVI_ROOT,
-    TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0,
+    LVM_SETITEMTEXTW, LVM_SETSELECTIONMARK, LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER,
+    LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA,
+    LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR,
+    ODS_FLAGS, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, ODT_LISTBOX, OpenThemeData,
+    PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETRECT,
+    SB_SETMINHEIGHT, SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS,
+    SBT_OWNERDRAW, STATUSCLASSNAMEW, SetWindowTheme, TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS,
+    TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW,
+    TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON,
+    TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVGN_ROOT, TVI_LAST,
+    TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0,
     TVIS_STATEIMAGEMASK, TVITEMEXW_CHILDREN, TVITEMW, TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW,
     TVM_GETNEXTITEM, TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETEXTENDEDSTYLE, TVM_SETITEMW,
     TVS_CHECKBOXES, TVS_EX_DOUBLEBUFFER, TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
@@ -226,6 +229,20 @@ impl Edit {
         .map(Edit)
     }
 
+    /// A box that shows what keys typed elsewhere make, such as a panel's
+    /// quick search box: it takes no focus from `Tab`, and its text cannot
+    /// be edited.
+    pub(crate) fn create_echo(parent: Hwnd, id: u16) -> windows::core::Result<Edit> {
+        child(
+            parent,
+            w!("EDIT"),
+            (ES_AUTOHSCROLL | ES_READONLY) as u32,
+            WS_EX_CLIENTEDGE,
+            id,
+        )
+        .map(Edit)
+    }
+
     /// The edit control `id` of a dialog whose template declares one.
     pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<Edit> {
         super::dialog::item(dialog, id).map(Edit)
@@ -285,6 +302,12 @@ impl Edit {
     pub(crate) fn text(self) -> String {
         self.0.text()
     }
+
+    /// Selects the text and puts the caret at its end.
+    pub(crate) fn select_to_end(self) {
+        send(self.0, EM_SETSEL, 0, -1);
+        send(self.0, EM_SCROLLCARET, 0, 0);
+    }
 }
 
 /// A static text, such as a label before its control.
@@ -327,6 +350,20 @@ impl Label {
             parent,
             w!("STATIC"),
             SS_RIGHT | SS_NOPREFIX | SS_ENDELLIPSIS,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Label)
+    }
+
+    /// A centred text that wraps at word ends and shows `&` as itself, such
+    /// as a panel's message in its empty list.
+    pub(crate) fn create_centred(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        const SS_CENTER: u32 = 0x1;
+        child(
+            parent,
+            w!("STATIC"),
+            SS_CENTER | SS_NOPREFIX,
             WINDOW_EX_STYLE(0),
             id,
         )
@@ -430,6 +467,41 @@ impl Button {
             id,
         )
         .map(Button)
+    }
+
+    /// A key bar button, which `Tab` does not reach, because `Tab` switches
+    /// panels (file-manager-spec.md: The key bar). Its parent draws it
+    /// ([`Button::draw_key`]).
+    pub(crate) fn create_key(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
+        child(
+            parent,
+            w!("BUTTON"),
+            BS_PUSHBUTTON as u32,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Button)
+    }
+
+    /// A button with its caption and a drop-down arrow and no split, so a
+    /// click anywhere on it asks for its menu ([`Button::dropped_down`]),
+    /// as a panel's drive button does.
+    pub(crate) fn create_drop_down(parent: Hwnd, id: u16) -> windows::core::Result<Button> {
+        let button = child(
+            parent,
+            w!("BUTTON"),
+            WS_TABSTOP.0 | BS_SPLITBUTTON as u32,
+            WINDOW_EX_STYLE(0),
+            id,
+        )?;
+        let info = BUTTON_SPLITINFO {
+            mask: BCSIF_STYLE,
+            uSplitStyle: BCSS_NOSPLIT,
+            ..BUTTON_SPLITINFO::default()
+        };
+        // SAFETY: `info` outlives the call, which copies it.
+        unsafe { send_pointer(button, BCM_SETSPLITINFO, 0, &raw const info) };
+        Ok(Button(button))
     }
 }
 
@@ -1233,6 +1305,50 @@ impl Tooltip {
         unsafe { send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
     }
 
+    /// Shows `text` while the mouse rests on `rect` of the parent, the tool
+    /// `id`, which [`Tooltip::move_area`] moves. A disabled control gets
+    /// no mouse messages, so its tip is an area of its parent, as the key
+    /// bar's always disabled `F4 Edit` has.
+    pub(crate) fn add_area(&self, id: u16, rect: Rect, text: &str) {
+        let mut text = wide(text);
+        let tool = self.area(id, rect, &mut text);
+        // SAFETY: `tool` and its text outlive the call, which copies them.
+        unsafe { send_pointer(self.tip, TTM_ADDTOOLW, 0, &raw const tool) };
+    }
+
+    /// Moves the area of the tool `id` to `rect`, after a layout.
+    pub(crate) fn move_area(&self, id: u16, rect: Rect) {
+        let mut empty = wide("");
+        let tool = self.area(id, rect, &mut empty);
+        // SAFETY: `tool` outlives the call, which reads its rectangle.
+        unsafe { send_pointer(self.tip, TTM_NEWTOOLRECTW, 0, &raw const tool) };
+    }
+
+    /// Sets the text of the tool `id`, an area.
+    pub(crate) fn set_area_text(&self, id: u16, text: &str) {
+        let mut text = wide(text);
+        let tool = self.area(id, Rect::default(), &mut text);
+        // SAFETY: `tool` and its text outlive the call, which copies them.
+        unsafe { send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
+    }
+
+    fn area(&self, id: u16, rect: Rect, text: &mut [u16]) -> TTTOOLINFOW {
+        TTTOOLINFOW {
+            cbSize: size_of::<TTTOOLINFOW>() as u32,
+            uFlags: TTF_SUBCLASS,
+            hwnd: self.parent.0,
+            uId: usize::from(id),
+            rect: RECT {
+                left: rect.x.0,
+                top: rect.y.0,
+                right: rect.right().0,
+                bottom: rect.bottom().0,
+            },
+            lpszText: PWSTR(text.as_mut_ptr()),
+            ..TTTOOLINFOW::default()
+        }
+    }
+
     /// The tool of `control`, which the tooltip knows by its handle.
     fn tool(&self, control: Hwnd, text: &mut [u16]) -> TTTOOLINFOW {
         TTTOOLINFOW {
@@ -1494,9 +1610,105 @@ impl ListView {
         self.set_state(row as usize, LVIS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS(0));
     }
 
+    /// The focused row, which a panel moves without the selection
+    /// (file-manager-spec.md: Selecting entries).
+    pub(crate) fn focused(self) -> Option<u64> {
+        u64::try_from(send(
+            self.0,
+            LVM_GETNEXTITEM,
+            usize::MAX,
+            LVNI_FOCUSED as isize,
+        ))
+        .ok()
+    }
+
+    /// Focuses `row` and keeps the selection, or takes the focus from every
+    /// row for `None`, and scrolls the row into view. The row is also where
+    /// a `Shift`+click starts.
+    pub(crate) fn set_focused(self, row: Option<u64>) {
+        self.focus_in_place(row);
+        if let Some(row) = row {
+            self.ensure_visible(row);
+        }
+    }
+
+    /// As [`ListView::set_focused`], without scrolling, so the rows stay
+    /// where the person sees them.
+    pub(crate) fn focus_in_place(self, row: Option<u64>) {
+        match row {
+            Some(row) => {
+                self.set_state(row as usize, LVIS_FOCUSED, LVIS_FOCUSED);
+                send(self.0, LVM_SETSELECTIONMARK, 0, row as isize);
+            }
+            None => self.set_state(usize::MAX, LVIS_FOCUSED, LIST_VIEW_ITEM_STATE_FLAGS(0)),
+        }
+    }
+
+    /// Whether `row` is focused, and whether it is selected.
+    pub(crate) fn row_state(self, row: u64) -> (bool, bool) {
+        let mask = LVIS_FOCUSED.0 | LVIS_SELECTED.0;
+        let state = send(self.0, LVM_GETITEMSTATE, row as usize, mask as isize) as u32;
+        (state & LVIS_FOCUSED.0 != 0, state & LVIS_SELECTED.0 != 0)
+    }
+
+    pub(crate) fn select(self, row: u64, selected: bool) {
+        let state = if selected {
+            LVIS_SELECTED
+        } else {
+            LIST_VIEW_ITEM_STATE_FLAGS(0)
+        };
+        self.set_state(row as usize, LVIS_SELECTED, state);
+    }
+
+    /// Selects exactly the rows of `ranges`, sorted ranges that do not
+    /// touch, and keeps the focus.
+    pub(crate) fn set_selected(self, ranges: &[Range<u64>]) {
+        let none = LIST_VIEW_ITEM_STATE_FLAGS(0);
+        self.set_state(usize::MAX, LVIS_SELECTED, none);
+        let count = self.count();
+        if let [all] = ranges
+            && *all == (0..count)
+        {
+            return self.select_all();
+        }
+        for row in ranges.iter().flat_map(Clone::clone) {
+            self.select(row, true);
+        }
+    }
+
+    /// Changes the selection from `shown`, the rows the list selects, to
+    /// `wanted`, both sorted ranges that do not touch, writing only the rows
+    /// that differ, because each write notifies the parent.
+    pub(crate) fn change_selected(self, shown: &[Range<u64>], wanted: &[Range<u64>]) {
+        let count = self.count();
+        if let [all] = wanted
+            && all.end == count
+            && all.start < 2
+            && shown != wanted
+        {
+            self.select_all();
+            for row in 0..all.start {
+                self.select(row, false);
+            }
+            return;
+        }
+        for row in difference(shown, wanted).into_iter().flatten() {
+            self.select(row, false);
+        }
+        for row in difference(wanted, shown).into_iter().flatten() {
+            self.select(row, true);
+        }
+    }
+
+    /// How many whole rows the list shows at a time.
+    pub(crate) fn page_rows(self) -> u64 {
+        send(self.0, LVM_GETCOUNTPERPAGE, 0, 0).max(1) as u64
+    }
+
     /// The selected rows, as sorted ranges that do not touch. A virtual
-    /// list knows them only row by row, so a selection of every row, which
-    /// Select all makes, is read without asking for each.
+    /// list knows them only row by row, so a selection of every row from
+    /// the first selected one on, which Select all makes, also without a
+    /// panel's `..`, is read without asking for each.
     #[allow(
         clippy::single_range_in_vec_init,
         reason = "a selection is a list of row ranges"
@@ -1507,8 +1719,11 @@ impl ListView {
             return Vec::new();
         }
         let count = self.count();
-        if selected == count {
-            return vec![0..count];
+        let first = send(self.0, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
+        if let Ok(first) = u64::try_from(first)
+            && selected == count - first
+        {
+            return vec![first..count];
         }
         let mut ranges: Vec<Range<u64>> = Vec::new();
         let mut after = -1isize;

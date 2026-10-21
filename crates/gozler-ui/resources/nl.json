@@ -48,7 +48,8 @@
     "copy_to_folder": "Kopië&ren naar map…",
     "move_to_folder": "Verplaa&tsen naar map…",
     "file_operations": "&Bestandsbewerkingen",
-    "two_panels": "&Twee panelen"
+    "two_panels": "&Twee panelen",
+    "clear_selection": "Selectie &wissen"
   },
   "column": {
     "name": "&Naam",
@@ -728,6 +729,35 @@
     "delete_button": "&Verwijderen",
     "copy_to_title": "Kopiëren naar map",
     "move_to_title": "Verplaatsen naar map"
+  },
+  "panel": {
+    "items_one": "{0} item",
+    "items_other": "{0} items",
+    "selected_one": "{0} van {1} geselecteerd",
+    "selected_other": "{0} van {1} geselecteerd",
+    "free": "{0} vrij",
+    "reading": "Lezen…",
+    "not_ready": "Station {0} is niet gereed. Plaats het opnieuw en selecteer Opnieuw proberen.",
+    "retry": "&Opnieuw proberen",
+    "find": "Zoeken: {0}",
+    "folder": "Map",
+    "ext": "Ext.",
+    "missing": "{0} bestaat niet.",
+    "cannot_open": "Windows kan {0} niet openen: {1}",
+    "drive_not_ready": "Station {0} is niet gereed. {1}",
+    "open_title": "Openen",
+    "indexing": "{0} wordt geïndexeerd — grootten kunnen ontbreken.",
+    "not_indexed": "{0} is niet geïndexeerd, dus mapgrootten worden niet getoond."
+  },
+  "key_bar": {
+    "view": "Weergeven",
+    "edit": "Bewerken",
+    "copy": "Kopiëren",
+    "move": "Verplaatsen",
+    "new_folder": "Nieuwe map",
+    "delete": "Verwijderen",
+    "edit_tooltip": "Bewerken is nog niet beschikbaar.",
+    "move_tooltip": "Verplaatsen naar het andere paneel, of de naam wijzigen."
   },
   "message": {
     "internal_error": "Gozler moest worden gesloten. De details staan in {0}.",

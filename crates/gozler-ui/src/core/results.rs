@@ -308,6 +308,15 @@ impl Results {
         chunk.rows.get(usize::try_from(index - chunk.start).ok()?)
     }
 
+    /// Every row whose chunk has arrived.
+    pub(crate) fn fetched(&self) -> impl Iterator<Item = &ResultItem> {
+        let chunks = match &self.shown {
+            Shown::Rows(shown) => shown.chunks.as_slice(),
+            Shown::Nothing | Shown::Message(_) => &[],
+        };
+        chunks.iter().flat_map(|chunk| &chunk.rows)
+    }
+
     /// The byte ranges of the row's full path that the shown search's text
     /// terms matched.
     pub(crate) fn matched_parts(&self, row: &ResultItem) -> Vec<Range<usize>> {

@@ -235,7 +235,7 @@ impl Queue {
         (self.shared.wake)();
     }
 
-    /// Removes an ended operation, once no list of the window needs it.
+    /// Removes an ended operation, once no list of the window keeps it.
     pub fn remove(&self, id: OperationId) {
         let mut operations = self.shared.lock();
         if let Some(Tracked {
@@ -394,7 +394,8 @@ impl Queue {
     }
 
     /// The taken entries, which the window leaves out of its lists. Take
-    /// it once per wake.
+    /// it once per wake. An ended operation stays in it until
+    /// [`Queue::remove`].
     pub fn taken(&self) -> Arc<Taken> {
         Arc::clone(&self.shared.lock().taken)
     }
@@ -742,14 +743,11 @@ fn current(file: &CurrentFile) -> Current {
 /// removed.
 fn taken(operations: &Operations) -> Arc<Taken> {
     let mut taken = Taken::default();
-    for operation in operations
-        .by_id
-        .values()
-        .filter(|operation| operation.submitted)
-    {
+    for (&id, operation) in (operations.by_id.iter()).filter(|(_, operation)| operation.submitted) {
         if let Request::Delete { sources } | Request::Move { sources, .. } = &*operation.request {
+            let ended = matches!(operation.phase, Phase::Ended(_));
             for source in sources {
-                taken.insert(source);
+                taken.insert(id, source, ended);
             }
         }
     }

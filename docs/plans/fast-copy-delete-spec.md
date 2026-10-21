@@ -565,18 +565,21 @@ its destination, its bytes copied and its size; for a delete, the entry
 being deleted, with no destination and 0 for both. With several workers it
 is the one that started last.
 
-**Taken entries.** The queue gives two sets of sources: those of the
-waiting and running deletes and moves, and those of the ended ones. A path
-is taken when it equals or is below a source, compared as Windows compares
-names, ignoring case. The window asks this, and nothing else, to leave
-those entries out of the panels and show them blank in the search results.
+**Taken entries.** The queue gives the sources of the deletes and moves
+that wait, run or ended, and which of them ended. A path is taken when it
+equals or is below a source of a waiting or running one, or of an ended one
+that the list keeps, compared as Windows compares names, ignoring case. The
+window asks this, and nothing else, to leave those entries out of the panels
+and show them blank in the search results.
 Each list keeps the ended operations it still needs
 ([file manager spec](file-manager-spec.md), "The person never waits for the
 disk"): a folder panel keeps an operation whose end makes it read its folder
 again until its first complete listing started after the end, because the
 change notifications and the end arrive in no fixed order; a search list
-keeps the operations it shows blank until its next search, because gozlerd
-applies a large delete's journal records for some time after the delete.
+keeps an ended operation only when, at its end, the operation takes a row
+of the list's fetched results, and then until its next search, because
+gozlerd applies a large delete's journal records for some time after the
+delete.
 The window removes an ended operation from the queue when no list keeps it.
 This is a display rule on the path text the window gave; the safety rule
 stays D14 on identities.
@@ -584,10 +587,12 @@ stays D14 on identities.
 The test runs for every row Windows paints, about 50 rows per paint, so it
 must not compare a row with every taken path: 100,000 deleted rows would
 cost 5 million compares per paint. The queue keeps the taken sources in a
-hash set of folded full paths, and a row is taken when its folded path or
-one of its parent paths is in the set, a few dozen lookups per row. At each
-wake the window takes a snapshot of the set (`Arc`), so a paint never waits
-for the engine's lock while a worker holds it.
+hash map from each folded full path to the operations that take it, and a
+row is taken when its folded path or one of its parent paths is in the map
+for an operation that takes it from that list, a few dozen lookups per row.
+At each wake the window takes a snapshot of the map (`Arc`), so a paint
+never waits for the engine's lock while a worker holds it, and decides from
+that snapshot which lists keep each operation that ended.
 
 **The overlap test (D14)** compares the paths of two operations through a
 trie of their identity components: each path of one operation walks the

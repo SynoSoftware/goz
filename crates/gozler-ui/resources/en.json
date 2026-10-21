@@ -48,7 +48,8 @@
     "copy_to_folder": "Copy to &folder…",
     "move_to_folder": "&Move to folder…",
     "file_operations": "File &operations",
-    "two_panels": "&Two panels"
+    "two_panels": "&Two panels",
+    "clear_selection": "&Clear selection"
   },
   "column": {
     "name": "&Name",
@@ -728,6 +729,35 @@
     "delete_button": "&Delete",
     "copy_to_title": "Copy to folder",
     "move_to_title": "Move to folder"
+  },
+  "panel": {
+    "items_one": "{0} item",
+    "items_other": "{0} items",
+    "selected_one": "{0} of {1} selected",
+    "selected_other": "{0} of {1} selected",
+    "free": "{0} free",
+    "reading": "Reading…",
+    "not_ready": "Drive {0} is not ready. Insert it again, then select Retry.",
+    "retry": "&Retry",
+    "find": "Find: {0}",
+    "folder": "Folder",
+    "ext": "Ext",
+    "missing": "{0} does not exist.",
+    "cannot_open": "Windows could not open {0}: {1}",
+    "drive_not_ready": "Drive {0} is not ready. {1}",
+    "open_title": "Open",
+    "indexing": "{0} is indexing — sizes may be missing.",
+    "not_indexed": "{0} is not indexed, so folder sizes are not shown."
+  },
+  "key_bar": {
+    "view": "View",
+    "edit": "Edit",
+    "copy": "Copy",
+    "move": "Move",
+    "new_folder": "New folder",
+    "delete": "Delete",
+    "edit_tooltip": "Editing is not available yet.",
+    "move_tooltip": "Move to the other panel, or rename."
   },
   "message": {
     "internal_error": "Gozler had to close. The details are in {0}.",

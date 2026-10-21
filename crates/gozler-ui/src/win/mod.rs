@@ -10,6 +10,7 @@ pub(crate) mod clipboard;
 pub(crate) mod controls;
 pub(crate) mod dialog;
 pub(crate) mod file_operations;
+pub(crate) mod folder;
 pub(crate) mod gdi;
 pub(crate) mod instance;
 pub(crate) mod keys;

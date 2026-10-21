@@ -30,10 +30,11 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
-    FOLDERID_LocalAppData, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOTESTFILECREATE,
-    FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileOpenDialog,
-    IFileSaveDialog, IFileSystemBindData, IFileSystemBindData_Impl, ILClone, ILCreateFromPathW,
-    ILFindLastID, ILFree, ILIsParent, ILRemoveLastID, IShellItem, KF_FLAG_DEFAULT,
+    FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData, FOS_FILEMUSTEXIST,
+    FOS_FORCEFILESYSTEM, FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS,
+    FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IFileSystemBindData,
+    IFileSystemBindData_Impl, ILClone, ILCreateFromPathW, ILFindLastID, ILFree, ILIsParent,
+    ILRemoveLastID, IShellItem, KF_FLAG_DEFAULT, KF_FLAG_DONT_VERIFY, KNOWN_FOLDER_FLAG,
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject, SHCreateItemFromParsingName,
     SHDoDragDrop, SHELLEXECUTEINFOW, SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties,
     SHOpenFolderAndSelectItems, SHParseDisplayName, SIGDN_FILESYSPATH, STR_FILE_SYS_BIND_DATA,
@@ -205,14 +206,33 @@ pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
 /// The user's local application data folder, such as
 /// `C:\Users\ana\AppData\Local`.
 pub(crate) fn local_app_data() -> windows::core::Result<PathBuf> {
+    known_folder(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT).map(PathBuf::from)
+}
+
+/// The user's Documents folder, which the left panel shows the first time
+/// (file-manager-spec.md: A panel). It is not checked, because a folder
+/// redirected to a server that does not answer would hold the window; the
+/// panel's reading finds out.
+pub(crate) fn documents() -> windows::core::Result<String> {
+    known_folder(&FOLDERID_Documents, KF_FLAG_DONT_VERIFY)
+}
+
+/// The user's Downloads folder, which the right panel shows the first time,
+/// not checked, as [`documents`].
+pub(crate) fn downloads() -> windows::core::Result<String> {
+    known_folder(&FOLDERID_Downloads, KF_FLAG_DONT_VERIFY)
+}
+
+fn known_folder(
+    id: &windows::core::GUID,
+    flags: KNOWN_FOLDER_FLAG,
+) -> windows::core::Result<String> {
     // SAFETY: the returned string is copied, then freed as the call requires.
     unsafe {
-        let path = SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DEFAULT, None)?;
+        let path = SHGetKnownFolderPath(id, flags, None)?;
         let text = path.to_string();
         CoTaskMemFree(Some(path.0.cast_const().cast()));
-        Ok(PathBuf::from(
-            text.map_err(|_| windows::core::Error::from_thread())?,
-        ))
+        text.map_err(|_| windows::core::Error::from_thread())
     }
 }
 

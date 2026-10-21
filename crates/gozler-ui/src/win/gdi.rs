@@ -13,14 +13,14 @@ use std::collections::hash_map::Entry;
 use windows::Win32::Foundation::{COLORREF, LRESULT, MAX_PATH, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, COLOR_3DLIGHT,
-    COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateBitmap,
-    CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET, DIB_RGB_COLORS,
-    DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FW_BOLD, FW_SEMIBOLD,
-    FillRect, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW,
-    GetSysColor, GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ,
-    LOGFONTW, PAINTSTRUCT, ReleaseDC, RestoreDC, SYS_COLOR_INDEX, SaveDC, SelectObject, SetBkColor,
-    SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
+    COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+    COLOR_WINDOWTEXT, CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW,
+    DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
+    EndPaint, FW_BOLD, FW_SEMIBOLD, FillRect, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC,
+    GetGlyphIndicesW, GetObjectW, GetSysColor, GetSysColorBrush, GetTextFaceW, GetTextMetricsW,
+    HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, PAINTSTRUCT, ReleaseDC, RestoreDC, SYS_COLOR_INDEX,
+    SaveDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
@@ -783,13 +783,24 @@ impl StaticColors {
         self.on_window(muted_text())
     }
 
+    /// The system highlight colours, as the active panel's path box shows
+    /// them while it does not have the focus (file-manager-spec.md: A
+    /// panel).
+    pub(crate) fn highlight(self) -> LRESULT {
+        self.on(COLOR_HIGHLIGHTTEXT, COLOR_HIGHLIGHT)
+    }
+
     fn on_window(self, text: SYS_COLOR_INDEX) -> LRESULT {
+        self.on(text, COLOR_WINDOW)
+    }
+
+    fn on(self, text: SYS_COLOR_INDEX, ground: SYS_COLOR_INDEX) -> LRESULT {
         // SAFETY: a stale DC makes the calls fail; system brushes are never
         // freed.
         unsafe {
             SetTextColor(self.0, COLORREF(GetSysColor(text)));
-            SetBkColor(self.0, COLORREF(GetSysColor(COLOR_WINDOW)));
-            LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
+            SetBkColor(self.0, COLORREF(GetSysColor(ground)));
+            LRESULT(GetSysColorBrush(ground).0 as isize)
         }
     }
 }
@@ -813,13 +824,28 @@ pub(super) fn disabled_color(ground: SYS_COLOR_INDEX) -> COLORREF {
     if high_contrast() {
         return system_color(COLOR_GRAYTEXT);
     }
+    // 92 of 255, WinUI's disabled text opacity.
+    text_over(ground, 92)
+}
+
+/// The fill of a panel's focused row while the panel is not active: the
+/// text colour at 15 % over the window colour, which stays visible on it,
+/// as the light gray of the approved design does on white. `None` in high
+/// contrast, whose scheme has no colour between the two, so the row then
+/// shows a frame instead.
+pub(super) fn inactive_bar_color() -> Option<COLORREF> {
+    (!high_contrast()).then(|| text_over(COLOR_WINDOW, 38))
+}
+
+/// The window text colour at `alpha` of 255 over the system colour
+/// `ground`.
+fn text_over(ground: SYS_COLOR_INDEX, alpha: u32) -> COLORREF {
     let text = system_color(COLOR_WINDOWTEXT).0;
     let ground = system_color(ground).0;
-    // 92 of 255, WinUI's disabled text opacity.
     let channel = |shift: u32| {
         let text = (text >> shift) & 0xFF;
         let ground = (ground >> shift) & 0xFF;
-        ((text * 92 + ground * (255 - 92) + 127) / 255) << shift
+        ((text * alpha + ground * (255 - alpha) + 127) / 255) << shift
     };
     COLORREF(channel(0) | channel(8) | channel(16))
 }

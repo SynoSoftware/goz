@@ -7,16 +7,18 @@ use super::{Hwnd, wide};
 use crate::core::commands::{Keystroke, Mark, MenuNode};
 use crate::core::glyph::Glyph;
 use crate::core::layout::{Px, icon_glyph_height};
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{COLOR_GRAYTEXT, COLOR_MENUTEXT, HBITMAP};
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN;
 use windows::Win32::UI::WindowsAndMessaging::{
     ACCEL, ACCEL_VIRT_FLAGS, CheckMenuItem, CreateAcceleratorTableW, CreateMenu, CreatePopupMenu,
     DestroyAcceleratorTable, DestroyMenu, DrawMenuBar, EnableMenuItem, FALT, FCONTROL, FSHIFT,
     FVIRTKEY, GetMenu, GetMenuItemInfoW, HACCEL, HMENU, InsertMenuItemW, MENU_ITEM_TYPE, MENUINFO,
     MENUITEMINFOW, MF_BYCOMMAND, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_UNCHECKED, MFT_RADIOCHECK,
     MFT_RIGHTJUSTIFY, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_DATA, MIIM_FTYPE, MIIM_ID,
-    MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_CHECKORBMP, MSG, SetMenu, SetMenuDefaultItem,
-    SetMenuInfo, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
-    TranslateAcceleratorW,
+    MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_CHECKORBMP, MSG, PostMessageW, SetMenu,
+    SetMenuDefaultItem, SetMenuInfo, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenuEx, TranslateAcceleratorW, WM_KEYDOWN,
 };
 use windows::core::PWSTR;
 
@@ -237,6 +239,25 @@ impl Menu {
         chosen
             .and_then(|id| u16::try_from(id).ok())
             .filter(|id| *id != 0)
+    }
+
+    /// As [`Menu::track_popup`], with the item at `highlighted` among the
+    /// items that are not separators highlighted when the menu opens, so
+    /// the arrow keys start from it. The menu's own loop takes the `Down`
+    /// keys posted before it opens, as it takes the person's.
+    pub(crate) fn track_popup_highlighted(
+        owner: Hwnd,
+        items: &[MenuNode],
+        point: (i32, i32),
+        states: &[(u16, bool, bool)],
+        highlighted: usize,
+    ) -> Option<u16> {
+        let down = WPARAM(usize::from(VK_DOWN.0));
+        for _ in 0..=highlighted {
+            // SAFETY: plain values.
+            let _ = unsafe { PostMessageW(Some(owner.0), WM_KEYDOWN, down, LPARAM(0)) };
+        }
+        Menu::track_popup(owner, items, point, states, None)
     }
 
     /// A popup menu whose items show their check mark or their icon in one

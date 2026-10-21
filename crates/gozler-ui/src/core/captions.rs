@@ -23,6 +23,7 @@ use super::glyph::Glyph;
 use super::ids::{ControlId, DialogId};
 use super::layout::WIDEST_TOTAL;
 use super::model::{Column, Export, Job, Model};
+use super::panel::{Counts, Row, Side, View};
 use super::query::{
     ATTRIBUTES, AttributeChoice, DateModified, DateRange, Day, Kind, LocationItem, MatchMode,
     RangeItem, SizeFilter, SizeRange, SizeUnit, SizeWord, date_items, size_items,
@@ -74,6 +75,13 @@ pub(crate) struct WindowCaptions {
     pub(crate) status_cancel: String,
     pub(crate) status_widest: StatusWidest,
     pub(crate) message: Option<ListCaption>,
+    pub(crate) panel_headers: [String; 4],
+    /// The key bar's buttons: each key, its word and its tooltip.
+    pub(crate) key_bar: [(String, String, Option<String>); 6],
+    pub(crate) retry: String,
+    /// The widest free space a status line shows, which the layout sizes
+    /// the status line's right end for.
+    pub(crate) free_widest: String,
 }
 
 /// What a [`CommandButton`] says: its caption, which for an icon is the name
@@ -150,6 +158,10 @@ pub(crate) struct StatusWidest {
     pub(crate) running: Vec<String>,
     /// A job's results, which have the middle group to themselves.
     pub(crate) done: Vec<String>,
+    /// The right group's texts in Two panels, which the layout sizes the
+    /// group for at the bar's right end, so the middle group has the rest
+    /// (file-manager-spec.md: The status bar in Two panels).
+    pub(crate) panel_index: Vec<String>,
 }
 
 /// What the list's empty area says instead of rows: the message, and its
@@ -416,7 +428,7 @@ pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 14] = [
 /// caption shows the same icon on every button that has it (DESIGN.md:
 /// Look). A fix that needs administrator permission shows the
 /// administrator shield instead, so its caption has no icon here.
-const BUTTON_GLYPHS: [(&str, Glyph); 23] = [
+const BUTTON_GLYPHS: [(&str, Glyph); 24] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
     ("button.close", Glyph::ChromeClose),
@@ -440,6 +452,7 @@ const BUTTON_GLYPHS: [(&str, Glyph); 23] = [
     ("fix.update", Glyph::Download),
     ("fix.downgrade", Glyph::Download),
     ("fix.open_services", Glyph::Processing),
+    ("panel.retry", Glyph::Refresh),
 ];
 
 /// The icon of a push button whose caption is the catalogue text `key`.
@@ -1166,6 +1179,7 @@ impl WindowCaptions {
                 &commands::menu_bar(model.mode()),
                 strings,
                 &model.choices().shortcuts,
+                model.mode(),
             ),
             search_cue: strings.text("search.cue").to_owned(),
             clear_search: strings.text("button.clear").to_owned(),
@@ -1201,6 +1215,10 @@ impl WindowCaptions {
             status_cancel: strings.text("button.cancel").to_owned(),
             status_widest: status_widest(strings, numbers),
             message: list_message(model),
+            panel_headers: panel_headers(strings),
+            key_bar: key_bar(strings),
+            retry: strings.text("panel.retry").to_owned(),
+            free_widest: strings.format("panel.free", &[&text::bytes(strings, numbers, 999 << 30)]),
         }
     }
 }
@@ -1639,6 +1657,11 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
         ))
         .chain(fix_ended)
         .collect(),
+        panel_index: vec![
+            strings.format("panel.not_indexed", &["C:\\"]),
+            strings.format("panel.indexing", &["C:\\"]),
+            update_text(strings, WIDEST_VERSION),
+        ],
     }
 }
 
@@ -2028,6 +2051,15 @@ pub(crate) fn index_status(model: &Model) -> String {
     {
         return failure_text(strings, failure);
     }
+    if model.mode() == Mode::TwoPanels {
+        return panel_index_status(model)
+            .or_else(|| {
+                model
+                    .newer_release()
+                    .map(|version| update_text(strings, version))
+            })
+            .unwrap_or_default();
+    }
     let coverage = model.coverage();
     if let Some(volume) = coverage.incomplete() {
         let key = match volume.phase {
@@ -2049,6 +2081,154 @@ pub(crate) fn index_status(model: &Model) -> String {
                 .map(|version| update_text(strings, version))
         })
         .unwrap_or_default()
+}
+
+/// Why the active panel's folder sizes may be unknown, as the status bar's
+/// right group says it in Two panels (file-manager-spec.md: Folder sizes).
+fn panel_index_status(model: &Model) -> Option<String> {
+    let strings = model.strings();
+    let coverage = model.panel_coverage()?;
+    let Some(volume) = coverage.volumes().next() else {
+        let panels = model.panels();
+        let root = panels.panel(panels.active()).root();
+        return Some(strings.format("panel.not_indexed", &[&root]));
+    };
+    (!volume.phase.is_complete() || volume.metadata_pending)
+        .then(|| strings.format("panel.indexing", &[volume.mounted().display_prefix()]))
+}
+
+/// What a panel shows besides its rows (file-manager-spec.md: A panel).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PanelCaptions {
+    pub(crate) drive: String,
+    pub(crate) path: String,
+    /// The status line's counts, or the quick search box's text while it
+    /// is open.
+    pub(crate) counts: String,
+    pub(crate) quick: bool,
+    /// The free space of the panel's drive, at the status line's right end.
+    pub(crate) free: String,
+    /// What the list area says instead of rows, and whether Retry shows
+    /// under it.
+    pub(crate) message: Option<String>,
+    pub(crate) retry: bool,
+}
+
+impl PanelCaptions {
+    pub(crate) fn new(model: &Model, side: Side, numbers: &dyn Numbers) -> PanelCaptions {
+        let strings = model.strings();
+        let panel = model.panels().panel(side);
+        let (message, retry) = match panel.view() {
+            View::Reading => (Some(strings.text("panel.reading").to_owned()), false),
+            View::Folder => (None, false),
+            View::NotReady { drive } => (Some(strings.format("panel.not_ready", &[drive])), true),
+        };
+        let quick = panel.quick_text();
+        let counts = match quick {
+            Some(typed) => strings.format("panel.find", &[typed]),
+            None if *panel.view() == View::Folder => panel_counts(strings, numbers, panel.counts()),
+            None => String::new(),
+        };
+        PanelCaptions {
+            drive: panel.drive(),
+            path: panel.path_box().to_owned(),
+            counts,
+            quick: quick.is_some(),
+            free: match (panel.view(), panel.free()) {
+                (View::Folder, Some(free)) => {
+                    strings.format("panel.free", &[&text::bytes(strings, numbers, free)])
+                }
+                _ => String::new(),
+            },
+            message,
+            retry,
+        }
+    }
+}
+
+/// The status line's counts: "14 items · 5.2 GB" or "3 of 14 selected ·
+/// 4.2 GB", without the size when a counted folder's is unknown.
+fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> String {
+    let count = match counts.selected {
+        None => strings.count("panel.items", counts.items, numbers, &[]),
+        Some(selected) => strings.count(
+            "panel.selected",
+            selected,
+            numbers,
+            &[&numbers.integer(counts.items)],
+        ),
+    };
+    let size = counts
+        .bytes
+        .map(|bytes| text::bytes(strings, numbers, bytes))
+        .unwrap_or_default();
+    joined(strings, count, size)
+}
+
+/// A panel's cell: Name, Ext, Size or Date modified, by its column's
+/// index (file-manager-spec.md: A panel).
+pub(crate) fn panel_cell(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    row: Row,
+    column: usize,
+) -> String {
+    let Row::Entry(entry) = row else {
+        return if column == 0 {
+            "..".to_owned()
+        } else {
+            String::new()
+        };
+    };
+    match column {
+        0 => entry.display_name(),
+        1 => entry.extension(),
+        2 => match (entry.is_folder(), entry.folder_size()) {
+            (true, None) => strings.text("panel.folder").to_owned(),
+            (true, Some(size)) | (false, Some(size)) => kilobytes(strings, numbers, size),
+            (false, None) => kilobytes(strings, numbers, entry.size),
+        },
+        _ => numbers.date_time(entry.modified),
+    }
+}
+
+/// A size in Search's Size column format, in KB rounded up, so sizes line
+/// up for comparison.
+fn kilobytes(strings: &Strings, numbers: &dyn Numbers, size: u64) -> String {
+    strings.format("size.kb", &[&numbers.integer(size.div_ceil(1024))])
+}
+
+/// The panels' column headers, in their order.
+pub(crate) fn panel_headers(strings: &Strings) -> [String; 4] {
+    [
+        strings.text("header.name").to_owned(),
+        strings.text("panel.ext").to_owned(),
+        strings.text("header.size").to_owned(),
+        strings.text("header.date_modified").to_owned(),
+    ]
+}
+
+/// The key bar's buttons: each key and its word, and the tooltip where the
+/// word alone cannot say what it does (file-manager-spec.md: The key bar).
+pub(crate) fn key_bar(strings: &Strings) -> [(String, String, Option<String>); 6] {
+    let tip = |key: &str| Some(strings.text(key).to_owned());
+    let word = |key: &str| strings.text(key).to_owned();
+    [
+        ("F3".to_owned(), word("key_bar.view"), None),
+        (
+            "F4".to_owned(),
+            word("key_bar.edit"),
+            tip("key_bar.edit_tooltip"),
+        ),
+        ("F5".to_owned(), word("key_bar.copy"), None),
+        (
+            "F6".to_owned(),
+            word("key_bar.move"),
+            tip("key_bar.move_tooltip"),
+        ),
+        ("F7".to_owned(), word("key_bar.new_folder"), None),
+        ("F8".to_owned(), word("key_bar.delete"), None),
+    ]
 }
 
 fn update_text(strings: &Strings, version: &str) -> String {

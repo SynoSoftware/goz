@@ -16,19 +16,22 @@
 //! `gozler-fileops` lists folders on any file system, FAT included, and
 //! [`walk_full_listing_buffer`] turns its listings into [`FolderEntry`]s,
 //! and its ring reads `BackupRead`'s stream headers with
-//! [`parse_backup_header`].
+//! [`parse_backup_header`]. The window's panels follow their folders with
+//! `ReadDirectoryChangesW`, whose changes [`walk_notify_buffer`] reads.
 //!
 //! All parsing is little-endian [`zerocopy`] views over `&[u8]` with no
 //! `unsafe`; the Win32 layer only ever hands this module raw bytes.
 
 mod backup;
 mod listing;
+mod notify;
 mod parse;
 
 pub use backup::{
     BACKUP_HEADER_LEN, BackupHeaderError, BackupStream, BackupStreamHeader, parse_backup_header,
 };
 pub use listing::{FolderEntry, walk_full_listing_buffer, walk_listing_buffer};
+pub use notify::{Notified, NotifyAction, walk_notify_buffer};
 
 pub use parse::{
     FILE_LAYOUT_NAME_ENTRY_DOS, FILE_LAYOUT_NAME_ENTRY_PRIMARY,

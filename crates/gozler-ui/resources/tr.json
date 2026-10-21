@@ -48,7 +48,8 @@
     "copy_to_folder": "Klas&öre kopyala…",
     "move_to_folder": "Klasöre ta&şı…",
     "file_operations": "Dosya &işlemleri",
-    "two_panels": "İki &panel"
+    "two_panels": "İki &panel",
+    "clear_selection": "Seçimi &kaldır"
   },
   "column": {
     "name": "&Ad",
@@ -728,6 +729,35 @@
     "delete_button": "&Sil",
     "copy_to_title": "Klasöre kopyala",
     "move_to_title": "Klasöre taşı"
+  },
+  "panel": {
+    "items_one": "{0} öğe",
+    "items_other": "{0} öğe",
+    "selected_one": "{0}/{1} seçili",
+    "selected_other": "{0}/{1} seçili",
+    "free": "{0} boş",
+    "reading": "Okunuyor…",
+    "not_ready": "{0} sürücüsü hazır değil. Yeniden takın, ardından Yeniden dene'yi seçin.",
+    "retry": "&Yeniden dene",
+    "find": "Bul: {0}",
+    "folder": "Klasör",
+    "ext": "Uzantı",
+    "missing": "{0} yok.",
+    "cannot_open": "Windows {0} öğesini açamadı: {1}",
+    "drive_not_ready": "{0} sürücüsü hazır değil. {1}",
+    "open_title": "Aç",
+    "indexing": "{0} dizinleniyor — boyutlar eksik olabilir.",
+    "not_indexed": "{0} dizinlenmiyor, bu yüzden klasör boyutları gösterilmiyor."
+  },
+  "key_bar": {
+    "view": "Görüntüle",
+    "edit": "Düzenle",
+    "copy": "Kopyala",
+    "move": "Taşı",
+    "new_folder": "Yeni klasör",
+    "delete": "Sil",
+    "edit_tooltip": "Düzenleme henüz kullanılamıyor.",
+    "move_tooltip": "Diğer panele taşı veya yeniden adlandır."
   },
   "message": {
     "internal_error": "Gozler kapanmak zorunda kaldı. Ayrıntılar şurada: {0}",

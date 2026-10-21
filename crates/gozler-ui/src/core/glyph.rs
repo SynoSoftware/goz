@@ -131,6 +131,8 @@ pub(crate) enum Glyph {
     Sync,
     /// An arrow turning back: Reset and Reset all.
     Undo,
+    /// An arrow pointing up: a panel's `..` row, over a folder's icon.
+    Up,
     /// A film camera: the Videos kind.
     Video,
     /// Four squares: the All kind.
@@ -138,7 +140,7 @@ pub(crate) enum Glyph {
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 56] = [
+    pub(crate) const ALL: [Glyph; 57] = [
         Glyph::Accept,
         Glyph::Add,
         Glyph::BackToWindow,
@@ -193,6 +195,7 @@ impl Glyph {
         Glyph::SpeedHigh,
         Glyph::Sync,
         Glyph::Undo,
+        Glyph::Up,
         Glyph::Video,
         Glyph::ViewAll,
     ];
@@ -254,6 +257,7 @@ impl Glyph {
             Glyph::SpeedHigh => '\u{EC4A}',
             Glyph::Sync => '\u{E895}',
             Glyph::Undo => '\u{E7A7}',
+            Glyph::Up => '\u{E74A}',
             Glyph::Video => '\u{E714}',
             Glyph::ViewAll => '\u{E8A9}',
         }

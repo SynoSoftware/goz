@@ -8,6 +8,7 @@ use super::glyph::Glyph;
 use super::ids::DialogId;
 use super::layout::{Dip, Panes};
 use super::model::Column;
+use super::panel::SavedPanels;
 use super::query::{Filters, Matching};
 use super::shortcuts::{CommandShortcuts, ShowShortcut};
 use super::speed::Speed;
@@ -510,6 +511,10 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) destination_folder: Option<String>,
+    /// Each panel's folder, sort and recent folders, and which panel is
+    /// active (file-manager-spec.md: A panel).
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) panels: SavedPanels,
 }
 
 impl Default for WindowState {
@@ -527,6 +532,7 @@ impl Default for WindowState {
             tray_notice_shown: false,
             last_update_check: None,
             destination_folder: None,
+            panels: SavedPanels::default(),
         }
     }
 }
@@ -642,6 +648,7 @@ fn is_windows_default(choice: &LanguageChoice) -> bool {
 mod tests {
     use super::*;
     use crate::core::commands::{CommandId, Key, Keystroke};
+    use crate::core::panel::{SavedPanel, Side};
     use crate::core::query::{DateModified, DateRange, Day, Kind, SizeFilter, SizeWord};
 
     /// A settings file that breaks a rule of Settings > Keyboard would give
@@ -841,6 +848,15 @@ mod tests {
                 tray_notice_shown: true,
                 last_update_check: Some(1_790_000_000),
                 destination_folder: Some(r"E:\Backup".into()),
+                panels: SavedPanels {
+                    left: SavedPanel {
+                        folder: Some(r"D:\work".into()),
+                        sort: SortSpec::default_for(gozler_core::types::SortKey::DateModified),
+                        history: vec![r"D:\work".into(), r"C:\".into()],
+                    },
+                    right: SavedPanel::default(),
+                    active: Side::Right,
+                },
             },
         };
         Settings::default()

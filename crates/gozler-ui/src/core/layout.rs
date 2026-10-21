@@ -388,6 +388,12 @@ pub(crate) struct CaptionWidths {
     /// Every push button's but the filter pane's: Clear, the inspector's,
     /// the list message's and the status bar's Cancel.
     buttons: ButtonWidths,
+    /// A drive button's widest text, such as `W:`.
+    drive: Px,
+    /// The widest free space of a panel's status line.
+    free: Px,
+    /// The widest key bar caption, its key and its word.
+    key_bar: Px,
 }
 
 /// The widest captions of push buttons that share one width, as a
@@ -417,6 +423,7 @@ pub(crate) struct StatusWidths {
     view: Px,
     running: Px,
     done: Px,
+    panel_index: Px,
 }
 
 impl StatusWidths {
@@ -428,6 +435,7 @@ impl StatusWidths {
             view: widest_of(&widest.view),
             running: widest_of(&widest.running),
             done: widest_of(&widest.done),
+            panel_index: widest_of(&widest.panel_index),
         }
     }
 }
@@ -511,7 +519,18 @@ impl CaptionWidths {
             },
             inspector_labels: widest(&captions.inspector_labels),
             status: StatusWidths::measure(&captions.status_widest, measure),
-            buttons,
+            buttons: ButtonWidths {
+                with_image: buttons.with_image.max(measure(&captions.retry)),
+                ..buttons
+            },
+            drive: measure("W:").max(measure(r"\\")),
+            free: measure(&captions.free_widest),
+            key_bar: captions
+                .key_bar
+                .iter()
+                .map(|(key, word, _)| measure(&format!("{key} {word}")))
+                .max()
+                .unwrap_or_default(),
         }
     }
 
@@ -525,6 +544,10 @@ impl CaptionWidths {
 const BUTTON_PADDING: Dip = Dip(24);
 /// The narrowest push button, as Windows' guidelines size OK and Cancel.
 const BUTTON_MIN_WIDTH: Dip = Dip(75);
+
+/// The space above a panel's message, under its list's header, as the
+/// prototype draws it.
+const MESSAGE_TOP: Dip = Dip(18);
 /// The room a button needs for a caption `caption` wide, with an image
 /// before it when `with_image`: an icon, or the administrator shield of a
 /// button that runs as administrator, which is as large.
@@ -1216,9 +1239,29 @@ pub(crate) struct Layout {
 pub(crate) enum Body {
     /// Boxed, because Search's controls take far more room than two lists.
     Search(Box<SearchLayout>),
-    /// The left and the right panel's lists, each half of the window
-    /// (file-manager-spec.md: The window).
-    TwoPanels { lists: [Rect; 2] },
+    /// The left and the right panel, each half of the window, and the key
+    /// bar under them (file-manager-spec.md: The window). The panels are
+    /// boxed, as Search is, so the two variants take about the same room.
+    TwoPanels {
+        panels: Box<[PanelLayout; 2]>,
+        key_bar: [Rect; 6],
+    },
+}
+
+/// One panel's controls, from the top: the drive button and the path box,
+/// the list, and the status line (file-manager-spec.md: A panel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PanelLayout {
+    pub(crate) drive: Rect,
+    pub(crate) path: Rect,
+    pub(crate) list: Rect,
+    /// The list area's message, under the header, and Retry under it.
+    pub(crate) message: Rect,
+    pub(crate) retry: Rect,
+    /// The status line's counts, which the quick search box replaces.
+    pub(crate) counts: Rect,
+    /// The free space, at the status line's right end.
+    pub(crate) free: Rect,
 }
 
 /// Search's controls between the menu bar and the status bar.
@@ -1276,9 +1319,11 @@ impl Layout {
         self.search()?.inspector.as_ref()
     }
 
-    /// The two lists side by side from the menu bar to the status bar,
-    /// with a divider between them and no splitter (file-manager-spec.md:
-    /// Choices this spec makes, 10).
+    /// The two panels side by side from the menu bar to the key bar, with a
+    /// divider between them and no splitter (file-manager-spec.md: Choices
+    /// this spec makes, 10), and the key bar's buttons sharing its width.
+    /// The status bar has no left group, because each panel's status line
+    /// shows its drive's free space.
     fn compute_two_panels(
         client: Size,
         dpi: Dpi,
@@ -1286,9 +1331,21 @@ impl Layout {
         status_height: Px,
         captions: &CaptionWidths,
     ) -> Layout {
+        let px = |dip: Dip| dip.to_px(dpi);
+        let (margin, related) = (px(MARGIN), px(RELATED));
+        let control_height = font_height + px(CONTROL_PADDING);
+        let line_height = font_height + px(ROW_PADDING);
         let list_min_width = LIST_MIN_WIDTH.to_px(dpi);
-        let list_min_height = Px((font_height + ROW_PADDING.to_px(dpi)).0 * LIST_MIN_ROWS);
-        let status = StatusLayout::compute(
+        // Tall enough for the header, the message and Retry.
+        let list_min_height = Px(line_height.0 * LIST_MIN_ROWS).max(
+            line_height
+                + px(MESSAGE_TOP)
+                + Px(font_height.0 * 2)
+                + related
+                + control_height
+                + related,
+        );
+        let mut status = StatusLayout::compute(
             &captions.status,
             captions.button_width(dpi),
             dpi,
@@ -1296,33 +1353,129 @@ impl Layout {
             status_height,
             None,
         );
+        status.drop_view_group();
+        let key_min =
+            Px((captions.key_bar + px(BUTTON_PADDING)).0 * 6 + related.0 * 5 + margin.0 * 2);
+        let path_row = related + control_height + related;
+        let status_line = Px(1) + line_height;
+        let key_row = Px(1) + related + control_height + related;
         let min_client = Size {
-            width: (list_min_width + Px(1) + list_min_width).max(status.min_width(dpi)),
-            height: list_min_height + status_height,
+            width: (list_min_width + Px(1) + list_min_width)
+                .max(status.min_width(dpi))
+                .max(key_min),
+            height: path_row + list_min_height + status_line + key_row + status_height,
         };
         let width = client.width.max(min_client.width);
-        let height = (client.height - status_height).max(list_min_height);
-        let left = Rect {
-            x: Px(0),
-            y: Px(0),
-            width: Px((width.0 - 1) / 2),
-            height,
+        let height = client.height.max(min_client.height);
+        // The right group keeps the room for its text and the size grip.
+        status.give_middle_the_rest(
+            width - captions.status.panel_index - px(STATUS_PART_PADDING) - px(SCROLL_BAR),
+        );
+        let key_top = height - status_height - key_row;
+        let half = Px((width.0 - 1) / 2);
+        let mut dividers = vec![
+            Rect {
+                x: half,
+                y: Px(0),
+                width: Px(1),
+                height: key_top,
+            },
+            Rect {
+                x: Px(0),
+                y: key_top,
+                width,
+                height: Px(1),
+            },
+        ];
+        let panel = |x: Px, panel_width: Px, inner: Px, dividers: &mut Vec<Rect>| {
+            let drive = Rect {
+                x: x + margin,
+                y: related,
+                width: captions.drive + px(DROP_DOWN_CHROME),
+                height: control_height,
+            };
+            let path_x = drive.right() + related;
+            let path = Rect {
+                x: path_x,
+                y: related,
+                width: (x + panel_width - inner - path_x).max(Px(0)),
+                height: control_height,
+            };
+            let line_top = key_top - status_line;
+            let list = Rect {
+                x,
+                y: path_row,
+                width: panel_width,
+                height: line_top - path_row,
+            };
+            dividers.push(Rect {
+                x,
+                y: line_top,
+                width: panel_width,
+                height: Px(1),
+            });
+            let line = Rect {
+                x: x + margin,
+                y: line_top + Px(1),
+                width: (panel_width - margin - inner).max(Px(0)),
+                height: line_height,
+            };
+            let free_width = captions.free.min(Px(line.width.0 / 2));
+            let free = Rect {
+                x: line.right() - free_width,
+                width: free_width,
+                ..line
+            };
+            let counts = Rect {
+                width: (free.x - related - line.x).max(Px(0)),
+                ..line
+            };
+            // Under the header, as Search's message stands under its list's.
+            let message = Rect {
+                x: x + margin,
+                y: list.y + line_height + px(MESSAGE_TOP),
+                width: (panel_width - margin - margin).max(Px(0)),
+                height: Px(font_height.0 * 2),
+            };
+            let retry_width = captions.button_width(dpi);
+            let retry = Rect {
+                x: x + Px((panel_width.0 - retry_width.0) / 2),
+                y: message.bottom() + related,
+                width: retry_width,
+                height: control_height,
+            };
+            PanelLayout {
+                drive,
+                path,
+                list,
+                message,
+                retry,
+                counts,
+                free,
+            }
         };
-        let divider = Rect {
-            x: left.right(),
-            width: Px(1),
-            ..left
-        };
-        let right = Rect {
-            x: divider.right(),
-            width: width - divider.right(),
-            ..left
-        };
+        let left = panel(Px(0), half, related, &mut dividers);
+        let right = panel(half + Px(1), width - half - Px(1), margin, &mut dividers);
+        let buttons_width = Px(width.0 - margin.0 * 2 - related.0 * 5);
+        let key_y = key_top + Px(1) + related;
+        let key_bar = std::array::from_fn(|i| {
+            let i = i as i32;
+            // Each button's edges at even shares, so the widths differ by
+            // at most a pixel and the row ends at the margin.
+            let edge = |n: i32| Px(margin.0 + related.0 * n + buttons_width.0 * n / 6);
+            Rect {
+                x: edge(i),
+                y: key_y,
+                width: edge(i + 1) - related - edge(i),
+                height: control_height,
+            }
+        });
         Layout {
             body: Body::TwoPanels {
-                lists: [left, right],
+                panels: Box::new([left, right]),
+                key_bar,
             },
-            dividers: vec![divider],
+            dividers,
             status,
             min_client,
         }
@@ -1575,6 +1728,22 @@ impl StatusLayout {
             show_details,
             right,
         }
+    }
+
+    /// Leaves out the left group, which Two panels does not have, by giving
+    /// it no width.
+    fn drop_view_group(&mut self) {
+        let width = self.groups[0];
+        self.groups[0] = Px(0);
+        self.cancel.x = self.cancel.x - width;
+        self.progress.x = self.progress.x - width;
+    }
+
+    /// Widens the middle group to end at `right`, where the right group
+    /// starts, as Two panels draws it. The running job's progress bar and
+    /// Cancel stay beside its text.
+    fn give_middle_the_rest(&mut self, right: Px) {
+        self.groups[1] = self.groups[1].max(right - self.groups[0]);
     }
 
     /// The widths of the status bar's parts but the last, which takes the
@@ -1834,14 +2003,16 @@ mod tests {
         }
     }
 
-    /// Two panels' lists split the window between them, so a list that left
-    /// the client area, overlapped the other or its divider, or took more
-    /// than its half would show only when a person looks: at the minimum
-    /// size, at a size with an odd width, and at 150 %.
+    /// Two panels' controls split the window between them, so a control
+    /// that left the client area or overlapped another, or a list that took
+    /// more than its half, would show only when a person looks: at the
+    /// minimum size, at a size with an odd width, at 150 %, and with the
+    /// pseudo-language's longer captions.
     #[test]
     fn the_two_panels_share_the_window() {
-        for dpi in [96, 144].map(|d| Dpi::new(d).expect("a DPI is not zero")) {
-            let captions = captions(dpi, 1.0);
+        for (dpi, stretch) in [(96, 1.0), (144, 1.0), (96, 2.0)] {
+            let dpi = Dpi::new(dpi).expect("a DPI is not zero");
+            let captions = captions(dpi, stretch);
             let font_height = Dip(15).to_px(dpi);
             let status_height = StatusLayout::min_height(dpi, font_height) + Dip(4).to_px(dpi);
             let compute = |client| {
@@ -1864,28 +2035,43 @@ mod tests {
                 },
             ] {
                 let layout = compute(client);
-                let Body::TwoPanels {
-                    lists: [left, right],
-                } = layout.body
-                else {
+                let Body::TwoPanels { panels, key_bar } = layout.body else {
                     panic!("Two panels shows");
                 };
-                assert_eq!(layout.dividers.len(), 1);
-                let divider = layout.dividers[0];
-                for (a, b) in [(left, divider), (divider, right), (left, right)] {
-                    assert!(!overlaps(a, b), "{a:?} overlaps {b:?} at {dpi:?}");
+                let panels = *panels;
+                let [left, right] = panels.map(|panel| panel.list);
+                let mut controls: Vec<Rect> = key_bar.to_vec();
+                controls.extend(layout.dividers.iter().copied());
+                for panel in panels {
+                    // The message and Retry lie over the list, which is
+                    // empty while they show.
+                    controls.extend([
+                        panel.drive,
+                        panel.path,
+                        panel.list,
+                        panel.counts,
+                        panel.free,
+                    ]);
+                    assert!(panel.retry.bottom() <= panel.list.bottom());
+                }
+                for (i, a) in controls.iter().enumerate() {
+                    assert!(
+                        a.x >= Px(0)
+                            && a.right() <= client.width
+                            && a.bottom() <= client.height - status_height
+                            && a.width > Px(0),
+                        "{a:?} in {client:?} at {dpi:?}, stretch {stretch}"
+                    );
+                    for b in &controls[i + 1..] {
+                        assert!(!overlaps(*a, *b), "{a:?} overlaps {b:?} at {dpi:?}");
+                    }
                 }
                 for list in [left, right] {
-                    assert!(
-                        list.x >= Px(0)
-                            && list.right() <= client.width
-                            && list.bottom() <= client.height - status_height
-                            && list.width >= Dip(300).to_px(dpi),
-                        "{list:?} in {client:?} at {dpi:?}"
-                    );
+                    assert!(list.width >= Dip(300).to_px(dpi), "{list:?} at {dpi:?}");
                 }
                 assert_eq!(right.right(), client.width);
                 assert!((right.width.0 - left.width.0).abs() <= 1);
+                assert_eq!(layout.status.groups[0], Px(0));
             }
         }
     }

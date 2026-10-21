@@ -56,6 +56,8 @@ mod storage;
 #[cfg(windows)]
 mod volume;
 #[cfg(windows)]
+mod watch;
+#[cfg(windows)]
 mod working_set;
 
 #[cfg(windows)]
@@ -108,6 +110,9 @@ pub use entry::{Access, AttributeTag, Entry, EntryStat, FileIdentity, Reparse, o
 
 #[cfg(windows)]
 pub use file_id::{Folder, open_folder, root_folder_id};
+
+#[cfg(windows)]
+pub use watch::{FolderWatch, Signal, WatchRelease, watch_folder};
 
 #[cfg(windows)]
 pub use file_layout::query_file_layout;

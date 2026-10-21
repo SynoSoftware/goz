@@ -40,6 +40,7 @@ use crate::core::model::{
     Then,
 };
 use crate::core::open::{self, CommandLine};
+use crate::core::panel::Side;
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
     date_items, size_items,
@@ -57,6 +58,7 @@ use crate::win::controls::{
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
 use crate::win::file_operations::TAKEN_CHANGED;
+use crate::win::folder::PanelThreads;
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Accelerators;
@@ -84,6 +86,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 use windows::Win32::Foundation::LRESULT;
 
+mod panels;
+
+use panels::{KEY_BAR, PanelControls};
+
 mod timer {
     /// Search as you type waits this long after the last keystroke.
     pub(super) const SEARCH: usize = 1;
@@ -95,6 +101,12 @@ mod timer {
     /// The columns are fitted again this long after the list's width last
     /// changed.
     pub(super) const FILL: usize = 5;
+    /// Each panel's folder sizes and free space are read again this long
+    /// after the last change in its folder, by side.
+    pub(super) const PANEL_SETTLE: [usize; 2] = [6, 7];
+    /// Each panel asks for its folder sizes once more after an operation in
+    /// it ended, by side.
+    pub(super) const PANEL_AGAIN: [usize; 2] = [8, 9];
 }
 
 const SEARCH_DELAY_MS: u32 = 150;
@@ -140,8 +152,13 @@ struct Controls {
     message_tips: Tooltip,
     list: ListView,
     inspector: Inspector,
-    /// Two panels' lists, the left panel's first.
-    panels: [ListView; 2],
+    /// Two panels' panels, the left one's first, and the key bar.
+    panels: [PanelControls; 2],
+    key_bar: [Button; 6],
+    /// The tooltips of `F4 Edit`, which is always disabled, and `F6 Move`,
+    /// as areas of the window, because a disabled button gets no mouse
+    /// messages.
+    key_tips: Tooltip,
     status: StatusBar,
 }
 
@@ -169,11 +186,31 @@ impl Controls {
             list: ListView::create(parent, ControlId::List.id())?,
             inspector: Inspector::create(parent)?,
             panels: [
-                ListView::create(parent, ControlId::LeftPanel.id())?,
-                ListView::create(parent, ControlId::RightPanel.id())?,
+                PanelControls::create(parent, Side::Left)?,
+                PanelControls::create(parent, Side::Right)?,
             ],
+            key_bar: [
+                Button::create_key(parent, KEY_BAR[0].id())?,
+                Button::create_key(parent, KEY_BAR[1].id())?,
+                Button::create_key(parent, KEY_BAR[2].id())?,
+                Button::create_key(parent, KEY_BAR[3].id())?,
+                Button::create_key(parent, KEY_BAR[4].id())?,
+                Button::create_key(parent, KEY_BAR[5].id())?,
+            ],
+            key_tips: Tooltip::create(parent, &[])?,
             status: StatusBar::for_window(parent)?,
         };
+        // F4 and F6 have tips; their texts and areas come later. Every key
+        // bar command arrives in a later stage of the file manager, so the
+        // buttons stay disabled until then.
+        for index in [1, 3] {
+            controls
+                .key_tips
+                .add_area(KEY_BAR[index].id(), Rect::default(), "");
+        }
+        for button in controls.key_bar {
+            button.hwnd().set_enabled(false);
+        }
         controls.message.hwnd().set_visible(false);
         // The search box starts empty; its changes enable Clear.
         controls.clear_search.hwnd().set_enabled(false);
@@ -197,17 +234,19 @@ impl Controls {
             self.message_buttons[0].hwnd(),
             self.message_buttons[1].hwnd(),
             self.list.hwnd(),
-            self.panels[0].hwnd(),
-            self.panels[1].hwnd(),
         ];
         let pane = self.filters.controls();
         let inspector = self.inspector.controls();
         let status = self.status.text_controls();
+        let panels = self.panels.iter().flat_map(PanelControls::hwnds);
+        let key_bar = self.key_bar.map(Button::hwnd);
         for control in controls
             .into_iter()
             .chain(pane)
             .chain(inspector)
             .chain(status)
+            .chain(panels)
+            .chain(key_bar)
         {
             control.set_font(&fonts.ui);
         }
@@ -232,6 +271,8 @@ impl Controls {
             (self.clear_search, "button.clear"),
             (self.filters.clear, "filter.clear"),
             (self.filters.choose_folder, "filter.choose_folder"),
+            (self.panels[0].retry, "panel.retry"),
+            (self.panels[1].retry, "panel.retry"),
         ] {
             control.set_icon(ButtonIcon::of(key, false));
         }
@@ -625,6 +666,8 @@ struct Created {
     images: Option<ImageList>,
     /// The inspector's icons; their indexes are those of `images`.
     large_images: Option<ImageList>,
+    /// The panels' disk threads (file-manager-spec.md: A panel).
+    panel_threads: PanelThreads,
 }
 
 /// The open Settings dialog, which replies and the window's job go to.
@@ -718,6 +761,12 @@ pub(crate) struct MainWindow {
     /// The File operations window and its queue, which only the first
     /// window has (file-manager-spec.md: Interrupted operations).
     file_operations: RefCell<Option<FileOperations>>,
+    /// Each panel whose list's selection changed since the panel last read
+    /// it; a [`Message::Deferred`] is posted to read it.
+    panel_selection_pending: [Cell<bool>; 2],
+    /// The text typed in each panel's path box, which it shows again when
+    /// the typed path cannot be opened.
+    panel_typed: RefCell<[Option<String>; 2]>,
 }
 
 impl MainWindow {
@@ -773,6 +822,8 @@ impl MainWindow {
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
             file_operations: RefCell::new(None),
+            panel_selection_pending: Default::default(),
+            panel_typed: RefCell::new([None, None]),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -780,6 +831,9 @@ impl MainWindow {
         // the first search (DESIGN.md: Requests).
         window.search(hwnd);
         window.ask_status();
+        if window.model.borrow().mode() == Mode::TwoPanels {
+            window.start_panels();
+        }
         if instance == Instance::First {
             window.register_saved_shortcut(hwnd);
             window.check_for_updates();
@@ -840,6 +894,9 @@ impl MainWindow {
         let images = ImageList::system_small();
         if let Some(images) = &images {
             controls.list.set_small_images(images);
+            for panel in &controls.panels {
+                panel.list.set_small_images(images);
+            }
         }
         let captions = self.captions();
         let metrics = Metrics::measure(&fonts, &captions, dpi);
@@ -851,6 +908,7 @@ impl MainWindow {
             layout: RefCell::new(None),
             requests: Requests::new(Waker::new(hwnd)),
             fixer: FixThread::new(waker.clone()),
+            panel_threads: PanelThreads::new(hwnd, waker.clone()),
             waker,
             images,
             large_images: ImageList::system_large(),
@@ -937,6 +995,7 @@ impl MainWindow {
             .set_show_details_caption(&captions.show_details);
         self.show_status(&captions.status);
         self.show_message(captions.message.as_ref());
+        self.apply_panel_text(captions);
         self.update_bound_controls();
     }
 
@@ -1523,8 +1582,16 @@ impl MainWindow {
                 placed.match_path,
                 placed.list,
             ])),
-            Body::TwoPanels { lists } => {
-                moves.extend(controls.panels.map(ListView::hwnd).into_iter().zip(*lists));
+            Body::TwoPanels { panels, key_bar } => {
+                for (panel, placed) in controls.panels.iter().zip(panels.iter()) {
+                    moves.extend(panel.placed(placed));
+                }
+                moves.extend(controls.key_bar.map(Button::hwnd).into_iter().zip(*key_bar));
+                for index in [1, 3] {
+                    controls
+                        .key_tips
+                        .move_area(KEY_BAR[index].id(), key_bar[index]);
+                }
             }
         }
         let pane = &controls.filters;
@@ -1568,8 +1635,16 @@ impl MainWindow {
         for control in strip {
             control.set_visible(search.is_some());
         }
-        for panel in controls.panels {
-            panel.hwnd().set_visible(search.is_none());
+        for panel in &controls.panels {
+            for control in [panel.drive.hwnd(), panel.path.hwnd(), panel.list.hwnd()] {
+                control.set_visible(search.is_none());
+            }
+        }
+        for side in Side::BOTH {
+            self.show_panel(side);
+        }
+        for button in controls.key_bar {
+            button.hwnd().set_visible(search.is_none());
         }
         let shown = filters.is_some();
         for control in [
@@ -1589,7 +1664,11 @@ impl MainWindow {
             button.hwnd().set_visible(shown);
         }
         controls.status.place(&layout.status);
+        let two_panels = search.is_none();
         created.layout.replace(Some(layout));
+        if two_panels {
+            self.fill_panel_columns();
+        }
         self.fill_on_resize(hwnd);
         self.show_fields();
         self.update_message();
@@ -1819,6 +1898,8 @@ impl MainWindow {
                 text_selected: controls.search.has_selected_text(),
             },
             Some(control) if control == controls.list.hwnd() => Focus::List,
+            Some(control) if self.panel_list(control).is_some() => Focus::Panel,
+            Some(control) if self.panel_path(control).is_some() => Focus::PathBox,
             // An open list takes Enter itself, to close.
             Some(control)
                 if controls
@@ -1867,7 +1948,12 @@ impl MainWindow {
         let (slot, node) = {
             let model = self.model.borrow();
             let slot = commands::export_slot(&model);
-            let node = commands::node(&slot, model.strings(), &model.choices().shortcuts);
+            let node = commands::node(
+                &slot,
+                model.strings(),
+                &model.choices().shortcuts,
+                model.mode(),
+            );
             (slot, node)
         };
         let export = [CommandId::ExportResults, CommandId::CancelExport]
@@ -1902,6 +1988,13 @@ impl MainWindow {
         if !enabled {
             return;
         }
+        let mode = self.model.borrow().mode();
+        if mode == Mode::TwoPanels {
+            // Any key or command closes the box first, so F5 after a
+            // quick search copies the focused row.
+            self.close_quick_search();
+        }
+        let active = self.model.borrow().panels().active();
         let controls = &self.created().controls;
         let accepted = match item {
             MenuItem::Run(command) => match command {
@@ -1928,7 +2021,11 @@ impl MainWindow {
                         }
                         return;
                     }
-                    Focus::List | Focus::RangeFilter | Focus::Other => {
+                    Focus::List
+                    | Focus::RangeFilter
+                    | Focus::Panel
+                    | Focus::PathBox
+                    | Focus::Other => {
                         return self.copy(hwnd, ClipboardFormat::Files);
                     }
                 },
@@ -1943,15 +2040,26 @@ impl MainWindow {
                         }
                         return;
                     }
-                    Focus::List | Focus::RangeFilter | Focus::Other => {
-                        return controls.list.select_all();
+                    Focus::PathBox => return self.panel(active).path.select_all(),
+                    Focus::List | Focus::RangeFilter | Focus::Panel | Focus::Other => {
+                        return match mode {
+                            Mode::Search => controls.list.select_all(),
+                            // `..` is let go when the selection is read.
+                            Mode::TwoPanels => self.panel(active).list.select_all(),
+                        };
                     }
                 },
+                CommandId::ClearSelection => return self.panel(active).list.set_selected(&[]),
                 CommandId::Find => {
                     controls.search.hwnd().focus();
                     return controls.search.select_all();
                 }
-                CommandId::Refresh => return self.search(hwnd),
+                CommandId::Refresh => {
+                    return match mode {
+                        Mode::Search => self.search(hwnd),
+                        Mode::TwoPanels => self.refresh_panel(),
+                    };
+                }
                 CommandId::SearchSyntax => {
                     self.open_dialog(hwnd, DialogId::SearchSyntax, &SearchSyntax);
                     return;
@@ -2007,6 +2115,12 @@ impl MainWindow {
                 }
                 return;
             }
+            MenuItem::SortKey(key) if mode == Mode::TwoPanels => {
+                return self.sort_active_panel(Some(key), None);
+            }
+            MenuItem::SortDirection(dir) if mode == Mode::TwoPanels => {
+                return self.sort_active_panel(None, Some(dir));
+            }
             MenuItem::SortKey(key) => {
                 let mut model = self.model.borrow_mut();
                 let sort = model.key_sort(key);
@@ -2017,6 +2131,7 @@ impl MainWindow {
                 let key = model.sort().key;
                 model.sort_by(SortSpec { key, dir })
             }
+            MenuItem::Panel(action) => return self.run_panel_action(hwnd, action),
             MenuItem::Language(place) => {
                 self.set_language(hwnd, LanguageChoice::at(place));
                 self.save_settings(hwnd, true);
@@ -2214,6 +2329,11 @@ impl MainWindow {
             Change::Mode => {
                 self.replace_menu_bar(hwnd);
                 hwnd.set_text(&captions::title(&self.model.borrow()));
+                let mode = self.model.borrow().mode();
+                match mode {
+                    Mode::TwoPanels => self.start_panels(),
+                    Mode::Search => self.stop_panels(hwnd),
+                }
                 self.layout(hwnd);
                 // The focused control may have hidden, and a hidden control
                 // keeps the focus but takes no key.
@@ -2259,9 +2379,7 @@ impl MainWindow {
                 }
                 // The new rows no longer hold what the ended deletes and
                 // moves took, and show again what they failed on.
-                if let Some(operations) = self.file_operations.borrow().as_ref() {
-                    operations.release_ended();
-                }
+                self.release_operations();
                 self.update_status();
                 self.update_message();
                 self.fetch_visible();
@@ -2305,6 +2423,7 @@ impl MainWindow {
                 self.included_count.replace(Some(counted));
                 self.post_settings_reply();
             }
+            Change::FolderSizes(side) => self.show_panel_sizes(side),
         }
         self.update_bound_controls();
         self.update_inspector(hwnd);
@@ -2325,6 +2444,7 @@ impl MainWindow {
                 &commands::menu_bar(model.mode()),
                 model.strings(),
                 shortcuts,
+                model.mode(),
             );
             (menu_bar, shortcuts.clone(), model.mode())
         };
@@ -2358,6 +2478,7 @@ impl MainWindow {
             let accepted = self.model.borrow_mut().accept_fix(event);
             self.apply(hwnd, accepted);
         }
+        self.on_panel_events(hwnd);
         let newer = self
             .update
             .lock()
@@ -2471,6 +2592,35 @@ impl MainWindow {
             return self.run(hwnd, MenuItem::Run(button.command));
         } else if controls.status.cancel_clicked(event) {
             return self.cancel_job(hwnd);
+        } else if let Some(side) = self.panel_path(event.sender()) {
+            // The active path box shows the highlight colors only while it
+            // does not have the focus; a path left without Enter goes back.
+            let path = self.panel(side).path;
+            if path.focused(event) {
+                self.activate_panel(side, false);
+                path.hwnd().invalidate();
+            } else if path.unfocused(event) {
+                path.hwnd().invalidate();
+                self.show_panel(side);
+            }
+            return;
+        } else if let Some(side) = Side::BOTH
+            .into_iter()
+            .find(|side| self.panel(*side).retry.clicked(event))
+        {
+            self.activate_panel(side, true);
+            let ask = self.model.borrow_mut().panels_mut().read_again(side);
+            return self.read(side, ask);
+        } else if let Some(side) = Side::BOTH
+            .into_iter()
+            .find(|side| self.panel(*side).drive.clicked(event))
+        {
+            return self.drive_menu(hwnd, side);
+        } else if controls.key_bar.iter().any(|button| button.clicked(event)) {
+            // The buttons take no focus, so it goes back to the panel.
+            let active = self.model.borrow().panels().active();
+            self.panel(active).list.hwnd().focus();
+            return;
         } else {
             return self.on_filter(hwnd, event);
         };
@@ -2688,7 +2838,10 @@ impl MainWindow {
                 self.fit_column(index);
                 None
             }
-            ListNotify::Other => None,
+            ListNotify::Focused
+            | ListNotify::Unfocused
+            | ListNotify::Clicked
+            | ListNotify::Other => None,
         }
     }
 
@@ -2757,7 +2910,23 @@ impl MainWindow {
 
     /// A key that the control `target` gives a meaning (DESIGN.md:
     /// window rule 8). Returns whether the window took it.
-    fn on_key(&self, hwnd: Hwnd, target: Hwnd, keystroke: Keystroke) -> bool {
+    fn on_key(&self, hwnd: Hwnd, target: Hwnd, mut keystroke: Keystroke) -> bool {
+        // Shift+Space types a space in the quick search box, as Space does,
+        // instead of selecting rows in the list.
+        let space = Keystroke::plain(commands::Key::Space);
+        if keystroke
+            == (Keystroke {
+                shift: true,
+                ..space
+            })
+            && self.panel_list(target).is_some_and(|side| {
+                (self.model.borrow().panels().panel(side))
+                    .quick_text()
+                    .is_some()
+            })
+        {
+            keystroke = space;
+        }
         let Some(action) = commands::control_key(self.focus_of(Some(target)), keystroke) else {
             return false;
         };
@@ -2790,6 +2959,7 @@ impl MainWindow {
                     self.choose_custom(hwnd, range);
                 }
             }
+            KeyAction::Panel(key) => return self.on_panel_key(hwnd, target, keystroke, key),
         }
         true
     }
@@ -3117,7 +3287,9 @@ impl MainWindow {
     }
 
     /// Shows the rows that deletes and moves have taken blank, and takes
-    /// them out of the selection.
+    /// them out of the selection; the panels also follow the operations
+    /// that ended. Then the queue lets go of the ended operations that no
+    /// list keeps (fast-copy-delete-spec.md: Taken entries).
     fn show_taken(&self, hwnd: Hwnd) {
         let Some(taken) = self
             .file_operations
@@ -3127,6 +3299,14 @@ impl MainWindow {
         else {
             return;
         };
+        let ended = self
+            .file_operations
+            .borrow()
+            .as_ref()
+            .map(FileOperations::take_ended)
+            .unwrap_or_default();
+        let follow = self.model.borrow_mut().operations_ended(&ended, &taken);
+        self.show_panels_taken(hwnd, Arc::clone(&taken), follow);
         let accepted = self.model.borrow_mut().set_taken(taken);
         self.apply(hwnd, accepted);
         let list = self.created().controls.list;
@@ -3144,6 +3324,7 @@ impl MainWindow {
             list.deselect(row);
         }
         list.redraw_rows(list.visible_rows());
+        self.release_operations();
     }
 
     /// Asks where to export the shown search, and starts the export (DESIGN.md:
@@ -3232,12 +3413,16 @@ impl MainWindow {
     }
 
     /// The control that the shown mode focuses first: the search box, or the
-    /// left panel's list.
+    /// active panel's list.
     fn home(&self) -> Hwnd {
         let controls = &self.created().controls;
-        match self.model.borrow().mode() {
+        let (mode, active) = {
+            let model = self.model.borrow();
+            (model.mode(), model.panels().active())
+        };
+        match mode {
             Mode::Search => controls.search.hwnd(),
-            Mode::TwoPanels => controls.panels[0].hwnd(),
+            Mode::TwoPanels => self.panel(active).list.hwnd(),
         }
     }
 
@@ -3930,8 +4115,41 @@ impl WindowProc for MainWindow {
                     self.on_status_click(hwnd);
                     return Some(LRESULT(0));
                 }
+                if let Some(side) = Side::BOTH
+                    .into_iter()
+                    .find(|side| self.panel(*side).drive.dropped_down(&notification))
+                {
+                    self.drive_menu(hwnd, side);
+                    return Some(LRESULT(0));
+                }
+                {
+                    let key_bar = captions::key_bar(self.model.borrow().strings());
+                    let fonts = self.created().fonts.borrow();
+                    for (button, (key, word, _)) in controls.key_bar.iter().zip(&key_bar) {
+                        if let Some(answer) =
+                            button.draw_key(&notification, key, word, (&fonts.ui, &fonts.bold))
+                        {
+                            return Some(answer);
+                        }
+                    }
+                }
+                if let Some(side) = self.panel_list(notification.sender()) {
+                    let list = self.panel(side).list.notification(notification)?;
+                    return self.on_panel_notify(hwnd, side, list);
+                }
                 let list = controls.list.notification(notification)?;
                 self.on_list_notify(hwnd, list)
+            }
+            Message::Timer(id) if timer::PANEL_SETTLE.contains(&id) => {
+                let side = Side::BOTH[usize::from(id == timer::PANEL_SETTLE[1])];
+                self.on_panel_settled(hwnd, side);
+                Some(LRESULT(0))
+            }
+            Message::Timer(id) if timer::PANEL_AGAIN.contains(&id) => {
+                hwnd.kill_timer(id);
+                let side = Side::BOTH[usize::from(id == timer::PANEL_AGAIN[1])];
+                self.ask_panel_sizes(side);
+                Some(LRESULT(0))
             }
             Message::Timer(timer::SEARCH) => {
                 self.search(hwnd);
@@ -3967,6 +4185,7 @@ impl WindowProc for MainWindow {
             }
             Message::Deferred => {
                 self.read_list_selection(hwnd);
+                self.read_panel_selection();
                 if self.select_search.replace(false) {
                     self.created().controls.search.select_all();
                 }
@@ -4019,6 +4238,22 @@ impl WindowProc for MainWindow {
             Message::ContextMenu { .. } => None,
             Message::KeyDown { target, keystroke } => {
                 Some(LRESULT(isize::from(self.on_key(hwnd, target, keystroke))))
+            }
+            Message::Char {
+                target,
+                character,
+                alt,
+            } => Some(LRESULT(isize::from(
+                self.on_panel_char(target, character, alt),
+            ))),
+            Message::CtlColorEdit { colors, control } => self.path_box_colors(colors, control),
+            // TRUE lets Windows remove the drive.
+            Message::DeviceRemoval {
+                removal,
+                notification,
+            } => {
+                self.on_device_removal(removal, notification);
+                Some(LRESULT(1))
             }
             Message::InitMenuPopup => {
                 self.update_menu(hwnd);
@@ -4154,6 +4389,7 @@ impl WindowProc for MainWindow {
                 // close_for_setup to close.
                 self.closing_for_setup.set(false);
                 self.created().waker.close();
+                self.created().panel_threads.stop_all();
                 self.shortcut.replace(None);
                 self.tray.replace(None);
                 self.created().requests.shut_down();

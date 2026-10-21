@@ -48,7 +48,8 @@
     "copy_to_folder": "Cop&iar en la carpeta…",
     "move_to_folder": "&Mover a la carpeta…",
     "file_operations": "Operaciones &de archivo",
-    "two_panels": "Dos pa&neles"
+    "two_panels": "Dos pa&neles",
+    "clear_selection": "&Quitar selección"
   },
   "column": {
     "name": "&Nombre",
@@ -728,6 +729,35 @@
     "delete_button": "&Eliminar",
     "copy_to_title": "Copiar en la carpeta",
     "move_to_title": "Mover a la carpeta"
+  },
+  "panel": {
+    "items_one": "{0} elemento",
+    "items_other": "{0} elementos",
+    "selected_one": "{0} de {1} seleccionado",
+    "selected_other": "{0} de {1} seleccionados",
+    "free": "{0} libres",
+    "reading": "Leyendo…",
+    "not_ready": "La unidad {0} no está lista. Vuelve a insertarla y selecciona Reintentar.",
+    "retry": "&Reintentar",
+    "find": "Buscar: {0}",
+    "folder": "Carpeta",
+    "ext": "Ext.",
+    "missing": "{0} no existe.",
+    "cannot_open": "Windows no pudo abrir {0}: {1}",
+    "drive_not_ready": "La unidad {0} no está lista. {1}",
+    "open_title": "Abrir",
+    "indexing": "{0} se está indexando: puede que falten tamaños.",
+    "not_indexed": "{0} no está indexada, así que no se muestran los tamaños de las carpetas."
+  },
+  "key_bar": {
+    "view": "Ver",
+    "edit": "Editar",
+    "copy": "Copiar",
+    "move": "Mover",
+    "new_folder": "Nueva carpeta",
+    "delete": "Eliminar",
+    "edit_tooltip": "La edición aún no está disponible.",
+    "move_tooltip": "Mover al otro panel o cambiar el nombre."
   },
   "message": {
     "internal_error": "Gozler tuvo que cerrarse. Los detalles están en {0}.",

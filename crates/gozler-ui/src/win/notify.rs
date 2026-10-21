@@ -5,27 +5,34 @@
 
 use super::Hwnd;
 use super::controls::{Button, ListView, StatusBar};
-use super::gdi::{Font, ImageList, disabled_color, draw_lone_glyph, draw_text, system_color};
+use super::gdi::{
+    Font, ImageList, disabled_color, draw_lone_glyph, draw_text, inactive_bar_color, system_color,
+};
 use crate::core::glyph::Glyph;
-use crate::core::layout::{Px, icon_glyph_height};
+use crate::core::layout::{Px, cell_text_inset, icon_glyph_height};
 use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX,
-    DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawFocusRect, FillRect, GetSysColor,
-    GetSysColorBrush, HGDIOBJ, InflateRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, DC_BRUSH, DFC_BUTTON, DFCS_BUTTONPUSH, DFCS_INACTIVE,
+    DFCS_PUSHED, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, DrawFocusRect, DrawFrameControl, FillRect, FrameRect,
+    GetStockObject, GetSysColor, GetSysColorBrush, HBRUSH, HGDIOBJ, InflateRect, SelectObject,
+    SetBkMode, SetDCBrushColor, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT,
-    CDIS_SELECTED, CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT, CDRF_NOTIFYITEMDRAW,
-    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, CloseThemeData, DrawThemeBackground,
-    HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_SELECTED,
-    LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
-    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
-    LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW,
-    NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE, NMMOUSE, OpenThemeData,
-    TP_BUTTON, TS_HOT, TS_PRESSED,
+    BCN_DROPDOWN, BP_PUSHBUTTON, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM, CDIS_DISABLED,
+    CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED, CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT,
+    CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, CloseThemeData,
+    DrawThemeBackground, DrawThemeParentBackground, HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE,
+    LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT,
+    LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK,
+    LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED,
+    NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMCUSTOMDRAW, NMHDR,
+    NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE,
+    NMMOUSE, OpenThemeData, PBS_DISABLED, PBS_HOT, PBS_NORMAL, PBS_PRESSED, TP_BUTTON, TS_HOT,
+    TS_PRESSED,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use windows::core::{PWSTR, w};
@@ -88,6 +95,11 @@ impl Notification<'_> {
         // SAFETY: `new`'s contract.
         unsafe { &*self.header }
     }
+
+    /// The control that sent it.
+    pub(crate) fn sender(&self) -> Hwnd {
+        Hwnd(self.header().hwndFrom)
+    }
 }
 
 /// A list view's notification.
@@ -109,6 +121,13 @@ pub(crate) enum ListNotify<'a> {
     Activated,
     /// The person starts dragging the selected rows, with either button.
     BeginDrag,
+    /// The list got the focus.
+    Focused,
+    /// The list lost the focus.
+    Unfocused,
+    /// A click in the list, on a row or on its empty area, with either
+    /// button.
+    Clicked,
     /// A double-click on the divider after the column at this index, which
     /// the header sends and the list passes on after sizing the column
     /// itself.
@@ -175,6 +194,9 @@ impl ListView {
                 }
                 LVN_ITEMACTIVATE => ListNotify::Activated,
                 LVN_BEGINDRAG | LVN_BEGINRDRAG => ListNotify::BeginDrag,
+                NM_SETFOCUS => ListNotify::Focused,
+                NM_KILLFOCUS => ListNotify::Unfocused,
+                NM_CLICK | NM_RCLICK | NM_DBLCLK => ListNotify::Clicked,
                 NM_CUSTOMDRAW => ListNotify::CustomDraw(CustomDraw {
                     draw: &mut *pointer.cast(),
                     list: self.hwnd(),
@@ -263,6 +285,102 @@ impl Button {
     }
 }
 
+impl Button {
+    /// Whether `notification` is this drop-down button's request for its
+    /// menu, which a click anywhere on it sends ([`Button::create_drop_down`]).
+    pub(crate) fn dropped_down(self, notification: &Notification) -> bool {
+        let header = notification.header();
+        header.hwndFrom == self.hwnd().0 && header.code == BCN_DROPDOWN
+    }
+
+    /// Draws this key bar button, if `notification` is its
+    /// `NM_CUSTOMDRAW`, as a push button with `key` in `fonts.1`, bold,
+    /// then `word` in `fonts.0`, centred, as Total Commander's key bar
+    /// shows them (file-manager-spec.md: The key bar). The button's caption
+    /// stays the name that screen readers say. Returns the answer to the
+    /// notification.
+    pub(crate) fn draw_key(
+        self,
+        notification: &Notification,
+        key: &str,
+        word: &str,
+        fonts: (&Font, &Font),
+    ) -> Option<LRESULT> {
+        let header = notification.header();
+        if header.hwndFrom != self.hwnd().0 || header.code != NM_CUSTOMDRAW {
+            return None;
+        }
+        // SAFETY: a button sends NM_CUSTOMDRAW with an NMCUSTOMDRAW, valid
+        // for the notification's lifetime.
+        let draw = unsafe { &*notification.header.cast::<NMCUSTOMDRAW>() };
+        if draw.dwDrawStage != CDDS_PREPAINT {
+            return Some(LRESULT(CDRF_DODEFAULT as isize));
+        }
+        let state = draw.uItemState;
+        let disabled = state.contains(CDIS_DISABLED);
+        let pressed = state.contains(CDIS_SELECTED);
+        let dc = draw.hdc;
+        let mut rect = draw.rc;
+        let color = if disabled {
+            disabled_color(COLOR_BTNFACE)
+        } else {
+            system_color(COLOR_BTNTEXT)
+        };
+        let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+        let word = format!(" {word}");
+        // SAFETY: the DC is the notification's, which the button holds for
+        // it; the theme is closed and the font restored before the answer.
+        unsafe {
+            // High contrast has no theme, and the classic frame shows the
+            // state instead.
+            let theme = OpenThemeData(Some(self.hwnd().0), w!("Button"));
+            if theme.is_invalid() {
+                let mut look = DFCS_BUTTONPUSH;
+                if pressed {
+                    look |= DFCS_PUSHED;
+                }
+                if disabled {
+                    look |= DFCS_INACTIVE;
+                }
+                let _ = DrawFrameControl(dc, &mut rect, DFC_BUTTON, look);
+            } else {
+                let look = if disabled {
+                    PBS_DISABLED
+                } else if pressed {
+                    PBS_PRESSED
+                } else if state.contains(CDIS_HOT) {
+                    PBS_HOT
+                } else {
+                    PBS_NORMAL
+                };
+                let _ = DrawThemeParentBackground(self.hwnd().0, dc, Some(&rect));
+                let _ = DrawThemeBackground(theme, dc, BP_PUSHBUTTON.0, look.0, &rect, None);
+                let _ = CloseThemeData(theme);
+            }
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, color);
+            let previous = SelectObject(dc, HGDIOBJ(fonts.1.handle().0));
+            let mut key_size = RECT::default();
+            draw_text(dc, key, &mut key_size, flags | DT_CALCRECT);
+            SelectObject(dc, HGDIOBJ(fonts.0.handle().0));
+            let mut word_size = RECT::default();
+            draw_text(dc, &word, &mut word_size, flags | DT_CALCRECT);
+            let width = key_size.right + word_size.right;
+            let left = rect.left + ((rect.right - rect.left - width) / 2).max(0);
+            let mut area = RECT {
+                left: left + key_size.right,
+                ..rect
+            };
+            draw_text(dc, &word, &mut area, flags | DT_END_ELLIPSIS);
+            SelectObject(dc, HGDIOBJ(fonts.1.handle().0));
+            let mut area = RECT { left, ..rect };
+            draw_text(dc, key, &mut area, flags);
+            SelectObject(dc, previous);
+        }
+        Some(LRESULT(CDRF_SKIPDEFAULT as isize))
+    }
+}
+
 impl StatusBar {
     /// The index of the part that `notification` says was clicked, if this
     /// status bar sent it.
@@ -326,6 +444,40 @@ impl DispInfo<'_> {
     }
 }
 
+/// The bar on a panel's focused row (file-manager-spec.md: Selecting
+/// entries).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowBar {
+    None,
+    /// The active panel's focused row.
+    Active,
+    /// The other panel's focused row, gray as Windows draws a list's
+    /// selection while the list does not have the focus.
+    Inactive,
+}
+
+/// One of a panel's rows as the window draws it.
+pub(crate) struct PanelRow<'a> {
+    /// In the order of the list's columns.
+    pub(crate) cells: &'a [String],
+    pub(crate) right_aligned: &'a [bool],
+    pub(crate) icon: Option<(ImageList, i32)>,
+    /// `..`, whose folder icon carries an arrow up.
+    pub(crate) up: bool,
+    pub(crate) bar: RowBar,
+    pub(crate) selected: bool,
+    /// A hidden or system entry.
+    pub(crate) dimmed: bool,
+}
+
+/// The fonts of a panel's rows: plain, semibold for a selected row, and
+/// bold for a selected row under the bar.
+pub(crate) struct RowFonts<'a> {
+    pub(crate) plain: &'a Font,
+    pub(crate) selected: &'a Font,
+    pub(crate) selected_on_bar: &'a Font,
+}
+
 /// `NM_CUSTOMDRAW` from the list, which lets the window draw a cell itself.
 pub(crate) struct CustomDraw<'a> {
     draw: &'a mut NMLVCUSTOMDRAW,
@@ -385,6 +537,84 @@ impl CustomDraw<'_> {
             }
         } else {
             DrawStage::Other
+        }
+    }
+
+    /// The row being drawn.
+    pub(crate) fn row(&self) -> u64 {
+        self.draw.nmcd.dwItemSpec as u64
+    }
+
+    /// Draws the whole row at `DrawStage::Row`, in system colors so that
+    /// high contrast works (file-manager-spec.md: Selecting entries): the
+    /// bar of the focused row, and a selected row's text in the highlight
+    /// color, semibold, or bold under the bar. The answer is then
+    /// [`DrawAnswer::Drawn`].
+    pub(crate) fn draw_panel_row(&self, row: &PanelRow, fonts: &RowFonts) {
+        let dc = self.draw.nmcd.hdc;
+        let text = match row.bar {
+            RowBar::Active => COLOR_HIGHLIGHTTEXT,
+            _ if row.selected => COLOR_HIGHLIGHT,
+            _ if row.dimmed => COLOR_GRAYTEXT,
+            RowBar::Inactive | RowBar::None => COLOR_WINDOWTEXT,
+        };
+        // The inactive bar is a fill between the window and text colours,
+        // or a frame in high contrast.
+        let (ground, frame) = match row.bar {
+            RowBar::Active => (system_color(COLOR_HIGHLIGHT), false),
+            RowBar::Inactive => match inactive_bar_color() {
+                Some(fill) => (fill, false),
+                None => (system_color(COLOR_WINDOW), true),
+            },
+            RowBar::None => (system_color(COLOR_WINDOW), false),
+        };
+        let font = match (row.selected, row.bar) {
+            (false, _) => fonts.plain,
+            (true, RowBar::None) => fonts.selected,
+            (true, RowBar::Active | RowBar::Inactive) => fonts.selected_on_bar,
+        };
+        let bounds = self.part(0, LVIR_BOUNDS);
+        // SAFETY: the list's DC for the length of the message; the font
+        // selected into it is restored before the message returns, and
+        // system brushes are never freed.
+        unsafe {
+            SetDCBrushColor(dc, ground);
+            FillRect(dc, &bounds, HBRUSH(GetStockObject(DC_BRUSH).0));
+            if frame {
+                FrameRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOWTEXT));
+            }
+            if let Some((images, index)) = row.icon {
+                let icon = self.part(0, LVIR_ICON);
+                images.draw(dc, index, icon);
+                if row.up {
+                    // Over the folder's front, below its tab.
+                    let height = icon.bottom - icon.top;
+                    let arrow = RECT {
+                        top: icon.top + height / 4,
+                        ..icon
+                    };
+                    let size = Px(height * 5 / 8);
+                    draw_lone_glyph(dc, Glyph::Up, arrow, size, system_color(COLOR_WINDOWTEXT));
+                }
+            }
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, system_color(text));
+            let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
+            for (column, (cell, right)) in row.cells.iter().zip(row.right_aligned).enumerate() {
+                let label = self.part(column as i32, LVIR_LABEL);
+                let inset = cell_text_inset(column == 0, self.list.dpi());
+                let mut area = RECT {
+                    left: label.left + inset.0,
+                    right: label.right - inset.0,
+                    ..label
+                };
+                let mut flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
+                if *right {
+                    flags |= DT_RIGHT;
+                }
+                draw_text(dc, cell, &mut area, flags);
+            }
+            SelectObject(dc, previous);
         }
     }
 
@@ -484,7 +714,12 @@ impl CustomDraw<'_> {
 
     /// The part `part`, such as `LVIR_LABEL`, of the cell being drawn.
     fn cell_part(&self, part: u32) -> RECT {
-        let column = self.draw.iSubItem;
+        self.part(self.draw.iSubItem, part)
+    }
+
+    /// The part `part` of the drawn row's cell in the column at index
+    /// `column`; the first column's `LVIR_BOUNDS` is the whole row.
+    fn part(&self, column: i32, part: u32) -> RECT {
         let mut rect = RECT {
             left: part as i32,
             top: column,

@@ -3,6 +3,7 @@
 //! a daemon (DESIGN.md: Requests). `app::requests` runs each
 //! [`Fetch`] on its own thread and answers with a [`Fetched`].
 
+use super::panel::Side;
 use gozler_client::NotRunning;
 use gozler_core::include::IncludeSettings;
 use gozler_core::output::ResultFormat;
@@ -37,10 +38,14 @@ pub(crate) enum Purpose {
     /// Telling the service that the Include settings are saved; apart from
     /// the count, so a new count never cancels it.
     SettingsSaved,
+    /// A panel's folder sizes, one purpose for each panel, so one panel's
+    /// request never cancels the other's (file-manager-spec.md: Folder
+    /// sizes).
+    FolderSizes(Side),
 }
 
 impl Purpose {
-    pub(crate) const ALL: [Purpose; 7] = [
+    pub(crate) const ALL: [Purpose; 9] = [
         Purpose::Results,
         Purpose::Selection,
         Purpose::Status,
@@ -48,6 +53,8 @@ impl Purpose {
         Purpose::Program,
         Purpose::IncludeCount,
         Purpose::SettingsSaved,
+        Purpose::FolderSizes(Side::Left),
+        Purpose::FolderSizes(Side::Right),
     ];
 }
 
@@ -81,6 +88,9 @@ pub(crate) enum Ask {
     CountIncluded(IncludeSettings),
     /// The Include settings are saved, so the service applies them.
     SettingsSaved,
+    /// The direct subfolders of a panel's folder, whose sizes the panel
+    /// shows, answered with [`Outcome::Rows`].
+    FolderSizes(Side, ChunkAsk),
 }
 
 /// The rows of `search` in the order `sort` from the position `start`, at
@@ -177,6 +187,7 @@ impl Fetch {
             Ask::Program(_) => Purpose::Program,
             Ask::CountIncluded(_) => Purpose::IncludeCount,
             Ask::SettingsSaved => Purpose::SettingsSaved,
+            Ask::FolderSizes(side, _) => Purpose::FolderSizes(side),
         }
     }
 }

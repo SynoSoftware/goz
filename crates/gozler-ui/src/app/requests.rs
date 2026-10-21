@@ -139,7 +139,9 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
             Ask::Status => client
                 .status()
                 .map(|status| Outcome::Status(status, super::local_service::local_service())),
-            Ask::Rows(ask) | Ask::Program(ask) => rows(&mut client, &ask).map(Outcome::Rows),
+            Ask::Rows(ask) | Ask::Program(ask) | Ask::FolderSizes(_, ask) => {
+                rows(&mut client, &ask).map(Outcome::Rows)
+            }
             Ask::Selection(ask) => selection(&mut client, ask).map(Outcome::Selection),
             Ask::FolderSize(search) => client
                 .totals(search.request(Returns::Totals))

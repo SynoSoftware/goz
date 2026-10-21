@@ -28,20 +28,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, EndMenu,
-    GA_ROOT, GWLP_USERDATA, GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW,
-    IDC_SIZENS, IMAGE_ICON, IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW,
-    MINMAXINFO, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SB_BOTTOM,
-    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP,
-    SB_VERT, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED,
-    SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW,
-    SetWindowPlacement, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
-    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA,
-    WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION,
-    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT,
-    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DBT_DEVICEQUERYREMOVE,
+    DBT_DEVICEQUERYREMOVEFAILED, DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE,
+    DEV_BROADCAST_HDR, DefWindowProcW, DispatchMessageW, EndMenu, GA_ROOT, GWLP_USERDATA,
+    GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW,
+    KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG, PM_REMOVE, PeekMessageW,
+    PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
+    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS,
+    SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW,
+    SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateMessage, WA_INACTIVE,
+    WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
+    WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION, WM_GETMINMAXINFO,
+    WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
     WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
     WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
@@ -88,6 +90,16 @@ pub(crate) enum Message<'a> {
         target: Hwnd,
         keystroke: Keystroke,
     },
+    /// A character typed in the control `target`, with `Alt` when `alt`,
+    /// which [`run_message_loop`] offers the window before the control sees
+    /// it, as a panel's quick search takes it. A handler that takes it
+    /// answers 1. The key's `WM_SYSKEYDOWN` went its way, so releasing
+    /// `Alt` after it opens no menu.
+    Char {
+        target: Hwnd,
+        character: char,
+        alt: bool,
+    },
     /// A key that `IsDialogMessageW` handled moved the focus to `to`, such
     /// as `Tab` or an access key.
     FocusMoved {
@@ -133,6 +145,19 @@ pub(crate) enum Message<'a> {
     CtlColorStatic {
         colors: super::gdi::StaticColors,
         control: Hwnd,
+    },
+    /// An edit box asks for its colors; `DefWindowProcW`'s are the edit
+    /// box's own.
+    CtlColorEdit {
+        colors: super::gdi::StaticColors,
+        control: Hwnd,
+    },
+    /// Windows tells of a device's removal that a registration of the
+    /// window names (`WM_DEVICECHANGE` for a handle).
+    DeviceRemoval {
+        removal: super::folder::Removal,
+        /// The registration, as `RegisterDeviceNotificationW` returned it.
+        notification: isize,
     },
     Paint,
     SettingChange {
@@ -417,6 +442,10 @@ pub(crate) const DEFERRED: u32 = super::wake::WAKE + 2;
 /// focus ([`Message::FocusMoved`]).
 const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
 
+/// The private message that offers a character to the main window
+/// ([`Message::Char`]).
+const CHAR: u32 = super::wake::WAKE + 7;
+
 thread_local! {
     /// The window that [`set_modeless`] names, or none.
     static MODELESS: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
@@ -481,6 +510,21 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
             {
                 continue;
             }
+            // Before IsDialogMessageW, whose access keys would take Alt with
+            // a letter, and before the control's own handling.
+            if matches!(msg.message, WM_CHAR | WM_SYSCHAR)
+                && SendMessageW(
+                    main.0,
+                    CHAR,
+                    Some(WPARAM(
+                        msg.wParam.0 | usize::from(msg.message == WM_SYSCHAR) << 31,
+                    )),
+                    Some(LPARAM(msg.hwnd.0 as isize)),
+                )
+                .0 != 0
+            {
+                continue;
+            }
             let key = matches!(
                 msg.message,
                 WM_KEYDOWN | WM_SYSKEYDOWN | WM_CHAR | WM_SYSCHAR
@@ -497,6 +541,20 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
             DispatchMessageW(&msg);
         }
     }
+}
+
+/// Opens the menu bar with its first menu highlighted, as `Alt` pressed
+/// and released alone does.
+pub(crate) fn open_menu_bar(window: Hwnd) {
+    // SAFETY: a plain system command to the window.
+    unsafe {
+        SendMessageW(
+            window.0,
+            WM_SYSCOMMAND,
+            Some(WPARAM(SC_KEYMENU as usize)),
+            Some(LPARAM(0)),
+        )
+    };
 }
 
 pub(crate) fn quit() {
@@ -652,6 +710,14 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         FOCUS_MOVED => Message::FocusMoved {
             to: Hwnd(HWND(lparam.0 as *mut _)),
         },
+        CHAR => match char::from_u32((wparam.0 & 0xffff) as u32) {
+            Some(character) => Message::Char {
+                target: Hwnd(HWND(lparam.0 as *mut _)),
+                character,
+                alt: wparam.0 & (1 << 31) != 0,
+            },
+            None => Message::Other(msg),
+        },
         WM_VSCROLL => {
             let from = Hwnd(HWND(lparam.0 as *mut _));
             match scroll_request(from, low(wparam.0)) {
@@ -689,6 +755,37 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             colors: super::gdi::StaticColors::from_wparam(wparam),
             control: Hwnd(HWND(lparam.0 as *mut _)),
         },
+        WM_CTLCOLOREDIT => Message::CtlColorEdit {
+            colors: super::gdi::StaticColors::from_wparam(wparam),
+            control: Hwnd(HWND(lparam.0 as *mut _)),
+        },
+        WM_DEVICECHANGE => {
+            let removal = match wparam.0 as u32 {
+                DBT_DEVICEQUERYREMOVE => Some(super::folder::Removal::Query),
+                DBT_DEVICEQUERYREMOVEFAILED => Some(super::folder::Removal::Failed),
+                DBT_DEVICEREMOVECOMPLETE => Some(super::folder::Removal::Complete),
+                _ => None,
+            };
+            // SAFETY: these events carry a DEV_BROADCAST_HDR, and one of
+            // the handle type a DEV_BROADCAST_HANDLE, valid for the length
+            // of the message.
+            let handle = removal
+                .filter(|_| lparam.0 != 0)
+                .and_then(|removal| unsafe {
+                    let header = &*(lparam.0 as *const DEV_BROADCAST_HDR);
+                    (header.dbch_devicetype == DBT_DEVTYP_HANDLE).then(|| {
+                        let handle = &*(lparam.0 as *const DEV_BROADCAST_HANDLE);
+                        (removal, handle.dbch_hdevnotify.0 as isize)
+                    })
+                });
+            match handle {
+                Some((removal, notification)) => Message::DeviceRemoval {
+                    removal,
+                    notification,
+                },
+                None => Message::Other(msg),
+            }
+        }
         WM_PAINT => Message::Paint,
         WM_SETTINGCHANGE => Message::SettingChange {
             // SAFETY: WM_SETTINGCHANGE's lparam is null or a NUL-terminated

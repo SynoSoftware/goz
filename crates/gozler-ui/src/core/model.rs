@@ -14,6 +14,7 @@ use super::fetch::{
 use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
+use super::panel::{Panels, Side, View};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, Results, RowsChange, Shown};
 use super::selection::{FolderContents, Selection, wide_path};
@@ -29,8 +30,9 @@ use gozler_core::scope::{Coverage, leaves_matches_out};
 use gozler_core::search::Search;
 use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
-use gozler_fileops::Taken;
+use gozler_fileops::{OperationId, Request, Taken};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -90,6 +92,11 @@ pub(crate) struct Model {
     /// blank and the selection leaves out (file-manager-spec.md: The person
     /// never waits for the disk).
     taken: Arc<Taken>,
+    /// The ended deletes and moves whose rows the list still shows blank
+    /// until its next search, because the rows it shows are of the moment
+    /// its search ran: each one that took a fetched row when it ended.
+    search_kept: HashSet<OperationId>,
+    panels: Panels,
 }
 
 /// What the window knows of GitHub's latest release once the service is
@@ -223,6 +230,8 @@ pub(crate) enum Change {
     /// Settings > Include's count answered: the entries the index would
     /// keep, or why the service could not count them.
     IncludedCount(Result<u64, DaemonFailure>),
+    /// gozlerd answered a panel's folder sizes.
+    FolderSizes(Side),
 }
 
 /// Why an export failed.
@@ -329,6 +338,7 @@ pub(crate) enum ScopeCheck {
 impl Model {
     pub(crate) fn new(strings: Strings, settings: Settings) -> Model {
         let window = &settings.window;
+        let panels = Panels::new(&window.panels);
         let mut columns = vec![Column::Name];
         let saved: Vec<Column> = window.columns.iter().map(|c| c.column).collect();
         let shown = if saved.is_empty() {
@@ -370,6 +380,8 @@ impl Model {
             file_operations: false,
             clipboard_files: false,
             taken: Arc::default(),
+            search_kept: HashSet::new(),
+            panels,
         }
     }
 
@@ -405,14 +417,48 @@ impl Model {
     pub(crate) fn shown_row(&self, index: u64) -> Option<&ResultItem> {
         self.results
             .row(index)
-            .filter(|row| !is_taken(&self.taken, row))
+            .filter(|row| !is_taken(&self.taken, &self.search_kept, row))
     }
 
     /// Whether a delete or a move has taken the entry of the row at `index`.
     pub(crate) fn row_taken(&self, index: u64) -> bool {
         self.results
             .row(index)
-            .is_some_and(|row| is_taken(&self.taken, row))
+            .is_some_and(|row| is_taken(&self.taken, &self.search_kept, row))
+    }
+
+    /// The operations `ended`, which ended since the window last told the
+    /// lists, and the taken entries `taken` that the lists show next: the
+    /// search list keeps an ended delete or move that takes one of its
+    /// fetched rows, until its next search (fast-copy-delete-spec.md:
+    /// Taken entries), and the panels decide for themselves. Returns the
+    /// panels that read their folders again or ask for their sizes, as
+    /// [`Panels::operations_ended`] does.
+    pub(crate) fn operations_ended(
+        &mut self,
+        ended: &[(OperationId, Arc<Request>)],
+        taken: &Taken,
+    ) -> Vec<(Side, bool, bool)> {
+        for (id, request) in ended {
+            if matches!(**request, Request::Delete { .. } | Request::Move { .. })
+                && (self.results.fetched()).any(|row| taken.takes(&wide_path(row), *id))
+            {
+                self.search_kept.insert(*id);
+            }
+        }
+        // `taken` may be older than `ended`, so an operation that ended in
+        // this call stays even when `taken` does not have it as ended yet.
+        let in_queue: HashSet<OperationId> = (taken.ended())
+            .chain(ended.iter().map(|(id, _)| *id))
+            .collect();
+        self.search_kept.retain(|id| in_queue.contains(id));
+        self.panels.operations_ended(ended)
+    }
+
+    /// Whether a list still shows the rows of the ended operation `id`
+    /// blank, so it stays in the queue.
+    pub(crate) fn keeps(&self, id: OperationId) -> bool {
+        self.search_kept.contains(&id) || self.panels.keep(id)
     }
 
     /// Takes the entries of `taken` out of the selection; the list shows
@@ -423,7 +469,7 @@ impl Model {
         let files = match std::mem::replace(&mut self.selection, Selection::None) {
             Selection::Files(files) => files,
             Selection::Folder { folder, contents } => {
-                if !is_taken(&self.taken, &folder) {
+                if !is_taken(&self.taken, &self.search_kept, &folder) {
                     self.selection = Selection::Folder { folder, contents };
                 }
                 Vec::new()
@@ -436,7 +482,7 @@ impl Model {
         if !files.is_empty() {
             let kept: Vec<ResultItem> = files
                 .into_iter()
-                .filter(|file| !is_taken(&self.taken, file))
+                .filter(|file| !is_taken(&self.taken, &self.search_kept, file))
                 .collect();
             if !kept.is_empty() {
                 self.selection = Selection::Files(kept);
@@ -710,6 +756,39 @@ impl Model {
         self.settings.window.sort
     }
 
+    /// The sort that View > Sort by shows: Search's, or the active panel's.
+    pub(crate) fn shown_sort(&self) -> SortSpec {
+        match self.mode() {
+            Mode::Search => self.sort(),
+            Mode::TwoPanels => self.panels.panel(self.panels.active()).sort(),
+        }
+    }
+
+    pub(crate) fn panels(&self) -> &Panels {
+        &self.panels
+    }
+
+    pub(crate) fn panels_mut(&mut self) -> &mut Panels {
+        &mut self.panels
+    }
+
+    /// The request for `side`'s folder sizes, when it shows a folder with
+    /// subfolders (file-manager-spec.md: Folder sizes).
+    pub(crate) fn ask_sizes(&mut self, side: Side) -> Option<Fetch> {
+        let generation = self.generation();
+        let ask = self.panels.ask_sizes(side, generation)?;
+        Some(Fetch { generation, ask })
+    }
+
+    /// What the latest status says about the volume of the active panel's
+    /// folder: none when no volume holds it, so gozlerd does not index it.
+    pub(crate) fn panel_coverage(&self) -> Option<Coverage<'_>> {
+        self.status.as_ref()?;
+        let panel = self.panels.panel(self.panels.active());
+        (*panel.view() == View::Folder)
+            .then(|| Coverage::of(self.volumes(), Some(panel.folder()), true))
+    }
+
     pub(crate) fn selection(&self) -> &Selection {
         &self.selection
     }
@@ -978,7 +1057,7 @@ impl Model {
     /// Selects `files`, which are read; one folder alone also asks for its
     /// contents, which the inspector shows (DESIGN.md: Inspector pane).
     fn select(&mut self, mut files: Vec<ResultItem>) -> Option<Then> {
-        files.retain(|file| !is_taken(&self.taken, file));
+        files.retain(|file| !is_taken(&self.taken, &self.search_kept, file));
         if files.is_empty() {
             self.selection = Selection::None;
             return None;
@@ -1294,6 +1373,13 @@ impl Model {
                     then: self.status_needed().map(Then::Fetch),
                 }
             }
+            Purpose::FolderSizes(side) => {
+                if self.panels.accept_sizes(side, generation, fetched.outcome) {
+                    Accepted::only(Change::FolderSizes(side))
+                } else {
+                    Accepted::only(Change::Nothing)
+                }
+            }
             Purpose::Results
             | Purpose::Status
             | Purpose::Selection
@@ -1312,8 +1398,10 @@ impl Model {
                 let change = match self.results.accept(generation, chunk) {
                     RowsChange::Stale => Change::Nothing,
                     RowsChange::NewSearch { count } => {
-                        // A new search's rows are other files (DESIGN.md: T2).
+                        // A new search's rows are other files (DESIGN.md: T2),
+                        // and the disk as it is now.
                         self.selection = Selection::None;
+                        self.search_kept.clear();
                         Change::NewSearch {
                             count,
                             open_first: std::mem::take(&mut self.open_on_answer) && count > 0,
@@ -1537,6 +1625,7 @@ impl Model {
         columns: Option<Vec<SavedColumn>>,
     ) -> io::Result<()> {
         let window = &mut self.settings.window;
+        window.panels = self.panels.saved();
         if placement.is_some() {
             window.placement = placement;
         }
@@ -1649,8 +1738,8 @@ impl Column {
 /// when its UTF-8 path lost an unpaired surrogate. The window asks for every
 /// cell it paints and every selected file, so an empty set answers before
 /// the path is encoded.
-fn is_taken(taken: &Taken, row: &ResultItem) -> bool {
-    !taken.is_empty() && taken.contains(&wide_path(row))
+fn is_taken(taken: &Taken, kept: &HashSet<OperationId>, row: &ResultItem) -> bool {
+    !taken.is_empty() && taken.contains(&wide_path(row), |id| kept.contains(&id))
 }
 
 #[cfg(test)]
@@ -1670,6 +1759,37 @@ pub(crate) mod tests {
     use gozler_client::Repair;
     use gozler_core::escompat::{Command, parse_argv};
     use gozler_core::proto::VolumeStatus;
+
+    /// The search list keeps an ended delete only when, at its end, the
+    /// delete takes one of the list's fetched rows, and then until its next
+    /// search; a delete elsewhere would otherwise stay in the queue until
+    /// the next search (fast-copy-delete-spec.md: Taken entries). The
+    /// snapshot of the taken entries may be older than the end, so it
+    /// still has the delete as running.
+    #[test]
+    fn the_search_list_keeps_only_a_delete_of_its_rows() {
+        let mut model = model();
+        let fetch = search(&mut model, "row");
+        model.accept(rows(&fetch, 3));
+        let (ours, other) = (OperationId::for_tests(1), OperationId::for_tests(2));
+        let mut taken = Taken::default();
+        taken.insert(ours, std::path::Path::new(r"C:\row1"), false);
+        taken.insert(other, std::path::Path::new(r"D:\elsewhere"), true);
+        let delete = |path: &str| {
+            Arc::new(Request::Delete {
+                sources: vec![path.into()],
+            })
+        };
+        model.operations_ended(
+            &[(ours, delete(r"C:\row1")), (other, delete(r"D:\elsewhere"))],
+            &taken,
+        );
+        assert!(model.keeps(ours));
+        assert!(!model.keeps(other));
+        let fetch = search(&mut model, "rows");
+        model.accept(rows(&fetch, 3));
+        assert!(!model.keeps(ours));
+    }
 
     /// The list's message and its buttons' captions.
     fn message(model: &Model) -> Option<(String, Vec<String>)> {

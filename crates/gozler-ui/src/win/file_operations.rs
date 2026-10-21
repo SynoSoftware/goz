@@ -52,7 +52,7 @@ use windows::core::{PCWSTR, PWSTR, w};
 pub(crate) const ERASE_BACKGROUND: u32 = WM_ERASEBKGND;
 
 /// The message the File operations window posts to its owner after the
-/// entries that deletes and moves take changed.
+/// entries that deletes and moves take changed, or an operation ended.
 pub(crate) const TAKEN_CHANGED: u32 = super::wake::WAKE + 5;
 
 /// One line of a path that loses its middle when it is too long
