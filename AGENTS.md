@@ -1,9 +1,11 @@
 # gozler
 
-gozler is an instant filename search for Windows NTFS and ReFS: an elevated
-daemon (`gozlerd`) indexes the MFT, or walks a ReFS volume's folders, and
-serves queries over `\\.\pipe\gozler-v1` to an
-`es.exe`-compatible client (`gozler`). Each crate's `lib.rs` or `main.rs` opens
+gozler finds files instantly on Windows NTFS and ReFS volumes, and its window
+copies, moves and deletes them at full speed. An elevated daemon (`gozlerd`)
+indexes the MFT, or walks a ReFS volume's folders, and serves queries over
+`\\.\pipe\gozler-v1` to an `es.exe`-compatible client (`gozler`) and to the
+window (`gozler-ui`). The window's engine (`gozler-fileops`) does the file
+work with the person's own permissions. Each crate's `lib.rs` or `main.rs` opens
 with a doc comment that explains its design; read it before you change the
 crate.
 
