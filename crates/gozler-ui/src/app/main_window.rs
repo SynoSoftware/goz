@@ -92,7 +92,7 @@ use std::ops::Range;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime};
 use windows::Win32::Foundation::LRESULT;
@@ -870,6 +870,9 @@ pub(crate) struct MainWindow {
     include_saved: RefCell<Option<Result<(), NotSaved>>>,
     /// A Paste whose thread reads the clipboard.
     pasting: RefCell<Option<Pasting>>,
+    /// The actions on Search's selected entries whose check has not
+    /// arrived, in the order they were chosen.
+    checking: RefCell<Vec<Checking>>,
     /// Whether a click gave the search box the focus, so its text is
     /// selected once the click is handled (Settings > Search).
     select_search: Cell<bool>,
@@ -918,6 +921,13 @@ enum ModalStep {
     OpenFirst(ChunkAsk),
     /// A file operation's conflict question or failure dialog.
     Operation(OperationDialog),
+    /// An action on Search's selected entries, which a thread found
+    /// `present`, and the first that is `missing`.
+    Checked {
+        action: EntryAction,
+        present: Vec<Selected>,
+        missing: Option<Vec<u16>>,
+    },
 }
 
 /// Files dragged over the window.
@@ -1000,6 +1010,7 @@ impl MainWindow {
             include_saving: RefCell::new(None),
             include_saved: RefCell::new(None),
             pasting: RefCell::new(None),
+            checking: RefCell::new(Vec::new()),
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
             file_operations: OnceCell::new(),
@@ -2334,10 +2345,14 @@ impl MainWindow {
                     return;
                 }
                 CommandId::Open if mode == Mode::TwoPanels => return self.open_panel_entries(hwnd),
-                CommandId::Open => return self.open_selected(hwnd),
-                CommandId::OpenFileLocation => return self.show_selected(hwnd),
-                CommandId::Explore => return self.explore_selected(hwnd),
-                CommandId::Properties => return self.show_properties(hwnd),
+                CommandId::Open => return self.act_on_selected(hwnd, EntryAction::Open),
+                CommandId::OpenFileLocation => {
+                    return self.act_on_selected(hwnd, EntryAction::OpenFileLocation);
+                }
+                CommandId::Explore => return self.act_on_selected(hwnd, EntryAction::Explore),
+                CommandId::Properties => {
+                    return self.act_on_selected(hwnd, EntryAction::Properties);
+                }
                 CommandId::ExportResults => return self.export(hwnd),
                 CommandId::Cancel => self.model.borrow_mut().cancel_job(),
                 CommandId::Copy => match focus {
@@ -2918,6 +2933,11 @@ impl MainWindow {
                     }
                 }
                 ModalStep::Operation(dialog) => self.operation_dialog(hwnd, dialog),
+                ModalStep::Checked {
+                    action,
+                    present,
+                    missing,
+                } => self.act(hwnd, action, present, missing),
             }
         }
         self.modal_running.set(false);
@@ -2981,6 +3001,7 @@ impl MainWindow {
         }
         self.finish_include_save();
         self.finish_paste();
+        self.finish_checks(hwnd);
         self.on_panel_events(hwnd);
         let newer = self
             .update
@@ -3674,17 +3695,71 @@ impl MainWindow {
             .collect()
     }
 
-    /// The entries a file command acts on that still exist, and the first
-    /// that does not ([`present`]). A panel's rows come from a listing, and
-    /// Windows reports a missing entry itself, so Two panels checks none:
-    /// the check reads the disk on the window thread, where a share that
-    /// stopped answering would hang the window.
-    fn present_entries(&self) -> (Vec<Selected>, Option<Vec<u16>>) {
+    /// Does `action` on the selected entries. Search's rows come from the
+    /// index and can be stale, so a thread first checks which entries still
+    /// exist, because a share that stopped answering would hang the window,
+    /// and the window acts once it has the answer ([`present`]). A panel's
+    /// rows come from a listing, and Windows reports a missing entry itself,
+    /// so Two panels checks none.
+    fn act_on_selected(&self, hwnd: Hwnd, action: EntryAction) {
         let entries = self.selected_entries();
-        match self.model.borrow().mode() {
-            Mode::TwoPanels => (entries, None),
-            Mode::Search => present(entries),
+        if self.model.borrow().mode() == Mode::TwoPanels {
+            return self.act(hwnd, action, entries, None);
         }
+        let (sender, checked) = channel();
+        let waker = self.created().waker.clone();
+        std::thread::spawn(move || {
+            let checked = present(entries);
+            waker.deliver(|| sender.send(checked).is_ok());
+        });
+        (self.checking.borrow_mut()).push(Checking { action, checked });
+    }
+
+    /// The actions whose entries their threads have checked, in the order
+    /// they were chosen, each as a modal step, because an action can say
+    /// that an entry is missing (DESIGN.md: window rule 13). A check that
+    /// waits for a share that stopped answering holds back no later one.
+    fn finish_checks(&self, hwnd: Hwnd) {
+        let mut checked = Vec::new();
+        self.checking
+            .borrow_mut()
+            .retain(|checking| match checking.checked.try_recv() {
+                Ok((present, missing)) => {
+                    checked.push(ModalStep::Checked {
+                        action: checking.action,
+                        present,
+                        missing,
+                    });
+                    false
+                }
+                Err(TryRecvError::Empty) => true,
+                Err(TryRecvError::Disconnected) => false,
+            });
+        for step in checked {
+            self.defer(hwnd, step);
+        }
+    }
+
+    /// Does `action` on `present`, then says that `missing` no longer
+    /// exists.
+    fn act(
+        &self,
+        hwnd: Hwnd,
+        action: EntryAction,
+        present: Vec<Selected>,
+        missing: Option<Vec<u16>>,
+    ) {
+        match action {
+            EntryAction::Open => self.open_entries(hwnd, &present),
+            EntryAction::OpenFileLocation => self.show_entries(hwnd, present),
+            EntryAction::Explore => explore_entries(hwnd, present),
+            EntryAction::Properties => {
+                for entry in &present {
+                    shell::properties(hwnd, &entry.path);
+                }
+            }
+        }
+        self.report_missing(hwnd, missing);
     }
 
     /// Drags the selected entries out of the window, as File Explorer drags
@@ -3760,16 +3835,15 @@ impl MainWindow {
         self.drag_over(point, keys, allowed);
     }
 
-    /// Opens each selected entry with the Open folders or Open files
-    /// command, or as File Explorer does when it is empty (DESIGN.md: C1).
-    fn open_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = self.present_entries();
+    /// Opens each entry with the Open folders or Open files command, or as
+    /// File Explorer does when it is empty (DESIGN.md: C1).
+    fn open_entries(&self, hwnd: Hwnd, present: &[Selected]) {
         let (folders, files) = {
             let model = self.model.borrow();
             let choices = model.choices();
             (choices.open_folders.clone(), choices.open_files.clone())
         };
-        for entry in &present {
+        for entry in present {
             let command = if entry.is_folder { &folders } else { &files };
             match open::expand(command, &String::from_utf16_lossy(&entry.path)) {
                 Some(line) => {
@@ -3780,14 +3854,12 @@ impl MainWindow {
                 None => shell::open_entry(hwnd, &entry.path),
             }
         }
-        self.report_missing(hwnd, missing);
     }
 
-    /// Opens the folder of each selected entry with the entries selected,
-    /// one File Explorer window for each folder, or runs the Open file
-    /// location command for each entry (DESIGN.md: C2).
-    fn show_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = self.present_entries();
+    /// Opens the folder of each entry with the entries selected, one File
+    /// Explorer window for each folder, or runs the Open file location
+    /// command for each entry (DESIGN.md: C2).
+    fn show_entries(&self, hwnd: Hwnd, present: Vec<Selected>) {
         let command = self.model.borrow().choices().open_file_location.clone();
         if command.trim().is_empty() {
             show_in_folders(present);
@@ -3800,21 +3872,6 @@ impl MainWindow {
                 }
             }
         }
-        self.report_missing(hwnd, missing);
-    }
-
-    /// Shows each selected entry in File Explorer, whatever the open
-    /// commands say: a folder opens, and a file's folder opens with the
-    /// file selected (DESIGN.md: C26).
-    fn explore_selected(&self, hwnd: Hwnd) {
-        let (present, missing) = self.present_entries();
-        let (folders, files): (Vec<Selected>, Vec<Selected>) =
-            present.into_iter().partition(|entry| entry.is_folder);
-        for folder in &folders {
-            shell::explore(hwnd, &folder.path);
-        }
-        show_in_folders(files);
-        self.report_missing(hwnd, missing);
     }
 
     /// Runs an open command of Settings > Context menu, and answers whether it
@@ -3830,15 +3887,6 @@ impl MainWindow {
         );
         self.error_box(hwnd, &text);
         false
-    }
-
-    /// The shell's Properties of the selected entry (DESIGN.md: C3).
-    fn show_properties(&self, hwnd: Hwnd) {
-        let (present, missing) = self.present_entries();
-        for entry in &present {
-            shell::properties(hwnd, &entry.path);
-        }
-        self.report_missing(hwnd, missing);
     }
 
     /// Says that `missing`, which the person chose, no longer exists
@@ -4973,6 +5021,23 @@ fn matched_width(plain: &TextMeter, bold: &TextMeter, text: &str, parts: &[Range
     width + plain.plain_width(&text[at..])
 }
 
+/// What a command does with the selected entries, once Search's are
+/// checked ([`MainWindow::act_on_selected`]).
+#[derive(Clone, Copy)]
+enum EntryAction {
+    Open,
+    OpenFileLocation,
+    Explore,
+    Properties,
+}
+
+/// An action on Search's selected entries, until its thread has checked
+/// which of them still exist.
+struct Checking {
+    action: EntryAction,
+    checked: Receiver<(Vec<Selected>, Option<Vec<u16>>)>,
+}
+
 /// A selected entry, by its path as Windows names it.
 struct Selected {
     path: Vec<u16>,
@@ -4995,6 +5060,18 @@ fn present(entries: Vec<Selected>) -> (Vec<Selected>, Option<Vec<u16>>) {
         })
         .collect();
     (present, missing)
+}
+
+/// Shows each of `entries` in File Explorer, whatever the open commands
+/// say: a folder opens, and a file's folder opens with the file selected
+/// (DESIGN.md: C26).
+fn explore_entries(hwnd: Hwnd, entries: Vec<Selected>) {
+    let (folders, files): (Vec<Selected>, Vec<Selected>) =
+        entries.into_iter().partition(|entry| entry.is_folder);
+    for folder in &folders {
+        shell::explore(hwnd, &folder.path);
+    }
+    show_in_folders(files);
 }
 
 /// The accelerator table of `mode`, from the command shortcuts `shortcuts`.

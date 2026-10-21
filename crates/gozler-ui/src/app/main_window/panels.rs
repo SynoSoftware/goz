@@ -5,7 +5,7 @@
 //! The selection).
 
 use super::super::dialogs::{NewFolder, Transfer, TransferStart};
-use super::{MainWindow, timer};
+use super::{EntryAction, MainWindow, timer};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::captions::{DialogCaptions, DialogItem};
 use crate::core::commands::{
@@ -1566,7 +1566,7 @@ impl MainWindow {
                 let ask = self.model.borrow_mut().panels_mut().go(side, path, None);
                 self.read(side, Some(ask));
             }
-            None => self.open_selected(hwnd),
+            None => self.act_on_selected(hwnd, EntryAction::Open),
         }
     }
 
