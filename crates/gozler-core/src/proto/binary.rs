@@ -34,7 +34,9 @@
 //!   name_len: u32 LE
 //!   name:     name_len bytes   WTF-8
 //!   iflags:   u8        bit0 is_dir, bit1 has_size, bit2 has_mtime,
-//!                       bit3 has_attributes
+//!                       bit3 has_attributes, bit4 gone: a row of a result
+//!                       snapshot whose file is gone, whose folder is
+//!                       u32::MAX and whose name is empty, with no other bit
 //!   size:     u64 LE    iff has_size
 //!   mtime:    i64 LE    iff has_mtime
 //!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
@@ -61,9 +63,14 @@
 use smallvec::SmallVec;
 
 use super::frame::{begin_frame, end_frame};
-use super::types::{MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Rows};
+use super::types::{
+    MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Rows, SnapshotRowsRequest,
+};
 use crate::attributes::Attributes;
-use crate::query::{FolderId, IndexedVolume, MatchSums, ResultNames, ResultRows};
+use crate::query::{
+    FolderId, IndexedVolume, MatchSums, ResultNames, ResultRows, ResultSnapshotGone, RowView,
+    SnapshotRow, SnapshotRows,
+};
 use crate::wtf8;
 
 /// Response frame tag: the body is a JSON [`super::Response`].
@@ -84,6 +91,7 @@ const IFLAG_IS_DIR: u8 = 1;
 const IFLAG_HAS_SIZE: u8 = 1 << 1;
 const IFLAG_HAS_MTIME: u8 = 1 << 2;
 const IFLAG_HAS_ATTRIBUTES: u8 = 1 << 3;
+const IFLAG_GONE: u8 = 1 << 4;
 
 /// A folder's parent field for a volume's root.
 const NO_PARENT: u32 = u32::MAX;
@@ -276,6 +284,18 @@ impl ResultsPage {
         true
     }
 
+    /// Appends a row of a result snapshot whose file is gone, or returns
+    /// `false` when the page is full.
+    pub fn push_gone(&mut self) -> bool {
+        if self.count == PAGE_ROWS {
+            return false;
+        }
+        push_named(&mut self.items, NO_PARENT, b"");
+        self.items.push(IFLAG_GONE);
+        self.count += 1;
+        true
+    }
+
     /// Completes the frame with the header fields of `end`.
     pub fn finish(mut self, end: PageEnd) -> Vec<u8> {
         self.frame[self.total_at..self.total_at + size_of::<u64>()]
@@ -327,14 +347,12 @@ pub fn encode_page<V: IndexedVolume>(
     )
     .with_sums(rows.sums());
     let more = rows.page(PAGE_ROWS as usize, |row, names| {
-        let item = PageItem {
-            folder: row.folder,
-            name: row.name,
-            is_dir: row.is_dir,
-            size: wanted.want_size.then_some(row.size).flatten(),
-            mtime: wanted.want_mtime.then_some(row.mtime).flatten(),
-            attributes: wanted.want_attributes.then_some(row.attributes),
-        };
+        let item = page_item(
+            row,
+            wanted.want_size,
+            wanted.want_mtime,
+            wanted.want_attributes,
+        );
         page.push(item, names, sent)
     });
     let end = PageEnd {
@@ -343,6 +361,55 @@ pub fn encode_page<V: IndexedVolume>(
         volumes_incomplete: rows.volumes_incomplete(),
     };
     (page.finish(end), more)
+}
+
+/// Reads the next page of a result snapshot's `rows` and encodes it as one
+/// results page frame, each row with the values that `wanted` asks for, and
+/// a gone row as such; the page carries the search's sums when `sums`.
+/// `sent` holds the folders the reply's earlier pages sent. Returns the
+/// frame and whether rows are left.
+///
+/// # Errors
+///
+/// [`ResultSnapshotGone`] when a volume's index was replaced since the
+/// search.
+pub fn encode_snapshot_page<V: IndexedVolume>(
+    rows: &mut SnapshotRows<'_, V>,
+    wanted: &SnapshotRowsRequest,
+    sums: Option<MatchSums>,
+    sent: &mut SentFolders,
+) -> Result<(Vec<u8>, bool), ResultSnapshotGone> {
+    let mut page = ResultsPage::new(0, rows.metadata_pending(), rows.rows_left()).with_sums(sums);
+    let more = rows.page(PAGE_ROWS as usize, |row, names| match row {
+        SnapshotRow::Row(row) => {
+            let item = page_item(
+                row,
+                wanted.want_size,
+                wanted.want_mtime,
+                wanted.want_attributes,
+            );
+            page.push(item, names, sent)
+        }
+        SnapshotRow::Gone => page.push_gone(),
+    })?;
+    let end = PageEnd {
+        total: rows.total(),
+        more,
+        volumes_incomplete: rows.volumes_incomplete(),
+    };
+    Ok((page.finish(end), more))
+}
+
+/// The item of `row` with the values a request asks for.
+fn page_item(row: RowView<'_>, size: bool, mtime: bool, attributes: bool) -> PageItem<'_> {
+    PageItem {
+        folder: row.folder,
+        name: row.name,
+        is_dir: row.is_dir,
+        size: size.then_some(row.size).flatten(),
+        mtime: mtime.then_some(row.mtime).flatten(),
+        attributes: attributes.then_some(row.attributes),
+    }
 }
 
 /// Appends a folder or an item as the page lays both out: an id, then a
@@ -425,11 +492,19 @@ pub fn decode_results_payload(
     let mut items = Vec::with_capacity(count.min(PAGE_ROWS as usize));
     let mut path = Vec::new();
     for _ in 0..count {
-        let folder = names
-            .folder_at(r.u32()?)
-            .ok_or(BinError("an item's folder was not sent before it"))?;
+        let folder = r.u32()?;
         let name = r.name()?;
         let iflags = r.u8()?;
+        if iflags & IFLAG_GONE != 0 {
+            if iflags != IFLAG_GONE || folder != NO_PARENT || !name.is_empty() {
+                return Err(BinError("a gone row carries a field"));
+            }
+            items.push(ResultItem::gone());
+            continue;
+        }
+        let folder = names
+            .folder_at(folder)
+            .ok_or(BinError("an item's folder was not sent before it"))?;
         let size = (iflags & IFLAG_HAS_SIZE != 0)
             .then(|| r.u64())
             .transpose()?;
@@ -804,5 +879,36 @@ mod tests {
         let (plain, with) = (decode(&[page(None)]), decode(&[page(Some(sums))]));
         assert_eq!(with[0].sums, Some(sums));
         assert_eq!(with[0].items, plain[0].items);
+    }
+
+    /// A gone row of a result snapshot keeps its place between the rows
+    /// around it, and a page whose gone row carries a field is refused, so
+    /// no gone row reads as a file.
+    #[test]
+    fn a_gone_row_keeps_its_place_and_carries_nothing() {
+        let t = tree();
+        let mut sent = SentFolders::default();
+        let mut page = ResultsPage::new(0, false, 3);
+        assert!(page.push(item(t.c, b"a"), &t.names, &mut sent));
+        assert!(page.push_gone());
+        assert!(page.push(item(t.c, b"c"), &t.names, &mut sent));
+        let frame = page.finish(last_page(3));
+        let items = &decode(std::slice::from_ref(&frame))[0].items;
+        let gone: Vec<bool> = items.iter().map(ResultItem::is_gone).collect();
+        assert_eq!(gone, [false, true, false]);
+        assert_eq!(items[2].path, r"C:\c");
+
+        // The gone row's flags byte: the header is 4 + 1 + 8 + 8 + 1 bytes,
+        // the folder table 4 + (4 + 4 + 2), the count 4, the first item
+        // 4 + 4 + 1 + 1 and the gone row's folder and name 4 + 4.
+        let at = 4 + 1 + 8 + 8 + 1 + 14 + 4 + 10 + 8;
+        assert_eq!(frame[at], IFLAG_GONE);
+        let mut forged = frame.clone();
+        forged[at] = IFLAG_GONE | IFLAG_IS_DIR;
+        let mut names = ResultNames::default();
+        assert_eq!(
+            decode_results_payload(&forged[5..], &mut names),
+            Err(BinError("a gone row carries a field"))
+        );
     }
 }

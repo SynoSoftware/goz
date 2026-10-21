@@ -4,11 +4,14 @@
 //! frames requests/responses with the shared sans-io codec from
 //! `gozler-core::proto`, and answers each search through `gozler-core`'s
 //! [`ResultRows`] and [`search_totals`], which read each volume through its
-//! [`VolumeState`]. Indexing itself (bootstrap + tail) stays on dedicated OS
-//! threads; tokio only serves the pipe.
+//! [`VolumeState`]. A search can also keep its rows as a result snapshot,
+//! which later requests read by its id from one daemon-wide table
+//! ([`crate::result_snapshots`]). Indexing itself (bootstrap + tail) stays
+//! on dedicated OS threads; tokio only serves the pipe.
 
 use std::ops::Deref;
-use std::sync::Arc;
+use std::os::windows::io::AsHandle;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -16,10 +19,14 @@ use gozler_core::include::IncludeSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
     DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
-    ProtoError, Request, Response, Returns, Rows, SentFolders, VolumeMemory, VolumeStatus,
-    encode_page, encode_response_frame,
+    ProtoError, Request, Response, ResultSnapshotId, Returns, Rows, SentFolders,
+    SnapshotRowsRequest, VolumeMemory, VolumeStatus, encode_page, encode_response_frame,
+    encode_snapshot_page,
 };
-use gozler_core::query::{CompiledQuery, HeldVolume, ResultRows, TotalsError, search_totals};
+use gozler_core::query::{
+    CompiledQuery, HeldVolume, MatchSums, ResultRows, ResultSnapshot, RowsSpec, TotalsError,
+    search_totals,
+};
 use gozler_core::scope::VolumeMounts;
 use gozler_winfs::{PipeSecurity, build_pipe_security};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,7 +34,11 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{Semaphore, watch};
 
 use crate::include::Include;
+use crate::result_snapshots::{Kept, ResultSnapshots, live_volumes};
 use crate::volume_state::{VolumeRead, VolumeRegistry, VolumeSet, VolumeState};
+
+/// The result snapshots of every client, each with its volumes held weakly.
+type Snapshots = ResultSnapshots<Weak<VolumeState>>;
 
 /// Cap on concurrently-served pipe connections. A silent/hostile local client
 /// cannot pin more than this many tasks + read buffers + pipe instances.
@@ -72,12 +83,14 @@ pub(crate) fn run(
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(accept_loop(volumes, include, security, shutdown))
+    let snapshots = Arc::new(ResultSnapshots::new());
+    rt.block_on(accept_loop(volumes, include, snapshots, security, shutdown))
 }
 
 async fn accept_loop(
     volumes: Arc<VolumeRegistry>,
     include: Arc<Include>,
+    snapshots: Arc<Snapshots>,
     security: PipeSecurity,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -119,9 +132,10 @@ async fn accept_loop(
                     Ok(permit) => {
                         let vols = volumes.clone();
                         let include = include.clone();
+                        let snapshots = snapshots.clone();
                         tokio::spawn(async move {
                             let _permit = permit; // held for the connection's lifetime
-                            if let Err(e) = handle_connection(connected, vols, include).await {
+                            if let Err(e) = handle_connection(connected, vols, include, snapshots).await {
                                 tracing::debug!(error = %e, "connection ended");
                             }
                         });
@@ -162,7 +176,17 @@ async fn handle_connection(
     mut server: NamedPipeServer,
     volumes: Arc<VolumeRegistry>,
     include: Arc<Include>,
+    snapshots: Arc<Snapshots>,
 ) -> Result<()> {
+    // The user a result snapshot counts against. A client whose user cannot
+    // be read, such as one that already exited, counts as one user with
+    // every other such client.
+    let user: Arc<[u8]> = gozler_winfs::pipe_client_user(server.as_handle())
+        .unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "could not read the client's user");
+            Vec::new()
+        })
+        .into();
     let mut decoder = gozler_core::proto::FrameDecoder::new(MAX_CLIENT_FRAME);
     let mut read_buf = vec![0u8; 16 * 1024];
     loop {
@@ -191,11 +215,13 @@ async fn handle_connection(
             // pipe writes instead of preceding them.
             let vols = volumes.current();
             let include = include.clone();
+            let snapshots = snapshots.clone();
+            let user = user.clone();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
             let encoder = tokio::task::spawn_blocking(move || {
                 // A failed send means the receiver is gone (client vanished or
                 // write error): stop encoding.
-                serve(&vols, &include, &frame, &mut |reply| {
+                serve(&vols, &include, &snapshots, &user, &frame, &mut |reply| {
                     tx.blocking_send(reply).is_ok()
                 });
             });
@@ -225,12 +251,14 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client stopped reading"))?
 }
 
-/// Answers one request frame, handing each framed reply to `emit` as soon as
-/// it is encoded. `emit` returning `false` means the client is gone; encoding
-/// stops.
+/// Answers one request frame from a client running as `user`, handing each
+/// framed reply to `emit` as soon as it is encoded. `emit` returning `false`
+/// means the client is gone; encoding stops.
 fn serve(
     volumes: &VolumeSet,
     include: &Include,
+    snapshots: &Snapshots,
+    user: &[u8],
     frame: &[u8],
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
@@ -252,6 +280,9 @@ fn serve(
             let entries = count_included(volumes, &settings);
             return reply(emit, Response::IncludedCount { entries });
         }
+        Ok(Request::ResultSnapshotRows(read)) => {
+            return read_snapshot(volumes, snapshots, &read, emit);
+        }
         Err(e) => return reply(emit, refusal(format!("malformed request: {e}"))),
     };
     let query = match CompiledQuery::new(&search.query) {
@@ -268,6 +299,135 @@ fn serve(
             Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
         },
         Returns::Totals => reply(emit, totals(targets, &query, scope)),
+        Returns::ResultSnapshot { rows, replaces } => {
+            let every_row = RowsSpec {
+                offset: 0,
+                limit: None,
+                ..rows.spec()
+            };
+            match ResultRows::search(targets, &query, scope, every_row) {
+                Ok(found) => {
+                    let made = Made {
+                        user,
+                        replaces,
+                        cap: snapshot_cap(volumes),
+                    };
+                    make_snapshot(snapshots, made, found, &rows, emit);
+                }
+                Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
+            }
+        }
+    }
+}
+
+/// Who makes a result snapshot, and what makes room for it.
+struct Made<'a> {
+    user: &'a [u8],
+    replaces: Option<ResultSnapshotId>,
+    /// The most rows all result snapshots hold.
+    cap: u64,
+}
+
+/// The most rows all result snapshots hold: twice the entries of every
+/// index, two empty searches.
+fn snapshot_cap(volumes: &VolumeSet) -> u64 {
+    2 * volumes.iter().map(|v| v.index().len() as u64).sum::<u64>()
+}
+
+/// Keeps `found`, a search for every row, as a result snapshot, answers its
+/// id, and streams the rows that `rows`' offset and limit ask for.
+fn make_snapshot(
+    snapshots: &Snapshots,
+    made: Made<'_>,
+    found: ResultRows<Arc<VolumeState>>,
+    rows: &Rows,
+    emit: &mut dyn FnMut(Vec<u8>) -> bool,
+) {
+    let (snapshot, volumes) = match found.into_snapshot() {
+        Ok(kept) => kept,
+        Err(too_many) => return reply(emit, refusal(too_many.to_string())),
+    };
+    let id = match gozler_winfs::random_u128() {
+        Ok(bits) => ResultSnapshotId(bits),
+        Err(e) => return reply(emit, refusal(format!("no id for a result snapshot: {e}"))),
+    };
+    let snapshot = Arc::new(snapshot);
+    snapshots.keep(
+        Kept {
+            id,
+            user: made.user.to_vec(),
+            last_read: Instant::now(),
+            snapshot: snapshot.clone(),
+            volumes: volumes.iter().map(Arc::downgrade).collect(),
+        },
+        made.replaces,
+        made.cap,
+    );
+    let total = snapshot.total();
+    let mut made_frame = Vec::new();
+    encode_response_frame(&Response::ResultSnapshot { id, total }, &mut made_frame);
+    if !emit(made_frame) {
+        return;
+    }
+    let read = SnapshotRowsRequest {
+        id,
+        offset: rows.offset,
+        limit: rows.limit,
+        want_size: rows.want_size,
+        want_mtime: rows.want_mtime,
+        want_attributes: rows.want_attributes,
+    };
+    let sums = rows.want_sums.then(|| snapshot.sums()).flatten();
+    stream_snapshot(&snapshot, volumes, &read, sums, emit);
+}
+
+/// Streams the rows of the result snapshot that `read` names, or says it is
+/// gone.
+fn read_snapshot(
+    volumes: &VolumeSet,
+    snapshots: &Snapshots,
+    read: &SnapshotRowsRequest,
+    emit: &mut dyn FnMut(Vec<u8>) -> bool,
+) {
+    let found = snapshots.get(read.id, Instant::now());
+    let Some((snapshot, held)) = found else {
+        return reply(emit, snapshot_gone());
+    };
+    let Some(held) = live_volumes(&held, volumes) else {
+        return reply(emit, snapshot_gone());
+    };
+    stream_snapshot(&snapshot, held, read, None, emit);
+}
+
+/// Streams the rows of `snapshot` that `read` asks for, from `volumes`, its
+/// volumes, as [`stream_rows`] streams a search's; each page carries `sums`.
+/// An index replaced meanwhile ends the reply with the gone error.
+fn stream_snapshot(
+    snapshot: &ResultSnapshot,
+    volumes: Vec<Arc<VolumeState>>,
+    read: &SnapshotRowsRequest,
+    sums: Option<MatchSums>,
+    emit: &mut dyn FnMut(Vec<u8>) -> bool,
+) {
+    let mut rows = snapshot.read(volumes, read.offset, read.limit);
+    let mut sent = SentFolders::default();
+    loop {
+        match encode_snapshot_page(&mut rows, read, sums, &mut sent) {
+            Ok((page, more)) => {
+                if !emit(page) || !more {
+                    return;
+                }
+            }
+            Err(_) => return reply(emit, snapshot_gone()),
+        }
+    }
+}
+
+/// The reply to a read of a result snapshot that no longer answers.
+fn snapshot_gone() -> Response {
+    Response::Error {
+        code: ProtoError::ResultSnapshotGone,
+        message: "the result snapshot is gone; search again".into(),
     }
 }
 
@@ -450,8 +610,9 @@ impl gozler_core::query::IndexedVolume for VolumeState {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_status, serve};
+    use super::{Snapshots, build_status, serve};
     use crate::include::Include;
+    use crate::result_snapshots::ResultSnapshots;
     use crate::volume_state::{Indexed, VolumeSet, VolumeState};
     use gozler_core::include::{DriveChoice, FolderChoice, IncludeSettings};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
@@ -616,10 +777,17 @@ mod tests {
     /// Every frame the daemon replies to `request` with, back to back as the
     /// pipe carries them.
     fn reply_bytes(volumes: &VolumeSet, request: &Request) -> Vec<u8> {
+        reply_bytes_in(volumes, &ResultSnapshots::new(), request)
+    }
+
+    /// [`reply_bytes`] with the result snapshots of earlier requests.
+    fn reply_bytes_in(volumes: &VolumeSet, snapshots: &Snapshots, request: &Request) -> Vec<u8> {
         let mut out = Vec::new();
         serve(
             volumes,
             &defaults(),
+            snapshots,
+            b"",
             &request_frame(request),
             &mut |reply| {
                 out.extend_from_slice(&reply);
@@ -737,6 +905,8 @@ mod tests {
         serve(
             &vols,
             &defaults(),
+            &ResultSnapshots::new(),
+            b"",
             br#"{"t":"Search","query":"#,
             &mut |reply| {
                 replies.extend_from_slice(&reply);
@@ -837,6 +1007,80 @@ mod tests {
         );
     }
 
+    /// A result snapshot answers its id and the rows asked for, a later
+    /// read by that id answers the rows at its offset with the same total,
+    /// and an id the daemon does not keep answers the gone error, which the
+    /// window answers with a new search.
+    #[test]
+    fn a_result_snapshot_is_read_by_its_id_until_it_is_gone() {
+        use gozler_core::proto::{ResultSnapshotId, SnapshotRowsRequest};
+        let vols = set(&[live_volume(r"C:\")]);
+        let snapshots = ResultSnapshots::new();
+        let made = Request::Search(SearchRequest {
+            query: parse_query_with("", ParseOptions::default()).expect("parses"),
+            scope: None,
+            returns: Returns::ResultSnapshot {
+                rows: Rows {
+                    sort: SortSpec::default_for(SortKey::Name),
+                    offset: 0,
+                    limit: Some(1),
+                    want_size: false,
+                    want_mtime: false,
+                    want_attributes: false,
+                    want_sums: false,
+                },
+                replaces: None,
+            },
+        });
+        let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &made));
+        let Response::ResultSnapshot { id, total: 2 } = frames[0] else {
+            panic!("the id of 2 rows first: {:?}", frames[0])
+        };
+        let paths = |frame: &Response| match frame {
+            Response::Results(page) => (
+                page.total,
+                page.items
+                    .iter()
+                    .map(|i| i.path.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("a results page: {other:?}"),
+        };
+        assert_eq!(frames.len(), 2);
+        assert_eq!(
+            paths(&frames[1]),
+            (2, vec![r"C:\Windows\System32".to_string()])
+        );
+
+        let read = |id| {
+            Request::ResultSnapshotRows(SnapshotRowsRequest {
+                id,
+                offset: 1,
+                limit: None,
+                want_size: false,
+                want_mtime: false,
+                want_attributes: false,
+            })
+        };
+        let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &read(id)));
+        assert_eq!(paths(&frames[0]), (2, vec![r"C:\Windows".to_string()]));
+        let frames = decode_frames(&reply_bytes_in(
+            &vols,
+            &snapshots,
+            &read(ResultSnapshotId(0)),
+        ));
+        assert!(
+            matches!(
+                frames[..],
+                [Response::Error {
+                    code: ProtoError::ResultSnapshotGone,
+                    ..
+                }]
+            ),
+            "{frames:?}"
+        );
+    }
+
     /// A scope on no indexed volume answers `BadQuery`, which gozler exits by
     /// as invalid input, for rows and totals alike, because an empty answer
     /// would read as "no such file".
@@ -894,6 +1138,8 @@ mod tests {
         serve(
             &vols,
             &defaults(),
+            &ResultSnapshots::new(),
+            b"",
             &request_frame(&search(query("hit"))),
             &mut |reply| {
                 if out.is_empty() {
@@ -987,6 +1233,8 @@ mod tests {
         serve(
             &vols,
             &defaults(),
+            &ResultSnapshots::new(),
+            b"",
             &request_frame(&search(query("hit"))),
             &mut |_page| {
                 emitted += 1;

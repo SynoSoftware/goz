@@ -946,6 +946,7 @@ fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, S
                 }
             }
         }
+        Returns::ResultSnapshot { .. } => unreachable!("gozler never asks for a result snapshot"),
         Returns::Totals => {
             let totals = search_totals(volumes, &query, scope).map_err(|e| e.to_string())?;
             Ok(vec![Response::Totals(totals.into())])

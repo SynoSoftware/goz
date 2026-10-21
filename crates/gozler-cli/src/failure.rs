@@ -64,6 +64,8 @@ impl Failure {
                     ProtoError::BadQuery => ExitCode::InvalidInput,
                     ProtoError::Unsupported => ExitCode::Communication,
                     ProtoError::Overflow => ExitCode::Internal,
+                    // gozler never reads a result snapshot.
+                    ProtoError::ResultSnapshotGone => ExitCode::Internal,
                 },
                 // gozler never cancels a request.
                 ClientError::Cancelled => ExitCode::Internal,

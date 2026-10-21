@@ -43,6 +43,10 @@ use core::ops::Deref;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+mod snapshot;
+
+pub use snapshot::{ResultSnapshot, ResultSnapshotGone, SnapshotRow, SnapshotRows, TooManyVolumes};
+
 /// A row of a volume whose file IDs fit in 64 bits, as NTFS's do. It has the
 /// size and alignment of a [`SortRecord`], so the records become rows in
 /// place, without a second list.
@@ -103,6 +107,16 @@ impl RowList {
         match self {
             RowList::Narrow(rows) => rows.len(),
             RowList::Wide(rows) => rows.len(),
+        }
+    }
+
+    /// Keeps the rows whose place `kept` marks, in their order.
+    fn retain_kept(&mut self, kept: &[bool]) {
+        let mut kept = kept.iter();
+        let mut keep = || *kept.next().expect("one mark for each row");
+        match self {
+            RowList::Narrow(rows) => rows.retain(|_| keep()),
+            RowList::Wide(rows) => rows.retain(|_| keep()),
         }
     }
 
@@ -180,7 +194,7 @@ pub struct RowView<'a> {
 }
 
 /// The rows of every volume of one reply, merged in the result order and
-/// read a page at a time with [`Self::fill`].
+/// read a page at a time with [`Self::fill_placed`].
 pub(super) struct Reply {
     volumes: Vec<VolumeReader>,
     /// The folders of every row read so far, of every volume.
@@ -317,6 +331,17 @@ impl Reply {
         }
     }
 
+    /// [`Self::fill_placed`] without each row's place.
+    #[cfg(test)]
+    pub(super) fn fill(
+        &mut self,
+        indexes: &[Option<&VolumeIndex>],
+        page_rows: usize,
+        mut push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
+    ) -> bool {
+        self.fill_placed(indexes, page_rows, |_, _, row, names| push(row, names))
+    }
+
     /// Reads the next rows from `indexes`, one for each answer given to
     /// [`Self::new`], in their order: the index held under its read lock
     /// where [`Self::reads_volume`] says the page reads it, and `None`
@@ -325,11 +350,14 @@ impl Reply {
     /// rows, sent or skipped for the offset, so that one hold of the locks
     /// does a page's work at most. Returns whether rows are left: a row
     /// `push` refused is read again for the next page.
-    pub(super) fn fill(
+    ///
+    /// `push` also gets each row's volume, the `v`th answer, and its place
+    /// in that volume's rows.
+    fn fill_placed(
         &mut self,
         indexes: &[Option<&VolumeIndex>],
         page_rows: usize,
-        mut push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
+        mut push: impl FnMut(usize, usize, RowView<'_>, &ResultNames) -> bool,
     ) -> bool {
         assert_eq!(
             indexes.len(),
@@ -375,7 +403,7 @@ impl Reply {
                 mtime: entry.mtime(),
                 attributes: entry.attributes(),
             };
-            if !push(row, &self.names) {
+            if !push(v, volume.next, row, &self.names) {
                 volume.head = Some(folder);
                 return true;
             }
@@ -867,7 +895,17 @@ impl<V: IndexedVolume> ResultRows<V> {
     pub fn page(
         &mut self,
         page_rows: usize,
-        push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
+        mut push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
+    ) -> bool {
+        self.page_placed(page_rows, |_, _, row, names| push(row, names))
+    }
+
+    /// [`Self::page`], which also hands `push` each row's volume and its
+    /// place in that volume's rows.
+    fn page_placed(
+        &mut self,
+        page_rows: usize,
+        push: impl FnMut(usize, usize, RowView<'_>, &ResultNames) -> bool,
     ) -> bool {
         let held: Vec<Option<V::Index<'_>>> = self
             .volumes
@@ -876,7 +914,7 @@ impl<V: IndexedVolume> ResultRows<V> {
             .map(|(v, volume)| self.reply.reads_volume(v).then(|| volume.read().index))
             .collect();
         let indexes: Vec<Option<&VolumeIndex>> = held.iter().map(Option::as_deref).collect();
-        self.reply.fill(&indexes, page_rows, push)
+        self.reply.fill_placed(&indexes, page_rows, push)
     }
 
     /// The matches, less every row left out so far: the total each page
@@ -1364,6 +1402,163 @@ mod tests {
         assert_eq!(
             (sums.files, sums.file_bytes, sums.files_without_size),
             (2, 5, 1)
+        );
+    }
+
+    /// The rows a read of `snapshot` from `offset` finds, each by its full
+    /// path, or `None` for a gone row.
+    fn snapshot_paths<V: IndexedVolume>(
+        snapshot: &ResultSnapshot,
+        volumes: Vec<V>,
+        offset: u32,
+        limit: Option<u32>,
+    ) -> Result<Vec<Option<Vec<u8>>>, ResultSnapshotGone> {
+        let mut read = snapshot.read(volumes, offset, limit);
+        let mut paths = Vec::new();
+        while read.page(1000, |row, names| {
+            paths.push(match row {
+                SnapshotRow::Row(row) => {
+                    let mut path = Vec::new();
+                    names.full_path_into(row.folder, row.name, &mut path);
+                    Some(path)
+                }
+                SnapshotRow::Gone => None,
+            });
+            true
+        })? {}
+        Ok(paths)
+    }
+
+    /// A read of a result snapshot over several volumes starts at the
+    /// checkpoint below its offset and replays the merged order from there;
+    /// an off-by-one in either would show another file at a far offset,
+    /// where the window cannot check it. Every offset, on both sides of a
+    /// checkpoint, reads the rows that one read from the start finds there,
+    /// which are the reply's rows.
+    #[test]
+    fn a_result_snapshot_reads_each_offset_as_the_merged_order() {
+        // Even numbers on C:, odd ones on D:, so the volumes take turns.
+        let files = |first: usize| -> Vec<File> {
+            (0..2100)
+                .map(|n| {
+                    (
+                        n % (FOLDERS.len() + 1),
+                        format!("{:05}.txt", 2 * n + first),
+                        None,
+                    )
+                })
+                .collect()
+        };
+        let indexes = [volume(&files(0)), volume(&files(1))];
+        let mounts = [[r"C:\".to_string()], [r"D:\".to_string()]];
+        let volumes: Vec<PlainVolume> = indexes
+            .iter()
+            .zip(&mounts)
+            .map(|(index, mounts)| PlainVolume {
+                index,
+                mounts: VolumeMounts { mounts, guid: "" },
+            })
+            .collect();
+        let query = CompiledQuery::new(&parse_query("txt").expect("parses")).expect("compiles");
+        let spec = RowsSpec {
+            sort: SortSpec::default_for(SortKey::Name),
+            offset: 0,
+            limit: None,
+            sums: false,
+        };
+        let search = || ResultRows::search(volumes.clone(), &query, None, spec).expect("no scope");
+        let mut reply = Vec::new();
+        let mut rows = search();
+        while rows.page(1000, |row, names| {
+            let mut path = Vec::new();
+            names.full_path_into(row.folder, row.name, &mut path);
+            reply.push(Some(path));
+            true
+        }) {}
+        let (snapshot, kept) = search().into_snapshot().expect("two volumes");
+        assert_eq!(snapshot.total(), 4200);
+        let all = snapshot_paths(&snapshot, kept.clone(), 0, None).expect("not gone");
+        assert_eq!(all, reply, "the reply's order");
+        for offset in [1, 4095, 4096, 4097, 4198, 4200] {
+            let at = offset as usize;
+            let read = snapshot_paths(&snapshot, kept.clone(), offset, Some(3)).expect("not gone");
+            assert_eq!(read, all[at..(at + 3).min(all.len())], "from {offset}");
+        }
+    }
+
+    /// A volume whose index a test changes between reads.
+    struct ChangingVolume {
+        index: std::sync::RwLock<VolumeIndex>,
+        mounts: [String; 1],
+    }
+
+    impl IndexedVolume for ChangingVolume {
+        type Index<'h>
+            = std::sync::RwLockReadGuard<'h, VolumeIndex>
+        where
+            Self: 'h;
+
+        fn read(&self) -> HeldVolume<std::sync::RwLockReadGuard<'_, VolumeIndex>> {
+            HeldVolume {
+                index: self.index.read().expect("no test panics holding it"),
+                complete: true,
+                metadata_pending: false,
+            }
+        }
+
+        fn mounts(&self) -> VolumeMounts<'_> {
+            VolumeMounts {
+                mounts: &self.mounts,
+                guid: "",
+            }
+        }
+    }
+
+    /// The window holds a result snapshot's rows by their place, so a file
+    /// deleted after the search is a gone row in its place and the total
+    /// stays; once the index is replaced, the rows name other entries, so
+    /// the whole result snapshot is gone.
+    #[test]
+    fn a_deleted_file_is_gone_in_its_place_and_a_new_index_ends_the_snapshot() {
+        let files: Vec<File> = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .map(|name| (0, name.to_string(), None))
+            .collect();
+        let volume = Arc::new(ChangingVolume {
+            index: std::sync::RwLock::new(volume(&files)),
+            mounts: [r"C:\".to_string()],
+        });
+        let query = CompiledQuery::new(&parse_query("txt").expect("parses")).expect("compiles");
+        let spec = RowsSpec {
+            sort: SortSpec::default_for(SortKey::Name),
+            offset: 0,
+            limit: None,
+            sums: false,
+        };
+        let rows = ResultRows::search(vec![volume.clone()], &query, None, spec).expect("no scope");
+        let (snapshot, kept) = rows.into_snapshot().expect("one volume");
+        // b.txt, the second file the helper makes after the folders.
+        let b = Frn((FOLDERS.len() as u128 + 1 + 100) | (1 << 48));
+        let mut changed = volume.index.write().expect("no test panics holding it");
+        changed.apply_batch(&[ParsedUsnRecord {
+            frn: b,
+            parent_frn: NTFS_ROOT_FRN,
+            reason: crate::usn::record::USN_REASON_FILE_DELETE,
+            attributes: 0,
+            name: Vec::new(),
+        }]);
+        drop(changed);
+        let path = |name: &str| Some(format!(r"C:\Data\{name}").into_bytes());
+        assert_eq!(
+            snapshot_paths(&snapshot, kept.clone(), 0, None),
+            Ok(vec![path("a.txt"), None, path("c.txt")])
+        );
+        assert_eq!(snapshot.total(), 3);
+
+        *volume.index.write().expect("no test panics holding it") = super::tests::volume(&files);
+        assert_eq!(
+            snapshot_paths(&snapshot, kept, 0, None),
+            Err(ResultSnapshotGone)
         );
     }
 }

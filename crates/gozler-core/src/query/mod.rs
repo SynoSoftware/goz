@@ -25,6 +25,7 @@ pub use parse::{
 };
 pub use paths::{FolderId, ResultNames};
 pub use rows::{
-    HeldVolume, IndexedVolume, NotIndexed, PathRow, QueryOutcome, ResultRows, RowView, RowsSpec,
-    SearchTotals, TotalsError, run_query, search_totals,
+    HeldVolume, IndexedVolume, NotIndexed, PathRow, QueryOutcome, ResultRows, ResultSnapshot,
+    ResultSnapshotGone, RowView, RowsSpec, SearchTotals, SnapshotRow, SnapshotRows, TooManyVolumes,
+    TotalsError, run_query, search_totals,
 };

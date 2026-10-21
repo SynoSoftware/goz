@@ -42,6 +42,8 @@ mod journal;
 #[cfg(windows)]
 mod links;
 #[cfg(windows)]
+mod pipe_client;
+#[cfg(windows)]
 mod pipe_sd;
 #[cfg(windows)]
 mod pipe_trust;
@@ -122,6 +124,9 @@ pub use links::{Link, file_links};
 
 #[cfg(windows)]
 pub use file_stat::{FileStat, stat_file};
+
+#[cfg(windows)]
+pub use pipe_client::{pipe_client_user, random_u128};
 
 #[cfg(windows)]
 pub use pipe_sd::{PipeSecurity, build_pipe_security};

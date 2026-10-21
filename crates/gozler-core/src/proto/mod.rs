@@ -16,7 +16,7 @@ pub mod types;
 
 pub use binary::{
     PageEnd, PageItem, RESP_TAG_JSON, RESP_TAG_RESULTS, ResultsPage, SentFolders,
-    decode_results_payload, encode_page,
+    decode_results_payload, encode_page, encode_snapshot_page,
 };
 pub use frame::{
     FrameDecoder, FrameError, RespFrameError, decode_request, decode_response_frame, encode_frame,
@@ -25,5 +25,6 @@ pub use frame::{
 pub use types::{
     DaemonStatus, LeftOutVolume, MAX_CLIENT_FRAME, MAX_SERVER_FRAME, MemPair, OLDEST_PROTO_VERSION,
     PAGE_ROWS, PIPE_NAME, PROTO_VERSION, ProtoError, QueryResults, QueryTotals, Request, Response,
-    ResultItem, Returns, Rows, SERVICE_NAME, SearchRequest, VolumeMemory, VolumeStatus,
+    ResultItem, ResultSnapshotId, Returns, Rows, SERVICE_NAME, SearchRequest, SnapshotRowsRequest,
+    VolumeMemory, VolumeStatus,
 };

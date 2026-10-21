@@ -18,6 +18,8 @@ mod include;
 #[cfg(windows)]
 mod pulse;
 #[cfg(windows)]
+mod result_snapshots;
+#[cfg(windows)]
 mod run;
 #[cfg(windows)]
 mod server;

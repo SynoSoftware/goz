@@ -435,6 +435,14 @@ the client still checks the pipe's owner before it sends anything.
 
 ### Who sees what
 
+**Result snapshots exist now** (DESIGN.md: Result snapshots), built before
+this plan by an owner decision, and their reads do not filter rows yet. This
+plan's stage that filters a page also filters each read of a result
+snapshot: the read is a request, so it builds its own answers from the
+caller's token, tests each row with `VolumeIndex::is_seen` as a page does,
+and reports a row the caller cannot see as gone. Main's protocol is 11, so
+this plan's protocol change raises it from 11, not from 9.
+
 `gozler-core/src/index/descriptors.rs`:
 
 ```rust

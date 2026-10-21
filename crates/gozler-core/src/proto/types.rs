@@ -20,7 +20,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 10;
+pub const PROTO_VERSION: u16 = 11;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -72,6 +72,29 @@ pub enum Request {
     /// How many entries the index would keep under these
     /// Include settings. Changes nothing.
     CountIncluded(IncludeSettings),
+    /// Rows of a result snapshot that a [`Returns::ResultSnapshot`] search
+    /// made, as [`Response::Results`] pages.
+    ResultSnapshotRows(SnapshotRowsRequest),
+}
+
+/// The id of a result snapshot: 128 random bits, which only the client that
+/// made it learns, over its own pipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResultSnapshotId(pub u128);
+
+/// Which rows of a result snapshot a [`Request::ResultSnapshotRows`] reads,
+/// and with which values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotRowsRequest {
+    pub id: ResultSnapshotId,
+    /// The place of the first row in the result order.
+    pub offset: u32,
+    /// The most rows to return; `None` = every row from `offset`.
+    pub limit: Option<u32>,
+    pub want_size: bool,
+    pub want_mtime: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_attributes: bool,
 }
 
 /// One search.
@@ -93,6 +116,16 @@ pub enum Returns {
     /// Only how many entries match and the summed size of the matching files,
     /// as one [`Response::Totals`], so no row crosses the pipe.
     Totals,
+    /// Every match, kept in the daemon as a result snapshot, which
+    /// [`Request::ResultSnapshotRows`] reads later: one
+    /// [`Response::ResultSnapshot`], then the [`Response::Results`] pages of
+    /// the rows that `rows`' offset and limit ask for. `rows`' sort orders
+    /// it. `replaces` names the client's earlier result snapshot, which the
+    /// daemon drops.
+    ResultSnapshot {
+        rows: Rows,
+        replaces: Option<ResultSnapshotId>,
+    },
 }
 
 /// Which matches a [`Returns::Rows`] search returns, in what order, and with
@@ -151,6 +184,13 @@ pub enum Response {
     /// Reply to [`Request::SettingsSaved`]: the daemon applies the saved
     /// settings.
     SettingsApplied,
+    /// The result snapshot a [`Returns::ResultSnapshot`] search made; its
+    /// rows' pages follow.
+    ResultSnapshot {
+        id: ResultSnapshotId,
+        /// The rows it holds, a gone row counted.
+        total: u64,
+    },
     /// Reply to [`Request::CountIncluded`].
     IncludedCount {
         /// The entries every indexed volume would keep. A volume that the
@@ -232,7 +272,8 @@ impl From<SearchTotals> for QueryTotals {
     }
 }
 
-/// One matched file or directory.
+/// One matched file or directory. A row of a result snapshot whose file is
+/// gone has an empty path and no other field ([`Self::is_gone`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResultItem {
     /// Full path, WTF-8 lossy-decoded to UTF-8 (lone surrogates → U+FFFD).
@@ -254,6 +295,26 @@ pub struct ResultItem {
     /// The attributes, as `FILE_ATTRIBUTE_*` bits; `None` = not requested.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub attributes: Option<Attributes>,
+}
+
+impl ResultItem {
+    /// A row of a result snapshot whose file was deleted, moved out of the
+    /// search's folder, or has no full path now.
+    pub fn gone() -> Self {
+        ResultItem {
+            path: String::new(),
+            path_u16: None,
+            size: None,
+            mtime_ft: None,
+            is_dir: false,
+            attributes: None,
+        }
+    }
+
+    /// Whether this is a [`Self::gone`] row: no file has an empty path.
+    pub fn is_gone(&self) -> bool {
+        self.path.is_empty()
+    }
 }
 
 /// Daemon-wide index status.
@@ -403,6 +464,10 @@ pub enum ProtoError {
     /// The summed size of the matches does not fit in 64 bits, which only a
     /// corrupt size in the index can cause.
     Overflow,
+    /// The result snapshot a [`Request::ResultSnapshotRows`] names was
+    /// dropped, or a volume's index was replaced since the search; a new
+    /// search answers instead.
+    ResultSnapshotGone,
 }
 
 #[cfg(test)]
