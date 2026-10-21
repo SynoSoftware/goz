@@ -13,8 +13,8 @@
 
 use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
-    self, Bar, CARD_ICON, Failure, Layout, Meter, Metrics, OPEN_WIDTH, QueueAction,
-    ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
+    self, Bar, CARD_ICON, Failure, Layout, Meter, Metrics, OPEN_WIDTH, QueueAction, ROW_GLYPHS,
+    ROW_ICON, Row, RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
@@ -26,8 +26,8 @@ use crate::win::controls::{Button, GlyphLabel, Label, ProgressBar, ReportList, T
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
 use crate::win::drop_target::AsyncDrop;
 use crate::win::file_operations::{
-    PathLabel, QUEUE_CHANGED, QueueList, QueueNotify, TaskbarProgress, Tile,
-    set_client_size, show_drag_cursor, show_paused, tell_hidden, window_size,
+    PathLabel, QUEUE_CHANGED, QueueList, QueueNotify, TaskbarProgress, Tile, set_client_size,
+    show_drag_cursor, show_paused, tell_hidden, window_size,
 };
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::WindowsNumbers;
@@ -1377,8 +1377,10 @@ impl DialogProc for FailureDialog {
             .rows
             .get(row)
             .filter(|_| id == ControlId::FailedList.id())?;
-        Some(format!("{path}
-{reason}"))
+        Some(format!(
+            "{path}
+{reason}"
+        ))
     }
 }
 
