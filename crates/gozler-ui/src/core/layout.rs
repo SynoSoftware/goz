@@ -293,8 +293,8 @@ impl Rect {
 const MARGIN: Dip = Dip(11);
 /// Between related controls, such as the match controls.
 const RELATED: Dip = Dip(7);
-/// Between groups, such as the strip and the panes; a pane's one-pixel
-/// divider sits in the middle of it.
+/// Between groups, such as the strip and the panes; a one-pixel divider
+/// sits in the middle of it.
 const GROUP: Dip = Dip(11);
 /// A text box or a drop-down list is this much taller than its font.
 const CONTROL_PADDING: Dip = Dip(8);
@@ -1284,7 +1284,8 @@ pub(crate) struct Layout {
     pub(crate) list: Rect,
     /// `None` while the pane is hidden.
     pub(crate) inspector: Option<InspectorLayout>,
-    /// The one-pixel lines between the panes.
+    /// The one-pixel lines between the panes and between the search row's
+    /// groups.
     pub(crate) dividers: Vec<Rect>,
     pub(crate) status: StatusLayout,
     pub(crate) min_client: Size,
@@ -1311,38 +1312,58 @@ impl Layout {
         let centred = |height: Px| margin + Px((control_height.0 - height.0) / 2);
 
         // The strip, from the right edge: the match controls and Clear keep
-        // their measured widths and the search box takes the rest.
+        // their measured widths and the search box takes the rest. A divider,
+        // in a group gap, stands left of a control when `divided`, so Clear,
+        // the check boxes and the match mode read as three groups.
+        let mut dividers = Vec::new();
         let mut right = client.width - margin;
-        let mut place_left = |width: Px, y: Px, height: Px| {
+        let mut place_left = |width: Px, y: Px, height: Px, divided: bool| {
             let rect = Rect {
                 x: right - width,
                 y,
                 width,
                 height,
             };
-            right = rect.x - related;
+            right = rect.x - if divided { group } else { related };
+            if divided {
+                dividers.push(Rect {
+                    x: right + Px((group.0 - 1) / 2),
+                    y: centred(font_height),
+                    width: Px(1),
+                    height: font_height,
+                });
+            }
             rect
         };
         let match_mode = place_left(
             captions.match_modes + px(DROP_DOWN_CHROME),
             margin,
             control_height,
+            false,
         );
-        let match_label = place_left(captions.match_label, centred(font_height), font_height);
+        let match_label = place_left(
+            captions.match_label,
+            centred(font_height),
+            font_height,
+            true,
+        );
         let match_path = place_left(
             captions.match_path + px(CHECK_BOX_CHROME),
             centred(check_height),
             check_height,
+            false,
         );
         let match_case = place_left(
             captions.match_case + px(CHECK_BOX_CHROME),
             centred(check_height),
             check_height,
+            true,
         );
         let clear_search = place_left(
             clear_width(captions.clear_search, captions.icons, control_height, dpi),
             margin,
             control_height,
+            false,
         );
         let show_filters = (!panes.filters).then_some(Rect {
             x: margin,
@@ -1357,23 +1378,12 @@ impl Layout {
             width: (right - search_x).max(px(SEARCH_MIN_WIDTH)),
             height: control_height,
         };
-        let strip_width = search_x
-            + px(SEARCH_MIN_WIDTH)
-            + [
-                clear_search,
-                match_label,
-                match_mode,
-                match_case,
-                match_path,
-            ]
-            .iter()
-            .fold(Px(0), |sum, r| sum + related + r.width)
-            + margin;
+        let strip_width =
+            search_x + px(SEARCH_MIN_WIDTH) + related + (client.width - clear_search.x);
 
         // The body, between the strip and the status bar.
         let top = search.bottom() + group;
         let bottom = client.height - status_height - margin;
-        let mut dividers = Vec::new();
         let mut left = margin;
         let filters = panes.filters.then(|| {
             let area = Rect {
