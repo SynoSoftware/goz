@@ -22,7 +22,7 @@ use crate::error::{WinError, last_error};
 use crate::util::to_wide_nul;
 use crate::volume::VolumeHandle;
 
-/// An open file or folder; `CloseHandle` on drop.
+/// An open file, folder, volume or event; `CloseHandle` on drop.
 pub(crate) struct FileHandle(pub(crate) HANDLE);
 
 impl FileHandle {
@@ -42,13 +42,17 @@ impl Drop for FileHandle {
 /// Opens the file or folder `id` on `volume` with `access`, whatever its
 /// permissions allow, because the daemon holds `SeBackupPrivilege`. A
 /// symbolic link or a junction opens as itself, which is what the index
-/// holds. Without `FILE_FLAG_OPEN_REPARSE_POINT` its open by ID fails with
-/// `ERROR_INVALID_PARAMETER`, which [`is_gone`] reads as gone.
+/// holds; without `FILE_FLAG_OPEN_REPARSE_POINT` its open by ID would fail
+/// as a gone file's does.
+///
+/// `Ok(None)` when no file has the ID any more. NTFS answers
+/// `ERROR_INVALID_PARAMETER`, whether the record is free or holds another
+/// file; `ERROR_FILE_NOT_FOUND` says the same.
 pub(crate) fn open_by_id(
     volume: &VolumeHandle,
     id: u128,
     access: u32,
-) -> Result<FileHandle, WinError> {
+) -> Result<Option<FileHandle>, WinError> {
     // SAFETY: `desc` is fully initialized before use, and OpenFileById takes
     // the live volume-hint handle.
     let handle = unsafe {
@@ -69,27 +73,21 @@ pub(crate) fn open_by_id(
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(last_error("OpenFileById"));
+        let error = last_error("OpenFileById");
+        return match error.code {
+            ERROR_INVALID_PARAMETER | ERROR_FILE_NOT_FOUND => Ok(None),
+            _ => Err(error),
+        };
     }
-    Ok(FileHandle(handle))
-}
-
-/// Whether an [`open_by_id`] failure means that no file has the ID any more.
-/// NTFS answers `ERROR_INVALID_PARAMETER`, whether the record is free or
-/// holds another file; `ERROR_FILE_NOT_FOUND` says the same.
-pub(crate) fn is_gone(error: &WinError) -> bool {
-    matches!(error.code, ERROR_INVALID_PARAMETER | ERROR_FILE_NOT_FOUND)
+    Ok(Some(FileHandle(handle)))
 }
 
 /// The file ID of the root folder of the volume at `guid_path`
-/// (`\\?\Volume{GUID}\`). NTFS gives record 5; ReFS gives its own.
+/// (`\\?\Volume{GUID}\`, with its trailing backslash, as
+/// [`VolumeInfo::guid_path`](crate::VolumeInfo::guid_path) holds it). NTFS
+/// gives record 5; ReFS gives its own.
 pub fn root_folder_id(guid_path: &str) -> Result<u128, WinError> {
-    let root = if guid_path.ends_with('\\') {
-        to_wide_nul(guid_path)
-    } else {
-        to_wide_nul(&format!("{guid_path}\\"))
-    };
-    path_file_id(&root)
+    path_file_id(&to_wide_nul(guid_path))
 }
 
 /// The file ID of the file or folder at `path`, a NUL-terminated UTF-16 path.
@@ -136,8 +134,8 @@ pub struct Folder(FileHandle);
 /// gone or being deleted, so there is nothing to list.
 pub fn open_folder(volume: &VolumeHandle, id: u128) -> Result<Option<Folder>, WinError> {
     match open_by_id(volume, id, FILE_LIST_DIRECTORY) {
-        Ok(handle) => Ok(Some(Folder(handle))),
-        Err(error) if is_gone(&error) || is_being_deleted(volume, id, &error) => Ok(None),
+        Ok(handle) => Ok(handle.map(Folder)),
+        Err(error) if is_being_deleted(volume, id, &error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -150,7 +148,10 @@ pub fn open_folder(volume: &VolumeHandle, id: u128) -> Result<Option<Folder>, Wi
 /// still allows.
 fn is_being_deleted(volume: &VolumeHandle, id: u128, error: &WinError) -> bool {
     error.code == ERROR_ACCESS_DENIED
-        && matches!(open_by_id(volume, id, 0), Err(e) if e.code == ERROR_ACCESS_DENIED || is_gone(&e))
+        && match open_by_id(volume, id, 0) {
+            Ok(handle) => handle.is_none(),
+            Err(e) => e.code == ERROR_ACCESS_DENIED,
+        }
 }
 
 impl Folder {

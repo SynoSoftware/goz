@@ -27,7 +27,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::error::{WinError, last_error};
-use crate::file_id::{is_gone, open_by_id, path_file_id};
+use crate::file_id::{open_by_id, path_file_id};
 use crate::volume::VolumeHandle;
 
 const BACKSLASH: u16 = b'\\' as u16;
@@ -61,10 +61,8 @@ pub struct Link {
 /// part way. The caller makes the index hold exactly the links it gets, so a
 /// partial set would delete the links the walk did not reach.
 pub fn file_links(volume: &VolumeHandle, id: u128) -> Result<Option<Vec<Link>>, WinError> {
-    let file = match open_by_id(volume, id, FILE_READ_ATTRIBUTES) {
-        Ok(file) => file,
-        Err(error) if is_gone(&error) => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(file) = open_by_id(volume, id, FILE_READ_ATTRIBUTES)? else {
+        return Ok(None);
     };
 
     // FindFirstFileNameW needs an openable path, and the index's own path for

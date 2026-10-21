@@ -7,8 +7,7 @@
 use core::ptr;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ, GetLastError, HANDLE,
-    INVALID_HANDLE_VALUE,
+    ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE, FindFirstVolumeW,
@@ -17,6 +16,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::error::{WinError, last_error};
+use crate::file_id::FileHandle;
 use crate::util::{from_wide_nul, to_wide_nul};
 
 pub use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
@@ -159,20 +159,12 @@ fn split_multi_sz(buf: &[u16]) -> Vec<String> {
 }
 
 /// An owned volume handle; `CloseHandle` on drop.
-pub struct VolumeHandle(HANDLE);
+pub struct VolumeHandle(FileHandle);
 
 impl VolumeHandle {
     /// The raw `HANDLE`, for this crate's own FSCTL calls.
     pub(crate) fn as_handle(&self) -> HANDLE {
-        self.0
-    }
-}
-
-impl Drop for VolumeHandle {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` came from a successful CreateFileW and is owned by
-        // this value; it is closed exactly once, here.
-        unsafe { CloseHandle(self.0) };
+        self.0.as_handle()
     }
 }
 
@@ -206,7 +198,7 @@ pub fn open_volume(guid_path: &str) -> Result<VolumeHandle, WinError> {
     if handle == INVALID_HANDLE_VALUE {
         return Err(last_error("CreateFileW (open_volume)"));
     }
-    Ok(VolumeHandle(handle))
+    Ok(VolumeHandle(FileHandle(handle)))
 }
 
 /// Total size of the volume in bytes (`GetDiskFreeSpaceExW` on its GUID path,

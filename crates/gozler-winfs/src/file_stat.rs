@@ -30,7 +30,7 @@ pub struct FileStat {
 /// deleted, or transiently locked): a non-fatal "nothing to refresh", since
 /// the structural create/delete was already applied from the journal.
 pub fn stat_file(volume: &VolumeHandle, id: u128) -> Result<Option<FileStat>, WinError> {
-    let Ok(file) = open_by_id(volume, id, FILE_READ_ATTRIBUTES) else {
+    let Ok(Some(file)) = open_by_id(volume, id, FILE_READ_ATTRIBUTES) else {
         return Ok(None);
     };
     // SAFETY: `info` is a plain struct the call fills, and `file` is live.
