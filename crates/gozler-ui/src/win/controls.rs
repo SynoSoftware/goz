@@ -1568,12 +1568,13 @@ impl ListView {
     /// As [`ListView::set_focused`], without scrolling, so the rows stay
     /// where the person sees them.
     pub(crate) fn focus_in_place(self, row: Option<u64>) {
-        match row {
-            Some(row) => {
-                self.set_state(row as usize, LVIS_FOCUSED, LVIS_FOCUSED);
-                send(self.0, LVM_SETSELECTIONMARK, 0, row as isize);
-            }
-            None => self.set_state(usize::MAX, LVIS_FOCUSED, LIST_VIEW_ITEM_STATE_FLAGS(0)),
+        // A virtual list does not draw again the row that loses the focus
+        // to another row, which keeps its focus rectangle on the screen;
+        // taking the focus from every row first draws it again.
+        self.set_state(usize::MAX, LVIS_FOCUSED, LIST_VIEW_ITEM_STATE_FLAGS(0));
+        if let Some(row) = row {
+            self.set_state(row as usize, LVIS_FOCUSED, LVIS_FOCUSED);
+            send(self.0, LVM_SETSELECTIONMARK, 0, row as isize);
         }
     }
 
