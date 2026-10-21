@@ -43,7 +43,7 @@ pub(super) struct IndexedFolders<'a> {
     /// The tree's folders; each item carries its index.
     nodes: RefCell<Vec<Node>>,
     /// The folders a thread lists, and where its subfolders arrive.
-    pending: RefCell<Vec<(TreeItem, Receiver<Vec<(String, bool)>>)>>,
+    pending: RefCell<Vec<(TreeItem, Receiver<Subfolders>)>>,
     /// The summary's rows.
     rows: RefCell<Vec<SummaryRow>>,
     /// Whether the dialog is setting check boxes or rows, whose
@@ -209,7 +209,7 @@ impl<'a> IndexedFolders<'a> {
     }
 
     /// Adds `folders`, the subfolders of `item`, below it.
-    fn add_folders(&self, tree: FolderTree, item: TreeItem, folders: Vec<(String, bool)>) {
+    fn add_folders(&self, tree: FolderTree, item: TreeItem, folders: Subfolders) {
         let (drive, path) = {
             let mut nodes = self.nodes.borrow_mut();
             let Some(node) = nodes.get_mut(tree.data(item)) else {
@@ -301,14 +301,17 @@ impl<'a> IndexedFolders<'a> {
     }
 }
 
+/// Folder names, each with whether it may hold folders.
+type Subfolders = Vec<(String, bool)>;
+
 /// The subfolders of `folder`, sorted by name, each with whether it may
 /// hold folders: a junction or a symbolic link leads elsewhere, so the tree
 /// does not open it.
-fn subfolders(folder: &str) -> Vec<(String, bool)> {
+fn subfolders(folder: &str) -> Subfolders {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
-    let mut folders: Vec<(String, bool)> = entries
+    let mut folders: Subfolders = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let kind = entry.file_type().ok()?;

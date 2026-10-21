@@ -53,11 +53,7 @@ impl Saving {
     /// Saves `settings` on a new thread, which wakes the window with its
     /// answer. Windows places its permission prompt over `owner`, the
     /// window, which joins the thread before it is destroyed.
-    pub(super) fn start(
-        owner: PromptOwner,
-        settings: IncludeSettings,
-        waker: OpenWaker,
-    ) -> Saving {
+    pub(super) fn start(owner: PromptOwner, settings: IncludeSettings, waker: OpenWaker) -> Saving {
         let (sender, answer) = channel();
         let thread = std::thread::spawn(move || {
             let saved = save(owner, &settings);

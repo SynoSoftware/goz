@@ -1042,7 +1042,7 @@ impl Panel {
                 Some(shown) => Totals::of(shown.iter().map(|&i| &self.entries[i as usize])),
             };
             // An empty folder's line says "0 items" alone.
-            (None, Some(size).filter(|_| items > 0))
+            (None, (items > 0).then_some(size))
         } else {
             (
                 Some(picked.len() as u64),

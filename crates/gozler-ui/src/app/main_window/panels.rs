@@ -1778,7 +1778,7 @@ impl MainWindow {
     fn draw_panel_row(&self, side: Side, draw: &mut CustomDraw, row: u64) -> DrawAnswer {
         let (taken, dimmed, up) = {
             let model = self.model.borrow();
-            let taken = model.taken_rows(List::Panel(side), &[row..row + 1]);
+            let taken = model.taken_rows(List::Panel(side), std::slice::from_ref(&(row..row + 1)));
             let shown = model.panels().row(side, row);
             (
                 !taken.is_empty(),

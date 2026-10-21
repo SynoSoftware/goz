@@ -4225,8 +4225,8 @@ impl MainWindow {
 
     /// Paste's files, once their thread has read them from the clipboard.
     fn finish_paste(&self) {
-        let read = (self.pasting.borrow().as_ref())
-            .and_then(|pasting| pasting.files.try_recv().ok());
+        let read =
+            (self.pasting.borrow().as_ref()).and_then(|pasting| pasting.files.try_recv().ok());
         let Some(read) = read else {
             return;
         };
