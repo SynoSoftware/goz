@@ -1136,6 +1136,11 @@ impl MainWindow {
                 self.read(side, ask);
             }
             PanelKey::OtherPanel => self.activate_panel(side.other(), true),
+            PanelKey::ShowIn(to) => {
+                let row = c.list.focused();
+                let ask = self.model.borrow_mut().panels_mut().show_in(side, row, to);
+                self.read(to, ask);
+            }
             // The selection the list holds now decides, which the panel may
             // not have read yet.
             PanelKey::Escape => {

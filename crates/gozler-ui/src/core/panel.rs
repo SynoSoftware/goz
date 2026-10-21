@@ -1569,6 +1569,14 @@ pub(crate) fn same_folder(a: &str, b: &str) -> bool {
     folder_key(a) == folder_key(b)
 }
 
+/// A search result's name, after the last `\` of its full path.
+fn result_name(item: &ResultItem) -> Box<[u16]> {
+    let wide = wide_path(item);
+    let start = (wide.iter().rposition(|&unit| unit == u16::from(b'\\')))
+        .map_or(0, |separator| separator + 1);
+    wide[start..].into()
+}
+
 /// Whether `path` is `folder` or below it.
 fn is_within(path: &str, folder: &str) -> bool {
     let path = folder_key(path);
@@ -2075,14 +2083,37 @@ impl Panels {
                 EnterAction::Read(self.go(side, path, None))
             }
             Some(Row::Result(item)) => {
-                let wide = wide_path(item);
-                let start = (wide.iter().rposition(|&unit| unit == u16::from(b'\\')))
-                    .map_or(0, |separator| separator + 1);
-                let name: Box<[u16]> = wide[start..].into();
+                let name = result_name(item);
                 let folder = parent_of(&item.path);
                 EnterAction::Read(self.go(side, folder, Some(name)))
             }
         }
+    }
+
+    /// `Ctrl+Left` or `Ctrl+Right` on `row` of `side`, as in Total
+    /// Commander: the panel `to` shows the row's folder, the parent folder
+    /// for `..`, with the folder it came from focused, or for a file the
+    /// folder that holds it, with the file focused; with no row, `side`'s
+    /// folder. `None` when `to` already
+    /// shows that folder, so a file in the same panel keeps its selection.
+    pub(crate) fn show_in(&mut self, side: Side, row: Option<u64>, to: Side) -> Option<ReadAsk> {
+        let panel = self.panel(side);
+        let (path, focus) = match row.and_then(|row| self.row(side, row)) {
+            None => (panel.folder.clone(), None),
+            Some(Row::Up) => (
+                parent_of(&panel.folder),
+                Some(last_name(&panel.folder).encode_utf16().collect()),
+            ),
+            Some(Row::Entry(entry)) if entry.is_folder() => (panel.path_of(&entry.name), None),
+            Some(Row::Entry(entry)) => (panel.folder.clone(), Some(entry.name.clone())),
+            Some(Row::Result(item)) if item.is_dir => (item.path.clone(), None),
+            Some(Row::Result(item)) => (parent_of(&item.path), Some(result_name(item))),
+        };
+        let target = self.panel(to);
+        if path.is_empty() || target.search().is_none() && same_folder(&path, &target.folder) {
+            return None;
+        }
+        Some(self.go(to, path, focus))
     }
 
     /// The row at `index` of `side`'s list: a search panel's fetched row
@@ -2987,6 +3018,22 @@ pub(crate) mod tests {
         Arc::new(Request::Delete {
             sources: sources.iter().map(PathBuf::from).collect(),
         })
+    }
+
+    /// `Ctrl+Right` shows the focused folder in the right panel, and for
+    /// `..` or a file the folder above or around it, as Total Commander
+    /// does. `Ctrl+Left` on a file of the left panel reads nothing, because
+    /// showing its own folder again would drop the panel's selection.
+    #[test]
+    fn ctrl_arrow_shows_the_focused_folder_in_that_panel() {
+        let mut panels = showing(r"C:\f", vec![folder("sub"), file("a.txt", 1, 0)]);
+        assert_eq!(names(&panels, Side::Left), ["..", "sub", "a.txt"]);
+        let path = |ask: Option<ReadAsk>| ask.map(|ask| ask.path);
+        let mut right = |row| path(panels.show_in(Side::Left, Some(row), Side::Right));
+        assert_eq!(right(0).as_deref(), Some(r"C:\"));
+        assert_eq!(right(1).as_deref(), Some(r"C:\f\sub"));
+        assert_eq!(right(2).as_deref(), Some(r"C:\f"));
+        assert_eq!(panels.show_in(Side::Left, Some(2), Side::Left), None);
     }
 
     /// An ended delete hides its rows until a listing that started after

@@ -898,6 +898,7 @@ A folder that cannot be opened, from `Enter`, the path box or the drive menu, is
 | `Up`, `Down`, `PgUp`, `PgDn`, `Home`, `End` | move the focus |
 | `Enter`, a double-click | on a folder: show it in the panel. On `..`: show the parent folder. On a file: Open, with Settings' "Open files" command (see "The Context menu page") |
 | `Backspace` | show the parent folder, with the folder the person came from focused |
+| `Ctrl+Left`, `Ctrl+Right` | show in the left or the right panel, as in Total Commander: on a folder, that folder; on `..`, the parent folder, with the folder the panel came from focused; on a file, the folder that holds it, with the file focused. The active panel stays active. A panel that already shows that folder reads nothing, so `Ctrl+Left` on a file of the left panel keeps its selection |
 | `Tab`, `Shift+Tab` | make the other panel active, from the list, the path box, the search box and Look in; from any other control, such as a drive button, return to the active panel. Search's controls are hidden, so `Tab` never reaches them |
 | `Alt+F1`, `Alt+F2` | open the left or the right panel's drive menu |
 | `Ctrl+L` | focus the path box |
@@ -1042,6 +1043,7 @@ Two panels has no clipboard commands. `Ctrl+C`, `Ctrl+X` and `Ctrl+V` in the pat
 | `Ctrl+C`, `Ctrl+X`, `Ctrl+V` | the path box's and the search box's own | the box | Copy, Cut and Paste |
 | `Ctrl+A` | Select all | acts on the focused control, as in Search | the same |
 | `Enter`, `Backspace`, `Esc`, arrows, `PgUp`, `PgDn`, `Home`, `End` | as "Moving around" says | list | the list's own |
+| `Ctrl+Left`, `Ctrl+Right` | as "Moving around" says | list | — |
 | `Insert`, `Space`, `Shift`+arrows | as "Selecting entries" says | list | — |
 | a character, `Alt`+a character | quick search | list | — |
 | `Tab` | the other panel's list | list, path box and search box | the next control |

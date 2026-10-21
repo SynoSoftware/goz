@@ -768,6 +768,9 @@ pub(crate) enum PanelKey {
     Back,
     /// `Tab`: the other panel becomes active.
     OtherPanel,
+    /// `Ctrl+Left`, `Ctrl+Right`: the left or the right panel shows the
+    /// focused row's folder ([`Panels::show_in`](super::panel::Panels::show_in)).
+    ShowIn(Side),
     /// `Esc` in the list: the quick search box closes, else the selection
     /// is cleared.
     Escape,
@@ -918,6 +921,11 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
     &[
         (Keystroke::plain(Key::Enter), P(PanelKey::Enter)),
         (Keystroke::plain(Key::Backspace), P(PanelKey::Back)),
+        (Keystroke::ctrl(Key::Left), P(PanelKey::ShowIn(Side::Left))),
+        (
+            Keystroke::ctrl(Key::Right),
+            P(PanelKey::ShowIn(Side::Right)),
+        ),
         (Keystroke::plain(Key::Escape), P(PanelKey::Escape)),
         (Keystroke::plain(Key::Insert), P(PanelKey::Toggle)),
         (Keystroke::plain(Key::Space), P(PanelKey::Toggle)),
