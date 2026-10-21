@@ -2046,10 +2046,14 @@ mod tests {
         );
         assert_eq!(line(r"C:\f", End::Complete, true), "Renamed report.pdf");
         assert_eq!(line(r"C:\f", End::Cancelled, false), "");
-        assert_eq!(
-            line(r"D:\g", End::Complete, false),
-            r"Moved 1 item to D:\g\report-old.pdf"
-        );
+        // The new path joins with the OS's separator, which is `\` only on
+        // Windows, where the window runs.
+        if cfg!(windows) {
+            assert_eq!(
+                line(r"D:\g", End::Complete, false),
+                r"Moved 1 item to D:\g\report-old.pdf"
+            );
+        }
     }
 
     /// An operation stays in the queue until the window reports it, and a
