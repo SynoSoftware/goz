@@ -4804,7 +4804,7 @@ impl MainWindow {
     }
 
     /// Settings shows or hides its Index page, which follows the service's
-    /// state while it shows (DESIGN.md: The Index page).
+    /// state while it shows (DESIGN.md: The Drives and service page).
     pub(super) fn show_index_page(&self, hwnd: Hwnd, shown: bool) {
         self.model.borrow_mut().show_index_page(shown);
         self.update_poll(hwnd);

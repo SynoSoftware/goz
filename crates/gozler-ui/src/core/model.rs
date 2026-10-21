@@ -101,7 +101,7 @@ pub(crate) struct Model {
     /// The notice that the Include settings are saved, in flight.
     settings_saved_asked: Option<Generation>,
     /// Whether Settings shows its Index page, which follows the service's
-    /// state every 2 seconds (DESIGN.md: The Index page).
+    /// state every 2 seconds (DESIGN.md: The Drives and service page).
     index_page_shown: bool,
     /// The newer release that Check for updates found, such as `0.4.0`.
     newer_release: Option<String>,

@@ -827,6 +827,9 @@ impl MainWindow {
                 again,
                 stale,
             } => {
+                // Asked before the status line shows, which waits for the
+                // first sizes.
+                self.ask_panel_sizes(side);
                 let scroll = if again { Scroll::Keep } else { Scroll::ToFocus };
                 self.show_place(side, &shown, &place, scroll);
                 self.show_awaited(side, &place);
@@ -836,7 +839,6 @@ impl MainWindow {
                 }
                 let folder = self.model.borrow().panels().panel(side).folder().to_owned();
                 threads.read_free(side, &folder);
-                self.ask_panel_sizes(side);
                 // The listing may release the ended operations that it
                 // started after.
                 self.release_operations(hwnd);

@@ -720,6 +720,9 @@ pub(crate) struct Panel {
     kept: HashMap<OperationId, u64>,
     read: Option<Read>,
     sizes_asked: Option<Generation>,
+    /// gozlerd answered a sizes request since the list was emptied, so a
+    /// folder without a size is unknown, not yet asked.
+    sized: bool,
     free: Option<u64>,
     /// The quick search box's text while it is open.
     quick: Option<String>,
@@ -797,6 +800,7 @@ impl Panel {
             kept: HashMap::new(),
             read: None,
             sizes_asked: None,
+            sized: false,
             free: None,
             quick: None,
             selected: Vec::new(),
@@ -1047,6 +1051,9 @@ impl Panel {
 
     /// What the status line counts: from the kept totals while every entry
     /// shows and none is selected, so it costs nothing in a large folder.
+    /// Until gozlerd first answers the sizes asked for the folder, a sum
+    /// that lacks some has none, because it would call each folder unknown
+    /// for the moment the reply takes.
     pub(crate) fn counts(&self) -> Counts {
         let items = self.shown_len() as u64;
         let mut picked = 0;
@@ -1065,10 +1072,11 @@ impl Panel {
         } else {
             (Some(picked), Some(chosen))
         };
+        let waits = self.sizes_asked.is_some() && !self.sized;
         Counts {
             items,
             selected,
-            size,
+            size: size.filter(|size| size.unknown == 0 || !waits),
         }
     }
 
@@ -1147,7 +1155,8 @@ impl Panel {
         }
     }
 
-    /// Empties the list, while it reads or its drive is not ready.
+    /// Empties the list, while it reads, its drive is not ready or it
+    /// starts a search.
     fn clear(&mut self) {
         self.entries.clear();
         self.totals = Totals::default();
@@ -1155,6 +1164,10 @@ impl Panel {
         self.selected.clear();
         self.quick = None;
         self.gone_focus = None;
+        // A search panel never filters, so it would keep a taken snapshot,
+        // which holds every source of a large delete, until it leaves.
+        self.taken_hashes = None;
+        self.sized = false;
     }
 
     /// Recomputes which entries show, after the entries or the taken
@@ -2739,6 +2752,7 @@ impl Panels {
             return false;
         }
         panel.sizes_asked = None;
+        panel.sized = true;
         let rows = match &outcome {
             Outcome::Rows(chunk) => chunk.rows.as_slice(),
             _ => &[],
@@ -3877,6 +3891,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// Until a folder's first sizes arrive, its status line shows no sum,
+    /// which would flash "(5 bytes, 1 unknown)" on each move into a folder
+    /// with a subfolder (#114); once they did, a later ask, as after a
+    /// change, keeps the sum.
+    #[test]
+    fn a_sum_waits_for_the_first_sizes() {
+        let mut panels = showing(r"C:\d", vec![folder("Photos"), file("a", 5, 0)]);
+        panels.ask_sizes(Side::Left, Generation(6));
+        assert_eq!(panels.panel(Side::Left).counts().size, None);
+        give_sizes(&mut panels, &[]);
+        panels.ask_sizes(Side::Left, Generation(8));
+        let size = panels.panel(Side::Left).counts().size;
+        assert_eq!(size.map(|size| size.unknown), Some(1));
+    }
+
     /// The status line sums the known sizes of the counted entries, and
     /// counts the folders whose size is unknown beside the sum.
     #[test]
@@ -3912,9 +3941,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// T2: `Esc` and `Backspace` in a search panel must show the searched
-    /// folder again with the row that was focused, the way back the spec
-    /// promises (DESIGN.md: Search in a panel).
+    /// `Esc` and `Backspace` in a search panel must show the searched folder
+    /// again with the row that was focused (DESIGN.md: Search in a panel).
     #[test]
     fn leaving_a_search_shows_the_folder_with_its_row_focused() {
         let mut panels = Panels::new(&SavedPanels::default());

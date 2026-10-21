@@ -106,9 +106,6 @@ impl Taken {
     /// The taken paths directly in the folder `folder`, as UTF-16,
     /// whichever operation takes them; `None` when it holds none.
     pub fn in_folder(&self, folder: &[u16]) -> Option<TakenFolder<'_>> {
-        if self.folders.is_empty() {
-            return None;
-        }
         let names = self.folders.get(&folded(folder))?;
         Some(TakenFolder { taken: self, names })
     }
