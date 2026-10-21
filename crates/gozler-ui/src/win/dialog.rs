@@ -138,9 +138,10 @@ pub(crate) trait DialogProc {
     fn path_column(&self, _id: u16) -> Option<usize> {
         None
     }
-    /// The captions a push button can show after the dialog opens, each
-    /// with whether the administrator shield shows beside it, so the
-    /// buttons are wide enough for them from the start.
+    /// The captions a push button can show after the dialog opens, also
+    /// those of a page made later, each with whether an icon or the
+    /// administrator shield shows beside it, so the buttons are wide enough
+    /// for them from the start.
     fn later_captions(&self) -> Vec<(String, bool)> {
         Vec::new()
     }
@@ -556,14 +557,9 @@ pub(crate) fn size_buttons<D: DialogProc>(dialog: Hwnd, state: &D) -> Px {
                 .filter(|child| child.parent() == dialog && is_class(*child, "#32770")),
         )
         .collect();
-    let (buttons, others): (Vec<Hwnd>, Vec<Hwnd>) = children
-        .into_iter()
-        .filter(|child| parents.contains(&child.parent()))
-        .partition(|child| is_push_button(*child));
-    let (clears, buttons): (Vec<Hwnd>, Vec<Hwnd>) = buttons
-        .into_iter()
-        .partition(|button| state.clear_glyph(control_id(*button)).is_some());
-    let width = buttons
+    let children = Children::of(children, &parents, state);
+    let width = children
+        .buttons
         .iter()
         .map(|&button| room(&button.text(), has_image(button)))
         .chain(
@@ -573,60 +569,120 @@ pub(crate) fn size_buttons<D: DialogProc>(dialog: Hwnd, state: &D) -> Px {
                 .map(|(caption, shielded)| room(caption, *shielded)),
         )
         .fold(minimum, Px::max);
-    let margin = horizontal_units(dialog, 7);
-    for parent in parents {
-        let of_parent = |controls: &[Hwnd]| -> (Vec<Hwnd>, Vec<Rect>) {
-            controls
-                .iter()
-                .filter(|control| control.parent() == parent)
-                .map(|&control| (control, control.rect_in(parent)))
-                .unzip()
-        };
-        let (parent_buttons, button_rects) = of_parent(&buttons);
-        let (parent_others, other_rects) = of_parent(&others);
-        let (placed, shrunk) = layout::sized_buttons(&button_rects, &other_rects, width, margin);
-        let moves: Vec<(Hwnd, Rect)> = parent_buttons
-            .into_iter()
-            .zip(placed)
-            .chain(
-                shrunk
-                    .into_iter()
-                    .map(|(index, rect)| (parent_others[index], rect)),
-            )
-            .collect();
-        super::move_children(&moves);
-    }
-    // After the rows have moved, so the control beside a Clear, such as
-    // its box, ends its gap before it.
-    for clear in clears {
-        let parent = clear.parent();
-        let id = control_id(clear);
-        if let Some(button) = Button::of_dialog(parent, id) {
-            button.set_lone_icon(state.clear_glyph(id).filter(|_| icons_shown()));
-        }
-        let beside: Vec<Hwnd> = others
-            .iter()
-            .copied()
-            .filter(|control| control.parent() == parent)
-            .collect();
-        let rects: Vec<Rect> = beside
-            .iter()
-            .map(|control| control.rect_in(parent))
-            .collect();
-        let rect = clear.rect_in(parent);
-        let caption = meter.width(&clear.text());
-        let width = layout::clear_width(caption, icons_shown(), rect.height, dpi);
-        let (placed, shrunk) = layout::sized_buttons(&[rect], &rects, width, margin);
-        let moves: Vec<(Hwnd, Rect)> = std::iter::once((clear, placed[0]))
-            .chain(
-                shrunk
-                    .into_iter()
-                    .map(|(index, rect)| (beside[index], rect)),
-            )
-            .collect();
-        super::move_children(&moves);
-    }
+    children.place(dialog, &parents, state, width, &meter);
     width
+}
+
+/// Gives the push buttons of `page`, which its dialog made after
+/// [`size_buttons`] ran, the `width` that it returned, placed as it placed
+/// the other pages' buttons. The dialog's [`DialogProc::later_captions`]
+/// names this page's captions, so the width already fits them.
+pub(crate) fn size_page_buttons<D: DialogProc>(page: Hwnd, state: &D, width: Px) {
+    let Ok(font) = Font::of(page) else {
+        return;
+    };
+    let meter = TextMeter::new(&font);
+    Children::of(descendants(page), &[page], state).place(page, &[page], state, width, &meter);
+}
+
+/// The controls of a dialog and its pages that [`size_buttons`] places.
+struct Children {
+    /// The push buttons, which share one width.
+    buttons: Vec<Hwnd>,
+    /// The Clear buttons, each as wide as its own caption or icon.
+    clears: Vec<Hwnd>,
+    /// Every other control, which a button's row may shrink.
+    others: Vec<Hwnd>,
+}
+
+impl Children {
+    /// Sorts the `children` whose parent is one of `parents`.
+    fn of<D: DialogProc>(children: Vec<Hwnd>, parents: &[Hwnd], state: &D) -> Children {
+        let (buttons, others): (Vec<Hwnd>, Vec<Hwnd>) = children
+            .into_iter()
+            .filter(|child| parents.contains(&child.parent()))
+            .partition(|child| is_push_button(*child));
+        let (clears, buttons): (Vec<Hwnd>, Vec<Hwnd>) = buttons
+            .into_iter()
+            .partition(|button| state.clear_glyph(control_id(*button)).is_some());
+        Children {
+            buttons,
+            clears,
+            others,
+        }
+    }
+
+    /// Gives the buttons of each of `parents` the width `width`, and each
+    /// Clear its own; `units` converts the margin from dialog units.
+    fn place<D: DialogProc>(
+        self,
+        units: Hwnd,
+        parents: &[Hwnd],
+        state: &D,
+        width: Px,
+        meter: &TextMeter,
+    ) {
+        let Children {
+            buttons,
+            clears,
+            others,
+        } = self;
+        let dpi = units.dpi();
+        let margin = horizontal_units(units, 7);
+        for &parent in parents {
+            let of_parent = |controls: &[Hwnd]| -> (Vec<Hwnd>, Vec<Rect>) {
+                controls
+                    .iter()
+                    .filter(|control| control.parent() == parent)
+                    .map(|&control| (control, control.rect_in(parent)))
+                    .unzip()
+            };
+            let (parent_buttons, button_rects) = of_parent(&buttons);
+            let (parent_others, other_rects) = of_parent(&others);
+            let (placed, shrunk) =
+                layout::sized_buttons(&button_rects, &other_rects, width, margin);
+            let moves: Vec<(Hwnd, Rect)> = parent_buttons
+                .into_iter()
+                .zip(placed)
+                .chain(
+                    shrunk
+                        .into_iter()
+                        .map(|(index, rect)| (parent_others[index], rect)),
+                )
+                .collect();
+            super::move_children(&moves);
+        }
+        // After the rows have moved, so the control beside a Clear, such as
+        // its box, ends its gap before it.
+        for clear in clears {
+            let parent = clear.parent();
+            let id = control_id(clear);
+            if let Some(button) = Button::of_dialog(parent, id) {
+                button.set_lone_icon(state.clear_glyph(id).filter(|_| icons_shown()));
+            }
+            let beside: Vec<Hwnd> = others
+                .iter()
+                .copied()
+                .filter(|control| control.parent() == parent)
+                .collect();
+            let rects: Vec<Rect> = beside
+                .iter()
+                .map(|control| control.rect_in(parent))
+                .collect();
+            let rect = clear.rect_in(parent);
+            let caption = meter.width(&clear.text());
+            let width = layout::clear_width(caption, icons_shown(), rect.height, dpi);
+            let (placed, shrunk) = layout::sized_buttons(&[rect], &rects, width, margin);
+            let moves: Vec<(Hwnd, Rect)> = std::iter::once((clear, placed[0]))
+                .chain(
+                    shrunk
+                        .into_iter()
+                        .map(|(index, rect)| (beside[index], rect)),
+                )
+                .collect();
+            super::move_children(&moves);
+        }
+    }
 }
 
 /// The control ID of `control`, a dialog's or a page's.

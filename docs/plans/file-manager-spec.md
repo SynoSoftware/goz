@@ -1007,7 +1007,10 @@ picker as the destination:
   clipboard, as File Explorer does after its own paste; then it releases
   the data. It never sets `CFSTR_PERFORMEDDROPEFFECT` to move, because that
   value tells the program that cut the files to delete them itself
-  ("Handling Shell Data Transfer Scenarios", delete-on-paste). Checking the
+  ("Handling Shell Data Transfer Scenarios", delete-on-paste). Paste reads
+  the clipboard on a thread of its own, which keeps the data until the
+  paste is submitted or dropped, because the program that holds the
+  clipboard answers each call as slowly as it does. Checking the
   sequence number keeps anything the person copied since. Pasting Gozler's
   files in File Explorer works too, but then File Explorer's engine moves
   them.

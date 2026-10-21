@@ -432,6 +432,11 @@ impl SettingsDraft {
     pub(crate) fn last_applied(&self) -> &SettingsValues {
         &self.applied
     }
+
+    /// Records `include`, Include settings that were saved, as applied.
+    pub(crate) fn include_saved(&mut self, include: IncludeSettings) {
+        self.applied.include = Some(include);
+    }
 }
 
 /// What the window shows: Search's results list, or Norton Commander's two

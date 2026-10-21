@@ -9,7 +9,7 @@ use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
 use super::file_operations::{FileOperations, FilesSource};
 use super::fix_thread::FixThread;
 use super::icons::Icons;
-use super::include::{self, NotSaved};
+use super::include::{NotSaved, Saving};
 use super::requests::Requests;
 use super::settings::SettingsDialog;
 use super::status_bar::StatusBar;
@@ -54,7 +54,7 @@ use crate::core::settings::{Mode, SavedColumn, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
-use crate::win::clipboard::{self as clipboard, ClipboardBlock};
+use crate::win::clipboard::{self as clipboard, ClipboardBlock, ClipboardFiles};
 use crate::win::controls::{
     Button, CheckBox, DropDownList, Edit, FileIconLabel, IconList, Label, ListBox, ListClosing,
     ListColumn, ListView, ScrollEdge, Tooltip,
@@ -88,6 +88,7 @@ use std::ops::Range;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 use windows::Win32::Foundation::LRESULT;
@@ -746,6 +747,13 @@ struct Created {
     panel_threads: PanelThreads,
 }
 
+/// A Paste, from its command until its thread has read the clipboard.
+struct Pasting {
+    /// The folder selected when Paste was chosen.
+    destination: PathBuf,
+    files: Receiver<Option<ClipboardFiles>>,
+}
+
 /// The open Settings dialog, which replies and the window's job go to.
 #[derive(Clone, Copy)]
 struct OpenSettings {
@@ -847,6 +855,12 @@ pub(crate) struct MainWindow {
     settings: Cell<Option<OpenSettings>>,
     total_commander: RefCell<Option<Result<Option<String>, DaemonFailure>>>,
     included_count: RefCell<Option<Result<u64, DaemonFailure>>>,
+    /// The save of the Include settings while it runs.
+    include_saving: RefCell<Option<Saving>>,
+    /// The save's answer, once it arrived, for the Settings dialog.
+    include_saved: RefCell<Option<Result<(), NotSaved>>>,
+    /// A Paste whose thread reads the clipboard.
+    pasting: RefCell<Option<Pasting>>,
     /// Whether a click gave the search box the focus, so its text is
     /// selected once the click is handled (Settings > Search).
     select_search: Cell<bool>,
@@ -949,6 +963,9 @@ impl MainWindow {
             settings: Cell::new(None),
             total_commander: RefCell::new(None),
             included_count: RefCell::new(None),
+            include_saving: RefCell::new(None),
+            include_saved: RefCell::new(None),
+            pasting: RefCell::new(None),
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
             file_operations: RefCell::new(None),
@@ -2878,6 +2895,8 @@ impl MainWindow {
             let accepted = self.model.borrow_mut().accept_fix(event);
             self.apply(hwnd, accepted);
         }
+        self.finish_include_save();
+        self.finish_paste();
         self.on_panel_events(hwnd);
         let newer = self
             .update
@@ -3894,17 +3913,37 @@ impl MainWindow {
 
     /// Paste on one selected folder: copies the files on the clipboard into
     /// it, or moves them when they were cut (file-manager-spec.md: Search
-    /// mode).
+    /// mode), once a thread has read them.
     fn paste(&self) {
         let folder = self.selected_paths();
         let [destination] = folder.as_slice() else {
             return;
         };
-        let Some(files) = clipboard::read_files() else {
+        let (sender, files) = channel();
+        let waker = self.created().waker.clone();
+        clipboard::read_files(move |read| waker.deliver(|| sender.send(read).is_ok()));
+        self.pasting.replace(Some(Pasting {
+            destination: destination.clone(),
+            files,
+        }));
+    }
+
+    /// Paste's files, once their thread has read them from the clipboard.
+    fn finish_paste(&self) {
+        let read = (self.pasting.borrow().as_ref())
+            .and_then(|pasting| pasting.files.try_recv().ok());
+        let Some(read) = read else {
             return;
         };
-        let (sources, destination, moves) = (files.paths.clone(), destination.clone(), files.cut);
-        self.transfer_into(sources, destination, moves, Some(FilesSource::Paste(files)));
+        let Some(pasting) = self.pasting.take() else {
+            return;
+        };
+        let Some(files) = read else {
+            return;
+        };
+        let (sources, moves) = (files.paths.clone(), files.cut);
+        let from = Some(FilesSource::Paste(files));
+        self.transfer_into(sources, pasting.destination, moves, from);
     }
 
     /// Shows the rows that deletes and moves have taken struck through in
@@ -4559,18 +4598,44 @@ impl MainWindow {
         self.included_count.take()
     }
 
-    /// Saves the Include settings as administrator, after Windows asks the
-    /// person for permission, and tells the service, which applies them
-    /// (DESIGN.md: The Include page).
-    pub(super) fn save_include(
-        &self,
-        dialog: Hwnd,
-        settings: &IncludeSettings,
-    ) -> Result<(), NotSaved> {
-        include::save(dialog, settings)?;
-        let fetch = self.model.borrow_mut().settings_saved();
-        self.start(fetch);
-        Ok(())
+    /// Starts saving the Include settings as administrator, after Windows
+    /// asks the person for permission over `hwnd`, the window (DESIGN.md:
+    /// The Include page). The Settings dialog starts no second save while
+    /// one runs.
+    pub(super) fn save_include(&self, hwnd: Hwnd, settings: IncludeSettings) {
+        let saving = Saving::start(
+            PromptOwner::new(hwnd),
+            settings,
+            self.created().waker.clone(),
+        );
+        self.include_saving.replace(Some(saving));
+    }
+
+    /// Takes the save's answer once it arrived: tells the service, which
+    /// applies saved settings, and the Settings dialog.
+    fn finish_include_save(&self) {
+        let answer = self
+            .include_saving
+            .borrow()
+            .as_ref()
+            .and_then(Saving::answer);
+        let Some(answer) = answer else {
+            return;
+        };
+        if let Some(saving) = self.include_saving.take() {
+            saving.join();
+        }
+        if answer.is_ok() {
+            let fetch = self.model.borrow_mut().settings_saved();
+            self.start(fetch);
+        }
+        self.include_saved.replace(Some(answer));
+        self.post_settings_reply();
+    }
+
+    /// The Include save's answer, once it arrived.
+    pub(super) fn take_include_saved(&self) -> Option<Result<(), NotSaved>> {
+        self.include_saved.take()
     }
 
     /// The Use Total Commander link: searches the index for Total
@@ -5222,6 +5287,10 @@ impl WindowProc for MainWindow {
                 self.tray.replace(None);
                 self.created().requests.shut_down();
                 self.created().fixer.shut_down();
+                // It ends once the person answered the permission prompt.
+                if let Some(saving) = self.include_saving.take() {
+                    saving.join();
+                }
                 self.drop_target.replace(None);
                 // The queue is never dropped: dropping it waits for every
                 // Windows copy, which deletes the file it stops, while the

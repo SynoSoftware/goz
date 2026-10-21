@@ -3,12 +3,17 @@
 //! as administrator with `--save-include <file>`, after Windows asks the
 //! person for permission. That copy writes the settings to the registry and
 //! exits; the service reads them there, where only an administrator can
-//! write, so Windows proves who saved them.
+//! write, so Windows proves who saved them. A thread of its own waits for
+//! the person's answer and for that copy, so the window keeps working.
 
-use crate::win::{self, Hwnd};
+use crate::win;
+use crate::win::shell::PromptOwner;
+use crate::win::wake::OpenWaker;
 use gozler_core::include::{INCLUDE_VALUE, IncludeSettings, SETTINGS_KEY};
 use std::io;
 use std::path::Path;
+use std::sync::mpsc::{Receiver, channel};
+use std::thread::JoinHandle;
 
 /// The argument that makes the window the copy that saves.
 pub(super) const SAVE_ARGUMENT: &str = "--save-include";
@@ -38,9 +43,45 @@ pub(super) enum NotSaved {
     Failed(String),
 }
 
+/// A save of the Include settings that runs on its own thread.
+pub(super) struct Saving {
+    thread: JoinHandle<()>,
+    answer: Receiver<Result<(), NotSaved>>,
+}
+
+impl Saving {
+    /// Saves `settings` on a new thread, which wakes the window with its
+    /// answer. Windows places its permission prompt over `owner`, the
+    /// window, which joins the thread before it is destroyed.
+    pub(super) fn start(
+        owner: PromptOwner,
+        settings: IncludeSettings,
+        waker: OpenWaker,
+    ) -> Saving {
+        let (sender, answer) = channel();
+        let thread = std::thread::spawn(move || {
+            let saved = save(owner, &settings);
+            waker.deliver(|| sender.send(saved).is_ok());
+        });
+        Saving { thread, answer }
+    }
+
+    /// The answer, once it has arrived; the thread has then ended, or ends
+    /// at once.
+    pub(super) fn answer(&self) -> Option<Result<(), NotSaved>> {
+        self.answer.try_recv().ok()
+    }
+
+    /// Waits for the thread, which ends once the person answered the
+    /// prompt and the copy that saves has ended.
+    pub(super) fn join(self) {
+        let _ = self.thread.join();
+    }
+}
+
 /// Saves `settings` through a copy of the window that runs as
 /// administrator, and waits for it.
-pub(super) fn save(owner: Hwnd, settings: &IncludeSettings) -> Result<(), NotSaved> {
+fn save(owner: PromptOwner, settings: &IncludeSettings) -> Result<(), NotSaved> {
     let failed = |error: &io::Error| NotSaved::Failed(win::error_text(error));
     let file = std::env::temp_dir().join(format!("gozler-include-{}.json", std::process::id()));
     std::fs::write(&file, settings.to_json()).map_err(|e| failed(&e))?;

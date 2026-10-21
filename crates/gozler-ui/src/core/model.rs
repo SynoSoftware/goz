@@ -1132,8 +1132,8 @@ impl Model {
         Accepted::only(Change::Message(list))
     }
 
-    /// The chunk that `list`'s visible rows still lack, if no request for
-    /// its rows is in flight.
+    /// The chunk that `list`'s visible rows still lack, unless a request
+    /// for rows in view is in flight ([`super::results::Results::next_chunk`]).
     pub(crate) fn rows_needed(&mut self, list: List, visible: Range<u64>) -> Option<Fetch> {
         let generation = self.generation();
         let ask = self

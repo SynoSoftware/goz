@@ -946,7 +946,7 @@ impl Window {
             && paste.cut
             && matches!(request, Request::Move { .. })
         {
-            paste.moved(self.owner);
+            paste.moved();
         }
     }
 

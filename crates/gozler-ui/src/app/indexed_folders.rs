@@ -12,14 +12,27 @@ use crate::win::controls::{FolderTree, ReportList, TreeItem};
 use crate::win::dialog::{DialogMessage, DialogProc, Opened, TreeChange};
 use gozler_core::include::IncludeSettings;
 use std::cell::{Cell, RefCell};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+
+/// The dialog's timer, which adds the folders listed on other threads.
+const LISTED_TIMER: usize = 1;
+const LISTED_POLL_MS: u32 = 50;
 
 /// One folder the tree shows: a drive's root, as an empty path, or a folder
 /// below it.
 struct Node {
     drive: usize,
     path: String,
-    /// Whether its subfolders are in the tree.
-    listed: bool,
+    listing: Listing,
+}
+
+/// Whether a folder's subfolders are in the tree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    NotListed,
+    /// A thread lists them.
+    Pending,
+    Listed,
 }
 
 pub(super) struct IndexedFolders<'a> {
@@ -29,6 +42,8 @@ pub(super) struct IndexedFolders<'a> {
     settings: RefCell<IncludeSettings>,
     /// The tree's folders; each item carries its index.
     nodes: RefCell<Vec<Node>>,
+    /// The folders a thread lists, and where its subfolders arrive.
+    pending: RefCell<Vec<(TreeItem, Receiver<Vec<(String, bool)>>)>>,
     /// The summary's rows.
     rows: RefCell<Vec<SummaryRow>>,
     /// Whether the dialog is setting check boxes or rows, whose
@@ -49,6 +64,7 @@ impl<'a> IndexedFolders<'a> {
             drives,
             settings: RefCell::new(settings),
             nodes: RefCell::new(Vec::new()),
+            pending: RefCell::new(Vec::new()),
             rows: RefCell::new(Vec::new()),
             filling: Cell::new(false),
         }
@@ -93,7 +109,7 @@ impl<'a> IndexedFolders<'a> {
             nodes.push(Node {
                 drive,
                 path,
-                listed: false,
+                listing: Listing::NotListed,
             });
             nodes.len() - 1
         };
@@ -114,24 +130,94 @@ impl<'a> IndexedFolders<'a> {
         Some((node.drive, node.path.clone()))
     }
 
-    /// Lists the subfolders of `item` the first time it opens, from the
-    /// drive, not from the index, so a folder that is left out can be
-    /// checked again.
-    fn list(&self, tree: FolderTree, item: TreeItem) {
+    /// Marks `item` as being listed, and gives its folder; `None` once it
+    /// was, or for a drive that is not connected.
+    fn start_listing(&self, tree: FolderTree, item: TreeItem) -> Option<String> {
+        let mut nodes = self.nodes.borrow_mut();
+        let node = nodes.get_mut(tree.data(item))?;
+        let root = self.drives[node.drive].root.as_ref()?;
+        if node.listing != Listing::NotListed {
+            return None;
+        }
+        node.listing = Listing::Pending;
+        Some(format!("{root}{}", node.path))
+    }
+
+    /// Lists the subfolders of `item` the first time it opens, on a thread
+    /// of its own, because a folder such as `C:\Windows\WinSxS` takes long
+    /// to list; the dialog's timer adds them. They come from the drive, not
+    /// from the index, so a folder that is left out can be checked again.
+    fn list_later(&self, dialog: Hwnd, tree: FolderTree, item: TreeItem) {
+        let Some(folder) = self.start_listing(tree, item) else {
+            return;
+        };
+        let (sender, listed) = channel();
+        // Not joined: once the dialog has closed, its send fails.
+        std::thread::spawn(move || {
+            let _ = sender.send(subfolders(&folder));
+        });
+        self.pending.borrow_mut().push((item, listed));
+        dialog.set_timer(LISTED_TIMER, LISTED_POLL_MS);
+    }
+
+    /// Lists the subfolders of `item` now, unless they are in the tree,
+    /// waiting for the thread that lists them.
+    fn list_now(&self, tree: FolderTree, item: TreeItem) {
+        let folders = match self.start_listing(tree, item) {
+            Some(folder) => subfolders(&folder),
+            None => {
+                let position = self
+                    .pending
+                    .borrow()
+                    .iter()
+                    .position(|(pending, _)| *pending == item);
+                let Some(position) = position else {
+                    return;
+                };
+                let (_, listed) = self.pending.borrow_mut().remove(position);
+                listed.recv().unwrap_or_default()
+            }
+        };
+        self.add_folders(tree, item, folders);
+    }
+
+    /// Adds the folders that the threads have listed, and stops the timer
+    /// once none lists any.
+    fn add_listed(&self, dialog: Hwnd) {
+        let mut listed = Vec::new();
+        {
+            let mut pending = self.pending.borrow_mut();
+            pending.retain(|(item, folders)| match folders.try_recv() {
+                Err(TryRecvError::Empty) => true,
+                answer => {
+                    listed.push((*item, answer.unwrap_or_default()));
+                    false
+                }
+            });
+            if pending.is_empty() {
+                dialog.kill_timer(LISTED_TIMER);
+            }
+        }
+        let Some(tree) = Self::tree(dialog) else {
+            return;
+        };
+        for (item, folders) in listed {
+            self.add_folders(tree, item, folders);
+            // The tree opened the item while it had no folders yet.
+            tree.expand(item);
+        }
+    }
+
+    /// Adds `folders`, the subfolders of `item`, below it.
+    fn add_folders(&self, tree: FolderTree, item: TreeItem, folders: Vec<(String, bool)>) {
         let (drive, path) = {
             let mut nodes = self.nodes.borrow_mut();
             let Some(node) = nodes.get_mut(tree.data(item)) else {
                 return;
             };
-            if std::mem::replace(&mut node.listed, true) {
-                return;
-            }
+            node.listing = Listing::Listed;
             (node.drive, node.path.clone())
         };
-        let Some(root) = &self.drives[drive].root else {
-            return;
-        };
-        let folders = subfolders(&format!("{root}{path}"));
         if folders.is_empty() {
             tree.set_childless(item);
         }
@@ -197,7 +283,7 @@ impl<'a> IndexedFolders<'a> {
             return;
         };
         for name in path.split('\\').filter(|name| !name.is_empty()) {
-            self.list(tree, item);
+            self.list_now(tree, item);
             tree.expand(item);
             let child = tree.children(Some(item)).into_iter().find(|&child| {
                 self.node(tree, child).is_some_and(|(_, path)| {
@@ -254,7 +340,7 @@ impl DialogProc for IndexedFolders<'_> {
                 if let Some(item) = item
                     && drive.root.is_some()
                 {
-                    self.list(tree, item);
+                    self.list_now(tree, item);
                     tree.expand(item);
                 }
             }
@@ -294,8 +380,12 @@ impl DialogProc for IndexedFolders<'_> {
                 ..
             } => {
                 if let Some(tree) = Self::tree(dialog) {
-                    self.list(tree, item);
+                    self.list_later(dialog, tree, item);
                 }
+                true
+            }
+            DialogMessage::Timer { id: LISTED_TIMER } => {
+                self.add_listed(dialog);
                 true
             }
             DialogMessage::Tree {

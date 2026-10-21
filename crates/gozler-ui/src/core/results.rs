@@ -229,6 +229,9 @@ struct CachedChunk {
     /// asked for a third time: a reply can stay short, as when a row has no
     /// full path, and the window asks for the visible rows after each reply.
     asked_again: bool,
+    /// Only its first page has arrived. The rest replaces it, unless the
+    /// request was replaced, and then it is asked for as a short chunk is.
+    first_page: bool,
 }
 
 /// The request whose reply the results wait for; a reply of another
@@ -237,7 +240,8 @@ struct CachedChunk {
 enum InFlight {
     /// A new search, whose first chunk's ask its rows will be shown with.
     Search(Generation, ChunkAsk),
-    Chunk(Generation),
+    /// The chunk that starts at the position.
+    Chunk(Generation, u64),
 }
 
 /// What accepting a chunk changed.
@@ -414,9 +418,12 @@ impl Results {
         };
         let mut start = positions.first()?.start;
         let mut end = positions.last()?.end;
+        // The rest of a first page's chunk replaces it, so the selection's
+        // rows would not stay there.
         let overlapped: Vec<Range<u64>> = shown
             .chunks
             .iter()
+            .filter(|c| !c.first_page)
             .map(|c| c.start..c.start + c.rows.len() as u64)
             .filter(|chunk| chunk.start < end && start < chunk.end)
             .collect();
@@ -494,14 +501,16 @@ impl Results {
 
     /// Whether `generation` is the request the results wait for.
     pub(crate) fn awaits(&self, generation: Generation) -> bool {
-        matches!(&self.in_flight, Some(InFlight::Search(g, _) | InFlight::Chunk(g)) if *g == generation)
+        matches!(&self.in_flight, Some(InFlight::Search(g, _) | InFlight::Chunk(g, _)) if *g == generation)
     }
 
     /// The ask for the first chunk that the rows `visible` need and the
     /// cache lacks, which `generation` then asks for, and marks the cached
-    /// chunks they show as used. `None` while a search or a chunk is in
-    /// flight, so fast scrolling never queues a request for every chunk it
-    /// passes.
+    /// chunks they show as used. One chunk is in flight at a time, so fast
+    /// scrolling never queues a request for every chunk it passes: `None`
+    /// while a search is, or while the chunk in flight is still in view. A
+    /// chunk that left the view is replaced, so a scrollbar jump never waits
+    /// for the rows it jumped away from.
     pub(crate) fn next_chunk(
         &mut self,
         visible: Range<u64>,
@@ -532,11 +541,17 @@ impl Results {
             }
             start += CHUNK_ROWS;
         }
-        if self.in_flight.is_some() {
-            return None;
-        }
         let start = missing?;
-        self.in_flight = Some(InFlight::Chunk(generation));
+        match self.in_flight {
+            Some(InFlight::Search(..)) => return None,
+            Some(InFlight::Chunk(_, asked))
+                if asked < visible.end && visible.start < asked + CHUNK_ROWS =>
+            {
+                return None;
+            }
+            Some(InFlight::Chunk(..)) | None => {}
+        }
+        self.in_flight = Some(InFlight::Chunk(generation, start));
         Some(ChunkAsk {
             start,
             len: CHUNK_ROWS.min(LIST_LIMIT - start),
@@ -552,12 +567,18 @@ impl Results {
         }
     }
 
-    /// Accepts the rows of the request `generation` asked for.
+    /// Accepts the rows of the request `generation` asked for. A chunk's
+    /// first page leaves the request in flight for the rest.
     pub(crate) fn accept(&mut self, generation: Generation, chunk: Chunk) -> RowsChange {
         if !self.awaits(generation) {
             return RowsChange::Stale;
         }
-        match self.in_flight.take() {
+        let first_page = chunk.rest_follows;
+        let in_flight = self.in_flight.take();
+        if first_page {
+            self.in_flight = Some(InFlight::Chunk(generation, chunk.start));
+        }
+        match in_flight {
             Some(InFlight::Search(_, ask)) => {
                 let mut shown = ShownRows {
                     ask,
@@ -567,20 +588,20 @@ impl Results {
                     matched: None,
                     clock: 0,
                 };
-                shown.insert(chunk.start, chunk.rows);
+                shown.insert(chunk.start, chunk.rows, first_page);
                 self.shown = Shown::Rows(shown);
                 RowsChange::NewSearch {
                     count: self.count(),
                 }
             }
-            Some(InFlight::Chunk(_)) => {
+            Some(InFlight::Chunk(..)) => {
                 let Shown::Rows(shown) = &mut self.shown else {
                     return RowsChange::Stale;
                 };
                 let rows = chunk.start..chunk.start + chunk.rows.len() as u64;
                 shown.total = chunk.total;
                 shown.sums = chunk.sums.or(shown.sums);
-                shown.insert(chunk.start, chunk.rows);
+                shown.insert(chunk.start, chunk.rows, first_page);
                 RowsChange::Rows {
                     rows,
                     count: self.count(),
@@ -604,20 +625,24 @@ impl std::fmt::Debug for ShownRows {
 }
 
 impl ShownRows {
-    /// Caches a chunk, and drops the chunk used least recently when the
-    /// cache holds more than [`CACHE_ROWS`]. A chunk is asked for only when
-    /// the cache lacks it or holds it short, so one that replaces a cached
-    /// chunk was asked for again. An empty chunk is cached too, so an empty
+    /// Caches a chunk, or its `first_page`, and drops the chunk used least
+    /// recently when the cache holds more than [`CACHE_ROWS`]. A chunk is
+    /// asked for only when the cache lacks it or holds it short, so one that
+    /// replaces a cached chunk was asked for again, unless what it replaces
+    /// is its own first page. An empty chunk is cached too, so an empty
     /// reply is not asked for again without end.
-    fn insert(&mut self, start: u64, rows: Vec<ResultItem>) {
+    fn insert(&mut self, start: u64, rows: Vec<ResultItem>, first_page: bool) {
         self.clock += 1;
-        let asked_again = self.chunks.iter().any(|c| c.start == start);
+        let asked_again = (self.chunks.iter())
+            .find(|c| c.start == start)
+            .is_some_and(|c| !c.first_page || c.asked_again);
         self.chunks.retain(|c| c.start != start);
         self.chunks.push(CachedChunk {
             start,
             rows,
             used: self.clock,
             asked_again,
+            first_page,
         });
         while self.chunks.len() as u64 * CHUNK_ROWS > CACHE_ROWS {
             let oldest = self
@@ -662,6 +687,7 @@ pub(crate) mod tests {
             volumes_incomplete: false,
             metadata_pending: false,
             sums: None,
+            rest_follows: false,
         }
     }
 
@@ -674,16 +700,26 @@ pub(crate) mod tests {
         results
     }
 
-    /// Fast scrolling would queue a request for every chunk it passes, and a
+    /// Fast scrolling would queue a request for every chunk it passes, a
+    /// scrollbar jump would wait for the rows it jumped away from, and a
     /// chunk asked for during a new search would name the old search's rows.
     #[test]
-    fn at_most_one_chunk_is_in_flight_and_none_while_a_search_is() {
+    fn one_chunk_is_in_flight_and_follows_the_view_but_none_while_a_search_is() {
         let mut results = showing(50_000);
         let far = 2 * CHUNK_ROWS + 5;
         let asked = results.next_chunk(far..far + 40, Generation(2));
         assert_eq!(asked.map(|a| a.start), Some(2 * CHUNK_ROWS));
+        let across = 3 * CHUNK_ROWS - 20..3 * CHUNK_ROWS + 20;
+        assert_eq!(
+            results.next_chunk(across, Generation(3)),
+            None,
+            "the chunk in flight is still in view"
+        );
         let near = CHUNK_ROWS..CHUNK_ROWS + 40;
-        assert_eq!(results.next_chunk(near, Generation(3)), None);
+        let asked = results.next_chunk(near, Generation(4));
+        assert_eq!(asked.map(|a| a.start), Some(CHUNK_ROWS));
+        let replaced = chunk(2 * CHUNK_ROWS, CHUNK_ROWS, 50_000);
+        assert_eq!(results.accept(Generation(2), replaced), RowsChange::Stale);
 
         let mut results = showing(50_000);
         results.start_search(Generation(2), search(), SortSpec::default());
@@ -749,6 +785,34 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(results.next_chunk(far, Generation(4)), None);
+    }
+
+    /// A chunk's first page shows while its other pages arrive, as the same
+    /// request; were it not, the rest would be dropped as stale. The rest
+    /// replacing it is not the chunk asked for again, so a short reply is
+    /// still asked for again once.
+    #[test]
+    fn a_first_page_shows_while_its_chunk_arrives() {
+        let total = 3 * CHUNK_ROWS;
+        let mut results = Results::new();
+        results.start_search(Generation(1), search(), SortSpec::default());
+        let first = Chunk {
+            rest_follows: true,
+            ..chunk(0, 4_096, total)
+        };
+        let accepted = results.accept(Generation(1), first);
+        assert_eq!(accepted, RowsChange::NewSearch { count: total });
+        assert_eq!(results.next_chunk(0..40, Generation(2)), None);
+        let short = chunk(0, CHUNK_ROWS - 1, total);
+        assert_eq!(
+            results.accept(Generation(1), short),
+            RowsChange::Rows {
+                rows: 0..CHUNK_ROWS - 1,
+                count: total
+            }
+        );
+        let asked = results.next_chunk(CHUNK_ROWS - 40..CHUNK_ROWS, Generation(3));
+        assert_eq!(asked.map(|a| a.start), Some(0));
     }
 
     /// Without the eviction the cache grows with every chunk scrolled to,
