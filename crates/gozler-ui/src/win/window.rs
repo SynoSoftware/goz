@@ -21,7 +21,6 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetFocus, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_CONTROL,
@@ -40,13 +39,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateMessage, WA_INACTIVE,
     WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
     WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION, WM_ENTERSIZEMOVE,
-    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
-    WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
-    WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
-    WS_SYSMENU, WS_THICKFRAME,
+    WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
+    WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
+    WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION,
+    WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -146,8 +144,6 @@ pub(crate) enum Message<'a> {
     /// window's.
     CaptureChanged,
     InitMenuPopup,
-    /// An owner-drawn control asks to be drawn.
-    DrawItem(super::gdi::OwnerDraw<'a>),
     /// A label or check box asks for its colors.
     CtlColorStatic {
         colors: super::gdi::StaticColors,
@@ -823,12 +819,6 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         WM_LBUTTONUP => Message::LeftButtonUp,
         WM_CAPTURECHANGED => Message::CaptureChanged,
         WM_INITMENUPOPUP => Message::InitMenuPopup,
-        WM_DRAWITEM => {
-            // SAFETY: WM_DRAWITEM's lparam points to a DRAWITEMSTRUCT that
-            // is valid for the length of the message.
-            let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
-            Message::DrawItem(super::gdi::OwnerDraw(item))
-        }
         WM_CTLCOLORSTATIC => Message::CtlColorStatic {
             colors: super::gdi::StaticColors::from_wparam(wparam),
             control: Hwnd(HWND(lparam.0 as *mut _)),

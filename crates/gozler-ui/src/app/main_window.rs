@@ -806,10 +806,9 @@ pub(crate) struct MainWindow {
     /// What the inspector shows, so a reply that changes none of it sets no
     /// text, and the index of its icon in the system image lists.
     inspector_shown: RefCell<(InspectorCaptions, Option<i32>)>,
-    /// What the status bar's right group shows, which the window draws.
+    /// What the status bar's right group and memory parts show, which a
+    /// new layout fits into parts again.
     status_right: RefCell<Vec<ValuePart>>,
-    /// What the status bar's memory parts show, which they show again when
-    /// the parts change.
     status_memory: RefCell<Option<captions::MemoryCaptions>>,
     /// The tooltip of each toolbar button, by its ID, which a toolbar asks
     /// for when the pointer rests on the button.
@@ -1478,9 +1477,15 @@ impl MainWindow {
         self.status_right.replace(status.right.clone());
         let job_text = self.job_text(&status.job);
         self.status_memory.replace(status.memory.clone());
+        let layout = self
+            .created()
+            .layout
+            .borrow()
+            .as_ref()
+            .map(|layout| layout.status);
         // Cancel hides when the job ends, and a hidden control would keep
         // the focus but take no key.
-        if controls.status.show(status, &job_text) {
+        if controls.status.show(status, &job_text, layout.as_ref()) {
             self.home().focus();
         }
         if let Some(OpenSettings {
@@ -1883,8 +1888,11 @@ impl MainWindow {
         for (index, divider) in controls.dividers.iter().enumerate() {
             divider.hwnd().set_visible(index < layout.dividers.len());
         }
+        let right = self.status_right.borrow().clone();
         let memory = self.status_memory.borrow().clone();
-        controls.status.place(&layout.status, memory.as_ref());
+        controls
+            .status
+            .place_in_window(&layout.status, &right, memory.as_ref());
         let two_panels = search.is_none();
         let inspector_moved = created
             .layout
@@ -5215,13 +5223,6 @@ impl WindowProc for MainWindow {
                     colors.window_background()
                 })
             }
-            // The status bar's right group, the only part it does not draw.
-            Message::DrawItem(item) if item.control() == self.created().controls.status.hwnd() => {
-                let fonts = self.created().fonts.borrow();
-                item.draw_status_parts(&fonts.ui, &self.status_right.borrow());
-                Some(LRESULT(1))
-            }
-            Message::DrawItem(_) => None,
             // The class brush paints the background.
             Message::EraseBackground | Message::Paint => None,
             Message::SettingChange {

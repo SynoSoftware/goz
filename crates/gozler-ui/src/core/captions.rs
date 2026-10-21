@@ -130,8 +130,8 @@ pub(crate) struct StatusCaptions {
     /// The service and the index, and a newer release, as the Settings
     /// dialog's right group shows them.
     pub(crate) service: String,
-    /// The main window's right group: `service`, then the search's totals,
-    /// each after its icon.
+    /// The main window's right group, a status bar part for each: `service`
+    /// unless it is empty, then the search's totals, each after its icon.
     pub(crate) right: Vec<ValuePart>,
     /// The main window's memory group; `None` while Settings > General
     /// hides it.
@@ -1422,14 +1422,14 @@ impl StatusCaptions {
                     cancel: model.can_cancel_job(),
                 }
             },
-            right: joined_parts(
-                model.strings(),
-                std::iter::once(ValuePart::plain(service.clone())).chain(
+            right: std::iter::once(ValuePart::plain(service.clone()))
+                .filter(|part| !part.text.is_empty())
+                .chain(
                     status_list(model)
                         .map(|list| totals_status(model, list, numbers))
                         .unwrap_or_default(),
-                ),
-            ),
+                )
+                .collect(),
             service,
             memory: model
                 .choices()
@@ -1872,20 +1872,6 @@ fn joined(strings: &Strings, first: String, second: String) -> String {
     } else {
         strings.format("status.view", &[&first, &second])
     }
-}
-
-/// `parts` with the dot of [`joined`] between them, and the empty ones left
-/// out.
-fn joined_parts(strings: &Strings, parts: impl Iterator<Item = ValuePart>) -> Vec<ValuePart> {
-    let dot = strings.format("status.view", &["", ""]);
-    let mut joined = Vec::new();
-    for part in parts.filter(|part| !part.text.is_empty()) {
-        if !joined.is_empty() {
-            joined.push(ValuePart::plain(dot.clone()));
-        }
-        joined.push(part);
-    }
-    joined
 }
 
 /// The list whose search the status bar describes: Search's, or in Two

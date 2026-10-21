@@ -3,32 +3,30 @@
 //! Every colour comes from `GetSysColor`, so high contrast works.
 
 use super::Hwnd;
-use crate::core::captions::ValuePart;
 use crate::core::glyph::Glyph;
-use crate::core::layout::{self, Dpi, Px};
+use crate::core::layout::{Dpi, Px};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use windows::Win32::Foundation::{COLORREF, LRESULT, MAX_PATH, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, AlphaBlend, BI_RGB, BITMAPINFO,
-    BITMAPINFOHEADER, BLENDFUNCTION, COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT,
-    COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateBitmap,
-    CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET, DIB_RGB_COLORS,
-    DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, FW_BOLD, FW_SEMIBOLD,
-    GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW, GetSysColor,
-    GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW,
-    ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode, SetTextColor, TEXTMETRICW,
-    TRANSPARENT,
+    ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLOR_3DLIGHT, COLOR_BTNFACE,
+    COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+    COLOR_WINDOWTEXT, CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW,
+    DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, FW_BOLD,
+    FW_SEMIBOLD, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW,
+    GetSysColor, GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ,
+    LOGFONTW, ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode, SetTextColor,
+    TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, HIMAGELIST, ILC_COLOR32, ILD_TRANSPARENT, ImageList_Create, ImageList_Draw,
-    ImageList_GetIcon, ImageList_GetIconSize, ImageList_ReplaceIcon,
+    HIMAGELIST, ILC_COLOR32, ILD_TRANSPARENT, ImageList_Create, ImageList_Draw, ImageList_GetIcon,
+    ImageList_GetIconSize, ImageList_ReplaceIcon,
 };
 use windows::Win32::UI::Shell::{
     PathCompactPathW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_LARGEICON, SHGFI_SMALLICON,
@@ -249,7 +247,7 @@ impl IconFont {
     }
 
     /// `glyph`, `side` pixels square, in `color`: a 32-bit bitmap with
-    /// premultiplied alpha, which `AlphaBlend` and menus draw. `None` when
+    /// premultiplied alpha, which menus draw. `None` when
     /// the icon font lacks the glyph or GDI fails.
     fn bitmap(&mut self, glyph: Glyph, side: Px, color: COLORREF) -> Option<HBITMAP> {
         let key = (glyph, side.0, color.0);
@@ -316,39 +314,6 @@ fn font_has(dc: HDC, glyph: Glyph) -> bool {
 pub(super) fn system_color(index: SYS_COLOR_INDEX) -> COLORREF {
     // SAFETY: plain values.
     COLORREF(unsafe { GetSysColor(index) })
-}
-
-/// Draws `glyph` `size` pixels square in the middle of `area` on `dc`, in
-/// `color`, beside text: nothing while icons are hidden (see
-/// [`show_icons`]), or when the icon font lacks it, so no box shows in its
-/// place. It copies the kept image, which is smoothed as every icon is (see
-/// [`glyph_coverage`]), so `dc` keeps its state.
-pub(super) fn draw_glyph(dc: HDC, glyph: Glyph, area: RECT, size: Px, color: COLORREF) {
-    if !icons_shown() {
-        return;
-    }
-    let Some(bitmap) = IconFont::with(|icons| icons.bitmap(glyph, size, color)) else {
-        return;
-    };
-    let x = area.left + (area.right - area.left - size.0) / 2;
-    let y = area.top + (area.bottom - area.top - size.0) / 2;
-    let blend = BLENDFUNCTION {
-        BlendOp: AC_SRC_OVER as u8,
-        BlendFlags: 0,
-        SourceConstantAlpha: 255,
-        AlphaFormat: AC_SRC_ALPHA as u8,
-    };
-    // SAFETY: the memory DC holds the bitmap only inside this block and is
-    // deleted at its end.
-    unsafe {
-        let source = CreateCompatibleDC(None);
-        let previous = SelectObject(source, HGDIOBJ(bitmap.0));
-        let _ = AlphaBlend(
-            dc, x, y, size.0, size.0, source, 0, 0, size.0, size.0, blend,
-        );
-        SelectObject(source, previous);
-        let _ = DeleteDC(source);
-    }
 }
 
 /// The image list of a push button that shows `glyph` before its caption,
@@ -961,72 +926,6 @@ pub(super) fn high_contrast() -> bool {
         )
     };
     read.is_ok() && contrast.dwFlags.contains(HCF_HIGHCONTRASTON)
-}
-
-/// `WM_DRAWITEM`'s structure, borrowed for the length of the message: an
-/// owner-drawn control asks its parent to draw it.
-pub(crate) struct OwnerDraw<'a>(pub(super) &'a DRAWITEMSTRUCT);
-
-impl OwnerDraw<'_> {
-    pub(crate) fn control(&self) -> Hwnd {
-        Hwnd(self.0.hwndItem)
-    }
-
-    /// Draws `parts` in an owner-drawn part of a status bar, which has drawn
-    /// the part's background, on one line in its middle, each after its
-    /// icon, in the button text colour. The first part that does not fit
-    /// ends in "…", and the parts after it are left out.
-    pub(crate) fn draw_status_parts(&self, font: &Font, parts: &[ValuePart]) {
-        let area = self.0.rcItem;
-        let dpi = self.control().dpi();
-        let height = TextMeter::new(font).height().0;
-        let top = area.top + (area.bottom - area.top - height) / 2;
-        let line = RECT {
-            left: area.left + layout::list_box_text_inset(dpi).0,
-            top,
-            bottom: top + height,
-            ..area
-        };
-        let dc = self.0.hDC;
-        let (icon, gap) = (layout::icon_glyph_height(dpi), layout::glyph_gap(dpi));
-        let flags = DT_SINGLELINE | DT_NOPREFIX;
-        let color = system_color(COLOR_BTNTEXT);
-        // SAFETY: the DC is the one Windows passed for this message; its
-        // font is restored before the answer.
-        unsafe {
-            let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, color);
-            let mut left = line.left;
-            for part in parts {
-                let mut size = RECT::default();
-                draw_text(dc, &part.text, &mut size, flags | DT_CALCRECT);
-                if let Some(glyph) = part.glyph.filter(|_| icons_shown()) {
-                    // The icon's own height, centred on the text's line: in
-                    // the line's height, an icon taller than the line, such
-                    // as 16 px beside 15 at 96 DPI, loses its bottom row.
-                    let top = line.top + (size.bottom - icon.0) / 2;
-                    let area = RECT {
-                        left,
-                        top,
-                        right: left + icon.0,
-                        bottom: top + icon.0,
-                    };
-                    draw_glyph(dc, glyph, area, icon, color);
-                    left += icon.0 + gap.0;
-                }
-                let fits = left + size.right <= line.right;
-                let mut rect = RECT { left, ..line };
-                if !fits {
-                    draw_text(dc, &part.text, &mut rect, flags | DT_END_ELLIPSIS);
-                    break;
-                }
-                draw_text(dc, &part.text, &mut rect, flags);
-                left += size.right;
-            }
-            SelectObject(dc, previous);
-        }
-    }
 }
 
 #[cfg(test)]

@@ -17,8 +17,7 @@ use gozler_core::include::FolderCheck;
 use std::ops::Range;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNTEXT, COLOR_WINDOWTEXT, ClientToScreen, InvalidateRect, MapWindowPoints,
-    ScreenToClient,
+    COLOR_BTNTEXT, COLOR_WINDOWTEXT, ClientToScreen, MapWindowPoints, ScreenToClient,
 };
 use windows::Win32::UI::Controls::{
     BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BCM_SETSPLITINFO, BCSIF_STYLE, BCSS_NOSPLIT,
@@ -43,16 +42,16 @@ use windows::Win32::UI::Controls::{
     LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR,
     PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETICON,
-    SB_GETPARTS, SB_GETRECT, SB_SETICON, SB_SETMINHEIGHT, SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW,
-    SBARS_SIZEGRIP, SBARS_TOOLTIPS, SBT_OWNERDRAW, STATUSCLASSNAMEW, SetWindowTheme,
-    TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS,
-    TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
-    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND,
-    TVGN_CARET, TVGN_CHILD, TVGN_NEXT, TVGN_ROOT, TVI_LAST, TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM,
-    TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVIS_STATEIMAGEMASK,
-    TVITEMEXW_CHILDREN, TVITEMW, TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW, TVM_GETNEXTITEM,
-    TVM_INSERTITEMW, TVM_SELECTITEM, TVM_SETEXTENDEDSTYLE, TVM_SETITEMW, TVS_CHECKBOXES,
-    TVS_EX_DOUBLEBUFFER, TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
+    SB_GETPARTS, SB_SETICON, SB_SETMINHEIGHT, SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW,
+    SBARS_SIZEGRIP, SBARS_TOOLTIPS, STATUSCLASSNAMEW, SetWindowTheme, TOOLTIPS_CLASSW,
+    TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW,
+    TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW,
+    TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND, TVGN_CARET, TVGN_CHILD, TVGN_NEXT,
+    TVGN_ROOT, TVI_LAST, TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT,
+    TVINSERTSTRUCTW, TVINSERTSTRUCTW_0, TVIS_STATEIMAGEMASK, TVITEMEXW_CHILDREN, TVITEMW,
+    TVM_ENSUREVISIBLE, TVM_EXPAND, TVM_GETITEMW, TVM_GETNEXTITEM, TVM_INSERTITEMW, TVM_SELECTITEM,
+    TVM_SETEXTENDEDSTYLE, TVM_SETITEMW, TVS_CHECKBOXES, TVS_EX_DOUBLEBUFFER,
+    TVS_EX_PARTIALCHECKBOXES, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
@@ -1911,10 +1910,8 @@ impl StatusBar {
     }
 
     /// Sets the widths of the first parts; the last part takes the rest.
-    /// Returns whether the number of parts changed, after which a part
-    /// keeps the text and icon of the part that had its index.
-    pub(crate) fn set_parts(self, widths: &[Px]) -> bool {
-        let before = send(self.0, SB_GETPARTS, 0, 0);
+    /// A part keeps the text and icon of the part that had its index.
+    pub(crate) fn set_parts(self, widths: &[Px]) {
         let mut right = 0;
         let mut edges: Vec<i32> = widths
             .iter()
@@ -1924,10 +1921,19 @@ impl StatusBar {
             })
             .collect();
         edges.push(-1);
+        let mut current = vec![0; edges.len()];
+        // SAFETY: `current` has room for the `current.len()` integers the
+        // message writes at most, and outlives the call.
+        let count =
+            unsafe { send_pointer(self.0, SB_GETPARTS, current.len(), current.as_mut_ptr()) };
+        // Setting the parts draws the whole bar again, which the status
+        // updates would make flicker.
+        if count == edges.len() as isize && current == edges {
+            return;
+        }
         // SAFETY: `edges` holds the `edges.len()` integers the message reads,
         // and outlives the call.
         unsafe { send_pointer(self.0, SB_SETPARTS, edges.len(), edges.as_ptr()) };
-        before != edges.len() as isize
     }
 
     pub(crate) fn set_text(self, part: usize, text: &str) {
@@ -1954,16 +1960,11 @@ impl StatusBar {
         }
     }
 
-    /// Makes `part` one that the status bar's parent draws on
-    /// `WM_DRAWITEM`, and has it drawn again.
-    pub(crate) fn redraw_owner_drawn(self, part: usize) {
-        send(self.0, SB_SETTEXTW, part | SBT_OWNERDRAW as usize, 0);
-        let mut rect = RECT::default();
-        // SAFETY: `rect` is a local the call fills in; plain values after.
-        unsafe {
-            send_pointer(self.0, SB_GETRECT, part, &raw mut rect);
-            let _ = InvalidateRect(Some(self.0.0), Some(&rect), true);
-        }
+    /// The width of a part that shows `text` whole, after `glyph`'s icon
+    /// while icons show, as [`Self::set_icon`] shows it.
+    pub(crate) fn part_width(self, text: &str, glyph: Option<Glyph>) -> Px {
+        let text = Font::of(self.0).map_or(Px(0), |font| TextMeter::new(&font).width(text));
+        layout::status_part_width(text, glyph.is_some() && icons_shown(), self.0.dpi())
     }
 
     /// Sets the tooltip of `part`, which shows while its text is cut off.

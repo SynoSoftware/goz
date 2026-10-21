@@ -1908,10 +1908,14 @@ impl DialogProc for SettingsDialog<'_> {
         };
         let dpi = dialog.dpi();
         let height = status.fit(StatusLayout::min_height(dpi, *font_height));
-        status.place(
-            &StatusLayout::compute(widths, width, dpi, *font_height, height, None),
+        status.place(&StatusLayout::compute(
+            widths,
+            width,
+            dpi,
+            *font_height,
+            height,
             None,
-        );
+        ));
     }
 
     /// Every caption the Service group's fix buttons can show, and OK and
