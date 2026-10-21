@@ -141,8 +141,12 @@ pub(crate) fn run() {
         let _ = model.choose_folder(folder);
     }
 
-    win::window::register_class::<MainWindow>(&window_class, IconId::Gozler.id())
-        .expect("the window class registers");
+    win::window::register_class::<MainWindow>(
+        &window_class,
+        IconId::Gozler.id(),
+        win::window::Background::Window,
+    )
+    .expect("the window class registers");
     win::pane::register().expect("the filter pane's window class registers");
     let (hwnd, window) = MainWindow::open(
         &window_class,

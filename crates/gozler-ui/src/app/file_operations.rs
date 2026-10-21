@@ -11,9 +11,9 @@
 
 use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
-    self, Bar, CARD_CORNER, CARD_ICON, Failure, LastEnded, Layout, Meter, Metrics, OPEN_WIDTH,
-    QueueAction, ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, StatusOperation,
-    Taskbar, View, icon_index,
+    self, Bar, CARD_ICON, Failure, LastEnded, Layout, Meter, Metrics, OPEN_WIDTH, QueueAction,
+    ROW_GLYPHS, ROW_ICON, Row, RowButtons, RowLine, RowPhase, StatusOperation, Taskbar, View,
+    icon_index,
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
@@ -25,7 +25,7 @@ use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
 use crate::win::drop_target::AsyncDrop;
 use crate::win::file_operations::{
     OPERATION_CHANGED, PathLabel, QueueList, QueueNotify, TAKEN_CHANGED, TaskbarProgress,
-    TaskbarState, Tile, paint_card, set_client_size, show_drag_cursor, show_paused, window_size,
+    TaskbarState, Tile, set_client_size, show_drag_cursor, show_paused, window_size,
 };
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::WindowsNumbers;
@@ -105,8 +105,8 @@ struct Controls {
 }
 
 impl Controls {
-    /// The labels on the card, which draw on the window colour; the
-    /// `muted` ones step back in gray.
+    /// The labels of the running operation; the `muted` ones step back in
+    /// gray.
     fn card_labels(&self) -> [(Hwnd, bool); 12] {
         [
             (self.icon.hwnd(), false),
@@ -243,7 +243,11 @@ impl FileOperations {
         saved: &Path,
         strings: Strings,
     ) -> windows::core::Result<FileOperations> {
-        window::register_class::<Window>(WINDOW_CLASS, crate::core::ids::IconId::Gozler.id())?;
+        window::register_class::<Window>(
+            WINDOW_CLASS,
+            crate::core::ids::IconId::Gozler.id(),
+            window::Background::Dialog,
+        )?;
         let window = Rc::new(Window {
             hwnd: Cell::new(None),
             owner,
@@ -1653,6 +1657,8 @@ impl DialogProc for FailureDialog {
             list.set_columns(&[(item, 60, false), (reason, 40, false)]);
             list.set_rows(&self.failure.rows, None);
             list.fit_columns(&[item, reason], &self.failure.rows);
+            list.show_paths(0, &self.failure.rows);
+            list.show_info_tips();
         }
         Opened {
             focus: DialogItem::Cancel.id(),
@@ -1664,8 +1670,14 @@ impl DialogProc for FailureDialog {
         false
     }
 
-    fn path_column(&self, id: u16) -> Option<usize> {
-        (id == ControlId::FailedList.id()).then_some(0)
+    /// The entry's whole path and reason, which the row can show cut off.
+    fn info_tip(&self, id: u16, row: usize) -> Option<String> {
+        let [path, reason] = self
+            .failure
+            .rows
+            .get(row)
+            .filter(|_| id == ControlId::FailedList.id())?;
+        Some(format!("{path}\n{reason}"))
     }
 }
 
@@ -1698,21 +1710,12 @@ impl WindowProc for Window {
                 self.fit_height(hwnd);
                 Some(LRESULT(0))
             }
-            Message::EraseBackground(dc) => {
-                paint_card(hwnd, dc, self.layout.get().card, px(CARD_CORNER, hwnd));
-                Some(LRESULT(1))
-            }
             Message::CtlColorStatic { colors, control } => {
                 let c = self.controls.get()?;
-                let (_, muted) = c
-                    .card_labels()
+                c.card_labels()
                     .into_iter()
-                    .find(|(label, _)| *label == control)?;
-                Some(if muted {
-                    colors.muted_text()
-                } else {
-                    colors.window_background()
-                })
+                    .any(|(label, muted)| muted && label == control)
+                    .then(|| colors.muted_on_dialog())
             }
             Message::Command(Command::Menu(ESCAPE)) => {
                 if self.drag.get().is_some() {

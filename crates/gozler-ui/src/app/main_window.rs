@@ -56,7 +56,7 @@ use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
 use crate::win::clipboard::{self as clipboard, ClipboardBlock};
 use crate::win::controls::{
-    Button, CheckBox, DropDownList, Edit, FileIconLabel, IconList, Label, ListBox, ListClosing,
+    Button, CheckBox, Divider, DropDownList, Edit, FileIconLabel, IconList, Label, ListClosing,
     ListColumn, ListView, ScrollEdge, Tooltip,
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
@@ -67,7 +67,7 @@ use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Accelerators;
 use crate::win::notify::{
-    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify,
+    Command, ControlEvent, CustomDraw, DispInfo, DrawAnswer, DrawStage, InfoTip, ListNotify,
 };
 use crate::win::shell::{self, FileType, PromptOwner};
 use crate::win::shortcut::{self, RegisterError, Registration};
@@ -195,6 +195,8 @@ struct Controls {
     /// messages.
     key_tips: Tooltip,
     status: StatusBar,
+    /// As many as [`layout::DIVIDERS`]; those the layout leaves out hide.
+    dividers: Vec<Divider>,
 }
 
 impl Controls {
@@ -252,6 +254,9 @@ impl Controls {
             ],
             key_tips: Tooltip::create_areas(parent, KEY_TIPS.len())?,
             status: StatusBar::for_window(parent)?,
+            dividers: (0..layout::DIVIDERS)
+                .map(|_| Divider::create(parent))
+                .collect::<windows::core::Result<_>>()?,
         };
         controls.message.hwnd().set_visible(false);
         // The search box starts empty; its changes enable Clear.
@@ -308,9 +313,6 @@ impl Controls {
         self.inspector.heading.hwnd().set_font(&fonts.heading);
         self.filters.title.hwnd().set_font(&fonts.semibold);
         self.filters.tools.hwnd().set_font(&fonts.ui);
-        // Rows as tall as a list's that Windows draws.
-        let height = TextMeter::new(&fonts.ui).height();
-        self.filters.location.set_item_height(height);
     }
 
     /// Gives the buttons and the Kind list their icons, and the toolbars'
@@ -355,6 +357,7 @@ impl Controls {
             search_tools: self.search_tools.width(),
             filter_tools: self.filters.tools.width(),
             kind_row: self.filters.kind.row_size(),
+            location_row: self.filters.location.row_size().height,
         }
     }
 }
@@ -385,7 +388,7 @@ struct FilterPane {
     kind_label: Label,
     kind: IconList,
     location_label: Label,
-    location: ListBox,
+    location: IconList,
     choose_folder: Button,
     only_directly: CheckBox,
     date_label: Label,
@@ -443,7 +446,11 @@ impl FilterPane {
             kind_label: label(ControlId::KindLabel)?,
             kind: IconList::create(pane, ControlId::Kind.id())?,
             location_label: label(ControlId::LocationLabel)?,
-            location: ListBox::create_paths(pane, ControlId::Location.id())?,
+            location: {
+                let list = IconList::create(pane, ControlId::Location.id())?;
+                list.show_info_tips();
+                list
+            },
             choose_folder: Button::create(pane, ControlId::ChooseFolder.id())?,
             only_directly: CheckBox::create(pane, ControlId::OnlyDirectly.id())?,
             date_label: label(ControlId::DateLabel)?,
@@ -1202,7 +1209,7 @@ impl MainWindow {
             captions.kinds.iter().map(String::as_str).zip(0..).collect();
         pane.kind.set_items(&kinds, positions.kind);
         pane.location
-            .set_items(&captions.locations, positions.location);
+            .set_paths(&captions.locations, positions.location);
         // Only directly in a folder needs a folder.
         pane.only_directly.hwnd().set_enabled(located);
         pane.only_directly.set_checked(only_directly);
@@ -1234,7 +1241,7 @@ impl MainWindow {
             .controls
             .filters
             .location
-            .set_items(&locations, position);
+            .set_paths(&locations, position);
     }
 
     fn match_mode_index(&self) -> usize {
@@ -1828,6 +1835,13 @@ impl MainWindow {
                 moves.push((inspector.note.hwnd(), note));
             }
         }
+        moves.extend(
+            controls
+                .dividers
+                .iter()
+                .map(|divider| divider.hwnd())
+                .zip(layout.dividers.iter().copied()),
+        );
         // The list draws once, after the fill has set its new widths, so a
         // narrower window does not flash its horizontal scroll bar.
         controls.list.hwnd().draw_once_after(|| {
@@ -1837,6 +1851,8 @@ impl MainWindow {
         if let Some(filters) = filters {
             self.place_filters(filters, self.filter_scroll.get());
             pane.kind.fill_column();
+            // The paths are shortened to the list's new width.
+            self.update_locations();
         }
         for control in strip {
             control.set_visible(search.is_some());
@@ -1863,6 +1879,9 @@ impl MainWindow {
         inspector.copy_path.hwnd().set_visible(shown);
         for button in inspector.buttons {
             button.hwnd().set_visible(shown);
+        }
+        for (index, divider) in controls.dividers.iter().enumerate() {
+            divider.hwnd().set_visible(index < layout.dividers.len());
         }
         let memory = self.status_memory.borrow().clone();
         controls.status.place(&layout.status, memory.as_ref());
@@ -3069,6 +3088,39 @@ impl MainWindow {
         }
     }
 
+    /// The Location list selected another item, which the person or the
+    /// window chose, as [`Self::on_kind_selected`] says.
+    fn on_location_selected(&self, hwnd: Hwnd) {
+        let location = {
+            let model = self.model.borrow();
+            let items = model.location_items();
+            self.created()
+                .controls
+                .filters
+                .location
+                .selected()
+                .and_then(|i| items.get(i))
+                .map(|item| item.folder().map(str::to_owned))
+                .filter(|location| *location != model.filters().location)
+        };
+        if let Some(location) = location {
+            self.change_filters(hwnd, |f| f.location = location);
+        }
+    }
+
+    /// Answers the Location list's tooltip request with the row's whole
+    /// path when the row shows it shortened, and with no tip otherwise.
+    fn location_tip(&self, tip: InfoTip) -> LRESULT {
+        let list = self.created().controls.filters.location;
+        let whole = tip.row().and_then(|row| {
+            let path = captions::location_items(&self.model.borrow())
+                .into_iter()
+                .nth(row)?;
+            (path != list.text(row)).then_some(path)
+        });
+        tip.set(whole.as_deref().unwrap_or_default())
+    }
+
     /// A notification of a control in the filter pane.
     fn on_filter(&self, hwnd: Hwnd, event: ControlEvent) {
         let pane = &self.created().controls.filters;
@@ -3078,18 +3130,6 @@ impl MainWindow {
         } else if tool.is_some() {
             // Hide filters, or Show filters in the search row.
             self.run(hwnd, MenuItem::Run(CommandId::Filters));
-        } else if pane.location.selection_changed(event) {
-            let location = {
-                let model = self.model.borrow();
-                let items = model.location_items();
-                pane.location
-                    .selected()
-                    .and_then(|i| items.get(i))
-                    .map(|item| item.folder().map(str::to_owned))
-            };
-            if let Some(location) = location {
-                self.change_filters(hwnd, |f| f.location = location);
-            }
         } else if pane.choose_folder.clicked(event) {
             self.choose_folder(hwnd);
         } else if pane.only_directly.clicked(event) {
@@ -4928,7 +4968,7 @@ impl WindowProc for MainWindow {
                 self.on_control(hwnd, event);
                 None
             }
-            Message::Notify(notification) => {
+            Message::Notify(mut notification) => {
                 let controls = &self.created().controls;
                 if let Some(request) = controls
                     .toolbars()
@@ -4948,6 +4988,13 @@ impl WindowProc for MainWindow {
                 if controls.filters.kind.selection_changed(&notification) {
                     self.on_kind_selected(hwnd);
                     return Some(LRESULT(0));
+                }
+                if controls.filters.location.selection_changed(&notification) {
+                    self.on_location_selected(hwnd);
+                    return Some(LRESULT(0));
+                }
+                if let Some(tip) = controls.filters.location.info_tip(&mut notification) {
+                    return Some(self.location_tip(tip));
                 }
                 if controls.status.service_clicked(&notification) {
                     self.on_status_click(hwnd);
@@ -5156,11 +5203,14 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::CtlColorStatic { colors, control } => {
-                let inspector = &self.created().controls.inspector;
+                let controls = &self.created().controls;
+                let inspector = &controls.inspector;
                 Some(if control == inspector.note.hwnd() {
                     colors.gray_text()
                 } else if control == inspector.age.hwnd() {
                     colors.muted_text()
+                } else if controls.dividers.iter().any(|d| d.hwnd() == control) {
+                    colors.divider()
                 } else {
                     colors.window_background()
                 })
@@ -5173,18 +5223,7 @@ impl WindowProc for MainWindow {
             }
             Message::DrawItem(_) => None,
             // The class brush paints the background.
-            Message::EraseBackground(_) => None,
-            Message::Paint => {
-                let dividers = self
-                    .created()
-                    .layout
-                    .borrow()
-                    .as_ref()
-                    .map(|l| l.dividers.clone())
-                    .unwrap_or_default();
-                hwnd.paint_window(&dividers);
-                Some(LRESULT(0))
-            }
+            Message::EraseBackground | Message::Paint => None,
             Message::SettingChange {
                 regional_format: true,
             } => {

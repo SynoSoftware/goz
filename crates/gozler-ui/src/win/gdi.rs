@@ -1,27 +1,26 @@
-//! Fonts, text measurement, the system image list and the little painting
-//! the main window does itself: the one-pixel dividers and the
-//! window-coloured label background. Every colour comes from `GetSysColor`,
-//! so high contrast works.
+//! Fonts, text measurement, the system image list, the icons, and the
+//! colours the windows give their labels and the main window's dividers.
+//! Every colour comes from `GetSysColor`, so high contrast works.
 
-use super::{Hwnd, to_rect};
+use super::Hwnd;
 use crate::core::captions::ValuePart;
 use crate::core::glyph::Glyph;
-use crate::core::layout::{self, Dpi, Px, Rect};
+use crate::core::layout::{self, Dpi, Px};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use windows::Win32::Foundation::{COLORREF, LRESULT, MAX_PATH, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, AlphaBlend, BI_RGB, BITMAPINFO,
-    BITMAPINFOHEADER, BLENDFUNCTION, BeginPaint, COLOR_3DLIGHT, COLOR_BTNTEXT, COLOR_GRAYTEXT,
+    BITMAPINFOHEADER, BLENDFUNCTION, COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT,
     COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateBitmap,
     CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET, DIB_RGB_COLORS,
     DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-    DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FW_BOLD, FW_SEMIBOLD,
-    FillRect, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW,
-    GetSysColor, GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ,
-    LOGFONTW, PAINTSTRUCT, ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode,
-    SetTextColor, TEXTMETRICW, TRANSPARENT,
+    DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, FW_BOLD, FW_SEMIBOLD,
+    GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW, GetSysColor,
+    GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW,
+    ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode, SetTextColor, TEXTMETRICW,
+    TRANSPARENT,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
@@ -731,22 +730,6 @@ impl Hwnd {
         };
         HFONT(font.0 as *mut _)
     }
-
-    /// Paints the window's background and fills `dividers` with the divider
-    /// colour.
-    pub(crate) fn paint_window(self, dividers: &[Rect]) {
-        let mut paint = PAINTSTRUCT::default();
-        // SAFETY: BeginPaint and EndPaint pair on the same window and
-        // structure; the brushes are system brushes, which are never freed.
-        unsafe {
-            let dc = BeginPaint(self.0, &mut paint);
-            let brush = GetSysColorBrush(COLOR_3DLIGHT);
-            for divider in dividers {
-                FillRect(dc, &to_rect(*divider), brush);
-            }
-            let _ = EndPaint(self.0, &paint);
-        }
-    }
 }
 
 /// Measures text in one font, as its controls draw it: `DrawTextW` removes
@@ -903,6 +886,19 @@ impl StaticColors {
         self.on(COLOR_HIGHLIGHTTEXT, COLOR_HIGHLIGHT)
     }
 
+    /// The brush of a divider between the main window's panes, which fills
+    /// the whole control.
+    pub(crate) fn divider(self) -> LRESULT {
+        // SAFETY: system brushes are never freed.
+        LRESULT(unsafe { GetSysColorBrush(COLOR_3DLIGHT) }.0 as isize)
+    }
+
+    /// The muted text colour on the dialog colour, for a label of a window
+    /// whose background is the dialog colour.
+    pub(crate) fn muted_on_dialog(self) -> LRESULT {
+        self.on(muted_text(), COLOR_BTNFACE)
+    }
+
     fn on_window(self, text: SYS_COLOR_INDEX) -> LRESULT {
         self.on(text, COLOR_WINDOW)
     }
@@ -915,16 +911,6 @@ impl StaticColors {
             SetBkColor(self.0, COLORREF(GetSysColor(ground)));
             LRESULT(GetSysColorBrush(ground).0 as isize)
         }
-    }
-}
-
-/// `WM_ERASEBKGND`'s device context, valid for the length of the message.
-#[derive(Clone, Copy)]
-pub(crate) struct EraseDc(pub(super) HDC);
-
-impl EraseDc {
-    pub(crate) fn from_wparam(wparam: WPARAM) -> EraseDc {
-        EraseDc(HDC(wparam.0 as *mut _))
     }
 }
 

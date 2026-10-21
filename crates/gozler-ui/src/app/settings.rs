@@ -30,8 +30,8 @@ use crate::core::shortcuts::{
 use crate::core::speed::{ENGINES, Speed, SpeedNumber, SpeedPreset, ring_blocks};
 use crate::core::text::{LANGUAGES, LanguageChoice, SizeFormat, Strings, without_access_key};
 use crate::win::controls::{
-    Balloon, Button, CheckBox, DropDownList, Edit, HotkeyControl, HotkeyValue, IconList, ListBox,
-    ReportList, Tooltip, show_group_glyph,
+    Balloon, Button, CheckBox, DropDownList, Edit, GlyphLabel, HotkeyControl, HotkeyValue,
+    IconList, ListBox, ReportList, Tooltip, show_heading_icon,
 };
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
@@ -960,6 +960,22 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
+    /// Gives each group's title its icon, again when icons are shown or
+    /// hidden.
+    fn show_group_icons(&self) {
+        let pages = self.pages.borrow().clone();
+        for page in pages {
+            for (title, icon, glyph) in SETTINGS_GROUPS {
+                if let (Some(title), Some(icon)) = (
+                    dialog::item(page, title.id()),
+                    GlyphLabel::of_dialog(page, icon.id()),
+                ) {
+                    show_heading_icon(icon, title, glyph);
+                }
+            }
+        }
+    }
+
     /// Keeps the pages that the search box's words find. The shown page
     /// stays while it is one of them; otherwise the first one shows, or
     /// none, with a line that says so.
@@ -985,7 +1001,7 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Shows in bold each caption that holds a word of `search`; a page's
-    /// heading keeps its own font.
+    /// heading and its groups' titles keep their own font.
     fn highlight(&self, search: &str) {
         let Some((normal, bold)) = self.highlight.get() else {
             return;
@@ -993,6 +1009,9 @@ impl<'a> SettingsDialog<'a> {
         for page in SettingsPage::ALL {
             for (control, hit) in captions::settings_page_hits(&self.strings, page, search) {
                 if control != heading(page)
+                    && !SETTINGS_GROUPS
+                        .iter()
+                        .any(|(title, _, _)| *title == control)
                     && let Some(control) = self.control(page, control)
                 {
                     control.set_font(if hit { bold } else { normal });
@@ -1212,9 +1231,10 @@ impl<'a> SettingsDialog<'a> {
                 }
                 let icons_changed = edited.choices.show_icons != last.choices.show_icons;
                 if icons_changed {
-                    // The page list's rows, the group captions and the
+                    // The page list's rows, the group titles and the
                     // buttons follow.
                     self.show_page_icons(dialog);
+                    self.show_group_icons();
                     self.show_button_glyphs(dialog);
                     self.refresh_index(dialog);
                     dialog.draw_once_after(|| {});
@@ -1565,16 +1585,17 @@ impl DialogProc for SettingsDialog<'_> {
                 && let Ok(font) = Font::of(heading).and_then(|font| font.semibold())
             {
                 heading.set_font(&font);
-                fonts.push(font);
-            }
-            for (group, glyph) in SETTINGS_GROUPS {
-                if let Some(group) = dialog::item(hwnd, group.id()) {
-                    show_group_glyph(group, glyph);
+                for (title, _, _) in SETTINGS_GROUPS {
+                    if let Some(title) = dialog::item(hwnd, title.id()) {
+                        title.set_font(&font);
+                    }
                 }
+                fonts.push(font);
             }
             pages.push(hwnd);
         }
         self.pages.replace(pages);
+        self.show_group_icons();
         if let Some(label) = self
             .page(SettingsPage::General)
             .and_then(|page| dialog::item(page, ControlId::GeneralLanguageLabel.id()))

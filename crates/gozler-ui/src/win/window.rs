@@ -16,8 +16,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect,
-    MonitorFromWindow, ScreenToClient,
+    COLOR_BTNFACE, COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromRect, MonitorFromWindow, ScreenToClient,
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -168,7 +168,7 @@ pub(crate) enum Message<'a> {
     },
     /// Windows asks for the background before the window paints, or a
     /// themed control asks for what lies under its corners.
-    EraseBackground(super::gdi::EraseDc),
+    EraseBackground,
     Paint,
     SettingChange {
         regional_format: bool,
@@ -215,9 +215,23 @@ pub(crate) trait WindowProc: 'static {
     fn message(&self, hwnd: Hwnd, message: Message<'_>) -> Option<LRESULT>;
 }
 
+/// The system colour that a window class fills its windows' background
+/// with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Background {
+    /// The window colour, as File Explorer's views have.
+    Window,
+    /// The dialog colour, as the File operations window has.
+    Dialog,
+}
+
 /// Registers the class `name`, whose windows run `W`'s handler, with the
-/// executable's icon and the window colour as background.
-pub(crate) fn register_class<W: WindowProc>(name: &str, icon: u16) -> windows::core::Result<()> {
+/// executable's icon and `background`.
+pub(crate) fn register_class<W: WindowProc>(
+    name: &str,
+    icon: u16,
+    background: Background,
+) -> windows::core::Result<()> {
     // SAFETY: a null name asks for the executable's own module.
     let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
     let load_icon = |metric| {
@@ -247,7 +261,13 @@ pub(crate) fn register_class<W: WindowProc>(name: &str, icon: u16) -> windows::c
         // SAFETY: IDC_ARROW is a predefined cursor.
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }?,
         // The documented way to name a system colour as a class brush.
-        hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as isize as *mut _),
+        hbrBackground: HBRUSH(
+            (match background {
+                Background::Window => COLOR_WINDOW,
+                Background::Dialog => COLOR_BTNFACE,
+            }
+            .0 + 1) as isize as *mut _,
+        ),
         lpszClassName: PCWSTR(name.as_ptr()),
         ..Default::default()
     };
@@ -287,8 +307,7 @@ pub(crate) fn create_window<W: WindowProc>(
             WS_EX_LEFT,
             &HSTRING::from(class),
             PCWSTR::null(),
-            // The window's background and dividers never paint over its
-            // controls.
+            // The window's background never paints over its controls.
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x,
             y,
@@ -845,7 +864,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                 None => Message::Other(msg),
             }
         }
-        WM_ERASEBKGND => Message::EraseBackground(super::gdi::EraseDc::from_wparam(wparam)),
+        WM_ERASEBKGND => Message::EraseBackground,
         WM_PAINT => Message::Paint,
         WM_SETTINGCHANGE => Message::SettingChange {
             // SAFETY: WM_SETTINGCHANGE's lparam is null or a NUL-terminated

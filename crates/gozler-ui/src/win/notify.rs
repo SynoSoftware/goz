@@ -11,23 +11,21 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_GRAYTEXT, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_PATH_ELLIPSIS,
-    DT_SINGLELINE, DT_VCENTER, GetSysColor, HGDIOBJ, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT,
+    COLOR_GRAYTEXT, COLOR_WINDOWTEXT, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, GetSysColor, HGDIOBJ, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
     BCN_DROPDOWN, CDDS_ITEMPOSTPAINT, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM,
     CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
     CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE,
-    LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
-    LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
-    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
+    LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED,
+    LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK,
+    LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
     LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS,
-    NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE,
-    NMMOUSE,
+    NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW,
+    NMLVODSTATECHANGE, NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-use windows::core::PWSTR;
 
 /// A `WM_COMMAND`.
 #[derive(Clone, Copy, Debug)]
@@ -222,6 +220,19 @@ impl IconList {
         change.uChanged.contains(LVIF_STATE)
             && change.uNewState & !change.uOldState & LVIS_SELECTED.0 != 0
     }
+
+    /// The request for a row's tooltip that `notification` holds, if this
+    /// list sent it ([`IconList::show_info_tips`]).
+    pub(crate) fn info_tip<'a>(self, notification: &'a mut Notification) -> Option<InfoTip<'a>> {
+        let header = notification.header();
+        if header.hwndFrom != self.hwnd().0 || header.code != LVN_GETINFOTIPW {
+            return None;
+        }
+        // SAFETY: a list view sends LVN_GETINFOTIPW with an NMLVGETINFOTIPW,
+        // valid for the notification's lifetime, which the borrow of
+        // `notification` keeps to one answer.
+        Some(InfoTip(unsafe { &mut *notification.header.cast() }))
+    }
 }
 
 impl Button {
@@ -245,6 +256,34 @@ impl StatusBar {
         // is the part clicked, for the notification's lifetime.
         let mouse = unsafe { &*notification.header.cast::<NMMOUSE>() };
         Some(mouse.dwItemSpec)
+    }
+}
+
+/// `LVN_GETINFOTIPW`: the tooltip of the row under the pointer.
+pub(crate) struct InfoTip<'a>(pub(super) &'a mut NMLVGETINFOTIPW);
+
+impl InfoTip<'_> {
+    pub(crate) fn row(&self) -> Option<usize> {
+        usize::try_from(self.0.iItem).ok()
+    }
+
+    /// Answers with `text`, cut to the room the list gives, and returns
+    /// the notification's answer.
+    pub(crate) fn set(self, text: &str) -> LRESULT {
+        let Ok(room) = usize::try_from(self.0.cchTextMax) else {
+            return LRESULT(0);
+        };
+        if room == 0 {
+            return LRESULT(0);
+        }
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let kept = units.len().min(room - 1);
+        // SAFETY: the list gives pszText with room for cchTextMax
+        // characters, valid while it waits for the answer.
+        let buffer = unsafe { std::slice::from_raw_parts_mut(self.0.pszText.0, room) };
+        buffer[..kept].copy_from_slice(&units[..kept]);
+        buffer[kept] = 0;
+        LRESULT(0)
     }
 }
 
@@ -363,17 +402,6 @@ pub(crate) enum DrawAnswer {
 }
 
 impl CustomDraw<'_> {
-    /// # Safety
-    /// `notification` is an `NM_CUSTOMDRAW` that a list view sent.
-    pub(super) unsafe fn of_list(notification: &Notification) -> Self {
-        CustomDraw {
-            // SAFETY: a list view sends NM_CUSTOMDRAW with an
-            // NMLVCUSTOMDRAW, valid for the notification's lifetime.
-            draw: unsafe { &mut *notification.header.cast() },
-            list: Hwnd(notification.header().hwndFrom),
-        }
-    }
-
     pub(crate) fn stage(&self) -> DrawStage {
         let stage = self.draw.nmcd.dwDrawStage;
         let row = self.draw.nmcd.dwItemSpec as u64;
@@ -490,32 +518,6 @@ impl CustomDraw<'_> {
         }
     }
 
-    /// Draws the cell at `DrawStage::Cell` as the list would, except that
-    /// its text, a path, loses its middle where it does not fit
-    /// (`DT_PATH_ELLIPSIS`), so the drive and the name stay. The cell keeps
-    /// its whole text, which the list's label tip shows.
-    pub(crate) fn draw_path(&self, inset: Px) {
-        let label = self.cell_part(LVIR_LABEL);
-        let mut area = RECT {
-            left: label.left + inset.0,
-            right: label.right - inset.0,
-            ..label
-        };
-        let dc = self.draw.nmcd.hdc;
-        // SAFETY: the list's DC for the length of the message, which holds
-        // the list's font.
-        unsafe {
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, self.text_colour());
-        }
-        draw_text(
-            dc,
-            &self.cell_text(),
-            &mut area,
-            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_PATH_ELLIPSIS,
-        );
-    }
-
     /// Draws `icon` from its image list where the list puts the first
     /// column's icon; other columns have none.
     fn draw_icon(&self, icon: Option<(ImageList, i32)>) {
@@ -560,35 +562,6 @@ impl CustomDraw<'_> {
                 unsafe { GetSysColor(COLOR_WINDOWTEXT) },
             ),
             colour => colour,
-        }
-    }
-
-    /// The text of the cell being drawn, which the list holds.
-    fn cell_text(&self) -> String {
-        let mut buffer = vec![0u16; 260];
-        loop {
-            let mut item = LVITEMW {
-                iSubItem: self.draw.iSubItem,
-                pszText: PWSTR(buffer.as_mut_ptr()),
-                cchTextMax: buffer.len() as i32,
-                ..Default::default()
-            };
-            // SAFETY: `item` and the buffer it points to outlive the call,
-            // which writes at most `cchTextMax` characters.
-            let length = unsafe {
-                SendMessageW(
-                    self.list.0,
-                    LVM_GETITEMTEXTW,
-                    Some(WPARAM(self.draw.nmcd.dwItemSpec)),
-                    Some(LPARAM(&raw mut item as isize)),
-                )
-            }
-            .0 as usize;
-            // A text that fills the buffer may have been cut off.
-            if length + 1 < buffer.len() {
-                return String::from_utf16_lossy(&buffer[..length]);
-            }
-            buffer.resize(buffer.len() * 2, 0);
         }
     }
 }

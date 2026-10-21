@@ -71,7 +71,11 @@ impl Viewers {
         main: Hwnd,
     ) -> windows::core::Result<()> {
         if !self.registered.get() {
-            window::register_class::<Viewer>(WINDOW_CLASS, IconId::Gozler.id())?;
+            window::register_class::<Viewer>(
+                WINDOW_CLASS,
+                IconId::Gozler.id(),
+                window::Background::Window,
+            )?;
             register_area()?;
             self.registered.set(true);
         }

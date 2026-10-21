@@ -812,17 +812,34 @@ function Selected-Kind($process) {
     [long][GozlerProbe.Win]::SendMessageW((Pane-Hwnd $process $ids.IDC_KIND), 0x100C, [IntPtr](-1), [IntPtr]2)
 }
 
-# The Location list's selected item.
+# The Location list's items as it shows them: a path wider than the list
+# loses its middle.
+function Location-Items($process) {
+    $list = [GozlerProbe.Ui]::FromHandle((Pane-Hwnd $process $ids.IDC_LOCATION))
+    @([GozlerProbe.Ui]::Rows($list, 50) | ForEach-Object { $_[0] })
+}
+
+# Whether the Location list's text `shown` is `path`, whole or without its
+# middle ("..." from PathCompactPathW).
+function Shows-Path([string] $shown, [string] $path) {
+    if ($shown -eq $path) { return $true }
+    $parts = $shown -split '\.\.\.|…', 2
+    $parts.Count -eq 2 -and $path.StartsWith($parts[0]) -and $path.EndsWith($parts[1])
+}
+
+# The Location list's selected item, as it shows it (LVM_GETNEXTITEM with
+# LVNI_SELECTED).
 function Selected-Location($process) {
-    $items = [GozlerProbe.Win]::ListItems((Pane-Hwnd $process $ids.IDC_LOCATION))
-    $items[(Pane-Selected $process $ids.IDC_LOCATION $false)]
+    $selected = [long][GozlerProbe.Win]::SendMessageW((Pane-Hwnd $process $ids.IDC_LOCATION), 0x100C, [IntPtr](-1), [IntPtr]2)
+    (Location-Items $process)[$selected]
 }
 
 # Selects `folder` in the Location list, an item since Search in this
-# folder chose it.
+# folder chose it, as a click does (see Select-Kind).
 function Set-Location($process, [string] $folder) {
-    $items = @([GozlerProbe.Win]::ListItems((Pane-Hwnd $process $ids.IDC_LOCATION)))
-    Select-PaneItem $process $ids.IDC_LOCATION ([array]::IndexOf($items, $folder)) $false
+    $items = Location-Items $process
+    $index = 0..($items.Count - 1) | Where-Object { Shows-Path $items[$_] $folder } | Select-Object -First 1
+    [GozlerProbe.Win]::SetItemState((Pane-Hwnd $process $ids.IDC_LOCATION), $index, 3, 3)
 }
 
 # The captions of the list message's buttons that show.
@@ -2481,7 +2498,7 @@ try {
             [void](Wait-Answer $window)
             $location = Selected-Location $window
             Save-Screenshot $window.MainWindowHandle 'search-here-en'
-            Check 'Search in this folder' ($location -eq $files) ([ordered]@{ location = $location; expected = $files })
+            Check 'Search in this folder' (Shows-Path $location $files) ([ordered]@{ location = $location; expected = $files })
 
             # Each filter gives the fixture's own count and the count of the
             # gozler query it stands for.
@@ -2687,7 +2704,7 @@ try {
             $offered = @(Message-Buttons $window)
             Save-Screenshot $window.MainWindowHandle 'missing-folder-en'
             $expectedMessage = (Caption 'list.missing_folder').Replace('{0}', $missing)
-            Check 'a missing Location folder' ($chosen -eq $missing -and $message -eq $expectedMessage -and
+            Check 'a missing Location folder' ((Shows-Path $chosen $missing) -and $message -eq $expectedMessage -and
                 ($offered -join '|') -eq "$(Plain (Caption 'filter.choose_folder'))|$everywhereCaption" -and
                 -not ($parts | Where-Object { Is-Searching $_ })) ([ordered]@{
                     location = $chosen; message = $message; buttons = $offered; part_1 = $parts

@@ -483,24 +483,84 @@ impl DialogItem {
     }
 }
 
-/// The group boxes of the Settings pages, each with the icon before its
-/// caption.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, Glyph); 15] = [
-    (ControlId::GeneralDisplay, Glyph::Globe),
-    (ControlId::GeneralStarting, Glyph::PowerButton),
-    (ControlId::SearchBoxGroup, Glyph::Search),
-    (ControlId::ContextMenuItemGroup, Glyph::BulletedList),
-    (ControlId::ContextMenuOpenGroup, Glyph::OpenFile),
-    (ControlId::KeyboardShowGroup, Glyph::BackToWindow),
-    (ControlId::KeyboardCommandsGroup, Glyph::KeyboardShortcut),
-    (ControlId::IndexDrivesGroup, Glyph::HardDrive),
-    (ControlId::IndexHoldsGroup, Glyph::Library),
-    (ControlId::IndexServiceGroup, Glyph::Processing),
-    (ControlId::IncludeFoldersGroup, Glyph::Folder),
-    (ControlId::IncludeNamesGroup, Glyph::Rename),
-    (ControlId::SpeedCopyingGroup, Glyph::Copy),
-    (ControlId::SpeedRingGroup, Glyph::Sync),
-    (ControlId::SpeedDeleteGroup, Glyph::Delete),
+/// The groups of the Settings pages: each title, the static icon before it
+/// and the icon it shows.
+pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 15] = [
+    (
+        ControlId::GeneralDisplay,
+        ControlId::GeneralDisplayIcon,
+        Glyph::Globe,
+    ),
+    (
+        ControlId::GeneralStarting,
+        ControlId::GeneralStartingIcon,
+        Glyph::PowerButton,
+    ),
+    (
+        ControlId::SearchBoxGroup,
+        ControlId::SearchBoxGroupIcon,
+        Glyph::Search,
+    ),
+    (
+        ControlId::ContextMenuItemGroup,
+        ControlId::ContextMenuItemGroupIcon,
+        Glyph::BulletedList,
+    ),
+    (
+        ControlId::ContextMenuOpenGroup,
+        ControlId::ContextMenuOpenGroupIcon,
+        Glyph::OpenFile,
+    ),
+    (
+        ControlId::KeyboardShowGroup,
+        ControlId::KeyboardShowGroupIcon,
+        Glyph::BackToWindow,
+    ),
+    (
+        ControlId::KeyboardCommandsGroup,
+        ControlId::KeyboardCommandsGroupIcon,
+        Glyph::KeyboardShortcut,
+    ),
+    (
+        ControlId::IndexDrivesGroup,
+        ControlId::IndexDrivesGroupIcon,
+        Glyph::HardDrive,
+    ),
+    (
+        ControlId::IndexHoldsGroup,
+        ControlId::IndexHoldsGroupIcon,
+        Glyph::Library,
+    ),
+    (
+        ControlId::IndexServiceGroup,
+        ControlId::IndexServiceGroupIcon,
+        Glyph::Processing,
+    ),
+    (
+        ControlId::IncludeFoldersGroup,
+        ControlId::IncludeFoldersGroupIcon,
+        Glyph::Folder,
+    ),
+    (
+        ControlId::IncludeNamesGroup,
+        ControlId::IncludeNamesGroupIcon,
+        Glyph::Rename,
+    ),
+    (
+        ControlId::SpeedCopyingGroup,
+        ControlId::SpeedCopyingGroupIcon,
+        Glyph::Copy,
+    ),
+    (
+        ControlId::SpeedRingGroup,
+        ControlId::SpeedRingGroupIcon,
+        Glyph::Sync,
+    ),
+    (
+        ControlId::SpeedDeleteGroup,
+        ControlId::SpeedDeleteGroupIcon,
+        Glyph::Delete,
+    ),
 ];
 
 /// The icon of each push button's caption, by its catalogue key, so a

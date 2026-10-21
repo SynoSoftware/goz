@@ -348,8 +348,8 @@ impl Default for Panes {
 }
 
 /// What the window measures on its controls, which only Windows knows: the
-/// widths of the toolbars that share a line with other controls, and the
-/// Kind list's rows, an icon and a text.
+/// widths of the toolbars that share a line with other controls, the Kind
+/// list's rows, an icon and a text, and the Location list's rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ControlSizes {
     /// Clear, Match case and Match path, with their separators.
@@ -358,6 +358,8 @@ pub(crate) struct ControlSizes {
     pub(crate) filter_tools: Px,
     /// The height of a Kind row and the width of the widest.
     pub(crate) kind_row: Size,
+    /// The height of a Location row.
+    pub(crate) location_row: Px,
 }
 
 /// The height of the toolbars' buttons, each as tall as the control beside
@@ -511,6 +513,7 @@ struct FilterWidths {
     /// The widest group label.
     labels: Px,
     kind_row: Size,
+    location_row: Px,
     /// The widest Date modified or Size item.
     ranges: Px,
     attribute_names: Px,
@@ -559,6 +562,7 @@ impl CaptionWidths {
                     filters.attributes.clone(),
                 ]),
                 kind_row: controls.kind_row,
+                location_row: controls.location_row,
                 ranges: widest(&filters.ranges_widest),
                 attribute_names: widest(&filters.attribute_names),
                 attribute_choices: widest(&filters.attribute_choices),
@@ -953,7 +957,6 @@ impl FilterLayout {
         let px = |dip: Dip| dip.to_px(dpi);
         let control_height = font_height + px(CONTROL_PADDING);
         let check_height = font_height + px(CHECK_BOX_PADDING);
-        let list_height = |rows: usize| Px(font_height.0 * rows as i32) + px(LIST_BOX_CHROME);
         let mut y = Px(0);
         let mut next = |height: Px, gap: Dip| {
             let rect = Rect {
@@ -977,7 +980,10 @@ impl FilterLayout {
             GROUP,
         );
         let location_label = label(next(font_height, LABEL_GAP));
-        let location = next(list_height(LOCATION_ROWS), RELATED);
+        let location = next(
+            Px(widths.location_row.0 * LOCATION_ROWS as i32) + px(LIST_BOX_CHROME),
+            RELATED,
+        );
         let choose_folder = next(control_height, RELATED);
         let only_directly = next(check_height, GROUP);
         let date_label = label(next(font_height, LABEL_GAP));
@@ -1339,12 +1345,18 @@ impl InspectorLayout {
     }
 }
 
+/// The most dividers a layout has: in Two panels, the line between the
+/// panels, the line above the key bar and the line above each panel's
+/// status line. The window makes a control for each.
+pub(crate) const DIVIDERS: usize = 4;
+
 /// Every control's rectangle in the client area, the status bar's part
 /// widths, and the smallest client size at which every control fits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
     pub(crate) body: Body,
-    /// The one-pixel lines between the panes or the panels.
+    /// The one-pixel lines between the panes or the panels, at most
+    /// [`DIVIDERS`].
     pub(crate) dividers: Vec<Rect>,
     pub(crate) status: StatusLayout,
     pub(crate) min_client: Size,
@@ -2093,6 +2105,7 @@ mod tests {
                 width: widest(&captions.filters.kinds).unwrap_or_default() + Dip(30).to_px(dpi),
                 height: Dip(20).to_px(dpi),
             },
+            location_row: Dip(19).to_px(dpi),
         };
         CaptionWidths::measure(&captions, &measure, controls)
     }
@@ -2172,6 +2185,7 @@ mod tests {
                             search.match_mode,
                             search.list,
                         ];
+                        assert!(layout.dividers.len() <= DIVIDERS);
                         controls.extend(&layout.dividers);
                         if let Some(inspector) = &search.inspector {
                             controls.extend([

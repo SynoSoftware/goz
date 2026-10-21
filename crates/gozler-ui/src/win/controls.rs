@@ -2,8 +2,8 @@
 //! wrappers of the dialogs' controls, which their templates create.
 
 use super::gdi::{
-    Font, Icon, ImageList, TextMeter, button_images, draw_glyph, draw_text, glyph_icon, glyph_list,
-    icons_shown, lone_button_images, system_color,
+    Font, Icon, ImageList, TextMeter, button_images, glyph_icon, glyph_list, icons_shown,
+    lone_button_images, system_color,
 };
 use super::keys::{is_extended, key_of, virtual_key};
 use super::notify::ControlEvent;
@@ -11,49 +11,37 @@ use super::{Hwnd, wide};
 use crate::core::captions::ButtonIcon;
 use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
-use crate::core::layout::{
-    self, ColumnFit, Dpi, Px, Size, glyph_gap, icon_glyph_height, list_box_text_inset,
-};
+use crate::core::layout::{self, ColumnFit, Dpi, Px, Size, glyph_gap, icon_glyph_height};
 use crate::core::panel::difference;
 use gozler_core::include::FolderCheck;
-use std::cell::RefCell;
 use std::ops::Range;
-use windows::Win32::Foundation::{
-    COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
-};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BF_RECT, BeginPaint, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
-    COLOR_WINDOW, COLOR_WINDOWTEXT, ClientToScreen, DT_CALCRECT, DT_END_ELLIPSIS, DT_HIDEPREFIX,
-    DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_SINGLELINE, DT_VCENTER, DrawEdge, DrawFocusRect, EDGE_ETCHED,
-    EndPaint, ExcludeClipRect, FillRect, GetDC, GetSysColor, GetSysColorBrush, GetTextColor,
-    GetTextMetricsW, HBRUSH, HDC, HGDIOBJ, InvalidateRect, MapWindowPoints, PAINTSTRUCT,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow, ReleaseDC, RestoreDC, SaveDC,
-    ScreenToClient, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
+    COLOR_BTNTEXT, COLOR_WINDOWTEXT, ClientToScreen, InvalidateRect, MapWindowPoints,
+    ScreenToClient,
 };
 use windows::Win32::UI::Controls::{
     BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BCM_SETSPLITINFO, BCSIF_STYLE, BCSS_NOSPLIT,
-    BP_GROUPBOX, BS_SPLITBUTTON, BST_CHECKED, BUTTON_IMAGELIST, BUTTON_IMAGELIST_ALIGN,
-    BUTTON_IMAGELIST_ALIGN_CENTER, BUTTON_IMAGELIST_ALIGN_LEFT, BUTTON_SPLITINFO, CloseThemeData,
-    DRAWITEMSTRUCT, DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, DrawThemeBackground, EM_GETMARGINS,
-    EM_GETSEL, EM_SCROLLCARET, EM_SETCUEBANNER, EM_SETSEL, GBS_DISABLED, GBS_NORMAL, GDT_NONE,
-    GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO, HDI_FORMAT, HDITEMW, HDM_GETITEMRECT,
-    HDM_GETITEMW, HDM_HITTEST, HDM_SETITEMW, HIMAGELIST, HKM_GETHOTKEY, HKM_SETHOTKEY,
-    HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT, HTREEITEM,
-    ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES,
-    ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
-    LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT,
-    LVCOLUMNW, LVHITTESTINFO, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIR_LABEL, LVIS_DROPHILITED,
-    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
-    LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETHEADER,
-    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETITEMTEXTW, LVM_GETNEXTITEM,
-    LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_REDRAWITEMS, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
+    BS_SPLITBUTTON, BST_CHECKED, BUTTON_IMAGELIST, BUTTON_IMAGELIST_ALIGN,
+    BUTTON_IMAGELIST_ALIGN_CENTER, BUTTON_IMAGELIST_ALIGN_LEFT, BUTTON_SPLITINFO,
+    DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETMARGINS, EM_GETSEL, EM_SCROLLCARET,
+    EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO,
+    HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW, HDM_HITTEST, HDM_SETITEMW, HIMAGELIST,
+    HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT,
+    HOTKEYF_SHIFT, HTREEITEM, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS,
+    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
+    LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIR_LABEL,
+    LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETECOLUMN,
+    LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
+    LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETITEMTEXTW,
+    LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_REDRAWITEMS, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW,
     LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT,
     LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVM_SETSELECTIONMARK, LVNI_FOCUSED, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP, LVS_EX_INFOTIP,
     LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR,
-    ODS_FLAGS, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, ODT_LISTBOX, OpenThemeData,
     PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETICON,
     SB_GETPARTS, SB_GETRECT, SB_SETICON, SB_SETMINHEIGHT, SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW,
     SBARS_SIZEGRIP, SBARS_TOOLTIPS, SBT_OWNERDRAW, STATUSCLASSNAMEW, SetWindowTheme,
@@ -74,15 +62,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
     CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
     CreateWindowExW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_READONLY, GWL_STYLE,
-    GetClientRect, GetParent, GetWindowLongPtrW, GetWindowRect, HICON, HMENU, IMAGE_ICON, IsChild,
-    LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETITEMRECT, LB_GETTEXT, LB_GETTEXTLEN,
-    LB_ITEMFROMPOINT, LB_RESETCONTENT, LB_SETCURSEL, LB_SETITEMHEIGHT, LBN_SELCHANGE,
-    LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LBS_OWNERDRAWFIXED, SB_LINEDOWN, SB_LINEUP,
-    SM_CXVSCROLL, STM_GETIMAGE, STM_SETIMAGE, SendMessageW, SetWindowLongPtrW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_COMMAND, WM_COPY, WM_CTLCOLORSTATIC, WM_ENABLE, WM_GETFONT, WM_MOUSEMOVE,
-    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_SETTEXT, WM_SIZE, WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    GetParent, GetWindowLongPtrW, GetWindowRect, HICON, HMENU, IMAGE_ICON, IsChild, LB_ADDSTRING,
+    LB_GETCOUNT, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_RESETCONTENT, LB_SETCURSEL,
+    SB_LINEDOWN, SB_LINEUP, SM_CXVSCROLL, STM_GETIMAGE, STM_SETIMAGE, SendMessageW,
+    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_COPY, WM_NCDESTROY, WM_NOTIFY,
+    WM_SIZE, WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE,
+    WS_EX_CONTROLPARENT, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -420,6 +405,22 @@ impl Label {
     }
 }
 
+/// A one-pixel line between the main window's panes (DESIGN.md: Look): an
+/// empty static control, which fills itself with the brush its parent gives
+/// it ([`super::gdi::StaticColors::divider`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Divider(Hwnd);
+
+impl Divider {
+    pub(crate) fn create(parent: Hwnd) -> windows::core::Result<Divider> {
+        child(parent, w!("STATIC"), 0, WINDOW_EX_STYLE(0), 0).map(Divider)
+    }
+
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+}
+
 /// The static control styles, which the windows crate has only in a feature
 /// for system services.
 const SS_NOPREFIX: u32 = 0x80;
@@ -482,6 +483,12 @@ pub(crate) struct GlyphLabel(Hwnd);
 impl GlyphLabel {
     pub(crate) fn create(parent: Hwnd, id: u16) -> windows::core::Result<GlyphLabel> {
         icon_static(parent, id).map(GlyphLabel)
+    }
+
+    /// The static icon `id` of a dialog whose template declares one with
+    /// `SS_ICON | SS_CENTERIMAGE`, as [`GlyphLabel::create`] makes it.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<GlyphLabel> {
+        super::dialog::item(dialog, id).map(GlyphLabel)
     }
 
     pub(crate) fn hwnd(self) -> Hwnd {
@@ -747,45 +754,15 @@ impl DropDownList {
     }
 }
 
-/// A list box that shows every item, such as the filter pane's Location
-/// list.
+/// A list box that a dialog's template declares, such as Settings >
+/// Keyboard's keys.
 #[derive(Clone, Copy)]
 pub(crate) struct ListBox(Hwnd);
 
 impl ListBox {
-    pub(crate) fn hwnd(self) -> Hwnd {
-        self.0
-    }
-
     /// The list box `id` of a dialog whose template declares one.
     pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<ListBox> {
         super::dialog::item(dialog, id).map(ListBox)
-    }
-
-    /// A list of paths, such as the Location list, whose height is the
-    /// layout's, not a whole number of rows. A path wider than its row
-    /// loses its middle (`DT_PATH_ELLIPSIS`), so the drive and the last
-    /// folder stay visible, and a tooltip shows it whole. Its parent draws
-    /// its items with [`draw_list_item`], and gives it its row height with
-    /// [`ListBox::set_item_height`].
-    pub(crate) fn create_paths(parent: Hwnd, id: u16) -> windows::core::Result<ListBox> {
-        let style = WS_TABSTOP.0
-            | WS_VSCROLL.0
-            | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS) as u32;
-        let list = child(parent, w!("LISTBOX"), style, WS_EX_CLIENTEDGE, id).map(ListBox)?;
-        PathTip::attach(list.0)?;
-        Ok(list)
-    }
-
-    /// Sets the row height of a list whose parent draws its items, which
-    /// a font does not change; a list Windows draws takes it from its font.
-    pub(crate) fn set_item_height(self, height: Px) {
-        send(self.0, LB_SETITEMHEIGHT, 0, height.0 as isize);
-    }
-
-    /// Whether `event` says that the person selected another item.
-    pub(crate) fn selection_changed(self, event: ControlEvent) -> bool {
-        event.is(self.0, LBN_SELCHANGE)
     }
 
     /// Gives the list `items`, unless it has them, and selects `selected`,
@@ -817,7 +794,8 @@ impl ListBox {
 
 /// A list of items, each an icon and its text, in one column without a
 /// header, with one selection that looks like File Explorer's: the filter
-/// pane's Kind list and Settings' page list.
+/// pane's Kind list and Settings' page list, and the filter pane's Location
+/// list, whose paths have no icon.
 #[derive(Clone, Copy)]
 pub(crate) struct IconList(Hwnd);
 
@@ -916,7 +894,58 @@ impl IconList {
         }
     }
 
-    fn text(self, index: usize) -> String {
+    /// Shows the tooltip that the parent gives for the row under the pointer
+    /// (`LVN_GETINFOTIPW`, [`IconList::info_tip`]).
+    pub(crate) fn show_info_tips(self) {
+        send(
+            self.0,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            LVS_EX_INFOTIP as usize,
+            LVS_EX_INFOTIP as isize,
+        );
+    }
+
+    /// Gives the list `paths` as [`IconList::set_items`] does, each one that
+    /// is wider than its row without its middle, as Windows shortens a path,
+    /// so its drive and its last folder stay; then fills the column. The
+    /// owner shows a shortened path whole in the row's info tip.
+    pub(crate) fn set_paths(self, paths: &[String], selected: usize) {
+        let room = self.text_width(paths.len());
+        // The list has no icons, so the items' icon index shows nothing.
+        let items: Vec<(String, usize)> = match Font::of(self.0) {
+            Ok(font) => {
+                let meter = TextMeter::new(&font);
+                paths
+                    .iter()
+                    .map(|path| (meter.compact_path(path, room), 0))
+                    .collect()
+            }
+            Err(_) => paths.iter().map(|path| (path.clone(), 0)).collect(),
+        };
+        self.set_items(&items, selected);
+        self.fill_column();
+    }
+
+    /// The room for a row's text once the list holds `count` rows: the
+    /// list's inside, less the vertical scroll bar when it shows fewer rows,
+    /// and less the room the list keeps on either side of a text.
+    fn text_width(self, count: usize) -> Px {
+        let dpi = self.0.dpi();
+        let bar = scroll_bar_width(dpi);
+        // The client area leaves out the scroll bar that shows now.
+        let mut width = self.0.client_size().width;
+        if self.0.styles().0.0 & WS_VSCROLL.0 != 0 {
+            width = width + bar;
+        }
+        let shown = usize::try_from(send(self.0, LVM_GETCOUNTPERPAGE, 0, 0)).unwrap_or(0);
+        if count > shown {
+            width = width - bar;
+        }
+        width - layout::cell_width(Px(0), Px(0), true, dpi)
+    }
+
+    /// The text of the item `index`.
+    pub(crate) fn text(self, index: usize) -> String {
         let mut buffer = [0u16; 260];
         let mut item = LVITEMW {
             pszText: PWSTR(buffer.as_mut_ptr()),
@@ -964,397 +993,41 @@ impl IconList {
     }
 }
 
-/// Draws the item of `WM_DRAWITEM`'s `lparam` when it belongs to a list
-/// box, in the system colours, and returns whether it did.
-///
-/// # Safety
-/// `lparam` is the `lparam` of a `WM_DRAWITEM` that is being handled.
-pub(crate) unsafe fn draw_list_item(lparam: LPARAM) -> bool {
-    // SAFETY: the caller passes WM_DRAWITEM's lparam, which points to a
-    // DRAWITEMSTRUCT that lives while the message is handled.
-    let item = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
-    if item.CtlType != ODT_LISTBOX {
-        return false;
-    }
-    let list = Hwnd(item.hwndItem);
-    let state = |flag: ODS_FLAGS| item.itemState.0 & flag.0 != 0;
-    let (background, foreground) = if state(ODS_SELECTED) {
-        (COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT)
+/// Shows `glyph` in `icon` before `title`, the heading of a group of a
+/// dialog's page, and places the title after it; while icons are hidden
+/// (DESIGN.md: Look), it hides the icon and the title takes its place. The
+/// owner calls this again when icons are shown or hidden.
+pub(crate) fn show_heading_icon(icon: GlyphLabel, title: Hwnd, glyph: Glyph) {
+    let parent = title.parent();
+    let dpi = title.dpi();
+    let side = icon_glyph_height(dpi);
+    let shown = icons_shown();
+    icon.show_glyph(glyph, side);
+    icon.0.set_visible(shown);
+    let place = icon.0.rect_in(parent);
+    let heading = title.rect_in(parent);
+    let x = if shown {
+        place.x + side + glyph_gap(dpi)
     } else {
-        (COLOR_WINDOW, COLOR_WINDOWTEXT)
+        place.x
     };
-    // SAFETY: the DC and the rectangle are the ones Windows passed for this
-    // item.
-    unsafe {
-        FillRect(item.hDC, &item.rcItem, GetSysColorBrush(background));
-        // An empty list draws only its focus rectangle.
-        if item.itemID != u32::MAX {
-            let text = item_text(list, LB_GETTEXTLEN, LB_GETTEXT, item.itemID as usize);
-            let mut rect = path_text_rect(list, item.rcItem);
-            SetTextColor(item.hDC, COLORREF(GetSysColor(foreground)));
-            SetBkMode(item.hDC, TRANSPARENT);
-            draw_text(
-                item.hDC,
-                &text,
-                &mut rect,
-                DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_PATH_ELLIPSIS,
-            );
-        }
-        if state(ODS_FOCUS) && !state(ODS_NOFOCUSRECT) {
-            let _ = DrawFocusRect(item.hDC, &item.rcItem);
-        }
-    }
-    true
-}
-
-/// Where a path list's row `row` shows its text, which lines up with the
-/// text of a list that Windows draws.
-fn path_text_rect(list: Hwnd, row: RECT) -> RECT {
-    let inset = list_box_text_inset(list.dpi()).0;
-    RECT {
-        left: row.left + inset,
-        right: row.right - inset,
-        ..row
-    }
-}
-
-/// The tooltip of a list from [`ListBox::create_paths`]. Its one tool
-/// covers the row under the mouse and holds that row's whole path when
-/// the row shortens it, so moving onto another row leaves the tool, and
-/// the tip shows the new row's path once the mouse rests.
-struct PathTip {
-    tip: Hwnd,
-    /// The row the tool covers, in the list's client coordinates, and the
-    /// path in that row, because after the list scrolls another path has
-    /// the same rectangle.
-    covered: RefCell<(RECT, String)>,
-}
-
-impl PathTip {
-    /// Gives `list` its tooltip.
-    fn attach(list: Hwnd) -> windows::core::Result<()> {
-        // SAFETY: a tooltip window, as Windows documents it. The list is a
-        // child window, so Windows makes the list's top-level window the
-        // tip's owner, which destroys it.
-        let tip = unsafe {
-            CreateWindowExW(
-                WS_EX_TOPMOST,
-                TOOLTIPS_CLASSW,
-                PCWSTR::null(),
-                WINDOW_STYLE(WS_POPUP.0 | TTS_NOPREFIX),
-                0,
-                0,
-                0,
-                0,
-                Some(list.0),
-                None,
-                None,
-                None,
-            )
-        }?;
-        let data = Box::into_raw(Box::new(PathTip {
-            tip: Hwnd(tip),
-            covered: RefCell::new((RECT::default(), String::new())),
-        }));
-        // The list's procedure is subclassed before the tooltip subclasses
-        // it for its tool, so the tooltip sees each mouse move first: a
-        // move onto another row leaves the old tool before it covers the
-        // new row.
-        // SAFETY: `data` lives until the procedure frees it on
-        // WM_NCDESTROY, the list's last message.
-        if !unsafe { SetWindowSubclass(list.0, Some(path_list_procedure), 0, data as usize) }
-            .as_bool()
-        {
-            // SAFETY: the subclass did not take `data`.
-            drop(unsafe { Box::from_raw(data) });
-            return Err(windows::core::Error::from_thread());
-        }
-        let mut empty = wide("");
-        let tool = PathTip::tool(list, RECT::default(), &mut empty);
-        // SAFETY: `tool` and its text outlive the call, which copies them.
-        unsafe { send_pointer(Hwnd(tip), TTM_ADDTOOLW, 0, &raw const tool) };
-        Ok(())
-    }
-
-    /// The list's one tool, which covers `rect` and shows `text`.
-    fn tool(list: Hwnd, rect: RECT, text: &mut [u16]) -> TTTOOLINFOW {
-        TTTOOLINFOW {
-            cbSize: size_of::<TTTOOLINFOW>() as u32,
-            uFlags: TTF_SUBCLASS,
-            hwnd: list.0,
-            uId: 0,
-            rect,
-            lpszText: PWSTR(text.as_mut_ptr()),
-            ..TTTOOLINFOW::default()
-        }
-    }
-
-    /// Covers the row at `point`, `WM_MOUSEMOVE`'s `lparam`, with the
-    /// tool, unless the tool covers it already.
-    fn cover(&self, list: Hwnd, point: LPARAM) {
-        // The low word is the row, the high word 1 below the last row.
-        let hit = send(list, LB_ITEMFROMPOINT, 0, point.0);
-        let row = ((hit >> 16) & 0xffff == 0).then_some((hit & 0xffff) as usize);
-        let mut rect = RECT::default();
-        if let Some(row) = row {
-            // SAFETY: `rect` is a local the call fills in.
-            unsafe { send_pointer(list, LB_GETITEMRECT, row, &raw mut rect) };
-        }
-        let path = row
-            .map(|row| item_text(list, LB_GETTEXTLEN, LB_GETTEXT, row))
-            .unwrap_or_default();
-        {
-            let (covered_rect, covered_path) = &*self.covered.borrow();
-            if *covered_rect == rect && *covered_path == path {
-                return;
-            }
-        }
-        // An empty text shows no tip.
-        let shown = if shortened(list, &path, rect) {
-            path.as_str()
-        } else {
-            ""
-        };
-        let mut text = wide(shown);
-        *self.covered.borrow_mut() = (rect, path);
-        let tool = PathTip::tool(list, rect, &mut text);
-        // SAFETY: `tool` and its text outlive each call, which copies them.
-        unsafe {
-            send_pointer(self.tip, TTM_NEWTOOLRECTW, 0, &raw const tool);
-            send_pointer(self.tip, TTM_UPDATETIPTEXTW, 0, &raw const tool);
-        }
-    }
-}
-
-/// Whether the row `row` of a path list shortens `path`.
-fn shortened(list: Hwnd, path: &str, row: RECT) -> bool {
-    let shown = path_text_rect(list, row);
-    let mut measured = RECT::default();
-    // SAFETY: the list's DC is released, with its font restored, before
-    // the block ends.
-    unsafe {
-        let dc = GetDC(Some(list.0));
-        let font = HGDIOBJ(send(list, WM_GETFONT, 0, 0) as *mut _);
-        let previous = SelectObject(dc, font);
-        draw_text(
-            dc,
-            path,
-            &mut measured,
-            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        SelectObject(dc, previous);
-        ReleaseDC(Some(list.0), dc);
-    }
-    measured.right > shown.right - shown.left
-}
-
-/// The procedure of a list from [`ListBox::create_paths`], before the
-/// list's own: it moves the tooltip's tool to the row under the mouse.
-unsafe extern "system" fn path_list_procedure(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _id: usize,
-    data: usize,
-) -> LRESULT {
-    let list = Hwnd(hwnd);
-    match msg {
-        WM_MOUSEMOVE => {
-            // SAFETY: `data` is the PathTip that `attach` gave this
-            // subclass, which lives until WM_NCDESTROY.
-            unsafe { &*(data as *const PathTip) }.cover(list, lparam);
-        }
-        WM_NCDESTROY => {
-            // SAFETY: the list gets no message after this one, so nothing
-            // reads `data` again.
-            unsafe {
-                let _ = RemoveWindowSubclass(hwnd, Some(path_list_procedure), 0);
-                drop(Box::from_raw(data as *mut PathTip));
-            }
-        }
-        _ => {}
-    }
-    // SAFETY: the parameters are the ones Windows passed.
-    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
-}
-
-/// Draws the group box `group` of a dialog with `glyph` before its caption
-/// (DESIGN.md: Look). Windows draws a group box's caption itself, so the
-/// whole box is drawn here instead: its frame as the theme draws it, or
-/// etched without one, and the caption in the colours that its parent gives
-/// a static control, gray while the box is disabled.
-pub(crate) fn show_group_glyph(group: Hwnd, glyph: Glyph) {
-    // SAFETY: the subclass's data is the glyph's number, which needs no
-    // cleanup.
-    let _ = unsafe { SetWindowSubclass(group.0, Some(group_procedure), 0, glyph.data()) };
-}
-
-/// The procedure of a group box from [`show_group_glyph`], before its own.
-unsafe extern "system" fn group_procedure(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    _id: usize,
-    data: usize,
-) -> LRESULT {
-    let group = Hwnd(hwnd);
-    match msg {
-        WM_PAINT => {
-            if let Some(glyph) = Glyph::from_data(data).filter(|_| icons_shown()) {
-                paint_group(group, glyph);
-                return LRESULT(0);
-            }
-        }
-        // The box draws a new caption at once, and an old one stays where
-        // the new one is shorter, so its parent draws that strip again.
-        WM_SETTEXT | WM_ENABLE => {
-            // SAFETY: the parameters are the ones Windows passed.
-            let answer = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
-            redraw_group_caption(group);
-            return answer;
-        }
-        WM_NCDESTROY => {
-            // SAFETY: the subclass holds nothing to free.
-            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(group_procedure), 0) };
-        }
-        _ => {}
-    }
-    // SAFETY: the parameters are the ones Windows passed.
-    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
-}
-
-/// The height of a group box's caption line: its font's, or its icon's.
-/// `dc` holds the box's font.
-fn group_caption_height(group: Hwnd, dc: HDC) -> i32 {
-    let mut metrics = TEXTMETRICW::default();
-    // SAFETY: `metrics` is a local the call fills in.
-    let _ = unsafe { GetTextMetricsW(dc, &mut metrics) };
-    metrics.tmHeight.max(icon_glyph_height(group.dpi()).0)
-}
-
-/// Has the parent of `group` draw the strip of its caption again, with the
-/// controls in it.
-fn redraw_group_caption(group: Hwnd) {
-    // SAFETY: the DC is released, with its font restored, in the block;
-    // the rectangles are locals the calls fill in and read.
-    unsafe {
-        let Ok(parent) = GetParent(group.0) else {
-            return;
-        };
-        let dc = GetDC(Some(group.0));
-        let previous = SelectObject(dc, HGDIOBJ(send(group, WM_GETFONT, 0, 0) as *mut _));
-        let height = group_caption_height(group, dc);
-        SelectObject(dc, previous);
-        ReleaseDC(Some(group.0), dc);
-        let mut rect = RECT::default();
-        let _ = GetWindowRect(group.0, &mut rect);
-        let mut corners = [
-            POINT {
-                x: rect.left,
-                y: rect.top,
+    super::move_children(&[
+        (
+            icon.0,
+            layout::Rect {
+                width: side,
+                ..place
             },
-            POINT {
-                x: rect.right,
-                y: rect.top + height,
+        ),
+        (
+            title,
+            layout::Rect {
+                x,
+                width: heading.right() - x,
+                ..heading
             },
-        ];
-        MapWindowPoints(None, Some(parent), &mut corners);
-        let strip = RECT {
-            left: corners[0].x,
-            top: corners[0].y,
-            right: corners[1].x,
-            bottom: corners[1].y,
-        };
-        let _ = RedrawWindow(
-            Some(parent),
-            Some(&strip),
-            None,
-            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN,
-        );
-    }
-}
-
-/// Paints the group box `group` with `glyph` before its caption.
-fn paint_group(group: Hwnd, glyph: Glyph) {
-    let text = group.text();
-    let dpi = group.dpi();
-    let (icon, gap) = (icon_glyph_height(dpi).0, glyph_gap(dpi).0);
-    let mut paint = PAINTSTRUCT::default();
-    // SAFETY: BeginPaint and EndPaint pair on the box; the DC's state is
-    // saved and restored around the drawing, and the theme is closed.
-    unsafe {
-        let dc = BeginPaint(group.0, &mut paint);
-        let saved = SaveDC(dc);
-        SelectObject(dc, HGDIOBJ(send(group, WM_GETFONT, 0, 0) as *mut _));
-        // The parent sets the caption's colours on the DC and gives its
-        // background, as it does for the box's own drawing.
-        let brush = GetParent(group.0).map_or(0, |parent| {
-            SendMessageW(
-                parent,
-                WM_CTLCOLORSTATIC,
-                Some(WPARAM(dc.0 as usize)),
-                Some(LPARAM(group.0.0 as isize)),
-            )
-            .0
-        });
-        let enabled = IsWindowEnabled(group.0).as_bool();
-        let color = if enabled {
-            GetTextColor(dc)
-        } else {
-            system_color(COLOR_GRAYTEXT)
-        };
-        let height = group_caption_height(group, dc);
-        let flags = DT_SINGLELINE | DT_VCENTER | DT_HIDEPREFIX;
-        let mut measured = RECT::default();
-        draw_text(dc, &text, &mut measured, flags | DT_CALCRECT);
-        let mut client = RECT::default();
-        let _ = GetClientRect(group.0, &mut client);
-        // Half a line in from the frame, where Windows draws a group box's
-        // caption, with a little room on either side.
-        let pad = gap / 2;
-        let left = client.left + height / 2;
-        let caption = RECT {
-            left,
-            top: client.top,
-            right: (left + pad + icon + gap + measured.right + pad).min(client.right),
-            bottom: client.top + height,
-        };
-        let mut frame = RECT {
-            top: client.top + height / 2,
-            ..client
-        };
-        let inner = SaveDC(dc);
-        ExcludeClipRect(dc, caption.left, caption.top, caption.right, caption.bottom);
-        let theme = OpenThemeData(Some(group.0), w!("Button"));
-        if theme.is_invalid() {
-            let _ = DrawEdge(dc, &mut frame, EDGE_ETCHED, BF_RECT);
-        } else {
-            let state = if enabled { GBS_NORMAL } else { GBS_DISABLED };
-            let _ = DrawThemeBackground(theme, dc, BP_GROUPBOX.0, state.0, &frame, None);
-            let _ = CloseThemeData(theme);
-        }
-        let _ = RestoreDC(dc, inner);
-        if brush != 0 {
-            FillRect(dc, &caption, HBRUSH(brush as *mut _));
-        }
-        let glyph_area = RECT {
-            left: caption.left + pad,
-            right: caption.left + pad + icon,
-            ..caption
-        };
-        draw_glyph(dc, glyph, glyph_area, Px(icon), color);
-        SetTextColor(dc, color);
-        SetBkMode(dc, TRANSPARENT);
-        let mut text_area = RECT {
-            left: glyph_area.right + gap,
-            ..caption
-        };
-        draw_text(dc, &text, &mut text_area, flags | DT_END_ELLIPSIS);
-        let _ = RestoreDC(dc, saved);
-        let _ = EndPaint(group.0, &paint);
-    }
+        ),
+    ]);
 }
 
 /// A date picker with a check box, which a dialog's template declares.
@@ -2630,6 +2303,26 @@ impl ReportList {
             .enumerate()
         {
             send(self.0, LVM_SETCOLUMNWIDTH, column, width.0 as isize);
+        }
+    }
+
+    /// Shows each path of `rows` in `column` that is wider than the column
+    /// without its middle, as Windows shortens a path, so its drive and its
+    /// name stay. Call it once the column has its width.
+    pub(crate) fn show_paths<R: AsRef<[String]>>(self, column: usize, rows: &[R]) {
+        let Ok(font) = Font::of(self.0) else {
+            return;
+        };
+        let meter = TextMeter::new(&font);
+        let width = Px(send(self.0, LVM_GETCOLUMNWIDTH, column, 0) as i32);
+        let room = width - layout::cell_width(Px(0), Px(0), column == 0, self.0.dpi());
+        for (index, row) in rows.iter().enumerate() {
+            if let Some(path) = row.as_ref().get(column) {
+                let shown = meter.compact_path(path, room);
+                if shown != *path {
+                    self.put_cell(LVM_SETITEMTEXTW, index, column, &shown);
+                }
+            }
         }
     }
 }

@@ -1,22 +1,17 @@
 //! The Win32 parts of the File operations window that the other windows
 //! lack (file-manager-spec.md: File operations, step 5): a path line that
 //! loses its middle, the queue list in tile view with the line where a
-//! dragged row goes, a progress bar's paused state, the card that the
-//! window paints behind the running operation, and the progress on the
+//! dragged row goes, a progress bar's paused state, and the progress on the
 //! taskbar button.
 
 use super::controls::{ProgressBar, child, send, send_pointer};
-use super::gdi::{EraseDc, glyph_list, high_contrast, system_color};
-use super::notify::Notification;
+use super::gdi::{glyph_list, system_color};
+use super::notify::{InfoTip, Notification};
 use super::{Hwnd, to_rect, wide};
 use crate::core::glyph::Glyph;
 use crate::core::layout::{Px, Rect, Size};
 use windows::Win32::Foundation::{LRESULT, POINT, RECT, SIZE};
-use windows::Win32::Graphics::Gdi::{
-    COLOR_3DLIGHT, COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, CreatePen, CreateSolidBrush,
-    DeleteObject, FillRect, GetSysColorBrush, HGDIOBJ, MapWindowPoints, PS_SOLID, RoundRect,
-    SelectObject,
-};
+use windows::Win32::Graphics::Gdi::{COLOR_WINDOWTEXT, MapWindowPoints};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Controls::{
     EMF_CENTERED, LIST_VIEW_ITEM_STATE_FLAGS, LV_VIEW_TILE, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO,
@@ -28,8 +23,8 @@ use windows::Win32::UI::Controls::{
     LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
     LVSIL_NORMAL, LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE, NMLISTVIEW,
-    NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMLVKEYDOWN, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED,
-    SetWindowTheme, WC_LISTVIEWW,
+    NMLVEMPTYMARKUP, NMLVKEYDOWN, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED, SetWindowTheme,
+    WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
@@ -82,50 +77,6 @@ impl PathLabel {
 pub(crate) fn show_paused(bar: ProgressBar, paused: bool) {
     let state = if paused { PBST_PAUSED } else { PBST_NORMAL };
     send(bar.hwnd(), PBM_SETSTATE, state as usize, 0);
-}
-
-/// Paints the background of `window` on `dc`, as `WM_ERASEBKGND` asks: the
-/// dialog colour, and `card` on it in the window colour, with a one-pixel
-/// border and corners rounded by `corner`. A themed button asks for it too,
-/// to paint its corners in the colour it stands on.
-pub(crate) fn paint_card(window: Hwnd, dc: EraseDc, card: Rect, corner: Px) {
-    let EraseDc(dc) = dc;
-    let client = window.client_size();
-    let ground = to_rect(Rect {
-        x: Px(0),
-        y: Px(0),
-        width: client.width,
-        height: client.height,
-    });
-    let border = system_color(if high_contrast() {
-        COLOR_WINDOWTEXT
-    } else {
-        COLOR_3DLIGHT
-    });
-    // SAFETY: the DC is the message's, which Windows holds for it. The pen
-    // and the brush are this block's own, selected out of the DC before
-    // they are deleted; system brushes are never freed.
-    unsafe {
-        FillRect(dc, &ground, GetSysColorBrush(COLOR_BTNFACE));
-        let pen = CreatePen(PS_SOLID, 1, border);
-        let brush = CreateSolidBrush(system_color(COLOR_WINDOW));
-        let old_pen = SelectObject(dc, HGDIOBJ(pen.0));
-        let old_brush = SelectObject(dc, HGDIOBJ(brush.0));
-        let rect = to_rect(card);
-        let _ = RoundRect(
-            dc,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            corner.0,
-            corner.0,
-        );
-        SelectObject(dc, old_pen);
-        SelectObject(dc, old_brush);
-        let _ = DeleteObject(HGDIOBJ(pen.0));
-        let _ = DeleteObject(HGDIOBJ(brush.0));
-    }
 }
 
 /// The size of `window`, a top-level window without a menu bar, whose
@@ -207,34 +158,6 @@ pub(crate) enum QueueNotify<'a> {
     /// The pointer rests on a row, and the list asks for its tooltip.
     InfoTip(InfoTip<'a>),
     Other,
-}
-
-/// `LVN_GETINFOTIPW`: the tooltip of the row under the pointer.
-pub(crate) struct InfoTip<'a>(&'a mut NMLVGETINFOTIPW);
-
-impl InfoTip<'_> {
-    pub(crate) fn row(&self) -> Option<usize> {
-        usize::try_from(self.0.iItem).ok()
-    }
-
-    /// Answers with `text`, cut to the room the list gives, and returns
-    /// the notification's answer.
-    pub(crate) fn set(self, text: &str) -> LRESULT {
-        let Ok(room) = usize::try_from(self.0.cchTextMax) else {
-            return LRESULT(0);
-        };
-        if room == 0 {
-            return LRESULT(0);
-        }
-        let units: Vec<u16> = text.encode_utf16().collect();
-        let kept = units.len().min(room - 1);
-        // SAFETY: the list gives pszText with room for cchTextMax
-        // characters, valid while it waits for the answer.
-        let buffer = unsafe { std::slice::from_raw_parts_mut(self.0.pszText.0, room) };
-        buffer[..kept].copy_from_slice(&units[..kept]);
-        buffer[kept] = 0;
-        LRESULT(0)
-    }
 }
 
 /// `LVN_GETEMPTYMARKUP`: the text an empty list shows.
