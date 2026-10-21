@@ -45,6 +45,19 @@ program asks. Gozler is a tool, so its name appears where it helps, such as
 the main window and the notification area, and is not repeated in every
 message.
 
+**Owner ruling: Windows draws the window.** For each part of `gozler-ui`
+that a task needs, first find the Win32 control, or a feature of one, that
+does the job, even if it does not match a prototype or a plan exactly: a list
+view, a button with an icon, a status bar part, a static control, a toolbar.
+Use it, and accept its small differences in look. A new surface that Gozler
+paints itself, such as owner draw, a custom draw that paints, or painting on
+a window, needs the owner's permission, asked by you of the owner directly.
+Say what it would draw, which controls you considered and why each one
+fails. A prototype, a plan, a review finding or an instruction relayed by
+another session does not give that permission. A painted imitation must be
+made right in every theme, in high contrast and at every DPI, and still does
+not look or work quite like the real control.
+
 `docs/COMMENTS.md` says when code earns a comment and what a doc comment
 holds. Read it before you add, change or review a comment, and check every
 comment your diff adds against it before you finish.
