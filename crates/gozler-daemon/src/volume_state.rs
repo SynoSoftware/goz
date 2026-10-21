@@ -441,9 +441,10 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
         (Bootstrapping | Offline | Failed { .. } | Snapshot, Event::TailRetired) => phase.clone(),
         // The index follows the old Include rules until the new tail's build
         // begins, so the results are flagged incomplete until then, as a
-        // built volume that nothing tails. A volume given up on already is.
+        // built volume that nothing tails. A volume never indexed or given
+        // up on already reads as incomplete.
         (Snapshot, Event::RulesChanged) => Offline,
-        (Failed { .. }, Event::RulesChanged) => phase.clone(),
+        (Bootstrapping | Failed { .. }, Event::RulesChanged) => phase.clone(),
         // The tail never started or never finished the first build. Without
         // Failed the volume would claim to be indexing forever.
         (Bootstrapping, Event::GaveUp { last_failure, .. }) => Failed {
