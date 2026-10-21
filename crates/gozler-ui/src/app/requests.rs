@@ -9,7 +9,8 @@ use crate::core::fetch::{
 use crate::win::wake::Waker;
 use gozler_client::{CancelToken, Client, ClientError};
 use gozler_core::output::ResultWriter;
-use gozler_core::proto::{PIPE_NAME, QueryResults, Returns};
+use gozler_core::proto::{PIPE_NAME, ProtoError, QueryResults, Returns};
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, BufWriter};
@@ -156,6 +157,10 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
     match result {
         Ok(outcome) => Some(outcome),
         Err(ClientError::Cancelled) => None,
+        Err(ClientError::Refused {
+            code: ProtoError::ResultSnapshotGone,
+            ..
+        }) => Some(Outcome::ResultSnapshotGone),
         Err(error) => Some(Outcome::Failed(failure(error))),
     }
     .filter(|_| !cancel.is_cancelled())
@@ -170,28 +175,34 @@ fn rows(
     first: Option<&dyn Fn(Outcome)>,
 ) -> Result<Chunk, ClientError> {
     let mut all: Option<QueryResults> = None;
-    client.query(ask.request(), |page| {
-        match &mut all {
-            None => {
-                if let Some(first) = first
-                    && page.more
-                {
-                    first(Outcome::Rows(Chunk {
-                        start: ask.start,
-                        rows: page.items.clone(),
-                        total: page.total,
-                        volumes_incomplete: page.volumes_incomplete,
-                        metadata_pending: page.metadata_pending,
-                        sums: page.sums,
-                        rest_follows: true,
-                    }));
+    let made = Cell::new(None);
+    client.rows(
+        ask.request(),
+        |id| made.set(Some(id)),
+        |page| {
+            match &mut all {
+                None => {
+                    if let Some(first) = first
+                        && page.more
+                    {
+                        first(Outcome::Rows(Chunk {
+                            start: ask.start,
+                            rows: page.items.clone(),
+                            total: page.total,
+                            volumes_incomplete: page.volumes_incomplete,
+                            metadata_pending: page.metadata_pending,
+                            sums: page.sums,
+                            rest_follows: true,
+                            made: made.get(),
+                        }));
+                    }
+                    all = Some(page);
                 }
-                all = Some(page);
+                Some(all) => all.add_page(page),
             }
-            Some(all) => all.add_page(page),
-        }
-        Ok::<(), ClientError>(())
-    })?;
+            Ok::<(), ClientError>(())
+        },
+    )?;
     let all = all.ok_or_else(|| ClientError::Communication("the reply had no page".into()))?;
     Ok(Chunk {
         start: ask.start,
@@ -201,6 +212,7 @@ fn rows(
         metadata_pending: all.metadata_pending,
         sums: all.sums,
         rest_follows: false,
+        made: made.get(),
     })
 }
 
@@ -218,18 +230,24 @@ fn selection(client: &mut Client, ask: SelectionAsk) -> Result<SelectionRows, Cl
         .sum();
     let mut rows = Vec::with_capacity(usize::try_from(kept).unwrap_or(0));
     let mut position = ask.span.start;
-    client.query(ask.span.request(), |page| {
-        for item in page.items {
-            if ask.keeps(position) {
-                rows.push((position, item));
+    let mut made = None;
+    client.rows(
+        ask.span.request(),
+        |id| made = Some(id),
+        |page| {
+            for item in page.items {
+                if ask.keeps(position) {
+                    rows.push((position, item));
+                }
+                position += 1;
             }
-            position += 1;
-        }
-        Ok::<(), ClientError>(())
-    })?;
+            Ok::<(), ClientError>(())
+        },
+    )?;
     Ok(SelectionRows {
         rows,
         cached: ask.cached,
+        made,
     })
 }
 

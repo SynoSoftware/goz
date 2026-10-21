@@ -119,11 +119,11 @@
   "status": {
     "results_one": "{0} sonuç",
     "results_other": "{0} sonuç",
-    "showing": "{1} sonucun ilk {0} tanesi gösteriliyor",
     "filtered": "{0} · Filtrelendi",
     "searching": "Aranıyor…",
     "selected": "{0} seçili · {1}",
     "selected_only": "{0} seçili",
+    "too_many": "{0} seçili · Bir komut kullanmak için en fazla {1} seçin",
     "view": "{0} · {1}",
     "files_one": "{0} dosya ({1})",
     "files_other": "{0} dosya ({1})",
@@ -380,6 +380,7 @@
     "regex": "Normal ifade geçerli değil. Değiştirip yeniden arayın.\n\n{0}"
   },
   "cell": {
+    "gone": "Artık yok",
     "unknown": "Bilinmiyor"
   },
   "size": {

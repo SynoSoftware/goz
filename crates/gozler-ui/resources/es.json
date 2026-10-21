@@ -119,11 +119,11 @@
   "status": {
     "results_one": "{0} resultado",
     "results_other": "{0} resultados",
-    "showing": "Se muestran los primeros {0} de {1} resultados",
     "filtered": "{0} · Filtrado",
     "searching": "Buscando…",
     "selected": "Selección: {0} · {1}",
     "selected_only": "Selección: {0}",
+    "too_many": "Selección: {0} · Seleccione hasta {1} para usar un comando",
     "view": "{0} · {1}",
     "files_one": "{0} archivo ({1})",
     "files_other": "{0} archivos ({1})",
@@ -380,6 +380,7 @@
     "regex": "La expresión regular no es válida. Cámbiala y vuelve a buscar.\n\n{0}"
   },
   "cell": {
+    "gone": "Ya no existe",
     "unknown": "Desconocido"
   },
   "size": {

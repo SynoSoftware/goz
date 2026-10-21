@@ -20,7 +20,7 @@
 //!   because the change notifications and the end arrive in no fixed order.
 //!   A moment counter orders the ends and the starts of the readings.
 
-use super::fetch::{Ask, ChunkAsk, Generation, Outcome};
+use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
 use super::search_list::{SearchList, is_taken};
@@ -2620,6 +2620,7 @@ impl Panels {
                 sort: SortSpec::default(),
                 start: 0,
                 len: SIZE_ROWS,
+                snapshot: FromSnapshot::No,
             },
         ))
     }
@@ -3596,6 +3597,7 @@ pub(crate) mod tests {
             metadata_pending: false,
             sums: None,
             rest_follows: false,
+            made: None,
         };
         assert!(panels.accept_sizes(Side::Left, Generation(7), Outcome::Rows(chunk)));
     }

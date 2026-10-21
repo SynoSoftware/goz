@@ -1496,6 +1496,12 @@ impl ListView {
         send(self.0, LVM_GETITEMCOUNT, 0, 0).max(0) as u64
     }
 
+    /// How many rows are selected, in one message, where [`Self::selected`]
+    /// sends one for each selected row.
+    pub(crate) fn selected_count(self) -> u64 {
+        send(self.0, LVM_GETSELECTEDCOUNT, 0, 0).max(0) as u64
+    }
+
     pub(crate) fn ensure_visible(self, row: u64) {
         send(self.0, LVM_ENSUREVISIBLE, row as usize, 0);
     }

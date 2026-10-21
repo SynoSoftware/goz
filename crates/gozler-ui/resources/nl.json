@@ -119,11 +119,11 @@
   "status": {
     "results_one": "{0} resultaat",
     "results_other": "{0} resultaten",
-    "showing": "De eerste {0} van {1} resultaten worden weergegeven",
     "filtered": "{0} · Gefilterd",
     "searching": "Zoeken…",
     "selected": "{0} geselecteerd · {1}",
     "selected_only": "{0} geselecteerd",
+    "too_many": "{0} geselecteerd · Selecteer er hoogstens {1} om een opdracht te gebruiken",
     "view": "{0} · {1}",
     "files_one": "{0} bestand ({1})",
     "files_other": "{0} bestanden ({1})",
@@ -380,6 +380,7 @@
     "regex": "De reguliere expressie is ongeldig. Wijzig deze en zoek opnieuw.\n\n{0}"
   },
   "cell": {
+    "gone": "Bestaat niet meer",
     "unknown": "Onbekend"
   },
   "size": {

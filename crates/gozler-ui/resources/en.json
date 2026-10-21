@@ -119,11 +119,11 @@
   "status": {
     "results_one": "{0} result",
     "results_other": "{0} results",
-    "showing": "Showing the first {0} of {1} results",
     "filtered": "{0} · Filtered",
     "searching": "Searching…",
     "selected": "{0} selected · {1}",
     "selected_only": "{0} selected",
+    "too_many": "{0} selected · Select up to {1} to use a command",
     "view": "{0} · {1}",
     "files_one": "{0} file ({1})",
     "files_other": "{0} files ({1})",
@@ -380,6 +380,7 @@
     "regex": "The regular expression isn't valid. Change it, then search again.\n\n{0}"
   },
   "cell": {
+    "gone": "No longer exists",
     "unknown": "Unknown"
   },
   "size": {

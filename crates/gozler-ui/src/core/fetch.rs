@@ -8,7 +8,8 @@ use gozler_client::NotRunning;
 use gozler_core::include::IncludeSettings;
 use gozler_core::output::ResultFormat;
 use gozler_core::proto::{
-    DaemonStatus, PROTO_VERSION, QueryTotals, ResultItem, Returns, Rows, SearchRequest,
+    DaemonStatus, PROTO_VERSION, QueryTotals, Request, ResultItem, ResultSnapshotId, Returns, Rows,
+    SearchRequest, SnapshotRowsRequest,
 };
 use gozler_core::query::MatchSums;
 use gozler_core::search::Search;
@@ -122,15 +123,33 @@ pub(crate) struct ChunkAsk {
     pub(crate) sort: SortSpec,
     pub(crate) start: u64,
     pub(crate) len: u64,
+    pub(crate) snapshot: FromSnapshot,
+}
+
+/// Whether a chunk comes from a result snapshot (DESIGN.md: Result
+/// snapshots).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FromSnapshot {
+    /// From a search, as a new search's first chunk.
+    #[default]
+    No,
+    /// From a result snapshot that the request makes of the search, which
+    /// drops the list's earlier one.
+    Make { replaces: Option<ResultSnapshotId> },
+    /// From the list's result snapshot.
+    Read(ResultSnapshotId),
 }
 
 impl ChunkAsk {
     /// The request that asks the service for the chunk.
-    pub(crate) fn request(&self) -> SearchRequest {
-        self.search.clone().request(Returns::Rows(Rows {
+    pub(crate) fn request(&self) -> Request {
+        // A list holds fewer than 2^32 rows, because an index does.
+        let offset = u32::try_from(self.start).unwrap_or(u32::MAX);
+        let limit = Some(u32::try_from(self.len).unwrap_or(u32::MAX));
+        let rows = Rows {
             sort: self.sort,
-            offset: u32::try_from(self.start).expect("a chunk starts below LIST_LIMIT"),
-            limit: Some(u32::try_from(self.len).expect("a chunk fits in u32")),
+            offset,
+            limit,
             want_size: true,
             want_mtime: true,
             // Four bytes a row, so showing the Attributes column needs no
@@ -140,7 +159,21 @@ impl ChunkAsk {
             // every match for them, so only the first chunk asks, and the
             // later chunks keep its sums.
             want_sums: self.start == 0,
-        }))
+        };
+        match self.snapshot {
+            FromSnapshot::No => Request::Search(self.search.clone().request(Returns::Rows(rows))),
+            FromSnapshot::Make { replaces } => Request::Search(
+                (self.search.clone()).request(Returns::ResultSnapshot { rows, replaces }),
+            ),
+            FromSnapshot::Read(id) => Request::ResultSnapshotRows(SnapshotRowsRequest {
+                id,
+                offset,
+                limit,
+                want_size: rows.want_size,
+                want_mtime: rows.want_mtime,
+                want_attributes: rows.want_attributes,
+            }),
+        }
     }
 }
 
@@ -245,6 +278,9 @@ pub(crate) enum Outcome {
     /// Creating or writing the export's file failed; the partial file is
     /// deleted.
     ExportFailed(WriteFailure),
+    /// The result snapshot a chunk or a selection was read from is gone, so
+    /// the list searches again.
+    ResultSnapshotGone,
     Failed(DaemonFailure),
 }
 
@@ -255,6 +291,8 @@ pub(crate) struct SelectionRows {
     pub(crate) rows: Vec<(u64, ResultItem)>,
     /// The ask's [`SelectionAsk::cached`], whose chunks these rows replace.
     pub(crate) cached: Vec<Range<u64>>,
+    /// The result snapshot the request made, whose rows these are.
+    pub(crate) made: Option<ResultSnapshotId>,
 }
 
 /// Why a file could not be written, as Windows said it.
@@ -292,6 +330,8 @@ pub(crate) struct Chunk {
     /// More rows of the chunk follow in another reply: these are its first
     /// page's, which the list shows while the rest arrives.
     pub(crate) rest_follows: bool,
+    /// The result snapshot the request made, whose rows these are.
+    pub(crate) made: Option<ResultSnapshotId>,
 }
 
 /// The failures the window shows differently (DESIGN.md: Daemon failures);

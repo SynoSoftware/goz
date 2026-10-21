@@ -5,21 +5,21 @@
 //! names the rows the person sees even while the typed text has already
 //! changed.
 
-use super::fetch::{Chunk, ChunkAsk, DaemonFailure, Generation, Local, LocalService, SelectionAsk};
+use super::fetch::{
+    Chunk, ChunkAsk, DaemonFailure, FromSnapshot, Generation, Local, LocalService, SelectionAsk,
+};
 use gozler_client::Repair;
-use gozler_core::proto::ResultItem;
+use gozler_core::proto::{ResultItem, ResultSnapshotId};
 use gozler_core::query::{MatchSums, MatchedParts, QueryError};
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
 use std::ops::Range;
 use std::path::PathBuf;
 
-/// The list reaches the first 100,000 rows of a search (DESIGN.md: Searching).
-pub(crate) const LIST_LIMIT: u64 = 100_000;
-
 /// The rows of one request. Every request scans every match before it
 /// sorts, so a larger chunk costs the daemon little more and halves the
-/// waits on a long scroll.
+/// waits on a long scroll. The first chunk comes from the search, and every
+/// other from the list's result snapshot (DESIGN.md: Rows on demand).
 pub(crate) const CHUNK_ROWS: u64 = 16_384;
 
 /// The most rows the cache keeps, in whole chunks, so memory stays the same
@@ -218,6 +218,8 @@ pub(crate) struct ShownRows {
     matched: Option<MatchedParts>,
     /// The order of use, for dropping the chunk used least recently.
     clock: u64,
+    /// The result snapshot the rows are read from, once a request made it.
+    snapshot: Option<ResultSnapshotId>,
 }
 
 struct CachedChunk {
@@ -264,6 +266,9 @@ pub(crate) enum RowsChange {
 pub(crate) struct Results {
     shown: Shown,
     in_flight: Option<InFlight>,
+    /// The latest result snapshot the list made, which the next one it
+    /// makes replaces, so the service drops it at once.
+    last_snapshot: Option<ResultSnapshotId>,
 }
 
 impl Results {
@@ -271,6 +276,7 @@ impl Results {
         Results {
             shown: Shown::Nothing,
             in_flight: None,
+            last_snapshot: None,
         }
     }
 
@@ -305,9 +311,9 @@ impl Results {
         }
     }
 
-    /// The rows the list has: every match up to [`LIST_LIMIT`].
+    /// The rows the list has: every match.
     pub(crate) fn count(&self) -> u64 {
-        self.total().min(LIST_LIMIT)
+        self.total()
     }
 
     /// The row at `index`, or `None` while its chunk has not arrived.
@@ -436,6 +442,7 @@ impl Results {
             span: ChunkAsk {
                 start,
                 len: end - start,
+                snapshot: shown.source_of(self.last_snapshot, end),
                 ..shown.ask.clone()
             },
             positions,
@@ -486,6 +493,7 @@ impl Results {
             sort,
             start: 0,
             len: CHUNK_ROWS,
+            snapshot: FromSnapshot::No,
         };
         self.in_flight = Some(InFlight::Search(generation, ask.clone()));
         ask
@@ -553,9 +561,36 @@ impl Results {
         self.in_flight = Some(InFlight::Chunk(generation, start));
         Some(ChunkAsk {
             start,
-            len: CHUNK_ROWS.min(LIST_LIMIT - start),
+            len: CHUNK_ROWS,
+            snapshot: shown.source_of(self.last_snapshot, start + CHUNK_ROWS),
             ..shown.ask.clone()
         })
+    }
+
+    /// Reads the shown rows from the result snapshot `id` from now on, which
+    /// a request made. The chunks cached before are dropped, because they
+    /// are from an earlier moment than the result snapshot's rows (window
+    /// rule 10). Returns whether it was new to the list.
+    pub(crate) fn adopt_snapshot(&mut self, id: ResultSnapshotId) -> bool {
+        let Shown::Rows(shown) = &mut self.shown else {
+            return false;
+        };
+        if shown.snapshot == Some(id) {
+            return false;
+        }
+        shown.snapshot = Some(id);
+        shown.chunks.clear();
+        self.last_snapshot = Some(id);
+        true
+    }
+
+    /// The service no longer keeps the list's result snapshot, so no request
+    /// reads from it again; the list searches again.
+    pub(crate) fn forget_snapshot(&mut self) {
+        if let Shown::Rows(shown) = &mut self.shown {
+            shown.snapshot = None;
+        }
+        self.last_snapshot = None;
     }
 
     /// Compiles the shown search's terms, so [`Results::matched_parts`]
@@ -586,6 +621,7 @@ impl Results {
                     chunks: Vec::new(),
                     matched: None,
                     clock: 0,
+                    snapshot: None,
                 };
                 shown.insert(chunk.start, chunk.rows, first_page);
                 self.shown = Shown::Rows(shown);
@@ -594,10 +630,16 @@ impl Results {
                 }
             }
             Some(InFlight::Chunk(..)) => {
+                let adopted = chunk.made.is_some_and(|id| self.adopt_snapshot(id));
                 let Shown::Rows(shown) = &mut self.shown else {
                     return RowsChange::Stale;
                 };
-                let rows = chunk.start..chunk.start + chunk.rows.len() as u64;
+                let rows = if adopted {
+                    // Every other row is gone from the cache.
+                    0..chunk.total
+                } else {
+                    chunk.start..chunk.start + chunk.rows.len() as u64
+                };
                 shown.total = chunk.total;
                 shown.sums = chunk.sums.or(shown.sums);
                 shown.insert(chunk.start, chunk.rows, first_page);
@@ -624,6 +666,20 @@ impl std::fmt::Debug for ShownRows {
 }
 
 impl ShownRows {
+    /// Where the rows up to `end` come from: the list's result snapshot
+    /// once it has one, a new one that replaces `last` when they reach past
+    /// the first chunk, which the search answered, and otherwise the
+    /// search. A result snapshot sorts every match, so a search makes none
+    /// until the person needs rows past its first chunk (DESIGN.md: Rows on
+    /// demand).
+    fn source_of(&self, last: Option<ResultSnapshotId>, end: u64) -> FromSnapshot {
+        match self.snapshot {
+            Some(id) => FromSnapshot::Read(id),
+            None if end > CHUNK_ROWS => FromSnapshot::Make { replaces: last },
+            None => FromSnapshot::No,
+        }
+    }
+
     /// Caches a chunk, or its `first_page`, and drops the chunk used least
     /// recently when the cache holds more than [`CACHE_ROWS`]. A chunk is
     /// asked for only when the cache lacks it or holds it short, so one that
@@ -687,6 +743,7 @@ pub(crate) mod tests {
             metadata_pending: false,
             sums: None,
             rest_follows: false,
+            made: None,
         }
     }
 
@@ -725,22 +782,40 @@ pub(crate) mod tests {
         assert_eq!(results.next_chunk(far..far + 40, Generation(3)), None);
     }
 
-    /// The daemon's index changes between two chunks, so a later reply's
-    /// total is the list's new count, which stops at the list's limit.
+    /// A search makes no result snapshot, which sorts every match, until
+    /// the list needs rows past its first chunk. The result snapshot's rows
+    /// are of a later moment than the search's, so the chunks cached before
+    /// are dropped and every row is read from it from then on, and the
+    /// list's next one replaces it, so the service drops it at once.
     #[test]
-    fn a_changed_total_changes_the_count_which_stops_at_the_limit() {
-        let mut results = showing(3 * CHUNK_ROWS);
-        let asked = results.next_chunk(CHUNK_ROWS..CHUNK_ROWS + 40, Generation(2));
-        let start = asked.expect("the rows are not cached").start;
-        let accepted = results.accept(Generation(2), chunk(start, 1_000, 200_000));
+    fn rows_past_the_first_chunk_come_from_a_result_snapshot() {
+        let mut results = showing(200_000);
+        let id = ResultSnapshotId(7);
+        let asked = results.next_chunk(150_000..150_040, Generation(2));
+        let asked = asked.expect("the rows are not cached");
+        assert_eq!(asked.snapshot, FromSnapshot::Make { replaces: None });
+        let made = Chunk {
+            made: Some(id),
+            ..chunk(asked.start, CHUNK_ROWS, 200_000)
+        };
         assert_eq!(
-            accepted,
+            results.accept(Generation(2), made),
             RowsChange::Rows {
-                rows: start..start + 1_000,
-                count: LIST_LIMIT
+                rows: 0..200_000,
+                count: 200_000
             }
         );
-        assert_eq!(showing(LIST_LIMIT + 1).count(), LIST_LIMIT);
+        assert!(results.row(0).is_none(), "the search's chunk is dropped");
+        let asked = results.next_chunk(0..40, Generation(3));
+        assert_eq!(asked.map(|a| a.snapshot), Some(FromSnapshot::Read(id)));
+
+        results.start_search(Generation(4), search(), SortSpec::default());
+        results.accept(Generation(4), chunk(0, CHUNK_ROWS, 200_000));
+        let asked = results.next_chunk(150_000..150_040, Generation(5));
+        assert_eq!(
+            asked.map(|a| a.snapshot),
+            Some(FromSnapshot::Make { replaces: Some(id) })
+        );
     }
 
     /// A chunk that comes back short, because the service left out a row
@@ -819,7 +894,7 @@ pub(crate) mod tests {
     /// the person looks at.
     #[test]
     fn the_cache_drops_the_chunk_used_least_recently() {
-        let mut results = showing(LIST_LIMIT);
+        let mut results = showing(100_000);
         let cached = CACHE_ROWS / CHUNK_ROWS;
         for n in 1..=cached {
             let start = n * CHUNK_ROWS;
@@ -827,7 +902,7 @@ pub(crate) mod tests {
             results.next_chunk(0..10, Generation(0));
             let asked = results.next_chunk(start..start + 10, Generation(n + 1));
             assert_eq!(asked.map(|a| a.start), Some(start));
-            results.accept(Generation(n + 1), chunk(start, CHUNK_ROWS, LIST_LIMIT));
+            results.accept(Generation(n + 1), chunk(start, CHUNK_ROWS, 100_000));
         }
         assert!(results.row(0).is_some(), "the chunk in view stays");
         assert!(

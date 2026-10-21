@@ -1,50 +1,13 @@
-# Plan: the window reads result snapshots
+# Plan: what is left of the result snapshot
 
-A result snapshot is the list of one search's matches, in result order, that
-gozlerd keeps after it answers, so the window reads any rows of that list
-later without searching again. gozlerd and the protocol keep and serve them
-(DESIGN.md: Result snapshots); this plan holds what is left.
+gozlerd keeps result snapshots and the window reads its rows past the first
+chunk from them (DESIGN.md: Result snapshots, Rows on demand); #118 built
+them on 2026-10-21. What is left:
 
-## Schedule
-
-**Scheduled.** The owner lifted the deferral on 2026-10-21 and asked for the
-result snapshot to be built. `gozler-core`, protocol 11 and gozlerd were
-built first (#118). What is left:
-
-- the window's changes below;
 - the visibility filter of each read, which the [visibility
   plan](visibility-plan.md) adds with its filtered pages ("Who sees what"
   there), because until then every user may read every name;
-- the costs that "Not measured" lists.
-
-## What changes in gozler-ui
-
-[The design](../DESIGN.md#how-normal-changes-land) lists these changes. The
-first chunk of a search is asked for as today; the window asks for a result
-snapshot only when it first needs rows outside that chunk (a scroll, `End`,
-or a selection that reaches uncached rows), because search as you type sends
-a search 150 ms after each keystroke, and a full sort for each keystroke
-would multiply the daemon's work on the owner's 15 W laptop.
-
-1. **A new `Ask`** that makes a result snapshot of the shown search and
-   carries the chunk to read, and a chunk or selection read from it. When
-   the result snapshot arrives, the window drops the chunks it cached
-   before, because they are from an earlier moment (window rule 10).
-2. **The list reaches every match.** `LIST_LIMIT` goes, and so does state
-   `S4`'s text "Showing the first 100,000 of N results".
-3. **A gone row** shows that the file no longer exists, and the selection
-   leaves it out. This is a new state in `DESIGN.md`'s "States".
-4. **A gone result snapshot** makes the window run the search again, as `F5`
-   does.
-5. **The selection needs its own limit.** Today the list's limit bounds it.
-   With every row reachable, Select all on 3 million rows would hold about
-   600 MB of files (20 MB for each 100,000), which breaks the memory budget.
-   So the selection keeps 100,000 rows as its own limit: the window reads
-   `LVM_GETSELECTEDCOUNT` first, and above the limit the commands that act
-   on the selection are disabled and the status bar says why. The rule
-   "No action refuses" in `DESIGN.md`'s "The selection" changes with it.
-
-Export, the totals, a folder's size and status do not change.
+- the costs below, which no bench has measured.
 
 ## Not measured
 

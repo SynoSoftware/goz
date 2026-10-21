@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use gozler_core::include::IncludeSettings;
 use gozler_core::proto::{
     DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PROTO_VERSION, ProtoError, QueryResults,
-    QueryTotals, Request, Response, SERVICE_NAME, SearchRequest, decode_response_frame,
-    encode_request,
+    QueryTotals, Request, Response, ResultSnapshotId, SERVICE_NAME, SearchRequest,
+    decode_response_frame, encode_request,
 };
 use gozler_core::query::ResultNames;
 use gozler_winfs::ServiceState;
@@ -193,11 +193,30 @@ impl Client {
     pub fn query<E: From<ClientError>>(
         &mut self,
         request: SearchRequest,
+        page: impl FnMut(QueryResults) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.rows(Request::Search(request), |_| {}, page)
+    }
+
+    /// Sends `request`, whose reply is results pages, and hands them to
+    /// `page` as [`Self::query`] does. A search for a result snapshot is
+    /// answered first with its id, which goes to `made`.
+    ///
+    /// Fails with [`ClientError::Refused`] when the daemon refuses the
+    /// request, with [`ProtoError::ResultSnapshotGone`] for a result snapshot
+    /// it no longer keeps.
+    ///
+    /// [`ProtoError::ResultSnapshotGone`]: gozler_core::proto::ProtoError::ResultSnapshotGone
+    pub fn rows<E: From<ClientError>>(
+        &mut self,
+        request: Request,
+        mut made: impl FnMut(ResultSnapshotId),
         mut page: impl FnMut(QueryResults) -> Result<(), E>,
     ) -> Result<(), E> {
-        self.send(&Request::Search(request))?;
+        self.send(&request)?;
         loop {
             match self.next_response()? {
+                Response::ResultSnapshot { id, .. } => made(id),
                 Response::Results(results) => {
                     let more = results.more;
                     page(results)?;

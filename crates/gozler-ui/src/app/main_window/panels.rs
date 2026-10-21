@@ -22,6 +22,7 @@ use crate::core::panel::{
     self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels, Place,
     ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
 };
+use crate::core::selection::SELECTION_LIMIT;
 use crate::core::settings::Mode;
 use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListView};
 use crate::win::dialog::DialogEnd;
@@ -1465,10 +1466,17 @@ impl MainWindow {
             list.select(0, false);
             self.panel_changed[side.index()].set(ListChanged::Nothing);
         }
+        let searching = self.model.borrow().panels().search(side).is_some();
+        let count = list.selected_count();
+        if searching && count > SELECTION_LIMIT {
+            let accepted = (self.model.borrow_mut()).select_too_many(List::Panel(side), count);
+            self.apply(list.hwnd().parent(), accepted);
+            self.show_panel(side);
+            return;
+        }
         // Each read sends a message per selected row, so it runs again only
         // when Ctrl+A or a drag also selected a search panel's taken rows.
         let mut selected = list.selected();
-        let searching = self.model.borrow().panels().search(side).is_some();
         if searching && self.deselect_taken(List::Panel(side), &selected) {
             self.panel_changed[side.index()].set(ListChanged::Nothing);
             selected = list.selected();

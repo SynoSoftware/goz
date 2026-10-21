@@ -17,6 +17,11 @@ pub(crate) const OPEN_LIMIT: usize = 15;
 /// starts, and Edit > Copy has no limit (DESIGN.md: Dragging).
 pub(crate) const DRAG_LIMIT: usize = 1_000;
 
+/// The most rows a selection holds. A list reaches every match, and Select
+/// all would hold about 20 MB of files for each 100,000 rows (DESIGN.md:
+/// The selection).
+pub(crate) const SELECTION_LIMIT: u64 = 100_000;
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum Selection {
     None,
@@ -35,6 +40,9 @@ pub(crate) enum Selection {
         folder: ResultItem,
         contents: FolderContents,
     },
+    /// More rows than [`SELECTION_LIMIT`] are selected, this many, so no
+    /// command acts on them and none is read.
+    TooMany(u64),
 }
 
 /// What the inspector knows of the contents of the one selected folder.
@@ -52,7 +60,7 @@ impl Selection {
         match self {
             Selection::Files(files) => Some(files),
             Selection::Folder { folder, .. } => Some(std::slice::from_ref(folder)),
-            Selection::None | Selection::Reading { .. } => None,
+            Selection::None | Selection::Reading { .. } | Selection::TooMany(_) => None,
         }
     }
 
@@ -67,6 +75,7 @@ impl Selection {
             } => Some(*generation),
             Selection::None
             | Selection::Files(_)
+            | Selection::TooMany(_)
             | Selection::Folder {
                 contents: FolderContents::Counted(_),
                 ..

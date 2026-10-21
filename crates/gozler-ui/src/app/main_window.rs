@@ -52,7 +52,7 @@ use crate::core::query::{
     date_items, size_items,
 };
 use crate::core::results::{Fix, ListButton};
-use crate::core::selection::{DRAG_LIMIT, wide_path};
+use crate::core::selection::{DRAG_LIMIT, SELECTION_LIMIT, wide_path};
 use crate::core::settings::{Mode, SavedColumn, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
@@ -2845,6 +2845,8 @@ impl MainWindow {
                     self.show_panel(side);
                 }
                 self.update_status();
+                // A result snapshot the read made emptied the cache.
+                self.fetch_visible(list);
             }
             Change::ExportFailed { path, error } => {
                 self.update_status();
@@ -3324,11 +3326,16 @@ impl MainWindow {
         if !self.selection_pending.replace(false) {
             return;
         }
-        let positions = self.created().controls.list.selected();
-        let accepted = self
-            .model
-            .borrow_mut()
-            .set_selection(List::Search, positions);
+        let list = self.created().controls.list;
+        let count = list.selected_count();
+        let accepted = if count > SELECTION_LIMIT {
+            self.model.borrow_mut().select_too_many(List::Search, count)
+        } else {
+            let positions = list.selected();
+            self.model
+                .borrow_mut()
+                .set_selection(List::Search, positions)
+        };
         self.apply(hwnd, accepted);
     }
 
@@ -3416,8 +3423,9 @@ impl MainWindow {
                             row,
                         )
                     }),
+                    // A gone row names no file, so it has no icon.
                     crate::core::text::path_part(column, &row.path)
-                        .filter(|_| column == Column::Name)
+                        .filter(|_| column == Column::Name && !row.is_gone())
                         .map(|name| (row.path[name].to_owned(), row.is_dir)),
                 ),
                 _ => (None, None),

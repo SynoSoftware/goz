@@ -501,6 +501,13 @@ pub(crate) fn cell(
     column: Column,
     row: &ResultItem,
 ) -> String {
+    if row.is_gone() {
+        // A result snapshot's row whose file is gone has no other value.
+        return match column {
+            Column::Name => strings.text("cell.gone").to_owned(),
+            _ => String::new(),
+        };
+    }
     let name = name_of(&row.path);
     match column {
         Column::Name | Column::Path => row.path

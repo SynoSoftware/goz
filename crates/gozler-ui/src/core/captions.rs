@@ -31,9 +31,9 @@ use super::query::{
     ATTRIBUTES, AttributeChoice, DateModified, DateRange, Day, Kind, LocationItem, MatchMode,
     RangeItem, SizeFilter, SizeRange, SizeUnit, SizeWord, date_items, size_items,
 };
-use super::results::{Fix, LIST_LIMIT, ListButton, ListMessage, Shown};
+use super::results::{Fix, ListButton, ListMessage, Shown};
 use super::search_list::SearchList;
-use super::selection::{FolderContents, Selection, Sums};
+use super::selection::{FolderContents, SELECTION_LIMIT, Selection, Sums};
 use super::settings::{Mode, SettingsPage};
 use super::text::{self, Numbers, SizeFormat, Strings};
 use gozler_client::NotRunning;
@@ -1502,6 +1502,10 @@ impl InspectorCaptions {
                 },
                 Shown::Nothing | Shown::Message(_) => InspectorCaptions::default(),
             },
+            Selection::TooMany(count) => InspectorCaptions {
+                heading: too_many(strings, numbers, *count),
+                ..InspectorCaptions::default()
+            },
             Selection::Reading { .. } => {
                 let reading = label("status.reading");
                 InspectorCaptions {
@@ -1766,8 +1770,8 @@ fn fix_widest(strings: &Strings, numbers: &dyn Numbers, sizes: &[u64]) -> [Vec<S
 }
 
 fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
-    let limit = numbers.integer(LIST_LIMIT);
-    let showing = strings.format("status.showing", &[&limit, &numbers.integer(WIDEST_TOTAL)]);
+    let limit = numbers.integer(SELECTION_LIMIT);
+    let showing = strings.count("status.results", WIDEST_TOTAL, numbers, &[]);
     // Which size is widest depends on the font and the language, so every
     // unit's widest forms are measured: 1,023 bytes, then a three-digit size
     // with two, one and no decimals in each unit.
@@ -1787,6 +1791,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
         })
         .collect();
     selected.push(strings.format("status.selected_only", &[&limit]));
+    selected.push(too_many(strings, numbers, WIDEST_TOTAL));
     selected.push(strings.text("status.reading").to_owned());
     let results = [
         strings.format("status.filtered", &[&showing]),
@@ -1968,15 +1973,7 @@ pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
     match results.shown() {
         Shown::Rows(_) => {
-            let total = results.total();
-            let count = if total > LIST_LIMIT {
-                strings.format(
-                    "status.showing",
-                    &[&numbers.integer(LIST_LIMIT), &numbers.integer(total)],
-                )
-            } else {
-                strings.count("status.results", total, numbers, &[])
-            };
+            let count = strings.count("status.results", results.total(), numbers, &[]);
             if model.filters().is_set() && !model.panes().filters {
                 strings.format("status.filtered", &[&count])
             } else {
@@ -1994,6 +1991,7 @@ pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     match model.search_list().selection() {
         Selection::None => String::new(),
         Selection::Reading { .. } => strings.text("status.reading").to_owned(),
+        Selection::TooMany(count) => too_many(strings, numbers, *count),
         Selection::Files(_) | Selection::Folder { .. } => {
             let sums = Sums::of(model.search_list().selection().files().unwrap_or_default());
             let count = numbers.integer(sums.entries());
@@ -2008,6 +2006,14 @@ pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
             }
         }
     }
+}
+
+/// The status of a selection of `count` rows, more than a command acts on.
+fn too_many(strings: &Strings, numbers: &dyn Numbers, count: u64) -> String {
+    strings.format(
+        "status.too_many",
+        &[&numbers.integer(count), &numbers.integer(SELECTION_LIMIT)],
+    )
 }
 
 /// The export's progress, or the last export's result.
@@ -2439,6 +2445,7 @@ fn search_counts(
             LookIn::AllDrives => strings.count("panel.results_everywhere", total, numbers, &[]),
         },
         Selection::None | Selection::Reading { .. } => selected(panel.selected_rows()),
+        Selection::TooMany(count) => too_many(strings, numbers, *count),
         Selection::Files(_) | Selection::Folder { .. } => {
             let files = search.list.selection().files().unwrap_or_default();
             let size = (search.list.chosen_bytes())

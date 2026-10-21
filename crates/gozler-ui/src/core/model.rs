@@ -8,8 +8,8 @@
 //! necessary.
 
 use super::fetch::{
-    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, List, Local, Outcome,
-    Programs, Purpose, WriteFailure, inside,
+    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, FromSnapshot, Generation, List, Local,
+    Outcome, Programs, Purpose, WriteFailure, inside,
 };
 use super::file_operations::{self, Failure, StatusOperation};
 use super::fixer::{FixEvent, FixWork, Fixer};
@@ -22,7 +22,7 @@ use super::panel::{LookIn, PanelFollow, Panels, Side, TakenRows, View, drive_roo
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
 use super::search_list::{SearchList, is_taken};
-use super::selection::{FolderContents, Selection};
+use super::selection::{FolderContents, SELECTION_LIMIT, Selection};
 use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
 use super::text::{self, LanguageChoice, Numbers, Strings};
 use super::update;
@@ -795,6 +795,7 @@ impl Model {
                 },
                 start: 0,
                 len: PROGRAM_ROWS,
+                snapshot: FromSnapshot::No,
             }),
         }
     }
@@ -1339,8 +1340,16 @@ impl Model {
     /// The positions `list` says are selected, sorted and apart, read once
     /// per user action. When the cache holds every one, the selection is
     /// those rows, the files the person sees; otherwise it is read
-    /// (DESIGN.md: The selection).
+    /// (DESIGN.md: The selection). More than [`SELECTION_LIMIT`] rows are
+    /// not read, and no command acts on them.
     pub(crate) fn set_selection(&mut self, list: List, positions: Vec<Range<u64>>) -> Accepted {
+        let count: u64 = positions
+            .iter()
+            .map(|r| r.end.saturating_sub(r.start))
+            .sum();
+        if count > SELECTION_LIMIT {
+            return self.select_too_many(list, count);
+        }
         let Some(shown) = self.list_mut(list) else {
             return Accepted::only(Change::Nothing);
         };
@@ -1372,6 +1381,22 @@ impl Model {
         }
     }
 
+    /// `count` rows of `list` are selected, more than [`SELECTION_LIMIT`],
+    /// which the window counts before it reads their positions, because
+    /// reading a scattered selection of millions of rows takes seconds.
+    pub(crate) fn select_too_many(&mut self, list: List, count: u64) -> Accepted {
+        let Some(shown) = self.list_mut(list) else {
+            return Accepted::only(Change::Nothing);
+        };
+        let older = shown.selection.asked();
+        shown.selection = Selection::TooMany(count);
+        shown.chosen_bytes = None;
+        Accepted {
+            change: Change::Selection(list),
+            then: older.map(|_| Then::Cancel(Purpose::Selection(list))),
+        }
+    }
+
     /// Selects `files` of `list`, which are read. In Search's list, one
     /// folder alone also asks for its contents, which the inspector shows
     /// (DESIGN.md: Inspector pane); a search panel adds up the selection's
@@ -1379,7 +1404,8 @@ impl Model {
     fn select(&mut self, list: List, mut files: Vec<ResultItem>) -> Option<Then> {
         let taken = Arc::clone(self.panels.taken());
         let shown = self.list_mut(list)?;
-        files.retain(|file| !is_taken(&taken, &shown.kept, file));
+        // A result snapshot's row whose file is gone holds no file.
+        files.retain(|file| !file.is_gone() && !is_taken(&taken, &shown.kept, file));
         if files.is_empty() {
             shown.selection = Selection::None;
             shown.chosen_bytes = None;
@@ -1849,8 +1875,22 @@ impl Model {
                 };
                 Accepted { change, then }
             }
+            Outcome::ResultSnapshotGone => self.snapshot_gone(list),
             Outcome::Failed(failure) => self.show_failure(list, failure),
             other => unreachable!("a results request's reply is rows or a failure: {other:?}"),
+        }
+    }
+
+    /// The service no longer keeps the result snapshot that `list` reads,
+    /// so the list searches again, as `F5` does.
+    fn snapshot_gone(&mut self, list: List) -> Accepted {
+        let Some(shown) = self.list_mut(list) else {
+            return Accepted::only(Change::Nothing);
+        };
+        shown.results.forget_snapshot();
+        Accepted {
+            change: Change::Nothing,
+            then: Some(Then::SearchAgain(vec![list])),
         }
     }
 
@@ -1980,7 +2020,16 @@ impl Model {
                         (false, _) => cached.push((position, row)),
                     }
                 }
+                let adopted = reply
+                    .made
+                    .is_some_and(|id| shown.results.adopt_snapshot(id));
                 let rows = shown.results.replace_cached(&reply.cached, cached);
+                // The rows cached before are gone, so every row draws again.
+                let rows = if adopted {
+                    0..shown.results.count()
+                } else {
+                    rows
+                };
                 let then = if files.is_empty() {
                     None
                 } else {
@@ -1998,6 +2047,7 @@ impl Model {
                 };
                 Accepted::only(Change::FolderCounted)
             }
+            (_, Outcome::ResultSnapshotGone) => self.snapshot_gone(list),
             (_, Outcome::Failed(failure)) if !shown.results.searching() => {
                 self.show_failure(list, failure)
             }
@@ -2885,6 +2935,7 @@ pub(crate) mod tests {
             outcome: Outcome::Selection(SelectionRows {
                 rows,
                 cached: ask.cached.clone(),
+                made: None,
             }),
         }
     }
@@ -2921,6 +2972,70 @@ pub(crate) mod tests {
         assert_eq!(paths(&model), [r"D:\row0", r"D:\row40000"]);
         let shown = model.search_list.results.row(5).map(|r| r.path.as_str());
         assert_eq!(shown, Some(r"D:\row5"), "the cached rows are of its moment");
+    }
+
+    /// A list reaches every match, so Select all over millions of rows would
+    /// read about 20 MB of files for each 100,000; past the limit the
+    /// selection is not read, and no command acts on it.
+    #[test]
+    fn a_selection_past_the_limit_is_not_read() {
+        let mut model = showing(200_000);
+        let accepted = model.set_selection(List::Search, vec![0..150_000]);
+        assert_eq!(accepted, Accepted::only(Change::Selection(List::Search)));
+        assert_eq!(model.read_selection(List::Search), None);
+        assert_eq!(model.search_list().selection().files(), None);
+        assert_eq!(
+            captions::selection_status(&model, &English),
+            "150,000 selected · Select up to 100,000 to use a command"
+        );
+    }
+
+    /// A selection that reaches past the first chunk makes the list's
+    /// result snapshot, whose rows replace the cache, and a row whose file
+    /// is gone is no file to act on. Once the service drops the result
+    /// snapshot, the list searches again, as F5 does.
+    #[test]
+    fn a_selection_read_makes_the_result_snapshot_that_rows_are_read_from() {
+        use gozler_core::proto::{ResultItem, ResultSnapshotId};
+        let mut model = showing(200_000);
+        model.set_selection(List::Search, vec![150_000..150_002]);
+        let fetch = model
+            .read_selection(List::Search)
+            .expect("the selection is read");
+        let Ask::Selection(_, ask) = &fetch.ask else {
+            panic!("a selection fetch")
+        };
+        assert_eq!(ask.span.snapshot, FromSnapshot::Make { replaces: None });
+        let id = ResultSnapshotId(9);
+        let mut reply = selection_reply(&fetch, "D:");
+        if let Outcome::Selection(rows) = &mut reply.outcome {
+            rows.made = Some(id);
+            rows.rows.retain(|(p, _)| *p >= 150_000);
+            rows.rows[1].1 = ResultItem::gone();
+        }
+        assert_eq!(
+            model.accept(reply).change,
+            Change::SelectionRead {
+                list: List::Search,
+                rows: 0..200_000
+            }
+        );
+        assert_eq!(paths(&model), [r"D:\row150000"]);
+
+        let fetch = (model.rows_needed(List::Search, 0..40)).expect("the cache was dropped");
+        let Ask::Rows(_, ask) = &fetch.ask else {
+            panic!("a rows fetch")
+        };
+        assert_eq!(ask.snapshot, FromSnapshot::Read(id));
+        let gone = Fetched {
+            purpose: Purpose::Results(List::Search),
+            generation: fetch.generation,
+            outcome: Outcome::ResultSnapshotGone,
+        };
+        assert_eq!(
+            model.accept(gone).then,
+            Some(Then::SearchAgain(vec![List::Search]))
+        );
     }
 
     /// T6: a reply for a selection the person has changed since names other
