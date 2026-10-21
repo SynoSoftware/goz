@@ -81,29 +81,10 @@ the main window's and the Viewer's placement; the active panel; a search
 panel's sort; the Viewer's Wrap; the placement saved before the first show;
 a slow folder saved as the old one.
 
-## Documents
+## Not yet reviewed
 
-- DESIGN.md window rule 4 calls the generation check "the only staleness
-  check", but the panels have three: `PanelThreads::is_reading`, the
-  senders' `Stop`, and `ReadChange::Stale`.
-- DESIGN.md "How normal changes land": a new column's arm is in
-  `text::cell`, not the `LVN_GETDISPINFO` handler.
-
-## Smaller findings
-
-- `InspectorCaptions` uses stand-ins for states: an `Option` for "exactly
-  one entry", an `Option` for "the row has an age", and an empty `String`
-  for "no note". Give the inspector's state one enum: nothing, reading, one
-  entry, several.
-- The filter pane checks for an echo twice: `on_kind_selected`, and
-  `set_filters` returning `Nothing`. The Match list repeats the pattern
-  (`match_mode_index`, `MatchMode::ALL.get`).
-- The drop-down height factors × 10 (Match, at most 5 items) and × 12 (Size,
-  at most 10; Date at most 8) each fit their longest list. That reason is
-  written nowhere.
-- Not yet reviewed in the built code: the new `landing` and `stays_in_place`
-  against the old `drag_to` "unchanged" test, and the File operations
-  window's `show_hint`.
+The new `landing` and `stays_in_place` against the old `drag_to`
+"unchanged" test, and the File operations window's `show_hint`.
 
 ## Decided, nothing to build
 

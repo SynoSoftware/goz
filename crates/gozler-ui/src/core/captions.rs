@@ -1457,16 +1457,51 @@ pub(crate) const MODIFIED_ROW: usize = 2;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct InspectorCaptions {
     pub(crate) heading: String,
-    /// The one selected entry's name and whether it is a folder, whose icon
-    /// the heading shows.
-    pub(crate) icon: Option<(String, bool)>,
     /// Each field's label and value, in the pane's order.
     pub(crate) fields: Vec<(String, String)>,
-    /// The one selected entry's modification time, a FILETIME, whose
-    /// [`age`] the window shows after it and keeps current.
-    pub(crate) modified: Option<i64>,
-    /// The gray hint under the heading, or empty.
-    pub(crate) note: String,
+    pub(crate) inspected: Inspected,
+}
+
+/// What the inspector shows: the parts of the pane that only some
+/// selections have.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Inspected {
+    /// No results show.
+    #[default]
+    Nothing,
+    /// Results show and none is selected; the gray note under the heading
+    /// says how to see an entry's details.
+    NothingSelected { note: String },
+    /// The selection is being read.
+    Reading,
+    /// One entry: its name and whether it is a folder, whose icon the
+    /// heading shows, and its modification time, a FILETIME, whose [`age`]
+    /// the window shows after it and keeps current.
+    One {
+        name: String,
+        is_folder: bool,
+        modified: Option<i64>,
+    },
+    /// Several entries, or more than the selection reads.
+    Several,
+}
+
+impl InspectorCaptions {
+    /// The gray hint under the heading.
+    pub(crate) fn note(&self) -> Option<&str> {
+        match &self.inspected {
+            Inspected::NothingSelected { note } => Some(note),
+            _ => None,
+        }
+    }
+
+    /// The one selected entry's modification time.
+    pub(crate) fn modified(&self) -> Option<i64> {
+        match self.inspected {
+            Inspected::One { modified, .. } => modified,
+            _ => None,
+        }
+    }
 }
 
 /// A part of a value, after its icon if it has one, such as a status bar
@@ -1497,21 +1532,24 @@ impl InspectorCaptions {
                         numbers,
                         &[],
                     ),
-                    note: label("inspector.nothing_selected"),
-                    ..InspectorCaptions::default()
+                    fields: Vec::new(),
+                    inspected: Inspected::NothingSelected {
+                        note: label("inspector.nothing_selected"),
+                    },
                 },
                 Shown::Nothing | Shown::Message(_) => InspectorCaptions::default(),
             },
             Selection::TooMany(count) => InspectorCaptions {
                 heading: too_many(strings, numbers, *count),
-                ..InspectorCaptions::default()
+                fields: Vec::new(),
+                inspected: Inspected::Several,
             },
             Selection::Reading { .. } => {
                 let reading = label("status.reading");
                 InspectorCaptions {
                     heading: reading.clone(),
                     fields: vec![(label("inspector.total_size"), reading)],
-                    ..InspectorCaptions::default()
+                    inspected: Inspected::Reading,
                 }
             }
             Selection::Files(files) => match files.as_slice() {
@@ -1569,14 +1607,16 @@ fn entry(
     ];
     InspectorCaptions {
         heading: name.to_owned(),
-        icon: Some((name.to_owned(), entry.is_dir)),
         fields: FIELD_LABELS
             .iter()
             .zip(values)
             .map(|(key, value)| (strings.text(key).to_owned(), value))
             .collect(),
-        modified: entry.mtime_ft,
-        note: String::new(),
+        inspected: Inspected::One {
+            name: name.to_owned(),
+            is_folder: entry.is_dir,
+            modified: entry.mtime_ft,
+        },
     }
 }
 
@@ -1626,7 +1666,7 @@ fn several(strings: &Strings, numbers: &dyn Numbers, sums: Sums) -> InspectorCap
     InspectorCaptions {
         heading,
         fields: vec![(strings.text("inspector.total_size").to_owned(), total)],
-        ..InspectorCaptions::default()
+        inspected: Inspected::Several,
     }
 }
 

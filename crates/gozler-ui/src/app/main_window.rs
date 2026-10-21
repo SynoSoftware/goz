@@ -15,8 +15,8 @@ use super::settings::SettingsDialog;
 use super::status_bar::StatusBar;
 use super::viewer::Viewers;
 use crate::core::captions::{
-    self, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions, InspectorCaptions, JobCaption,
-    JobProgress, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart,
+    self, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions, Inspected, InspectorCaptions,
+    JobCaption, JobProgress, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart,
     WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
@@ -1370,18 +1370,23 @@ impl MainWindow {
             label.hwnd().set_text(label_text);
             value.hwnd().set_text(value_text);
         }
-        inspector.note.hwnd().set_text(&captions.note);
-        if captions.modified.is_some() {
+        inspector
+            .note
+            .hwnd()
+            .set_text(captions.note().unwrap_or(""));
+        if captions.modified().is_some() {
             hwnd.set_timer(timer::AGE, AGE_REFRESH_MS);
         } else {
             hwnd.kill_timer(timer::AGE);
         }
         // The shell call can dispatch messages, so no borrow is held
         // (DESIGN.md: window rule 1).
-        let icon = captions
-            .icon
-            .as_ref()
-            .map(|(name, is_folder)| self.icons.index(name, *is_folder));
+        let icon = match &captions.inspected {
+            Inspected::One {
+                name, is_folder, ..
+            } => Some(self.icons.index(name, *is_folder)),
+            _ => None,
+        };
         let icon_changed = self.inspector_shown.borrow().1 != icon;
         self.inspector_shown.replace((captions, icon));
         self.show_age();
@@ -1396,7 +1401,7 @@ impl MainWindow {
     /// Writes how long ago the shown entry was modified, from the current
     /// time, so a minute's refresh keeps it true (DESIGN.md: Inspector pane).
     fn show_age(&self) {
-        let age = self.inspector_shown.borrow().0.modified.map(|modified| {
+        let age = self.inspector_shown.borrow().0.modified().map(|modified| {
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map_or(0, |since| {
@@ -1424,8 +1429,8 @@ impl MainWindow {
             let rows = room.min(shown.0.fields.len());
             (
                 rows,
-                placed.is_some_and(|i| i.note.is_some()) && !shown.0.note.is_empty(),
-                MODIFIED_ROW < rows && shown.0.modified.is_some(),
+                placed.is_some_and(|i| i.note.is_some()) && shown.0.note().is_some(),
+                MODIFIED_ROW < rows && shown.0.modified().is_some(),
             )
         };
         let inspector = &self.created().controls.inspector;
@@ -1457,7 +1462,7 @@ impl MainWindow {
         };
         let shown = self.inspector_shown.borrow();
         // The copy icons copy one entry's name and folder.
-        let one_entry = shown.0.icon.is_some();
+        let one_entry = matches!(shown.0.inspected, Inspected::One { .. });
         let fonts = created.fonts.borrow();
         let meter = TextMeter::new(&fonts.ui);
         let focused = Hwnd::focused();
@@ -1483,7 +1488,7 @@ impl MainWindow {
                 rect = fitted;
                 moves.push((inspector.copy_folder.hwnd(), icon));
                 folder_shown = true;
-            } else if index == MODIFIED_ROW && shown.0.modified.is_some() {
+            } else if index == MODIFIED_ROW && shown.0.modified().is_some() {
                 let (fitted, age) = placed.age_beside(
                     rect,
                     meter.plain_width(text) + margins,
@@ -1835,7 +1840,8 @@ impl MainWindow {
                 placed.search,
                 placed.search_tools,
                 placed.match_label,
-                // A drop-down list's height includes its open list.
+                // A drop-down list's height includes its open list: ten
+                // times the box's height fits Match's five modes.
                 Rect {
                     height: Px(placed.match_mode.height.0 * 10),
                     ..placed.match_mode
@@ -2133,7 +2139,9 @@ impl MainWindow {
             .placed(filters)
             .into_iter()
             .map(|(control, rect, drop_down)| {
-                // A drop-down list's height includes its open list.
+                // A drop-down list's height includes its open list: twelve
+                // times the box's height fits Size's ten items, the longest
+                // list (Date has eight).
                 let height = if drop_down {
                     Px(rect.height.0 * 12)
                 } else {
@@ -3144,11 +3152,10 @@ impl MainWindow {
 
     /// The Kind list selected another item. A list view also tells of a
     /// selection that the window made to show the model's kind, which
-    /// changes nothing.
+    /// [`Model::set_filters`] takes as no change.
     fn on_kind_selected(&self, hwnd: Hwnd) {
         let selected = self.created().controls.filters.kind.selected();
-        let kind = selected.and_then(|index| Kind::ALL.get(index).copied());
-        if let Some(kind) = kind.filter(|kind| *kind != self.model.borrow().filters().kind) {
+        if let Some(kind) = selected.and_then(|index| Kind::ALL.get(index).copied()) {
             self.change_filters(hwnd, |f| f.kind = kind);
         }
     }

@@ -1057,8 +1057,13 @@ impl Model {
         SearchBoxEnter::Open
     }
 
-    /// The person changed a match control; the search runs again.
+    /// The person changed a match control; the search runs again. The
+    /// window's own selection of the shown mode in the Match list changes
+    /// nothing.
     pub(crate) fn set_matching(&mut self, matching: Matching) -> Accepted {
+        if matching == self.settings.window.matching {
+            return Accepted::only(Change::Nothing);
+        }
         self.settings.window.matching = matching;
         Accepted {
             change: Change::Choice,
