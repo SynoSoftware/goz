@@ -448,6 +448,21 @@ impl Model {
         self.list(list)?.shown_row(index, self.panels.taken())
     }
 
+    /// The parts of the cell in `column` of Search's row at `index` that
+    /// the search matched, from the cell's start, which the list draws in
+    /// bold (DESIGN.md: Results list). None outside Name and Path, and none
+    /// for a row whose entry a delete or a move took, which draws plain and
+    /// struck through.
+    pub(crate) fn matched_in_cell(&self, index: u64, column: Column) -> Vec<Range<usize>> {
+        let Some(row) = self.shown_row(List::Search, index) else {
+            return Vec::new();
+        };
+        let Some(span) = text::path_part(column, &row.path) else {
+            return Vec::new();
+        };
+        within(&self.search_list.results().matched_parts(row), &span)
+    }
+
     /// The rows of `selected` in `list` whose entries a delete or a move
     /// has taken; none while no operation takes entries.
     pub(crate) fn taken_rows(&self, list: List, selected: &[Range<u64>]) -> Vec<u64> {
@@ -2090,6 +2105,18 @@ impl Model {
     }
 }
 
+/// The parts of `ranges` inside `span`, from `span`'s start.
+fn within(ranges: &[Range<usize>], span: &Range<usize>) -> Vec<Range<usize>> {
+    ranges
+        .iter()
+        .filter_map(|range| {
+            let start = range.start.max(span.start);
+            let end = range.end.min(span.end);
+            (start < end).then(|| start - span.start..end - span.start)
+        })
+        .collect()
+}
+
 /// A column of the results list (DESIGN.md: Results list). Its names are
 /// `ui.json`'s.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2236,6 +2263,41 @@ pub(crate) mod tests {
         let fetch = search(&mut model, "rows");
         model.accept(rows(&fetch, 3));
         assert!(!model.keeps(ours));
+    }
+
+    /// A row whose entry a delete took draws plain and struck through, so a
+    /// fill that measured its matched part in bold would make the column a
+    /// little too wide. It keeps its text, which the list strikes through.
+    #[test]
+    fn a_taken_row_keeps_its_text_without_bold_parts() {
+        let mut model = model();
+        let fetch = search(&mut model, "row");
+        model.accept(rows(&fetch, 3));
+        assert_eq!(model.matched_in_cell(1, Column::Name), [0..3]);
+        let mut taken = Taken::default();
+        taken.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
+        model.set_taken(Arc::new(taken), [None, None]);
+        assert!(model.matched_in_cell(1, Column::Name).is_empty());
+        assert_eq!(model.taken_rows(List::Search, &[1..2]), [1]);
+        let row = model.search_list().results().row(1).expect("a fetched row");
+        assert_eq!(
+            text::cell(
+                model.strings(),
+                &English,
+                text::SizeFormat::Kb,
+                Column::Name,
+                row
+            ),
+            "row1"
+        );
+    }
+
+    /// A matched part that crosses the end of a cell's part of the path is
+    /// cut at it, and one that only touches it is left out.
+    #[test]
+    fn a_cell_keeps_only_the_matched_parts_inside_it() {
+        assert_eq!(within(&[0..4, 5..9], &(3..7)), [0..1, 2..4]);
+        assert!(within(&[0..3, 7..9], &(3..7)).is_empty());
     }
 
     /// The list's message and its buttons' captions.

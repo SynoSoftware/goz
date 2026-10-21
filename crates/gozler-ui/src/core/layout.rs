@@ -7,12 +7,13 @@
 
 use super::captions::{MODIFIED_ROW, MemoryWidest, StatusWidest, WindowCaptions};
 use super::commands::INSPECTOR_BUTTONS;
-use super::model::Column;
 use super::query::Kind;
 use super::settings::Mode;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 use std::ops::{Add, Sub};
+
+pub(crate) mod column_sizing;
 
 /// Device-independent pixels, as the layout is designed; 96 DPI pixels.
 /// `ui.json` saves one as its number.
@@ -76,134 +77,6 @@ pub(crate) fn icon_glyph_height(dpi: Dpi) -> Px {
 /// Between an icon and the text after it.
 pub(crate) fn glyph_gap(dpi: Dpi) -> Px {
     Dip(4).to_px(dpi)
-}
-
-/// The width of `column` on a monitor of `dpi` until a fill gives it one.
-pub(crate) fn column_width(column: Column, dpi: Dpi) -> Px {
-    column.default_width().to_px(dpi)
-}
-
-/// The narrowest a fill makes a column, so its header still shows a few
-/// letters.
-const COLUMN_MIN_WIDTH: Dip = Dip(40);
-
-/// The space a header leaves on each side of its text.
-const HEADER_TEXT_MARGIN: Dip = Dip(6);
-
-/// The width a column needs for its header and the cells a fit measured
-/// (DESIGN.md: Results list).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ColumnFit {
-    pub(crate) width: Px,
-    /// No measured row shows anything in the column, so `width` is its
-    /// header's.
-    pub(crate) empty: bool,
-}
-
-impl ColumnFit {
-    /// The fit of a column whose header text is `header` wide, and whose
-    /// widest measured cell `widest` is wide with its padding, if a measured
-    /// row shows anything in it; never narrower than a fill makes a column.
-    pub(crate) fn new(header: Px, widest: Option<Px>, dpi: Dpi) -> ColumnFit {
-        let margin = HEADER_TEXT_MARGIN.to_px(dpi);
-        let header = header + margin + margin;
-        ColumnFit {
-            width: widest
-                .map_or(header, |cell| cell.max(header))
-                .max(COLUMN_MIN_WIDTH.to_px(dpi)),
-            empty: widest.is_none(),
-        }
-    }
-
-    /// The fit of `column` before any row is read: its first width, as
-    /// though every column had content, so the first fill keeps the
-    /// columns' proportions until the rows arrive.
-    pub(crate) fn first(column: Column, dpi: Dpi) -> ColumnFit {
-        ColumnFit {
-            width: column_width(column, dpi),
-            empty: false,
-        }
-    }
-}
-
-/// The width of a cell whose text is `text` wide, in the column `first`
-/// when it is the list's first, whose text starts `label` after the
-/// column's left edge, past the row's icon: the text with the list's
-/// space on each side.
-pub(crate) fn cell_width(text: Px, label: Px, first: bool, dpi: Dpi) -> Px {
-    let inset = cell_text_inset(first, dpi);
-    label + inset + text + inset
-}
-
-/// The widths that make columns with these `fits` end at `width`, as
-/// TableView fills (DESIGN.md: Results list). Spare width goes to the
-/// columns with content, because an empty column has nothing to show in
-/// more. A shortfall comes from the empty columns first, because cutting a
-/// header hides less than cutting a value, and from the others once the
-/// empty ones are at their narrowest. With no empty column, or only empty
-/// ones, every column scales. When even the narrowest widths do not fit,
-/// the columns run past the edge.
-pub(crate) fn fill_widths(fits: &[ColumnFit], width: Px, dpi: Dpi) -> Vec<Px> {
-    let min = COLUMN_MIN_WIDTH.to_px(dpi);
-    let mut widths: Vec<Px> = fits.iter().map(|fit| fit.width).collect();
-    let (empty, filled): (Vec<usize>, Vec<usize>) = (0..fits.len()).partition(|&i| fits[i].empty);
-    if empty.is_empty() || filled.is_empty() {
-        scale_to(&mut widths, (0..fits.len()).collect(), width, min);
-        return widths;
-    }
-    let shortfall = total(&widths) - width.0;
-    if shortfall <= 0 {
-        scale_to(&mut widths, filled, width, min);
-        return widths;
-    }
-    let slack: i32 = empty.iter().map(|&i| (widths[i] - min).0).sum();
-    scale_to(&mut widths, empty, width, min);
-    if shortfall > slack {
-        scale_to(&mut widths, filled, width, min);
-    }
-    widths
-}
-
-fn total(widths: &[Px]) -> i32 {
-    widths.iter().map(|width| width.0).sum()
-}
-
-/// Scales the columns `scaled` of `widths` by one factor so that all of
-/// `widths` end at `width`, while the others keep theirs. One factor keeps
-/// the fitted proportions, and taking only the missing width keeps a
-/// resize from making a column jump. A column the factor would take below
-/// `min` stays at `min`, and the others share what is left. Rounding down
-/// leaves a few pixels, which go one each to the first scaled columns, so
-/// the columns end exactly at `width`.
-fn scale_to(widths: &mut [Px], mut scaled: Vec<usize>, width: Px, min: Px) {
-    let share = |widths: &[Px], scaled: &[usize]| scaled.iter().map(|&i| widths[i].0).sum::<i32>();
-    let mut room = width.0 - total(widths) + share(widths, &scaled);
-    while !scaled.is_empty() {
-        let factor = f64::from(room.max(0)) / f64::from(share(widths, &scaled).max(1));
-        let scaled_width = |width: Px| f64::from(width.0) * factor;
-        let floored: Vec<usize> = scaled
-            .iter()
-            .copied()
-            .filter(|&i| scaled_width(widths[i]) < f64::from(min.0))
-            .collect();
-        if floored.is_empty() {
-            let mut left = room.max(0);
-            for &i in &scaled {
-                // Rounded down, so it is no wider than `room`.
-                widths[i] = Px(scaled_width(widths[i]) as i32);
-                left -= widths[i].0;
-            }
-            for &i in scaled.iter().take(usize::try_from(left).unwrap_or(0)) {
-                widths[i].0 += 1;
-            }
-            return;
-        }
-        for i in floored {
-            widths[i] = min;
-            room -= min.0;
-            scaled.retain(|&s| s != i);
-        }
-    }
 }
 
 /// Where the list draws a cell's text after the left edge of the cell's
@@ -2050,27 +1923,6 @@ mod tests {
     use super::*;
     use crate::core::model::tests::model;
     use crate::core::text::tests::English;
-
-    /// A shortfall comes from the empty columns while they can give it, and
-    /// the columns with content keep their widths.
-    #[test]
-    fn fill_takes_a_shortfall_from_empty_columns_first() {
-        let dpi = Dpi::new(96).expect("96 is not zero");
-        let fit = |width: i32, empty: bool| ColumnFit {
-            width: Px(width),
-            empty,
-        };
-        let fits = [
-            fit(300, false),
-            fit(400, false),
-            fit(100, true),
-            fit(120, true),
-        ];
-        assert_eq!(
-            fill_widths(&fits, Px(850), dpi),
-            [Px(300), Px(400), Px(69), Px(81)]
-        );
-    }
 
     /// A cut-off total would show a partial sum (DESIGN.md: Status bar), so
     /// a right part after the first shows only while it fits whole, and the

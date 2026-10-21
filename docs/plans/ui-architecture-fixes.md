@@ -8,7 +8,7 @@ plan lists what is still to build.
 
 ## Schedule
 
-**Not scheduled.** The owner decides when. Stages A, B, E, F and G and item C3 are built:
+**Not scheduled.** The owner decides when. Stages A, B, D, E, F and G and item C3 are built:
 
 - A: a wake opens no dialog until every reply and panel event drained with it
   is applied (DESIGN.md: window rule 13); a new or failed search cancels its
@@ -19,6 +19,9 @@ plan lists what is still to build.
   runs once more.
 - C3: an Include edit and closing Settings forget the Include count
   (DESIGN.md: The Include page).
+- D: `core::layout::column_sizing::ColumnSizing` owns Search's column
+  sizing (DESIGN.md: Results list); a taken row has no bold part; the
+  panels' Ext and Size fit 7 letters and 10 digits in KB.
 - F: `run` reads the pending selection of both modes (DESIGN.md: The
   selection).
 - G: a `WH_MSGFILTER` hook gives the File operations window and the Viewers
@@ -74,30 +77,6 @@ the main window's and the Viewer's placement; the active panel; a search
 panel's sort; the Viewer's Wrap; the placement saved before the first show;
 a slow folder saved as the old one.
 
-## D. Column sizing
-
-Commit 8da09ba fixed a window shown again from the notification area that
-kept old column fits. Its fix added a sixth place that must reset Search's
-sizing fields by hand.
-
-1. A core type owns Search's five sizing facts. It takes events (width
-   changed, drag started and ended, DPI changed, rows arrived, column hidden
-   or shown, window shown) and answers with widths, so each reset becomes an
-   event with a test. The panels stay outside it: their widths are fixed
-   fits to sample values, and Name takes the rest.
-2. One core function returns a Search cell's bold ranges, and none for a
-   taken row. `draw_cell` and `fits_of` call it; `fill_cell` does not,
-   because screen readers need only text and an icon. This fixes taken rows
-   being measured with bold parts, which makes a column fill slightly too
-   wide.
-3. The panels' samples are too narrow. "xlsx" cuts "torrent", and
-   99,999,999 KB is one digit short of a 100 GiB folder. Ext fits 7
-   characters, and Size fits a 10-digit KB figure. The widths stay the same
-   in both panels and every folder. Change `fill_panel_columns`' doc comment
-   and DESIGN.md's "A panel" ("fit their content") to say so. A longer
-   extension ends in "…". Check whether the label tip shows it whole for
-   owner-drawn panel rows.
-
 ## C7. Apply's outcome, in core
 
 - `gozler-fileops` exposes `Count::MIN` and `Count::MAX`. The per-processor
@@ -129,9 +108,6 @@ per-processor off clamps the count to the top.
 
 ## Smaller findings
 
-- `win::controls::ReportList::fit_columns` fits and fills a second way, for
-  the File operations failure list. Route it through D's pure fits function,
-  and keep its scroll-bar subtraction or settle it on purpose.
 - `InspectorCaptions` uses stand-ins for states: an `Option` for "exactly
   one entry", an `Option` for "the row has an age", and an empty `String`
   for "no note". Give the inspector's state one enum: nothing, reading, one

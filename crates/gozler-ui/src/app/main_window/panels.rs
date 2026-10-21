@@ -14,7 +14,8 @@ use crate::core::commands::{
 use crate::core::fetch::{List, Purpose};
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
-use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
+use crate::core::layout::column_sizing::{self, ColumnFit};
+use crate::core::layout::{Body, PanelLayout, Px, Rect};
 use crate::core::model::{Column, TakenShown};
 use crate::core::open;
 use crate::core::panel::{
@@ -48,17 +49,18 @@ const SETTLE_MS: u32 = 500;
 const AGAIN_MS: u32 = 2_000;
 
 /// Entries whose Ext, Size and Date modified are about the widest a panel
-/// shows: a common long extension, a size near 100 GB, and a date late in a
-/// year at each hour of a day, because which hour shows two digits and
-/// which day part is wider depend on the time zone and the locale.
+/// shows: an extension of 7 letters, such as "torrent", a size of 10 digits
+/// in KB, as a folder of a few TB shows, and a date late in a year at each
+/// hour of a day, because which hour shows two digits and which day part
+/// is wider depend on the time zone and the locale.
 fn widest() -> impl Iterator<Item = Entry> {
     const HOUR: i64 = 36_000_000_000;
     (0..24).map(|hour| {
-        let name = "x.xlsx".encode_utf16().collect();
+        let name = "x.torrent".encode_utf16().collect();
         Entry::new(
             name,
             0x20,
-            99_999_999 * 1024,
+            9_999_999_999 * 1024,
             134_429_400_000_000_000 + hour * HOUR,
         )
     })
@@ -178,7 +180,7 @@ impl PanelControls {
                 index,
                 &ListColumn {
                     header: "",
-                    width: layout::column_width(column.search_column(), dpi),
+                    width: column_sizing::column_width(column.search_column(), dpi),
                     right_aligned: column.right_aligned(),
                 },
             );
@@ -457,7 +459,7 @@ impl MainWindow {
                         FOLDER_COLUMN,
                         &ListColumn {
                             header: &header[0],
-                            width: layout::column_width(Column::Path, dpi),
+                            width: column_sizing::column_width(Column::Path, dpi),
                             right_aligned: false,
                         },
                     );
@@ -533,9 +535,10 @@ impl MainWindow {
     }
 
     /// Sizes each panel's columns to its list: Ext, Size and Date modified
-    /// fit the widest text they show, in a selected row's font, and Name
-    /// takes the rest, or shares it with a search panel's Folder
-    /// (DESIGN.md: A panel, Search in a panel).
+    /// fit the [`widest`] samples, in a selected row's font, so the widths
+    /// stay the same in both panels and every folder, and Name takes the
+    /// rest, or shares it with a search panel's Folder (DESIGN.md: A panel,
+    /// Search in a panel).
     pub(super) fn fill_panel_columns(&self) {
         let created = self.created();
         let dpi = created.metrics.get().dpi;
@@ -577,9 +580,8 @@ impl MainWindow {
                 .iter()
                 .zip(&headers)
                 .map(|(column, header)| {
-                    let text = column.iter().map(|sample| plain.width(sample)).max();
-                    let cell = layout::cell_width(text.unwrap_or_default(), Px(0), false, dpi);
-                    ColumnFit::new(plain.plain_width(header), Some(cell), dpi).width
+                    let texts = column.iter().map(|sample| plain.width(sample));
+                    ColumnFit::of(plain.plain_width(header), texts, Px(0), false, dpi).width
                 })
                 .collect()
         };
@@ -605,11 +607,8 @@ impl MainWindow {
         let others = (c.columns().iter().enumerate())
             .filter(|(_, column)| !shared(column))
             .fold(Px(0), |sum, (index, _)| sum + c.list.column_width(index));
-        let room = (c.list.hwnd().client_size().width - others).max(Px(layout::column_width(
-            Column::Name,
-            dpi,
-        )
-        .0 / 2));
+        let room = (c.list.hwnd().client_size().width - others)
+            .max(Px(column_sizing::column_width(Column::Name, dpi).0 / 2));
         let (name, folder) = match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
             Some(index) => {
                 let name = Px(room.0 * 13 / 23);

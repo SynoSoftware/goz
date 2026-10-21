@@ -11,7 +11,8 @@ use super::{Hwnd, wide};
 use crate::core::captions::ButtonIcon;
 use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
-use crate::core::layout::{self, ColumnFit, Dpi, Px, Size, glyph_gap, icon_glyph_height};
+use crate::core::layout::column_sizing::{self, ColumnFit};
+use crate::core::layout::{self, Dpi, Px, Size, glyph_gap, icon_glyph_height};
 use crate::core::panel::difference;
 use gozler_core::include::FolderCheck;
 use std::ops::Range;
@@ -940,7 +941,7 @@ impl IconList {
         if count > shown {
             width = width - bar;
         }
-        width - layout::cell_width(Px(0), Px(0), true, dpi)
+        width - column_sizing::cell_width(Px(0), Px(0), true, dpi)
     }
 
     /// The text of the item `index`.
@@ -2273,7 +2274,7 @@ impl ReportList {
 
     /// Fits each column to `headers` and to the cells of `rows`, and fills
     /// the list's width with them, as the results list does
-    /// ([`layout::fill_widths`]). The list's label tips show a cell that is
+    /// ([`column_sizing::fill_widths`]). The list's label tips show a cell that is
     /// still cut off.
     pub(crate) fn fit_columns<R: AsRef<[String]>>(self, headers: &[&str], rows: &[R]) {
         let Ok(font) = Font::of(self.0) else {
@@ -2285,21 +2286,17 @@ impl ReportList {
             .iter()
             .enumerate()
             .map(|(column, header)| {
-                let widest = rows
-                    .iter()
+                let texts = (rows.iter())
                     .filter_map(|row| row.as_ref().get(column))
                     .filter(|text| !text.is_empty())
-                    .map(|text| {
-                        layout::cell_width(meter.plain_width(text), Px(0), column == 0, dpi)
-                    })
-                    .max();
-                ColumnFit::new(meter.plain_width(header), widest, dpi)
+                    .map(|text| meter.plain_width(text));
+                ColumnFit::of(meter.plain_width(header), texts, Px(0), column == 0, dpi)
             })
             .collect();
         // The vertical scroll bar takes its width when the rows fill the
         // list.
         let width = self.0.client_size().width - scroll_bar_width(dpi);
-        for (column, width) in layout::fill_widths(&fits, width, dpi)
+        for (column, width) in column_sizing::fill_widths(&fits, width, dpi)
             .into_iter()
             .enumerate()
         {
@@ -2316,7 +2313,7 @@ impl ReportList {
         };
         let meter = TextMeter::new(&font);
         let width = Px(send(self.0, LVM_GETCOLUMNWIDTH, column, 0) as i32);
-        let room = width - layout::cell_width(Px(0), Px(0), column == 0, self.0.dpi());
+        let room = width - column_sizing::cell_width(Px(0), Px(0), column == 0, self.0.dpi());
         for (index, row) in rows.iter().enumerate() {
             if let Some(path) = row.as_ref().get(column) {
                 let shown = meter.compact_path(path, room);

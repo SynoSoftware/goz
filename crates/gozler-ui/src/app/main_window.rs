@@ -35,8 +35,9 @@ use crate::core::include::{
     IncludeDrive, SummaryRow, connected_drives, connected_volumes, include_drives, preview,
     summary_rows,
 };
+use crate::core::layout::column_sizing::{self, ColumnFit, ColumnSizing};
 use crate::core::layout::{
-    self, Body, CaptionWidths, ColumnFit, ControlSizes, Dpi, FilterLayout, InspectorLayout, Layout,
+    self, Body, CaptionWidths, ControlSizes, Dpi, FilterLayout, InspectorLayout, Layout,
     MessageArea, Px, Rect, ScrollRequest, Size, StatusLayout, ToolHeights,
 };
 use crate::core::model::{
@@ -835,21 +836,7 @@ pub(crate) struct MainWindow {
     /// While the person drags the splitter: the pointer's client `y` and the
     /// inspector's height when the drag started.
     splitter_drag: Cell<Option<(i32, Px)>>,
-    /// The width the list's columns last filled, so a layout that keeps it
-    /// fills nothing.
-    filled_width: Cell<Option<Px>>,
-    /// Whether the person drags the window's border or title bar, between
-    /// `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`.
-    sizing: Cell<bool>,
-    /// The columns' fits during a drag, which each fill of the drag scales,
-    /// so the widths follow the pointer without measuring every time.
-    sizing_fits: RefCell<Option<Vec<ColumnFit>>>,
-    /// The width each column had when the person hid it, at the DPI then,
-    /// which it gets again when shown, for the window's life.
-    hidden_widths: RefCell<Vec<(Column, Px, Dpi)>>,
-    /// Whether the columns have filled the list around rows; until then
-    /// they hold their first widths.
-    filled_around_rows: Cell<bool>,
+    column_sizing: RefCell<ColumnSizing>,
     /// The person's command shortcuts, which Settings replaces; the message
     /// loop translates with the table of the moment.
     accelerators: RefCell<Rc<Accelerators>>,
@@ -995,11 +982,7 @@ impl MainWindow {
             status_memory: RefCell::new(None),
             tool_tips: RefCell::new(Vec::new()),
             splitter_drag: Cell::new(None),
-            filled_width: Cell::new(None),
-            sizing: Cell::new(false),
-            sizing_fits: RefCell::new(None),
-            hidden_widths: RefCell::new(Vec::new()),
-            filled_around_rows: Cell::new(false),
+            column_sizing: RefCell::default(),
             accelerators: RefCell::new(Rc::new(accelerators)),
             tray: RefCell::new(None),
             taskbar_created: win::instance::register_message("TaskbarCreated"),
@@ -1078,7 +1061,7 @@ impl MainWindow {
             let columns: Vec<(Column, Px)> = model
                 .columns()
                 .iter()
-                .map(|c| (*c, layout::column_width(*c, dpi)))
+                .map(|c| (*c, column_sizing::column_width(*c, dpi)))
                 .collect();
             (columns, model.column_order())
         };
@@ -1969,7 +1952,7 @@ impl MainWindow {
             // During a drag of the border only Name follows the width,
             // because fitting the other columns measures their texts, as
             // `fill_on_resize` keeps Search's fits.
-            if self.sizing.get() {
+            if self.column_sizing.borrow().is_dragging() {
                 for side in Side::BOTH {
                     self.fill_name_column(side);
                 }
@@ -1986,50 +1969,32 @@ impl MainWindow {
         hwnd.invalidate();
     }
 
-    /// Fills the list's width with its columns when the width changed: when
-    /// the window shows, is resized, or a pane beside the list shows, hides
-    /// or moves (DESIGN.md: Results list). A drag of the window's border
-    /// fits the columns once and scales those fits at each change, so the
-    /// widths follow the pointer; [`Self::end_sizing`] fits them again at
-    /// the final width.
+    /// Fills the list's width with its columns when the width changed
+    /// ([`ColumnSizing::resized`]).
     fn fill_on_resize(&self) {
-        let width = self.created().controls.list.fill_width();
-        if self.filled_width.replace(Some(width)) == Some(width) {
-            return;
+        let (width, dpi) = self.fill_width();
+        let widths = (self.column_sizing.borrow_mut()).resized(width, dpi, || self.column_fits());
+        if let Some(widths) = widths {
+            self.set_column_widths(widths);
         }
-        if !self.sizing.get() {
-            self.fill_columns(&self.column_fits());
-            return;
-        }
-        let columns = self.model.borrow().columns().len();
-        let fits = self
-            .sizing_fits
-            .take()
-            .filter(|fits| fits.len() == columns)
-            .unwrap_or_else(|| self.column_fits());
-        self.fill_columns(&fits);
-        self.sizing_fits.replace(Some(fits));
     }
 
-    /// The person ended a drag of the window's border or title bar: when
-    /// the drag resized the list, its columns are fitted afresh at the
-    /// final width, on the rows the list shows now.
+    /// The person ended a drag of the window's border or title bar
+    /// ([`ColumnSizing::drag_ended`]).
     fn end_sizing(&self) {
-        self.sizing.set(false);
-        if self.sizing_fits.take().is_some() {
+        let (width, dpi) = self.fill_width();
+        let widths =
+            (self.column_sizing.borrow_mut()).drag_ended(width, dpi, || self.column_fits());
+        if let Some(widths) = widths {
             let list = self.created().controls.list;
             list.hwnd()
-                .draw_once_after(|| self.fill_columns(&self.column_fits()));
+                .draw_once_after(|| self.set_column_widths(widths));
         }
     }
 
-    /// Fills the list's width once the first rows on screen arrive, because
-    /// the window shows before any row, when only the columns' first widths
-    /// stand for their fits (DESIGN.md: Results list).
+    /// Fills the list's width once the first rows on screen arrive
+    /// ([`ColumnSizing::rows_arrived`]).
     fn fill_around_first_rows(&self) {
-        if self.filled_around_rows.get() {
-            return;
-        }
         let first = self.created().controls.list.visible_rows().start;
         if self
             .model
@@ -2041,19 +2006,27 @@ impl MainWindow {
         {
             return;
         }
-        self.filled_around_rows.set(true);
-        // A drag that follows measures these rows, not the first widths.
-        self.sizing_fits.take();
-        self.fill_columns(&self.column_fits());
+        let (width, dpi) = self.fill_width();
+        let widths =
+            (self.column_sizing.borrow_mut()).rows_arrived(width, dpi, || self.column_fits());
+        if let Some(widths) = widths {
+            self.set_column_widths(widths);
+        }
     }
 
-    /// Gives the columns the widths that scale `fits` to end at the list's
-    /// right edge, each only when it differs from the column's, because
-    /// each width that the list takes draws it again.
-    fn fill_columns(&self, fits: &[ColumnFit]) {
+    /// The width the list's columns fill, and the DPI it is in.
+    fn fill_width(&self) -> (Px, Dpi) {
         let created = self.created();
-        let list = created.controls.list;
-        let widths = layout::fill_widths(fits, list.fill_width(), created.metrics.get().dpi);
+        (
+            created.controls.list.fill_width(),
+            created.metrics.get().dpi,
+        )
+    }
+
+    /// Gives the columns `widths`, each only when it differs from the
+    /// column's, because each width that the list takes draws it again.
+    fn set_column_widths(&self, widths: Vec<Px>) {
+        let list = self.created().controls.list;
         for (index, width) in widths.into_iter().enumerate() {
             if list.column_width(index) != width {
                 list.set_column_width(index, width);
@@ -2103,7 +2076,9 @@ impl MainWindow {
             let sizes = model.choices().size_format;
             let results = model.search_list().results();
             let columns = model.columns().get(indexes.clone()).unwrap_or_default();
-            let items: Vec<_> = rows.filter_map(|row| results.row(row)).collect();
+            let items: Vec<_> = rows
+                .filter_map(|row| Some((row, results.row(row)?)))
+                .collect();
             if items.is_empty() {
                 return columns
                     .iter()
@@ -2119,13 +2094,10 @@ impl MainWindow {
                 .map(|&column| {
                     items
                         .iter()
-                        .map(|item| {
-                            let bold = crate::core::text::path_part(column, &item.path)
-                                .map(|span| within(&results.matched_parts(item), &span))
-                                .unwrap_or_default();
+                        .map(|&(row, item)| {
                             (
                                 crate::core::text::cell(strings, &*numbers, sizes, column, item),
-                                bold,
+                                model.matched_in_cell(row, column),
                             )
                         })
                         .collect()
@@ -2143,15 +2115,10 @@ impl MainWindow {
             .map(|((header, cells), index)| {
                 let first = index == 0;
                 let label = if first { label } else { Px(0) };
-                let widest = cells
-                    .iter()
+                let texts = (cells.iter())
                     .filter(|(text, _)| !text.is_empty())
-                    .map(|(text, parts)| {
-                        let text = matched_width(&plain, &bold, text, parts);
-                        layout::cell_width(text, label, first, dpi)
-                    })
-                    .max();
-                ColumnFit::new(plain.plain_width(header), widest, dpi)
+                    .map(|(text, parts)| matched_width(&plain, &bold, text, parts));
+                ColumnFit::of(plain.plain_width(header), texts, label, first, dpi)
             })
             .collect()
     }
@@ -2225,10 +2192,7 @@ impl MainWindow {
         controls.apply_fonts(&fonts);
         drop(created.fonts.replace(fonts));
         self.apply_glyphs(dpi);
-        // The columns' widths and the drag's fits are in the old DPI's
-        // pixels, so the layout that follows fills the columns afresh.
-        self.sizing_fits.take();
-        self.filled_width.set(None);
+        self.column_sizing.borrow_mut().dpi_changed();
         let captions = self.captions();
         let _ = win::menu::replace_menu_bar(hwnd, &captions.menu_bar);
         self.measure(&captions, dpi);
@@ -2756,29 +2720,19 @@ impl MainWindow {
                     let column = model.columns()[index];
                     (column, captions::header(model.strings(), column))
                 };
-                // A column shown again gets the width it had, as
-                // TableView's does.
-                let kept = self
-                    .hidden_widths
-                    .borrow()
-                    .iter()
-                    .find(|(hidden, ..)| *hidden == column)
-                    .map(|(_, width, dpi)| width.rescale(*dpi, hwnd.dpi()));
+                let width = (self.column_sizing.borrow_mut()).column_shown(column, hwnd.dpi());
                 controls.list.insert_column(
                     index,
                     &ListColumn {
                         header: &header,
-                        width: kept.unwrap_or_else(|| layout::column_width(column, hwnd.dpi())),
+                        width,
                         right_aligned: column.right_aligned(),
                     },
                 );
             }
             Change::ColumnHidden { index, column } => {
                 let width = controls.list.column_width(index);
-                let mut hidden = self.hidden_widths.borrow_mut();
-                hidden.retain(|(kept, ..)| *kept != column);
-                hidden.push((column, width, hwnd.dpi()));
-                drop(hidden);
+                (self.column_sizing.borrow_mut()).column_hidden(column, width, hwnd.dpi());
                 controls.list.delete_column(index);
             }
             // A status also changes the failure that each list shows.
@@ -3515,19 +3469,17 @@ impl MainWindow {
     fn draw_cell(&self, draw: &CustomDraw, dpi: Dpi, row: u64, column: usize) -> DrawAnswer {
         let cell = {
             let model = self.model.borrow();
-            let column = model.columns().get(column).copied();
-            let Some(item) = model.shown_row(List::Search, row) else {
+            let Some(column) = model.columns().get(column).copied() else {
                 return DrawAnswer::Default;
             };
-            let Some(span) = column.and_then(|c| crate::core::text::path_part(c, &item.path))
-            else {
-                return DrawAnswer::Default;
-            };
-            let bold = within(&model.search_list().results().matched_parts(item), &span);
+            let bold = model.matched_in_cell(row, column);
             if bold.is_empty() {
                 return DrawAnswer::Default;
             }
-            let icon = (column == Some(Column::Name)).then_some(item.is_dir);
+            let item = (model.shown_row(List::Search, row)).expect("a matched cell's row shows");
+            let span = crate::core::text::path_part(column, &item.path)
+                .expect("only Name and Path have matched parts");
+            let icon = (column == Column::Name).then_some(item.is_dir);
             (item.path[span].to_owned(), bold, icon)
         };
         let (text, bold, icon) = cell;
@@ -4347,8 +4299,10 @@ impl MainWindow {
         // and a hidden window shows at the width it had, which no resize
         // fills. Filling before it shows draws it once.
         if !hwnd.is_visible() {
-            self.sizing_fits.take();
-            self.fill_columns(&self.column_fits());
+            let (width, dpi) = self.fill_width();
+            let widths =
+                (self.column_sizing.borrow_mut()).window_shown(width, dpi, || self.column_fits());
+            self.set_column_widths(widths);
         }
         if self.unshown.replace(false) {
             let placement = self.model.borrow().placement();
@@ -4988,18 +4942,6 @@ impl MainWindow {
     }
 }
 
-/// The parts of `ranges` inside `span`, from `span`'s start.
-fn within(ranges: &[Range<usize>], span: &Range<usize>) -> Vec<Range<usize>> {
-    ranges
-        .iter()
-        .filter_map(|range| {
-            let start = range.start.max(span.start);
-            let end = range.end.min(span.end);
-            (start < end).then(|| start - span.start..end - span.start)
-        })
-        .collect()
-}
-
 /// The width of `text` with its parts `bold` in the bold font, as
 /// `CustomDraw::draw_cell` draws a matched cell.
 fn matched_width(plain: &TextMeter, bold: &TextMeter, text: &str, parts: &[Range<usize>]) -> Px {
@@ -5219,9 +5161,7 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::EnterSizeMove => {
-                self.sizing.set(true);
-                // Fits measured before this drag were measured on other rows.
-                self.sizing_fits.take();
+                self.column_sizing.borrow_mut().drag_started();
                 None
             }
             Message::ExitSizeMove => {
