@@ -440,8 +440,8 @@ this plan by an owner decision, and their reads do not filter rows yet. This
 plan's stage that filters a page also filters each read of a result
 snapshot: the read is a request, so it builds its own answers from the
 caller's token, tests each row with `VolumeIndex::is_seen` as a page does,
-and reports a row the caller cannot see as gone. Main's protocol is 11, so
-this plan's protocol change raises it from 11, not from 9.
+and reports a row the caller cannot see as gone. Main's protocol is 12, so
+this plan's protocol change raises it from 12, not from 9.
 
 `gozler-core/src/index/descriptors.rs`:
 
@@ -567,9 +567,10 @@ the user and logon SIDs, and so do an administrator's elevated and filtered
 tokens, yet each pair lists different folders. This plan's history before
 the change that adds this paragraph holds that design.
 
-**For the result-snapshot plan.** `VolumeIndex::listable`, IDs that stay
+**For result snapshots.** `VolumeIndex::listable`, IDs that stay
 stable within an instance, `Visibility::Caller` carrying the token, and the
-one row test `is_seen` are what [that plan](result-snapshot.md) builds on.
+one row test `is_seen` are what the reads of result snapshots (DESIGN.md:
+Result snapshots) build on.
 
 ### The filter
 
