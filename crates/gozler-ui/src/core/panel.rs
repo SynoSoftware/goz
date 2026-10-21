@@ -1029,13 +1029,13 @@ impl Panel {
     /// shows and none is selected, so it costs nothing in a large folder.
     pub(crate) fn counts(&self) -> Counts {
         let items = self.shown_len() as u64;
-        let picked: Vec<&Entry> = self
-            .selected
-            .iter()
-            .flat_map(|range| range.clone())
-            .filter_map(|row| self.entry(row))
-            .collect();
-        let (selected, size) = if picked.is_empty() {
+        let mut picked = 0;
+        let chosen = Totals::of(
+            (self.selected.iter().flat_map(|range| range.clone()))
+                .filter_map(|row| self.entry(row))
+                .inspect(|_| picked += 1),
+        );
+        let (selected, size) = if picked == 0 {
             let size = match &self.shown {
                 None => self.totals,
                 Some(shown) => Totals::of(shown.iter().map(|&i| &self.entries[i as usize])),
@@ -1043,10 +1043,7 @@ impl Panel {
             // An empty folder's line says "0 items" alone.
             (None, (items > 0).then_some(size))
         } else {
-            (
-                Some(picked.len() as u64),
-                Some(Totals::of(picked.iter().copied())),
-            )
+            (Some(picked), Some(chosen))
         };
         Counts {
             items,

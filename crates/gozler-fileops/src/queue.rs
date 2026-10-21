@@ -51,9 +51,12 @@ struct Shared {
     /// Where prepare reads the totals.
     index: Box<dyn Index>,
     saved_path: PathBuf,
-    /// The operations of the saved file. Its lock also orders the file's
-    /// writes.
+    /// The operations of the saved file. A write holds its lock only to
+    /// copy them, so a change on the window's call never waits for a write.
     saved: Mutex<SavedOperations>,
+    /// Held while the saved file is written, which orders the writes, so
+    /// an older copy is never written after a newer one.
+    writing: Mutex<()>,
     /// Set when the queue closes or is dropped: a run that it cancels stays
     /// saved, so it is offered as interrupted at the next start, which is
     /// the truth, and keeps the files it was writing for Continue to resume.
@@ -63,7 +66,7 @@ struct Shared {
 
 /// The operations of the saved file.
 struct SavedOperations {
-    by_id: BTreeMap<OperationId, Saved>,
+    by_id: BTreeMap<OperationId, Arc<Saved>>,
     /// Whether the file holds `by_id`. A change on the window's call is
     /// written on a queue thread, because the file lists every source of
     /// every saved operation.
@@ -166,7 +169,7 @@ impl Queue {
                 Phase::Interrupted(restored),
             );
             operations.by_id.insert(id, operation);
-            saved_operations.insert(id, saved);
+            saved_operations.insert(id, Arc::new(saved));
         }
         Queue {
             shared: Arc::new(Shared {
@@ -178,6 +181,7 @@ impl Queue {
                     by_id: saved_operations,
                     written: true,
                 }),
+                writing: Mutex::new(()),
                 closing: AtomicBool::new(false),
                 threads: Mutex::default(),
             }),
@@ -745,27 +749,37 @@ impl Shared {
     /// [`Shared::write_saved`] writes.
     fn record(&self, id: OperationId, saved: Saved) {
         let mut operations = self.saved.lock().expect("no queue thread panics");
-        operations.by_id.insert(id, saved);
+        operations.by_id.insert(id, Arc::new(saved));
         operations.written = false;
     }
 
-    /// Writes the saved file, unless it holds every saved operation.
+    /// Writes the saved file, unless it holds every saved operation. A
+    /// change made while it writes marks the file unwritten again, and its
+    /// own write follows this one.
     fn write_saved(&self) {
-        let mut operations = self.saved.lock().expect("no queue thread panics");
-        if !operations.written {
-            // A file that cannot be written loses only the offer to
-            // continue.
-            let _ = saved::write(&self.saved_path, operations.by_id.values());
+        let _writing = self.writing.lock().expect("no queue thread panics");
+        let operations: Vec<Arc<Saved>> = {
+            let mut operations = self.saved.lock().expect("no queue thread panics");
+            if operations.written {
+                return;
+            }
             operations.written = true;
-        }
+            operations.by_id.values().cloned().collect()
+        };
+        // A file that cannot be written loses only the offer to continue.
+        let _ = saved::write(&self.saved_path, operations.iter().map(|saved| &**saved));
     }
 
     /// Removes the operation `id` from the saved file, on a queue thread.
     fn unsave(&self, id: OperationId) {
-        let mut operations = self.saved.lock().expect("no queue thread panics");
-        if operations.by_id.remove(&id).is_some() {
-            let _ = saved::write(&self.saved_path, operations.by_id.values());
-            operations.written = true;
+        let removed = {
+            let mut operations = self.saved.lock().expect("no queue thread panics");
+            let removed = operations.by_id.remove(&id).is_some();
+            operations.written &= !removed;
+            removed
+        };
+        if removed {
+            self.write_saved();
         }
     }
 
