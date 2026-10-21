@@ -47,7 +47,8 @@
     "paste": "Pas&te",
     "copy_to_folder": "Copy to &folder…",
     "move_to_folder": "&Move to folder…",
-    "file_operations": "File &operations"
+    "file_operations": "File &operations",
+    "two_panels": "&Two panels"
   },
   "column": {
     "name": "&Name",

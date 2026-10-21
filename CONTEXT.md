@@ -160,9 +160,9 @@ A surface over the window for one task, such as Settings or Custom date.
 _Avoid_: form, window (for a dialog)
 
 **Pane**:
-A side area of the window: the filter pane at the left and the inspector
-below the results list.
-_Avoid_: panel, sidebar
+A side area of Search: the filter pane at the left and the inspector below
+the results list. Not a panel: a panel is one of the two lists of Two panels.
+_Avoid_: sidebar
 
 **Results list**:
 The list of matches, one row per entry.
@@ -206,6 +206,52 @@ and exits otherwise.
 **Exit**:
 Ending gozler, from File > Exit or the tray menu. The service keeps running.
 _Avoid_: quit
+
+**Search**:
+The mode of the window with the search box, the results list and the panes.
+The other mode is Two panels.
+
+**Two panels**:
+The mode of the window with two panels, the key bar and Norton Commander's
+keys, which View > Two panels switches on and off.
+
+**Panel**:
+One of the two lists of Two panels, with its path box and its status line. It
+shows a folder, or the results of a search (a search panel).
+
+**Active panel**:
+The panel with the focus; commands act on it.
+
+**Other panel**:
+The panel that is not active; its folder is the destination of Copy to
+folder… and Move to folder….
+
+**Focused row**:
+The row with the bar, which the arrow keys move.
+
+**Selected entries**:
+The entries the person selected in a panel with `Insert`, `Space`, `Shift`
+or `Ctrl`; commands act on them, or on the focused row when there are none.
+
+**Quick search**:
+Going to a name in a panel by typing its start, with or without `Alt`.
+
+**Drive menu**:
+The menu of drives and recent folders that `Alt+F1` and `Alt+F2` open.
+
+**Key bar**:
+The row of `F3` to `F8` buttons under the panels.
+
+**Viewer**:
+The window that `F3` opens, which shows a file as text or as hex.
+
+**File operation**:
+A copy, a move, a delete, a rename or a new folder, which the engine's queue
+runs. Every delete is permanent.
+
+**Queue**:
+The file operations that wait, each for an earlier operation whose paths
+overlap its own or whose copy uses the same hard disk.
 
 **Color token**:
 What a piece of text means, which decides its color wherever gozler shows it:

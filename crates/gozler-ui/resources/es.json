@@ -47,7 +47,8 @@
     "paste": "Pe&gar",
     "copy_to_folder": "Cop&iar en la carpeta…",
     "move_to_folder": "&Mover a la carpeta…",
-    "file_operations": "Operaciones &de archivo"
+    "file_operations": "Operaciones &de archivo",
+    "two_panels": "Dos pa&neles"
   },
   "column": {
     "name": "&Nombre",

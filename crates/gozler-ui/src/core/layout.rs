@@ -9,6 +9,7 @@ use super::captions::{MODIFIED_ROW, StatusWidest, WindowCaptions};
 use super::commands::INSPECTOR_BUTTONS;
 use super::model::Column;
 use super::query::Kind;
+use super::settings::Mode;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU32;
 use std::ops::{Add, Sub};
@@ -1203,6 +1204,26 @@ impl InspectorLayout {
 /// widths, and the smallest client size at which every control fits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
+    pub(crate) body: Body,
+    /// The one-pixel lines between the panes or the panels.
+    pub(crate) dividers: Vec<Rect>,
+    pub(crate) status: StatusLayout,
+    pub(crate) min_client: Size,
+}
+
+/// The controls of the mode that shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Body {
+    /// Boxed, because Search's controls take far more room than two lists.
+    Search(Box<SearchLayout>),
+    /// The left and the right panel's lists, each half of the window
+    /// (file-manager-spec.md: The window).
+    TwoPanels { lists: [Rect; 2] },
+}
+
+/// Search's controls between the menu bar and the status bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SearchLayout {
     /// Show filters, before the search box while the filter pane is hidden.
     pub(crate) show_filters: Option<Rect>,
     pub(crate) search: Rect,
@@ -1216,17 +1237,98 @@ pub(crate) struct Layout {
     pub(crate) list: Rect,
     /// `None` while the pane is hidden.
     pub(crate) inspector: Option<InspectorLayout>,
-    /// The one-pixel lines between the panes.
-    pub(crate) dividers: Vec<Rect>,
-    pub(crate) status: StatusLayout,
-    pub(crate) min_client: Size,
 }
 
 impl Layout {
-    /// `status_height` is the height the status bar gives itself for its
-    /// font. When the client is smaller than `min_client`, the controls keep
-    /// their minimum sizes and the window's minimum size stops it there.
+    /// The layout of `mode`, where Search shows `panes`. `status_height` is
+    /// the height the status bar gives itself for its font. When the client
+    /// is smaller than `min_client`, the controls keep their minimum sizes
+    /// and the window's minimum size stops it there.
     pub(crate) fn compute(
+        client: Size,
+        dpi: Dpi,
+        font_height: Px,
+        status_height: Px,
+        captions: &CaptionWidths,
+        mode: Mode,
+        panes: &Panes,
+    ) -> Layout {
+        match mode {
+            Mode::Search => {
+                Layout::compute_search(client, dpi, font_height, status_height, captions, panes)
+            }
+            Mode::TwoPanels => {
+                Layout::compute_two_panels(client, dpi, font_height, status_height, captions)
+            }
+        }
+    }
+
+    /// Search's controls, or `None` while Two panels shows.
+    pub(crate) fn search(&self) -> Option<&SearchLayout> {
+        match &self.body {
+            Body::Search(search) => Some(search.as_ref()),
+            Body::TwoPanels { .. } => None,
+        }
+    }
+
+    /// The inspector's controls, or `None` while it or Two panels hides it.
+    pub(crate) fn inspector(&self) -> Option<&InspectorLayout> {
+        self.search()?.inspector.as_ref()
+    }
+
+    /// The two lists side by side from the menu bar to the status bar,
+    /// with a divider between them and no splitter (file-manager-spec.md:
+    /// Choices this spec makes, 10).
+    fn compute_two_panels(
+        client: Size,
+        dpi: Dpi,
+        font_height: Px,
+        status_height: Px,
+        captions: &CaptionWidths,
+    ) -> Layout {
+        let list_min_width = LIST_MIN_WIDTH.to_px(dpi);
+        let list_min_height = Px((font_height + ROW_PADDING.to_px(dpi)).0 * LIST_MIN_ROWS);
+        let status = StatusLayout::compute(
+            &captions.status,
+            captions.button_width(dpi),
+            dpi,
+            font_height,
+            status_height,
+            None,
+        );
+        let min_client = Size {
+            width: (list_min_width + Px(1) + list_min_width).max(status.min_width(dpi)),
+            height: list_min_height + status_height,
+        };
+        let width = client.width.max(min_client.width);
+        let height = (client.height - status_height).max(list_min_height);
+        let left = Rect {
+            x: Px(0),
+            y: Px(0),
+            width: Px((width.0 - 1) / 2),
+            height,
+        };
+        let divider = Rect {
+            x: left.right(),
+            width: Px(1),
+            ..left
+        };
+        let right = Rect {
+            x: divider.right(),
+            width: width - divider.right(),
+            ..left
+        };
+        Layout {
+            body: Body::TwoPanels {
+                lists: [left, right],
+            },
+            dividers: vec![divider],
+            status,
+            min_client,
+        }
+    }
+
+    fn compute_search(
         client: Size,
         dpi: Dpi,
         font_height: Px,
@@ -1379,16 +1481,18 @@ impl Layout {
                 + status_height,
         };
         Layout {
-            show_filters,
-            search,
-            clear_search,
-            match_label,
-            match_mode,
-            match_case,
-            match_path,
-            filters,
-            list,
-            inspector,
+            body: Body::Search(Box::new(SearchLayout {
+                show_filters,
+                search,
+                clear_search,
+                match_label,
+                match_mode,
+                match_case,
+                match_path,
+                filters,
+                list,
+                inspector,
+            })),
             dividers,
             status,
             min_client,
@@ -1599,6 +1703,7 @@ mod tests {
                         font_height,
                         status_height,
                         &captions,
+                        Mode::Search,
                         &panes,
                     )
                     .min_client;
@@ -1615,19 +1720,21 @@ mod tests {
                             font_height,
                             status_height,
                             &captions,
+                            Mode::Search,
                             &panes,
                         );
+                        let search = layout.search().expect("Search shows");
                         let mut controls = vec![
-                            layout.search,
-                            layout.clear_search,
-                            layout.match_label,
-                            layout.match_mode,
-                            layout.match_case,
-                            layout.match_path,
-                            layout.list,
+                            search.search,
+                            search.clear_search,
+                            search.match_label,
+                            search.match_mode,
+                            search.match_case,
+                            search.match_path,
+                            search.list,
                         ];
                         controls.extend(&layout.dividers);
-                        if let Some(inspector) = &layout.inspector {
+                        if let Some(inspector) = &search.inspector {
                             controls.extend([
                                 inspector.icon,
                                 inspector.heading,
@@ -1647,8 +1754,8 @@ mod tests {
                                 inspector.fields.len()
                             );
                         }
-                        controls.extend(layout.show_filters);
-                        if let Some(filters) = &layout.filters {
+                        controls.extend(search.show_filters);
+                        if let Some(filters) = &search.filters {
                             controls.extend([filters.title, filters.clear, filters.hide]);
                             controls.push(filters.pane);
                             // The pane scrolls instead of setting the
@@ -1695,8 +1802,8 @@ mod tests {
                         }
                         let list_min = Px((font_height + Dip(7).to_px(dpi)).0 * 4);
                         assert!(
-                            layout.list.height >= list_min
-                                && layout.list.width >= Dip(300).to_px(dpi)
+                            search.list.height >= list_min
+                                && search.list.width >= Dip(300).to_px(dpi)
                         );
                         let status = layout.status;
                         let [view, middle] = status.groups;
@@ -1723,6 +1830,62 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Two panels' lists split the window between them, so a list that left
+    /// the client area, overlapped the other or its divider, or took more
+    /// than its half would show only when a person looks: at the minimum
+    /// size, at a size with an odd width, and at 150 %.
+    #[test]
+    fn the_two_panels_share_the_window() {
+        for dpi in [96, 144].map(|d| Dpi::new(d).expect("a DPI is not zero")) {
+            let captions = captions(dpi, 1.0);
+            let font_height = Dip(15).to_px(dpi);
+            let status_height = StatusLayout::min_height(dpi, font_height) + Dip(4).to_px(dpi);
+            let compute = |client| {
+                Layout::compute(
+                    client,
+                    dpi,
+                    font_height,
+                    status_height,
+                    &captions,
+                    Mode::TwoPanels,
+                    &Panes::default(),
+                )
+            };
+            let min = compute(Size::default()).min_client;
+            for client in [
+                min,
+                Size {
+                    width: Px(min.width.0 * 2 + 1),
+                    height: Px(min.height.0 * 2),
+                },
+            ] {
+                let layout = compute(client);
+                let Body::TwoPanels {
+                    lists: [left, right],
+                } = layout.body
+                else {
+                    panic!("Two panels shows");
+                };
+                assert_eq!(layout.dividers.len(), 1);
+                let divider = layout.dividers[0];
+                for (a, b) in [(left, divider), (divider, right), (left, right)] {
+                    assert!(!overlaps(a, b), "{a:?} overlaps {b:?} at {dpi:?}");
+                }
+                for list in [left, right] {
+                    assert!(
+                        list.x >= Px(0)
+                            && list.right() <= client.width
+                            && list.bottom() <= client.height - status_height
+                            && list.width >= Dip(300).to_px(dpi),
+                        "{list:?} in {client:?} at {dpi:?}"
+                    );
+                }
+                assert_eq!(right.right(), client.width);
+                assert!((right.width.0 - left.width.0).abs() <= 1);
             }
         }
     }

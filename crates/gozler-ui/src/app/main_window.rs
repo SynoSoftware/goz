@@ -21,8 +21,7 @@ use crate::core::captions::{
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
 use crate::core::commands::{
     self, CommandButton, CommandId, Focus, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
-    INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, Menu, MenuItem, SHOW_DETAILS,
-    State,
+    INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, MenuItem, SHOW_DETAILS, State,
 };
 use crate::core::fetch::{DaemonFailure, Fetch, Purpose, WriteFailure};
 use crate::core::file_operations::{delete_question, exit_question};
@@ -33,8 +32,8 @@ use crate::core::include::{
     IncludeDrive, SummaryRow, connected_drives, include_drives, preview, summary_rows,
 };
 use crate::core::layout::{
-    self, CaptionWidths, ColumnFit, Dpi, FilterLayout, InspectorLayout, Layout, MessageArea, Px,
-    Rect, ScrollRequest, Size, StatusLayout,
+    self, Body, CaptionWidths, ColumnFit, Dpi, FilterLayout, InspectorLayout, Layout, MessageArea,
+    Px, Rect, ScrollRequest, Size, StatusLayout,
 };
 use crate::core::model::{
     Accepted, Change, Column, ExportError, ExportFormat, Job, Model, ScopeCheck, SearchBoxEnter,
@@ -47,7 +46,7 @@ use crate::core::query::{
 };
 use crate::core::results::{Fix, ListButton};
 use crate::core::selection::{DRAG_LIMIT, wide_path};
-use crate::core::settings::{SavedColumn, SettingsValues};
+use crate::core::settings::{Mode, SavedColumn, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
@@ -141,6 +140,8 @@ struct Controls {
     message_tips: Tooltip,
     list: ListView,
     inspector: Inspector,
+    /// Two panels' lists, the left panel's first.
+    panels: [ListView; 2],
     status: StatusBar,
 }
 
@@ -167,6 +168,10 @@ impl Controls {
             message_tips: Tooltip::create(parent, &message_buttons.map(Button::hwnd))?,
             list: ListView::create(parent, ControlId::List.id())?,
             inspector: Inspector::create(parent)?,
+            panels: [
+                ListView::create(parent, ControlId::LeftPanel.id())?,
+                ListView::create(parent, ControlId::RightPanel.id())?,
+            ],
             status: StatusBar::for_window(parent)?,
         };
         controls.message.hwnd().set_visible(false);
@@ -192,6 +197,8 @@ impl Controls {
             self.message_buttons[0].hwnd(),
             self.message_buttons[1].hwnd(),
             self.list.hwnd(),
+            self.panels[0].hwnd(),
+            self.panels[1].hwnd(),
         ];
         let pane = self.filters.controls();
         let inspector = self.inspector.controls();
@@ -645,7 +652,6 @@ pub(crate) struct MainWindow {
     instance: Instance,
     model: RefCell<Model>,
     numbers: RefCell<WindowsNumbers>,
-    menus: Vec<Menu>,
     /// The control that had the focus when the window was deactivated.
     focus_on_activate: Cell<Option<Hwnd>>,
     settings_file: PathBuf,
@@ -731,14 +737,13 @@ impl MainWindow {
         if instance == Instance::First {
             model.offer_file_operations();
         }
-        let accelerators =
-            accelerator_table(&model.choices().shortcuts).expect("the accelerator table builds");
+        let accelerators = accelerator_table(&model.choices().shortcuts, model.mode())
+            .expect("the accelerator table builds");
         let window = Rc::new(MainWindow {
             created: OnceCell::new(),
             instance,
             model: RefCell::new(model),
             numbers: RefCell::new(WindowsNumbers::new()),
-            menus: commands::menu_bar(),
             focus_on_activate: Cell::new(None),
             settings_file,
             settings_failure_shown: Cell::new(false),
@@ -1108,7 +1113,7 @@ impl MainWindow {
     fn show_fields(&self) {
         let (rows, note, age) = {
             let layout = self.created().layout.borrow();
-            let placed = layout.as_ref().and_then(|l| l.inspector.as_ref());
+            let placed = layout.as_ref().and_then(Layout::inspector);
             let room = placed.map_or(0, |i| i.fields.len());
             let shown = self.inspector_shown.borrow();
             let rows = room.min(shown.0.fields.len());
@@ -1139,7 +1144,7 @@ impl MainWindow {
         let created = self.created();
         let inspector = &created.controls.inspector;
         let layout = created.layout.borrow();
-        let Some(placed) = layout.as_ref().and_then(|l| l.inspector.as_ref()) else {
+        let Some(placed) = layout.as_ref().and_then(Layout::inspector) else {
             for copy in [inspector.copy_name, inspector.copy_folder] {
                 copy.hwnd().set_visible(false);
             }
@@ -1223,7 +1228,7 @@ impl MainWindow {
         // Cancel hides when the job ends, and a hidden control would keep
         // the focus but take no key.
         if controls.status.show(status) {
-            controls.search.hwnd().focus();
+            self.home().focus();
         }
         if let Some(OpenSettings {
             dialog,
@@ -1440,7 +1445,13 @@ impl MainWindow {
     /// buttons below it.
     fn place_message(&self, text: &str, buttons: usize) {
         let created = self.created();
-        let Some(list) = created.layout.borrow().as_ref().map(|l| l.list) else {
+        let Some(list) = created
+            .layout
+            .borrow()
+            .as_ref()
+            .and_then(Layout::search)
+            .map(|search| search.list)
+        else {
             return;
         };
         let controls = &created.controls;
@@ -1463,7 +1474,7 @@ impl MainWindow {
     }
 
     /// Places every control where `Layout::compute` says (DESIGN.md:
-    /// window rule 7).
+    /// window rule 7), and shows only the controls of the shown mode.
     fn layout(&self, hwnd: Hwnd) {
         let created = self.created();
         let controls = &created.controls;
@@ -1471,33 +1482,53 @@ impl MainWindow {
         let status_height = controls
             .status
             .fit(StatusLayout::min_height(metrics.dpi, metrics.font_height));
-        let panes = self.model.borrow().panes();
+        let (mode, panes) = {
+            let model = self.model.borrow();
+            (model.mode(), model.panes())
+        };
         let layout = Layout::compute(
             hwnd.client_size(),
             metrics.dpi,
             metrics.font_height,
             status_height,
             &metrics.captions,
+            mode,
             &panes,
         );
-        let mut moves = vec![
-            (controls.search.hwnd(), layout.search),
-            (controls.clear_search.hwnd(), layout.clear_search),
-            (controls.match_label.hwnd(), layout.match_label),
-            // A drop-down list's height includes its open list.
-            (
-                controls.match_mode.hwnd(),
-                Rect {
-                    height: Px(layout.match_mode.height.0 * 10),
-                    ..layout.match_mode
-                },
-            ),
-            (controls.match_case.hwnd(), layout.match_case),
-            (controls.match_path.hwnd(), layout.match_path),
-            (controls.list.hwnd(), layout.list),
+        let search = layout.search();
+        let filters = search.and_then(|search| search.filters.as_ref());
+        let show_filters = search.and_then(|search| search.show_filters);
+        let placed_inspector = layout.inspector();
+        let strip = [
+            controls.search.hwnd(),
+            controls.clear_search.hwnd(),
+            controls.match_label.hwnd(),
+            controls.match_mode.hwnd(),
+            controls.match_case.hwnd(),
+            controls.match_path.hwnd(),
+            controls.list.hwnd(),
         ];
+        let mut moves = Vec::new();
+        match &layout.body {
+            Body::Search(placed) => moves.extend(strip.into_iter().zip([
+                placed.search,
+                placed.clear_search,
+                placed.match_label,
+                // A drop-down list's height includes its open list.
+                Rect {
+                    height: Px(placed.match_mode.height.0 * 10),
+                    ..placed.match_mode
+                },
+                placed.match_case,
+                placed.match_path,
+                placed.list,
+            ])),
+            Body::TwoPanels { lists } => {
+                moves.extend(controls.panels.map(ListView::hwnd).into_iter().zip(*lists));
+            }
+        }
         let pane = &controls.filters;
-        if let Some(filters) = &layout.filters {
+        if let Some(filters) = filters {
             moves.extend([
                 (pane.title.hwnd(), filters.title),
                 (pane.clear.hwnd(), filters.clear),
@@ -1505,11 +1536,11 @@ impl MainWindow {
                 (pane.pane, filters.pane),
             ]);
         }
-        if let Some(show) = layout.show_filters {
+        if let Some(show) = show_filters {
             moves.push((pane.show.hwnd(), show));
         }
         let inspector = &controls.inspector;
-        if let Some(placed) = &layout.inspector {
+        if let Some(placed) = placed_inspector {
             moves.push((inspector.heading.hwnd(), placed.heading));
             moves.push((inspector.hide.hwnd(), placed.hide));
             moves.push((inspector.copy_path.hwnd(), placed.copy_path));
@@ -1531,10 +1562,16 @@ impl MainWindow {
             }
         }
         win::move_children(&moves);
-        if let Some(filters) = &layout.filters {
+        if let Some(filters) = filters {
             self.place_filters(filters, self.filter_scroll.get());
         }
-        let shown = layout.filters.is_some();
+        for control in strip {
+            control.set_visible(search.is_some());
+        }
+        for panel in controls.panels {
+            panel.hwnd().set_visible(search.is_none());
+        }
+        let shown = filters.is_some();
         for control in [
             pane.title.hwnd(),
             pane.clear.hwnd(),
@@ -1543,8 +1580,8 @@ impl MainWindow {
         ] {
             control.set_visible(shown);
         }
-        pane.show.hwnd().set_visible(!shown);
-        let shown = layout.inspector.is_some();
+        pane.show.hwnd().set_visible(show_filters.is_some());
+        let shown = placed_inspector.is_some();
         inspector.heading.hwnd().set_visible(shown);
         inspector.hide.hwnd().set_visible(shown);
         inspector.copy_path.hwnd().set_visible(shown);
@@ -1717,7 +1754,8 @@ impl MainWindow {
             .layout
             .borrow()
             .as_ref()
-            .and_then(|l| l.filters.clone());
+            .and_then(Layout::search)
+            .and_then(|search| search.filters.clone());
         let Some(filters) = filters else { return };
         let position = to(&filters, self.filter_scroll.get());
         if position != self.filter_scroll.get() {
@@ -1732,7 +1770,8 @@ impl MainWindow {
             .layout
             .borrow()
             .as_ref()
-            .and_then(|l| l.filters.clone());
+            .and_then(Layout::search)
+            .and_then(|search| search.filters.clone());
         let Some(filters) = filters else { return };
         let placed = self.created().controls.filters.placed(&filters);
         if let Some((_, rect, _)) = placed.into_iter().find(|(c, ..)| *c == control) {
@@ -1834,7 +1873,8 @@ impl MainWindow {
         let export = [CommandId::ExportResults, CommandId::CancelExport]
             .map(|command| MenuItem::Run(command).id());
         bar.replace_item(&export, &node);
-        let items: Vec<MenuItem> = commands::items(&self.menus)
+        let mode = self.model.borrow().mode();
+        let items: Vec<MenuItem> = commands::items(&commands::menu_bar(mode))
             .into_iter()
             .map(|item| match item {
                 MenuItem::Run(CommandId::ExportResults) => slot,
@@ -1932,6 +1972,14 @@ impl MainWindow {
                         operations.show();
                     }
                     return;
+                }
+                CommandId::TwoPanels => {
+                    let mut model = self.model.borrow_mut();
+                    let other = match model.mode() {
+                        Mode::Search => Mode::TwoPanels,
+                        Mode::TwoPanels => Mode::Search,
+                    };
+                    model.show_mode(other)
                 }
                 CommandId::Columns | CommandId::Language | CommandId::Match | CommandId::SortBy => {
                     return;
@@ -2163,6 +2211,15 @@ impl MainWindow {
                 }
                 self.update_status();
             }
+            Change::Mode => {
+                self.replace_menu_bar(hwnd);
+                hwnd.set_text(&captions::title(&self.model.borrow()));
+                self.layout(hwnd);
+                // The focused control may have hidden, and a hidden control
+                // keeps the focus but takes no key.
+                self.home().focus();
+                self.update_status();
+            }
             Change::Typed => hwnd.set_text(&captions::title(&self.model.borrow())),
             Change::ColumnShown { index } => {
                 let (column, header) = {
@@ -2237,17 +2294,7 @@ impl MainWindow {
                 failed_export = Some((path, error));
             }
             Change::Settings => {
-                let (menu_bar, shortcuts) = {
-                    let model = self.model.borrow();
-                    let shortcuts = &model.choices().shortcuts;
-                    let menu_bar =
-                        commands::render(&commands::menu_bar(), model.strings(), shortcuts);
-                    (menu_bar, shortcuts.clone())
-                };
-                let _ = win::menu::replace_menu_bar(hwnd, &menu_bar);
-                if let Ok(table) = accelerator_table(&shortcuts) {
-                    self.accelerators.replace(Rc::new(table));
-                }
+                self.replace_menu_bar(hwnd);
                 self.update_tray(hwnd);
             }
             Change::TotalCommander(found) => {
@@ -2265,6 +2312,25 @@ impl MainWindow {
         // Last, because the message box runs its own message loop.
         if let Some((path, error)) = failed_export {
             self.show_export_failure(hwnd, &path, &error);
+        }
+    }
+
+    /// Builds the menu bar and the accelerator table again, for the shown
+    /// mode and the person's shortcuts.
+    fn replace_menu_bar(&self, hwnd: Hwnd) {
+        let (menu_bar, shortcuts, mode) = {
+            let model = self.model.borrow();
+            let shortcuts = &model.choices().shortcuts;
+            let menu_bar = commands::render(
+                &commands::menu_bar(model.mode()),
+                model.strings(),
+                shortcuts,
+            );
+            (menu_bar, shortcuts.clone(), model.mode())
+        };
+        let _ = win::menu::replace_menu_bar(hwnd, &menu_bar);
+        if let Ok(table) = accelerator_table(&shortcuts, mode) {
+            self.accelerators.replace(Rc::new(table));
         }
     }
 
@@ -2748,18 +2814,16 @@ impl MainWindow {
             .layout
             .borrow()
             .as_ref()
-            .and_then(|l| l.inspector.as_ref())
+            .and_then(Layout::inspector)
             .is_some_and(|inspector| inspector.splitter.contains(point))
     }
 
     /// Whether `point`, in screen coordinates, is on the list's header.
     fn on_header(&self, point: (i32, i32)) -> bool {
-        self.created()
-            .controls
-            .list
-            .header()
-            .screen_rect()
-            .contains(point)
+        // A hidden list keeps its header's rectangle, which a panel covers
+        // in Two panels.
+        let list = self.created().controls.list;
+        list.hwnd().is_visible() && list.header().screen_rect().contains(point)
     }
 
     /// The selected entries.
@@ -3148,7 +3212,9 @@ impl MainWindow {
 
     /// Brings the window forward with the search box focused and its text
     /// selected, so the person types the next search at once (DESIGN.md: Window
-    /// lifetime, C24). While a dialog is open, the dialog keeps the focus.
+    /// lifetime, C24), or in Two panels with the left panel's list focused
+    /// (file-manager-spec.md: The window). While a dialog is open, the dialog
+    /// keeps the focus.
     fn show_window(&self, hwnd: Hwnd) {
         if self.unshown.replace(false) {
             let placement = self.model.borrow().placement();
@@ -3158,9 +3224,21 @@ impl MainWindow {
         if !hwnd.is_enabled() {
             return;
         }
-        let search = self.created().controls.search;
-        search.hwnd().focus();
-        search.select_all();
+        self.home().focus();
+        let mode = self.model.borrow().mode();
+        if mode == Mode::Search {
+            self.created().controls.search.select_all();
+        }
+    }
+
+    /// The control that the shown mode focuses first: the search box, or the
+    /// left panel's list.
+    fn home(&self) -> Hwnd {
+        let controls = &self.created().controls;
+        match self.model.borrow().mode() {
+            Mode::Search => controls.search.hwnd(),
+            Mode::TwoPanels => controls.panels[0].hwnd(),
+        }
     }
 
     /// Closing hides the window while Gozler keeps running in the
@@ -3723,9 +3801,12 @@ fn present(entries: Vec<Selected>) -> (Vec<Selected>, Option<Vec<u16>>) {
     (present, missing)
 }
 
-/// The accelerator table of the command shortcuts `shortcuts`.
-fn accelerator_table(shortcuts: &CommandShortcuts) -> windows::core::Result<Accelerators> {
-    let table: Vec<_> = commands::accelerators(shortcuts)
+/// The accelerator table of `mode`, from the command shortcuts `shortcuts`.
+fn accelerator_table(
+    shortcuts: &CommandShortcuts,
+    mode: Mode,
+) -> windows::core::Result<Accelerators> {
+    let table: Vec<_> = commands::accelerators(shortcuts, mode)
         .into_iter()
         .map(|(shortcut, item)| (shortcut, item.id()))
         .collect();
@@ -3790,7 +3871,11 @@ impl WindowProc for MainWindow {
             } => {
                 let search = self.created().controls.search;
                 let saved = self.focus_on_activate.take();
-                if from_another_program && self.model.borrow().choices().select_on_activate {
+                let selects = {
+                    let model = self.model.borrow();
+                    model.mode() == Mode::Search && model.choices().select_on_activate
+                };
+                if from_another_program && selects {
                     search.hwnd().focus();
                     search.select_all();
                 } else {
@@ -3799,7 +3884,7 @@ impl WindowProc for MainWindow {
                     // the focus but take no key.
                     saved
                         .filter(|control| control.is_visible() && control.is_enabled())
-                        .unwrap_or(search.hwnd())
+                        .unwrap_or(self.home())
                         .focus();
                 }
                 if self.shortcut_failure.borrow().is_some() {
@@ -3955,7 +4040,7 @@ impl WindowProc for MainWindow {
                     .layout
                     .borrow()
                     .as_ref()
-                    .and_then(|l| l.inspector.as_ref())
+                    .and_then(Layout::inspector)
                     .map(InspectorLayout::height);
                 if let Some(height) = height {
                     self.splitter_drag.set(Some((point.1, height)));
@@ -3971,7 +4056,7 @@ impl WindowProc for MainWindow {
                     .layout
                     .borrow()
                     .as_ref()
-                    .and_then(|l| l.inspector.as_ref())
+                    .and_then(Layout::inspector)
                     .map(|inspector| inspector.dragged(height, Px(point.1 - start)));
                 if let Some(dragged) = dragged {
                     let accepted = self.model.borrow_mut().set_inspector_height(dragged);
@@ -4029,7 +4114,7 @@ impl WindowProc for MainWindow {
                         created
                             .large_images
                             .zip(icon)
-                            .zip(layout.and_then(|l| l.inspector.as_ref()))
+                            .zip(layout.and_then(Layout::inspector))
                             .map(|((images, index), inspector)| (images, index, inspector.icon)),
                     )
                 };
@@ -4092,8 +4177,11 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             // A second start with `--location`, such as from Total Commander
-            // or a script (DESIGN.md: Window lifetime).
+            // or a script (DESIGN.md: Window lifetime), shows Search, whose
+            // filter Location is (file-manager-spec.md: The window).
             Message::CopyData { tag, text } if tag == self.show_message as usize => {
+                let accepted = self.model.borrow_mut().show_mode(Mode::Search);
+                self.apply(hwnd, accepted);
                 let accepted = self.model.borrow_mut().choose_folder(text);
                 self.apply(hwnd, accepted);
                 self.show_window(hwnd);

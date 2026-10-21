@@ -47,7 +47,8 @@
     "paste": "&Plakken",
     "copy_to_folder": "Kopië&ren naar map…",
     "move_to_folder": "Verplaa&tsen naar map…",
-    "file_operations": "&Bestandsbewerkingen"
+    "file_operations": "&Bestandsbewerkingen",
+    "two_panels": "&Twee panelen"
   },
   "column": {
     "name": "&Naam",

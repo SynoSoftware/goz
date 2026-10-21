@@ -29,21 +29,21 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, EndMenu,
-    GWLP_USERDATA, GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsChild,
-    IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
-    PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP,
-    SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO,
-    SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL,
-    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, TranslateMessage,
-    WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR,
-    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE,
-    WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
-    WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
-    WS_SYSMENU, WS_THICKFRAME,
+    GA_ROOT, GWLP_USERDATA, GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowThreadProcessId, HICON, HTCLIENT, IDC_ARROW,
+    IDC_SIZENS, IMAGE_ICON, IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW,
+    MINMAXINFO, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SB_BOTTOM,
+    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP,
+    SB_VERT, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED,
+    SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW,
+    SetWindowPlacement, TranslateMessage, WA_INACTIVE, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA,
+    WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_ENDSESSION,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_QUIT,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN,
+    WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -430,27 +430,38 @@ pub(crate) fn set_modeless(window: Option<Hwnd>) {
     MODELESS.set(window.map_or(HWND(std::ptr::null_mut()), |window| window.0));
 }
 
-/// Runs the thread's message loop until `WM_QUIT`. The accelerators come
-/// first, then the keys the main window takes for its focused control, then
-/// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
-/// main window's controls (DESIGN.md: window rule 8). A key that
-/// `IsDialogMessageW` moves the focus with is reported to the main window,
-/// which no control notifies of it. A message for the window that
-/// [`set_modeless`] names, or for one of its controls, goes only through
-/// that window's `IsDialogMessageW`.
+/// Runs the thread's message loop until `WM_QUIT`, giving each message to
+/// the keys of the top-level window it belongs to, so a key pressed in one
+/// window never runs another window's command. For the main window, the
+/// accelerators come first, then the keys the main window takes for its
+/// focused control, then `IsDialogMessageW` for Tab, the access keys,
+/// `Enter` and `Esc` among the main window's controls (DESIGN.md: window
+/// rule 8). A key that `IsDialogMessageW` moves the focus with is reported
+/// to the main window, which no control notifies of it. A message for the
+/// window that [`set_modeless`] names, or for one of its controls, goes only
+/// through that window's `IsDialogMessageW`, and one for any other window,
+/// such as a tooltip, is only dispatched.
 ///
-/// `accelerators` gives the table of the moment, because Settings replaces
-/// it; the loop holds each table until the command it sent returns.
+/// `accelerators` gives the table of the moment, because Settings and the
+/// mode replace it; the loop holds each table until the command it sent
+/// returns.
 pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Accelerators>) {
     let mut msg = MSG::default();
     // SAFETY: `msg` is a local that each call fills in or reads.
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            let modeless = MODELESS.get();
-            if !modeless.is_invalid()
-                && (msg.hwnd == modeless || IsChild(modeless, msg.hwnd).as_bool())
-            {
-                if !IsDialogMessageW(modeless, &msg).as_bool() {
+            // A thread message has no window, and belongs to the main one.
+            let root = if msg.hwnd.is_invalid() {
+                main.0
+            } else {
+                GetAncestor(msg.hwnd, GA_ROOT)
+            };
+            if root != main.0 {
+                let modeless = MODELESS.get();
+                if modeless.is_invalid()
+                    || root != modeless
+                    || !IsDialogMessageW(modeless, &msg).as_bool()
+                {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }

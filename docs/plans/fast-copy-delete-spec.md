@@ -565,15 +565,19 @@ its destination, its bytes copied and its size; for a delete, the entry
 being deleted, with no destination and 0 for both. With several workers it
 is the one that started last.
 
-**Taken entries.** The queue answers whether a path is taken: it equals or
-is below a source of a waiting, running or ended delete or move, compared
-as Windows compares names, ignoring case. The window asks this, and nothing
-else, to leave those entries out of the panels and show them blank in the
-search results. The
-window removes an ended operation from the queue when no list still needs
-it: a panel releases it when the operation ends, because it lists the disk
-again; a search list releases it when its search changes, because gozlerd
+**Taken entries.** The queue gives two sets of sources: those of the
+waiting and running deletes and moves, and those of the ended ones. A path
+is taken when it equals or is below a source, compared as Windows compares
+names, ignoring case. The window asks this, and nothing else, to leave
+those entries out of the panels and show them blank in the search results.
+Each list keeps the ended operations it still needs
+([file manager spec](file-manager-spec.md), "The person never waits for the
+disk"): a folder panel keeps an operation whose end makes it read its folder
+again until its first complete listing started after the end, because the
+change notifications and the end arrive in no fixed order; a search list
+keeps the operations it shows blank until its next search, because gozlerd
 applies a large delete's journal records for some time after the delete.
+The window removes an ended operation from the queue when no list keeps it.
 This is a display rule on the path text the window gave; the safety rule
 stays D14 on identities.
 
@@ -668,10 +672,6 @@ reads and writes its old and new names, and a new folder writes its own
 name, so each waits only for an operation on those paths. A rename uses
 `MoveFileExW` without a replace flag, and a new folder `CreateDirectoryW`,
 so an existing name is refused, never replaced.
-
-**Measure**, for Space on a folder in a volume that gozlerd does not index,
-counts a folder's items and bytes outside the queue, because it changes
-nothing; it can be cancelled.
 
 **Progress** is atomic counters of bytes or entries and the current file,
 which the window reads about twice a second. A file the run counts without

@@ -17,7 +17,7 @@ mod status_bar;
 
 use crate::core::ids::IconId;
 use crate::core::model::Model;
-use crate::core::settings::Settings;
+use crate::core::settings::{Mode, Settings};
 use crate::core::text::{LANGUAGES, Language, Strings};
 use crate::win;
 use main_window::{Instance, MainWindow};
@@ -132,7 +132,9 @@ pub(crate) fn run() {
     set_panic_report(|report| report.language = Some(language));
     let mut model = Model::new(Strings::load(language), settings);
     if let Some(folder) = arguments.location {
-        // The window's first search runs with it.
+        // The window's first search runs with it, in Search, whose filter
+        // Location is (file-manager-spec.md: The window).
+        let _ = model.show_mode(Mode::Search);
         let _ = model.choose_folder(folder);
     }
 

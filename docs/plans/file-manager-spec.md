@@ -42,6 +42,9 @@ the person sees and does.
   2026-10-20).
 - **Copy, move and delete as fast as possible**, with the engine's methods:
   parallel deletion and the copy engine that measures faster.
+- **Only the asked features** (owner, 2026-10-20): the keys of "Goal",
+  with what makes them usable, such as selecting several entries for `F5`.
+  "Not planned" lists what this removed.
 - **Owner ruling: no Recycle Bin** (2026-10-19). Every delete is permanent
   and fast. A person who wants the Recycle Bin uses File Explorer.
 - **Operations run in the background,** with a queue (owner, 2026-10-19).
@@ -117,15 +120,17 @@ owner can change one before stage 3 starts.
 The filter pane and the inspector belong to Search, and Two panels does not
 show them.
 
+- **The title** is "Gozler" in Two panels, because a title that names one
+  panel's folder would be wrong for the other.
 - **Switching modes keeps each mode's state:** the search text, its results
   and the panels' folders. While Search shows, the panels stop watching
   their folders and ask gozlerd nothing, and they read their folders again
   when Two panels shows, because a watched folder on a USB drive blocks its
   removal and nobody sees the changes.
 - **Show window** (the tray, the shortcut from any program, a second start)
-  in Two panels focuses the active panel's list. A second start with
-  `--location <folder>` switches to Search, because Location is Search's
-  filter.
+  in Two panels focuses the active panel's list. A start with
+  `--location <folder>`, the first or a second, switches to Search, because
+  Location is Search's filter.
 
 ### A panel
 
@@ -161,10 +166,9 @@ show them.
     column. Names compare by their folded form, as Search's name sort does,
     so the two modes order names the same.
   - A click on a column header sorts by it, and a second click reverses
-    the order. `Ctrl+F3`, `Ctrl+F4`, `Ctrl+F5` and `Ctrl+F6` sort by name,
-    extension, date and size, as in Norton Commander, and the same key again
-    reverses the order. The first sort by Size or Date modified puts the
-    largest or the newest first, as in Search. The header shows the arrow.
+    the order; View > Sort by does the same. The first sort by Size or Date
+    modified puts the largest or the newest first, as in Search. The header
+    shows the arrow.
   - Hidden and system entries are shown, in the gray text color, as File
     Explorer shows them when "Hidden items" is on. A copy of a folder
     copies them too, so the person must see them.
@@ -172,21 +176,27 @@ show them.
     Date modified fit their content. The person can drag a column's
     divider; widths are not saved.
 - **The status line** under the list counts the panel's entries, without
-  `..`:
+  `..`, and shows the free space of the panel's drive at its right end, so
+  before `F5` the person compares the selection's size with the other
+  panel's free space without leaving the panel:
 
-  | Case | Text |
-  | --- | --- |
-  | Nothing selected | "14 items · 5.2 GB" |
-  | Entries selected | "3 of 14 selected · 4.2 GB" |
-  | A search panel | "1,204 results", or "3 of 1,204 selected · 4.2 GB" |
+  | Case | Left | Right |
+  | --- | --- | --- |
+  | Nothing selected | "14 items · 5.2 GB" | "120 GB free" |
+  | Entries selected | "3 of 14 selected · 4.2 GB" | "120 GB free" |
+  | A search panel | "1,204 results in C:\Users\me", or "3 of 1,204 selected · 4.2 GB" | the searched drive's free space; for All drives, the focused result's full folder, because the Folder column may shorten it. A folder that does not fit loses its middle, so the drive and the last folders stay |
 
-  The size adds the files' sizes only, as the selection's size does in
-  Search's status bar (DESIGN.md: Status bar). The Size column already shows
-  each folder's size, and a sum with folders would read "size unknown" for
-  most folders on a drive that gozlerd does not index. With only folders
-  counted, the size is left out: "2 of 14 selected".
+  The size adds the sizes of the counted files and folders, in the short
+  form of Search's status bar (DESIGN.md: Status bar), such as "4.2 GB",
+  because the Size column's KB do not compare at a glance with the free
+  space. When a counted folder's size is unknown (see "Folder sizes"), the
+  size is left out, because a sum that misses a folder would promise room
+  that the copy does not have: "2 of 14 selected". The free space is read
+  on a thread, and again after each change in the panel.
 - **The active panel** has the focus. Its path box shows the system
-  highlight colors, as Total Commander shows its active path. The other
+  highlight colors, as Total Commander shows its active path, except while
+  the path box has the focus: then it is a plain edit box, so selected text
+  and the caret show. The other
   panel shows its focused row with the gray bar that Windows gives a list
   without the focus. Commands act on the active panel. The other panel's
   folder is the destination of `F5` and `F6`. `Tab` makes the other panel
@@ -223,7 +233,9 @@ show them.
   at Exit, and wake the window only while it is open (DESIGN.md: window rule
   5, as for the update check's thread).
 - **A panel remembers** its folder and its sort in `ui.json`, and the window
-  remembers which panel was active. At start, a folder that no longer exists
+  remembers which panel was active. The first time, the left panel shows
+  Documents and the right panel Downloads, the two folders a person copies
+  between most. At start, a folder that no longer exists
   is replaced by the nearest folder above it that exists; the reading thread
   finds it, so a saved folder on a network share never delays the start.
 - **Memory:** a panel holds about 100 bytes for each entry of its folder, so
@@ -256,9 +268,8 @@ text, as "A panel" says.
 | `Tab` | make the other panel active |
 | `Alt+F1`, `Alt+F2` | open the left or the right panel's drive menu |
 | `Ctrl+L` | focus the path box |
-| `Ctrl+U` | swap the two panels' folders |
 | `Ctrl+R` | read the folder again, and ask gozlerd for the folder sizes again |
-| `Esc` | close the quick search box; in a search panel, show the folder again |
+| `Esc` | close the quick search box; when it is closed, clear the selection; when nothing is selected, in a search panel, show the folder again. Each press does the first that applies, so the first `Esc` never drops a search whose results are selected |
 | `Alt` pressed and released alone, `F9`, `F10` | open the menu bar, because `Alt`+a letter is quick search |
 
 Going to a parent folder focuses the folder that the panel came from, as
@@ -279,11 +290,14 @@ changing the selection.
   `Home` and `End` are keys of the panel's list (DESIGN.md: window rule 8),
   which move `LVIS_FOCUSED` without changing the selection, as Norton
   Commander's cursor moves without changing its marks.
-- **The window draws the rows** in `NM_CUSTOMDRAW`: the focused row has a
-  bar, and the selected rows have a different text color, as Total
-  Commander draws them in red. A selected row under the bar is still
-  visibly selected. The prototype sets the colors, from `GetSysColor`, so
-  that high contrast works.
+- **The window draws the rows** in `NM_CUSTOMDRAW` (owner, 2026-10-20,
+  the prototype's look A), with system colors so that high contrast works:
+  - the focused row of the active panel is a bar in `COLOR_HIGHLIGHT` with
+    `COLOR_HIGHLIGHTTEXT`; the other panel's focused row is a gray bar;
+  - a selected row's text is `COLOR_HIGHLIGHT` and semibold, as Total
+    Commander draws selected files in red;
+  - a selected row under the bar keeps the bar's text color and is bold, so
+    it still shows as selected.
 - **Commands act on the selected entries,** or on the focused row when
   nothing is selected, as in Norton Commander. No command acts on `..`, and
   `..` cannot be selected.
@@ -293,26 +307,17 @@ changing the selection.
 | `Insert`, `Space` | select the focused row, or clear it when it is selected, and move the focus down |
 | `Shift+Up`, `Shift+Down`, `Shift+PgUp`, `Shift+PgDn`, `Shift+Home`, `Shift+End` | select each row the focus passes, as in Total Commander |
 | `Ctrl+A` | select every entry |
-| `Num +` | Select by pattern…: a dialog with a pattern box, `*.*` at first, and Select and Cancel |
-| `Num -` | Clear by pattern…: the same dialog, with Clear and Cancel |
-| `Num *` | invert the selection of the files |
 | a click | select only that row and focus it, as in File Explorer |
 | `Ctrl`+click | select the row, or clear it when it is selected |
 | `Shift`+click | select the rows from the focused row to the clicked one |
-| a right-click | on a row that is not selected: clear the selection and focus the row, as File Explorer does; then open the context menu |
+| a right-click | on a row that is not selected: clear the selection and focus the row, as File Explorer does; on a selected row: focus it and keep the selection; then open the context menu |
+| `Esc`, Edit > Clear selection | clear the whole selection (owner, 2026-10-21), because every delete is permanent, so a forgotten selection must take one key to drop |
 
-- **A pattern** uses `*` and `?`, several patterns are separated by `;`,
-  such as `*.jpg;*.png`, and it matches names without regard to case. It
-  selects or clears files only, and `Num *` inverts files only, as in
-  Norton Commander, because selecting every folder by `*.*` would copy whole
-  trees by accident. `Ctrl+A` and the mouse select folders too.
 - **The selection is cleared** when the panel shows another folder, and
   when the person submits a copy, a move or a delete of it, as in Total
   Commander, because the rows of a move or a delete leave the panel.
 - **A search panel uses the same keys and the same list selection.** Its
-  selection is read from gozlerd, as Search's is. `Num +`, `Num -` and `Num
-  *` are disabled there, because they test names and kinds of rows that are
-  not fetched.
+  selection is read from gozlerd, as Search's is.
 
 ### Quick search
 
@@ -325,8 +330,9 @@ lets the `WM_SYSKEYDOWN` through, so releasing `Alt` after a quick search
 does not open the menu bar, while `Alt` pressed and released alone still
 does. Stage 4 checks this once in the running window.
 
-- **The box** shows the typed text over the active panel's status line, such
-  as "Find: rep". It opens with the first character.
+- **The box** takes the place of the active panel's status line while it is
+  open, and shows the typed text, such as "Find: rep". It opens with the
+  first character.
 - **The focus goes to the first row whose name starts with the typed text,**
   from the top of the list, without regard to case. `..` never matches. The
   text is the start of a name, not a pattern, so `*` and `?` match
@@ -353,7 +359,10 @@ button opens it too. The panel becomes active.
   "&C:  Windows", with the drive letter as its access key, so `Alt+F1` then
   `D` goes to drive D, as in Norton Commander. A separator follows, then the
   last 10 folders that this panel showed, newest first, with the access keys
-  `1` to `9` and `0`. The folder list is saved in `ui.json`.
+  `1` to `9` and `0`, without the folder the panel shows, because choosing
+  it would do nothing. The folder list is saved in `ui.json`. The panel's
+  own drive has the radio mark, and the menu opens with it highlighted, as
+  Norton Commander's drive menu opens on the current drive.
 - **A drive** shows the folder that the panel last showed on that drive in
   this session, as Norton Commander remembers a folder for each drive, or
   the drive's root. The drive that the panel already shows goes to its root,
@@ -410,44 +419,57 @@ Commander's Find File searches from the current folder.
 
 - **The search box** takes the place of the path box, with a drop-down list
   beside it, "Look in": "This folder and subfolders" (the default) or "All
-  drives". The focus goes to the box.
+  drives". The drive button stays, so its menu leaves the search with the
+  mouse too. The focus goes to the box. While the box is empty, the list
+  area says "Type a name to search C:\Users\me and its subfolders.", or
+  "Type a name to search all indexed drives." On a drive that gozlerd does
+  not index, it shows the "not indexed" message below instead, so the
+  person learns it before typing.
 - **The search** runs as the person types, 150 ms after the last key, through
   gozlerd, as in Search mode. It uses Search's syntax with the default
   match: Start of words, without Match case and Match path. Search's match
   controls and filters do not apply, because the panel does not show them;
   the typed syntax, such as `case:` or `regex:`, gives the rest.
-- **The list** shows Name, Ext, Folder, Size and Date modified. Its rows
+- **The list** shows Name, Ext, Folder, Size and Date modified. With "This
+  folder and subfolders", Folder is the path below the searched folder,
+  such as `Projects\Accounts`, or empty for the folder itself; with All
+  drives, it is the full path. A path that does not fit loses its middle,
+  as File Explorer shortens a path, because the part that tells two results
+  apart is its end. Its rows
   come on demand, up to 100,000, as in Search (DESIGN.md: Rows on demand).
-  It does not follow the disk; `Ctrl+R` runs the search again. The panel
+  It does not follow the disk; `Ctrl+R` runs the search again. A search
+  that finds nothing says "No items match your search.", and with "This
+  folder and subfolders" a second line says "Choose All drives in Look in
+  to search every indexed drive." The panel
   drops its rows when it leaves the search, so a search panel costs memory
-  only while it shows. It leaves the search by `Esc`, `Backspace`, `Enter`
-  on a folder, or a choice in the drive menu.
+  only while it shows. It leaves the search by `Esc` with nothing selected, `Backspace`, `Enter`,
+  or a choice in the drive menu.
 - **The sort** is the panel's own, the one its folder uses, so the header
-  and `Ctrl+F3` to `Ctrl+F6` work as in a folder panel; gozlerd sorts the
-  results. It never changes Search's sort. The Folder header does not sort,
+  works as in a folder panel; gozlerd sorts the results. It never changes Search's sort. The Folder header does not sort,
   because the panel's sort also orders its folder, which has no Folder
   column.
 - **A folder on a drive that gozlerd does not index** cannot be searched
   with "This folder and subfolders". The list area says "E:\ is not indexed,
-  so Gozler cannot search it.", with All drives as its button, instead of an
-  empty list that reads as "no such file".
+  so Gozler cannot search it. Choose All drives in Look in to search the
+  indexed drives.", instead of an empty list that reads as "no such file".
 - **Keys in the search box:** `Down` and `Enter` go to the list. `Esc` shows
   the folder again, with the row that was focused before the search.
-  `Tab` goes to the other panel's list, as from the path box.
+  `Tab` goes to the other panel's list, as from the path box. `Alt+L`, the
+  access key of "Look in", goes to the drop-down list, whose `Enter`
+  returns to the search box.
 - **Keys in the list:**
 
   | Key | Does |
   | --- | --- |
-  | `Enter` | on a folder: show it in the panel and leave the search. On a file: Open |
-  | `Backspace` | show the folder that holds the focused result, with the result focused, as Norton Commander's Find File does with Go to |
-  | `Esc` | show the folder again, as before the search |
+  | `Enter` | go to the focused result: show the folder that holds it, with it focused, and leave the search, as Far Manager's search and Norton Commander's Find File with Go to do. A folder result shows the folder itself. File > Open opens a file |
+  | `Esc` | clear the selection; with nothing selected, show the folder again, as before the search |
+  | `Backspace` | show the folder again, as before the search |
   | `Alt+F7`, `Ctrl+F` | go to the search box with its text selected |
 
 - **Commands:** `F3` views the focused result, as in a folder panel. `F5`,
-  `F6`, `F8` and the clipboard commands act on the selected results, or on
-  the focused one (see "Selecting entries"). Rename and New folder are
-  disabled,
-  because the list shows gozlerd's results, not a folder. When the other
+  `F6` and `F8` act on the selected results, or on the focused one (see
+  "Selecting entries"). New folder is disabled, because the list shows
+  gozlerd's results, not a folder. When the other
   panel is a search panel too, `F5` and `F6` are disabled, because there is
   no destination folder.
 - **Quick search** in a search panel looks only at the rows already
@@ -456,9 +478,8 @@ Commander's Find File searches from the current folder.
   never waits for the disk").
 - **States:** the search panel's list area shows Search's messages for no
   results, a search that does not parse and a failure of the service
-  (DESIGN.md: States, S5, S7 and S9), and the "not indexed" state above. In
-  S5, the button is All drives while "Look in" is "This folder and
-  subfolders", and there is none otherwise.
+  (DESIGN.md: States, S5, S7 and S9), and the "not indexed" state above,
+  without Search's buttons, because "Look in" is the panel's only filter.
 
 ### The key bar
 
@@ -474,6 +495,8 @@ Move`, `F7 New folder`, `F8 Delete`.
   because `Tab` switches panels.
 - **A button is disabled when its command is,** never hidden. `F4 Edit` is
   always disabled, and its tooltip says "Editing is not available yet."
+  `F6 Move`'s tooltip says "Move to the other panel, or rename.", because
+  no other place tells a person who wants to rename that `F6` does it.
 
 ### Commands in Two panels
 
@@ -481,25 +504,29 @@ Move`, `F7 New folder`, `F8 Delete`.
 | --- | --- | --- | --- |
 | View | `F3` | the focused row is a file | the focused file, in a Viewer |
 | Edit | `F4` | never in this version | — |
-| Copy to folder… | `F5` | an entry is selected or focused, and the other panel shows a folder | the selected entries, or the focused row |
+| Copy to folder… | `F5` | an entry is selected or focused | the selected entries, or the focused row |
 | Move to folder… | `F6` | as Copy to folder… | as Copy to folder… |
-| Rename | `F2`, `Shift+F6` | the panel shows a folder, and an entry is focused | the focused row |
 | New folder… | `F7` | the panel shows a folder | the panel's folder |
 | Delete | `F8`, `Delete`, `Shift+Delete` | an entry is selected or focused | the selected entries, or the focused row |
-| Cut | `Ctrl+X` | the list has the focus, and an entry is selected or focused | the selected entries, or the focused row, put on the clipboard as in Search |
-| Copy | `Ctrl+C` | the list has the focus with an entry selected or focused, or the path box or the search box has selected text, as in Search (C8) | the entries, as Cut; or the selected text |
-| Paste | `Ctrl+V` | the panel shows a folder, and the clipboard holds files | the panel's folder, as Search's Paste does for a folder row |
 | Find | `Alt+F7`, `Ctrl+F` | always | the active panel (see "Search in a panel") |
-| Open, Properties | `Enter`; none | as in Search | the focused row, or the selected entries |
+| Open, Properties | `Enter` on a file in a folder panel; none | as in Search | the focused row, or the selected entries |
+| Select all | `Ctrl+A` | always | the panel's entries, or the focused box's text |
+| Clear selection | `Esc` | an entry is selected | the panel's selection |
+| Refresh | `Ctrl+R` | always | the panel's folder and its sizes, or its search |
 
 Copy to folder… and Move to folder… are the commands Search already has
 (DESIGN.md: window rule 9, one row per command). Only the question differs:
 Search asks with the folder picker, Two panels with the edit box of "Copy
 and Move". The key bar still reads `F5 Copy` and `F6 Move`.
 
-A second Gozler window, which owns no file operations, disables Copy to
-folder…, Move to folder…, Rename, New folder…, Delete, Cut and Paste (see
+The key bar, the menus and the context menus show each command disabled by
+these rules, on the active panel's state, so the key bar never offers a key
+that does nothing. A second Gozler window, which owns no file operations,
+disables Copy to folder…, Move to folder…, New folder… and Delete (see
 "Interrupted operations").
+
+Two panels has no clipboard commands. `Ctrl+C`, `Ctrl+X` and `Ctrl+V` in
+the path box and the search box edit their text, as in any edit box.
 
 #### Keys
 
@@ -516,7 +543,7 @@ shows. A key has one of three owners:
   `Enter`, `Esc` and `Tab` (see "A panel" and "Search in a panel"). The path box
   and the search box keep every other key for their text.
 - **The person's shortcuts** (Settings > Keyboard) for a command that both
-  modes have, such as Copy path, work in both modes. In Two panels a fixed
+  modes have, such as Settings…, work in both modes. In Two panels a fixed
   key wins over a shortcut on the same key, and the menus show the key that
   works in the shown mode, so a menu never shows a key that does something
   else. The Keyboard page says which keys Two panels fixes. Two panels'
@@ -529,7 +556,6 @@ shows. A key has one of three owners:
 
 | Key | Two panels | Owner in Two panels | Search |
 | --- | --- | --- | --- |
-| `F2`, `Shift+F6` | Rename | fixed | — |
 | `F3` | View | fixed | — |
 | `F4` | Edit (disabled) | fixed | — |
 | `F5` | Copy to folder… | fixed | Refresh |
@@ -540,29 +566,32 @@ shows. A key has one of three owners:
 | `Alt+F1`, `Alt+F2` | the left or the right drive menu | fixed | — |
 | `Alt+F7`, `Ctrl+F` | Find | fixed | `Ctrl+F`, `Ctrl+E` are Find |
 | `Ctrl+R` | Refresh | fixed | — |
-| `Ctrl+U` | Swap panels | fixed | — |
 | `Ctrl+L` | focus the path box | fixed | — |
-| `Ctrl+F3` to `Ctrl+F6` | sort by name, extension, date, size | fixed | — |
 | `Delete`, `Shift+Delete` | Delete | list | the same, a key of the list |
-| `Ctrl+C` | Copy | the person's shortcut, which acts on the focused control | the same |
-| `Ctrl+X`, `Ctrl+V` | Cut, Paste | list | the same, keys of the list |
+| `Ctrl+C`, `Ctrl+X`, `Ctrl+V` | the path box's and the search box's own | the box | Copy, Cut and Paste |
 | `Ctrl+A` | Select all | acts on the focused control, as in Search | the same |
 | `Enter`, `Backspace`, `Esc`, arrows, `PgUp`, `PgDn`, `Home`, `End` | as "Moving around" says | list | the list's own |
-| `Insert`, `Space`, `Shift`+arrows, `Num +`, `Num -`, `Num *` | as "Selecting entries" says | list | — |
+| `Insert`, `Space`, `Shift`+arrows | as "Selecting entries" says | list | — |
 | a character, `Alt`+a character | quick search | list | — |
 | `Tab` | the other panel's list | list, path box and search box | the next control |
 
-`commands::Key` has no numeric keypad keys yet; stage 3 adds `Num +`, `Num
--` and `Num *`. View > Two panels has no default shortcut, as Copy to
-folder… has none; the person can give it one.
+View > Two panels has no default shortcut, as Copy to folder… has none;
+the person can give it one.
 
 #### Copy and Move
 
 1. **The question** is a dialog titled Copy to folder or Move to folder, as
    Search's folder picker is. It says "Copy 3 items to:" or "Copy
    report.pdf to:", then an edit box with the other panel's folder, ending
-   in `\`, all selected. Its buttons are Copy or Move, the default, and
-   Cancel. `Enter` starts the operation at once, as in Norton Commander.
+   in `\`, all selected. `F6` on one entry adds the entry's name, with
+   the name selected without its extension, as Total Commander's, so the
+   person sees that typing a name renames (owner, 2026-10-21). Left as it
+   started, that box moves the entry into the other panel's folder, as the
+   folder alone does, so a folder of the same name there is merged and not
+   entered. When the other panel shows no folder, such as a
+   search or a drive that is not ready, the box starts empty, so the person
+   types the destination. Its buttons are Copy or Move, the default, and
+   Cancel; Copy or Move is disabled while the box is empty. `Enter` starts the operation at once, as in Norton Commander.
 2. **The dialog closes at once,** because it decides nothing from the disk.
    It stays open only for a path that is not valid as text, such as one
    with `*` or `?`, and then a message box gives the reason. The engine's
@@ -598,40 +627,22 @@ folder… has none; the person can give it one.
    Copy to folder… also creates a chosen folder that was deleted after it
    was chosen, as Total Commander does.
 
-#### Rename
-
-`F2` or `Shift+F6` edits the focused row's name in place
-(`LVM_EDITLABEL`). The name without its extension is selected, as in File
-Explorer. `Enter` renames through the engine, and `Esc` cancels.
-
-- A character that Windows does not allow in a name is refused as it is
-  typed, with File Explorer's balloon: "A file name can't contain any of
-  the following characters: \ / : * ? " < > |".
-- An unchanged name closes the edit and renames nothing. A name that
-  differs only in case, such as `report.PDF` to `report.pdf`, is renamed,
-  as File Explorer does.
-- A name that another row of the panel shows, without regard to case, is
-  refused before the edit closes: a message box says "There is already a
-  file with the same name in this location.", and the edit stays open with
-  the name selected. The check reads the panel's rows in memory, never the
-  disk, and leaves out the rows that a delete or a move takes, because the
-  person does not see them; an operation on a name that such a delete still
-  holds waits for it (engine spec, D14).
-  A name that another program takes meanwhile is refused by the engine,
-  which never replaces it, and the failure dialog says so.
-- The row shows the new name when the change notification arrives.
-
 #### New folder
 
 `F7` opens a dialog titled New folder, with "Name:" and an empty edit box,
 and Create and Cancel. Create is disabled while the box is empty.
 
-- Characters that Windows does not allow are refused as in Rename. A name
-  with `\` is refused too, because the box names one folder.
-- A name that a row of the panel shows: a message box says
-  "D:\Backup\Photos already exists.", and the dialog stays open with the
-  name selected. The check reads the panel's rows as Rename's does, and a
-  race is the engine's refusal in the failure dialog.
+- A character that Windows does not allow in a name is refused as it is
+  typed, with File Explorer's balloon: "A file name can't contain any of
+  the following characters: \ / : * ? " < > |". So `\` is refused too,
+  because the box names one folder.
+- A name that a row of the panel shows, without regard to case: a message
+  box says "D:\Backup\Photos already exists.", and the dialog stays open
+  with the name selected. The check reads the panel's rows in memory, never
+  the disk, and leaves out the rows that a delete or a move takes, because
+  the person does not see them. A name that another program takes
+  meanwhile is refused by the engine, which never replaces it, and the
+  failure dialog says so.
 - The engine creates the folder (`Request::NewFolder`). When it appears in
   the list, the focus goes to it.
 
@@ -644,19 +655,19 @@ first row after the deleted ones.
 ### Menus in Two panels
 
 The menus follow Search's (DESIGN.md: Menus): File acts on the selected
-entries and the window, Edit on the clipboard and the selection, View on
-what the window shows.
+entries and the window, Edit on the selection, View on what the window
+shows. Each item shows its key, so the menus teach the keys as the key bar
+does.
 
 - **File:** Open, View, Edit, Properties | Copy to folder…, Move to
-  folder…, Rename, New folder…, Delete | Settings… | Exit. Edit is
-  disabled, as in the key bar.
-- **Edit:** Cut, Copy, Paste, Copy name, Copy path | Select all, Select by
-  pattern…, Clear by pattern…, Invert selection | Find
-- **View:** Two panels | Sort by ▸ | Swap panels | Refresh | File operations
+  folder…, New folder…, Delete | Settings… | Exit. Edit is disabled, as in
+  the key bar.
+- **Edit:** Select all, Clear selection | Find
+- **View:** Two panels | Sort by ▸ | Refresh | File operations
 - **Help** and **Language** as in Search.
-- **The context menu on a row:** Open, View | Cut, Copy, Paste | Copy to
-  folder…, Move to folder…, Rename, Delete | Copy path | Properties. The
-  context menu on the empty area of a list: Paste | New folder… | Refresh.
+- **The context menu on a row:** Open, View | Copy to folder…, Move to
+  folder…, Delete | Properties. The context menu on the empty area of a
+  list: New folder… | Refresh.
 
 ### The status bar in Two panels
 
@@ -664,8 +675,8 @@ It has Search's three groups (DESIGN.md: Status bar):
 
 | Group | Shows |
 | --- | --- |
-| Left | the active panel's drive and its free space: "C:\ · 120 GB free", read on a thread and read again after each change in the panel |
-| Middle | the running job, as in Search |
+| Left | empty, because each panel's status line shows its drive's free space |
+| Middle | the running job, as in Search, or what the last operation did ("File operations", step 6) |
 | Right | in a folder panel, the index state when it leaves sizes unknown; in a search panel, the search's totals, as in Search |
 
 ### The Viewer
@@ -675,8 +686,8 @@ Lister is. Each `F3` opens a new Viewer, so the person can view two files
 side by side. A Viewer is a top-level window that no window owns, so it has
 its own taskbar button and stays reachable while the main window is hidden.
 Its keys are its own: the message loop gives each message to the keys of
-the window it belongs to (see stage 3), so `F3`, `F5` or `Ctrl+R` in a
-Viewer never act on a panel. Exit in the main window closes every Viewer; closing the
+the window it belongs to (see stage 3), so `F3` or `F5` in a Viewer never
+act on a panel. Exit in the main window closes every Viewer; closing the
 main window to the notification area leaves them open.
 
 ```text
@@ -715,35 +726,35 @@ main window to the notification area leaves them open.
 - **Text:**
   - The encoding comes from the byte order mark: UTF-8, UTF-16 LE or UTF-16
     BE. Without one, the text is UTF-8 when the first 64 KB is valid UTF-8,
-    and Windows' ANSI code page otherwise. View > Encoding ▸ Automatic,
-    UTF-8, UTF-16 LE, UTF-16 BE, Windows (ANSI), DOS (OEM) overrides it.
-    DOS (OEM) shows the box-drawing characters of old DOS text files.
+    and Windows' ANSI code page otherwise.
   - A line ends at CR LF, LF or CR. A tab moves to the next multiple of 8
     columns. Bytes that the encoding cannot read show as �, as Notepad shows
     them.
   - Long lines wrap at the window's width. `F2` and View > Wrap long lines
     switch wrapping off, as in Norton Commander; then `Left` and `Right`
-    scroll sideways. A line longer than 10,000 characters is shown in pieces
+    scroll sideways. In Hex both are disabled, because a hex row is always
+    16 bytes. A line longer than 10,000 characters is shown in pieces
     of 10,000, because the Viewer finds a line's start by reading back from
     the shown position.
 - **Hex:** each row shows its offset, 8 hex digits, or 16 for a file of 4 GB
   or more; then 16 bytes in hex, with a gap after the eighth; then the same
   16 bytes as characters, with `.` for each byte outside the printable ASCII
-  range. View > Encoding is disabled in Hex, because it changes only Text.
+  range.
 - **Moving:** `Up`, `Down`, `PgUp`, `PgDn`, the mouse wheel and the scroll
   bar. `Home` or `Ctrl+Home` goes to the start, and `End` or `Ctrl+End` to the
   end. The scroll bar maps to the byte position in the file, so dragging it
   to the middle of a 50 GB file shows the middle at once. In Text, a jump
-  shows the first line that starts after that byte.
+  shows the first line that starts after that byte. When the whole file
+  shows, the scroll bar is disabled, as Notepad's is.
 - **Closing:** `Esc` or `F3`, as in Norton Commander, or File > Close.
+  Closing a Viewer that a panel opened activates the main window, with the
+  same focused row, so `F3`, `Esc`, `Down`, `F3` walks through the files as
+  in Norton Commander. Windows would otherwise activate whichever window
+  was behind the Viewer.
 - **The status bar:** the file's name, the encoding (Text) and the file's
   size, and at the right the position: "Top", "37 %" or "End" in Text, and
   the first row's offset in Hex.
-- **Menus:** File: Reload (`Ctrl+R`) | Close. View: Text, Hex | Wrap long
-  lines | Encoding ▸.
-- **Reload** reads the file again from the shown position, because the
-  Viewer shows what it read when it read it, and a growing log file grows
-  after that.
+- **Menus:** File: Close. View: Text, Hex | Wrap long lines.
 - **A file that cannot be opened:** the Viewer's area says "Windows could
   not open settings.ini: Access is denied.", with Retry.
 - **The font** is Consolas, at the height of the window's message font,
@@ -754,8 +765,8 @@ main window to the notification area leaves them open.
 ## File operations
 
 These rules apply to both modes. Search reaches them through its own
-commands (see "Search mode"), Two panels through `F5`, `F6`, `F7`, `F8`
-and Rename.
+commands (see "Search mode"), Two panels through `F5`, `F6`, `F7` and
+`F8`.
 
 1. **Copy and Move ask first.** Two panels asks with the destination dialog
    of "Copy and Move"; Search asks with the folder picker of "Search mode".
@@ -768,8 +779,11 @@ and Rename.
    and what happens to a conflict that appears after the question.
 4. **The operation then runs in the background.** The person goes on
    browsing, searching and starting other operations.
-5. **The File operations window** opens when an operation starts. It is one
-   window that never blocks Gozler, modelled on Total Commander's copy window
+5. **The File operations window** opens when an operation still runs 2
+   seconds after it starts, in both modes, so a short operation shows only
+   in the status bar's middle group (owner, 2026-10-21). It opens without
+   taking the keyboard focus, so the keys go on acting on the panel. It is
+   one window that never blocks Gozler, modelled on Total Commander's copy window
    with its background queue under it (owner, 2026-10-20). At the top, the
    running operation: its title (Copy, Move or Delete), From and To with the
    current file's paths shortened in the middle, a bar with a percentage for
@@ -788,7 +802,11 @@ and Rename.
    and the person can close it at any time; View > File operations shows it
    again. The taskbar button shows the progress of all operations together.
 6. **When an operation ends,** both panels show the change, through their
-   change notifications and the reading that the operation's end starts. A
+   change notifications and the reading that the operation's end starts.
+   The status bar's middle group then says what was done, such as "Copied
+   3,310 items to D:\Backup" or "Deleted 12 items", until another
+   operation starts, in both modes, because after Hide it is the only sign
+   that the operation finished (owner, 2026-10-21). A
    search list shows the rows that the operation took blank. "The person
    never waits for the disk" says both.
 7. **A failure does not stop the operation.** At its end, a dialog lists
@@ -831,7 +849,7 @@ to skip it, and one forgot.
   a path it was moved from all show, and a deleted row never shows again
   for a moment. Today
   `Queue::taken()` also holds ended operations, which the window releases
-  only on a new search in Search (`release_ended`); stage 3 splits the
+  only on a new search in Search (`release_ended`); stage 4 splits the
   queue's set into the waiting and running sources and the ended ones.
 - **Each search list keeps the ended operations it shows blank,** and
   releases them on its own next search, or when a search panel leaves its
@@ -872,7 +890,7 @@ their mind, but the person must know what happened.
   Exit question says they will not run.
 - **Another window offers no file operations.** When "Allow only one Gozler
   window at a time" is off, a second window shows Delete, Cut, Paste, Copy
-  to folder… and Move to folder… disabled and accepts no drop, as it shows
+  to folder…, Move to folder… and New folder… disabled and accepts no drop, as it shows
   no tray icon, because the first window's queue owns the saved file
   (engine spec, "One queue per user session").
 
@@ -1005,6 +1023,11 @@ picker as the destination:
 - Thumbnails and other views than the report list; choosing the panels'
   columns.
 - A splitter between the panels.
+- In Two panels, as beyond the owner's list (owner, 2026-10-20): rename in
+  place (`F6` with a new name renames), the clipboard commands, selecting
+  by pattern and inverting the selection (`Num +`, `Num -`, `Num *`),
+  swapping the panels (`Ctrl+U`) and the sort keys (`Ctrl+F3` to
+  `Ctrl+F6`). In the Viewer: choosing the encoding, and Reload.
 
 ## Vocabulary
 
@@ -1021,7 +1044,7 @@ These terms go into `CONTEXT.md` in stage 3, and "Pane" there stops listing
   destination of Copy to folder… and Move to folder….
 - **Focused row**: the row with the bar, which the arrow keys move.
 - **Selected entries**: the entries the person selected with `Insert`,
-  `Space`, `Shift`, `Ctrl` or a pattern; commands act on them, or on the
+  `Space`, `Shift` or `Ctrl`; commands act on them, or on the
   focused row when there are none.
 - **Quick search**: going to a name by typing its start, with or without
   `Alt`.
@@ -1041,11 +1064,11 @@ These terms go into `CONTEXT.md` in stage 3, and "Pane" there stops listing
 | --- | --- | --- |
 | 1 | The engine of [the engine spec](fast-copy-delete-spec.md): delete, copy and move, and the measurement on the owner's machine | built |
 | 2 | Search mode's commands: Delete, Copy to folder…, Move to folder…, Cut and Paste, dropping files onto a folder row, the questions, the File operations window, the taskbar progress and the speed settings page | built; the drop is being built |
-| 3 | The prototype, then the restructuring listed under this table. It changes no behavior of Search | next |
-| 4 | The panels: reading folders, the columns and sorting, moving around, selecting, quick search, the drive menu, folder sizes, change notifications, removing a USB drive, the status lines, the key bar and the status bar's left group | |
-| 5 | The panels' commands: Copy to folder… and Move to folder… with their dialog and the two engine changes, Rename, New folder…, Delete, the clipboard commands, the menus and the context menus | |
+| 3 | The prototype, then the restructuring listed under this table: the Two panels shell, with two empty lists. It changes no behavior of Search | built |
+| 4 | The taken entries split, then the panels: reading folders, the columns and sorting, moving around, selecting, quick search, the drive menu, folder sizes, change notifications, removing a USB drive, the status lines, the key bar and the status bar's left group | next |
+| 5 | The panels' commands: Copy to folder… and Move to folder… with their dialog and the two engine changes, New folder…, Delete, the menus and the context menus; in both modes, the File operations window opening after 2 seconds and the status bar's line for an ended operation | |
 | 6 | The Viewer | |
-| 7 | Search in a panel, and the measured memory of a search panel | |
+| 7 | One state for each list, then search in a panel, and the measured memory of a search panel | |
 | 8 | Close the plan: the rules move into `docs/DESIGN.md` (its Memory budget included), `CONTEXT.md` and the help, and this file is deleted | |
 
 **Stage 3's restructuring,** before any feature, as `AGENTS.md` ("Writing a
@@ -1053,35 +1076,43 @@ plan", item 4) asks, because each item changes code that every later stage
 builds on:
 
 - **Two lists in `Layout::compute`,** the mode switch, and an accelerator
-  table for each mode (see "Keys"), with the numeric keypad keys added to
-  `commands::Key`.
+  table for each mode (see "Keys"): each command row names the modes it
+  belongs to, and the menus and the accelerator table hold only the shown
+  mode's commands.
 - **One message loop for several windows:** `win::window::run_message_loop`
   gives each message to the keys of its top-level window
   (`GetAncestor(msg.hwnd, GA_ROOT)`): the main window's accelerators and
   keys, the File operations window's dialog keys, or a Viewer's own keys.
   Today the loop has one extra window (`set_modeless`), and every other
   message goes through the main window's accelerators.
-- **One state for each list:** `core::model::Model` has one search text,
-  one set of results, one selection and one taken set, and
-  `core::fetch::Purpose` one `Results` and one `Selection`. They become one
-  of each for every list (Search's list, the left panel, the right panel),
-  with a folder-size purpose for each panel, so a search in one list never
-  cancels another list's request (DESIGN.md: window rule 4).
-- **Taken entries split** into the sources of waiting and running
-  operations and the ended operations that each list keeps: each search
-  list until its next search or until it leaves the search, and each
-  folder panel, for the operations whose end makes it read its folder
-  again, until its first complete listing started after the end (see "The
-  person never waits for the disk"). An ended operation leaves the queue when no list keeps it.
-- **One sort for each list:** each panel has its own sort, for its folder
-  and its search, and Search keeps its saved sort. A search panel's request
-  carries its panel's sort and the default match.
 - **The documents:** the vocabulary goes into `CONTEXT.md`. In the engine
-  spec, "Taken entries" splits the queue's set as above, and its sentence
-  that a panel releases an operation when it ends is replaced by the folder
-  panel's rule above. The "Measure"
-  rule for `Space` on a folder that gozlerd does not index is removed,
-  because the panels never count a size.
+  spec, "Taken entries" splits the queue's set as stage 4's first step
+  says, and its sentence that a panel releases an operation when it ends is
+  replaced by the folder panel's rule. The "Measure" rule for `Space` on a
+  folder that gozlerd does not index is removed, because the panels never
+  count a size.
+
+**A restructuring whose second user comes later is the first step of that
+stage,** before its features and with its own proof, because a structure
+built for one user is shaped by a guess (the `codebase-design` skill: one
+adapter means a hypothetical seam):
+
+- **Stage 4 starts with the taken entries split** into the sources of
+  waiting and running operations and the ended operations that each list
+  keeps: each search list until its next search or until it leaves the
+  search, and each folder panel, for the operations whose end makes it read
+  its folder again, until its first complete listing started after the end
+  (see "The person never waits for the disk"). An ended operation leaves
+  the queue when no list keeps it.
+- **Stage 7 starts with one state for each list:** `core::model::Model` has
+  one search text, one set of results, one selection and one taken set,
+  and `core::fetch::Purpose` one `Results` and one `Selection`. They become
+  one of each for every list (Search's list, the left panel, the right
+  panel), so a search in one list never cancels another list's request
+  (DESIGN.md: window rule 4). Each panel has its own sort, for its folder
+  and its search, and Search keeps its saved sort; a search panel's request
+  carries its panel's sort and the default match. Stage 4 adds each panel's
+  folder-size purpose, which it needs first.
 
 **The stages run in order, by one implementer.** The Viewer (stage 6) needs
 stage 3's message loop and stage 4's handling of a removed drive, and it
@@ -1091,9 +1122,11 @@ main window.
 
 - **The prototype comes first in stage 3.** It is one HTML page outside the
   repository, with: Two panels with a folder in each panel, the drive menu,
-  quick search, a search panel, the Copy and the New folder dialogs, the
-  Select by pattern dialog, the Viewer in Text and in Hex, and a panel's
-  failure states. The owner approves it once, because a design change after
+  quick search, a search panel, the Copy and the New folder dialogs, an
+  operation running, the menus, the Viewer in Text and in Hex, and a
+  panel's failure states. It does not draw the File operations window, the
+  conflict question or the Delete question, because Two panels uses them as
+  Search built them. The owner approves it once, because a design change after
   that costs code. It shows only what this plan builds, and its sample data
   looks like the owner's machine or is labeled as samples. Its texts become
   `en.json` keys before code uses them, because texts that existed only in
@@ -1110,18 +1143,18 @@ main window.
 
 | Stage | Unit tests in `core` | Screenshots |
 | --- | --- | --- |
-| 3 | which keys each mode takes, and a fixed key winning over a shortcut; a search in one list leaving another list's request alone; an ended delete still hiding its rows from a folder panel until a listing started after its end arrives, whichever of the change notifications and the end comes first, while a listing started before the end releases nothing; a folder panel then showing an entry that the delete could not remove; the layout of two lists at the minimum size and at 150 % DPI | Search unchanged; Two panels empty |
-| 4 | sorting with folders first; the selection rules (focus moves without changing the selection; `Num *` inverts files only); quick search (first match, a refused character, `Up` and `Down`); applying a change notification by name (the focus moves to the next row when its entry goes, the selection keeps its names); the path box's relative paths, environment variables and a file's path; matching folder sizes to rows by name without regard to case; the status line's sum of files | two panels with sizes; quick search; the drive menu; each failure state |
-| 5 | the refused names of Rename and New folder, with an unchanged name and a change of case; the enabled state of each command | the Copy to folder, Move to folder and New folder dialogs; rename in place |
-| 6 | the Text or Hex choice; encoding detection; finding a line's start from any byte; the hex row's text; the scroll position of a byte | a text file, a UTF-16 file, a DOS (OEM) file and an executable in Hex |
-| 7 | leaving a search with `Esc` and with `Backspace`; each list releasing only its own ended operations | a search panel beside a folder panel; the "not indexed" state |
+| 3 | which commands and keys each mode takes; the layout of two lists at the minimum size and at 150 % DPI | Search unchanged; Two panels empty |
+| 4 | first, the taken entries: an ended delete still hiding its rows from a folder panel until a listing started after its end arrives, whichever of the change notifications and the end comes first, while a listing started before the end releases nothing, and the panel then showing an entry that the delete could not remove; then sorting with folders first; the selection rules (focus moves without changing the selection); quick search (first match, a refused character, `Up` and `Down`); applying a change notification by name (the focus moves to the next row when its entry goes, the selection keeps its names); the path box's relative paths, environment variables and a file's path; matching folder sizes to rows by name without regard to case; the status line's sum, left out when a folder's size is unknown | two panels with sizes; quick search; the drive menu; each failure state |
+| 5 | the refused names of New folder; the enabled state of each command | the Copy to folder, Move to folder and New folder dialogs |
+| 6 | the Text or Hex choice; encoding detection; finding a line's start from any byte; the hex row's text; the scroll position of a byte | a text file, a UTF-16 file and an executable in Hex |
+| 7 | first, a search in one list leaving another list's request alone; then leaving a search with `Esc` and with `Backspace`; each list releasing only its own ended operations | a search panel beside a folder panel; the "not indexed" state |
 
 The engine's two changes in stage 5 get tests on folders that each test
 creates, one for each row of the Copy and Move table; no test touches the
 owner's files. Two Win32 behaviors are checked once in the running window,
 because no unit test reaches them: in stage 4, that releasing `Alt` after a
-quick search does not open the menu bar; in stage 5, that rename in place
-works in the virtual list (`LVM_EDITLABEL`).
+quick search does not open the menu bar; in stage 6, that closing a Viewer
+activates the main window with the same focused row.
 
 ### How each stage runs
 

@@ -437,6 +437,21 @@ impl SettingsDraft {
     }
 }
 
+/// What the window shows: Search's results list, or Norton Commander's two
+/// panels (file-manager-spec.md: Two panels). The window opens in the mode
+/// it closed in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Mode {
+    #[default]
+    Search,
+    TwoPanels,
+}
+
+impl Mode {
+    pub(crate) const ALL: [Mode; 2] = [Mode::Search, Mode::TwoPanels];
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WindowState {
     #[serde(
@@ -445,6 +460,8 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) placement: Option<Placement>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) mode: Mode,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) matching: Matching,
     #[serde(default, deserialize_with = "or_default")]
@@ -499,6 +516,7 @@ impl Default for WindowState {
     fn default() -> WindowState {
         WindowState {
             placement: None,
+            mode: Mode::Search,
             matching: Matching::default(),
             sort: SortSpec::default(),
             columns: Vec::new(),
@@ -793,6 +811,7 @@ mod tests {
                     bottom: 600,
                     maximized: false,
                 }),
+                mode: Mode::TwoPanels,
                 matching: Matching {
                     mode: crate::core::query::MatchMode::WholeWords,
                     case: true,

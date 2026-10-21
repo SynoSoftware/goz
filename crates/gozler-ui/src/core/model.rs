@@ -17,7 +17,7 @@ use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, Results, RowsChange, Shown};
 use super::selection::{FolderContents, Selection, wide_path};
-use super::settings::{Choices, Placement, SavedColumn, Settings};
+use super::settings::{Choices, Mode, Placement, SavedColumn, Settings};
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
 use gozler_core::escompat::EsPlan;
@@ -164,6 +164,9 @@ pub(crate) enum Change {
     Filters,
     /// A pane was shown or hidden, or the inspector's height changed.
     Panes,
+    /// Search or Two panels now shows, which every control, the menus and
+    /// the accelerators follow.
+    Mode,
     /// The column at `index` of [`Model::columns`] was added.
     ColumnShown {
         index: usize,
@@ -629,6 +632,10 @@ impl Model {
         &self.columns
     }
 
+    pub(crate) fn mode(&self) -> Mode {
+        self.settings.window.mode
+    }
+
     pub(crate) fn panes(&self) -> Panes {
         let window = &self.settings.window;
         Panes {
@@ -817,6 +824,17 @@ impl Model {
             _ => return Accepted::only(Change::Nothing),
         };
         self.choose_folder(folder)
+    }
+
+    /// Shows `mode`. Each mode keeps its state while the other shows
+    /// (file-manager-spec.md: The window).
+    pub(crate) fn show_mode(&mut self, mode: Mode) -> Accepted {
+        let window = &mut self.settings.window;
+        if window.mode == mode {
+            return Accepted::only(Change::Nothing);
+        }
+        window.mode = mode;
+        Accepted::only(Change::Mode)
     }
 
     /// Shows or hides the filter pane (DESIGN.md: C13).

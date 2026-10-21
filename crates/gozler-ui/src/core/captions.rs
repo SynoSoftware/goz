@@ -29,7 +29,7 @@ use super::query::{
 };
 use super::results::{Fix, LIST_LIMIT, ListButton, ListMessage, Shown};
 use super::selection::{FolderContents, Selection, Sums};
-use super::settings::SettingsPage;
+use super::settings::{Mode, SettingsPage};
 use super::text::{self, Numbers, Strings};
 use gozler_client::NotRunning;
 use gozler_core::proto::ResultItem;
@@ -1162,7 +1162,11 @@ impl WindowCaptions {
         WindowCaptions {
             icons: model.choices().show_icons,
             title: title(model),
-            menu_bar: commands::render(&commands::menu_bar(), strings, &model.choices().shortcuts),
+            menu_bar: commands::render(
+                &commands::menu_bar(model.mode()),
+                strings,
+                &model.choices().shortcuts,
+            ),
             search_cue: strings.text("search.cue").to_owned(),
             clear_search: strings.text("button.clear").to_owned(),
             match_label: strings.text("match.label").to_owned(),
@@ -1202,14 +1206,21 @@ impl WindowCaptions {
 }
 
 impl StatusCaptions {
+    /// Two panels shows no results, so it leaves out their counts and
+    /// totals.
     pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> StatusCaptions {
         let service = index_status(model);
+        let search = model.mode() == Mode::Search;
         StatusCaptions {
-            view: joined(
-                model.strings(),
-                results_status(model, numbers),
-                selection_status(model, numbers),
-            ),
+            view: if search {
+                joined(
+                    model.strings(),
+                    results_status(model, numbers),
+                    selection_status(model, numbers),
+                )
+            } else {
+                String::new()
+            },
             job: match model.job() {
                 Job::Export => JobCaption {
                     text: export_status(model, numbers),
@@ -1224,8 +1235,11 @@ impl StatusCaptions {
             },
             right: joined_parts(
                 model.strings(),
-                std::iter::once(ValuePart::plain(service.clone()))
-                    .chain(totals_status(model, numbers)),
+                std::iter::once(ValuePart::plain(service.clone())).chain(if search {
+                    totals_status(model, numbers)
+                } else {
+                    Vec::new()
+                }),
             ),
             service,
         }
@@ -1629,11 +1643,13 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
 }
 
 /// The window's title: the typed search and the product's name, as Windows
-/// titles a document window, or the name alone while the search is empty.
+/// titles a document window, or the name alone while the search is empty or
+/// Two panels shows, because a title that named one panel's folder would be
+/// wrong for the other (file-manager-spec.md: The window).
 pub(crate) fn title(model: &Model) -> String {
     let strings = model.strings();
     let text = model.text.trim();
-    if text.is_empty() {
+    if text.is_empty() || model.mode() == Mode::TwoPanels {
         strings.text("window.title").to_owned()
     } else {
         strings.format("window.title_search", &[text])
@@ -2047,8 +2063,12 @@ pub(crate) fn shows_update(model: &Model) -> bool {
         .is_some_and(|version| index_status(model) == update_text(model.strings(), version))
 }
 
-/// What the list's empty area says instead of rows, if anything.
+/// What the list's empty area says instead of rows, if anything. Two panels
+/// hides the list, and its message with it.
 pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
+    if model.mode() == Mode::TwoPanels {
+        return None;
+    }
     let strings = model.strings();
     let text = match model.results().shown() {
         Shown::Rows(_) if model.results().total() == 0 => {

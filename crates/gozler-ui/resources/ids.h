@@ -35,6 +35,9 @@
 #define IDC_SHOW_FILTERS 76
 #define IDC_FILTER_TITLE 77
 #define IDC_HIDE_FILTERS 78
+// Two panels' lists, the left panel's and the right panel's.
+#define IDC_LEFT_PANEL 79
+#define IDC_RIGHT_PANEL 80
 
 // The filter pane, a window of its own that scrolls, and its controls.
 #define IDC_FILTER_PANE 20

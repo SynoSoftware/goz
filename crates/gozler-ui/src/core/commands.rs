@@ -8,7 +8,7 @@ use super::ids::ControlId;
 use super::model::{Column, Model};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
 use super::selection::OPEN_LIMIT;
-use super::settings::{ContextItem, ContextMenu};
+use super::settings::{ContextItem, ContextMenu, Mode};
 use super::shortcuts::CommandShortcuts;
 use super::text::{LANGUAGES, LanguageChoice, Strings, menu_label};
 use gozler_core::types::{SortDir, SortKey};
@@ -51,10 +51,11 @@ pub(crate) enum CommandId {
     Cut,
     Paste,
     FileOperations,
+    TwoPanels,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 32] = [
+    pub(crate) const ALL: [CommandId; 33] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::Explore,
@@ -87,6 +88,7 @@ impl CommandId {
         CommandId::Cut,
         CommandId::Paste,
         CommandId::FileOperations,
+        CommandId::TwoPanels,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -212,6 +214,12 @@ impl CommandId {
                     |s| s.model.offers_file_operations(),
                     None,
                 ),
+                C::TwoPanels => (
+                    "command.two_panels",
+                    &[],
+                    always,
+                    Some(|s| s.model.mode() == Mode::TwoPanels),
+                ),
             };
         Command {
             label,
@@ -257,8 +265,51 @@ impl CommandId {
             | C::Language
             | C::Match
             | C::SortBy
-            | C::ClearFilters => return None,
+            | C::ClearFilters
+            | C::TwoPanels => return None,
         })
+    }
+
+    /// Whether the command belongs to `mode`: only such a command shows in
+    /// the menu bar and takes its shortcuts while `mode` shows
+    /// (file-manager-spec.md: Keys).
+    pub(crate) fn belongs_to(self, mode: Mode) -> bool {
+        use CommandId as C;
+        match self {
+            C::Settings
+            | C::Exit
+            | C::Language
+            | C::SearchSyntax
+            | C::About
+            | C::ShowWindow
+            | C::FileOperations
+            | C::TwoPanels => true,
+            C::Open
+            | C::OpenFileLocation
+            | C::Explore
+            | C::Properties
+            | C::ExportResults
+            | C::CancelExport
+            | C::Copy
+            | C::CopyAsPath
+            | C::CopyName
+            | C::CopyFolder
+            | C::SelectAll
+            | C::SearchInThisFolder
+            | C::Filters
+            | C::Inspector
+            | C::Columns
+            | C::Refresh
+            | C::Find
+            | C::Match
+            | C::SortBy
+            | C::ClearFilters
+            | C::CopyToFolder
+            | C::MoveToFolder
+            | C::Delete
+            | C::Cut
+            | C::Paste => mode == Mode::Search,
+        }
     }
 }
 
@@ -821,6 +872,25 @@ pub(crate) enum Entry {
     },
 }
 
+impl Entry {
+    /// The entry with only the items whose command belongs to `mode`, or
+    /// `None` when none does.
+    fn of_mode(self, mode: Mode) -> Option<Entry> {
+        let belongs = |item: &MenuItem| item.command().belongs_to(mode);
+        match self {
+            Entry::Item(item) => belongs(&item).then_some(Entry::Item(item)),
+            Entry::Submenu { label, groups } => {
+                let groups: Vec<Vec<MenuItem>> = groups
+                    .into_iter()
+                    .map(|group| group.into_iter().filter(belongs).collect::<Vec<_>>())
+                    .filter(|group| !group.is_empty())
+                    .collect();
+                (!groups.is_empty()).then_some(Entry::Submenu { label, groups })
+            }
+        }
+    }
+}
+
 /// A menu of the menu bar; a separator divides its groups.
 pub(crate) struct Menu {
     pub(crate) label: &'static str,
@@ -829,8 +899,31 @@ pub(crate) struct Menu {
     pub(crate) aligned_right: bool,
 }
 
-/// The menu bar, in its order and groups (DESIGN.md: Menus).
-pub(crate) fn menu_bar() -> Vec<Menu> {
+/// The menu bar of `mode`, in its order and groups (DESIGN.md: Menus): the
+/// entries of the commands that belong to `mode`, without the groups and the
+/// menus that are left empty.
+pub(crate) fn menu_bar(mode: Mode) -> Vec<Menu> {
+    every_menu()
+        .into_iter()
+        .filter_map(|menu| {
+            let groups: Vec<Vec<Entry>> = menu
+                .groups
+                .into_iter()
+                .map(|group| {
+                    group
+                        .into_iter()
+                        .filter_map(|entry| entry.of_mode(mode))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|group| !group.is_empty())
+                .collect();
+            (!groups.is_empty()).then_some(Menu { groups, ..menu })
+        })
+        .collect()
+}
+
+/// The menus of both modes, each command in its place.
+fn every_menu() -> Vec<Menu> {
     use CommandId as C;
     let run = |commands: &[CommandId]| {
         commands
@@ -872,6 +965,7 @@ pub(crate) fn menu_bar() -> Vec<Menu> {
         menu(
             "menu.view",
             vec![
+                run(&[C::TwoPanels]),
                 vec![
                     Entry::Item(MenuItem::Run(C::Filters)),
                     Entry::Item(MenuItem::Run(C::Inspector)),
@@ -1157,10 +1251,12 @@ pub(crate) fn items(menus: &[Menu]) -> Vec<MenuItem> {
         .collect()
 }
 
-/// Every command shortcut of `shortcuts`, with the item it runs.
-pub(crate) fn accelerators(shortcuts: &CommandShortcuts) -> Vec<(Keystroke, MenuItem)> {
+/// Every command shortcut of `shortcuts` whose command belongs to `mode`,
+/// with the item it runs.
+pub(crate) fn accelerators(shortcuts: &CommandShortcuts, mode: Mode) -> Vec<(Keystroke, MenuItem)> {
     CommandId::ALL
         .iter()
+        .filter(|c| c.belongs_to(mode))
         .flat_map(|c| shortcuts.of(*c).iter().map(|s| (*s, MenuItem::Run(*c))))
         .collect()
 }
@@ -1183,13 +1279,15 @@ mod tests {
     #[test]
     fn every_menu_item_id_names_its_item() {
         let mut seen = std::collections::HashMap::new();
-        let all: Vec<MenuItem> = items(&menu_bar())
+        let all: Vec<MenuItem> = Mode::ALL
             .into_iter()
-            .chain(
-                accelerators(&CommandShortcuts::default())
-                    .into_iter()
-                    .map(|(_, item)| item),
-            )
+            .flat_map(|mode| {
+                items(&menu_bar(mode)).into_iter().chain(
+                    accelerators(&CommandShortcuts::default(), mode)
+                        .into_iter()
+                        .map(|(_, item)| item),
+                )
+            })
             .chain(CommandId::ALL.into_iter().map(MenuItem::Run))
             .collect();
         for item in all {
@@ -1206,13 +1304,49 @@ mod tests {
     /// second command with the same key would never run from it.
     #[test]
     fn no_two_commands_share_a_shortcut() {
-        let mut seen = HashSet::new();
-        for (shortcut, item) in accelerators(&CommandShortcuts::default()) {
-            assert!(
-                seen.insert((shortcut.ctrl, shortcut.alt, shortcut.shift, shortcut.key)),
-                "{item:?} repeats {shortcut:?}"
+        for mode in Mode::ALL {
+            let mut seen = HashSet::new();
+            for (shortcut, item) in accelerators(&CommandShortcuts::default(), mode) {
+                assert!(
+                    seen.insert((shortcut.ctrl, shortcut.alt, shortcut.shift, shortcut.key)),
+                    "{item:?} repeats {shortcut:?} in {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// Two panels hides Search's list, so a Search command that ran there,
+    /// such as `F5` Refresh or `Ctrl+A` Select all, would act on results the
+    /// person cannot see (file-manager-spec.md: Keys).
+    #[test]
+    fn each_mode_takes_only_its_own_commands_and_keys() {
+        let shortcuts = CommandShortcuts::default();
+        let takes = |mode, key| {
+            accelerators(&shortcuts, mode)
+                .into_iter()
+                .find(|(stroke, _)| *stroke == key)
+                .map(|(_, item)| item)
+        };
+        let refresh = Keystroke::plain(Key::Function(5));
+        let settings = Keystroke::ctrl(Key::Comma);
+        assert_eq!(
+            takes(Mode::Search, refresh),
+            Some(MenuItem::Run(CommandId::Refresh))
+        );
+        assert_eq!(takes(Mode::TwoPanels, refresh), None);
+        for mode in Mode::ALL {
+            assert_eq!(
+                takes(mode, settings),
+                Some(MenuItem::Run(CommandId::Settings))
             );
         }
+        let shown = |mode, command| items(&menu_bar(mode)).contains(&MenuItem::Run(command));
+        assert!(shown(Mode::Search, CommandId::Refresh));
+        assert!(!shown(Mode::TwoPanels, CommandId::Refresh));
+        assert!(
+            shown(Mode::Search, CommandId::TwoPanels)
+                && shown(Mode::TwoPanels, CommandId::TwoPanels)
+        );
     }
 
     /// An access key that two items of one menu share opens the first only,
@@ -1235,14 +1369,21 @@ mod tests {
         }
         for language in LANGUAGES {
             let strings = Strings::load(language);
-            let bar = menu_bar();
             let mut bar_keys = HashSet::new();
+            assert_unique(
+                language.tag,
+                menu_bar(Mode::TwoPanels)
+                    .iter()
+                    .map(|m| strings.text(m.label)),
+                &mut HashSet::new(),
+            );
+            let bar = menu_bar(Mode::Search);
             assert_unique(
                 language.tag,
                 bar.iter().map(|m| strings.text(m.label)),
                 &mut bar_keys,
             );
-            for menu in &bar {
+            for menu in bar.iter().chain(&menu_bar(Mode::TwoPanels)) {
                 // A submenu's label shares its menu with the items beside it,
                 // and Cancel export shares File with them in Export
                 // results…' place.
