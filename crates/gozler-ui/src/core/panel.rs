@@ -1369,6 +1369,15 @@ impl Panel {
         self.entries = merged;
     }
 
+    /// The folder `ui.json` saves: the shown one, or the saved one while
+    /// the first reading has not opened.
+    fn saved_folder(&self) -> Option<&str> {
+        match self.folder.is_empty() {
+            true => self.saved.as_deref(),
+            false => Some(&self.folder),
+        }
+    }
+
     /// Records the shown folder in the drive menu's history and as its
     /// drive's last folder.
     fn note_folder(&mut self) {
@@ -1785,13 +1794,8 @@ impl Panels {
 
     /// What `ui.json` saves.
     pub(crate) fn saved(&self) -> SavedPanels {
-        // A panel whose first reading has not opened yet keeps its saved
-        // folder.
         let saved = |panel: &Panel| SavedPanel {
-            folder: match panel.folder.is_empty() {
-                true => panel.saved.clone(),
-                false => Some(panel.folder.clone()),
-            },
+            folder: panel.saved_folder().map(str::to_owned),
             sort: panel.sort,
             history: panel.history.clone(),
         };
@@ -1800,6 +1804,18 @@ impl Panels {
             right: saved(&self.panels[1]),
             active: self.active,
         }
+    }
+
+    /// Whether [`Panels::saved`] would give `saved`, compared in place.
+    pub(crate) fn saved_as(&self, saved: &SavedPanels) -> bool {
+        let same = |panel: &Panel, saved: &SavedPanel| {
+            panel.saved_folder() == saved.folder.as_deref()
+                && panel.sort == saved.sort
+                && panel.history == saved.history
+        };
+        self.active == saved.active
+            && same(&self.panels[0], &saved.left)
+            && same(&self.panels[1], &saved.right)
     }
 
     fn start(&mut self, side: Side, path: String, kind: ReadKind, nearest: bool) -> ReadAsk {

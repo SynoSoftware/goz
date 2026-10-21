@@ -33,9 +33,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DLGC_WANTARROWS, DLGC_WANTCHARS, DefWindowProcW, GetParent, HMENU, IDC_ARROW,
     LoadCursorW, RegisterClassExW, SB_VERT, SCROLLINFO, SIF_DISABLENOSCROLL, SIF_PAGE, SIF_POS,
-    SIF_RANGE, SM_CYCAPTION, SendMessageW, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETDLGCODE,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_PAINT, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_LEFT, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    SIF_RANGE, SM_CYCAPTION, SendMessageW, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_PAINT, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LEFT,
+    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -44,9 +44,6 @@ const AREA_CLASS: PCWSTR = w!("gozler.ui.viewer_area");
 /// The private message with which the area asks its Viewer to paint it;
 /// the Viewer answers 1 when it painted.
 pub(crate) const AREA_PAINT: u32 = super::wake::WAKE + 9;
-
-/// The message that ends a move or a resize of the Viewer.
-pub(crate) const MOVE_ENDED: u32 = WM_EXITSIZEMOVE;
 
 /// Registers the area's window class; once, before the first Viewer opens.
 pub(crate) fn register_area() -> windows::core::Result<()> {

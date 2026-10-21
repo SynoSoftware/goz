@@ -422,8 +422,10 @@ fn timing_other_waits() {
     let folder = std::env::temp_dir().join("gozler-timing-settings");
     let file = folder.join("ui.json");
     let settings = crate::core::settings::Settings::default();
+    // The second save reads the first file, as each save but a first does.
+    settings.save_changes(&settings, &file).expect("saves");
     time("save ui.json to the temporary folder", || {
-        settings.save(&file).expect("saves")
+        settings.save_changes(&settings, &file).expect("saves")
     });
     let _ = std::fs::remove_dir_all(&folder);
 

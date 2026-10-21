@@ -49,6 +49,12 @@ pub(crate) struct Model {
     /// Also the one copy of the match controls, the filters, the sort and
     /// whether the filter pane shows.
     pub(super) settings: Settings,
+    /// `settings` when [`Model::saved_state_changed`] last ran, so the save
+    /// timer starts once for each change.
+    seen: Settings,
+    /// The settings as this window saved them last, or loaded them, which
+    /// a save compares with, so it writes only what this window changed.
+    saved: Settings,
     /// The columns the list shows, in the list's column order: Name first,
     /// because only the first column carries the icon.
     pub(super) columns: Vec<Column>,
@@ -384,9 +390,11 @@ impl Model {
                 columns.push(column);
             }
         }
-        Model {
+        let mut model = Model {
             strings,
             columns,
+            seen: settings.clone(),
+            saved: settings.clone(),
             settings,
             search_list: SearchList::new(),
             search_due: false,
@@ -412,7 +420,16 @@ impl Model {
             file_operations: false,
             clipboard_files: false,
             panels,
-        }
+        };
+        // The saved columns stay current in display order from now on,
+        // also when the file had none.
+        model.settings.window.columns = (model.column_order().into_iter())
+            .map(|index| SavedColumn {
+                column: model.columns[index],
+            })
+            .collect();
+        model.seen.clone_from(&model.settings);
+        model
     }
 
     /// Makes this window the one that offers the file operations.
@@ -430,8 +447,9 @@ impl Model {
         self.settings.window.destination_folder.as_deref()
     }
 
-    pub(crate) fn set_destination_folder(&mut self, folder: String) {
+    pub(crate) fn set_destination_folder(&mut self, folder: String) -> Accepted {
         self.settings.window.destination_folder = Some(folder);
+        Accepted::only(Change::Choice)
     }
 
     pub(crate) fn set_clipboard_holds_files(&mut self, holds: bool) {
@@ -690,9 +708,10 @@ impl Model {
     /// Replaces the language with `strings` and records `choice`, which the
     /// settings file saves. It starts no request, because the results do
     /// not depend on the language (DESIGN.md: Language, `T12`).
-    pub(crate) fn set_language(&mut self, choice: LanguageChoice, strings: Strings) {
+    pub(crate) fn set_language(&mut self, choice: LanguageChoice, strings: Strings) -> Accepted {
         self.settings.choices.language = choice;
         self.strings = strings;
+        Accepted::only(Change::Choice)
     }
 
     /// Settings shows or hides its Index page; while it shows, the window
@@ -1005,6 +1024,11 @@ impl Model {
         self.settings.window.viewer = state;
     }
 
+    /// The window's placement changed after it showed.
+    pub(crate) fn set_placement(&mut self, placement: Placement) {
+        self.settings.window.placement = Some(placement);
+    }
+
     fn generation(&mut self) -> Generation {
         self.last_generation += 1;
         Generation(self.last_generation)
@@ -1173,10 +1197,13 @@ impl Model {
         Accepted::only(match self.columns.iter().position(|c| *c == column) {
             Some(index) => {
                 self.columns.remove(index);
+                (self.settings.window.columns).retain(|saved| saved.column != column);
                 Change::ColumnHidden { index, column }
             }
             None => {
                 self.columns.push(column);
+                // The list shows a column it inserts last at its end.
+                (self.settings.window.columns).push(SavedColumn { column });
                 Change::ColumnShown {
                     index: self.columns.len() - 1,
                 }
@@ -2140,23 +2167,50 @@ impl Model {
         }
     }
 
-    /// Saves the settings with the window's `placement` and `columns`, when
-    /// Windows gave them.
-    pub(crate) fn save_settings(
-        &mut self,
-        path: &Path,
-        placement: Option<Placement>,
-        columns: Option<Vec<SavedColumn>>,
-    ) -> io::Result<()> {
-        let window = &mut self.settings.window;
-        window.panels = self.panels.saved();
-        if placement.is_some() {
-            window.placement = placement;
+    /// The person dragged a header: `order` is the list's display order,
+    /// as indexes into [`Model::columns`].
+    pub(crate) fn set_column_order(&mut self, order: &[usize]) {
+        self.settings.window.columns = (order.iter())
+            .filter_map(|&index| self.columns.get(index))
+            .map(|&column| SavedColumn { column })
+            .collect();
+    }
+
+    /// Records the state that `ui.json` saves and answers whether it
+    /// changed since the last call, so the window starts its save timer
+    /// once for each change (DESIGN.md: Where settings are saved). The
+    /// panels are compared in place, so nothing is copied unless they
+    /// changed.
+    pub(crate) fn saved_state_changed(&mut self) -> bool {
+        if !self.panels.saved_as(&self.settings.window.panels) {
+            self.settings.window.panels = self.panels.saved();
         }
-        if let Some(columns) = columns {
-            window.columns = columns;
+        if self.settings == self.seen {
+            return false;
         }
-        self.settings.save(path)
+        self.seen.clone_from(&self.settings);
+        true
+    }
+
+    /// Saves to `path` what `scope` covers of what changed since the last
+    /// save; nothing when nothing changed. A failed save is not tried again
+    /// until the state changes, so a failing disk is not written at every
+    /// change of anything else.
+    pub(crate) fn save_settings(&mut self, path: &Path, scope: SaveScope) -> io::Result<()> {
+        self.saved_state_changed();
+        let settings = match scope {
+            SaveScope::Everything => self.settings.clone(),
+            SaveScope::Choices => Settings {
+                choices: self.settings.choices.clone(),
+                window: self.saved.window.clone(),
+            },
+        };
+        if settings == self.saved {
+            return Ok(());
+        }
+        let saved = settings.save_changes(&self.saved, path);
+        self.saved = settings;
+        saved
     }
 }
 
@@ -2170,6 +2224,16 @@ fn within(ranges: &[Range<usize>], span: &Range<usize>) -> Vec<Range<usize>> {
             (start < end).then(|| start - span.start..end - span.start)
         })
         .collect()
+}
+
+/// What a save writes: everything this window changed, or, from another
+/// window, only what its Settings and its Language menu apply, so closing
+/// it never undoes a setting that another window saved (DESIGN.md: Window
+/// lifetime).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SaveScope {
+    Everything,
+    Choices,
 }
 
 /// A column of the results list (DESIGN.md: Results list). Its names are
@@ -2353,6 +2417,58 @@ pub(crate) mod tests {
     fn a_cell_keeps_only_the_matched_parts_inside_it() {
         assert_eq!(within(&[0..4, 5..9], &(3..7)), [0..1, 2..4]);
         assert!(within(&[0..3, 7..9], &(3..7)).is_empty());
+    }
+
+    /// A change that no `Accepted` reports, such as the active panel, was
+    /// lost when the window ended without Exit; each change starts the save
+    /// timer once, so a burst of changes saves a second after the last.
+    #[test]
+    fn each_change_of_the_saved_state_starts_one_save() {
+        let mut model = model();
+        assert!(!model.saved_state_changed());
+        model.panels_mut().activate(Side::Right);
+        assert!(model.saved_state_changed());
+        assert!(!model.saved_state_changed());
+        model.toggle_column(Column::Extension);
+        assert!(model.saved_state_changed());
+        let order = [3, 0, 1, 2, 4];
+        model.set_column_order(&order);
+        let saved: Vec<Column> = (model.settings.window.columns.iter())
+            .map(|saved| saved.column)
+            .collect();
+        assert_eq!(
+            saved,
+            [order[0], order[1], order[2], order[3], order[4]].map(|i| model.columns[i])
+        );
+    }
+
+    /// Another window saves only what its Settings apply, so closing it
+    /// never undoes the placement or the panels the first window saved
+    /// (DESIGN.md: Window lifetime).
+    #[test]
+    fn another_window_saves_only_its_choices() {
+        let folder = std::env::temp_dir().join(format!("gozler-ui-another-{}", std::process::id()));
+        let path = folder.join("ui.json");
+        let mut model = model();
+        model.set_placement(Placement {
+            left: 0,
+            top: 0,
+            right: 640,
+            bottom: 480,
+            maximized: true,
+        });
+        let choices = Choices {
+            show_memory: true,
+            ..model.choices().clone()
+        };
+        model.set_choices(choices);
+        model
+            .save_settings(&path, SaveScope::Choices)
+            .expect("the temporary folder is writable");
+        let saved = Settings::load(&path);
+        assert!(saved.choices.show_memory);
+        assert_eq!(saved.window.placement, None);
+        std::fs::remove_dir_all(&folder).expect("the test's folder is removable");
     }
 
     /// The list's message and its buttons' captions.

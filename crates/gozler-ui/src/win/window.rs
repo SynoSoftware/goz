@@ -45,9 +45,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
     WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW,
-    WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
-    WS_SYSMENU, WS_THICKFRAME,
+    WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL,
+    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -62,6 +62,11 @@ pub(crate) enum Message<'a> {
     },
     Deactivate,
     Size,
+    /// The window moved, was resized, or was shown or hidden, by any means:
+    /// a drag, maximize, restore, a snap, `Win+Arrow`, or a move to a
+    /// monitor of the same size, which sends no `WM_SIZE`. A handler that
+    /// answers `None` still gets `WM_SIZE` and `WM_MOVE`.
+    WindowPosChanged,
     /// The person starts dragging the window's border or title bar.
     EnterSizeMove,
     /// The person ends that drag.
@@ -814,6 +819,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             from_another_program: from_another_program(HWND(lparam.0 as *mut _)),
         },
         WM_SIZE => Message::Size,
+        WM_WINDOWPOSCHANGED => Message::WindowPosChanged,
         WM_ENTERSIZEMOVE => Message::EnterSizeMove,
         WM_EXITSIZEMOVE => Message::ExitSizeMove,
         WM_DPICHANGED => match Dpi::new(u32::from(high(wparam.0))) {

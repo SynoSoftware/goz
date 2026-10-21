@@ -5,7 +5,7 @@
 //! The selection).
 
 use super::super::dialogs::{NewFolder, Transfer, TransferStart};
-use super::{MainWindow, SAVE_DELAY_MS, timer};
+use super::{MainWindow, timer};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::captions::{DialogCaptions, DialogItem};
 use crate::core::commands::{
@@ -698,9 +698,9 @@ impl MainWindow {
         if let Some(ask) = ask {
             self.created().panel_threads.read(side, ask);
             self.show_panel(side);
-            // The panel's folder and sort are saved state, as Search's are.
-            let window = self.panel(side).list.hwnd().parent();
-            window.set_timer(timer::SAVE, SAVE_DELAY_MS);
+            // A new sort is saved state; the folder changes when the
+            // reading opens, in `on_panel_events`.
+            self.note_saved_state(self.panel(side).list.hwnd().parent());
         }
     }
 
@@ -775,6 +775,9 @@ impl MainWindow {
         for side in Side::BOTH {
             self.apply_panel_changes(hwnd, side, std::mem::take(&mut pending[side.index()]));
         }
+        // A reading that opened or ended changes the saved folder and its
+        // history.
+        self.note_saved_state(hwnd);
     }
 
     /// Applies one batch of `side`'s changes and shows the rows.
@@ -958,6 +961,7 @@ impl MainWindow {
             ask => self.read(side, ask),
         }
         self.show_panel_sort(side);
+        self.note_saved_state(hwnd);
     }
 
     /// View > Sort by in Two panels sorts the active panel.
@@ -999,6 +1003,7 @@ impl MainWindow {
             self.release_operations(hwnd);
             self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
             self.search(hwnd, List::Panel(side));
+            self.note_saved_state(hwnd);
         }
         let search = self.panel(side).search;
         search.hwnd().focus();
@@ -1040,6 +1045,7 @@ impl MainWindow {
                 self.panel(side).path.hwnd().invalidate();
             }
             self.update_status();
+            self.note_saved_state(self.panel(side).list.hwnd().parent());
         }
     }
 
@@ -1416,7 +1422,10 @@ impl MainWindow {
                 self.activate_panel(side, false);
                 None
             }
-            ListNotify::BeginDrag | ListNotify::DividerDoubleClick(_) | ListNotify::Other => None,
+            ListNotify::BeginDrag
+            | ListNotify::DividerDoubleClick(_)
+            | ListNotify::ColumnDragEnded
+            | ListNotify::Other => None,
         }
     }
 
@@ -1830,6 +1839,7 @@ impl MainWindow {
                 }
                 self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
                 self.show_panel(side);
+                self.note_saved_state(hwnd);
             }
         }
     }

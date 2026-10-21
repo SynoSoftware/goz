@@ -23,11 +23,11 @@ use crate::win::locale::{WindowsNumbers, ansi_text};
 use crate::win::menu::{Menu, replace_menu_bar};
 use crate::win::notify::Command;
 use crate::win::viewer::{
-    AREA_PAINT, AreaText, FileReader, MOVE_ENDED, ViewerEvent, caption_height, create_area,
-    paint_area, register_area, set_area_scroll,
+    AREA_PAINT, AreaText, FileReader, ViewerEvent, caption_height, create_area, paint_area,
+    register_area, set_area_scroll,
 };
 use crate::win::wake::OpenWaker;
-use crate::win::window::{self, Message, WindowProc};
+use crate::win::window::{self, DEFERRED, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::{Rc, Weak};
@@ -581,6 +581,7 @@ impl Viewer {
                 wrap,
                 ..shared.state.get()
             });
+            self.main.post(DEFERRED);
         }
     }
 
@@ -604,13 +605,18 @@ impl Viewer {
         hwnd.destroy();
     }
 
-    /// Keeps the window's size and place for the next Viewer.
+    /// Keeps the shown window's size and place for the next Viewer, which
+    /// the main window saves.
     fn remember_placement(&self, hwnd: Hwnd) {
+        if !hwnd.is_visible() {
+            return;
+        }
         if let (Some(shared), Some(placement)) = (self.shared.upgrade(), hwnd.placement()) {
             shared.state.set(ViewerState {
                 placement: Some(placement),
                 ..shared.state.get()
             });
+            self.main.post(DEFERRED);
         }
     }
 }
@@ -619,9 +625,12 @@ impl WindowProc for Viewer {
     fn message(&self, hwnd: Hwnd, message: Message<'_>) -> Option<LRESULT> {
         match message {
             Message::Size => {
-                self.remember_placement(hwnd);
                 self.layout(hwnd);
                 Some(LRESULT(0))
+            }
+            Message::WindowPosChanged => {
+                self.remember_placement(hwnd);
+                None
             }
             Message::DpiChanged { suggested, .. } => {
                 hwnd.set_rect(suggested);
@@ -631,12 +640,6 @@ impl WindowProc for Viewer {
                 Some(LRESULT(0))
             }
             Message::Other(AREA_PAINT) => Some(LRESULT(isize::from(self.paint(hwnd)))),
-            // A move without a resize sends no `WM_SIZE`, and signing out
-            // closes no Viewer.
-            Message::Other(MOVE_ENDED) => {
-                self.remember_placement(hwnd);
-                None
-            }
             Message::Wake => {
                 self.read_events(hwnd);
                 Some(LRESULT(0))

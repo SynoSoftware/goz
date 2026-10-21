@@ -19,10 +19,11 @@ use gozler_core::types::SortSpec;
 use gozler_fileops::DeleteWorkers;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 use std::io;
 use std::path::Path;
 
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Settings {
     /// The settings that Settings and the Language menu change.
     #[serde(rename = "settings", default, deserialize_with = "or_default")]
@@ -541,7 +542,7 @@ impl Mode {
     pub(crate) const ALL: [Mode; 2] = [Mode::Search, Mode::TwoPanels];
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WindowState {
     #[serde(
         default,
@@ -680,16 +681,70 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    /// Writes `path` through a temporary file renamed over it, so a failed
-    /// write never leaves half a file.
-    pub(crate) fn save(&self, path: &Path) -> io::Result<()> {
+    /// Writes each setting that differs from `saved`, the copy this window
+    /// saved last, over the one in `path`, and keeps every other setting
+    /// the file holds, so a setting that another window saved meanwhile
+    /// stays (DESIGN.md: Window lifetime). A setting is a key of
+    /// `settings` or `window`. A file that is missing or not a JSON object
+    /// gets every setting. The file is written through a temporary file
+    /// renamed over it, so a failed write never leaves half a file.
+    pub(crate) fn save_changes(&self, saved: &Settings, path: &Path) -> io::Result<()> {
+        let now = serde_json::to_value(self).expect("Settings serializes");
+        let before = serde_json::to_value(saved).expect("Settings serializes");
+        let on_disk = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .filter(Value::is_object);
+        let file = match on_disk {
+            Some(mut file) => {
+                merge_changes(&mut file, &now, &before);
+                file
+            }
+            None => now,
+        };
         if let Some(folder) = path.parent() {
             std::fs::create_dir_all(folder)?;
         }
         let temporary = path.with_extension("json.tmp");
-        let text = serde_json::to_string_pretty(self).expect("Settings serializes");
+        let text = serde_json::to_string_pretty(&file).expect("a JSON value serializes");
         std::fs::write(&temporary, text)?;
         std::fs::rename(&temporary, path)
+    }
+}
+
+/// Writes into `file` each key of each group of `now` whose value differs
+/// from `before`'s, and removes a key that `now` no longer has.
+fn merge_changes(file: &mut Value, now: &Value, before: &Value) {
+    let (Some(file), Some(now)) = (file.as_object_mut(), now.as_object()) else {
+        return;
+    };
+    for (group, now) in now {
+        let before = before.get(group);
+        let target = file
+            .entry(group.clone())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !target.is_object() {
+            *target = Value::Object(Map::new());
+        }
+        let (Some(target), Some(now)) = (target.as_object_mut(), now.as_object()) else {
+            continue;
+        };
+        let keys = now.keys().chain(
+            before
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(Map::keys),
+        );
+        for key in keys {
+            let value = now.get(key);
+            if value == before.and_then(|before| before.get(key)) {
+                continue;
+            }
+            match value {
+                Some(value) => target.insert(key.clone(), value.clone()),
+                None => target.remove(key),
+            };
+        }
     }
 }
 
@@ -1091,12 +1146,42 @@ mod tests {
             },
         };
         Settings::default()
-            .save(&path)
+            .save_changes(&Settings::default(), &path)
             .expect("the temporary folder is writable");
         settings
-            .save(&path)
+            .save_changes(&Settings::default(), &path)
             .expect("the temporary folder is writable");
         assert_eq!(Settings::load(&path), settings);
+        std::fs::remove_dir_all(&folder).expect("the test's folder is removable");
+    }
+
+    /// Each window saves its whole state, so a window that wrote every
+    /// setting would undo a language that another window applied since
+    /// (DESIGN.md: Window lifetime); a setting this window turned back to
+    /// its default leaves the file.
+    #[test]
+    fn a_save_keeps_what_another_window_saved() {
+        let folder = std::env::temp_dir().join(format!("gozler-ui-merge-{}", std::process::id()));
+        let path = folder.join("ui.json");
+        let mut loaded = Settings::default();
+        loaded.window.destination_folder = Some(r"E:\Backup".into());
+        loaded
+            .save_changes(&Settings::default(), &path)
+            .expect("the temporary folder is writable");
+        let mut other = loaded.clone();
+        other.choices.language = LanguageChoice::Tag("de".into());
+        other
+            .save_changes(&loaded, &path)
+            .expect("the temporary folder is writable");
+        let mut this = loaded.clone();
+        this.window.mode = Mode::TwoPanels;
+        this.window.destination_folder = None;
+        this.save_changes(&loaded, &path)
+            .expect("the temporary folder is writable");
+        let saved = Settings::load(&path);
+        assert_eq!(saved.choices.language, LanguageChoice::Tag("de".into()));
+        assert_eq!(saved.window.mode, Mode::TwoPanels);
+        assert_eq!(saved.window.destination_folder, None);
         std::fs::remove_dir_all(&folder).expect("the test's folder is removable");
     }
 }

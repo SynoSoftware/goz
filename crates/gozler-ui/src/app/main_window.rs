@@ -41,8 +41,8 @@ use crate::core::layout::{
     MessageArea, Px, Rect, ScrollRequest, Size, StatusLayout, ToolHeights,
 };
 use crate::core::model::{
-    Accepted, Change, Column, ExportError, ExportFormat, Job, Model, ScopeCheck, SearchBoxEnter,
-    Then,
+    Accepted, Change, Column, ExportError, ExportFormat, Job, Model, SaveScope, ScopeCheck,
+    SearchBoxEnter, Then,
 };
 use crate::core::open::{self, CommandLine};
 use crate::core::operations::{Answer, OperationDialog, OperationProgress, QueueStep, WindowStep};
@@ -53,7 +53,7 @@ use crate::core::query::{
 };
 use crate::core::results::{Fix, ListButton};
 use crate::core::selection::{DRAG_LIMIT, SELECTION_LIMIT, wide_path};
-use crate::core::settings::{Mode, SavedColumn, SettingsValues};
+use crate::core::settings::{Mode, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
@@ -809,6 +809,9 @@ pub(crate) struct MainWindow {
     /// Whether a [`Message::Deferred`] is posted to read the list's
     /// selection, so one user action reads it once (DESIGN.md: The selection).
     selection_pending: Cell<bool>,
+    /// Whether a [`Message::Deferred`] is posted to read the header's order
+    /// after the person dragged a column.
+    column_dragged: Cell<bool>,
     /// The filter pane's scroll position.
     filter_scroll: Cell<Px>,
     /// How the open Date modified or Size list is closing, between its
@@ -972,6 +975,7 @@ impl MainWindow {
             icons: Icons::default(),
             polling: Cell::new(false),
             selection_pending: Cell::new(false),
+            column_dragged: Cell::new(false),
             filter_scroll: Cell::new(Px(0)),
             range_closing: Cell::new(None),
             range_closed: Cell::new(None),
@@ -1130,28 +1134,27 @@ impl MainWindow {
         WindowCaptions::new(&self.model.borrow(), &*self.numbers.borrow())
     }
 
-    /// Sets every caption, then measures them and lays out again, and draws
-    /// the window once at the end. Runs after a change to the language or
-    /// to the regional format.
+    /// Sets every caption, then measures them and lays out again. Runs
+    /// after a change to the language or to the regional format, inside the
+    /// caller's [`Hwnd::draw_once_after`], which does not nest, so a caller
+    /// that refreshes several things draws the window once.
     fn refresh_text(&self, hwnd: Hwnd) {
-        hwnd.draw_once_after(|| {
-            let captions = self.captions();
-            self.apply_text(hwnd, &captions);
-            self.measure(&captions, hwnd.dpi());
-            self.layout(hwnd);
-        });
+        let captions = self.captions();
+        self.apply_text(hwnd, &captions);
+        self.measure(&captions, hwnd.dpi());
+        self.layout(hwnd);
     }
 
     /// Loads the language of `choice`, gives it to the model and sets every
     /// caption in it (DESIGN.md: Language). The Language menu
     /// and Settings' OK and Apply call it; the typed text, the results, the
-    /// selection and the focus stay as they are.
+    /// selection and the focus stay as they are. Runs inside the caller's
+    /// [`Hwnd::draw_once_after`].
     fn set_language(&self, hwnd: Hwnd, choice: LanguageChoice) {
         let language = choice.resolve(&win::locale::display_languages());
-        self.model
-            .borrow_mut()
-            .set_language(choice, Strings::load(language));
+        let accepted = (self.model.borrow_mut()).set_language(choice, Strings::load(language));
         super::set_panic_report(|report| report.language = Some(language));
+        self.apply(hwnd, accepted);
         self.refresh_text(hwnd);
         if let Some(operations) = self.file_operations.get() {
             operations.set_strings(Strings::load(language));
@@ -2470,7 +2473,7 @@ impl MainWindow {
             }
             MenuItem::Panel(action) => return self.run_panel_action(hwnd, action),
             MenuItem::Language(place) => {
-                self.set_language(hwnd, LanguageChoice::at(place));
+                hwnd.draw_once_after(|| self.set_language(hwnd, LanguageChoice::at(place)));
                 self.save_settings(hwnd, true);
                 return;
             }
@@ -2677,17 +2680,6 @@ impl MainWindow {
             Some(Then::RunSetup(setup)) => self.run_setup(hwnd, &setup),
             None => {}
         }
-        if matches!(
-            accepted.change,
-            Change::Choice
-                | Change::Filters
-                | Change::Panes
-                | Change::Mode
-                | Change::ColumnShown { .. }
-                | Change::ColumnHidden { .. }
-        ) {
-            hwnd.set_timer(timer::SAVE, SAVE_DELAY_MS);
-        }
         match accepted.change {
             Change::Nothing | Change::Choice | Change::FolderCounted => {}
             Change::Filters => self.update_filters(),
@@ -2874,6 +2866,24 @@ impl MainWindow {
         self.update_bound_controls();
         self.update_inspector(hwnd);
         self.update_poll(hwnd);
+        self.note_saved_state(hwnd);
+    }
+
+    /// Starts the save timer when the state that `ui.json` saves changed
+    /// (DESIGN.md: Where settings are saved). It runs after each change
+    /// that can touch that state: the end of [`Self::apply`] and of the
+    /// panels' events, each panel command that changes a folder, a sort or
+    /// the active panel, a move of the window, and [`Message::Deferred`],
+    /// which reads a header drag and what a Viewer changed.
+    pub(super) fn note_saved_state(&self, hwnd: Hwnd) {
+        let changed = {
+            let mut model = self.model.borrow_mut();
+            model.set_viewer(self.viewers.state());
+            model.saved_state_changed()
+        };
+        if changed {
+            hwnd.set_timer(timer::SAVE, SAVE_DELAY_MS);
+        }
     }
 
     /// Runs `step` from [`Message::Deferred`], after every reply and panel
@@ -3399,6 +3409,11 @@ impl MainWindow {
             }
             ListNotify::DividerDoubleClick(index) => {
                 self.fit_column(index);
+                None
+            }
+            ListNotify::ColumnDragEnded => {
+                self.column_dragged.set(true);
+                hwnd.post(DEFERRED);
                 None
             }
             ListNotify::Focused
@@ -4138,10 +4153,8 @@ impl MainWindow {
         let Some(folder) = shell::pick_destination(hwnd, start.as_deref(), &title, &ok) else {
             return;
         };
-        self.model
-            .borrow_mut()
-            .set_destination_folder(folder.clone());
-        hwnd.set_timer(timer::SAVE, SAVE_DELAY_MS);
+        let accepted = (self.model.borrow_mut()).set_destination_folder(folder.clone());
+        self.apply(hwnd, accepted);
         self.transfer_into(sources, PathBuf::from(folder), moves, None);
     }
 
@@ -4404,9 +4417,7 @@ impl MainWindow {
         // Each Viewer leaves its size, place and Wrap long lines as it
         // closes, so the save holds them.
         self.viewers.close_all();
-        if self.instance == Instance::First {
-            self.save_settings(hwnd, true);
-        }
+        self.save_settings(hwnd, true);
         hwnd.destroy();
         true
     }
@@ -4666,43 +4677,46 @@ impl MainWindow {
             // The Settings dialog saves them apart, as administrator.
             include: last.include.clone(),
         };
-        let accepted = self.model.borrow_mut().set_choices(values.choices.clone());
-        self.apply(hwnd, accepted);
-        if edited.choices.language != last.choices.language {
-            self.set_language(hwnd, edited.choices.language.clone());
-        }
-        if edited.choices.show_icons != last.choices.show_icons {
-            win::gdi::show_icons(edited.choices.show_icons);
-            self.apply_glyphs(hwnd.dpi());
-            if let Some(operations) = self.file_operations.get() {
-                operations.apply_glyphs();
+        // The window draws once after every refresh below.
+        hwnd.draw_once_after(|| {
+            let accepted = self.model.borrow_mut().set_choices(values.choices.clone());
+            self.apply(hwnd, accepted);
+            if edited.choices.language != last.choices.language {
+                self.set_language(hwnd, edited.choices.language.clone());
             }
-            self.viewers.apply_glyphs();
-            // The menus, the button widths and the Kind list follow.
-            self.refresh_text(hwnd);
-        }
-        if edited.choices.show_memory != last.choices.show_memory {
-            // The group first shows the app's figure, read now, and the
-            // service's from the latest status; the reply to this request
-            // brings both current ones.
-            if edited.choices.show_memory {
-                self.read_app_memory();
-                self.ask_status();
+            if edited.choices.show_icons != last.choices.show_icons {
+                win::gdi::show_icons(edited.choices.show_icons);
+                self.apply_glyphs(hwnd.dpi());
+                if let Some(operations) = self.file_operations.get() {
+                    operations.apply_glyphs();
+                }
+                self.viewers.apply_glyphs();
+                // The menus, the button widths and the Kind list follow.
+                self.refresh_text(hwnd);
             }
-            self.refresh_text(hwnd);
-        }
-        if edited.choices.size_format != last.choices.size_format {
-            // The columns keep their widths, as TableView's do when a
-            // property changes; Fit column fits the new Size texts.
-            let list = self.created().controls.list;
-            list.redraw_rows(list.visible_rows());
-            // The panels' Size column fits its widest size in the format.
-            self.fill_panel_columns();
-            for side in Side::BOTH {
-                let list = self.panel(side).list;
+            if edited.choices.show_memory != last.choices.show_memory {
+                // The group first shows the app's figure, read now, and the
+                // service's from the latest status; the reply to this request
+                // brings both current ones.
+                if edited.choices.show_memory {
+                    self.read_app_memory();
+                    self.ask_status();
+                }
+                self.refresh_text(hwnd);
+            }
+            if edited.choices.size_format != last.choices.size_format {
+                // The columns keep their widths, as TableView's do when a
+                // property changes; Fit column fits the new Size texts.
+                let list = self.created().controls.list;
                 list.redraw_rows(list.visible_rows());
+                // The panels' Size column fits its widest size in the format.
+                self.fill_panel_columns();
+                for side in Side::BOTH {
+                    let list = self.panel(side).list;
+                    list.redraw_rows(list.visible_rows());
+                }
             }
-        }
+        });
         self.save_settings(hwnd, true);
         Ok(Applied { values, failures })
     }
@@ -4907,31 +4921,19 @@ impl MainWindow {
         self.total_commander.take()
     }
 
-    /// The shown columns in the header's order.
-    fn saved_columns(&self) -> Vec<SavedColumn> {
-        let list = self.created().controls.list;
-        let columns = self.model.borrow().columns().to_vec();
-        list.column_order(columns.len())
-            .into_iter()
-            .filter_map(|index| {
-                Some(SavedColumn {
-                    column: *columns.get(index)?,
-                })
-            })
-            .collect()
-    }
-
-    /// Saves the window's placement, match controls, sort and columns with
-    /// the settings. A failure is shown once per session, and not while
-    /// Windows ends the session.
+    /// Saves what changed since the last save: from another window, only
+    /// what its Settings and its Language menu apply. A failure is shown
+    /// once per session, and not while Windows ends the session.
     fn save_settings(&self, hwnd: Hwnd, report_failure: bool) {
-        let placement = hwnd.placement();
-        let columns = self.saved_columns();
-        self.model.borrow_mut().set_viewer(self.viewers.state());
-        let saved =
-            self.model
-                .borrow_mut()
-                .save_settings(&self.settings_file, placement, Some(columns));
+        let scope = match self.instance {
+            Instance::First => SaveScope::Everything,
+            Instance::Another => SaveScope::Choices,
+        };
+        let saved = {
+            let mut model = self.model.borrow_mut();
+            model.set_viewer(self.viewers.state());
+            model.save_settings(&self.settings_file, scope)
+        };
         let Err(error) = saved else { return };
         if !report_failure || self.settings_failure_shown.replace(true) {
             return;
@@ -5164,6 +5166,17 @@ impl WindowProc for MainWindow {
             // Every other handler does nothing until WM_CREATE has made the
             // controls, because notifications arrive while it runs.
             _ if self.created.get().is_none() => None,
+            // Before the window first shows, it has the placement it was
+            // made with, not the saved one.
+            Message::WindowPosChanged => {
+                if hwnd.is_visible()
+                    && let Some(placement) = hwnd.placement()
+                {
+                    self.model.borrow_mut().set_placement(placement);
+                    self.note_saved_state(hwnd);
+                }
+                None
+            }
             Message::Size => {
                 // A minimized window has no room for its controls, and laying
                 // them out would fill the columns into it, so restoring it
@@ -5320,11 +5333,7 @@ impl WindowProc for MainWindow {
             }
             Message::Timer(timer::SAVE) => {
                 hwnd.kill_timer(timer::SAVE);
-                // Another window's settings are not saved, so it never
-                // overwrites the first window's.
-                if self.instance == Instance::First {
-                    self.save_settings(hwnd, true);
-                }
+                self.save_settings(hwnd, true);
                 Some(LRESULT(0))
             }
             Message::Timer(timer::SELECTION) => {
@@ -5348,6 +5357,13 @@ impl WindowProc for MainWindow {
             Message::Deferred => {
                 self.read_list_selection(hwnd);
                 self.read_panel_selection();
+                if self.column_dragged.replace(false) {
+                    let list = self.created().controls.list;
+                    let count = self.model.borrow().columns().len();
+                    let order = list.column_order(count);
+                    self.model.borrow_mut().set_column_order(&order);
+                }
+                self.note_saved_state(hwnd);
                 if self.select_search.replace(false) {
                     self.created().controls.search.select_all();
                 }
@@ -5495,7 +5511,7 @@ impl WindowProc for MainWindow {
                 regional_format: true,
             } => {
                 self.numbers.replace(WindowsNumbers::new());
-                self.refresh_text(hwnd);
+                hwnd.draw_once_after(|| self.refresh_text(hwnd));
                 None
             }
             Message::SettingChange { .. } => None,
@@ -5504,9 +5520,7 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::EndSession { ending: true } => {
-                if self.instance == Instance::First {
-                    self.save_settings(hwnd, false);
-                }
+                self.save_settings(hwnd, false);
                 Some(LRESULT(0))
             }
             Message::EndSession { .. } => None,

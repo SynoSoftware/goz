@@ -17,8 +17,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Controls::{
     BCN_DROPDOWN, CDDS_ITEMPOSTPAINT, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM,
     CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
-    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE,
-    LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED,
+    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDN_DIVIDERDBLCLICKW, HDN_ENDDRAG, LVIF_IMAGE,
+    LVIF_STATE, LVIF_TEXT, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED,
     LVM_GETITEMRECT, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK,
     LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
     LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS,
@@ -127,6 +127,9 @@ pub(crate) enum ListNotify<'a> {
     /// the header sends and the list passes on after sizing the column
     /// itself.
     DividerDoubleClick(usize),
+    /// The person dropped a header they dragged. The header takes its new
+    /// order after this notification, so the handler reads it later.
+    ColumnDragEnded,
     Other,
 }
 
@@ -135,6 +138,9 @@ impl ListView {
     pub(crate) fn notification<'a>(self, notification: Notification<'a>) -> Option<ListNotify<'a>> {
         let header = notification.header();
         let pointer = notification.header;
+        if header.hwndFrom == self.header().0 && header.code == HDN_ENDDRAG {
+            return Some(ListNotify::ColumnDragEnded);
+        }
         if header.hwndFrom == self.header().0 && header.code == HDN_DIVIDERDBLCLICKW {
             // SAFETY: a header sends HDN_DIVIDERDBLCLICKW with an NMHEADERW,
             // valid for the notification's lifetime.
