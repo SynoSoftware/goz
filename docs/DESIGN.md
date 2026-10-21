@@ -191,13 +191,13 @@ A result snapshot is the list of one search's matches, in result order, that goz
 The window is native Win32, through Microsoft's `windows` crate. Two throwaway prototypes of the same window, with a virtual list of 3 million rows, measured it against Slint 1.18.1: 4.6 MB of private memory against 12 MB with Slint's software renderer and 120 MB with its OpenGL renderer, a 182 KB executable against 13.9 MB, and a first release build in under a minute against 9.5 minutes. Windows itself gives the list's selection, keyboard navigation, column resizing and reordering, sort arrows and accessibility, which in a framework are code that gozler would write. The window uses `windows`, not the workspace's `windows-sys`, because it needs COM interfaces such as the folder picker (`IFileOpenDialog`).
 
 - **`core` holds every decision**: what to search, which rows to fetch, which replies are current, what the selection holds, which commands are enabled, where each control goes and what every caption says. It has no Win32 type, so its tests run on Ubuntu, as `gozler-core`'s do beside `gozler-winfs`. It starts with `#![cfg_attr(not(windows), allow(dead_code))]`, because on Ubuntu nothing outside its tests calls it and CI denies warnings.
-- **`win` holds every `unsafe` block**, each the smallest block that needs it, behind a safe function, and decides nothing. `core` and `app` start with `#![forbid(unsafe_code)]`, so the compiler rejects `unsafe` anywhere else.
+- **`win` holds every `unsafe` block of the window**, each the smallest block that needs it, behind a safe function, and decides nothing. `core` and `app` start with `#![forbid(unsafe_code)]`, so the compiler rejects `unsafe` there. The test-only `timing` module, which times shell calls on synthetic paths, makes its own calls in `unsafe` blocks and is never built into the window.
 - **`app` holds the message handlers**, which turn Windows messages into calls on `core`, and `core`'s answers into calls on `win`.
 - **The dialogs are templates** in `resources/gozler-ui.rc`, so Windows runs their modal loop, Tab order, `Enter`, `Esc` and per-monitor DPI scaling. The main window, the menus and the accelerator table are built in code, because the layout follows the window's size and the menus follow the command table and the person's shortcuts.
 
 Window code stays out of `gozler-winfs`, because that crate uses `windows-sys` only and depends on no other workspace crate, and the window needs COM and `core`'s types. A crate of its own for the window's Win32 layer would add a public API and `deny.toml` and CI entries, and protect nothing more, because the layer has one user; if a second program needs it, `src/win/` moves into a crate as it is. Values from `gozler-winfs` and `gozler-client` cross into the window as Rust types, never as raw handles.
 
-The alternatives fail on one Win32 fact or another. A view diffed against the controls, or a list of commands that one applier runs, cannot answer `LVN_GETDISPINFO`, which needs each cell's text before it returns. Free functions over one global `RefCell` panic when Win32 calls back into the window (window rule 1). `winsafe` makes no stability promise before 1.0 and reads the system DPI, not the monitor's, and `native-windows-gui` has had no release since September 2022.
+The alternatives fail on one Win32 fact or another. A view diffed against the controls would keep a second copy of the selection and the scroll position, which the controls own. The window does run its effects through one applier (`Accepted`, which `apply` runs), and answers `LVN_GETDISPINFO`, which needs each cell's text before it returns, with a short read borrow of the model. Free functions over one global `RefCell` panic when Win32 calls back into the window (window rule 1). `winsafe` makes no stability promise before 1.0 and reads the system DPI, not the monitor's, and `native-windows-gui` has had no release since September 2022.
 
 ### Window rules
 
@@ -234,7 +234,7 @@ The window builds its own `SearchRequest` in `core::query`, not through `build_s
 | A folder's size | `gozlerd`'s index (see "Sizes and dates") |
 | Help > Search syntax | `gozler_core::escompat::search_syntax`, from the tables that `gozler --help` reads |
 | Whether a volume's results are complete | `VolumePhase::is_complete` |
-| The owner check, the version handshake, the service's state, and the check that a scope folder exists | `gozler-client`. `app` runs the folder check and passes the result to `Model::start_search`, because `core` makes no filesystem call. |
+| The owner check, the version handshake, the service's state, and the check that a scope folder exists | `gozler-client`. `app` runs the folder check and passes the result to `Model::start_search`, so `core`'s tests decide a missing folder without a disk. `core`'s only filesystem calls load and save the settings file (`core::settings`). |
 | Results pages, and CSV, TSV and TXT output with its date format | `gozler_core::proto` and `gozler_core::output` |
 
 `gozler-client`'s error keeps every distinction that `gozler-cli`'s exit codes need. The window collapses them into the failures of "Daemon failures", and shows `Communication` as a lost connection, because both mean that the pipe failed after the service was found.
@@ -1191,12 +1191,11 @@ Each of these waits for a concrete need:
 These do not fit gozler:
 
 - A second command-line grammar beside es's: `/NAME:value` options, `/F`, `/D`, `/EXT:` and `/NOT:` lists, `AND`/`OR`/`NOT` keywords, and exact-path lookups keyed on a trailing separator.
-- Results filtered by the caller's file permissions: gozler's trust model shows metadata to every local user (see `SECURITY.md`).
 - Accessed dates: Windows can turn their updates off (`NtfsDisableLastAccessUpdate`), so they can mislead.
 - A scheduled-task install: gozlerd is a service.
 - Appearance settings in the window, such as fonts, colors, size and date formats and editable menus, and polish such as Mica, a custom title bar, custom-drawn buttons or taller rows: the owner wants Windows and File Explorer to decide the look, polish that needs a paint routine for every state costs more code than it gives, and a list at Windows' compact height shows more results.
 - Rename in Search's list: Open file location gives File Explorer for it.
-- A second window, or a window run as administrator: one window serves a session, and only the service needs administrator rights.
+- A window run as administrator: only the service needs administrator rights. One main window serves a session unless the person allows more (see "One window per user session, unless the person allows more"); the Viewers and the File operations window are separate top-level windows beside it.
 - Staging all output before printing it: exit codes 2 and 7 already mark a late failure.
 - Saving the index between runs: the file would keep every name on the volume on disk after gozlerd stops, where backups and disk images copy it, and a damaged or planted file could be served as `live`. One MFT pass already builds a volume of 2 million entries in about 10 s.
 
