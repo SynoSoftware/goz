@@ -1,0 +1,4 @@
+en: 833 DIP
+es: 859 DIP
+nl: 853 DIP
+tr: 853 DIP
