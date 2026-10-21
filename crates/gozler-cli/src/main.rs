@@ -154,7 +154,8 @@ mod win {
                 .filter(|v| v.phase.is_complete())
                 .count(),
             entries: status.volumes.iter().map(|v| v.entries).sum(),
-            size: (!totals.metadata_pending).then_some(totals.size),
+            size: totals.size,
+            some_sizes_unknown: totals.metadata_pending,
         })
     }
 

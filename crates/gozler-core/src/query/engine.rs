@@ -12,7 +12,7 @@
 //! folder's bits and its own name, with no path built, and any other path
 //! term costs one copy of the full path per candidate. A match
 //! holds no full path: it becomes a row, its entry and its file ID, which
-//! [`super::Reply`] reads again when a page is built.
+//! [`super::ResultRows`] reads again when a page is built.
 
 use super::dates::DateRange;
 use super::order::{
@@ -35,55 +35,39 @@ use smallvec::SmallVec;
 use std::ops::Range;
 
 /// How many matches are files and how many are folders, and the space each
-/// kind takes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// kind takes. The files' sum adds the sizes that are known and counts the
+/// files whose size is not, so a search on a volume whose size pass stopped
+/// still shows the space it found. A sum stops at `u64::MAX`, which only a
+/// corrupt size makes it reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatchSums {
     pub files: u64,
-    /// The matching files' summed size in bytes, each name of a hard-linked
-    /// file counted; `None` when a file's size is unknown, or when the sum
-    /// passes `u64::MAX`, which only a corrupt size makes it do.
-    pub file_bytes: Option<u64>,
+    /// The summed size in bytes of the matching files whose size is known,
+    /// each name of a hard-linked file counted.
+    pub file_bytes: u64,
+    /// The matching files whose size is unknown, which `file_bytes` leaves
+    /// out.
+    pub files_without_size: u64,
     pub folders: u64,
-    /// The matching folders' summed size in bytes, without a folder that
-    /// another matching folder holds, so it is the space they take; `None`
-    /// as for [`Self::file_bytes`].
-    pub folder_bytes: Option<u64>,
-}
-
-impl Default for MatchSums {
-    /// No match, whose sizes are known: nothing.
-    fn default() -> Self {
-        Self {
-            files: 0,
-            file_bytes: Some(0),
-            folders: 0,
-            folder_bytes: Some(0),
-        }
-    }
+    /// The summed size in bytes of the matching folders, without a folder
+    /// that another matching folder holds, so it is the space they take.
+    pub folder_bytes: u64,
+    /// `folder_bytes` is only a lower bound: the size pass stopped on a
+    /// volume searched, so a folder's size counts only the files it read
+    /// ([`VolumeIndex::folder_sizes_at_least`]).
+    pub folder_bytes_at_least: bool,
 }
 
 impl MatchSums {
     /// Adds `other`, the sums of another volume's matches.
     pub fn add(&mut self, other: MatchSums) {
         self.files += other.files;
+        self.file_bytes = self.file_bytes.saturating_add(other.file_bytes);
+        self.files_without_size += other.files_without_size;
         self.folders += other.folders;
-        self.file_bytes = plus(self.file_bytes, other.file_bytes);
-        self.folder_bytes = plus(self.folder_bytes, other.folder_bytes);
+        self.folder_bytes = self.folder_bytes.saturating_add(other.folder_bytes);
+        self.folder_bytes_at_least |= other.folder_bytes_at_least;
     }
-
-    /// The counts, with both sizes unknown.
-    pub fn without_sizes(self) -> MatchSums {
-        MatchSums {
-            file_bytes: None,
-            folder_bytes: None,
-            ..self
-        }
-    }
-}
-
-/// `a + b`, unknown when either is or the sum overflows.
-fn plus(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    a?.checked_add(b?)
 }
 
 /// The [`MatchSums`] of `records`. A folder inside another matching folder
@@ -111,17 +95,27 @@ fn match_sums(index: &VolumeIndex, records: &[SortRecord]) -> MatchSums {
         }
         false
     };
-    let mut sums = MatchSums::default();
+    let mut sums = MatchSums {
+        folder_bytes_at_least: index.folder_sizes_at_least(),
+        ..MatchSums::default()
+    };
     for r in records {
         let entry = index.entry(r.idx());
         if entry.is_dir() {
             sums.folders += 1;
             if !held(r.idx()) {
-                sums.folder_bytes = plus(sums.folder_bytes, entry.size());
+                // Only an index whose size pass has not ended lacks a
+                // folder's size, and the daemon searches none that holds a
+                // folder.
+                let size = entry.size().unwrap_or(0);
+                sums.folder_bytes = sums.folder_bytes.saturating_add(size);
             }
         } else {
             sums.files += 1;
-            sums.file_bytes = plus(sums.file_bytes, entry.size());
+            match entry.size() {
+                Some(size) => sums.file_bytes = sums.file_bytes.saturating_add(size),
+                None => sums.files_without_size += 1,
+            }
         }
     }
     sums
@@ -406,6 +400,11 @@ impl CompiledQuery {
         })
     }
 
+    /// Whether the query matches case, which its scope folder follows too.
+    pub(super) fn match_case(&self) -> bool {
+        self.match_case
+    }
+
     /// The bits of the [`Check::Component`] terms that `text`, one path
     /// component in the form the query compares, matches.
     fn component_bits(&self, text: &[u8], code_points: &mut CodePointBuf) -> u64 {
@@ -492,6 +491,9 @@ struct Subject<'a> {
     /// The full path in the same form as `name`; set before the path
     /// clauses run.
     path: Option<&'a [u8]>,
+    /// [`VolumeIndex::folder_sizes_at_least`]: a folder's size is only a
+    /// lower bound.
+    folder_sizes_at_least: bool,
 }
 
 /// Buffers the checks reuse from one entry to the next.
@@ -595,6 +597,9 @@ impl Check {
             }
             // A folder's size is the sum of its files, and unknown until the
             // size and date pass ends.
+            Check::Size(range) if entry.is_dir() && subject.folder_sizes_at_least => {
+                return holds_from(*range, entry.size()?);
+            }
             Check::Size(range) => range.contains(entry.size()?),
             Check::DateModified(range) => range.contains(entry.mtime()?),
             Check::Extension(exts) => match extension(entry.name(), entry.is_dir()) {
@@ -627,6 +632,21 @@ impl Check {
                 bits & (1 << bit) != 0
             }
         })
+    }
+}
+
+/// Whether `range` holds a size that is at least `floor`, as a folder's after
+/// a size pass that stopped: `Some(true)` when it holds every size from
+/// `floor` up, `Some(false)` when it holds none, and unknown otherwise. So a
+/// folder whose unread files could take it out of the range never matches,
+/// negated or not, because a wrong row is worse than a missing one.
+fn holds_from(range: SizeRange, floor: u64) -> Option<bool> {
+    if range.max == u64::MAX && range.min <= floor {
+        Some(true)
+    } else if range.max < floor {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -915,12 +935,13 @@ impl<'a> Compared<'a> {
 /// path sort and the sort of millions of matches never hold the journal back.
 ///
 /// `scope` (if any) restricts results to descendants of that directory entry;
-/// the daemon resolves the `-path` folder via [`resolve_scope`]. The matches
-/// are ordered per `sort`, then the first `limit` become the rows; the rows'
-/// total counts every match. There is no offset: the daemon applies a
-/// request's offset after it merges the volumes, so an offset here would page
-/// each volume on its own. With `sums`, the rows also carry every match's
-/// [`MatchSums`], from the same scan.
+/// [`super::ResultRows::search`] resolves the `-path` folder via
+/// [`resolve_scope`] and runs these steps. The matches are ordered per
+/// `sort`, then the first `limit` become the rows; the rows' total counts
+/// every match. There is no offset: the search applies a request's offset
+/// after it merges the volumes, so an offset here would page each volume on
+/// its own. With `sums`, the rows also carry every match's [`MatchSums`],
+/// from the same scan.
 ///
 /// The common case, a case-insensitive query with a name literal, scans the
 /// index's contiguous folded-name arena with a single prebuilt `memmem`
@@ -929,7 +950,7 @@ impl<'a> Compared<'a> {
 /// building. The matches sort by numbers, from the index's name ranks, so the
 /// sort compares no names but within the runs of matches whose keys are
 /// equal.
-pub fn find_matches(
+pub(crate) fn find_matches(
     index: &VolumeIndex,
     mount_prefix: &str,
     query: &CompiledQuery,
@@ -970,7 +991,7 @@ pub fn find_matches(
 
 /// The keyed matches of one search on one volume, after the first hold of
 /// the volume's index read lock (see [`find_matches`]).
-pub struct Matches {
+pub(crate) struct Matches {
     records: Vec<SortRecord>,
     /// For a path sort: the folders of the records, while each record's
     /// primary key holds its folder's place in this table.
@@ -983,7 +1004,7 @@ pub struct Matches {
 
 /// The matches of [`Matches::order`], for the second hold of the volume's
 /// index read lock.
-pub struct OrderedMatches {
+pub(crate) struct OrderedMatches {
     /// Sorted by their keys up to `end`. From `end` to `ties_end` lie the
     /// other records with the keys of the last row, unsorted, which
     /// [`Self::read_rows`] orders with the rows; the rest are in no order.
@@ -1014,7 +1035,7 @@ struct Origin {
 /// the records no longer name its entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the volume's index changed during the search")]
-pub struct IndexChanged;
+pub(crate) struct IndexChanged;
 
 impl Matches {
     /// Puts the records of the rows in the order of their keys, without the
@@ -1023,7 +1044,7 @@ impl Matches {
     /// they are sorted; the records with the keys of the last row can then lie
     /// on both sides of the cut, so they are all gathered at the cut, to be
     /// ordered with the rows.
-    pub fn order(self) -> OrderedMatches {
+    pub(crate) fn order(self) -> OrderedMatches {
         use rayon::slice::ParallelSliceMut;
         // A broad query with no limit sorts millions of records, which is
         // done in parallel across cores; a small sort is not worth the rayon
@@ -1091,7 +1112,7 @@ impl OrderedMatches {
     /// [`IndexChanged`] when `index` is not the index the matches were found
     /// in, or its entries got new indexes since, or more of its slots got new
     /// entries since than it keeps a note of.
-    pub fn read_rows(mut self, index: &VolumeIndex) -> Result<VolumeRows, IndexChanged> {
+    pub(crate) fn read_rows(mut self, index: &VolumeIndex) -> Result<VolumeRows, IndexChanged> {
         let origin = self.origin;
         if index.instance() != origin.instance {
             return Err(IndexChanged);
@@ -1131,7 +1152,7 @@ impl OrderedMatches {
 
 /// The [`Totals`] of every match of `query` over `index`, with `scope` as in
 /// [`find_matches`]. No path is built and nothing is ordered.
-pub fn run_totals(
+pub(super) fn run_totals(
     index: &VolumeIndex,
     mount_prefix: &str,
     query: &CompiledQuery,
@@ -1429,6 +1450,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             entry,
             components: None,
             path: None,
+            folder_sizes_at_least: index.folder_sizes_at_least(),
         };
         if !entry_clauses
             .iter()
@@ -1681,7 +1703,11 @@ impl OrderFields for Ranked<'_> {
 /// walking components from the volume root: case-insensitively via the folded
 /// directory index, or case-sensitively against raw names when `match_case`. Returns `None`
 /// if any component is missing.
-pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Option<EntryIdx> {
+pub(super) fn resolve_scope(
+    index: &VolumeIndex,
+    path: &[u8],
+    match_case: bool,
+) -> Option<EntryIdx> {
     let components: Vec<&[u8]> = path
         .split(|&b| b == b'\\' || b == b'/')
         .filter(|c| !c.is_empty())
@@ -1962,6 +1988,24 @@ mod tests {
         assert_eq!((totals.count, totals.size), (3, 4096 + 200));
     }
 
+    /// After a size pass that stopped, a folder's size counts only the files
+    /// the pass read. A size test matches it only when every larger size
+    /// passes too, because its unread files could take it past an upper
+    /// bound: `size:<1mb` would otherwise list a folder that may hold
+    /// gigabytes. `docs` holds at least 4,296 bytes and `docs\sub` at least
+    /// 4,096.
+    #[test]
+    fn a_folder_size_after_a_stopped_pass_is_a_lower_bound() {
+        let mut idx = sample_index();
+        idx.compute_folder_sizes();
+        idx.record_size_pass_stopped();
+        assert_eq!(run(&idx, "folder: size:>4kb"), ["docs"]);
+        assert!(run(&idx, "folder: size:<1mb").is_empty());
+        // `docs\sub` may or may not pass, so its negation does not match it
+        // either.
+        assert!(run(&idx, "folder: !size:>4kb").is_empty());
+    }
+
     #[test]
     fn kind_filters() {
         let idx = sample_index();
@@ -1990,10 +2034,10 @@ mod tests {
     fn scope_restricts_to_descendants() {
         let idx = sample_index();
         let parsed = compiled("");
-        let scope = resolve_scope(&idx, b"docs\\sub", false).unwrap();
-        let out = run_query(&idx, "", &parsed, Some(scope), SortSpec::default(), None);
+        let scope = Some(r"C:\docs\sub");
+        let out = run_query(&idx, r"C:\", &parsed, scope, SortSpec::default(), None);
         let paths: Vec<String> = texts(&out);
-        assert_eq!(paths, vec!["docs\\sub\\Report.PDF"]); // descendants only, not "docs\sub" itself
+        assert_eq!(paths, vec![r"C:\docs\sub\Report.PDF"]); // descendants only, not "docs\sub" itself
     }
 
     #[test]
@@ -2096,10 +2140,9 @@ mod tests {
         idx: &VolumeIndex,
         prefix: &str,
         query: &str,
-        scope: Option<&[u8]>,
+        scope: Option<&str>,
     ) -> Vec<String> {
         let parsed = compiled(query);
-        let scope = scope.map(|s| resolve_scope(idx, s, false).expect("scope exists"));
         let out = run_query(
             idx,
             prefix,
@@ -2133,7 +2176,7 @@ mod tests {
         );
         // Scoped walk.
         assert_eq!(
-            paths_under(&idx, r"C:\", r"*\docs\*.md", Some(b"repo")),
+            paths_under(&idx, r"C:\", r"*\docs\*.md", Some(r"C:\repo")),
             [r"C:\repo\docs\guide.MD", r"C:\repo\docs\readme.md"]
         );
         // `path:` with a wildcard is a path wildcard too.
@@ -2195,7 +2238,7 @@ mod tests {
         let repo = [r"C:\repo\docs", r"C:\repo\readme.md", r"C:\repo\src"];
         assert_eq!(paths_under(&idx, r"C:\", r"parent:C:\repo", None), repo);
         assert_eq!(
-            paths_under(&idx, r"C:\", r"parent:c:\REPO\", Some(b"repo")),
+            paths_under(&idx, r"C:\", r"parent:c:\REPO\", Some(r"C:\repo")),
             repo
         );
         assert_eq!(
@@ -2644,8 +2687,8 @@ mod tests {
                     Err(QueryError::TooManyRegexes(_)) => return Ok(()),
                     compiled => compiled.expect("under the term cap, with valid regexes"),
                 };
+                let page = run_query(&idx, r"C:\", &query, scoped.then_some(r"C:\repo"), SortSpec::default(), None);
                 let scope = scoped.then(|| resolve_scope(&idx, b"repo", false).expect("repo exists"));
-                let page = run_query(&idx, r"C:\", &query, scope, SortSpec::default(), None);
                 let totals = run_totals(&idx, r"C:\", &query, scope).expect("no size is known");
                 prop_assert_eq!(totals.count, page.total);
             }

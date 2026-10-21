@@ -57,15 +57,19 @@ The reasons:
 
 ## What the code does now
 
-- **Every request for rows scans every match.** `find_matches` keys each
-  match as a 16-byte `SortRecord` under the volume's read lock,
-  `Matches::order` selects and sorts the first `offset + limit` of them
-  without the lock, and `OrderedMatches::read_rows` makes those the reply's
-  rows under the lock again: each row is the entry index and the file ID.
-  `stream_rows` reads each page's rows from the index (`query::Reply`) and
-  skips the first `offset`. The scan of the empty search takes about 0.3 s on
-  the owner's machine, under the volume's read lock, for every chunk. The
-  reply drops its rows when its last page is sent.
+- **Every request for rows scans every match.** `query::ResultRows::search`
+  keys each match as a 16-byte `SortRecord` under the volume's read lock,
+  selects and sorts the first `offset + limit` of them without the lock, and
+  makes those the reply's rows under the lock again: each row is the entry
+  index and the file ID. `ResultRows::page` reads each page's rows from the
+  index and skips the first `offset`, a skipped row costing as much as a sent
+  one. The scan of the empty search takes about 0.3 s on the owner's machine,
+  under the volume's read lock, for every chunk. The reply drops its rows when
+  its last page is sent.
+- **Several volumes merge by their current values.** A row keeps no sort key,
+  only its entry index and file ID, and name keys and folder ranks belong to
+  one volume. So a reply over several volumes compares each volume's next row
+  by the values the index holds when the page reads it.
 - **The daemon keeps nothing between requests.** A connection closes after 30
   s with no request (`IDLE_TIMEOUT`), the daemon serves at most 64 at once
   (`MAX_CONNECTIONS`), and the window opens a connection for each request
@@ -108,13 +112,30 @@ The reasons:
   (16 bytes a row on NTFS, 24 on ReFS), with the index instance that
   answered. The row has no path and no name, because the read builds them
   from the index, as a page does today.
+- **The merged order, for a search over several volumes:** one byte for each
+  row that names the volume of the next row, and every 4,096 rows a
+  checkpoint of each volume's position. Each volume's rows are already in
+  result order, so row k of the merge is the next unread row of the volume
+  that byte k names. A read jumps to the checkpoint below its offset and
+  replays at most 4,095 bytes without reading an index. A search over one
+  volume, which includes every search with a folder scope, needs none: the
+  offset indexes its rows directly. A single merged list was the
+  alternative, but a search over both NTFS and ReFS volumes would make every
+  row the 24-byte ReFS row.
 - The total and the two coverage flags (`volumes_incomplete`,
   `metadata_pending`) at the moment of the search.
 - Its id, the user SID of the request that made it, for the caps, and when
   it was last read.
+- **Its volumes, held weakly** (`Weak<VolumeState>`), so that a removed
+  volume's index is freed when its last owner drops it (see "Reading rows").
 
 It never changes after it is made, so readers share it through an `Arc`
-without a lock.
+without a lock. `VolumeRows` changes during a reply today only in its
+`past_cut` count, which a reply lowers as it ends a volume early. That count
+moves into the reader's own state, so `VolumeRows` never changes after the
+search and can be shared. Each read builds its own reader over the shared
+rows: its position, its `FolderCopy` and its `ResultNames`, because the
+folder ids a read hands out belong to that read's pages.
 
 ### When it is made
 
@@ -131,6 +152,13 @@ sort of every match without it, and the rows under the lock again. A merge of
 several volumes reads under the read locks of all of them, taken in
 `VolumeSet` order (the lock rules in `volume_state.rs`).
 
+For several volumes, making the merged order walks every row once, a page at
+a time, under the read locks of the volumes the page reads, because the merge
+compares current values (see "What the code does now"). A row that a page
+could not send at that moment, because its file was deleted or left the
+scope, is dropped then, because a dead slot has no value to compare. So the
+total is the count at that moment.
+
 While a volume's read lock is held, its journal tail waits. A `parking_lot`
 writer that waits also blocks new readers, so other clients' searches on that
 volume wait too. That is the main cost to measure.
@@ -142,15 +170,29 @@ lock, each row is checked:
 
 1. When the volume's index has another instance, or the volume is gone,
    the whole result snapshot is gone. A rebuilt index is better answered by
-   a new search.
+   a new search. A read upgrades each weak volume once, and the volume is
+   gone when the upgrade fails or the upgraded volume is not the one in the
+   request's `VolumeSet` (`Arc::ptr_eq`). The upgrade alone is not enough:
+   a tail that the supervisor abandoned as wedged still owns its volume, and
+   that volume's index keeps its instance, so without the check the result
+   snapshot would keep serving a removed volume's rows. A volume attached
+   again is a new `VolumeState`, so the check reports the old one gone.
 2. When the slot is live and holds the row's file ID, the row is that file,
    with its current name, path, size and date, as a page reads it today. A
    renamed or moved file keeps its place in the order until `F5` sorts
    again. A hard link that was removed and added again in the same slot
    shows that link: the same file.
-3. Otherwise the row is gone: the file was deleted. A page today leaves such
-   a row out; a result snapshot marks it gone instead, because the window
-   holds rows by their place.
+3. Otherwise the row is gone: the file was deleted, it moved out of the
+   search's folder scope, or its folder has no full path now, the rows that
+   "Index coherence" in `docs/DESIGN.md` has a reply leave out. A page today
+   leaves such a row out and lowers the total; a result snapshot marks it
+   gone, keeps its place and keeps the total, because the window holds rows
+   by their place. Both make the same check, one `query` function that a
+   reply's reader and a result snapshot's reader call: the row's folder when
+   the row can be sent, or nothing. The reuse-mark check that
+   `OrderedMatches::read_rows` makes before the rows exist stays apart,
+   because a `SortRecord` has no room for the file ID that this check
+   compares.
 4. A row that the reading request's caller cannot see now is gone too, so a
    result snapshot never shows a name its user has lost the right to see.
    Each read is a request, so it builds its own answers from the caller's
@@ -196,7 +238,9 @@ A dropped result snapshot costs only a new search.
 
 ### Memory
 
-16 bytes for each NTFS row (24 on ReFS), the reply's rows.
+16 bytes for each NTFS row (24 on ReFS), the reply's rows. A search over
+several volumes adds the merged order: 1 byte for each row and a checkpoint
+every 4,096 rows, about 6 % of the NTFS rows.
 
 | Search | Rows | Result snapshot | Beside |
 | --- | --- | --- | --- |
@@ -241,6 +285,46 @@ Export, the totals, a folder's size and status do not change.
   without it, and the rows 0.06 s under it again
   (`crates/gozler-daemon/examples/deep_export.rs`); `C:` is not measured.
 - **A read of 16,384 rows from a result snapshot.** It reads its rows as a
-  page does today, without the scan. On the same tree, a page of 4,096 rows
-  holds the read lock for at most 0.04 s, so four of them take about 0.16 s;
-  on `C:` it is not measured.
+  page does today, without the scan, and jumps to its offset through the
+  merged order instead of walking every earlier row as a reply does. On the
+  same tree, a page of 4,096 rows holds the read lock for at most 0.04 s, so
+  four of them take about 0.16 s; on `C:` it is not measured.
+- **Making the merged order of a search over several volumes.** It walks
+  every row once under the volumes' read locks, as a full export does; not
+  measured.
+
+## Where the architecture work stopped
+
+The architecture review of gozler-core and gozlerd moved the search's steps
+from gozlerd into `query::ResultRows`, gave the page-time row check one
+function (`row_folder`), and moved the journal read policy into
+`ReadFailures`. One question is still open, and it comes first when work
+resumes. No release happens before it is settled.
+
+**Is the `path-term` search slower?** The criterion bench
+`query_2M/path-term(group_007\bin_x64_03)` in
+`crates/gozler-core/benches/query.rs` was slower with the new code in every
+completed run:
+
+| Code | Mcycles, criterion's middle estimate |
+| --- | --- |
+| Before the move (HEAD) | 350, 376, 396, 490, 676 |
+| After the move | 571, 767, 843 |
+
+- **Method.** Export HEAD with `git archive` into a temporary folder and give
+  it its own `CARGO_TARGET_DIR`, so its bench binary cannot share a name with
+  the tree's. Run `check.ps1 -Bench path-term` for HEAD, then for the tree,
+  and repeat the pair. Run nothing else on the machine meanwhile.
+- **Why it is undecided.** The same HEAD binary moved by up to 53 % between
+  runs, and the tree's numbers lie inside HEAD's range. A review of the code
+  found no extra work per entry or per match: `find_matches` gets the same
+  arguments as before, and the new code adds only a few small allocations
+  per search and a call through a closure in `run_held`.
+- **If the tree stays slower in both pairs,** find what costs the time,
+  starting with what the closure in `run_held` stops the compiler from
+  inlining, and fix it, because the window must not get slower.
+
+Two candidates of the review need no work of their own. Placing Dates
+created in the service is in [service settings](service-settings.md). The
+search totals and the window's sums now both add the known sizes, so the
+candidate to give them one owner was dropped.

@@ -16,9 +16,11 @@ pub(crate) struct Index {
     pub(crate) volumes: usize,
     pub(crate) ready: usize,
     pub(crate) entries: u64,
-    /// The total size of the files, or `None` when sizes on a volume could
-    /// not be read, because a short total would read as the real one.
-    pub(crate) size: Option<u64>,
+    /// The total size of the files whose size is known.
+    pub(crate) size: u64,
+    /// Some files' sizes are unknown, because a volume's size and date pass
+    /// stopped, so `size` leaves them out.
+    pub(crate) some_sizes_unknown: bool,
 }
 
 /// The state of the gozler service.
@@ -62,10 +64,10 @@ pub(crate) fn render(service: &Service, color: bool) -> String {
                 ));
             } else {
                 out.paint(ColorToken::Success, "Running");
-                let size = match index.size {
-                    Some(size) => bytes(size),
-                    None => "sizes not read yet".to_string(),
-                };
+                let mut size = bytes(index.size);
+                if index.some_sizes_unknown {
+                    size.push_str(" known");
+                }
                 out.text.push_str(&format!(" · {found} · {size}\n"));
             }
         }
@@ -151,11 +153,12 @@ mod tests {
     /// any length, may be wider.
     #[test]
     fn every_state_fits_an_80_by_25_console() {
-        let index = |ready, size| Index {
+        let index = |ready, some_sizes_unknown| Index {
             volumes: 12,
             ready,
             entries: 99_999_999,
-            size,
+            size: 999_999_999_999_999,
+            some_sizes_unknown,
         };
         let not_running = [
             NotRunning::Stopped,
@@ -170,9 +173,9 @@ mod tests {
             },
         ];
         let mut services = vec![
-            Service::Running(index(12, Some(999_999_999_999_999))),
-            Service::Running(index(12, None)),
-            Service::Running(index(11, None)),
+            Service::Running(index(12, false)),
+            Service::Running(index(12, true)),
+            Service::Running(index(11, true)),
             Service::NotReady,
         ];
         services.extend(not_running.iter().map(Service::NotRunning));

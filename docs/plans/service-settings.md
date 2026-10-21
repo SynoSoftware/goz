@@ -25,8 +25,9 @@ machine in `HKLM\SOFTWARE\Gozler`, only an administrator changes them, OK and
 Apply show the administrator shield, and the service applies a change without
 a restart. OK and Apply save every changed service setting through one
 elevated copy of the window, as `gozler-ui --save-include` saves Include
-today, which then writes each changed value; so each setting adds a value,
-not a save path of its own. The plan owns how a request that acts at once,
+today, which then writes each changed value; so a setting adds a value or,
+like Dates created, a field of the `Include` value, never a save path of its
+own. The plan owns how a request that acts at once,
 such as Rebuild index, proves that an administrator sent it.
 
 The approved prototype of these screens, with their English words, is in git
@@ -61,6 +62,67 @@ with both controls.
 
 They take over two of Everything's options, on its Indexes page: Force
 Rebuild becomes Rebuild index, and Index date created becomes Dates created.
+
+## How the service applies Dates created
+
+Dates created decides what the index holds, as Include does, so it is a field
+of the saved Include settings, inside the `Include` value, and not a value of
+its own. Then `Request::SettingsSaved` reloads it with Include, and a change
+reaches every volume by Include's route: the supervisor gives each volume its
+new rules, and the volume's tail applies them, or a new tail for a volume
+without one. Turning it off drops the dates in place; turning it on rebuilds
+the volume, because only a read of the volume brings the dates. The list of
+who sees every file stays a value of its own, because the service reads it
+for each search and nothing in the index depends on it.
+
+Three conditions, each a silent defect if missed:
+
+- `IncludeSettings::rules_key`, which its `PartialEq` compares, includes the
+  field; otherwise `Include::reload` sees no change and returns early.
+- `VolumeRules` carries the field, so that `VolumeRules::adds_to` reports
+  turning it on as adding and `VolumeState::set_rules` flags the change.
+- The field is `#[serde(default)]`, off, so a value saved before it still
+  loads.
+
+The type then holds more than Include, so this change renames
+`IncludeSettings` to `IndexSettings`. The registry value keeps its name
+`Include`, because renaming it would need a migration, and the wire carries
+the fields, not the type's name, so neither saved data nor the protocol
+changes.
+
+**`dc:` while Dates created is off** is refused, with a message that names
+the setting, as a scope on no indexed volume is refused: an empty answer
+would read as "no such file". It is not the parser's "unknown function"
+(exit 4), because the function exists.
+
+## How the service runs Rebuild index
+
+- **The request goes to the supervisor,** which asks each volume's tail for a
+  new build between journal batches, as it gives a tail changed Include
+  rules, and starts a tail for a volume without one: a snapshot volume, or
+  one it gave up on, which gets a new revival budget, as after a restart.
+  The route for changed Include rules already does this
+  (`Fleet::apply_settings`).
+- **The build is a `RescanReason` of its own** that does not count against
+  the rescan budget (`MAX_RESCANS`), as the build for changed Include rules
+  does not, because the person asked for it.
+- **One value says what the next build must do,** next to the rules in
+  `VolumeState`, and `VolumeState::begin_build` clears it, as it clears the
+  changed-rules flag. So a rules change and a rebuild that arrive together
+  cause one build, and a request that arrives during a build causes one more.
+- **The administrator check** can use the visibility plan's
+  `pipe_client_token` when this lands after that plan's stage 2; before it,
+  this plan needs its own way to read the caller.
+- **The journal read policy.** This change edits `tail_loop` anyway, so it
+  may also move `ReadFailures` into a type of its own that takes the time
+  (`now: Instant`) and returns what to do: retry after a sleep, and whether
+  this failure crossed the degrade line, or escalate. The loop keeps the log
+  lines and the state calls. Its tests replace
+  `retry_policy_is_bounded_and_degrades`, which pins only constants: 15 s of
+  failures never escalate, failures past 30 s escalate, recovery is reported
+  only after a degrade, and the backoff stops at its cap. On its own the move
+  is not worth a change, because the loop is its only caller and the policy
+  works.
 
 ## The Date created column
 

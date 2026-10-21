@@ -39,11 +39,12 @@
 //!   mtime:    i64 LE    iff has_mtime
 //!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
 //! sums, iff has_sums, after the items:
-//!   files:      u64 LE
-//!   folders:    u64 LE
-//!   known:      u8      bit0 file_bytes known, bit1 folder_bytes known
-//!   file_bytes: u64 LE  0 when unknown
-//!   folder_bytes: u64 LE  0 when unknown
+//!   files:                u64 LE
+//!   file_bytes:           u64 LE  the files whose size is known
+//!   files_without_size:   u64 LE
+//!   folders:              u64 LE
+//!   folder_bytes:         u64 LE
+//!   sums_flags:           u8      bit0 folder_bytes_at_least
 //! ```
 //!
 //! A folder's id is its place among the folders the reply has sent, from 0,
@@ -60,9 +61,9 @@
 use smallvec::SmallVec;
 
 use super::frame::{begin_frame, end_frame};
-use super::types::{MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem};
+use super::types::{MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Rows};
 use crate::attributes::Attributes;
-use crate::query::{FolderId, MatchSums, ResultNames};
+use crate::query::{FolderId, IndexedVolume, MatchSums, ResultNames, ResultRows};
 use crate::wtf8;
 
 /// Response frame tag: the body is a JSON [`super::Response`].
@@ -75,10 +76,9 @@ const FLAG_VOLUMES_INCOMPLETE: u8 = 1 << 1;
 const FLAG_METADATA_PENDING: u8 = 1 << 2;
 const FLAG_SUMS: u8 = 1 << 3;
 
-const SUMS_FILE_BYTES: u8 = 1;
-const SUMS_FOLDER_BYTES: u8 = 1 << 1;
 /// The sums' bytes after the items.
-const SUMS_LEN: usize = 8 + 8 + 1 + 8 + 8;
+const SUMS_LEN: usize = 5 * 8 + 1;
+const SUMS_FOLDER_BYTES_AT_LEAST: u8 = 1;
 
 const IFLAG_IS_DIR: u8 = 1;
 const IFLAG_HAS_SIZE: u8 = 1 << 1;
@@ -291,24 +291,58 @@ impl ResultsPage {
         self.frame.extend_from_slice(&self.count.to_le_bytes());
         self.frame.extend_from_slice(&self.items);
         if let Some(sums) = self.sums {
-            let mut known = 0u8;
-            if sums.file_bytes.is_some() {
-                known |= SUMS_FILE_BYTES;
+            for value in [
+                sums.files,
+                sums.file_bytes,
+                sums.files_without_size,
+                sums.folders,
+                sums.folder_bytes,
+            ] {
+                self.frame.extend_from_slice(&value.to_le_bytes());
             }
-            if sums.folder_bytes.is_some() {
-                known |= SUMS_FOLDER_BYTES;
-            }
-            self.frame.extend_from_slice(&sums.files.to_le_bytes());
-            self.frame.extend_from_slice(&sums.folders.to_le_bytes());
-            self.frame.push(known);
-            self.frame
-                .extend_from_slice(&sums.file_bytes.unwrap_or(0).to_le_bytes());
-            self.frame
-                .extend_from_slice(&sums.folder_bytes.unwrap_or(0).to_le_bytes());
+            self.frame.push(if sums.folder_bytes_at_least {
+                SUMS_FOLDER_BYTES_AT_LEAST
+            } else {
+                0
+            });
         }
         end_frame(&mut self.frame, 0);
         self.frame
     }
+}
+
+/// Reads the next page of `rows` and encodes it as one results page frame,
+/// each row with the size, date and attributes that `wanted` asks for. `sent`
+/// holds the folders the reply's earlier pages sent. Returns the frame and
+/// whether rows are left.
+pub fn encode_page<V: IndexedVolume>(
+    rows: &mut ResultRows<V>,
+    wanted: &Rows,
+    sent: &mut SentFolders,
+) -> (Vec<u8>, bool) {
+    let mut page = ResultsPage::new(
+        0, // generation: unused by the CLI, matches the prior wire
+        rows.metadata_pending(),
+        rows.rows_left(),
+    )
+    .with_sums(rows.sums());
+    let more = rows.page(PAGE_ROWS as usize, |row, names| {
+        let item = PageItem {
+            folder: row.folder,
+            name: row.name,
+            is_dir: row.is_dir,
+            size: wanted.want_size.then_some(row.size).flatten(),
+            mtime: wanted.want_mtime.then_some(row.mtime).flatten(),
+            attributes: wanted.want_attributes.then_some(row.attributes),
+        };
+        page.push(item, names, sent)
+    });
+    let end = PageEnd {
+        total: rows.total(),
+        more,
+        volumes_incomplete: rows.volumes_incomplete(),
+    };
+    (page.finish(end), more)
 }
 
 /// Appends a folder or an item as the page lays both out: an id, then a
@@ -420,16 +454,13 @@ pub fn decode_results_payload(
     }
     let sums = (flags & FLAG_SUMS != 0)
         .then(|| -> Result<MatchSums, BinError> {
-            let files = r.u64()?;
-            let folders = r.u64()?;
-            let known = r.u8()?;
-            let file_bytes = r.u64()?;
-            let folder_bytes = r.u64()?;
             Ok(MatchSums {
-                files,
-                file_bytes: (known & SUMS_FILE_BYTES != 0).then_some(file_bytes),
-                folders,
-                folder_bytes: (known & SUMS_FOLDER_BYTES != 0).then_some(folder_bytes),
+                files: r.u64()?,
+                file_bytes: r.u64()?,
+                files_without_size: r.u64()?,
+                folders: r.u64()?,
+                folder_bytes: r.u64()?,
+                folder_bytes_at_least: r.u8()? & SUMS_FOLDER_BYTES_AT_LEAST != 0,
             })
         })
         .transpose()?;
@@ -751,15 +782,17 @@ mod tests {
         }
     }
 
-    /// The sums follow the items, and a client reads them back, an unknown
-    /// size as `None`.
+    /// The sums follow the items, and a client reads them back, each field
+    /// in its place.
     #[test]
     fn sums_follow_the_items() {
         let sums = MatchSums {
             files: 3,
-            file_bytes: Some(7),
-            folders: 1,
-            folder_bytes: None,
+            file_bytes: 7,
+            files_without_size: 1,
+            folders: 2,
+            folder_bytes: 11,
+            folder_bytes_at_least: true,
         };
         let t = tree();
         let page = |sums: Option<MatchSums>| {

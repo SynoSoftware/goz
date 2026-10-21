@@ -1760,11 +1760,16 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
         panel_index: {
             // An active search panel's index state and totals, as Search
             // shows them; the layout adds the room of their two glyphs.
-            let total = |key| {
-                let size = text::bytes(strings, numbers, sizes[sizes.len() - 1]);
-                strings.count(key, WIDEST_TOTAL, numbers, &[&size])
-            };
-            let totals = joined(strings, total("status.files"), total("status.folders"));
+            let widest = sizes[sizes.len() - 1];
+            let total = |key, size: String| strings.count(key, WIDEST_TOTAL, numbers, &[&size]);
+            let totals = joined(
+                strings,
+                total(
+                    "status.files",
+                    size_with_unknown(strings, numbers, widest, WIDEST_TOTAL),
+                ),
+                total("status.folders", size_at_least(strings, numbers, widest)),
+            );
             let volumes = [
                 "status.volume_indexing",
                 "status.volume_offline",
@@ -1852,29 +1857,53 @@ fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValueP
     let Some(sums) = results.sums().filter(|_| !results.searching()) else {
         return Vec::new();
     };
-    let kind = |glyph: Glyph, key: &str, count: u64, bytes: Option<u64>| {
-        let size = bytes.map_or_else(
-            || strings.text("status.size_unknown").to_owned(),
-            |bytes| text::bytes(strings, numbers, bytes),
-        );
-        ValuePart {
-            glyph: Some(glyph),
-            text: strings.count(key, count, numbers, &[&size]),
-        }
+    let file_bytes = if sums.files_without_size == 0 {
+        text::bytes(strings, numbers, sums.file_bytes)
+    } else if sums.files_without_size == sums.files {
+        strings.text("status.size_unknown").to_owned()
+    } else {
+        size_with_unknown(strings, numbers, sums.file_bytes, sums.files_without_size)
+    };
+    let folder_bytes = if sums.folder_bytes_at_least {
+        size_at_least(strings, numbers, sums.folder_bytes)
+    } else {
+        text::bytes(strings, numbers, sums.folder_bytes)
     };
     [
-        (Glyph::Page, "status.files", sums.files, sums.file_bytes),
-        (
-            Glyph::Folder,
-            "status.folders",
-            sums.folders,
-            sums.folder_bytes,
-        ),
+        (Glyph::Page, "status.files", sums.files, file_bytes),
+        (Glyph::Folder, "status.folders", sums.folders, folder_bytes),
     ]
     .into_iter()
     .filter(|(_, _, count, _)| *count > 0)
-    .map(|(glyph, key, count, bytes)| kind(glyph, key, count, bytes))
+    .map(|(glyph, key, count, size)| ValuePart {
+        glyph: Some(glyph),
+        text: strings.count(key, count, numbers, &[&size]),
+    })
     .collect()
+}
+
+/// A folder sum that counts only the files whose size was read: "at least
+/// 18.2 GB".
+fn size_at_least(strings: &Strings, numbers: &dyn Numbers, bytes: u64) -> String {
+    strings.format(
+        "status.size_at_least",
+        &[&text::bytes(strings, numbers, bytes)],
+    )
+}
+
+/// The known sizes' sum and how many sizes are unknown: "3.4 GB, 12 sizes
+/// unknown".
+fn size_with_unknown(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    bytes: u64,
+    without_size: u64,
+) -> String {
+    let unknown = strings.count("status.sizes_unknown", without_size, numbers, &[]);
+    strings.format(
+        "status.size_with_unknown",
+        &[&text::bytes(strings, numbers, bytes), &unknown],
+    )
 }
 
 /// How many results, or that a search runs. A filter that the hidden pane

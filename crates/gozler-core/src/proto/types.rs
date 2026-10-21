@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attributes::Attributes;
 use crate::include::IncludeSettings;
-use crate::query::{MatchSums, ParsedQuery};
+use crate::query::{MatchSums, ParsedQuery, RowsSpec, SearchTotals};
 use crate::scope::VolumeMounts;
 use crate::types::{SortSpec, VolumePhase};
 
@@ -20,7 +20,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 9;
+pub const PROTO_VERSION: u16 = 10;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -116,6 +116,19 @@ pub struct Rows {
     pub want_sums: bool,
 }
 
+impl Rows {
+    /// The rows the search returns. [`super::encode_page`] gives each row the
+    /// values this asks for.
+    pub fn spec(&self) -> RowsSpec {
+        RowsSpec {
+            sort: self.sort,
+            offset: self.offset,
+            limit: self.limit,
+            sums: self.want_sums,
+        }
+    }
+}
+
 /// A server→client message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t")]
@@ -172,8 +185,7 @@ pub struct QueryResults {
     /// Index generation the results were computed against.
     pub generation: u64,
     /// Every match's files and folders and their sizes, when the request
-    /// asked for them with [`Rows::want_sums`] and the daemon knows them;
-    /// both sizes are unknown while `metadata_pending` holds.
+    /// asked for them with [`Rows::want_sums`] and the daemon knows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sums: Option<MatchSums>,
 }
@@ -207,6 +219,17 @@ pub struct QueryTotals {
     pub volumes_incomplete: bool,
     /// As [`QueryResults::metadata_pending`]: some sizes may be unknown.
     pub metadata_pending: bool,
+}
+
+impl From<SearchTotals> for QueryTotals {
+    fn from(found: SearchTotals) -> Self {
+        QueryTotals {
+            count: found.totals.count,
+            size: found.totals.size,
+            volumes_incomplete: found.volumes_incomplete,
+            metadata_pending: found.metadata_pending,
+        }
+    }
 }
 
 /// One matched file or directory.
@@ -454,9 +477,11 @@ mod tests {
             generation: 42,
             sums: Some(MatchSums {
                 files: 3,
-                file_bytes: Some(7),
-                folders: 1,
-                folder_bytes: None,
+                file_bytes: 7,
+                files_without_size: 1,
+                folders: 2,
+                folder_bytes: 11,
+                folder_bytes_at_least: true,
             }),
         }));
         // Empty page.

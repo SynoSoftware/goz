@@ -197,7 +197,8 @@ pub struct ApplyOutcome {
     pub wants_compact: bool,
 }
 
-/// Whether the index keeps a size for each folder yet.
+/// Whether the index keeps a size for each folder yet, and whether that
+/// size can be short.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FolderSizes {
     /// The size and date pass has not ended, so every folder's size is
@@ -206,6 +207,9 @@ enum FolderSizes {
     /// Each folder's size slot holds the sum of the known sizes of the files
     /// below it, and every change keeps it exact.
     Kept,
+    /// As `Kept`, but the pass stopped before it read every file's size, so
+    /// a folder's size is at least the sum it holds.
+    AtLeast,
 }
 
 enum UpsertResult {
@@ -584,15 +588,18 @@ impl VolumeIndex {
     /// sizes of the files below it, each name of a hard-linked file counted,
     /// and from then on every change keeps each sum exact. Until it runs,
     /// every folder's size is unknown. The daemon calls it when a build's
-    /// pass completes, and never after a pass that failed or stopped, whose
-    /// sums would be short. The index calls it again for the two changes that
-    /// move more than one entry's size: a move that opens or closes a loop in
-    /// the parent links, and a file that becomes a folder.
+    /// pass ends, also after a pass that stopped, whose sums then leave out
+    /// the files it did not read ([`Self::record_size_pass_stopped`]). The
+    /// index calls it again for the two changes that move more than one
+    /// entry's size: a move that opens or closes a loop in the parent links,
+    /// and a file that becomes a folder.
     ///
     /// A folder counts each file whose parent links pass through it once, so
     /// inside a loop every folder of the loop holds the whole loop's files.
     pub fn compute_folder_sizes(&mut self) {
-        self.folder_sizes = FolderSizes::Kept;
+        if self.folder_sizes == FolderSizes::Unknown {
+            self.folder_sizes = FolderSizes::Kept;
+        }
         let slots = 0..self.entries.capacity() as EntryIdx;
         for idx in slots.clone() {
             if !self.entries.is_tombstone(idx) && self.entries.flags(idx).contains(EntryFlags::DIR)
@@ -605,6 +612,20 @@ impl VolumeIndex {
                 self.add_to_folders_from(self.entries.parent(idx), self.counted_size(idx));
             }
         }
+    }
+
+    /// Records that the size and date pass stopped before it read every
+    /// file's size, after [`Self::compute_folder_sizes`] summed what it read:
+    /// each folder's size is then at least the sum it holds, which
+    /// [`Self::folder_sizes_at_least`] tells the search.
+    pub fn record_size_pass_stopped(&mut self) {
+        self.folder_sizes = FolderSizes::AtLeast;
+    }
+
+    /// Whether a folder's size is only a lower bound, because the size and
+    /// date pass stopped before it read every file's size.
+    pub fn folder_sizes_at_least(&self) -> bool {
+        self.folder_sizes == FolderSizes::AtLeast
     }
 
     /// Sets the attributes of a record's `FILE_ATTRIBUTE_*` bits on every link
@@ -898,7 +919,7 @@ impl VolumeIndex {
     /// the folders above `new_parent`.
     fn move_entry(&mut self, idx: EntryIdx, new_parent: EntryIdx) {
         let old_parent = self.entries.parent(idx);
-        let folders = (self.folder_sizes == FolderSizes::Kept && old_parent != new_parent)
+        let folders = (self.folder_sizes != FolderSizes::Unknown && old_parent != new_parent)
             .then(|| (self.chain_up(old_parent), self.chain_up(new_parent)));
         self.unlink_child(idx);
         self.entries.set_parent(idx, new_parent);
@@ -974,7 +995,7 @@ impl VolumeIndex {
     /// Adds `delta` to the size of `start` and of each folder above it, while
     /// folder sizes are kept.
     fn add_to_folders_from(&mut self, start: EntryIdx, delta: u64) {
-        if self.folder_sizes == FolderSizes::Kept && delta != 0 {
+        if self.folder_sizes != FolderSizes::Unknown && delta != 0 {
             let chain = self.chain_up(start);
             self.add_to_folders(&chain, delta);
         }
@@ -1011,7 +1032,7 @@ impl VolumeIndex {
         let size = match (flags.contains(EntryFlags::DIR), self.folder_sizes) {
             (false, _) => size,
             (true, FolderSizes::Unknown) => SIZE_UNKNOWN,
-            (true, FolderSizes::Kept) => 0,
+            (true, FolderSizes::Kept | FolderSizes::AtLeast) => 0,
         };
         let id = self.names.intern(name);
         let idx = self
@@ -1164,7 +1185,7 @@ impl VolumeIndex {
             // unknown size leaves the sums above it as they are; a file that
             // becomes a folder takes its size from them and needs its own sum.
             self.entries.set_size(idx, SIZE_UNKNOWN);
-            if is_dir && self.folder_sizes == FolderSizes::Kept {
+            if is_dir && self.folder_sizes != FolderSizes::Unknown {
                 self.compute_folder_sizes();
             }
         }
@@ -1606,7 +1627,7 @@ impl VolumeIndex {
             .iter_live()
             .filter(|&e| self.entry(e).is_dir())
             .all(|dir| {
-                let want = (self.folder_sizes == FolderSizes::Kept).then(|| rebuilt(dir));
+                let want = (self.folder_sizes != FolderSizes::Unknown).then(|| rebuilt(dir));
                 self.entry(dir).size() == want
             })
     }

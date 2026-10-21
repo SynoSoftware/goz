@@ -1,26 +1,31 @@
 //! The golden corpus: command lines run over one fixture index, each with what
 //! gozler prints for it, as the code behaves today. A row runs its command line
 //! through `parse_argv` and [`build_search`] into the request gozler sends, and
-//! that request through [`serve`](crate::server::serve), the daemon's request
-//! path; the rows printed, the warnings and the exit code then come from
-//! [`Answer`], as in gozler.
+//! that request through [`ResultRows`] and [`encode_page`], or
+//! [`search_totals`], as gozlerd answers it; the rows printed, the warnings
+//! and the exit code then come from [`Answer`], as in gozler.
 //!
 //! A row records today's behavior, right or wrong. A row that a fix changed
 //! on purpose carries a comment with its bug number from the "Golden corpus"
 //! section of `docs/DESIGN.md`. The rows for output formats (`--json`,
-//! `-export-csv`, columns) are in `gozler-cli`'s corpus, which prints a fixed
+//! `-export-csv`, columns) are in the output corpus, which prints a fixed
 //! result set.
 
-use super::{decode_frames, dir_record, reply_bytes, set, volume};
-use crate::volume_state::{Indexed, VolumeSet, VolumeState};
-use gozler_core::escompat::{Answer, Command, Count, EsPlan, build_search, parse_argv};
-use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::layout::{LayoutFile, LayoutName};
-use gozler_core::proto::{ProtoError, Request, Response, SearchRequest};
-use gozler_core::query::{QueryError, QueryStart};
-use gozler_core::types::{Frn, VolumePhase};
+use super::{Answer, Command, Count, EsPlan, build_search, parse_argv};
+use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
+use crate::layout::{LayoutFile, LayoutName};
+use crate::proto::{
+    Request, Response, Returns, SearchRequest, SentFolders, decode_request, decode_response_frame,
+    encode_page, encode_request,
+};
+use crate::query::{
+    CompiledQuery, HeldVolume, IndexedVolume, QueryError, QueryStart, ResultNames, ResultRows,
+    TotalsError, search_totals,
+};
+use crate::scope::VolumeMounts;
+use crate::types::Frn;
+use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// One entry of the fixture, by full path.
 enum Entry {
@@ -775,6 +780,57 @@ const TICKS_PER_DAY: i64 = 864_000_000_000;
 const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 
+/// A volume of the fixture as gozlerd reads it: its index, mounted at one
+/// drive and complete.
+struct Volume {
+    index: VolumeIndex,
+    mounts: [String; 1],
+    /// The size and date pass failed or stopped.
+    metadata_pending: bool,
+}
+
+impl IndexedVolume for &Volume {
+    type Index<'a>
+        = &'a VolumeIndex
+    where
+        Self: 'a;
+
+    fn read(&self) -> HeldVolume<&VolumeIndex> {
+        HeldVolume {
+            index: &self.index,
+            complete: true,
+            metadata_pending: self.metadata_pending,
+        }
+    }
+
+    fn mounts(&self) -> VolumeMounts<'_> {
+        VolumeMounts {
+            mounts: &self.mounts,
+            guid: "",
+        }
+    }
+}
+
+/// The volume mounted at `mount`, holding `entries`, with every size and
+/// date read.
+fn volume(mount: &str, entries: &'static [Entry]) -> Volume {
+    Volume {
+        index: index(mount, entries),
+        mounts: [mount.to_string()],
+        metadata_pending: false,
+    }
+}
+
+fn dir_record(frn: u128, parent: u128, name: &str) -> ParsedUsnRecord {
+    ParsedUsnRecord {
+        frn: Frn(frn),
+        parent_frn: Frn(parent),
+        reason: USN_REASON_FILE_CREATE,
+        attributes: FILE_ATTRIBUTE_DIRECTORY,
+        name: name.as_bytes().to_vec(),
+    }
+}
+
 /// The index of the volume mounted at `mount`, built from `entries` in order,
 /// so a folder comes before what it holds, with its folder sizes summed as at
 /// the end of a build.
@@ -861,7 +917,43 @@ fn search(plan: &EsPlan) -> Result<SearchRequest, QueryError> {
     build_search(plan, WORKING_DIR, &query_start())
 }
 
-fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
+/// What gozlerd answers to `search` over `volumes`: each results page as
+/// gozler decodes it, or the totals, or the message of its refusal. The
+/// request crosses the pipe's JSON first, so a query that does not survive it
+/// fails its row.
+fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, String> {
+    let mut frame = Vec::new();
+    encode_request(&Request::Search(search.clone()), &mut frame);
+    // The payload follows the frame's 4-byte length.
+    let Ok(Request::Search(search)) = decode_request(&frame[4..]) else {
+        panic!("a search decodes as the search it was");
+    };
+    let query = CompiledQuery::new(&search.query).map_err(|e| e.to_string())?;
+    let scope = search.scope.as_deref();
+    let volumes: Vec<&Volume> = volumes.iter().collect();
+    match &search.returns {
+        Returns::Rows(wanted) => {
+            let mut rows = ResultRows::search(volumes, &query, scope, wanted.spec())
+                .map_err(|e| e.to_string())?;
+            let mut sent = SentFolders::default();
+            let mut names = ResultNames::default();
+            let mut pages = Vec::new();
+            loop {
+                let (frame, more) = encode_page(&mut rows, wanted, &mut sent);
+                pages.push(decode_response_frame(&frame[4..], &mut names).expect("decodes"));
+                if !more {
+                    return Ok(pages);
+                }
+            }
+        }
+        Returns::Totals => {
+            let totals = search_totals(volumes, &query, scope).map_err(|e| e.to_string())?;
+            Ok(vec![Response::Totals(totals.into())])
+        }
+    }
+}
+
+fn print(volumes: &[Volume], args: &[&str]) -> Printed {
     let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let plan = match parse_argv(&args) {
         Ok(Command::Run(plan)) => plan,
@@ -874,40 +966,39 @@ fn print(volumes: &VolumeSet, args: &[&str]) -> Printed {
         Ok(search) => search,
         Err(e) => return Printed::QueryError(e.to_string()),
     };
-    let mut answer = Answer::new(&plan, &search.query);
-    let request = Request::Search(search);
+    let mut printed = Answer::new(&plan, &search.query);
+    let replies = match answer(volumes, &search) {
+        Ok(replies) => replies,
+        Err(message) => return Printed::QueryError(message),
+    };
     let mut paths = Vec::new();
-    for frame in decode_frames(&reply_bytes(volumes, &request)) {
-        match frame {
+    for reply in replies {
+        match reply {
             Response::Results(page) => {
-                answer.add_page(&page);
+                printed.add_page(&page);
                 paths.extend(page.items.into_iter().map(|i| i.path));
             }
             // A count prints its one number instead of the rows.
             Response::Totals(totals) => {
-                answer.add_totals(&totals);
+                printed.add_totals(&totals);
                 let value = match plan.count {
                     Some(Count::TotalSize) => totals.size,
                     _ => totals.count,
                 };
                 paths.push(value.to_string());
             }
-            Response::Error { message, .. } => return Printed::QueryError(message),
             other => panic!("unexpected reply to a query: {other:?}"),
         }
     }
     Printed::Paths {
         paths,
-        warnings: answer.warnings().iter().map(ToString::to_string).collect(),
-        exit: answer.exit_code(plan.no_result_error).code(),
+        warnings: printed.warnings().iter().map(ToString::to_string).collect(),
+        exit: printed.exit_code(plan.no_result_error).code(),
     }
 }
 
-fn fixture() -> VolumeSet {
-    set(&[
-        volume(r"C:\", index(r"C:\", C_DRIVE), VolumePhase::Live),
-        volume(r"D:\", index(r"D:\", D_DRIVE), VolumePhase::Live),
-    ])
+fn fixture() -> [Volume; 2] {
+    [volume(r"C:\", C_DRIVE), volume(r"D:\", D_DRIVE)]
 }
 
 /// Every row prints what it recorded. All changed rows are listed at once, so
@@ -952,9 +1043,10 @@ fn a_total_counts_and_adds_up_every_row_of_the_same_query() {
             let Ok(Command::Run(plan)) = parse_argv(&args) else {
                 panic!("{args:?} is a search");
             };
-            Request::Search(search(&plan).expect("parses"))
+            search(&plan).expect("parses")
         };
-        let rows: Vec<_> = decode_frames(&reply_bytes(&volumes, &search(&["-n", "all"])))
+        let rows: Vec<_> = answer(&volumes, &search(&["-n", "all"]))
+            .expect("answers")
             .into_iter()
             .flat_map(|frame| match frame {
                 Response::Results(page) => page.items,
@@ -966,7 +1058,7 @@ fn a_total_counts_and_adds_up_every_row_of_the_same_query() {
             .filter(|row| !row.is_dir)
             .filter_map(|row| row.size)
             .sum();
-        match decode_frames(&reply_bytes(&volumes, &search(&["-get-total-size"])))[..] {
+        match answer(&volumes, &search(&["-get-total-size"])).expect("answers")[..] {
             [Response::Totals(ref totals)] => {
                 assert_eq!(
                     (totals.count, totals.size),
@@ -984,17 +1076,15 @@ fn a_total_counts_and_adds_up_every_row_of_the_same_query() {
 #[test]
 fn a_total_too_large_for_64_bits_is_refused() {
     const HUGE: &[Entry] = &[File(r"C:\a.bin", u64::MAX - 1, 1), File(r"C:\b.bin", 2, 1)];
-    let volumes = set(&[volume(r"C:\", index(r"C:\", HUGE), VolumePhase::Live)]);
+    let volume = volume(r"C:\", HUGE);
     let Ok(Command::Run(plan)) = parse_argv(&["-get-total-size".to_string()]) else {
         panic!("a search");
     };
-    let request = Request::Search(search(&plan).expect("parses"));
+    let search = search(&plan).expect("parses");
+    let query = CompiledQuery::new(&search.query).expect("compiles");
     assert!(matches!(
-        decode_frames(&reply_bytes(&volumes, &request))[..],
-        [Response::Error {
-            code: ProtoError::Overflow,
-            ..
-        }]
+        search_totals(vec![&volume], &query, search.scope.as_deref()),
+        Err(TotalsError::Overflow(_))
     ));
 }
 
@@ -1005,20 +1095,11 @@ fn a_total_too_large_for_64_bits_is_refused() {
 /// size or date, a count included, is unaffected.
 #[test]
 fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
-    let unknown_sizes = Indexed {
-        index: index(r"C:\", C_DRIVE),
+    let unknown_sizes = Volume {
         metadata_pending: true,
-        journal_max_bytes: None,
-        built: true,
+        ..volume(r"C:\", C_DRIVE)
     };
-    let volumes = set(&[
-        Arc::new(VolumeState::in_state(
-            r"C:\",
-            unknown_sizes,
-            VolumePhase::Live,
-        )),
-        volume(r"D:\", index(r"D:\", D_DRIVE), VolumePhase::Live),
-    ]);
+    let volumes = [unknown_sizes, volume(r"D:\", D_DRIVE)];
     let warning = "results may be incomplete: gozler could not read the sizes and dates on a \
                    volume in scope, so size and date tests and size totals leave those files \
                    out";
@@ -1036,4 +1117,13 @@ fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
     for args in [&["report"][..], &["-get-result-count"]] {
         assert_eq!(outcome(args), (vec![], 0), "{args:?}");
     }
+    // Rows that show sizes are all there, so they warn that some sizes are
+    // missing and still exit 0, which a script reads as a complete answer.
+    let sizes_short = "some sizes are unknown: gozler could not read the sizes on a volume in \
+                       scope, so those files show no size and a folder's size counts only the \
+                       files it read";
+    assert_eq!(
+        outcome(&["report", "-size", "-n", "all"]),
+        (vec![sizes_short.to_string()], 0)
+    );
 }

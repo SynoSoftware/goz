@@ -2,10 +2,12 @@
 //!
 //! A tokio multi-thread runtime accepts connections on `\\.\pipe\gozler-v1`,
 //! frames requests/responses with the shared sans-io codec from
-//! `gozler-core::proto`, and answers each `Query` by locking every volume's index
-//! for reads, running the query, and merging the results. Indexing itself
-//! (bootstrap + tail) stays on dedicated OS threads; tokio only serves the pipe.
+//! `gozler-core::proto`, and answers each search through `gozler-core`'s
+//! [`ResultRows`] and [`search_totals`], which read each volume through its
+//! [`VolumeState`]. Indexing itself (bootstrap + tail) stays on dedicated OS
+//! threads; tokio only serves the pipe.
 
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,23 +15,19 @@ use anyhow::{Context, Result};
 use gozler_core::include::IncludeSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
-    DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PAGE_ROWS, PIPE_NAME,
-    PROTO_VERSION, PageEnd, PageItem, ProtoError, QueryTotals, Request, Response, ResultsPage,
-    Returns, Rows, SentFolders, VolumeMemory, VolumeStatus, encode_response_frame,
+    DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
+    ProtoError, Request, Response, Returns, Rows, SentFolders, VolumeMemory, VolumeStatus,
+    encode_page, encode_response_frame,
 };
-use gozler_core::query::{
-    CompiledQuery, IndexChanged, MatchSums, Reply, SizeOverflow, Totals, find_matches,
-    resolve_scope, run_totals,
-};
-use gozler_core::scope::Scope;
-use gozler_core::types::EntryIdx;
+use gozler_core::query::{CompiledQuery, HeldVolume, ResultRows, TotalsError, search_totals};
+use gozler_core::scope::VolumeMounts;
 use gozler_winfs::{PipeSecurity, build_pipe_security};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{Semaphore, watch};
 
 use crate::include::Include;
-use crate::volume_state::{VolumeRegistry, VolumeSet, VolumeState};
+use crate::volume_state::{VolumeRead, VolumeRegistry, VolumeSet, VolumeState};
 
 /// Cap on concurrently-served pipe connections. A silent/hostile local client
 /// cannot pin more than this many tasks + read buffers + pipe instances.
@@ -260,24 +258,16 @@ fn serve(
         Ok(query) => query,
         Err(e) => return reply(emit, refusal(e.to_string())),
     };
-    // A scope on no indexed volume (a network drive, a drive letter that does
-    // not exist) is refused: an empty page would read as "no such file".
-    let Some(targets) = targets(volumes, search.scope.as_deref()) else {
-        let scope = search
-            .scope
-            .as_deref()
-            .expect("only a scope can miss every volume");
-        return reply(
-            emit,
-            refusal(format!(
-                "{scope} is not on an indexed volume; gozlerd indexes fixed NTFS and ReFS volumes"
-            )),
-        );
-    };
-    let match_case = search.query.match_case;
+    // In `VolumeSet` order, the order every request takes the volumes' locks
+    // in.
+    let targets = volumes.to_vec();
+    let scope = search.scope.as_deref();
     match search.returns {
-        Returns::Rows(rows) => stream_rows(&targets, &query, match_case, rows, emit),
-        Returns::Totals => reply(emit, totals(&targets, &query, match_case)),
+        Returns::Rows(wanted) => match ResultRows::search(targets, &query, scope, wanted.spec()) {
+            Ok(rows) => stream_rows(rows, &wanted, emit),
+            Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
+        },
+        Returns::Totals => reply(emit, totals(targets, &query, scope)),
     }
 }
 
@@ -296,166 +286,33 @@ fn refusal(message: String) -> Response {
     }
 }
 
-/// Whether the answer from the volumes a search ran on may be short.
-#[derive(Default)]
-struct Coverage {
-    /// A volume searched is indexing, rescanning or offline, or its index
-    /// changed during the search.
-    volumes_incomplete: bool,
-    /// The size and date pass failed or stopped on a volume.
-    metadata_pending: bool,
-}
-
-/// Runs `run` on each volume of `targets` with its scope folder resolved, and
-/// collects what it returns; a volume without the scope folder holds no
-/// match and is skipped.
-fn run_on_volumes<'t, T>(
-    targets: &'t [(Arc<VolumeState>, VolScope)],
-    match_case: bool,
-    mut run: impl FnMut(&'t VolumeState, &VolumeIndex, Option<EntryIdx>) -> T,
-) -> (Vec<T>, Coverage) {
-    let mut coverage = Coverage::default();
-    let mut results = Vec::new();
-    for (vol, scope) in targets {
-        // Resolve and run under ONE read guard; see `VolScope`.
-        let read = vol.read();
-        coverage.volumes_incomplete |= !read.phase().is_complete();
-        coverage.metadata_pending |= read.metadata_pending();
-        let scope_entry = match scope {
-            VolScope::All => None,
-            VolScope::Rel(rel) => match resolve_scope(read.index(), rel, match_case) {
-                Some(e) => Some(e),
-                None => continue, // scope folder absent on this volume: no hits
-            },
-        };
-        results.push(run(vol, read.index(), scope_entry));
-    }
-    (results, coverage)
-}
-
-/// Streams the rows of a search as one or more binary results-page frames
-/// (paged by [`ResultsPage::push`], `more` set on all but the last). An empty
-/// result set still emits one `more: false` page so the client always sees a
-/// terminal frame. No full path is built: each page sends the folders its
-/// rows need that no earlier page sent, and each row its folder and its name.
-///
-/// Each volume finds and keys its matches under its index lock, sorts them
-/// without it, and makes its rows under it again. Each page then reads its
-/// rows from the indexes under every volume's read lock, taken in
-/// [`VolumeSet`] order, and releases them before the page is sent, so the
-/// pipe and a slow client never hold a lock.
+/// Streams `rows` as one or more binary results-page frames (paged by
+/// [`ResultsPage::push`](gozler_core::proto::ResultsPage::push), `more` set
+/// on all but the last). An empty result set still emits one `more: false`
+/// page so the client always sees a terminal frame. No full path is built:
+/// each page sends the folders its rows need that no earlier page sent, and
+/// each row its folder and its name. A page releases the volumes' locks
+/// before it is sent, so the pipe and a slow client never hold a lock.
 fn stream_rows(
-    targets: &[(Arc<VolumeState>, VolScope)],
-    query: &CompiledQuery,
-    match_case: bool,
-    rows: Rows,
+    mut rows: ResultRows<Arc<VolumeState>>,
+    wanted: &Rows,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let per_vol_limit = rows.limit.map(|l| rows.offset.saturating_add(l));
-
-    let (found, mut coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
-        let matches = find_matches(
-            index,
-            vol.mount_prefix(),
-            query,
-            scope,
-            rows.sort,
-            per_vol_limit,
-            rows.want_sums,
-        );
-        (vol, matches)
-    });
-    let mut sums = rows.want_sums.then(MatchSums::default);
-    let mut volumes = Vec::with_capacity(found.len());
-    let mut answers = Vec::with_capacity(found.len());
-    for (vol, matches) in found {
-        // Off the lock, so the journal does not wait for the sort.
-        let ordered = matches.order();
-        match ordered.read_rows(vol.read().index()) {
-            Ok(answer) => {
-                if let (Some(sums), Some(volume)) = (sums.as_mut(), answer.sums()) {
-                    sums.add(volume);
-                }
-                volumes.push(vol);
-                answers.push(answer);
-            }
-            // `IndexChanged` says why this volume's rows are lost.
-            Err(IndexChanged) => coverage.volumes_incomplete = true,
-        }
-    }
-    // A size pass that has not completed leaves sums short.
-    if coverage.metadata_pending {
-        sums = sums.map(MatchSums::without_sizes);
-    }
-
-    let mut reply = Reply::new(answers, rows.offset, rows.limit);
     let mut sent = SentFolders::default();
     loop {
-        let mut page = ResultsPage::new(
-            0, // generation: unused by the CLI, matches the prior wire
-            coverage.metadata_pending,
-            reply.rows_left(),
-        )
-        .with_sums(sums);
-        // `targets`, and so `volumes`, are in `VolumeSet` order.
-        let reads: Vec<_> = volumes
-            .iter()
-            .enumerate()
-            .map(|(v, vol)| reply.reads_volume(v).then(|| vol.read()))
-            .collect();
-        let indexes: Vec<_> = reads
-            .iter()
-            .map(|read| read.as_ref().map(|read| read.index()))
-            .collect();
-        let more = reply.fill(&indexes, PAGE_ROWS as usize, |row, names| {
-            let item = PageItem {
-                folder: row.folder,
-                name: row.name,
-                is_dir: row.is_dir,
-                size: rows.want_size.then_some(row.size).flatten(),
-                mtime: rows.want_mtime.then_some(row.mtime).flatten(),
-                attributes: rows.want_attributes.then_some(row.attributes),
-            };
-            page.push(item, names, &mut sent)
-        });
-        drop(indexes);
-        drop(reads);
-        let end = PageEnd {
-            total: reply.total(),
-            more,
-            volumes_incomplete: coverage.volumes_incomplete || reply.index_changed(),
-        };
-        if !emit(page.finish(end)) || !more {
+        let (page, more) = encode_page(&mut rows, wanted, &mut sent);
+        if !emit(page) || !more {
             return;
         }
     }
 }
 
-/// The totals of a search, summed on each volume from the sizes the index
-/// already holds, so no row crosses the pipe: `-get-folder-size C:\` covers
-/// the whole volume.
-fn totals(
-    targets: &[(Arc<VolumeState>, VolScope)],
-    query: &CompiledQuery,
-    match_case: bool,
-) -> Response {
-    let (per_volume, coverage) = run_on_volumes(targets, match_case, |vol, index, scope| {
-        run_totals(index, vol.mount_prefix(), query, scope)
-    });
-    let sum = per_volume
-        .into_iter()
-        .try_fold(Totals::default(), |mut sum, volume| {
-            sum.add(volume?)?;
-            Ok::<_, SizeOverflow>(sum)
-        });
-    match sum {
-        Ok(sum) => Response::Totals(QueryTotals {
-            count: sum.count,
-            size: sum.size,
-            volumes_incomplete: coverage.volumes_incomplete,
-            metadata_pending: coverage.metadata_pending,
-        }),
-        Err(overflow) => Response::Error {
+/// The reply to a [`Returns::Totals`] search.
+fn totals(volumes: Vec<Arc<VolumeState>>, query: &CompiledQuery, scope: Option<&str>) -> Response {
+    match search_totals(volumes, query, scope) {
+        Ok(totals) => Response::Totals(totals.into()),
+        Err(TotalsError::NotIndexed(not_indexed)) => refusal(not_indexed.to_string()),
+        Err(TotalsError::Overflow(overflow)) => Response::Error {
             code: ProtoError::Overflow,
             message: overflow.to_string(),
         },
@@ -563,27 +420,31 @@ fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
     }
 }
 
-/// A query's per-volume scope: the whole volume, or a relative folder path not
-/// yet resolved to an `EntryIdx`. [`run_on_volumes`] resolves it under the same
-/// index read guard as the query. Otherwise a concurrent rescan between the two
-/// could swap the index and leave the resolved `EntryIdx` stale (wrong or empty
-/// results, or an out-of-bounds panic).
-enum VolScope {
-    All,
-    Rel(Vec<u8>),
+/// A volume's index, held through [`VolumeState::read`] for a search.
+pub(crate) struct HeldIndex<'a>(VolumeRead<'a>);
+
+impl Deref for HeldIndex<'_> {
+    type Target = VolumeIndex;
+
+    fn deref(&self) -> &VolumeIndex {
+        self.0.index()
+    }
 }
 
-/// Resolves which volumes (and per-volume unresolved scope) a query targets,
-/// by the rule the client also waits by ([`Scope::of`]); `None` when the scope
-/// is on no indexed volume.
-fn targets(volumes: &VolumeSet, scope: Option<&str>) -> Option<Vec<(Arc<VolumeState>, VolScope)>> {
-    match Scope::of(scope, volumes.iter().map(|v| v.mounted())) {
-        Scope::Everywhere => Some(volumes.iter().map(|v| (v.clone(), VolScope::All)).collect()),
-        Scope::Folder { volume, folder } => Some(vec![(
-            volumes[volume].clone(),
-            VolScope::Rel(folder.as_bytes().to_vec()),
-        )]),
-        Scope::Nowhere => None,
+impl gozler_core::query::IndexedVolume for VolumeState {
+    type Index<'a> = HeldIndex<'a>;
+
+    fn read(&self) -> HeldVolume<HeldIndex<'_>> {
+        let read = VolumeState::read(self);
+        HeldVolume {
+            complete: read.phase().is_complete(),
+            metadata_pending: read.metadata_pending(),
+            index: HeldIndex(read),
+        }
+    }
+
+    fn mounts(&self) -> VolumeMounts<'_> {
+        self.mounted()
     }
 }
 
@@ -604,8 +465,6 @@ mod tests {
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
     };
     use std::sync::Arc;
-
-    mod corpus;
 
     fn dir_record(frn: u128, parent: u128, name: &str) -> ParsedUsnRecord {
         ParsedUsnRecord {
@@ -891,6 +750,58 @@ mod tests {
             "got {:?}",
             frames[0]
         );
+    }
+
+    /// A search for the totals of `query` below `scope`.
+    fn totals_search(query: &str, scope: Option<&str>) -> Request {
+        Request::Search(SearchRequest {
+            query: parse_query_with(query, ParseOptions::default()).expect("the query parses"),
+            scope: scope.map(str::to_string),
+            returns: Returns::Totals,
+        })
+    }
+
+    /// A total past 64 bits, which only a corrupt size in the index can make,
+    /// answers `Overflow`, which gozler exits by as an internal error, rather
+    /// than a wrapped total that looks valid.
+    #[test]
+    fn a_total_past_64_bits_answers_overflow() {
+        use gozler_core::layout::{LayoutFile, LayoutName};
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
+        for (frn, size) in [(100, u64::MAX - 1), (101, 2)] {
+            index.enrich(&LayoutFile {
+                frn: Frn(frn),
+                attributes: 0x20,
+                size: Some(size),
+                mtime_ft: Some(5),
+                names: vec![LayoutName {
+                    parent_frn: NTFS_ROOT_FRN,
+                    name: format!("{frn}.bin").into_bytes(),
+                    dos_only: false,
+                }],
+            });
+        }
+        let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
+        match answer(&vols, totals_search("", None)) {
+            Response::Error { code, .. } => assert_eq!(code, ProtoError::Overflow),
+            other => panic!("an overflow must be refused, got {other:?}"),
+        }
+    }
+
+    /// A scope on no indexed volume answers `BadQuery`, which gozler exits by
+    /// as invalid input, for rows and totals alike, because an empty answer
+    /// would read as "no such file".
+    #[test]
+    fn a_scope_on_no_indexed_volume_answers_bad_query() {
+        let vols = set(&[live_volume(r"C:\")]);
+        let mut rows = query("System32");
+        rows.scope = Some(r"E:\x".to_string());
+        for request in [search(rows), totals_search("System32", Some(r"E:\x"))] {
+            match answer(&vols, request) {
+                Response::Error { code, .. } => assert_eq!(code, ProtoError::BadQuery),
+                other => panic!("a scope on no volume must be refused, got {other:?}"),
+            }
+        }
     }
 
     /// Paging must set `more` on every frame but the last, and `total` must be
