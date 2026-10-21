@@ -78,9 +78,25 @@ pub enum Request {
 }
 
 /// The id of a result snapshot: 128 random bits, which only the client that
-/// made it learns, over its own pipe.
+/// made it learns, over its own pipe. It travels as 32 hex digits, because
+/// serde reads no `u128` inside an internally tagged enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct ResultSnapshotId(pub u128);
+
+impl From<ResultSnapshotId> for String {
+    fn from(id: ResultSnapshotId) -> String {
+        format!("{:032x}", id.0)
+    }
+}
+
+impl TryFrom<String> for ResultSnapshotId {
+    type Error = std::num::ParseIntError;
+
+    fn try_from(hex: String) -> Result<Self, Self::Error> {
+        u128::from_str_radix(&hex, 16).map(ResultSnapshotId)
+    }
+}
 
 /// Which rows of a result snapshot a [`Request::ResultSnapshotRows`] reads,
 /// and with which values.
@@ -485,6 +501,23 @@ mod tests {
         let json = serde_json::to_string(resp).expect("serialize");
         let back: Response = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(&back, resp, "json: {json}");
+    }
+
+    /// A result snapshot's id takes all 128 bits, which serde cannot read as
+    /// a number inside a tagged request or reply; the daemon would refuse
+    /// every read and the window search again without end.
+    #[test]
+    fn a_result_snapshot_id_round_trips_in_its_request_and_reply() {
+        let id = ResultSnapshotId(u128::MAX - 5);
+        rt_response(&Response::ResultSnapshot { id, total: 3 });
+        rt_request(&Request::ResultSnapshotRows(SnapshotRowsRequest {
+            id,
+            offset: 1,
+            limit: None,
+            want_size: true,
+            want_mtime: false,
+            want_attributes: false,
+        }));
     }
 
     fn sample_items() -> Vec<ResultItem> {
