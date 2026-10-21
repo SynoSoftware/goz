@@ -2929,4 +2929,49 @@ mod tests {
         }
         assert!(missing.is_empty(), "en.json lacks: {missing:#?}");
     }
+
+    /// The Settings buttons share one width, set before a page is made from
+    /// the captions that `SettingsDialog::later_captions` finds by their
+    /// icon, so a push button added to a page template without a key in
+    /// `BUTTON_GLYPHS` would be cut off when its page first shows. The fix
+    /// buttons' captions come from `Fix::label_groups`.
+    #[test]
+    fn every_settings_page_button_has_an_icon() {
+        let script = include_str!("../../resources/gozler-ui.rc");
+        let header = include_str!("../../resources/ids.h");
+        let number = |name: &str| {
+            header.lines().find_map(|line| {
+                let mut words = line.split_whitespace();
+                (words.next() == Some("#define") && words.next() == Some(name))
+                    .then(|| words.next()?.parse::<u16>().ok())
+                    .flatten()
+            })
+        };
+        let strings = super::super::text::tests::english();
+        let fixes = [ControlId::IndexUseLocal.id(), ControlId::IndexFix.id()];
+        // Each part but the first starts with a template and ends with the
+        // name of the next.
+        let parts: Vec<&str> = script.split("DIALOGEX").collect();
+        for page in SettingsPage::ALL {
+            let template = (parts.windows(2))
+                .find(|pair| {
+                    let name = pair[0].split_whitespace().last().unwrap_or_default();
+                    number(name) == Some(page.dialog().id())
+                })
+                .map(|pair| pair[1].split("\nEND").next().unwrap_or_default())
+                .unwrap_or_else(|| panic!("gozler-ui.rc has the template of {page:?}"));
+            let glyphs = DialogCaptions::new(page.dialog(), &strings).glyphs;
+            for line in template.lines() {
+                let Some(rest) = line.trim().strip_prefix("PUSHBUTTON") else {
+                    continue;
+                };
+                let name = rest.split(',').nth(1).unwrap_or_default().trim();
+                let id = number(name).unwrap_or_else(|| panic!("ids.h defines {name}"));
+                assert!(
+                    fixes.contains(&id) || glyphs.iter().any(|(item, _)| *item == id),
+                    "{name} on {page:?} has no caption key in BUTTON_GLYPHS"
+                );
+            }
+        }
+    }
 }

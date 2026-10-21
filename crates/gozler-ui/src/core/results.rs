@@ -713,6 +713,10 @@ impl ShownRows {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::single_range_in_vec_init,
+    reason = "a selection is a list of row ranges"
+)]
 pub(crate) mod tests {
     use super::*;
     use gozler_core::query::parse_query;
@@ -887,6 +891,24 @@ pub(crate) mod tests {
         );
         let asked = results.next_chunk(CHUNK_ROWS - 40..CHUNK_ROWS, Generation(3));
         assert_eq!(asked.map(|a| a.start), Some(0));
+    }
+
+    /// A selection read leaves out a chunk that holds only its first page,
+    /// because the rest of that chunk replaces it whole, and the rows the
+    /// selection read into it would go with it.
+    #[test]
+    fn a_selection_read_leaves_out_a_first_page() {
+        let total = 3 * CHUNK_ROWS;
+        let mut results = Results::new();
+        results.start_search(Generation(1), search(), SortSpec::default());
+        let first = Chunk {
+            rest_follows: true,
+            ..chunk(0, 4_096, total)
+        };
+        results.accept(Generation(1), first);
+        let ask = results.selection_ask(vec![10..20]).expect("rows show");
+        assert!(ask.cached.is_empty());
+        assert_eq!((ask.span.start, ask.span.len), (10, 10));
     }
 
     /// Without the eviction the cache grows with every chunk scrolled to,
