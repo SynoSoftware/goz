@@ -842,12 +842,20 @@ impl CaptionTable {
                 keyed: &[
                     (Control(C::IndexRebuild), "settings_index.rebuild"),
                     (Control(C::IndexReport), "settings_index.report"),
+                    (
+                        Control(C::IndexDatesCreated),
+                        "settings_index.dates_created",
+                    ),
                 ],
                 plain: &[
                     (Control(C::IndexHeading), "settings.index"),
                     (Control(C::IndexDrivesGroup), "settings_index.drives"),
                     (Control(C::IndexHoldsGroup), "settings_index.holds"),
                     (Control(C::IndexHolds), "settings_index.holds_text"),
+                    (
+                        Control(C::IndexDatesCreatedNote),
+                        "settings_index.dates_created_note",
+                    ),
                     (Control(C::IndexServiceGroup), "settings_index.service"),
                     (
                         Control(C::IndexServiceProgramLabel),
@@ -1912,7 +1920,7 @@ pub(crate) fn title(model: &Model) -> String {
 
 /// A column's header.
 pub(crate) fn header(strings: &Strings, column: Column) -> String {
-    strings.text(column.header()).to_owned()
+    strings.text(column.row().header).to_owned()
 }
 
 /// Two texts of a status bar group with a dot between them, or the one

@@ -1127,13 +1127,13 @@ impl MenuItem {
     pub(crate) fn label(self, strings: &Strings) -> String {
         let key = match self {
             MenuItem::Run(command) => command.row().label,
-            MenuItem::Column(column) => column.menu_label(),
+            MenuItem::Column(column) => column.row().menu_label,
             MenuItem::SortKey(key) => sort_key_label(key),
             MenuItem::SortDirection(dir) => sort_direction_label(dir),
             MenuItem::Language(None) => "command.windows_default",
             MenuItem::Language(Some(language)) => return LANGUAGES[language].label(strings),
             MenuItem::FitColumn(column) => {
-                return strings.format("column.fit", &[strings.text(column.header())]);
+                return strings.format("column.fit", &[strings.text(column.row().header)]);
             }
             MenuItem::FitColumns => "column.fit_columns",
             MenuItem::Panel(_) => return String::new(),
@@ -1184,7 +1184,7 @@ impl MenuItem {
 
     pub(crate) fn enabled(self, state: &State) -> bool {
         let shown = match self {
-            MenuItem::Column(column) => column.can_hide(),
+            MenuItem::Column(column) => column.row().can_hide,
             _ => true,
         };
         (self.command().row().enabled)(state) && shown

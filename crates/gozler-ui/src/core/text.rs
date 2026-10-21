@@ -440,7 +440,11 @@ pub(crate) fn path_part(column: Column, path: &str) -> Option<Range<usize>> {
     match column {
         Column::Name => Some(name_start..path.len()),
         Column::Path => Some(0..name_start.saturating_sub(1)),
-        Column::Size | Column::DateModified | Column::Extension | Column::Attributes => None,
+        Column::Size
+        | Column::DateModified
+        | Column::DateCreated
+        | Column::Extension
+        | Column::Attributes => None,
     }
 }
 
@@ -519,6 +523,10 @@ pub(crate) fn cell(
         },
         Column::DateModified => row
             .mtime_ft
+            .map(|ft| numbers.date_time(ft))
+            .unwrap_or_default(),
+        Column::DateCreated => row
+            .created_ft
             .map(|ft| numbers.date_time(ft))
             .unwrap_or_default(),
         Column::Extension => gozler_core::query::extension(name.as_bytes(), row.is_dir)

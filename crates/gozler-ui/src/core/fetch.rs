@@ -155,9 +155,10 @@ impl ChunkAsk {
             limit,
             want_size: true,
             want_mtime: true,
-            want_created: false,
-            // Four bytes a row, so showing the Attributes column needs no
+            // Only an index with Dates created on sends them, eight bytes a
+            // row, and attributes four, so showing either column needs no
             // second request.
+            want_created: true,
             want_attributes: true,
             // The status bar shows them beside the total. The service sums
             // every match for them, so only the first chunk asks, and the
@@ -175,7 +176,7 @@ impl ChunkAsk {
                 limit,
                 want_size: rows.want_size,
                 want_mtime: rows.want_mtime,
-                want_created: false,
+                want_created: rows.want_created,
                 want_attributes: rows.want_attributes,
             }),
             FromSnapshot::Sort(id) => Request::SortResultSnapshot(SortSnapshotRequest { id, rows }),
@@ -221,6 +222,8 @@ pub(crate) struct ExportAsk {
     /// Whether the file has an Attributes column, as `gozler` asks only
     /// then.
     pub(crate) want_attributes: bool,
+    /// Whether the file has a Date created column, likewise.
+    pub(crate) want_created: bool,
 }
 
 impl ExportAsk {
@@ -231,7 +234,7 @@ impl ExportAsk {
             limit: None,
             want_size: true,
             want_mtime: true,
-            want_created: false,
+            want_created: self.want_created,
             want_attributes: self.want_attributes,
             want_sums: false,
         }))

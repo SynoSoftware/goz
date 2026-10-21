@@ -565,6 +565,8 @@
     "left_out": "Left out",
     "holds": "What the index holds",
     "holds_text": "Names, sizes, folder sizes, dates modified and attributes. They're always indexed, because search, the filters and the Size column use them.",
+    "dates_created": "Dates &created",
+    "dates_created_note": "Adds the Date created column. Uses more service memory.",
     "service": "Service",
     "asking": "Checking the service…",
     "running": "The service is running.",

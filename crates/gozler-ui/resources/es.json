@@ -565,6 +565,8 @@
     "left_out": "Omitida",
     "holds": "Qué contiene el índice",
     "holds_text": "Nombres, tamaños, tamaños de carpeta, fechas de modificación y atributos. Siempre se indexan, porque la búsqueda, los filtros y la columna Tamaño los usan.",
+    "dates_created": "&Fechas de creación",
+    "dates_created_note": "Agrega la columna Fecha de creación. Usa más memoria del servicio.",
     "service": "Servicio",
     "asking": "Comprobando el servicio…",
     "running": "El servicio se está ejecutando.",

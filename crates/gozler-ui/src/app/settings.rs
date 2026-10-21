@@ -486,7 +486,7 @@ impl<'a> SettingsDialog<'a> {
                 self.fill_commands(self.selected_command());
             }
             SettingsPage::FileOperations => self.fill_speed(&values.choices.speed),
-            SettingsPage::Index => {}
+            SettingsPage::Index => self.fill_dates_created(values.include.as_ref()),
             SettingsPage::Include => self.fill_include(values.include.as_mut()),
         });
         self.show_closed_note();
@@ -603,6 +603,17 @@ impl<'a> SettingsDialog<'a> {
             if let Some(button) = CheckBox::of_dialog(page, control.id()) {
                 button.set_checked(shown == visibility);
             }
+        }
+    }
+
+    /// Sets Dates created from `include`; without it, the service gave no
+    /// settings, so it is disabled.
+    fn fill_dates_created(&self, include: Option<&IndexSettings>) {
+        if let Some(control) = self.control(SettingsPage::Index, ControlId::IndexDatesCreated) {
+            control.set_enabled(include.is_some());
+        }
+        if let Some(check_box) = self.check_box(SettingsPage::Index, ControlId::IndexDatesCreated) {
+            check_box.set_checked(include.is_some_and(|i| i.dates_created));
         }
     }
 
@@ -1806,6 +1817,14 @@ impl<'a> SettingsDialog<'a> {
                 .is_some_and(CheckBox::is_checked);
             if let Some(include) = &mut self.draft.borrow_mut().edited.include {
                 *value(include) = checked;
+            }
+            self.include_changed(dialog);
+        } else if is(id, ControlId::IndexDatesCreated) {
+            let checked = self
+                .check_box(SettingsPage::Index, ControlId::IndexDatesCreated)
+                .is_some_and(CheckBox::is_checked);
+            if let Some(include) = &mut self.draft.borrow_mut().edited.include {
+                include.dates_created = checked;
             }
             self.include_changed(dialog);
         } else if let Some((page, _)) = RESTORE.into_iter().find(|(_, c)| is(id, *c)) {

@@ -1088,7 +1088,7 @@ impl MainWindow {
                 &ListColumn {
                     header: "",
                     width,
-                    right_aligned: column.right_aligned(),
+                    right_aligned: column.row().right_aligned,
                 },
             );
         }
@@ -2743,7 +2743,7 @@ impl MainWindow {
                     &ListColumn {
                         header: &header,
                         width,
-                        right_aligned: column.right_aligned(),
+                        right_aligned: column.row().right_aligned,
                     },
                 );
             }
@@ -3295,7 +3295,7 @@ impl MainWindow {
                 model
                     .columns()
                     .iter()
-                    .position(|c| c.sort_key() == Some(sort.key))
+                    .position(|c| c.row().sort_key == Some(sort.key))
                     .map(|index| (index, sort.dir == SortDir::Asc)),
             )
         };

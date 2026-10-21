@@ -565,6 +565,8 @@
     "left_out": "Dışarıda bırakıldı",
     "holds": "Dizinin içerdikleri",
     "holds_text": "Adlar, boyutlar, klasör boyutları, değiştirme tarihleri ve öznitelikler. Arama, filtreler ve Boyut sütunu bunları kullandığı için her zaman dizinlenirler.",
+    "dates_created": "&Oluşturma tarihleri",
+    "dates_created_note": "Oluşturma tarihi sütununu ekler. Hizmet daha fazla bellek kullanır.",
     "service": "Hizmet",
     "asking": "Hizmet denetleniyor…",
     "running": "Hizmet çalışıyor.",

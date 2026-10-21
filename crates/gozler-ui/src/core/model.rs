@@ -380,7 +380,7 @@ impl Model {
         let shown = if saved.is_empty() {
             Column::ALL
                 .into_iter()
-                .filter(|c| c.shown_by_default())
+                .filter(|c| c.row().shown_by_default)
                 .collect()
         } else {
             saved
@@ -1190,7 +1190,7 @@ impl Model {
     /// Shows or hides `column` (DESIGN.md: C15). A shown column joins at the
     /// end; Name cannot be hidden.
     pub(crate) fn toggle_column(&mut self, column: Column) -> Accepted {
-        if !column.can_hide() {
+        if !column.row().can_hide {
             return Accepted::only(Change::Nothing);
         }
         Accepted::only(match self.columns.iter().position(|c| *c == column) {
@@ -1530,7 +1530,7 @@ impl Model {
         let (search, sort) = (shown.search.clone(), shown.sort);
         let columns: Vec<EsColumn> = display_order
             .iter()
-            .filter_map(|&index| self.columns.get(index)?.export_column())
+            .filter_map(|&index| self.columns.get(index)?.row().export_column)
             .collect();
         let plan = EsPlan {
             format: format.table_format(),
@@ -1554,6 +1554,7 @@ impl Model {
                     sort,
                     path,
                     want_attributes: plan.columns.contains(&EsColumn::Attributes),
+                    want_created: plan.columns.contains(&EsColumn::DateCreated),
                     format: plan.result_format(),
                 }),
             })),
@@ -2140,7 +2141,7 @@ impl Model {
     /// reversed on a second click, and largest or newest first on the first
     /// click on Size or Date modified, as gozler's sort keys do.
     pub(crate) fn header_sort(&self, column: Column) -> Option<SortSpec> {
-        let key = column.sort_key()?;
+        let key = column.row().sort_key?;
         let sort = self.sort();
         Some(if sort.key == key {
             SortSpec {
@@ -2244,93 +2245,120 @@ pub(crate) enum Column {
     Path,
     Size,
     DateModified,
+    DateCreated,
     Extension,
     Attributes,
 }
 
 impl Column {
     /// In View > Columns' order.
-    pub(crate) const ALL: [Column; 6] = [
+    pub(crate) const ALL: [Column; 7] = [
         Column::Name,
         Column::Path,
         Column::Size,
         Column::DateModified,
+        Column::DateCreated,
         Column::Extension,
         Column::Attributes,
     ];
 
-    pub(crate) fn header(self) -> &'static str {
+    /// Its facts, in one match, so a new column chooses each on purpose.
+    pub(crate) fn row(self) -> ColumnRow {
         match self {
-            Column::Name => "header.name",
-            Column::Path => "header.path",
-            Column::Size => "header.size",
-            Column::DateModified => "header.date_modified",
-            Column::Extension => "header.extension",
-            Column::Attributes => "header.attributes",
+            Column::Name => ColumnRow {
+                header: "header.name",
+                menu_label: "column.name",
+                width: Dip(320),
+                shown_by_default: true,
+                // The list would show rows that name nothing (DESIGN.md:
+                // C15).
+                can_hide: false,
+                right_aligned: false,
+                sort_key: Some(SortKey::Name),
+                export_column: None,
+            },
+            Column::Path => ColumnRow {
+                header: "header.path",
+                menu_label: "column.path",
+                width: Dip(380),
+                shown_by_default: true,
+                can_hide: true,
+                right_aligned: false,
+                sort_key: Some(SortKey::Path),
+                export_column: None,
+            },
+            Column::Size => ColumnRow {
+                header: "header.size",
+                menu_label: "column.size",
+                width: Dip(90),
+                shown_by_default: true,
+                can_hide: true,
+                // So the digits line up.
+                right_aligned: true,
+                sort_key: Some(SortKey::Size),
+                export_column: Some(EsColumn::Size),
+            },
+            Column::DateModified => ColumnRow {
+                header: "header.date_modified",
+                menu_label: "column.date_modified",
+                width: Dip(130),
+                shown_by_default: true,
+                can_hide: true,
+                right_aligned: false,
+                sort_key: Some(SortKey::DateModified),
+                export_column: Some(EsColumn::DateModified),
+            },
+            Column::DateCreated => ColumnRow {
+                header: "header.date_created",
+                menu_label: "column.date_created",
+                width: Dip(130),
+                // Its index setting, Dates created, is off by default.
+                shown_by_default: false,
+                can_hide: true,
+                right_aligned: false,
+                sort_key: Some(SortKey::DateCreated),
+                export_column: Some(EsColumn::DateCreated),
+            },
+            Column::Extension => ColumnRow {
+                header: "header.extension",
+                menu_label: "column.extension",
+                width: Dip(80),
+                shown_by_default: false,
+                can_hide: true,
+                right_aligned: false,
+                sort_key: Some(SortKey::Extension),
+                export_column: Some(EsColumn::Extension),
+            },
+            Column::Attributes => ColumnRow {
+                header: "header.attributes",
+                menu_label: "column.attributes",
+                width: Dip(80),
+                shown_by_default: false,
+                can_hide: true,
+                right_aligned: false,
+                // gozler has no attribute sort.
+                sort_key: None,
+                export_column: Some(EsColumn::Attributes),
+            },
         }
     }
+}
 
+/// What the window knows of a [`Column`].
+pub(crate) struct ColumnRow {
+    pub(crate) header: &'static str,
     /// Its item in View > Columns.
-    pub(crate) fn menu_label(self) -> &'static str {
-        match self {
-            Column::Name => "column.name",
-            Column::Path => "column.path",
-            Column::Size => "column.size",
-            Column::DateModified => "column.date_modified",
-            Column::Extension => "column.extension",
-            Column::Attributes => "column.attributes",
-        }
-    }
-
-    pub(crate) fn default_width(self) -> Dip {
-        Dip(match self {
-            Column::Name => 320,
-            Column::Path => 380,
-            Column::Size => 90,
-            Column::DateModified => 130,
-            Column::Extension | Column::Attributes => 80,
-        })
-    }
-
-    fn shown_by_default(self) -> bool {
-        !matches!(self, Column::Extension | Column::Attributes)
-    }
-
-    /// Name cannot be hidden, because the list would show rows that name
-    /// nothing (DESIGN.md: C15).
-    pub(crate) fn can_hide(self) -> bool {
-        self != Column::Name
-    }
-
-    /// Sizes are right-aligned, so their digits line up.
-    pub(crate) fn right_aligned(self) -> bool {
-        self == Column::Size
-    }
-
-    /// What a click on its header sorts by; Attributes sorts by nothing,
-    /// because gozler has no attribute sort.
-    pub(crate) fn sort_key(self) -> Option<SortKey> {
-        match self {
-            Column::Name => Some(SortKey::Name),
-            Column::Path => Some(SortKey::Path),
-            Column::Size => Some(SortKey::Size),
-            Column::DateModified => Some(SortKey::DateModified),
-            Column::Extension => Some(SortKey::Extension),
-            Column::Attributes => None,
-        }
-    }
-
+    pub(crate) menu_label: &'static str,
+    /// Its default width.
+    pub(crate) width: Dip,
+    pub(crate) shown_by_default: bool,
+    pub(crate) can_hide: bool,
+    pub(crate) right_aligned: bool,
+    /// What a click on its header sorts by.
+    pub(crate) sort_key: Option<SortKey>,
     /// Its column in an export; Name and Path are parts of the full path,
     /// which every export holds (DESIGN.md: Export).
-    fn export_column(self) -> Option<EsColumn> {
-        match self {
-            Column::Name | Column::Path => None,
-            Column::Size => Some(EsColumn::Size),
-            Column::DateModified => Some(EsColumn::DateModified),
-            Column::Extension => Some(EsColumn::Extension),
-            Column::Attributes => Some(EsColumn::Attributes),
-        }
-    }
+    pub(crate) export_column: Option<EsColumn>,
 }
 
 #[cfg(test)]

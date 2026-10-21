@@ -8,7 +8,7 @@ use crate::core::model::Column;
 
 /// The width of `column` on a monitor of `dpi` until a fill gives it one.
 pub(crate) fn column_width(column: Column, dpi: Dpi) -> Px {
-    column.default_width().to_px(dpi)
+    column.row().width.to_px(dpi)
 }
 
 /// The narrowest a fill makes a column, so its header still shows a few

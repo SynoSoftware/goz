@@ -1,38 +1,30 @@
 # Service settings
 
-This plan adds the two service settings that the window does not have
-yet, both on the Drives and service page:
+This plan adds the service setting that the window does not have yet, on
+the Drives and service page: Users and groups who see every file, a list,
+which the [visibility plan](visibility-plan.md) stores.
 
-- Users and groups who see every file, a list, which the
-  [visibility plan](visibility-plan.md) stores;
-- Dates created, a check box, which adds the Date created column and the
-  `dc:` search function.
-
-Rebuild index, the page's third, is built: `docs/DESIGN.md` describes it in
-"Include settings" and "The Drives and service page".
+Rebuild index and Dates created, the page's others, are built:
+`docs/DESIGN.md` describes them in "Include settings" and "The Drives and
+service page".
 
 **Stages.** The list is its own stage, the visibility plan's stage 3. It
-starts at once and lands right after that plan's stage 2, ahead of Dates
-created, because the public release that turns the
-visibility filter on for the other users of a shared PC also carries the
-page where an administrator changes who sees every file (visibility plan,
-"Schedule"). Dates created follows, scheduled after the
-Include page, which `docs/DESIGN.md` now describes ("Include settings" and
-"The Include page").
+starts at once and lands right after that plan's stage 2, because the public
+release that turns the visibility filter on for the other users of a shared
+PC also carries the page where an administrator changes who sees every file
+(visibility plan, "Schedule").
 
-These settings follow the Include page's rules: they are saved for the whole
-machine in `HKLM\SOFTWARE\Gozler`, only an administrator changes them, OK and
-Apply show the administrator shield, and the service applies a change without
-a restart. OK and Apply save every changed service setting through one
-elevated copy of the window, as `gozler-ui --save-include` saves Include
-today, which then writes each changed value; so a setting adds a value or,
-like Dates created, a field of the `Include` value, never a save path of its
-own.
+The list follows the Include page's rules: it is saved for the whole machine
+in `HKLM\SOFTWARE\Gozler`, only an administrator changes it, OK and Apply
+show the administrator shield, and the service applies a change without a
+restart. OK and Apply save every changed service setting through one
+elevated copy of the window, as `gozler-ui --save-include` saves Include and
+Dates created today, which then writes each changed value; so the list adds
+a value, never a save path of its own.
 
 The approved prototype of these screens, with their English words, is in git
 history: `git show b43f935:docs/plans/ui-prototype.html`, a page that opens in
-a browser. Its Settings dialog shows the Index page, now Drives and service,
-with Dates created and Rebuild index.
+a browser. Its Settings dialog shows the Index page, now Drives and service.
 
 ## The Drives and service page
 
@@ -48,28 +40,6 @@ with Dates created and Rebuild index.
   it for each search, so the page sends no request after saving it. The
   stage's After install list holds the screenshots of the list, empty and
   with entries, and of the Select Users or Groups dialog it opens.
-- **Dates created** is off by default, because it adds memory per entry to the
-  service. The page shows the service's memory, so the person sees the cost
-  after they turn it on. The service, `dc:`, `-dc` and `-sort dc` are built:
-  `docs/DESIGN.md` describes them in "Include settings".
-
-Dates created takes over Everything's Index date created, on its Indexes
-page, as Rebuild index took over Force Rebuild.
-
-## The Date created column
-
-The change that adds the Date created column also gives each column one row,
-as `CommandId::row` does for a command. Three of `Column`'s facts in
-`core/model.rs` (`shown_by_default`, `can_hide`, `right_aligned`) are
-`matches!` or `==`, so a new column silently gets "shown by default, can be
-hidden, left-aligned". Date created must choose its default on purpose,
-because it costs service memory and its index setting is off by default.
-`Column::row(self) -> ColumnRow` is one exhaustive match, and
-`ColumnRow { header, menu_label, width: Dip, shown_by_default: bool, can_hide:
-bool, right_aligned: bool, sort_key: Option<SortKey>, export_column:
-Option<EsColumn> }` replaces the per-column functions. `text::cell` stays
-apart, because it formats data. The names that `ui.json` saves do not change,
-so saved settings still load. No new test: the compiler forces each row.
 
 ## After install: the Include page
 

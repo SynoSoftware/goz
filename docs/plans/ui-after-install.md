@@ -42,6 +42,13 @@ owner has run it, and file an issue for each item that fails.
   then Live again, and `gozler --status` shows each rebuilt; saying no to the
   prompt changes nothing. Clicking it again while the drives index rebuilds
   them once more, not twice.
+- Settings > Drives and service > Dates created, then OK, shows the
+  administrator shield on OK. After Windows' permission prompt, each drive
+  reads Indexing, then Live; View > Columns > Date created then shows the
+  dates File Explorer shows, and `gozler dc:today -dc` finds the files
+  created today. Turned off again, the service's memory falls by about 8
+  bytes an entry, and `gozler dc:today` exits 4 with a message that names
+  Dates created.
 
 ## The selection and its actions
 

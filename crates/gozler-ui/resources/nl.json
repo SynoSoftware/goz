@@ -565,6 +565,8 @@
     "left_out": "Weggelaten",
     "holds": "Wat de index bevat",
     "holds_text": "Namen, grootten, mapgrootten, wijzigingsdatums en kenmerken. Ze worden altijd geïndexeerd, omdat de zoekfunctie, de filters en de kolom Grootte ze gebruiken.",
+    "dates_created": "&Aanmaakdatums",
+    "dates_created_note": "Voegt de kolom Gemaakt op toe. Gebruikt meer geheugen van de service.",
     "service": "Service",
     "asking": "De service controleren…",
     "running": "De service wordt uitgevoerd.",

@@ -665,11 +665,12 @@ pub(crate) const ATTRIBUTES: [(char, &str); 6] = [
 ];
 
 /// The sort keys in View > Sort by's order.
-pub(crate) const SORT_KEYS: [SortKey; 5] = [
+pub(crate) const SORT_KEYS: [SortKey; 6] = [
     SortKey::Name,
     SortKey::Path,
     SortKey::Size,
     SortKey::DateModified,
+    SortKey::DateCreated,
     SortKey::Extension,
 ];
 

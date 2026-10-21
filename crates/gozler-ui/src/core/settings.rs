@@ -251,7 +251,11 @@ impl SettingsValues {
                         .iter()
                         .map(|d| (d.volume.clone(), d.name.clone()))
                         .collect();
-                    *include = IndexSettings::default().with_drives(&drives);
+                    // Dates created is the Drives and service page's.
+                    *include = IndexSettings {
+                        dates_created: include.dates_created,
+                        ..IndexSettings::default().with_drives(&drives)
+                    };
                 }
             }
         }
