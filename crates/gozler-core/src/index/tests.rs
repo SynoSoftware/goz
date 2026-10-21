@@ -990,7 +990,7 @@ impl settle::VolumeReads for ModelReads<'_> {
     fn list_folder(
         &mut self,
         folder: Frn,
-        page: &mut dyn FnMut(&[LayoutFile]),
+        page: &mut dyn FnMut(Vec<LayoutFile>),
     ) -> Result<bool, Self::Error> {
         self.assert_unlocked();
         if let Some(changes) = &mut self.listing_changes {
@@ -1002,7 +1002,7 @@ impl settle::VolumeReads for ModelReads<'_> {
         if !model.exists(folder) {
             return Ok(false);
         }
-        page(&model.listing(self.ids, folder));
+        page(model.listing(self.ids, folder));
         Ok(true)
     }
 
@@ -1296,7 +1296,7 @@ proptest! {
         let walked = settle::walk_folders(&mut reads, &[ids.root()], || false, |files| {
             files.iter().for_each(|f| index.borrow_mut().insert_listed(f));
         });
-        prop_assert!(matches!(walked, Ok(true)));
+        prop_assert!(matches!(walked, Ok(settle::Walk::Complete)));
         reads.listing_changes = None;
 
         let mut delays = walk_delays.iter().cycle();

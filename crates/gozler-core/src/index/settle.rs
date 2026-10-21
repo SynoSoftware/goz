@@ -48,7 +48,7 @@ pub trait VolumeReads {
     fn list_folder(
         &mut self,
         folder: Frn,
-        page: &mut dyn FnMut(&[LayoutFile]),
+        page: &mut dyn FnMut(Vec<LayoutFile>),
     ) -> Result<bool, Self::Error>;
 
     /// The size and date of `frn`; `Ok(None)` when there is nothing to
@@ -120,9 +120,18 @@ pub struct WalkFailed<E> {
     pub error: E,
 }
 
+/// How a [`walk_folders`] that met no error ended.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub enum Walk {
+    /// Every folder was listed.
+    Complete,
+    /// `cancelled` stopped the walk before it listed every folder.
+    Cancelled,
+}
+
 /// Lists every folder in `tops` and every folder under them, and hands each
-/// page of listed names to `insert`. Returns `false` when `cancelled`, asked
-/// before each folder, stopped the walk.
+/// page of listed names to `insert`. `cancelled` is asked before each folder.
 ///
 /// A folder that is gone when the walk lists it is skipped: the journal's
 /// delete record removes it. Any other failure fails the walk. A folder
@@ -140,8 +149,8 @@ pub fn walk_folders<R: VolumeReads>(
     reads: &mut R,
     tops: &[Frn],
     mut cancelled: impl FnMut() -> bool,
-    mut insert: impl FnMut(&[LayoutFile]),
-) -> Result<bool, WalkFailed<R::Error>> {
+    mut insert: impl FnMut(Vec<LayoutFile>),
+) -> Result<Walk, WalkFailed<R::Error>> {
     let mut folders: VecDeque<Frn> = tops.iter().copied().collect();
     let mut listed: HashSet<Frn> = HashSet::new();
     while let Some(folder) = folders.pop_front() {
@@ -149,7 +158,7 @@ pub fn walk_folders<R: VolumeReads>(
             continue;
         }
         if cancelled() {
-            return Ok(false);
+            return Ok(Walk::Cancelled);
         }
         reads
             .list_folder(folder, &mut |files| {
@@ -166,7 +175,7 @@ pub fn walk_folders<R: VolumeReads>(
             })
             .map_err(|error| WalkFailed { folder, error })?;
     }
-    Ok(true)
+    Ok(Walk::Complete)
 }
 
 /// Applies `batch` to `index`, then reads from `reads` what its records leave
@@ -223,9 +232,10 @@ pub fn settle_batch<R: VolumeReads>(
 
     if !needs_walk.is_empty() {
         let mut listed = Vec::new();
-        if !walk_folders(reads, &needs_walk, &mut cancelled, |files| {
-            listed.extend_from_slice(files);
-        })? {
+        let walk = walk_folders(reads, &needs_walk, &mut cancelled, |files| {
+            listed.extend(files);
+        })?;
+        if walk == Walk::Cancelled {
             return Ok(settled);
         }
         index.write(|i| {
@@ -318,7 +328,10 @@ pub fn settle_batch<R: VolumeReads>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Batch, FileLink, FileStat, VolumeReads, WalkFailed, settle_batch};
+    use super::{
+        Batch, FILE_ATTRIBUTE_REPARSE_POINT, FileLink, FileStat, VolumeReads, Walk, WalkFailed,
+        settle_batch, walk_folders,
+    };
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::layout::{LayoutFile, LayoutName};
     use crate::types::Frn;
@@ -401,12 +414,12 @@ mod tests {
         fn list_folder(
             &mut self,
             folder: Frn,
-            page: &mut dyn FnMut(&[LayoutFile]),
+            page: &mut dyn FnMut(Vec<LayoutFile>),
         ) -> Result<bool, Self::Error> {
             match self.listings.get(&folder) {
                 None => Ok(false),
                 Some(Ok(files)) => {
-                    page(files);
+                    page(files.clone());
                     Ok(true)
                 }
                 Some(Err(e)) => Err(*e),
@@ -440,6 +453,33 @@ mod tests {
 
     fn set(paths: &[&str]) -> BTreeSet<String> {
         paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// A junction can point outside the volume or at a folder above it, so
+    /// entering it would index another volume's files or never end.
+    #[test]
+    fn a_walk_lists_a_junction_but_does_not_enter_it() {
+        let (junction, inside) = (id(100), id(101));
+        let mut reads = Fake::default();
+        let mut entry = listed(junction, ROOT, "link", true);
+        entry.attributes |= FILE_ATTRIBUTE_REPARSE_POINT;
+        reads.listings.insert(ROOT, Ok(vec![entry]));
+        reads
+            .listings
+            .insert(junction, Ok(vec![listed(inside, junction, "a.txt", false)]));
+
+        let mut names = Vec::new();
+        let walk = walk_folders(
+            &mut reads,
+            &[ROOT],
+            || false,
+            |files| {
+                names.extend(files.into_iter().map(|f| f.frn));
+            },
+        );
+
+        assert_eq!(walk.expect("lists"), Walk::Complete);
+        assert_eq!(names, [junction]);
     }
 
     /// On ReFS a walk lists `a` and then, before it lists `c`, the file's name

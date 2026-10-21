@@ -293,12 +293,12 @@ pub(crate) fn build_index(
             &[root],
             cancelled,
             |files| {
-                for f in files {
+                for f in &files {
                     index.insert_listed(f);
                 }
             },
         )?;
-        if !walked {
+        if walked == settle::Walk::Cancelled {
             return Ok(None);
         }
         finish_index(&mut index, rules);
@@ -377,7 +377,7 @@ impl<'a> Disk<'a> {
         }
     }
 
-    fn list(&mut self, folder: Frn, page: &mut dyn FnMut(&[LayoutFile])) -> Result<bool> {
+    fn list(&mut self, folder: Frn, page: &mut dyn FnMut(Vec<LayoutFile>)) -> Result<bool> {
         let Some(listing) =
             open_folder(self.handle, folder.0).map_err(|e| anyhow!("opening it: {e}"))?
         else {
@@ -389,7 +389,7 @@ impl<'a> Disk<'a> {
         {
             let files = walk_listing_buffer(folder, bytes)
                 .map_err(|e| anyhow!("parsing its listing: {e}"))?;
-            page(&files);
+            page(files);
         }
         Ok(true)
     }
@@ -398,7 +398,7 @@ impl<'a> Disk<'a> {
 impl VolumeReads for Disk<'_> {
     type Error = anyhow::Error;
 
-    fn list_folder(&mut self, folder: Frn, page: &mut dyn FnMut(&[LayoutFile])) -> Result<bool> {
+    fn list_folder(&mut self, folder: Frn, page: &mut dyn FnMut(Vec<LayoutFile>)) -> Result<bool> {
         let listed = self.list(folder, page);
         if let Err(e) = &listed {
             tracing::debug!(volume = %self.volume, ?folder, error = %e, "folder listing failed");
