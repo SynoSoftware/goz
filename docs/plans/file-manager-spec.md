@@ -161,8 +161,9 @@ show them.
   | Size | a file's size, in the unit of Settings > General's "Show sizes in", as Search's (DESIGN.md: Results list); a folder's size from gozlerd, or "Folder" while gozlerd does not know it |
   | Date modified | as in Search |
 
-  - The first row is `..` in every folder except a drive's root. It has no
-    size and no date, and no command acts on it.
+  - The first row is `..` in every folder except a drive's root. Its icon
+    is an arrow up, as Total Commander's. It has no size and no date, and
+    no command acts on it.
   - Folders come first, then files. Each group is sorted by the chosen
     column. Names compare by their folded form, as Search's name sort does,
     so the two modes order names the same.
@@ -198,8 +199,9 @@ show them.
   highlight colors, as Total Commander shows its active path, except while
   the path box has the focus: then it is a plain edit box, so selected text
   and the caret show. The other
-  panel shows its focused row with the gray bar that Windows gives a list
-  without the focus. Commands act on the active panel. The other panel's
+  panel shows its selected entries in the gray that Windows gives a list
+  without the focus, and no focused row (owner, 2026-10-21). Commands act
+  on the active panel. The other panel's
   folder is the destination of `F5` and `F6`. `Tab` makes the other panel
   active, and so does a click anywhere in it.
 - **Reading a folder** runs on the panel's own thread, so a slow network
@@ -295,14 +297,13 @@ changing the selection.
   `Home` and `End` are keys of the panel's list (DESIGN.md: window rule 8),
   which move `LVIS_FOCUSED` without changing the selection, as Norton
   Commander's cursor moves without changing its marks.
-- **The window draws the rows** in `NM_CUSTOMDRAW` (owner, 2026-10-20,
-  the prototype's look A), with system colors so that high contrast works:
-  - the focused row of the active panel is a bar in `COLOR_HIGHLIGHT` with
-    `COLOR_HIGHLIGHTTEXT`; the other panel's focused row is a gray bar;
-  - a selected row's text is `COLOR_HIGHLIGHT` and semibold, as Total
-    Commander draws selected files in red;
-  - a selected row under the bar keeps the bar's text color and is bold, so
-    it still shows as selected.
+- **The list view draws the rows** in File Explorer's look, the
+  prototype's look B (owner, 2026-10-21: no custom drawing for little
+  gain). Selected rows are filled, and the focused row has an outline while
+  its list has the focus, so a focused selected row is an outline on the
+  fill. The list's own drawing follows the theme and high contrast. Before
+  the list draws a row, the window sets only its font and color: hidden
+  and system entries in gray, and a taken result struck through, in gray.
 - **Commands act on the selected entries,** or on the focused row when
   nothing is selected, as in Norton Commander. No command acts on `..`, and
   `..` cannot be selected.
@@ -438,9 +439,9 @@ Commander's Find File searches from the current folder.
 - **The list** shows Name, Ext, Folder, Size and Date modified. With "This
   folder and subfolders", Folder is the path below the searched folder,
   such as `Projects\Accounts`, or empty for the folder itself; with All
-  drives, it is the full path. A path that does not fit loses its middle,
-  as File Explorer shortens a path, because the part that tells two results
-  apart is its end. Its rows
+  drives, it is the full path. A path that does not fit ends in "…", and
+  a tooltip shows it whole, as any cut-off cell's (owner, 2026-10-21: no
+  custom drawing for little gain). Its rows
   come on demand, up to 100,000, as in Search (DESIGN.md: Rows on demand).
   It does not follow the disk; `Ctrl+R` runs the search again. A search
   that finds nothing says "No items match your search.", and with "This
@@ -1101,7 +1102,8 @@ These terms go into `CONTEXT.md` in stage 3, and "Pane" there stops listing
 - **Active panel**: the panel with the focus; commands act on it.
 - **Other panel**: the panel that is not active; its folder is the
   destination of Copy to folder… and Move to folder….
-- **Focused row**: the row with the bar, which the arrow keys move.
+- **Focused row**: the row with the focus outline, which the arrow keys
+  move.
 - **Selected entries**: the entries the person selected with `Insert`,
   `Space`, `Shift` or `Ctrl`; commands act on them, or on the
   focused row when there are none.

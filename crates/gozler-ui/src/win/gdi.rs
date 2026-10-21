@@ -325,15 +325,9 @@ pub(super) fn system_color(index: SYS_COLOR_INDEX) -> COLORREF {
 /// place. It copies the kept image, which is smoothed as every icon is (see
 /// [`glyph_coverage`]), so `dc` keeps its state.
 pub(super) fn draw_glyph(dc: HDC, glyph: Glyph, area: RECT, size: Px, color: COLORREF) {
-    if icons_shown() {
-        draw_icon_mark(dc, glyph, area, size, color);
+    if !icons_shown() {
+        return;
     }
-}
-
-/// Draws `glyph` as [`draw_glyph`] does, also while icons are hidden,
-/// because it marks a file's icon, which shows either way, such as the
-/// arrow on the folder icon of a panel's `..`.
-pub(super) fn draw_icon_mark(dc: HDC, glyph: Glyph, area: RECT, size: Px, color: COLORREF) {
     let Some(bitmap) = IconFont::with(|icons| icons.bitmap(glyph, size, color)) else {
         return;
     };
@@ -659,6 +653,22 @@ impl ImageList {
         (!icon.is_invalid()).then_some(Icon(icon))
     }
 
+    /// Adds `glyph` as an icon of the list's size in the window text
+    /// colour, and returns its index; `None` when the icon font lacks it or
+    /// GDI fails. The process's system image list keeps it, after the
+    /// shell's own icons, so it has no index in the other size's list.
+    pub(crate) fn add_glyph(self, glyph: Glyph) -> Option<i32> {
+        let (mut width, mut height) = (0, 0);
+        // SAFETY: the system image list lives as long as the process.
+        unsafe {
+            let _ = ImageList_GetIconSize(self.0, Some(&mut width), Some(&mut height));
+        }
+        let icon = glyph_icon(glyph, Px(width), system_color(COLOR_WINDOWTEXT))?;
+        // SAFETY: the list copies `icon`, which stays the thread's.
+        let index = unsafe { ImageList_ReplaceIcon(self.0, -1, icon) };
+        (index >= 0).then_some(index)
+    }
+
     /// Draws the icon `index` in the middle of `area`.
     pub(super) fn draw(self, dc: HDC, index: i32, area: RECT) {
         let (mut width, mut height) = (0, 0);
@@ -937,28 +947,13 @@ pub(super) fn disabled_color(ground: SYS_COLOR_INDEX) -> COLORREF {
     if high_contrast() {
         return system_color(COLOR_GRAYTEXT);
     }
-    // 92 of 255, WinUI's disabled text opacity.
-    text_over(ground, 92)
-}
-
-/// The fill of a panel's focused row while the panel is not active: the
-/// text colour at 15 % over the window colour, which stays visible on it,
-/// as the light gray of the approved design does on white. `None` in high
-/// contrast, whose scheme has no colour between the two, so the row then
-/// shows a frame instead.
-pub(super) fn inactive_bar_color() -> Option<COLORREF> {
-    (!high_contrast()).then(|| text_over(COLOR_WINDOW, 38))
-}
-
-/// The window text colour at `alpha` of 255 over the system colour
-/// `ground`.
-fn text_over(ground: SYS_COLOR_INDEX, alpha: u32) -> COLORREF {
     let text = system_color(COLOR_WINDOWTEXT).0;
     let ground = system_color(ground).0;
+    // 92 of 255, WinUI's disabled text opacity.
     let channel = |shift: u32| {
         let text = (text >> shift) & 0xFF;
         let ground = (ground >> shift) & 0xFF;
-        ((text * alpha + ground * (255 - alpha) + 127) / 255) << shift
+        ((text * 92 + ground * (255 - 92) + 127) / 255) << shift
     };
     COLORREF(channel(0) | channel(8) | channel(16))
 }

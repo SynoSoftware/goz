@@ -18,17 +18,15 @@ use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
 use crate::core::model::{Accepted, Column};
 use crate::core::open;
 use crate::core::panel::{
-    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, Place, ReadAsk, ReadChange,
-    ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
+    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, Panels, Place, ReadAsk,
+    ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
 };
 use crate::core::settings::Mode;
 use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListView};
 use crate::win::dialog::DialogEnd;
 use crate::win::folder::{self, PanelEvent, Removal};
 use crate::win::gdi::{StaticColors, TextMeter};
-use crate::win::notify::{
-    CellFit, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify, PanelRow, RowBar, RowFonts,
-};
+use crate::win::notify::{CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify};
 use crate::win::{self, Hwnd, shell};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::parent_of;
@@ -36,15 +34,6 @@ use gozler_fileops::{Destination, Request};
 use std::cell::Cell;
 use std::path::PathBuf;
 use windows::Win32::Foundation::LRESULT;
-
-/// How a column's cells fit their text.
-fn fit_of(column: PanelColumn) -> CellFit {
-    match column {
-        PanelColumn::Size => CellFit::Right,
-        PanelColumn::Folder => CellFit::Path,
-        PanelColumn::Name | PanelColumn::Ext | PanelColumn::DateModified => CellFit::End,
-    }
-}
 
 /// Where a search panel's list puts its Folder column.
 const FOLDER_COLUMN: usize = 2;
@@ -584,17 +573,11 @@ impl MainWindow {
         let widths: Vec<Px> = {
             let fonts = created.fonts.borrow();
             let plain = TextMeter::new(&fonts.ui);
-            let selected = [TextMeter::new(&fonts.semibold), TextMeter::new(&fonts.bold)];
             samples
                 .iter()
                 .zip(&headers)
                 .map(|(column, header)| {
-                    // Segoe UI's semibold digits are wider than its bold
-                    // ones, so a selected row takes the wider.
-                    let text = column
-                        .iter()
-                        .flat_map(|sample| selected.iter().map(|meter| meter.width(sample)))
-                        .max();
+                    let text = column.iter().map(|sample| plain.width(sample)).max();
                     let cell = layout::cell_width(text.unwrap_or_default(), Px(0), false, dpi);
                     ColumnFit::new(plain.plain_width(header), Some(cell), dpi).width
                 })
@@ -1015,7 +998,7 @@ impl MainWindow {
     }
 
     /// Makes `side` the active panel, and with `focus` gives its list the
-    /// focus. The path boxes and the focused rows show which is active.
+    /// focus. The path boxes show which is active.
     pub(super) fn activate_panel(&self, side: Side, focus: bool) {
         let changed = self.model.borrow_mut().panels_mut().activate(side);
         // A click in the other panel closes this one's quick search box.
@@ -1025,11 +1008,7 @@ impl MainWindow {
         }
         if changed {
             for side in Side::BOTH {
-                let c = self.panel(side);
-                c.path.hwnd().invalidate();
-                if let Some(row) = c.list.focused() {
-                    c.list.redraw_rows(row..row + 1);
-                }
+                self.panel(side).path.hwnd().invalidate();
             }
             self.update_status();
         }
@@ -1372,15 +1351,14 @@ impl MainWindow {
                 }
                 Some(LRESULT(0))
             }
-            ListNotify::CustomDraw(draw) => Some(CustomDraw::answer(match draw.stage() {
+            ListNotify::CustomDraw(mut draw) => Some(CustomDraw::answer(match draw.stage() {
                 DrawStage::Paint => DrawAnswer::EachRow,
-                DrawStage::Row { row } if self.draw_panel_row(side, &draw, row) => {
-                    DrawAnswer::Drawn
+                DrawStage::Row { row } => self.draw_panel_row(side, &mut draw, row),
+                DrawStage::RowPainted => {
+                    draw.restore_font(&self.created().fonts.borrow().ui);
+                    DrawAnswer::Default
                 }
-                DrawStage::Row { .. }
-                | DrawStage::Cell { .. }
-                | DrawStage::RowPainted
-                | DrawStage::Other => DrawAnswer::Default,
+                DrawStage::Cell { .. } | DrawStage::Other => DrawAnswer::Default,
             })),
             // Read later, because the list tells them while the window may
             // hold the model.
@@ -1455,12 +1433,14 @@ impl MainWindow {
             list.select(0, false);
             self.panel_changed[side.index()].set(ListChanged::Nothing);
         }
-        // Ctrl+A or a drag also selects a search panel's blank taken rows.
+        // Each read sends a message per selected row, so it runs again only
+        // when Ctrl+A or a drag also selected a search panel's taken rows.
+        let mut selected = list.selected();
         let searching = self.model.borrow().panels().search(side).is_some();
-        if searching && self.deselect_taken(List::Panel(side)) {
+        if searching && self.deselect_taken(List::Panel(side), &selected) {
             self.panel_changed[side.index()].set(ListChanged::Nothing);
+            selected = list.selected();
         }
-        let selected = list.selected();
         let search = {
             let mut model = self.model.borrow_mut();
             let panels = model.panels_mut();
@@ -1721,8 +1701,8 @@ impl MainWindow {
         list.set_selected(&[]);
     }
 
-    /// The cell's text and the row's icon of `side`'s list, which screen
-    /// readers and the list's label tips read; the window draws the rows.
+    /// The cell's text and the row's icon of `side`'s list, which the list
+    /// draws.
     fn fill_panel_cell(&self, side: Side, info: &mut DispInfo) {
         let (text, icon) = {
             let model = self.model.borrow();
@@ -1730,7 +1710,10 @@ impl MainWindow {
             let panels = model.panels();
             let sizes = model.choices().size_format;
             let columns = self.panel(side).columns();
-            match (panels.row(side, info.row()), columns.get(info.column())) {
+            match (
+                shown_or_taken(panels, side, info.row()),
+                columns.get(info.column()),
+            ) {
                 (Some(row), Some(column)) => (
                     info.wants_text().then(|| {
                         let panel = panels.panel(side);
@@ -1745,61 +1728,36 @@ impl MainWindow {
             info.set_text(text.as_deref().unwrap_or_default());
         }
         if info.wants_image() {
-            info.set_image(icon.map(|(name, is_folder)| self.icons.index(&name, is_folder)));
+            info.set_image(icon.map(|icon| match icon {
+                RowIcon::Up => self.icons.up(),
+                RowIcon::Item(name, is_folder) => self.icons.index(&name, is_folder),
+            }));
         }
     }
 
-    /// Draws `row` of `draw` in `side`'s list; `false` when the panel no
-    /// longer has it, so the list draws it.
-    fn draw_panel_row(&self, side: Side, draw: &CustomDraw, row: u64) -> bool {
-        let (focused, selected) = self.panel(side).list.row_state(row);
-        let (cells, icon, dimmed, up, active) = {
+    /// Has the list draw `row` of `side` in grey when it is a hidden or
+    /// system entry, or struck through in grey when a delete or a move took
+    /// it (file-manager-spec.md: Selecting entries); the list draws every
+    /// other row as it is.
+    fn draw_panel_row(&self, side: Side, draw: &mut CustomDraw, row: u64) -> DrawAnswer {
+        let (taken, dimmed) = {
             let model = self.model.borrow();
-            let numbers = self.numbers.borrow();
-            let panels = model.panels();
-            let sizes = model.choices().size_format;
-            let Some(shown) = panels.row(side, row) else {
-                return false;
-            };
-            let panel = panels.panel(side);
-            let cells: Vec<String> = (self.panel(side).columns().iter())
-                .map(|c| captions::panel_cell(model.strings(), &*numbers, sizes, panel, shown, *c))
-                .collect();
-            let dimmed = matches!(shown, Row::Entry(entry) if entry.is_dimmed());
-            let up = matches!(shown, Row::Up);
-            (cells, icon_of(shown), dimmed, up, panels.active() == side)
+            let taken = model.taken_rows(List::Panel(side), &[row..row + 1]);
+            let shown = model.panels().row(side, row);
+            (
+                !taken.is_empty(),
+                matches!(shown, Some(Row::Entry(entry)) if entry.is_dimmed()),
+            )
         };
-        let icon = self.icons.index(&icon.0, icon.1);
-        let bar = match (focused, active) {
-            (false, _) => RowBar::None,
-            (true, true) => RowBar::Active,
-            (true, false) => RowBar::Inactive,
-        };
-        let created = self.created();
-        let fonts = created.fonts.borrow();
-        let fits: Vec<CellFit> = self
-            .panel(side)
-            .columns()
-            .iter()
-            .map(|c| fit_of(*c))
-            .collect();
-        draw.draw_panel_row(
-            &PanelRow {
-                cells: &cells,
-                fits: &fits,
-                icon: created.images.map(|images| (images, icon)),
-                up,
-                bar,
-                selected,
-                dimmed,
-            },
-            &RowFonts {
-                plain: &fonts.ui,
-                selected: &fonts.semibold,
-                selected_on_bar: &fonts.bold,
-            },
-        );
-        true
+        if taken {
+            draw.draw_row_struck(&self.created().fonts.borrow().struck);
+            DrawAnswer::NewFont
+        } else if dimmed {
+            draw.draw_row_grey();
+            DrawAnswer::NewColour
+        } else {
+            DrawAnswer::Default
+        }
     }
 
     /// The colors of a path box: the system highlight for the active
@@ -1894,12 +1852,28 @@ fn drive_id(letter: char) -> u16 {
     DRIVE_IDS + (u32::from(letter) - u32::from('A')) as u16
 }
 
-/// The name and the kind that a row's icon is looked up by: `..` shows a
-/// folder's, which the row draws an arrow over.
-fn icon_of(row: Row) -> (String, bool) {
+/// What a row's icon is looked up by.
+enum RowIcon {
+    /// `..`'s arrow ([`Icons::up`](super::super::icons::Icons::up)).
+    Up,
+    /// An entry's or a result's name and whether it is a folder.
+    Item(String, bool),
+}
+
+fn icon_of(row: Row) -> RowIcon {
     match row {
-        Row::Up => (String::new(), true),
-        Row::Entry(entry) => (entry.display_name(), entry.is_folder()),
-        Row::Result(item) => (panel::last_name(&item.path).to_owned(), item.is_dir),
+        Row::Up => RowIcon::Up,
+        Row::Entry(entry) => RowIcon::Item(entry.display_name(), entry.is_folder()),
+        Row::Result(item) => RowIcon::Item(panel::last_name(&item.path).to_owned(), item.is_dir),
+    }
+}
+
+/// `side`'s row at `index` with its text, also when a delete or a move took
+/// a search panel's result, which then shows struck through, as Search's
+/// list shows it (file-manager-spec.md: Search in a panel).
+fn shown_or_taken(panels: &Panels, side: Side, index: u64) -> Option<Row<'_>> {
+    match panels.search(side) {
+        Some(search) => search.list.results().row(index).map(Row::Result),
+        None => panels.row(side, index),
     }
 }

@@ -3943,18 +3943,19 @@ impl MainWindow {
     /// files or is read, so the list may still draw a taken row it selects
     /// highlighted, and deselects each one.
     fn show_list_taken(&self, list: List, deselect: bool) {
-        if deselect {
-            self.deselect_taken(list);
-        }
         let control = self.list_control(list);
+        if deselect {
+            self.deselect_taken(list, &control.selected());
+        }
         control.redraw_rows(control.visible_rows());
     }
 
-    /// Deselects `list`'s selected rows whose entries are taken, which show
-    /// blank and which the selection leaves out. Returns whether any was.
-    fn deselect_taken(&self, list: List) -> bool {
+    /// Deselects the rows of `selected`, `list`'s selected rows, whose
+    /// entries are taken, which the selection leaves out. Returns whether
+    /// any was; none while no operation takes entries.
+    fn deselect_taken(&self, list: List, selected: &[Range<u64>]) -> bool {
         let control = self.list_control(list);
-        let rows = self.model.borrow().taken_rows(list, &control.selected());
+        let rows = self.model.borrow().taken_rows(list, selected);
         // Each deselect notifies the window, so nothing is borrowed here.
         for &row in &rows {
             control.deselect(row);
@@ -5187,6 +5188,12 @@ impl WindowProc for MainWindow {
             Message::SettingChange { .. } => None,
             Message::SysColorChange => {
                 self.apply_glyphs(hwnd.dpi());
+                // The panels' `..` takes the new text colour.
+                self.icons.forget_up();
+                for side in Side::BOTH {
+                    let list = self.panel(side).list;
+                    list.redraw_rows(list.visible_rows());
+                }
                 None
             }
             Message::EndSession { ending: true } => {
