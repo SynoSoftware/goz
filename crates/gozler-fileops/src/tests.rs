@@ -433,6 +433,24 @@ fn an_ended_delete_is_taken_only_where_kept() {
     assert!(watched.queue.taken().is_empty());
 }
 
+/// A delete takes its source from the lists while it prepares and asks,
+/// because prepare opens every source, one open per entry on a share, and a
+/// deleted row must go at once; cancelled before its submit, it changed
+/// nothing and takes nothing (#111).
+#[test]
+fn a_delete_takes_its_source_before_its_submit() {
+    let scratch = Scratch::new("taken-early");
+    let file = scratch.file("gone.txt");
+    let watched = Watched::new(&scratch.saved());
+
+    let (id, _) = watched.prepared(Request::Delete {
+        sources: vec![file.clone()],
+    });
+    assert!(watched.queue.taken().contains(&units(&file), |_| false));
+    watched.queue.cancel(id);
+    assert!(watched.queue.taken().is_empty());
+}
+
 /// A folder panel compares its entries' paths only where a taken path is
 /// directly in its folder, so a drive's root, whose path ends in a
 /// backslash, must find the taken entries in it.

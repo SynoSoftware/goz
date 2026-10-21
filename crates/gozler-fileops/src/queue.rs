@@ -93,7 +93,8 @@ struct Tracked {
     /// Continue's prepare: it submits with the interrupted run's choice and
     /// start as soon as it is prepared.
     continuing: Option<Rule>,
-    /// It was submitted, so its sources are taken while it lives.
+    /// It was submitted, so its sources are taken while it lives, and not
+    /// only while it prepares.
     submitted: bool,
     /// Prepare's total, from submit on.
     total: Option<Total>,
@@ -532,6 +533,15 @@ impl Shared {
         };
         let thread = Arc::clone(shared);
         shared.spawn(move || {
+            // Its sources are taken while prepare opens each of them, one
+            // open per entry on a share, so a deleted row goes at once. The
+            // rebuild runs here, not on the window's thread.
+            if matches!(*request, Request::Delete { .. } | Request::Move { .. }) {
+                let mut operations = thread.lock();
+                operations.taken = taken(&operations);
+                drop(operations);
+                (thread.wake)();
+            }
             let entered = io.enter();
             let first = Rule {
                 choice: None,
@@ -552,6 +562,7 @@ impl Shared {
                     Err(refusal) => {
                         let outcome = Outcome::ended(End::Refused(refusal));
                         operation.phase = Phase::Ended(Arc::new(outcome));
+                        operations.taken = taken(&operations);
                         drop(operations);
                         // A refused Continue ends, as any operation does.
                         thread.unsave(id);
@@ -808,11 +819,15 @@ fn current(file: &CurrentFile) -> Current {
     }
 }
 
-/// The sources of every submitted delete or move that has not been
-/// removed.
+/// The sources of every delete or move that prepares, asks its question, or
+/// was submitted and has not been removed. One that ended before it was
+/// submitted, refused or cancelled, changed nothing and takes nothing.
 fn taken(operations: &Operations) -> Arc<Taken> {
     let mut taken = Taken::default();
-    for (&id, operation) in (operations.by_id.iter()).filter(|(_, operation)| operation.submitted) {
+    let takes = |operation: &Tracked| {
+        operation.submitted || matches!(operation.phase, Phase::Preparing | Phase::Prepared(_))
+    };
+    for (&id, operation) in (operations.by_id.iter()).filter(|(_, operation)| takes(operation)) {
         if let Request::Delete { sources } | Request::Move { sources, .. } = &*operation.request {
             let ended = matches!(operation.phase, Phase::Ended(_));
             for source in sources {
