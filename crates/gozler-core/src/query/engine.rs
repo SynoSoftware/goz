@@ -2982,6 +2982,38 @@ mod tests {
         }
     }
 
+    /// A folder inside another matching folder adds to the count but not to
+    /// the folders' bytes, because its size is already in its parent's; the
+    /// status bar would otherwise show `docs` and `docs\sub` as 8,392
+    /// bytes. A file with no size is counted apart, and after a size pass
+    /// that stopped the folders' bytes are only a lower bound.
+    #[test]
+    fn a_nested_folder_adds_its_count_but_not_its_size() {
+        let mut idx = sample_index();
+        idx.insert_enum(&enum_rec(frn(105), frn(101), "unread.bin", false));
+        idx.compute_folder_sizes();
+        let parsed = compiled("");
+        let sums = |idx: &VolumeIndex| {
+            find_matches(idx, "", &parsed, None, SortSpec::default(), None, true)
+                .origin
+                .sums
+                .expect("the search asked for sums")
+        };
+        assert_eq!(
+            sums(&idx),
+            MatchSums {
+                files: 4,
+                file_bytes: 4096 + 200 + 2 * 1024 * 1024,
+                files_without_size: 1,
+                folders: 2,
+                folder_bytes: 4096 + 200,
+                folder_bytes_at_least: false,
+            }
+        );
+        idx.record_size_pass_stopped();
+        assert!(sums(&idx).folder_bytes_at_least);
+    }
+
     /// Matches whose index got new entry indexes between the two locks, as
     /// `optimize_storage` gives them once a removed entry left a slot, make
     /// no rows, because their records would name other entries. An

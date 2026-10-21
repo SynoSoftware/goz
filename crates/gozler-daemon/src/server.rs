@@ -788,6 +788,55 @@ mod tests {
         }
     }
 
+    /// The sums a window asks for reach it through the pipe, over every
+    /// match and not only the page's rows, and a folder inside a matching
+    /// folder adds nothing to the folders' bytes.
+    #[test]
+    fn a_search_that_wants_sums_gets_them_over_the_pipe() {
+        use gozler_core::layout::{LayoutFile, LayoutName};
+        use gozler_core::query::MatchSums;
+        let mut index = windows_index();
+        index.enrich(&LayoutFile {
+            frn: Frn(102),
+            attributes: 0x20,
+            size: Some(5),
+            mtime_ft: Some(5),
+            names: vec![LayoutName {
+                parent_frn: Frn(101),
+                name: b"kernel32.dll".to_vec(),
+                dos_only: false,
+            }],
+        });
+        index.compute_folder_sizes();
+        let vols = set(&[volume(r"C:", index, VolumePhase::Live)]);
+        let mut request = search(TextQuery {
+            limit: Some(1),
+            ..query("")
+        });
+        let Request::Search(SearchRequest {
+            returns: Returns::Rows(rows),
+            ..
+        }) = &mut request
+        else {
+            unreachable!("search asks for rows")
+        };
+        rows.want_sums = true;
+        let pages = results(&reply_bytes(&vols, &request));
+        let last = pages.last().expect("one page at least");
+        assert_eq!(last.items.len(), 1, "the limit cuts the rows");
+        assert_eq!(
+            last.sums,
+            Some(MatchSums {
+                files: 1,
+                file_bytes: 5,
+                files_without_size: 0,
+                folders: 2,
+                folder_bytes: 5,
+                folder_bytes_at_least: false,
+            })
+        );
+    }
+
     /// A scope on no indexed volume answers `BadQuery`, which gozler exits by
     /// as invalid input, for rows and totals alike, because an empty answer
     /// would read as "no such file".
