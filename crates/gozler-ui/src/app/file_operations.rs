@@ -281,7 +281,7 @@ impl FileOperations {
                 if let Some(FilesSource::Paste(files)) = source
                     && moved
                 {
-                    files.moved(self.owner);
+                    files.moved();
                 }
             }
             SourceStep::Ended { id, succeeded } => {

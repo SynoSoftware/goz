@@ -624,7 +624,12 @@ file: to a temporary file, then renamed over the old one, as `ui.json` is
 written. The start time comes from `GetSystemTimeAsFileTime`, which never
 runs ahead of the clock that stamps files, and Continue keeps the first
 run's. It removes the operation when it ends, cancelled included.
-A waiting operation is not saved, because it has changed no file. When the
+A waiting operation is not saved, because it has changed no file. The
+operation's own thread, and for a removal the window asked for, a thread
+of the queue, writes the file, because the file lists every source of
+every saved operation and the window's calls wait for no disk write. Exit
+writes it for a run whose thread has not yet, so every operation that runs
+is in the file when the window ends. When the
 queue is created, each saved operation becomes an interrupted one.
 
 - **Continue** prepares and submits it again with two more rules, which its

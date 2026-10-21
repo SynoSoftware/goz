@@ -49,6 +49,16 @@ const INDEX_REFRESH_MS: u32 = 2_000;
 const PREVIEW_TIMER: usize = 2;
 const PREVIEW_DELAY_MS: u32 = 300;
 
+/// What the dialog does once the Include settings are saved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterSave {
+    /// Apply was pressed: the dialog stays open.
+    Stay,
+    /// OK was pressed: the dialog applies anything changed since, and
+    /// closes.
+    Close,
+}
+
 /// The page's heading, which shows its name in semibold.
 fn heading(page: SettingsPage) -> ControlId {
     match page {
@@ -239,9 +249,16 @@ pub(super) struct SettingsDialog<'a> {
     window: Hwnd,
     strings: Strings,
     draft: RefCell<SettingsDraft>,
-    /// The pages in [`SettingsPage::ALL`]'s order, once the dialog made
-    /// them.
-    pages: RefCell<Vec<Hwnd>>,
+    /// The pages in [`SettingsPage::ALL`]'s order, each once it first
+    /// showed. A page is made then, not when the dialog opens, so the
+    /// dialog shows without waiting for every page's controls; the draft
+    /// holds the values of a page not made yet.
+    pages: [Cell<Option<Hwnd>>; SettingsPage::ALL.len()],
+    /// The pages' heading fonts, which live until the dialog ends, because
+    /// `WM_SETFONT` does not take ownership.
+    fonts: RefCell<Vec<Font>>,
+    /// The one width of the push buttons, which a page made later gets.
+    button_width: Cell<Option<Px>>,
     /// The pages the page list shows, which the search box keeps; the
     /// shown page is one of them, or none when the list is empty.
     listed: RefCell<Vec<SettingsPage>>,
@@ -267,6 +284,10 @@ pub(super) struct SettingsDialog<'a> {
     /// Whether the person confirmed Reset all, which the main window carries
     /// out once the dialog has closed.
     resets: Cell<bool>,
+    /// The Include settings being saved, while Windows asks for permission
+    /// and the copy that saves runs; OK, Cancel, Apply and Reset all wait
+    /// for the answer.
+    saving: RefCell<Option<(IncludeSettings, AfterSave)>>,
     /// The Drives and service page's tooltip, whose fix buttons' tips
     /// follow their fix.
     index_tips: OnceCell<Tooltip>,
@@ -292,7 +313,9 @@ impl<'a> SettingsDialog<'a> {
             window,
             strings,
             draft: RefCell::new(SettingsDraft::new(values)),
-            pages: RefCell::new(Vec::new()),
+            pages: Default::default(),
+            fonts: RefCell::new(Vec::new()),
+            button_width: Cell::new(None),
             listed: RefCell::new(SettingsPage::ALL.to_vec()),
             shown: Cell::new(None),
             commands: RefCell::new(Vec::new()),
@@ -303,6 +326,7 @@ impl<'a> SettingsDialog<'a> {
             balloon: OnceCell::new(),
             capture: Cell::new(None),
             resets: Cell::new(false),
+            saving: RefCell::new(None),
             index_tips: OnceCell::new(),
             highlight: OnceCell::new(),
             status: OnceCell::new(),
@@ -369,7 +393,7 @@ impl<'a> SettingsDialog<'a> {
 
     fn page(&self, page: SettingsPage) -> Option<Hwnd> {
         let index = SettingsPage::ALL.iter().position(|p| *p == page)?;
-        self.pages.borrow().get(index).copied()
+        self.pages[index].get()
     }
 
     fn control(&self, page: SettingsPage, control: ControlId) -> Option<Hwnd> {
@@ -422,8 +446,12 @@ impl<'a> SettingsDialog<'a> {
         self.filling.set(was);
     }
 
-    /// Sets every control of `page` from the edited values.
+    /// Sets every control of `page` from the edited values; a page not made
+    /// yet is set when it is made.
     fn fill(&self, page: SettingsPage) {
+        if self.page(page).is_none() {
+            return;
+        }
         let mut values = self.draft.borrow().edited.clone();
         self.filling(|| match page {
             SettingsPage::General | SettingsPage::Search => {
@@ -714,27 +742,55 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Saves the edited Include settings, when they changed, as
-    /// administrator, and answers whether they are saved.
-    fn save_include(&self, dialog: Hwnd, edited: &SettingsValues, last: &SettingsValues) -> bool {
+    /// Starts saving the edited Include settings as administrator, when
+    /// they changed, and answers whether it started; the answer arrives as
+    /// a reply.
+    fn save_include(
+        &self,
+        edited: &SettingsValues,
+        last: &SettingsValues,
+        after: AfterSave,
+    ) -> bool {
         let Some(include) = edited
             .include
-            .as_ref()
+            .clone()
             .filter(|_| edited.include != last.include)
         else {
-            return true;
+            return false;
         };
-        match self.main.save_include(dialog, include) {
-            Ok(()) => true,
-            Err(NotSaved::Declined) => false,
+        self.saving.replace(Some((include.clone(), after)));
+        self.main.save_include(self.window, include);
+        true
+    }
+
+    /// The Include save's answer, which the main window holds: saved
+    /// settings become applied, and after OK the dialog closes; refused
+    /// ones stay edited, and a failure says why.
+    fn save_answered(&self, dialog: Hwnd) {
+        let Some(answer) = self.main.take_include_saved() else {
+            return;
+        };
+        let Some((include, after)) = self.saving.take() else {
+            return;
+        };
+        match answer {
+            Ok(()) => {
+                self.draft.borrow_mut().include_saved(include);
+                if after == AfterSave::Close && self.apply(dialog, AfterSave::Close) {
+                    dialog::end(dialog, DialogEnd::Ok);
+                    return;
+                }
+            }
+            Err(NotSaved::Declined) => {}
             Err(NotSaved::Failed(reason)) => {
                 let text = self
                     .strings
                     .format("settings_include.not_saved", &[&reason]);
                 win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
-                false
             }
         }
+        self.show_preview();
+        self.update_apply(dialog);
     }
 
     /// The Keyboard page says under the shortcut whether it works after the
@@ -889,8 +945,20 @@ impl<'a> SettingsDialog<'a> {
             )
         };
         let changed = changed || self.read_speed().is_err();
+        let saving = self.saving.borrow().is_some();
         if let Some(apply) = dialog::item(dialog, ControlId::SettingsApply.id()) {
-            apply.set_enabled(changed);
+            if saving {
+                focus_off(dialog, apply);
+            }
+            apply.set_enabled(changed && !saving);
+        }
+        for button in [DialogItem::Ok.id(), DialogItem::Cancel.id()] {
+            if let Some(button) = dialog::item(dialog, button) {
+                if saving {
+                    focus_off(dialog, button);
+                }
+                button.set_enabled(!saving);
+            }
         }
         for (button, key) in [
             (DialogItem::Ok.id(), "button.ok"),
@@ -902,9 +970,228 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
+    /// Makes `page`, unless it was made: its controls, their lists and
+    /// tooltips, and their values from the draft.
+    fn make_page(&self, dialog: Hwnd, page: SettingsPage) {
+        let Some(index) = SettingsPage::ALL.iter().position(|p| *p == page) else {
+            return;
+        };
+        if self.pages[index].get().is_some() {
+            return;
+        }
+        let id = page.dialog();
+        let Ok(hwnd) = dialog::create_page(dialog, id, &DialogCaptions::new(id, &self.strings))
+        else {
+            dialog::end(dialog, DialogEnd::Cancel);
+            return;
+        };
+        // After the page list in the Tab order, before OK.
+        if let (Some(area), Some(list)) = (
+            dialog::item(dialog, ControlId::SettingsPageArea.id()),
+            dialog::item(dialog, ControlId::SettingsPages.id()),
+        ) {
+            hwnd.place_after(list, area.rect_in(dialog));
+        }
+        if let Some(heading) = dialog::item(hwnd, heading(page).id())
+            && let Ok(font) = Font::of(heading).and_then(|font| font.semibold())
+        {
+            heading.set_font(&font);
+            for (title, _, _) in SETTINGS_GROUPS {
+                if let Some(title) = dialog::item(hwnd, title.id()) {
+                    title.set_font(&font);
+                }
+            }
+            self.fonts.borrow_mut().push(font);
+        }
+        self.show_group_icons(hwnd);
+        self.pages[index].set(Some(hwnd));
+        // The first page is made before the dialog sizes its buttons.
+        if let Some(width) = self.button_width.get() {
+            dialog::size_page_buttons(hwnd, self, width);
+        }
+        self.set_up_lists(page);
+        self.add_tooltips(page, hwnd);
+        self.fill(page);
+        let search = dialog::item(dialog, ControlId::SettingsSearch.id())
+            .map(Hwnd::text)
+            .unwrap_or_default();
+        if !search.is_empty() {
+            self.highlight_page(page, &search);
+        }
+    }
+
+    /// Gives the lists of `page` their items or columns, and the boxes
+    /// their cues.
+    fn set_up_lists(&self, page: SettingsPage) {
+        let text = |key: &'static str| self.strings.text(key);
+        match page {
+            SettingsPage::General => {
+                if let Some(list) = self.language_list() {
+                    // As the Language menu lists them (DESIGN.md: Language).
+                    let names = LANGUAGES
+                        .iter()
+                        .map(|language| without_access_key(&language.label(&self.strings)));
+                    let items: Vec<String> =
+                        std::iter::once(text("settings_general.windows_default").to_owned())
+                            .chain(names)
+                            .collect();
+                    list.set_items(&items, 0);
+                }
+                if let Some(list) = self.size_list() {
+                    let names: Vec<&str> = SizeFormat::ALL
+                        .iter()
+                        .map(|format| text(format.label()))
+                        .collect();
+                    list.set_items(&names, 0);
+                }
+            }
+            SettingsPage::Search => {}
+            SettingsPage::ContextMenu => {
+                let Some(page) = self.page(SettingsPage::ContextMenu) else {
+                    return;
+                };
+                if let Some(list) = ListBox::of_dialog(page, ControlId::ContextMenuItems.id()) {
+                    let names: Vec<String> = ContextItem::all()
+                        .into_iter()
+                        .map(|item| without_access_key(text(item.label())))
+                        .collect();
+                    list.set_items(&names, 0);
+                }
+                for (control, _, cue, _) in OPEN_COMMANDS {
+                    if let Some(edit) = Edit::of_dialog(page, control.id()) {
+                        edit.set_cue(text(cue));
+                    }
+                }
+                // The link ends the hint's line, at the Browse… buttons'
+                // right edge.
+                if let (Some(link), Some(hint)) = (
+                    dialog::item(page, ControlId::ContextMenuTotalCommander.id()),
+                    dialog::item(page, ControlId::ContextMenuCommandHint.id()),
+                ) {
+                    dialog::fit_link(link, hint);
+                }
+            }
+            SettingsPage::Keyboard => {
+                if let Some(list) = self.command_list() {
+                    list.set_columns(&[
+                        (text("settings_keyboard.command_column"), 62, false),
+                        (text("settings_keyboard.keys_column"), 38, false),
+                    ]);
+                }
+            }
+            SettingsPage::FileOperations => {
+                if let Some(list) = self.speed_list(ControlId::SpeedPreset) {
+                    let names: Vec<&str> = SpeedPreset::ALL
+                        .iter()
+                        .map(|preset| text(preset.texts().0))
+                        .collect();
+                    list.set_items(&names, 0);
+                }
+                for (control, windows, _) in SPEED_ENGINES {
+                    if let Some(list) = self.speed_list(control) {
+                        let names: Vec<&str> = ENGINES
+                            .iter()
+                            .map(|engine| match engine {
+                                Engine::Windows => text(windows),
+                                Engine::Ring => text("settings_file_operations.engine_ring"),
+                            })
+                            .collect();
+                        list.set_items(&names, 0);
+                    }
+                }
+                let blocks: Vec<String> = ring_blocks()
+                    .map(|block| {
+                        let kib = block.bytes() / 1024;
+                        if kib < 1024 {
+                            self.strings.format("size.kb", &[&kib.to_string()])
+                        } else {
+                            self.strings.format("size.mb", &[&(kib / 1024).to_string()])
+                        }
+                    })
+                    .collect();
+                for (control, _) in SPEED_BLOCKS {
+                    if let Some(list) = self.speed_list(control) {
+                        list.set_items(&blocks, 0);
+                    }
+                }
+            }
+            SettingsPage::Index => {
+                if let Some(list) = self
+                    .page(SettingsPage::Index)
+                    .and_then(|page| ReportList::of_dialog(page, ControlId::IndexDrives.id()))
+                {
+                    list.set_columns(&[
+                        (text("settings_index.drive_column"), 38, false),
+                        (text("settings_index.state_column"), 42, false),
+                        (text("settings_index.entries_column"), 20, true),
+                    ]);
+                }
+            }
+            SettingsPage::Include => {
+                if let Some(list) = self.include_folders() {
+                    list.set_columns(&[
+                        (text("settings_include.folder_column"), 30, false),
+                        (text("settings_include.left_out_column"), 18, false),
+                        (text("settings_include.folders_column"), 52, false),
+                    ]);
+                    list.show_info_tips();
+                }
+            }
+        }
+    }
+
+    /// Gives `page`, whose window is `hwnd`, its tooltip: its Reset says
+    /// which settings it restores, the Use Total Commander link says what it
+    /// does, the Service group's fix buttons say what their fix does, and
+    /// Clear says its name, because it can show only its icon.
+    fn add_tooltips(&self, page: SettingsPage, hwnd: Hwnd) {
+        let text = |key: &'static str| self.strings.text(key);
+        let clear = without_access_key(text("button.clear"));
+        let reset = RESTORE
+            .into_iter()
+            .find(|(restored, _)| *restored == page)
+            .map(|(_, reset)| (reset, text("settings.reset_tooltip")));
+        let others: &[(ControlId, &str)] = match page {
+            SettingsPage::ContextMenu => &[(
+                ControlId::ContextMenuTotalCommander,
+                text("settings_context_menu.total_commander_tooltip"),
+            )],
+            SettingsPage::Keyboard => &[(ControlId::KeyboardClear, clear.as_str())],
+            // `refresh_index` gives these their tips.
+            SettingsPage::Index => &[
+                (ControlId::IndexUseLocal, ""),
+                (ControlId::IndexFix, ""),
+                (ControlId::IndexServiceProgramPath, ""),
+                (ControlId::IndexBesidePath, ""),
+            ],
+            _ => &[],
+        };
+        let tipped: Vec<(Hwnd, &str)> = reset
+            .iter()
+            .chain(others)
+            .filter_map(|&(control, tip)| Some((dialog::item(hwnd, control.id())?, tip)))
+            .collect();
+        if tipped.is_empty() {
+            return;
+        }
+        let controls: Vec<Hwnd> = tipped.iter().map(|&(control, _)| control).collect();
+        let Ok(tips) = Tooltip::create(hwnd, &controls) else {
+            return;
+        };
+        for (control, tip) in tipped {
+            tips.set(control, tip);
+        }
+        if page == SettingsPage::Index {
+            let _ = self.index_tips.set(tips);
+        }
+    }
+
     /// Shows `page`, or no page, and has the main window follow the service
     /// while the Index page shows (DESIGN.md: Settings dialog).
     fn show_page(&self, dialog: Hwnd, page: Option<SettingsPage>) {
+        if let Some(page) = page {
+            self.make_page(dialog, page);
+        }
         let previous = self.shown.replace(page);
         self.fill_page_list(dialog);
         if let Some(status) = self.status.get() {
@@ -913,9 +1200,10 @@ impl<'a> SettingsDialog<'a> {
         if previous == page {
             return;
         }
-        let pages = self.pages.borrow().clone();
-        for (each, hwnd) in SettingsPage::ALL.into_iter().zip(pages) {
-            hwnd.set_visible(Some(each) == page);
+        for (each, hwnd) in SettingsPage::ALL.into_iter().zip(&self.pages) {
+            if let Some(hwnd) = hwnd.get() {
+                hwnd.set_visible(Some(each) == page);
+            }
         }
         if page == Some(SettingsPage::Include) {
             // The index changes while the dialog is open.
@@ -960,18 +1248,15 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Gives each group's title its icon, again when icons are shown or
-    /// hidden.
-    fn show_group_icons(&self) {
-        let pages = self.pages.borrow().clone();
-        for page in pages {
-            for (title, icon, glyph) in SETTINGS_GROUPS {
-                if let (Some(title), Some(icon)) = (
-                    dialog::item(page, title.id()),
-                    GlyphLabel::of_dialog(page, icon.id()),
-                ) {
-                    show_heading_icon(icon, title, glyph);
-                }
+    /// Gives each group's title on `page` its icon, again when icons are
+    /// shown or hidden.
+    fn show_group_icons(&self, page: Hwnd) {
+        for (title, icon, glyph) in SETTINGS_GROUPS {
+            if let (Some(title), Some(icon)) = (
+                dialog::item(page, title.id()),
+                GlyphLabel::of_dialog(page, icon.id()),
+            ) {
+                show_heading_icon(icon, title, glyph);
             }
         }
     }
@@ -1003,19 +1288,26 @@ impl<'a> SettingsDialog<'a> {
     /// Shows in bold each caption that holds a word of `search`; a page's
     /// heading and its groups' titles keep their own font.
     fn highlight(&self, search: &str) {
+        for page in SettingsPage::ALL {
+            self.highlight_page(page, search);
+        }
+    }
+
+    fn highlight_page(&self, page: SettingsPage, search: &str) {
         let Some((normal, bold)) = self.highlight.get() else {
             return;
         };
-        for page in SettingsPage::ALL {
-            for (control, hit) in captions::settings_page_hits(&self.strings, page, search) {
-                if control != heading(page)
-                    && !SETTINGS_GROUPS
-                        .iter()
-                        .any(|(title, _, _)| *title == control)
-                    && let Some(control) = self.control(page, control)
-                {
-                    control.set_font(if hit { bold } else { normal });
-                }
+        if self.page(page).is_none() {
+            return;
+        }
+        for (control, hit) in captions::settings_page_hits(&self.strings, page, search) {
+            if control != heading(page)
+                && !SETTINGS_GROUPS
+                    .iter()
+                    .any(|(title, _, _)| *title == control)
+                && let Some(control) = self.control(page, control)
+            {
+                control.set_font(if hit { bold } else { normal });
             }
         }
     }
@@ -1025,6 +1317,10 @@ impl<'a> SettingsDialog<'a> {
     /// refresh, because setting a control redraws it, and the memory and
     /// the entry counts change at nearly every 2-second refresh.
     fn refresh_index(&self, dialog: Hwnd) {
+        // The page refreshes when it is made, so it shows the latest state.
+        if self.page(SettingsPage::Index).is_none() {
+            return;
+        }
         let captions = self.main.index_captions();
         // Stored first, because the drive list asks for its empty text
         // while its rows change.
@@ -1178,8 +1474,10 @@ impl<'a> SettingsDialog<'a> {
 
     /// Gives the edited values to the main window, and answers whether they
     /// were applied; a speed that cannot be one, or a shortcut that another
-    /// program holds, keeps the dialog open (DESIGN.md: Dialogs).
-    fn apply(&self, dialog: Hwnd) -> bool {
+    /// program holds, keeps the dialog open (DESIGN.md: Dialogs). Changed
+    /// Include settings are applied once they are saved, and `after` says
+    /// what the dialog does then.
+    fn apply(&self, dialog: Hwnd, after: AfterSave) -> bool {
         if let Err((control, message)) = self.read_speed() {
             self.refuse(dialog, SettingsPage::FileOperations, control, &message);
             return false;
@@ -1202,11 +1500,8 @@ impl<'a> SettingsDialog<'a> {
                 false
             }
             Ok(applied) => {
-                let saved = self.save_include(dialog, &edited, &last);
-                let mut values = applied.values;
-                if saved {
-                    values.include.clone_from(&edited.include);
-                }
+                let saving = self.save_include(&edited, &last, after);
+                let values = applied.values;
                 let refill = SettingsValues {
                     include: edited.include.clone(),
                     ..values.clone()
@@ -1214,7 +1509,7 @@ impl<'a> SettingsDialog<'a> {
                 {
                     let mut draft = self.draft.borrow_mut();
                     draft.applied(values);
-                    // Settings that were not saved stay edited.
+                    // The Include settings stay edited until they are saved.
                     draft.edited.include.clone_from(&edited.include);
                 }
                 if refill {
@@ -1234,7 +1529,9 @@ impl<'a> SettingsDialog<'a> {
                     // The page list's rows, the group titles and the
                     // buttons follow.
                     self.show_page_icons(dialog);
-                    self.show_group_icons();
+                    for page in self.pages.iter().filter_map(Cell::get) {
+                        self.show_group_icons(page);
+                    }
                     self.show_button_glyphs(dialog);
                     self.refresh_index(dialog);
                     dialog.draw_once_after(|| {});
@@ -1245,7 +1542,7 @@ impl<'a> SettingsDialog<'a> {
                     let width = dialog::size_buttons(dialog, self);
                     self.buttons_sized(dialog, width);
                 }
-                saved
+                !saving
             }
         }
     }
@@ -1563,163 +1860,17 @@ impl DialogProc for SettingsDialog<'_> {
         self.show_page_icons(dialog);
         self.fill_page_list(dialog);
         self.fit_page_list(dialog);
-        let area =
-            dialog::item(dialog, ControlId::SettingsPageArea.id()).map(|a| a.rect_in(dialog));
-        let pages_list = dialog::item(dialog, ControlId::SettingsPages.id());
-        let mut pages = Vec::new();
-        for page in SettingsPage::ALL {
-            let id = page.dialog();
-            let Ok(hwnd) = dialog::create_page(dialog, id, &DialogCaptions::new(id, &self.strings))
-            else {
-                dialog::end(dialog, DialogEnd::Cancel);
-                return Opened {
-                    focus: DialogItem::Cancel.id(),
-                    fonts,
-                };
-            };
-            // After the page list in the Tab order, before OK.
-            if let (Some(area), Some(list)) = (area, pages_list) {
-                hwnd.place_after(list, area);
-            }
-            if let Some(heading) = dialog::item(hwnd, heading(page).id())
-                && let Ok(font) = Font::of(heading).and_then(|font| font.semibold())
-            {
-                heading.set_font(&font);
-                for (title, _, _) in SETTINGS_GROUPS {
-                    if let Some(title) = dialog::item(hwnd, title.id()) {
-                        title.set_font(&font);
-                    }
-                }
-                fonts.push(font);
-            }
-            pages.push(hwnd);
-        }
-        self.pages.replace(pages);
-        self.show_group_icons();
-        if let Some(label) = self
-            .page(SettingsPage::General)
-            .and_then(|page| dialog::item(page, ControlId::GeneralLanguageLabel.id()))
-            && let Ok(normal) = Font::of(label)
-            && let Ok(bold) = normal.bold()
-        {
-            let _ = self.highlight.set((normal, bold));
-        }
-
-        let text = |key: &'static str| self.strings.text(key);
-        if let Some(list) = self.language_list() {
-            // As the Language menu lists them (DESIGN.md: Language).
-            let names = LANGUAGES
-                .iter()
-                .map(|language| without_access_key(&language.label(&self.strings)));
-            let items: Vec<String> =
-                std::iter::once(text("settings_general.windows_default").to_owned())
-                    .chain(names)
-                    .collect();
-            list.set_items(&items, 0);
-        }
-        if let Some(list) = self.size_list() {
-            let names: Vec<&str> = SizeFormat::ALL
-                .iter()
-                .map(|format| text(format.label()))
-                .collect();
-            list.set_items(&names, 0);
-        }
-        if let Some(list) = self.speed_list(ControlId::SpeedPreset) {
-            let names: Vec<&str> = SpeedPreset::ALL
-                .iter()
-                .map(|preset| text(preset.texts().0))
-                .collect();
-            list.set_items(&names, 0);
-        }
-        for (control, windows, _) in SPEED_ENGINES {
-            if let Some(list) = self.speed_list(control) {
-                let names: Vec<&str> = ENGINES
-                    .iter()
-                    .map(|engine| match engine {
-                        Engine::Windows => text(windows),
-                        Engine::Ring => text("settings_file_operations.engine_ring"),
-                    })
-                    .collect();
-                list.set_items(&names, 0);
-            }
-        }
-        let blocks: Vec<String> = ring_blocks()
-            .map(|block| {
-                let kib = block.bytes() / 1024;
-                if kib < 1024 {
-                    self.strings.format("size.kb", &[&kib.to_string()])
-                } else {
-                    self.strings.format("size.mb", &[&(kib / 1024).to_string()])
-                }
-            })
-            .collect();
-        for (control, _) in SPEED_BLOCKS {
-            if let Some(list) = self.speed_list(control) {
-                list.set_items(&blocks, 0);
-            }
-        }
-        if let Some(list) = self
-            .page(SettingsPage::ContextMenu)
-            .and_then(|page| ListBox::of_dialog(page, ControlId::ContextMenuItems.id()))
-        {
-            let names: Vec<String> = ContextItem::all()
-                .into_iter()
-                .map(|item| without_access_key(text(item.label())))
-                .collect();
-            list.set_items(&names, 0);
-        }
-        if let Some(page) = self.page(SettingsPage::ContextMenu) {
-            for (control, _, cue, _) in OPEN_COMMANDS {
-                if let Some(edit) = Edit::of_dialog(page, control.id()) {
-                    edit.set_cue(text(cue));
-                }
-            }
-            // The link ends the hint's line, at the Browse… buttons' right
-            // edge.
-            if let (Some(link), Some(hint)) = (
-                dialog::item(page, ControlId::ContextMenuTotalCommander.id()),
-                dialog::item(page, ControlId::ContextMenuCommandHint.id()),
-            ) {
-                dialog::fit_link(link, hint);
-            }
-        }
-        if let Some(list) = self.command_list() {
-            list.set_columns(&[
-                (text("settings_keyboard.command_column"), 62, false),
-                (text("settings_keyboard.keys_column"), 38, false),
-            ]);
-        }
-        if let Some(list) = self
-            .page(SettingsPage::Index)
-            .and_then(|page| ReportList::of_dialog(page, ControlId::IndexDrives.id()))
-        {
-            list.set_columns(&[
-                (text("settings_index.drive_column"), 38, false),
-                (text("settings_index.state_column"), 42, false),
-                (text("settings_index.entries_column"), 20, true),
-            ]);
-        }
-        if let Some(list) = self.include_folders() {
-            list.set_columns(&[
-                (text("settings_include.folder_column"), 30, false),
-                (text("settings_include.left_out_column"), 18, false),
-                (text("settings_include.folders_column"), 52, false),
-            ]);
-            list.show_info_tips();
-        }
         if let Ok(balloon) = Balloon::create(dialog) {
             let _ = self.balloon.set(balloon);
         }
-        // Reset all and every page's Reset say which settings they restore,
-        // the Use Total Commander link says what it does, the Service
-        // group's fix buttons say what their fix does, and each Clear says
-        // its name, because it can show only its icon. Each page has one
-        // tooltip, and Windows destroys the tooltips with the dialog.
-        let clear = without_access_key(text("button.clear"));
+        // Reset all says which settings it restores, and Clear says its
+        // name, because it can show only its icon. Each page has a tooltip
+        // of its own, and Windows destroys the tooltips with the dialog.
+        let clear = without_access_key(self.strings.text("button.clear"));
         let tipped: Vec<(Hwnd, &str)> = [
             (
                 ControlId::SettingsResetAll,
-                text("settings.reset_all_tooltip"),
+                self.strings.text("settings.reset_all_tooltip"),
             ),
             (ControlId::SettingsClearSearch, clear.as_str()),
         ]
@@ -1732,57 +1883,20 @@ impl DialogProc for SettingsDialog<'_> {
                 tips.set(control, tip);
             }
         }
-        for page in SettingsPage::ALL {
-            let Some(hwnd) = self.page(page) else {
-                continue;
-            };
-            let reset = RESTORE
-                .into_iter()
-                .find(|(restored, _)| *restored == page)
-                .map(|(_, reset)| (reset, text("settings.reset_tooltip")));
-            let others: &[(ControlId, &str)] = match page {
-                SettingsPage::ContextMenu => &[(
-                    ControlId::ContextMenuTotalCommander,
-                    text("settings_context_menu.total_commander_tooltip"),
-                )],
-                SettingsPage::Keyboard => &[(ControlId::KeyboardClear, clear.as_str())],
-                // `refresh_index` gives these their tips.
-                SettingsPage::Index => &[
-                    (ControlId::IndexUseLocal, ""),
-                    (ControlId::IndexFix, ""),
-                    (ControlId::IndexServiceProgramPath, ""),
-                    (ControlId::IndexBesidePath, ""),
-                ],
-                _ => &[],
-            };
-            let tipped: Vec<(Hwnd, &str)> = reset
-                .iter()
-                .chain(others)
-                .filter_map(|&(control, tip)| Some((dialog::item(hwnd, control.id())?, tip)))
-                .collect();
-            if tipped.is_empty() {
-                continue;
-            }
-            let controls: Vec<Hwnd> = tipped.iter().map(|&(control, _)| control).collect();
-            let Ok(tips) = Tooltip::create(hwnd, &controls) else {
-                continue;
-            };
-            for (control, tip) in tipped {
-                tips.set(control, tip);
-            }
-            if page == SettingsPage::Index {
-                let _ = self.index_tips.set(tips);
-            }
-        }
-        for page in SettingsPage::ALL {
-            self.fill(page);
-        }
         if let Some(search) = Edit::of_dialog(dialog, ControlId::SettingsSearch.id()) {
-            search.set_cue(text("settings.search_cue"));
+            search.set_cue(self.strings.text("settings.search_cue"));
         }
         let status = self.add_status_bar(dialog, &mut fonts);
         self.main.settings_opened(dialog, status);
         self.show_page(dialog, Some(SettingsPage::General));
+        if let Some(label) = self
+            .page(SettingsPage::General)
+            .and_then(|page| dialog::item(page, ControlId::GeneralLanguageLabel.id()))
+            && let Ok(normal) = Font::of(label)
+            && let Ok(bold) = normal.bold()
+        {
+            let _ = self.highlight.set((normal, bold));
+        }
         self.update_apply(dialog);
         Opened {
             focus: ControlId::SettingsPages.id(),
@@ -1791,6 +1905,19 @@ impl DialogProc for SettingsDialog<'_> {
     }
 
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        if self.saving.borrow().is_some()
+            && let DialogMessage::Command { id } = message
+            && [
+                DialogItem::Ok.id(),
+                DialogItem::Cancel.id(),
+                ControlId::SettingsApply.id(),
+                ControlId::SettingsResetAll.id(),
+            ]
+            .contains(&id)
+        {
+            // Esc and the close button too wait for the Include save.
+            return true;
+        }
         let handled = match message {
             DialogMessage::Edited { .. } if self.filling.get() => return true,
             DialogMessage::Edited { id } => {
@@ -1798,7 +1925,7 @@ impl DialogProc for SettingsDialog<'_> {
                 true
             }
             DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
-                if self.apply(dialog) {
+                if self.apply(dialog, AfterSave::Close) {
                     dialog::end(dialog, DialogEnd::Ok);
                 }
                 return true;
@@ -1811,7 +1938,7 @@ impl DialogProc for SettingsDialog<'_> {
                 true
             }
             DialogMessage::Command { id } if is(id, ControlId::SettingsApply) => {
-                self.apply(dialog);
+                self.apply(dialog, AfterSave::Stay);
                 return true;
             }
             DialogMessage::Command { id } if is(id, ControlId::StatusCancel) => {
@@ -1875,6 +2002,7 @@ impl DialogProc for SettingsDialog<'_> {
             DialogMessage::Reply => {
                 self.total_commander_found(dialog);
                 self.preview_counted();
+                self.save_answered(dialog);
                 // A fix moved on, which the fix button follows.
                 self.refresh_index(dialog);
                 return true;
@@ -1901,6 +2029,7 @@ impl DialogProc for SettingsDialog<'_> {
 
     /// Places the status bar, whose Cancel is as wide as OK and Apply.
     fn buttons_sized(&self, dialog: Hwnd, width: Px) {
+        self.button_width.set(Some(width));
         let (Some(status), Some((widths, font_height))) =
             (self.status.get(), self.status_widths.get())
         else {
@@ -1918,17 +2047,32 @@ impl DialogProc for SettingsDialog<'_> {
         ));
     }
 
-    /// Every caption the Service group's fix buttons can show, and OK and
-    /// Apply with the shield, which they show while Include has changes.
-    /// Each of them shows an icon also without the shield while icons show.
+    /// Every caption the Service group's fix buttons can show, OK and
+    /// Apply with the shield, which they show while Include has changes,
+    /// and every page's push buttons but Clear, because a page is made when
+    /// it first shows. Each of them shows an icon also without the shield
+    /// while icons show.
     fn later_captions(&self) -> Vec<(String, bool)> {
         let icons = self.draft.borrow().last_applied().choices.show_icons;
-        Fix::label_groups()
+        let mut captions: Vec<(String, bool)> = Fix::label_groups()
             .into_iter()
             .flatten()
             .chain([("button.ok", true), ("settings.apply", true)])
             .map(|(key, shielded)| (self.strings.text(key).to_owned(), shielded || icons))
-            .collect()
+            .collect();
+        for page in SettingsPage::ALL {
+            // A page's push buttons are its captions with an icon, but for
+            // the fix buttons above.
+            let page = DialogCaptions::new(page.dialog(), &self.strings);
+            for (id, _) in &page.glyphs {
+                if self.clear_glyph(*id).is_none()
+                    && let Some((_, caption)) = page.items.iter().find(|(item, _)| item == id)
+                {
+                    captions.push((caption.clone(), icons));
+                }
+            }
+        }
+        captions
     }
 
     fn clear_glyph(&self, id: u16) -> Option<Glyph> {

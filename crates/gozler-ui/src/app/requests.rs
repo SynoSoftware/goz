@@ -139,8 +139,9 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
             Ask::Status => client
                 .status()
                 .map(|status| Outcome::Status(status, super::local_service::local_service())),
-            Ask::Rows(_, ask) | Ask::Program(ask) | Ask::FolderSizes(_, ask) => {
-                rows(&mut client, &ask).map(Outcome::Rows)
+            Ask::Rows(_, ask) => rows(&mut client, &ask, Some(reply)).map(Outcome::Rows),
+            Ask::Program(ask) | Ask::FolderSizes(_, ask) => {
+                rows(&mut client, &ask, None).map(Outcome::Rows)
             }
             Ask::Selection(_, ask) => selection(&mut client, ask).map(Outcome::Selection),
             Ask::FolderSize(search) => client
@@ -160,12 +161,33 @@ fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcom
     .filter(|_| !cancel.is_cancelled())
 }
 
-/// Every page of one chunk.
-fn rows(client: &mut Client, ask: &ChunkAsk) -> Result<Chunk, ClientError> {
+/// Every page of one chunk. With `first`, the first page also goes there
+/// as soon as it arrives, when more pages follow, so the list shows rows
+/// before the whole chunk has arrived.
+fn rows(
+    client: &mut Client,
+    ask: &ChunkAsk,
+    first: Option<&dyn Fn(Outcome)>,
+) -> Result<Chunk, ClientError> {
     let mut all: Option<QueryResults> = None;
     client.query(ask.request(), |page| {
         match &mut all {
-            None => all = Some(page),
+            None => {
+                if let Some(first) = first
+                    && page.more
+                {
+                    first(Outcome::Rows(Chunk {
+                        start: ask.start,
+                        rows: page.items.clone(),
+                        total: page.total,
+                        volumes_incomplete: page.volumes_incomplete,
+                        metadata_pending: page.metadata_pending,
+                        sums: page.sums,
+                        rest_follows: true,
+                    }));
+                }
+                all = Some(page);
+            }
             Some(all) => all.add_page(page),
         }
         Ok::<(), ClientError>(())
@@ -178,6 +200,7 @@ fn rows(client: &mut Client, ask: &ChunkAsk) -> Result<Chunk, ClientError> {
         volumes_incomplete: all.volumes_incomplete,
         metadata_pending: all.metadata_pending,
         sums: all.sums,
+        rest_follows: false,
     })
 }
 

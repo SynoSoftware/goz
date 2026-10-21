@@ -3595,6 +3595,7 @@ pub(crate) mod tests {
             volumes_incomplete: false,
             metadata_pending: false,
             sums: None,
+            rest_follows: false,
         };
         assert!(panels.accept_sizes(Side::Left, Generation(7), Outcome::Rows(chunk)));
     }

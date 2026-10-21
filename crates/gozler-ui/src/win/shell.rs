@@ -795,14 +795,14 @@ const ELEVATED_WAIT_MS: u32 = 30_000;
 
 /// Runs `program` with `parameters` as administrator, as
 /// [`start_as_administrator`] does, waits for it to end, and gives its exit
-/// code. The program must end quickly, because this thread waits for it, at
-/// most [`ELEVATED_WAIT_MS`].
+/// code. This thread waits for the person's answer and then for the
+/// program, at most [`ELEVATED_WAIT_MS`], so it is not the window's.
 pub(crate) fn run_as_administrator_and_wait(
-    owner: Hwnd,
+    owner: PromptOwner,
     program: &str,
     parameters: &str,
 ) -> io::Result<u32> {
-    start_as_administrator(PromptOwner::new(owner), program, parameters)?
+    start_as_administrator(owner, program, parameters)?
         .wait(ELEVATED_WAIT_MS)?
         .ok_or_else(|| io::ErrorKind::TimedOut.into())
 }

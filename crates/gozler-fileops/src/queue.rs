@@ -51,14 +51,23 @@ struct Shared {
     /// Where prepare reads the totals.
     index: Box<dyn Index>,
     saved_path: PathBuf,
-    /// The operations in the saved file. Its lock also orders the file's
+    /// The operations of the saved file. Its lock also orders the file's
     /// writes.
-    saved: Mutex<BTreeMap<OperationId, Saved>>,
+    saved: Mutex<SavedOperations>,
     /// Set when the queue closes or is dropped: a run that it cancels stays
     /// saved, so it is offered as interrupted at the next start, which is
     /// the truth, and keeps the files it was writing for Continue to resume.
     closing: AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// The operations of the saved file.
+struct SavedOperations {
+    by_id: BTreeMap<OperationId, Saved>,
+    /// Whether the file holds `by_id`. A change on the window's call is
+    /// written on a queue thread, because the file lists every source of
+    /// every saved operation.
+    written: bool,
 }
 
 #[derive(Default)]
@@ -165,7 +174,10 @@ impl Queue {
                 wake: Box::new(wake),
                 index,
                 saved_path,
-                saved: Mutex::new(saved_operations),
+                saved: Mutex::new(SavedOperations {
+                    by_id: saved_operations,
+                    written: true,
+                }),
                 closing: AtomicBool::new(false),
                 threads: Mutex::default(),
             }),
@@ -231,7 +243,7 @@ impl Queue {
             }
         };
         // A Continue cancelled before its run started ends too.
-        self.shared.unsave(id);
+        Shared::unsave_later(&self.shared, id);
         self.shared.start(starts);
         (self.shared.wake)();
     }
@@ -287,7 +299,7 @@ impl Queue {
             };
             operations.by_id.remove(&id);
         }
-        self.shared.unsave(id);
+        Shared::unsave_later(&self.shared, id);
         (self.shared.wake)();
         Ok(())
     }
@@ -402,17 +414,21 @@ impl Queue {
     }
 
     /// Exit: stops every operation, a paused one too, so that Continue can
-    /// finish it at the next start, and returns at once; the window then
-    /// ends the process without dropping the queue. `CopyFile2` deletes what
-    /// it wrote when it is stopped, so a file the Windows engine is copying
-    /// goes on until the process ends, which leaves it at its final name.
-    /// Every operation that runs is already in the saved file.
+    /// finish it at the next start, and returns without waiting for them to
+    /// stop; the window then ends the process without dropping the queue.
+    /// `CopyFile2` deletes what it wrote when it is stopped, so a file the
+    /// Windows engine is copying goes on until the process ends, which
+    /// leaves it at its final name.
+    /// Every operation that runs is in the saved file when this returns:
+    /// its thread wrote it there before it changed a file, or this writes
+    /// it, which takes as long as that thread's write would.
     pub fn close(&self) {
         self.shared.closing.store(true, Ordering::Relaxed);
         for operation in self.shared.lock().by_id.values() {
             operation.cancel.store(true, Ordering::Relaxed);
             operation.pause.wake();
         }
+        self.shared.write_saved();
     }
 }
 
@@ -651,9 +667,9 @@ impl Shared {
                     Arc::clone(&operation.io),
                 )
             };
-            // Before the run writes its first file, and before its thread
-            // starts, so a queue that Exit closes has saved every operation
-            // that runs.
+            // Recorded before its thread starts, and written by the thread
+            // before the run writes its first file, so a queue that Exit
+            // closes has saved every operation that runs (`Queue::close`).
             let started = match start.run {
                 Run::Continue {
                     started: Some(started),
@@ -668,13 +684,14 @@ impl Shared {
                 Run::Continue { started: None } => system_time(),
             };
             if let Some(saved) = Saved::new(&request, start.choice, started, &settings) {
-                self.save(id, saved);
+                self.record(id, saved);
             }
             if let Work::Delete { entries, missing } = &start.work {
                 self.count(id, Counting::of(entries, *missing), Arc::clone(&cancel));
             }
             let shared = Arc::clone(self);
             self.spawn(move || {
+                shared.write_saved();
                 let _entered = io.enter();
                 let outcome = run(
                     *start,
@@ -724,17 +741,46 @@ impl Shared {
         });
     }
 
-    fn save(&self, id: OperationId, saved: Saved) {
+    /// Adds the operation `id` to the saved file's operations, which
+    /// [`Shared::write_saved`] writes.
+    fn record(&self, id: OperationId, saved: Saved) {
         let mut operations = self.saved.lock().expect("no queue thread panics");
-        operations.insert(id, saved);
-        // A file that cannot be written loses only the offer to continue.
-        let _ = saved::write(&self.saved_path, operations.values());
+        operations.by_id.insert(id, saved);
+        operations.written = false;
     }
 
+    /// Writes the saved file, unless it holds every saved operation.
+    fn write_saved(&self) {
+        let mut operations = self.saved.lock().expect("no queue thread panics");
+        if !operations.written {
+            // A file that cannot be written loses only the offer to
+            // continue.
+            let _ = saved::write(&self.saved_path, operations.by_id.values());
+            operations.written = true;
+        }
+    }
+
+    /// Removes the operation `id` from the saved file, on a queue thread.
     fn unsave(&self, id: OperationId) {
         let mut operations = self.saved.lock().expect("no queue thread panics");
-        if operations.remove(&id).is_some() {
-            let _ = saved::write(&self.saved_path, operations.values());
+        if operations.by_id.remove(&id).is_some() {
+            let _ = saved::write(&self.saved_path, operations.by_id.values());
+            operations.written = true;
+        }
+    }
+
+    /// Removes the operation `id` from the saved file on the window's call,
+    /// and writes the file on a queue thread of its own.
+    fn unsave_later(shared: &Arc<Shared>, id: OperationId) {
+        let removed = {
+            let mut operations = shared.saved.lock().expect("no queue thread panics");
+            let removed = operations.by_id.remove(&id).is_some();
+            operations.written &= !removed;
+            removed
+        };
+        if removed {
+            let writer = Arc::clone(shared);
+            shared.spawn(move || writer.write_saved());
         }
     }
 }

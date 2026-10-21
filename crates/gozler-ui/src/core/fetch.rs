@@ -289,6 +289,9 @@ pub(crate) struct Chunk {
     /// Every match's files and folders and their sizes; `None` from a
     /// service that does not send them.
     pub(crate) sums: Option<MatchSums>,
+    /// More rows of the chunk follow in another reply: these are its first
+    /// page's, which the list shows while the rest arrives.
+    pub(crate) rest_follows: bool,
 }
 
 /// The failures the window shows differently (DESIGN.md: Daemon failures);

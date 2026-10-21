@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::sync::mpsc::{Sender, channel};
 use std::time::Duration;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::Com::{
@@ -20,7 +21,9 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows::Win32::System::Ole::{OleGetClipboard, ReleaseStgMedium};
+use windows::Win32::System::Ole::{
+    OleGetClipboard, OleInitialize, OleUninitialize, ReleaseStgMedium,
+};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::WM_CLIPBOARDUPDATE;
 use windows::core::w;
@@ -170,64 +173,88 @@ pub(crate) fn holds_files() -> bool {
     unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok()
 }
 
-/// Files that Paste read from the clipboard. It keeps the clipboard's data
-/// object until the paste is submitted, so a move can tell the files'
-/// source that it moved them.
+/// Files that Paste read from the clipboard. The thread that read them
+/// keeps the clipboard's data object, which belongs to its thread, until
+/// this value drops, so a move can tell the files' source that it moved
+/// them.
 pub(crate) struct ClipboardFiles {
-    data: IDataObject,
-    /// The clipboard's sequence number when Paste read it, which changes
-    /// when anything else is put there.
-    sequence: u32,
     pub(crate) paths: Vec<PathBuf>,
     /// The files were cut, so Paste moves them.
     pub(crate) cut: bool,
+    /// Tells the reading thread that a move of the files was submitted.
+    moved: Sender<()>,
 }
 
-/// The files on the clipboard, and whether they were cut, or `None` when
-/// it holds none or cannot be read.
-pub(crate) fn read_files() -> Option<ClipboardFiles> {
-    // SAFETY: OLE is initialized on this thread at start; the data object
-    // is released when the value drops, and each medium after it is read.
-    unsafe {
-        let sequence = GetClipboardSequenceNumber();
-        let data = OleGetClipboard().ok()?;
-        let paths = files_of(&data);
-        let cut = match read_format(&data, preferred_drop_effect()) {
-            Some(mut effect) => {
-                let value = read_effect(&effect);
-                ReleaseStgMedium(&mut effect);
-                value.is_some_and(|value| value & DROPEFFECT_MOVE != 0)
+/// Reads the files on the clipboard on a thread of its own, because the
+/// program that holds the clipboard answers each call as slowly as it
+/// does, and gives `answer` the files and whether they were cut, or `None`
+/// when it holds none or cannot be read.
+pub(crate) fn read_files(answer: impl FnOnce(Option<ClipboardFiles>) + Send + 'static) {
+    std::thread::spawn(move || {
+        // SAFETY: OLE starts for this thread alone, and ends after the
+        // data object is released.
+        if unsafe { OleInitialize(None) }.is_err() {
+            answer(None);
+            return;
+        }
+        // SAFETY: OLE is initialized on this thread; the data object is
+        // released before OLE ends, and each medium after it is read.
+        unsafe {
+            let sequence = GetClipboardSequenceNumber();
+            let data = OleGetClipboard().ok();
+            let paths = data.as_ref().map(files_of).unwrap_or_default();
+            let cut = match data
+                .as_ref()
+                .and_then(|data| read_format(data, preferred_drop_effect()))
+            {
+                Some(mut effect) => {
+                    let value = read_effect(&effect);
+                    ReleaseStgMedium(&mut effect);
+                    value.is_some_and(|value| value & DROPEFFECT_MOVE != 0)
+                }
+                None => false,
+            };
+            match data.filter(|_| !paths.is_empty()) {
+                Some(data) => {
+                    let (moved, submitted) = channel();
+                    answer(Some(ClipboardFiles { paths, cut, moved }));
+                    // Fails once the files are dropped without a move.
+                    if submitted.recv().is_ok() {
+                        tell_moved(&data, sequence);
+                    }
+                }
+                None => answer(None),
             }
-            None => false,
-        };
-        (!paths.is_empty()).then_some(ClipboardFiles {
-            data,
-            sequence,
-            paths,
-            cut,
-        })
-    }
+            OleUninitialize();
+        }
+    });
 }
 
 impl ClipboardFiles {
-    /// After a move of these files was submitted: when the clipboard still
-    /// holds them, tells their source that they were moved, and empties the
-    /// clipboard, as File Explorer does after its own paste. It never sets
-    /// the performed effect to move, which would tell the source to delete
-    /// the files itself.
-    pub(crate) fn moved(self, owner: Hwnd) {
-        // SAFETY: plain values.
-        if unsafe { GetClipboardSequenceNumber() } != self.sequence {
-            return;
-        }
-        set_effect(&self.data, paste_succeeded(), DROPEFFECT_MOVE);
-        // SAFETY: plain values; a clipboard another program holds stays as
-        // it is.
-        unsafe {
-            if OpenClipboard(Some(owner.0)).is_ok() {
-                let _ = EmptyClipboard();
-                let _ = CloseClipboard();
-            }
+    /// After a move of these files was submitted: their reading thread
+    /// tells their source that they moved, as [`tell_moved`] says.
+    pub(crate) fn moved(self) {
+        let _ = self.moved.send(());
+    }
+}
+
+/// When the clipboard still holds the files of `data`, which it held at
+/// `sequence`, tells their source that they were moved, and empties the
+/// clipboard, as File Explorer does after its own paste. It never sets the
+/// performed effect to move, which would tell the source to delete the
+/// files itself.
+fn tell_moved(data: &IDataObject, sequence: u32) {
+    // SAFETY: plain values.
+    if unsafe { GetClipboardSequenceNumber() } != sequence {
+        return;
+    }
+    set_effect(data, paste_succeeded(), DROPEFFECT_MOVE);
+    // SAFETY: plain values; a clipboard another program holds stays as it
+    // is. Without a window, emptying it leaves it without an owner.
+    unsafe {
+        if OpenClipboard(None).is_ok() {
+            let _ = EmptyClipboard();
+            let _ = CloseClipboard();
         }
     }
 }
