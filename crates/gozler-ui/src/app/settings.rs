@@ -37,7 +37,7 @@ use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::shortcut::{self, Capture};
 use crate::win::{self, Hwnd};
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_fileops::{DeleteWorkers, Engine, RingBlock, SpeedSettings};
 use std::cell::{Cell, OnceCell, RefCell};
 
@@ -63,7 +63,7 @@ enum AfterSave {
 /// dialog.
 enum Awaited {
     /// Saves these Include settings, after Apply or OK.
-    Include(IncludeSettings, AfterSave),
+    Include(IndexSettings, AfterSave),
     /// Asks the service to rebuild the index, after Rebuild.
     Rebuild,
 }
@@ -154,7 +154,7 @@ const VISIBILITY_BUTTONS: [(ControlId, ItemVisibility); 3] = [
 ];
 
 /// The Include setting that a check box shows.
-type IncludeField = fn(&mut IncludeSettings) -> &mut bool;
+type IncludeField = fn(&mut IndexSettings) -> &mut bool;
 
 /// Each check box of the Include page and the setting it shows.
 const INCLUDE_CHECK_BOXES: [(ControlId, IncludeField); 3] = [
@@ -608,7 +608,7 @@ impl<'a> SettingsDialog<'a> {
 
     /// Sets the Include page's controls from `include`; without it, the
     /// service gave no settings, so they are disabled.
-    fn fill_include(&self, include: Option<&mut IncludeSettings>) {
+    fn fill_include(&self, include: Option<&mut IndexSettings>) {
         for control in INCLUDE_CONTROLS {
             if let Some(control) = self.control(SettingsPage::Include, control) {
                 control.set_enabled(include.is_some());

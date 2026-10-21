@@ -190,6 +190,7 @@ pub struct RowView<'a> {
     pub is_dir: bool,
     pub size: Option<u64>,
     pub mtime: Option<i64>,
+    pub created: Option<i64>,
     pub attributes: Attributes,
 }
 
@@ -401,6 +402,7 @@ impl Reply {
                 is_dir: entry.is_dir(),
                 size: entry.size(),
                 mtime: entry.mtime(),
+                created: entry.created(),
                 attributes: entry.attributes(),
             };
             if !push(v, volume.next, row, &self.names) {
@@ -673,6 +675,9 @@ impl OrderFields for Live<'_> {
     }
     fn mtime(&self) -> Option<i64> {
         self.index.entry(self.idx).mtime()
+    }
+    fn created(&self) -> Option<i64> {
+        self.index.entry(self.idx).created()
     }
     fn volume(&self) -> &[u8] {
         self.volume

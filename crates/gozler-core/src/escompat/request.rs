@@ -30,9 +30,10 @@ pub fn build_search(
             offset: 0,
             limit: plan.row_limit(),
             // Always fetch the size and date; output decides what to show.
-            // Attributes travel only for their column.
+            // Attributes and the date created travel only for their column.
             want_size: true,
             want_mtime: true,
+            want_created: plan.columns.contains(&EsColumn::DateCreated),
             want_attributes: plan.columns.contains(&EsColumn::Attributes),
             want_sums: false,
         }),

@@ -16,17 +16,19 @@ use crate::volume::VolumeHandle;
 
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
 
-/// The live size/mtime of one file.
+/// The live size, dates and kind of one file.
 pub struct FileStat {
     pub size: u64,
     /// Last-write time as a Windows `FILETIME` packed into `i64` (100 ns ticks
     /// since 1601), the same representation the FILE_LAYOUT path produces.
     pub mtime_ft: i64,
+    /// Creation time, in the same form.
+    pub created_ft: i64,
     pub is_dir: bool,
 }
 
-/// Opens the file identified by `id` on `volume` and reads its size and
-/// last-write time. Returns `Ok(None)` when the file cannot be opened (already
+/// Opens the file identified by `id` on `volume` and reads its size,
+/// last-write time and creation time. Returns `Ok(None)` when the file cannot be opened (already
 /// deleted, or transiently locked): a non-fatal "nothing to refresh", since
 /// the structural create/delete was already applied from the journal.
 pub fn stat_file(volume: &VolumeHandle, id: u128) -> Result<Option<FileStat>, WinError> {
@@ -46,10 +48,13 @@ pub fn stat_file(volume: &VolumeHandle, id: u128) -> Result<Option<FileStat>, Wi
     let size = ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64;
     let mtime_ft = ((info.ftLastWriteTime.dwHighDateTime as i64) << 32)
         | info.ftLastWriteTime.dwLowDateTime as i64;
+    let created_ft = ((info.ftCreationTime.dwHighDateTime as i64) << 32)
+        | info.ftCreationTime.dwLowDateTime as i64;
     let is_dir = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
     Ok(Some(FileStat {
         size,
         mtime_ft,
+        created_ft,
         is_dir,
     }))
 }

@@ -150,6 +150,11 @@ impl TableWriter {
                     .map(|ft| format_date_local(ft, &self.time_zone))
                     .unwrap_or_default()
                     .into(),
+                EsColumn::DateCreated => item
+                    .created_ft
+                    .map(|ft| format_date_local(ft, &self.time_zone))
+                    .unwrap_or_default()
+                    .into(),
                 EsColumn::Attributes => match item.attributes {
                     Some(attributes) if plain => attributes.letters().into(),
                     Some(attributes) => attributes.bits().to_string().into(),
@@ -170,13 +175,16 @@ impl TableWriter {
                 EsColumn::Size if plain => {
                     out.extend_from_slice(format!("{cell:>PLAIN_SIZE_WIDTH$}").as_bytes());
                 }
-                EsColumn::DateModified if plain && !last => {
+                EsColumn::DateModified | EsColumn::DateCreated if plain && !last => {
                     out.extend_from_slice(format!("{cell:<PLAIN_DATE_WIDTH$}").as_bytes());
                 }
                 EsColumn::Attributes if plain && !last => {
                     out.extend_from_slice(format!("{cell:<PLAIN_ATTRIBUTES_WIDTH$}").as_bytes());
                 }
-                EsColumn::Size | EsColumn::DateModified | EsColumn::Attributes => {
+                EsColumn::Size
+                | EsColumn::DateModified
+                | EsColumn::DateCreated
+                | EsColumn::Attributes => {
                     out.extend_from_slice(cell.as_bytes());
                 }
             }
@@ -220,6 +228,7 @@ fn column_name(column: EsColumn) -> &'static str {
         EsColumn::Extension => "Extension",
         EsColumn::Size => "Size",
         EsColumn::DateModified => "Date Modified",
+        EsColumn::DateCreated => "Date Created",
         EsColumn::Attributes => "Attributes",
     }
 }
@@ -269,6 +278,7 @@ mod tests {
             path_u16: None,
             size,
             mtime_ft,
+            created_ft: None,
             is_dir,
             attributes: None,
         }

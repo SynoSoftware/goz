@@ -257,6 +257,7 @@ fn main() {
         limit,
         want_size: false,
         want_mtime: false,
+        want_created: false,
         want_attributes: false,
         want_sums: false,
     };

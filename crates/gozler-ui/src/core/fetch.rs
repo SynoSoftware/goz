@@ -5,7 +5,7 @@
 
 use super::panel::Side;
 use gozler_client::NotRunning;
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::output::ResultFormat;
 use gozler_core::proto::{
     DaemonStatus, PROTO_VERSION, QueryTotals, Request, ResultItem, ResultSnapshotId, Returns, Rows,
@@ -107,7 +107,7 @@ pub(crate) enum Ask {
     /// [`Outcome::Rows`].
     Program(ChunkAsk),
     /// How many entries the index would keep under the settings.
-    CountIncluded(IncludeSettings),
+    CountIncluded(IndexSettings),
     /// The Include settings are saved, so the service applies them.
     SettingsSaved,
     /// The direct subfolders of a panel's folder, whose sizes the panel
@@ -155,6 +155,7 @@ impl ChunkAsk {
             limit,
             want_size: true,
             want_mtime: true,
+            want_created: false,
             // Four bytes a row, so showing the Attributes column needs no
             // second request.
             want_attributes: true,
@@ -174,6 +175,7 @@ impl ChunkAsk {
                 limit,
                 want_size: rows.want_size,
                 want_mtime: rows.want_mtime,
+                want_created: false,
                 want_attributes: rows.want_attributes,
             }),
             FromSnapshot::Sort(id) => Request::SortResultSnapshot(SortSnapshotRequest { id, rows }),
@@ -229,6 +231,7 @@ impl ExportAsk {
             limit: None,
             want_size: true,
             want_mtime: true,
+            want_created: false,
             want_attributes: self.want_attributes,
             want_sums: false,
         }))

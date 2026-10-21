@@ -62,6 +62,7 @@ fn row(path: String) -> ResultItem {
         path_u16: None,
         size: Some(123_456_789),
         mtime_ft: Some(133_400_000_000_000_000),
+        created_ft: None,
         is_dir: false,
         attributes: None,
     }

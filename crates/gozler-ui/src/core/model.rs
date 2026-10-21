@@ -28,7 +28,7 @@ use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerSta
 use super::text::{self, LanguageChoice, Numbers, Strings};
 use super::update;
 use gozler_core::escompat::EsPlan;
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::output::Format;
 use gozler_core::proto::{DaemonStatus, ResultItem, VolumeStatus};
 use gozler_core::query::{ParsedQuery, QueryStart};
@@ -833,7 +833,7 @@ impl Model {
     /// Settings > Include's preview, which cancels an earlier one: how
     /// many entries the index keeps under `settings` (DESIGN.md: The
     /// Include page).
-    pub(crate) fn count_included(&mut self, settings: IncludeSettings) -> Fetch {
+    pub(crate) fn count_included(&mut self, settings: IndexSettings) -> Fetch {
         let generation = self.generation();
         self.include_count_asked = Some(generation);
         self.included_count = None;
@@ -3547,14 +3547,14 @@ pub(crate) mod tests {
             generation: fetch.generation,
             outcome: Outcome::IncludedCount(7),
         };
-        let first = model.count_included(IncludeSettings::default());
+        let first = model.count_included(IndexSettings::default());
         assert_eq!(
             model.forget_included_count().then,
             Some(Then::Cancel(Purpose::IncludeCount))
         );
         assert_eq!(model.accept(counted(&first)).change, Change::Nothing);
         assert_eq!(model.included_count(), None);
-        let second = model.count_included(IncludeSettings::default());
+        let second = model.count_included(IndexSettings::default());
         assert_eq!(model.accept(counted(&second)).change, Change::IncludedCount);
         assert_eq!(model.included_count(), Some(&Ok(7)));
         // Closing Settings forgets it, so the next session starts empty.

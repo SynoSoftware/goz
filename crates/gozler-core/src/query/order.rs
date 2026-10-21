@@ -76,6 +76,7 @@ pub(crate) enum KeyValue {
     },
     Size(Option<u64>),
     DateModified(Option<i64>),
+    DateCreated(Option<i64>),
     /// The place of the match's folded [`extension`] among the distinct
     /// extensions of the matches, `None` first.
     Extension(u32),
@@ -108,7 +109,9 @@ pub(crate) fn primary_key(dir: SortDir, value: KeyValue) -> u64 {
         KeyValue::Size(size) => unknown_last(size),
         // Flipping the sign bit orders an `i64` as a `u64`. The index stores
         // an unknown date as i64::MIN, so a known one maps to 1 or more.
-        KeyValue::DateModified(mtime) => unknown_last(mtime.map(|t| ((t as u64) ^ (1 << 63)) - 1)),
+        KeyValue::DateModified(date) | KeyValue::DateCreated(date) => {
+            unknown_last(date.map(|t| ((t as u64) ^ (1 << 63)) - 1))
+        }
         KeyValue::Extension(rank) => directed(u64::from(rank)),
     }
 }
@@ -133,6 +136,7 @@ pub(crate) trait OrderFields {
     fn folded_name(&self) -> &[u8];
     fn size(&self) -> Option<u64>;
     fn mtime(&self) -> Option<i64>;
+    fn created(&self) -> Option<i64>;
     /// Tells volumes apart; constant within one volume.
     fn volume(&self) -> &[u8];
     fn frn(&self) -> Frn;
@@ -155,6 +159,7 @@ pub(crate) fn compare<T: OrderFields>(sort: SortSpec, a: &T, b: &T) -> Ordering 
         ),
         SortKey::Size => unknown_last(sort.dir, a.size(), b.size()),
         SortKey::DateModified => unknown_last(sort.dir, a.mtime(), b.mtime()),
+        SortKey::DateCreated => unknown_last(sort.dir, a.created(), b.created()),
         // Folding keeps every `.` where it is, so the extension of the folded
         // name is the folded extension.
         SortKey::Extension => directed(

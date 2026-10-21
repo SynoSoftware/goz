@@ -81,6 +81,9 @@ pub enum SortKey {
     /// The extension, case-insensitive; an entry without one, a folder
     /// included, sorts before every extension. From protocol 5.
     Extension,
+    /// Unknown, also while Dates created is off, sorts last, as an unknown
+    /// date modified does. From protocol 13.
+    DateCreated,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +104,7 @@ impl SortSpec {
     pub fn default_for(key: SortKey) -> Self {
         let dir = match key {
             SortKey::Name | SortKey::Path | SortKey::Extension => SortDir::Asc,
-            SortKey::Size | SortKey::DateModified => SortDir::Desc,
+            SortKey::Size | SortKey::DateModified | SortKey::DateCreated => SortDir::Desc,
         };
         Self { key, dir }
     }
@@ -126,6 +129,8 @@ pub enum EsColumn {
     Extension,
     Size,
     DateModified,
+    /// Known only on an index with Dates created on.
+    DateCreated,
     Attributes,
 }
 

@@ -597,10 +597,7 @@ fn rescan(
 /// rebuild, because the index no longer holds it.
 fn apply_rules_in_place(state: &VolumeState, rules: Arc<VolumeRules>) -> bool {
     let mut index = state.index_mut();
-    if index
-        .include_rules()
-        .is_some_and(|applied| rules.adds_to(applied))
-    {
+    if index.lacks_for(&rules) {
         return false;
     }
     tracing::info!(volume = %state.mount_prefix(), "applying the changed Include settings");

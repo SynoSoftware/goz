@@ -59,6 +59,7 @@
     "path": "&Ruta de acceso",
     "size": "&Tamaño",
     "date_modified": "&Fecha de modificación",
+    "date_created": "Fec&ha de creación",
     "extension": "&Extensión",
     "attributes": "&Atributos",
     "fit": "A&justar columna «{0}»",
@@ -69,6 +70,7 @@
     "path": "Ruta de acceso",
     "size": "Tamaño",
     "date_modified": "Fecha de modificación",
+    "date_created": "Fecha de creación",
     "extension": "Extensión",
     "attributes": "Atributos",
     "folder": "Carpeta"
@@ -78,6 +80,7 @@
     "path": "&Ruta de acceso",
     "size": "&Tamaño",
     "date_modified": "&Fecha de modificación",
+    "date_created": "Fec&ha de creación",
     "extension": "&Extensión",
     "ascending": "&Ascendente",
     "descending": "&Descendente"
@@ -371,10 +374,10 @@
     "or_without_terms": "| necesita un término a cada lado, como pdf|docx.",
     "operator_on_nothing": "{0} no comprueba nada, así que ! y | no se le pueden aplicar. Quita el ! o el |.",
     "size": "{0} no es un tamaño. Usa un tamaño como size:large o size:1mb..10mb.",
-    "reversed_dates": "{0} va hacia atrás. Escribe primero la fecha anterior, como dm:2026-01-01..2026-03-31.",
-    "date_out_of_range": "{0} está fuera de las fechas que puedes buscar. Usa una fecha como dm:2026-01-31.",
-    "days": "{0} necesita un número de días mayor que 0, como dm:7days.",
-    "date": "{0} no es una fecha. Usa una fecha como dm:today, dm:yesterday o dm:2026-01-31.",
+    "reversed_dates": "{0} va hacia atrás. Escribe primero la fecha anterior, como {1}2026-01-01..2026-03-31.",
+    "date_out_of_range": "{0} está fuera de las fechas que puedes buscar. Usa una fecha como {1}2026-01-31.",
+    "days": "{0} necesita un número de días mayor que 0, como {1}7days.",
+    "date": "{0} no es una fecha. Usa una fecha como {1}today, {1}yesterday o {1}2026-01-31.",
     "no_parent_folder": "parent: necesita una carpeta, como parent:C:\\Users\\Public.",
     "attribute_letter": "{0} no es una letra de atributo. Usa una letra como attrib:h para los elementos ocultos, o presiona F1 para verlas todas.",
     "regex": "La expresión regular no es válida. Cámbiala y vuelve a buscar.\n\n{0}"

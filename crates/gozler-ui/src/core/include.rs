@@ -4,7 +4,7 @@
 //! names the drives and folders as the person sees them.
 
 use super::text::{Numbers, Strings};
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::proto::DaemonStatus;
 
 /// A drive that the Include settings can name: one the service indexes or
@@ -28,7 +28,7 @@ pub(crate) struct IncludeDrive {
 /// a mount prefix, which only Windows knows.
 pub(crate) fn include_drives(
     status: &DaemonStatus,
-    settings: &IncludeSettings,
+    settings: &IndexSettings,
     label: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<IncludeDrive> {
     let connected = status
@@ -113,7 +113,7 @@ impl SummaryRow {
 /// with the folders left out inside it.
 pub(crate) fn summary_rows(
     drives: &[IncludeDrive],
-    settings: &IncludeSettings,
+    settings: &IndexSettings,
     strings: &Strings,
     numbers: &dyn Numbers,
 ) -> Vec<SummaryRow> {
@@ -141,7 +141,7 @@ pub(crate) fn summary_rows(
     rows
 }
 
-/// The pairs of GUID path and name that `IncludeSettings::with_drives`
+/// The pairs of GUID path and name that `IndexSettings::with_drives`
 /// takes, for the connected drives.
 pub(crate) fn connected_drives(drives: &[IncludeDrive]) -> Vec<(String, String)> {
     drives

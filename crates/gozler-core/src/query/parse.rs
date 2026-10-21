@@ -28,7 +28,7 @@
 //! paths, terms keep the text as typed; the daemon folds them when it
 //! compiles the query ([`super::CompiledQuery`]).
 
-use super::dates::{DateRange, QueryStart, date_range};
+use super::dates::{DateField, DateRange, QueryStart, date_range};
 use crate::attributes::Attributes;
 use serde::{Deserialize, Serialize};
 
@@ -204,18 +204,33 @@ pub enum Test {
     /// The date modified is in this range, resolved by the client from its
     /// clock and time zone. From protocol 5.
     DateModified(DateRange),
+    /// The date created is in this range, resolved as for
+    /// [`Test::DateModified`]. Only an index with Dates created on holds
+    /// the dates. From protocol 13.
+    DateCreated(DateRange),
     /// The entry has every one of these attributes. From protocol 6.
     Attributes(Attributes),
 }
 
 impl ParsedQuery {
-    /// Whether a term tests the size or the date modified, so an answer from
-    /// a volume whose sizes and dates could not be read may leave files out.
+    /// Whether a term tests the size or a date, so an answer from a volume
+    /// whose sizes and dates could not be read may leave files out.
     pub fn tests_size_or_date(&self) -> bool {
+        self.clauses.iter().flat_map(|c| &c.terms).any(|t| {
+            matches!(
+                t.test,
+                Test::Size(_) | Test::DateModified(_) | Test::DateCreated(_)
+            )
+        })
+    }
+
+    /// Whether a term tests the date created, which only an index with
+    /// Dates created on holds.
+    pub fn tests_date_created(&self) -> bool {
         self.clauses
             .iter()
             .flat_map(|c| &c.terms)
-            .any(|t| matches!(t.test, Test::Size(_) | Test::DateModified(_)))
+            .any(|t| matches!(t.test, Test::DateCreated(_)))
     }
 
     /// `true` when no term tests text: the query matches everything its
@@ -261,9 +276,10 @@ pub enum QueryError {
         "{0} is a relative path, and this query has no working directory to resolve it; give the full path"
     )]
     RelativePath(String),
-    /// A `dm:` term in a query parsed without a query start to resolve it.
-    #[error("dm: needs the time the search starts, and this query was parsed without one")]
-    NoQueryStart,
+    /// A `dm:` or `dc:` term in a query parsed without a query start to
+    /// resolve it.
+    #[error("{0} needs the time the search starts, and this query was parsed without one")]
+    NoQueryStart(DateField),
     /// More terms than a query may hold; carries the query's count.
     #[error("the query has {0} terms; a query may have at most {max}", max = super::engine::MAX_QUERY_TERMS)]
     TooManyTerms(usize),
@@ -297,16 +313,16 @@ pub enum Malformed {
     #[error("size: {0} is not a size; write a number with kb, mb, gb or tb, such as 10mb")]
     Size(String),
     /// A date range whose lower value starts after its upper one.
-    #[error("dm: {0} is a reversed range; write the earlier date first")]
-    ReversedDates(String),
+    #[error("{0} {1} is a reversed range; write the earlier date first")]
+    ReversedDates(DateField, String),
     /// A date before or after every date the resolver can hold.
-    #[error("dm: {0} is out of range")]
-    DateOutOfRange(String),
+    #[error("{0} {1} is out of range")]
+    DateOutOfRange(DateField, String),
     /// `Ndays` without a number of days above 0.
-    #[error("dm: {0} needs a number of days above 0")]
-    Days(String),
-    #[error("dm: {0} is not a date; use today, yesterday, Ndays or YYYY-MM-DD")]
-    Date(String),
+    #[error("{0} {1} needs a number of days above 0")]
+    Days(DateField, String),
+    #[error("{0} {1} is not a date; use today, yesterday, Ndays or YYYY-MM-DD")]
+    Date(DateField, String),
     /// `parent:` without a folder.
     #[error("parent: needs a folder")]
     NoParentFolder,
@@ -337,7 +353,7 @@ pub(crate) struct SearchFunction {
 enum Function {
     Ext,
     Size,
-    DateModified,
+    Date(DateField),
     Path,
     Parent,
     NoPath,
@@ -372,10 +388,17 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
     },
     SearchFunction {
         names: &["dm", "datemodified", "date-modified"],
-        function: Function::DateModified,
+        function: Function::Date(DateField::Modified),
         example: "today",
         help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD` or `Ndays`; also `<`, `<=`, `>`, \
                `>=` and ranges such as `2026-01-01..2026-03-31`",
+    },
+    SearchFunction {
+        names: &["dc", "datecreated", "date-created"],
+        function: Function::Date(DateField::Created),
+        example: "today",
+        help: "Date created, with the values of `dm:`; needs Dates created, on the window's \
+               Settings > Drives and service page",
     },
     SearchFunction {
         names: &["path"],
@@ -744,9 +767,13 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
         match function_named(name) {
             Some(Function::Ext) => return Ok(Operand::Extensions(extensions(value))),
             Some(Function::Size) => return Ok(Operand::Size(parse_size(value)?)),
-            Some(Function::DateModified) => {
-                let start = options.query_start.ok_or(QueryError::NoQueryStart)?;
-                return Ok(Operand::Text(Test::DateModified(date_range(value, start)?)));
+            Some(Function::Date(field)) => {
+                let start = options.query_start.ok_or(QueryError::NoQueryStart(field))?;
+                let range = date_range(value, start, field)?;
+                return Ok(Operand::Text(match field {
+                    DateField::Modified => Test::DateModified(range),
+                    DateField::Created => Test::DateCreated(range),
+                }));
             }
             Some(Function::Path) => {
                 let path = path_text(value, options.working_dir)?;
@@ -1452,8 +1479,8 @@ mod tests {
     #[test]
     fn an_unknown_function_is_refused() {
         assert_eq!(
-            parse_query("x !DC:today"),
-            Err(QueryError::UnknownFunction("DC".to_string()))
+            parse_query("x !DA:today"),
+            Err(QueryError::UnknownFunction("DA".to_string()))
         );
         assert_eq!(tests(r"C:\repo"), [Test::Path(r"C:\repo".to_string())]);
     }

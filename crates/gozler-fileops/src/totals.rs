@@ -158,7 +158,7 @@ mod gozlerd {
 
 #[cfg(test)]
 mod tests {
-    use gozler_core::include::IncludeSettings;
+    use gozler_core::include::IndexSettings;
     use gozler_core::proto::{DaemonStatus, VolumeStatus};
     use gozler_core::types::VolumePhase;
 
@@ -186,7 +186,7 @@ mod tests {
         }
     }
 
-    fn status(include: Option<IncludeSettings>) -> DaemonStatus {
+    fn status(include: Option<IndexSettings>) -> DaemonStatus {
         DaemonStatus {
             volumes: vec![
                 volume(r"\\?\Volume{c}\", &[r"C:\"]),
@@ -218,12 +218,12 @@ mod tests {
     #[test]
     fn include_settings_that_leave_entries_out_give_no_total() {
         let users = identity(r"\\?\Volume{c}\Users");
-        let hidden_left_out = IncludeSettings {
+        let hidden_left_out = IndexSettings {
             exclude_hidden: true,
-            ..IncludeSettings::default()
+            ..IndexSettings::default()
         };
         assert_eq!(scope(&status(Some(hidden_left_out)), &users), None);
-        let every_entry = status(Some(IncludeSettings::default()));
+        let every_entry = status(Some(IndexSettings::default()));
         assert_eq!(scope(&every_entry, &users).as_deref(), Some(r"C:\Users"));
     }
 }

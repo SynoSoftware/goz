@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::os::windows::io::AsHandle;
 use std::time::{Duration, Instant};
 
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::proto::{
     DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PROTO_VERSION, ProtoError, QueryResults,
     QueryTotals, Request, Response, ResultSnapshotId, SERVICE_NAME, SearchRequest,
@@ -265,7 +265,7 @@ impl Client {
     }
 
     /// How many entries the index would keep under `settings`.
-    pub fn count_included(&mut self, settings: IncludeSettings) -> Result<u64, ClientError> {
+    pub fn count_included(&mut self, settings: IndexSettings) -> Result<u64, ClientError> {
         self.send(&Request::CountIncluded(settings))?;
         match self.next_response()? {
             Response::IncludedCount { entries } => Ok(entries),

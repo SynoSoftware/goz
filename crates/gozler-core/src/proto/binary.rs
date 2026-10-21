@@ -36,9 +36,11 @@
 //!   iflags:   u8        bit0 is_dir, bit1 has_size, bit2 has_mtime,
 //!                       bit3 has_attributes, bit4 gone: a row of a result
 //!                       snapshot whose file is gone, whose folder is
-//!                       u32::MAX and whose name is empty, with no other bit
+//!                       u32::MAX and whose name is empty, with no other bit;
+//!                       bit5 has_created
 //!   size:     u64 LE    iff has_size
 //!   mtime:    i64 LE    iff has_mtime
+//!   created:  i64 LE    iff has_created
 //!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
 //! sums, iff has_sums, after the items:
 //!   files:                u64 LE
@@ -92,6 +94,7 @@ const IFLAG_HAS_SIZE: u8 = 1 << 1;
 const IFLAG_HAS_MTIME: u8 = 1 << 2;
 const IFLAG_HAS_ATTRIBUTES: u8 = 1 << 3;
 const IFLAG_GONE: u8 = 1 << 4;
+const IFLAG_HAS_CREATED: u8 = 1 << 5;
 
 /// A folder's parent field for a volume's root.
 const NO_PARENT: u32 = u32::MAX;
@@ -130,6 +133,7 @@ pub struct PageItem<'a> {
     pub is_dir: bool,
     pub size: Option<u64>,
     pub mtime: Option<i64>,
+    pub created: Option<i64>,
     pub attributes: Option<Attributes>,
 }
 
@@ -254,6 +258,9 @@ impl ResultsPage {
         if item.mtime.is_some() {
             iflags |= IFLAG_HAS_MTIME;
         }
+        if item.created.is_some() {
+            iflags |= IFLAG_HAS_CREATED;
+        }
         if item.attributes.is_some() {
             iflags |= IFLAG_HAS_ATTRIBUTES;
         }
@@ -263,6 +270,9 @@ impl ResultsPage {
         }
         if let Some(m) = item.mtime {
             self.items.extend_from_slice(&m.to_le_bytes());
+        }
+        if let Some(c) = item.created {
+            self.items.extend_from_slice(&c.to_le_bytes());
         }
         if let Some(a) = item.attributes {
             self.items.extend_from_slice(&a.bits().to_le_bytes());
@@ -351,6 +361,7 @@ pub fn encode_page<V: IndexedVolume>(
             row,
             wanted.want_size,
             wanted.want_mtime,
+            wanted.want_created,
             wanted.want_attributes,
         );
         page.push(item, names, sent)
@@ -386,6 +397,7 @@ pub fn encode_snapshot_page<V: IndexedVolume>(
                 row,
                 wanted.want_size,
                 wanted.want_mtime,
+                wanted.want_created,
                 wanted.want_attributes,
             );
             page.push(item, names, sent)
@@ -401,13 +413,20 @@ pub fn encode_snapshot_page<V: IndexedVolume>(
 }
 
 /// The item of `row` with the values a request asks for.
-fn page_item(row: RowView<'_>, size: bool, mtime: bool, attributes: bool) -> PageItem<'_> {
+fn page_item(
+    row: RowView<'_>,
+    size: bool,
+    mtime: bool,
+    created: bool,
+    attributes: bool,
+) -> PageItem<'_> {
     PageItem {
         folder: row.folder,
         name: row.name,
         is_dir: row.is_dir,
         size: size.then_some(row.size).flatten(),
         mtime: mtime.then_some(row.mtime).flatten(),
+        created: created.then_some(row.created).flatten(),
         attributes: attributes.then_some(row.attributes),
     }
 }
@@ -511,6 +530,9 @@ pub fn decode_results_payload(
         let mtime = (iflags & IFLAG_HAS_MTIME != 0)
             .then(|| r.i64())
             .transpose()?;
+        let created = (iflags & IFLAG_HAS_CREATED != 0)
+            .then(|| r.i64())
+            .transpose()?;
         let attributes = (iflags & IFLAG_HAS_ATTRIBUTES != 0)
             .then(|| {
                 Attributes::try_from(r.u32()?).map_err(|_| BinError("unindexed attribute bits"))
@@ -523,6 +545,7 @@ pub fn decode_results_payload(
             path_u16: lossy.then(|| wtf8::to_utf16(&path)),
             size,
             mtime_ft: mtime,
+            created_ft: created,
             is_dir: iflags & IFLAG_IS_DIR != 0,
             attributes,
         });
@@ -589,6 +612,7 @@ mod tests {
             is_dir: false,
             size: None,
             mtime: None,
+            created: None,
             attributes: None,
         }
     }
@@ -641,6 +665,7 @@ mod tests {
             PageItem {
                 size: Some(1234),
                 mtime: Some(133_500_000_000_000_000),
+                created: Some(133_400_000_000_000_000),
                 attributes: Some(hidden_archive()),
                 ..item(t.system32, b"kernel32.dll")
             },
@@ -678,6 +703,7 @@ mod tests {
                         path_u16: None,
                         size: Some(1234),
                         mtime_ft: Some(133_500_000_000_000_000),
+                        created_ft: Some(133_400_000_000_000_000),
                         is_dir: false,
                         attributes: Some(hidden_archive()),
                     },
@@ -686,6 +712,7 @@ mod tests {
                         path_u16: None,
                         size: None,
                         mtime_ft: None,
+                        created_ft: None,
                         is_dir: true,
                         attributes: None,
                     },
@@ -694,6 +721,7 @@ mod tests {
                         path_u16: None,
                         size: Some(0),
                         mtime_ft: Some(-1),
+                        created_ft: None,
                         is_dir: false,
                         attributes: None,
                     },
@@ -813,6 +841,7 @@ mod tests {
                 path_u16: Some([&[b'C' as u16, b':' as u16, b'\\' as u16][..], &units].concat()),
                 size: None,
                 mtime_ft: None,
+                created_ft: None,
                 is_dir: false,
                 attributes: None,
             }]

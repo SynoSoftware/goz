@@ -39,7 +39,7 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::proto::LeftOutVolume;
 use gozler_core::types::VolumePhase;
 use gozler_winfs::{VolumeInfo, WinError};
@@ -196,7 +196,7 @@ impl Supervisor {
     /// when the OS refuses the thread; nothing would index the volumes then.
     pub(crate) fn spawn(
         enumerated: Vec<VolumeInfo>,
-        include: IncludeSettings,
+        include: IndexSettings,
         rebuild: Option<String>,
     ) -> std::io::Result<Supervisor> {
         let volumes = Arc::new(VolumeRegistry::default());
@@ -1097,7 +1097,7 @@ mod tests {
         let indexed = r"\\?\Volume{11111111-0000-0000-0000-000000000000}\";
         let usb_stick = r"\\?\Volume{22222222-0000-0000-0000-000000000000}\";
         let volumes = Arc::new(VolumeRegistry::default());
-        let defaults = IncludeSettings::default();
+        let defaults = IndexSettings::default();
         volumes.add(Arc::new(VolumeState::new(
             indexed.into(),
             vec![r"E:\".into()],
@@ -1138,7 +1138,7 @@ mod tests {
     #[test]
     fn changed_include_settings_start_a_tail_for_a_volume_without_one() {
         let snapshot = r"\\?\Volume{33333333-0000-0000-0000-000000000000}\";
-        let defaults = IncludeSettings::default();
+        let defaults = IndexSettings::default();
         let volumes = Arc::new(VolumeRegistry::default());
         volumes.add(Arc::new(VolumeState::new(
             snapshot.into(),
@@ -1146,7 +1146,7 @@ mod tests {
             bootstrap::Filesystem::Ntfs,
             Arc::new(defaults.rules_for(snapshot)),
         )));
-        let changed = IncludeSettings {
+        let changed = IndexSettings {
             exclude_hidden: true,
             ..defaults
         };
@@ -1191,7 +1191,7 @@ mod tests {
         let mut fleet = Fleet {
             volumes,
             include: Arc::new(Include::new(
-                IncludeSettings::default(),
+                IndexSettings::default(),
                 None,
                 Box::new(|| {}),
             )),

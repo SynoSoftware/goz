@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::attributes::Attributes;
-use crate::include::IncludeSettings;
+use crate::include::IndexSettings;
 use crate::query::{MatchSums, ParsedQuery, RowsSpec, SearchTotals};
 use crate::scope::VolumeMounts;
 use crate::types::{SortSpec, VolumePhase};
@@ -20,7 +20,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 12;
+pub const PROTO_VERSION: u16 = 13;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -71,7 +71,7 @@ pub enum Request {
     SettingsSaved,
     /// How many entries the index would keep under these
     /// Include settings. Changes nothing.
-    CountIncluded(IncludeSettings),
+    CountIncluded(IndexSettings),
     /// Rows of a result snapshot that a [`Returns::ResultSnapshot`] search
     /// made, as [`Response::Results`] pages.
     ResultSnapshotRows(SnapshotRowsRequest),
@@ -113,6 +113,8 @@ pub struct SnapshotRowsRequest {
     pub limit: Option<u32>,
     pub want_size: bool,
     pub want_mtime: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_created: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_attributes: bool,
 }
@@ -170,6 +172,9 @@ pub struct Rows {
     pub want_size: bool,
     /// Populate [`ResultItem::mtime_ft`] (skip the lookup otherwise).
     pub want_mtime: bool,
+    /// Populate [`ResultItem::created_ft`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_created: bool,
     /// Populate [`ResultItem::attributes`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_attributes: bool,
@@ -320,6 +325,10 @@ pub struct ResultItem {
     /// The client formats it (locale/timezone stays client-side).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mtime_ft: Option<i64>,
+    /// Raw FILETIME creation stamp; `None` = unknown, not requested, or
+    /// Dates created off.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub created_ft: Option<i64>,
     pub is_dir: bool,
     /// The attributes, as `FILE_ATTRIBUTE_*` bits; `None` = not requested.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -335,6 +344,7 @@ impl ResultItem {
             path_u16: None,
             size: None,
             mtime_ft: None,
+            created_ft: None,
             is_dir: false,
             attributes: None,
         }
@@ -364,7 +374,7 @@ pub struct DaemonStatus {
     /// The Include settings the daemon applies; `None` from a daemon before
     /// protocol 8.
     #[serde(default)]
-    pub include: Option<IncludeSettings>,
+    pub include: Option<IndexSettings>,
     /// The fixed NTFS and ReFS volumes that the Include settings leave out,
     /// which [`Self::volumes`] does not list.
     #[serde(default)]
@@ -529,6 +539,7 @@ mod tests {
             limit: None,
             want_size: true,
             want_mtime: false,
+            want_created: false,
             want_attributes: false,
         }));
     }
@@ -540,6 +551,7 @@ mod tests {
                 path_u16: None,
                 size: Some(1234),
                 mtime_ft: Some(133_500_000_000_000_000),
+                created_ft: None,
                 is_dir: false,
                 attributes: None,
             },
@@ -548,6 +560,7 @@ mod tests {
                 path_u16: None,
                 size: None,
                 mtime_ft: None,
+                created_ft: None,
                 is_dir: true,
                 attributes: None,
             },
@@ -648,7 +661,7 @@ mod tests {
             volumes_incomplete: true,
             process_working_set: 123_456_789,
             process_private_bytes: 987_654_321,
-            include: Some(crate::include::IncludeSettings::default()),
+            include: Some(crate::include::IndexSettings::default()),
             left_out: vec![LeftOutVolume {
                 guid: r"\\?\Volume{d}\".into(),
                 mounts: vec![r"D:\".into()],
@@ -677,6 +690,7 @@ mod tests {
             path_u16: None,
             size: None,
             mtime_ft: None,
+            created_ft: None,
             is_dir: false,
             attributes: None,
         };
@@ -708,6 +722,7 @@ mod tests {
             path_u16: Some(units.clone()),
             size: Some(7),
             mtime_ft: Some(-1),
+            created_ft: None,
             is_dir: false,
             attributes: None,
         };

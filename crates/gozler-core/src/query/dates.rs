@@ -1,5 +1,5 @@
-//! The date resolver: a `dm:` value turned into the UTC bounds the daemon
-//! compares, from the query start and its time zone.
+//! The date resolver: a `dm:` or `dc:` value turned into the UTC bounds the
+//! daemon compares, from the query start and its time zone.
 //!
 //! `today`, `yesterday` and an ISO date `YYYY-MM-DD` are calendar days in the
 //! time zone, from midnight to the next midnight, so a day around a
@@ -20,8 +20,33 @@ use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
+/// Which date of an entry a date function tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DateField {
+    /// `dm:`
+    Modified,
+    /// `dc:`
+    Created,
+}
+
+impl DateField {
+    /// The function's name as a query writes it, with its colon.
+    pub fn function(self) -> &'static str {
+        match self {
+            DateField::Modified => "dm:",
+            DateField::Created => "dc:",
+        }
+    }
+}
+
+impl std::fmt::Display for DateField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.function())
+    }
+}
+
 /// When a query starts and the time zone its calendar days are in: what a
-/// `dm:` value resolves against.
+/// date value resolves against.
 #[derive(Clone, Debug)]
 pub struct QueryStart {
     pub now: Timestamp,
@@ -49,8 +74,12 @@ struct Period {
     end: Timestamp,
 }
 
-/// The [`DateRange`] of a `dm:` value, read against `start`.
-pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, QueryError> {
+/// The [`DateRange`] of a value of `field`'s function, read against `start`.
+pub(crate) fn date_range(
+    value: &str,
+    start: &QueryStart,
+    field: DateField,
+) -> Result<DateRange, QueryError> {
     let value = value.trim();
     // The first tick at or after `at`, and the last tick before it.
     let from = |at: Timestamp| unix_ms_to_filetime(at.as_millisecond());
@@ -58,15 +87,16 @@ pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, Q
 
     if let Some((lower, upper)) = value.split_once("..") {
         let lower = (!lower.trim().is_empty())
-            .then(|| period(lower, start))
+            .then(|| period(lower, start, field))
             .transpose()?;
         let upper = (!upper.trim().is_empty())
-            .then(|| period(upper, start))
+            .then(|| period(upper, start, field))
             .transpose()?;
         if let (Some(lower), Some(upper)) = (lower, upper)
             && lower.start > upper.start
         {
             return Err(QueryError::Malformed(Malformed::ReversedDates(
+                field,
                 value.to_string(),
             )));
         }
@@ -79,7 +109,7 @@ pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, Q
     // Two-character operators before their one-character prefixes.
     for op in [">=", "<=", ">", "<", "="] {
         if let Some(rest) = value.strip_prefix(op) {
-            let p = period(rest, start)?;
+            let p = period(rest, start, field)?;
             return Ok(match op {
                 ">=" => DateRange {
                     min: from(p.start),
@@ -105,7 +135,7 @@ pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, Q
             });
         }
     }
-    let p = period(value, start)?;
+    let p = period(value, start, field)?;
     Ok(DateRange {
         min: from(p.start),
         max: before(p.end),
@@ -113,10 +143,11 @@ pub(crate) fn date_range(value: &str, start: &QueryStart) -> Result<DateRange, Q
 }
 
 /// The period one date value names: a calendar day or the last N days.
-fn period(value: &str, start: &QueryStart) -> Result<Period, QueryError> {
+fn period(value: &str, start: &QueryStart, field: DateField) -> Result<Period, QueryError> {
     let value = value.trim();
-    let malformed =
-        |reason: fn(String) -> Malformed| QueryError::Malformed(reason(value.to_string()));
+    let malformed = |reason: fn(DateField, String) -> Malformed| {
+        QueryError::Malformed(reason(field, value.to_string()))
+    };
     let out_of_range = |_| malformed(Malformed::DateOutOfRange);
     let today = || start.now.to_zoned(start.time_zone.clone()).date();
     let lower = value.to_ascii_lowercase();
@@ -205,7 +236,7 @@ mod tests {
     }
 
     fn range(value: &str, start: &QueryStart) -> DateRange {
-        date_range(value, start).unwrap_or_else(|e| panic!("{value}: {e}"))
+        date_range(value, start, DateField::Modified).unwrap_or_else(|e| panic!("{value}: {e}"))
     }
 
     /// A calendar day starts at local midnight, not at UTC midnight or at the
@@ -303,9 +334,9 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    date_range(value, &start),
+                    date_range(value, &start, DateField::Modified),
                     Err(QueryError::Malformed(
-                        Malformed::ReversedDates(_) | Malformed::Days(_) | Malformed::Date(_)
+                        Malformed::ReversedDates(..) | Malformed::Days(..) | Malformed::Date(..)
                     ))
                 ),
                 "{value}"

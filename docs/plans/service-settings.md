@@ -50,43 +50,11 @@ with Dates created and Rebuild index.
   with entries, and of the Select Users or Groups dialog it opens.
 - **Dates created** is off by default, because it adds memory per entry to the
   service. The page shows the service's memory, so the person sees the cost
-  after they turn it on. It is a search feature, so `gozler` gets `dc:` in the
-  same change, because the window adds no search feature that `gozler` lacks.
+  after they turn it on. The service, `dc:`, `-dc` and `-sort dc` are built:
+  `docs/DESIGN.md` describes them in "Include settings".
 
 Dates created takes over Everything's Index date created, on its Indexes
 page, as Rebuild index took over Force Rebuild.
-
-## How the service applies Dates created
-
-Dates created decides what the index holds, as Include does, so it is a field
-of the saved Include settings, inside the `Include` value, and not a value of
-its own. Then `Request::SettingsSaved` reloads it with Include, and a change
-reaches every volume by Include's route: the supervisor gives each volume its
-new rules, and the volume's tail applies them, or a new tail for a volume
-without one. Turning it off drops the dates in place; turning it on rebuilds
-the volume, because only a read of the volume brings the dates. The list of
-who sees every file stays a value of its own, because the service reads it
-for each search and nothing in the index depends on it.
-
-Three conditions, each a silent defect if missed:
-
-- `IncludeSettings::rules_key`, which its `PartialEq` compares, includes the
-  field; otherwise `Include::reload` sees no change and returns early.
-- `VolumeRules` carries the field, so that `VolumeRules::adds_to` reports
-  turning it on as adding and `VolumeState::set_rules` flags the change.
-- The field is `#[serde(default)]`, off, so a value saved before it still
-  loads.
-
-The type then holds more than Include, so this change renames
-`IncludeSettings` to `IndexSettings`. The registry value keeps its name
-`Include`, because renaming it would need a migration, and the wire carries
-the fields, not the type's name, so neither saved data nor the protocol
-changes.
-
-**`dc:` while Dates created is off** is refused, with a message that names
-the setting, as a scope on no indexed volume is refused: an empty answer
-would read as "no such file". It is not the parser's "unknown function"
-(exit 4), because the function exists.
 
 ## The Date created column
 

@@ -59,6 +59,7 @@
     "path": "&Pad",
     "size": "&Grootte",
     "date_modified": "Gewijzigd &op",
+    "date_created": "Gemaak&t op",
     "extension": "&Extensie",
     "attributes": "&Kenmerken",
     "fit": "Kolom ‘{0}’ passend &maken",
@@ -69,6 +70,7 @@
     "path": "Pad",
     "size": "Grootte",
     "date_modified": "Gewijzigd op",
+    "date_created": "Gemaakt op",
     "extension": "Extensie",
     "attributes": "Kenmerken",
     "folder": "Map"
@@ -78,6 +80,7 @@
     "path": "&Pad",
     "size": "&Grootte",
     "date_modified": "Gewijzigd &op",
+    "date_created": "Gemaak&t op",
     "extension": "&Extensie",
     "ascending": "Op&lopend",
     "descending": "&Aflopend"
@@ -371,10 +374,10 @@
     "or_without_terms": "| heeft aan elke kant een term nodig, zoals pdf|docx.",
     "operator_on_nothing": "{0} test niets, dus ! en | zijn er niet op van toepassing. Verwijder de ! of de |.",
     "size": "{0} is geen grootte. Gebruik een grootte zoals size:large of size:1mb..10mb.",
-    "reversed_dates": "{0} loopt achteruit. Schrijf de vroegste datum eerst, zoals dm:2026-01-01..2026-03-31.",
-    "date_out_of_range": "{0} valt buiten de datums waarin u kunt zoeken. Gebruik een datum zoals dm:2026-01-31.",
-    "days": "{0} heeft een aantal dagen boven 0 nodig, zoals dm:7days.",
-    "date": "{0} is geen datum. Gebruik een datum zoals dm:today, dm:yesterday of dm:2026-01-31.",
+    "reversed_dates": "{0} loopt achteruit. Schrijf de vroegste datum eerst, zoals {1}2026-01-01..2026-03-31.",
+    "date_out_of_range": "{0} valt buiten de datums waarin u kunt zoeken. Gebruik een datum zoals {1}2026-01-31.",
+    "days": "{0} heeft een aantal dagen boven 0 nodig, zoals {1}7days.",
+    "date": "{0} is geen datum. Gebruik een datum zoals {1}today, {1}yesterday of {1}2026-01-31.",
     "no_parent_folder": "parent: heeft een map nodig, zoals parent:C:\\Users\\Public.",
     "attribute_letter": "{0} is geen kenmerkletter. Gebruik een letter zoals attrib:h voor verborgen items, of druk op F1 om ze allemaal te bekijken.",
     "regex": "De reguliere expressie is ongeldig. Wijzig deze en zoek opnieuw.\n\n{0}"

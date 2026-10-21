@@ -2740,7 +2740,7 @@ fn query_error(strings: &Strings, error: &QueryError) -> String {
             strings.format("query.unknown_function", &[&format!("{name}:")])
         }
         QueryError::RelativePath(path) => strings.format("query.relative_path", &[path]),
-        QueryError::NoQueryStart => strings.text("query.no_query_start").to_owned(),
+        QueryError::NoQueryStart(_) => strings.text("query.no_query_start").to_owned(),
         QueryError::TooManyTerms(n) => strings.format("query.too_many_terms", &[&n.to_string()]),
         QueryError::TooManyRegexes(n) => {
             strings.format("query.too_many_regexes", &[&n.to_string()])
@@ -2753,14 +2753,22 @@ fn query_error(strings: &Strings, error: &QueryError) -> String {
                 strings.format("query.operator_on_nothing", &[term])
             }
             Malformed::Size(value) => strings.format("query.size", &[&as_typed("size:", value)]),
-            Malformed::ReversedDates(value) => {
-                strings.format("query.reversed_dates", &[&as_typed("dm:", value)])
-            }
-            Malformed::DateOutOfRange(value) => {
-                strings.format("query.date_out_of_range", &[&as_typed("dm:", value)])
-            }
-            Malformed::Days(value) => strings.format("query.days", &[&as_typed("dm:", value)]),
-            Malformed::Date(value) => strings.format("query.date", &[&as_typed("dm:", value)]),
+            Malformed::ReversedDates(field, value) => strings.format(
+                "query.reversed_dates",
+                &[&as_typed(field.function(), value), field.function()],
+            ),
+            Malformed::DateOutOfRange(field, value) => strings.format(
+                "query.date_out_of_range",
+                &[&as_typed(field.function(), value), field.function()],
+            ),
+            Malformed::Days(field, value) => strings.format(
+                "query.days",
+                &[&as_typed(field.function(), value), field.function()],
+            ),
+            Malformed::Date(field, value) => strings.format(
+                "query.date",
+                &[&as_typed(field.function(), value), field.function()],
+            ),
             Malformed::NoParentFolder => strings.text("query.no_parent_folder").to_owned(),
             Malformed::AttributeLetter(c) => {
                 strings.format("query.attribute_letter", &[&c.to_string()])

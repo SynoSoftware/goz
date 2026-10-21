@@ -379,7 +379,7 @@ pub(super) enum SwitchAction {
     /// `-sort`: consume the next token as a sort-key name with an optional
     /// `-ascending` / `-descending` suffix.
     SortParam,
-    /// `-size` / `-dm` / `-date-modified`: append a column (es dedupe).
+    /// `-size` / `-dm` / `-dc` and the like: append a column (es dedupe).
     Column(EsColumn),
     /// A combined `-sort-<key>[-ascending|-descending]` switch.
     SortFixed(SortSpec),
@@ -659,6 +659,14 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Es {
+            names: &["dc", "date-created"],
+            action: SwitchAction::Column(EsColumn::DateCreated),
+        },
+        group: Group::Output,
+        help: "Add a Date Created column; needs Dates created in the index settings",
+    },
+    Switch {
+        spelling: Spelling::Es {
             names: &["attributes", "attribs", "attrib"],
             action: SwitchAction::Column(EsColumn::Attributes),
         },
@@ -834,6 +842,11 @@ pub(super) const SORT_KEYS: &[SortKeyName] = &[
         names: &["dm", "date-modified"],
         key: SortKey::DateModified,
         help: "Date modified, newest first",
+    },
+    SortKeyName {
+        names: &["dc", "date-created"],
+        key: SortKey::DateCreated,
+        help: "Date created, newest first; needs Dates created",
     },
     SortKeyName {
         names: &["extension"],

@@ -424,7 +424,7 @@ impl VolumeIndex {
         }
 
         if let Some(head) = self.head_of(file.frn) {
-            self.set_chain_stat(head, file.size, file.mtime_ft);
+            self.set_chain_stat(head, file.size, file.mtime_ft, file.created_ft);
         }
         self.set_attributes(file.frn, file.attributes);
     }
@@ -595,7 +595,29 @@ impl VolumeIndex {
         let Some(head) = self.head_of(frn) else {
             return;
         };
-        self.set_chain_stat(head, Some(size), Some(mtime));
+        self.set_chain_stat(head, Some(size), Some(mtime), None);
+    }
+
+    /// Sets a file's date created on every entry in its hard-link chain,
+    /// when the index holds dates created ([`Self::keeps_created`]), as
+    /// [`Self::set_stat`] sets its date modified.
+    pub fn set_created(&mut self, frn: Frn, created: i64) {
+        let Some(head) = self.head_of(frn) else {
+            return;
+        };
+        self.set_chain_stat(head, None, None, Some(created));
+    }
+
+    /// Whether the index holds each entry's date created, which Dates
+    /// created turns on ([`VolumeRules::dates_created`]).
+    pub fn keeps_created(&self) -> bool {
+        self.entries.keeps_created()
+    }
+
+    /// Starts or stops holding each entry's date created. A build starts it
+    /// before it reads the volume, because only that read brings the dates.
+    pub fn keep_created(&mut self, keep: bool) {
+        self.entries.keep_created(keep);
     }
 
     /// Ends the size and date pass: gives every folder the sum of the known
@@ -653,12 +675,18 @@ impl VolumeIndex {
         }
     }
 
-    /// Sets `size` and `mtime` on EVERY link of the file whose chain starts at
-    /// `head`, not just the head: a query may return any of a hard-linked
-    /// file's names, and they all describe the same bytes. `size` reaches
-    /// files only, because a folder's size slot holds its sum; `None` leaves
-    /// that value as it was.
-    fn set_chain_stat(&mut self, head: EntryIdx, size: Option<u64>, mtime: Option<i64>) {
+    /// Sets `size`, `mtime` and `created` on EVERY link of the file whose
+    /// chain starts at `head`, not just the head: a query may return any of
+    /// a hard-linked file's names, and they all describe the same bytes.
+    /// `size` reaches files only, because a folder's size slot holds its
+    /// sum; `None` leaves that value as it was.
+    fn set_chain_stat(
+        &mut self,
+        head: EntryIdx,
+        size: Option<u64>,
+        mtime: Option<i64>,
+        created: Option<i64>,
+    ) {
         let mut cur = head;
         while cur != NIL {
             if let Some(size) = size
@@ -671,6 +699,9 @@ impl VolumeIndex {
             }
             if let Some(mtime) = mtime {
                 self.entries.set_mtime(cur, mtime);
+            }
+            if let Some(created) = created {
+                self.entries.set_created(cur, created);
             }
             cur = self.entries.next_link(cur);
         }
@@ -1359,12 +1390,18 @@ impl VolumeIndex {
         // size, date and attributes the chain already knows. Nothing stats a
         // link that reconciliation adds, so without this a new hard link, or
         // the new name of a renamed link, has no size, date or attributes.
-        let (size, mtime, attributes) = current.first().map_or(
-            (SIZE_UNKNOWN, MTIME_UNKNOWN, PackedAttributes::default()),
+        let (size, mtime, created, attributes) = current.first().map_or(
+            (
+                SIZE_UNKNOWN,
+                MTIME_UNKNOWN,
+                MTIME_UNKNOWN,
+                PackedAttributes::default(),
+            ),
             |&e| {
                 (
                     self.entries.size(e),
                     self.entries.mtime(e),
+                    self.entries.created(e).unwrap_or(MTIME_UNKNOWN),
                     self.entries.attributes(e),
                 )
             },
@@ -1391,6 +1428,7 @@ impl VolumeIndex {
                     mtime,
                     attributes,
                 );
+                self.entries.set_created(idx, created);
                 kept.push(idx);
             }
         }
@@ -1776,6 +1814,12 @@ impl<'a> EntryView<'a> {
     pub fn mtime(&self) -> Option<i64> {
         let m = self.index.entries.mtime(self.idx);
         (m != MTIME_UNKNOWN).then_some(m)
+    }
+    /// The date created, `None` while unknown or while the index holds no
+    /// dates created.
+    pub fn created(&self) -> Option<i64> {
+        let c = self.index.entries.created(self.idx)?;
+        (c != MTIME_UNKNOWN).then_some(c)
     }
     pub fn attributes(&self) -> Attributes {
         self.packed_attributes().unpack(self.is_dir())

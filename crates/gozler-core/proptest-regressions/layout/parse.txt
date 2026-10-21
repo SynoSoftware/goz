@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cff6a15b10adcce69dc68bd13d4aabd9b7f3d853a30a7e1b72cde5be41aa120a # shrinks to files = [LayoutFileFixture { frn: 0, attributes: 32, names: [], info: Some(LayoutInfoFixture { mtime: 0 }), streams: [] }]

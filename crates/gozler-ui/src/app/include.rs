@@ -11,7 +11,7 @@
 use crate::win;
 use crate::win::shell::PromptOwner;
 use crate::win::wake::OpenWaker;
-use gozler_core::include::{INCLUDE_VALUE, IncludeSettings, REBUILD_VALUE, SETTINGS_KEY};
+use gozler_core::include::{INCLUDE_VALUE, IndexSettings, REBUILD_VALUE, SETTINGS_KEY};
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, channel};
@@ -30,7 +30,7 @@ const ERROR_INVALID_DATA: i32 = 13;
 /// gives the exit code, 0 or the Windows error code of the failure.
 pub(super) fn save_as_administrator(file: &Path) -> i32 {
     let written = std::fs::read_to_string(file).and_then(|text| {
-        let settings = IncludeSettings::from_json(&text)
+        let settings = IndexSettings::from_json(&text)
             .map_err(|_| io::Error::from_raw_os_error(ERROR_INVALID_DATA))?;
         win::shell::set_machine_string(SETTINGS_KEY, INCLUDE_VALUE, &settings.to_json())
     });
@@ -58,7 +58,7 @@ pub(super) fn rebuild_as_administrator() -> i32 {
 /// What the copy that runs as administrator does.
 pub(super) enum Elevated {
     /// Saves these Include settings.
-    Include(IncludeSettings),
+    Include(IndexSettings),
     /// Asks the service to rebuild the index.
     Rebuild,
 }

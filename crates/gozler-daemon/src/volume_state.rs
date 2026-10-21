@@ -382,7 +382,7 @@ impl VolumeState {
             indexed: RwLock::new(indexed),
             phase: RwLock::new(phase),
             rules: Mutex::new(Rules {
-                rules: Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
+                rules: Arc::new(gozler_core::include::IndexSettings::default().rules_for("")),
                 next: Owed::Nothing,
                 unbuilt: Owed::Nothing,
             }),
@@ -593,7 +593,7 @@ mod tests {
             r"\\?\Volume{00000000-0000-0000-0000-000000000000}\".into(),
             vec![r"C:\".into()],
             Filesystem::Ntfs,
-            Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
+            Arc::new(gozler_core::include::IndexSettings::default().rules_for("")),
         );
         let first = volume.begin_build();
         assert!(first.is_first());
@@ -699,7 +699,7 @@ mod tests {
                 built: true,
             };
             let volume = VolumeState::in_state(r"D:\", indexed, VolumePhase::Snapshot);
-            let settings = gozler_core::include::IncludeSettings {
+            let settings = gozler_core::include::IndexSettings {
                 exclude_hidden: true,
                 ..Default::default()
             };
@@ -740,7 +740,7 @@ mod tests {
             built: true,
         };
         let volume = VolumeState::in_state(r"D:\", indexed, VolumePhase::Live);
-        let hidden = gozler_core::include::IncludeSettings {
+        let hidden = gozler_core::include::IndexSettings {
             exclude_hidden: true,
             ..Default::default()
         };
@@ -763,7 +763,7 @@ mod tests {
             r"\\?\Volume{00000000-0000-0000-0000-000000000000}\".into(),
             vec![r"C:\".into()],
             Filesystem::Ntfs,
-            Arc::new(gozler_core::include::IncludeSettings::default().rules_for("")),
+            Arc::new(gozler_core::include::IndexSettings::default().rules_for("")),
         );
         let _ = volume.begin_build();
         volume.fail("x".into());

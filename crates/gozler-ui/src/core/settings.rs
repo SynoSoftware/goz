@@ -14,7 +14,7 @@ use super::query::{Filters, Matching};
 use super::shortcuts::{CommandShortcuts, ShowShortcut};
 use super::speed::{OutOfRange, Speed, SpeedNumber};
 use super::text::{LanguageChoice, SizeFormat};
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::types::SortSpec;
 use gozler_fileops::DeleteWorkers;
 use serde::de::DeserializeOwned;
@@ -136,7 +136,7 @@ pub(crate) struct SettingsValues {
     /// The settings the service applies, with an entry for each connected
     /// drive; `None` while the service gives no status, and the Include page
     /// then changes nothing.
-    pub(crate) include: Option<IncludeSettings>,
+    pub(crate) include: Option<IndexSettings>,
 }
 
 /// A page of the Settings dialog, in the page list's order.
@@ -251,7 +251,7 @@ impl SettingsValues {
                         .iter()
                         .map(|d| (d.volume.clone(), d.name.clone()))
                         .collect();
-                    *include = IncludeSettings::default().with_drives(&drives);
+                    *include = IndexSettings::default().with_drives(&drives);
                 }
             }
         }
@@ -472,7 +472,7 @@ impl SettingsDraft {
     }
 
     /// Records `include`, Include settings that were saved, as applied.
-    pub(crate) fn include_saved(&mut self, include: IncludeSettings) {
+    pub(crate) fn include_saved(&mut self, include: IndexSettings) {
         self.applied.include = Some(include);
     }
 
@@ -840,7 +840,7 @@ mod tests {
         SettingsValues {
             choices: Choices::default(),
             start_at_sign_in: false,
-            include: Some(IncludeSettings::default()),
+            include: Some(IndexSettings::default()),
         }
     }
 
@@ -863,9 +863,9 @@ mod tests {
     fn a_failed_write_reverts_and_unsaved_include_keeps_the_shield() {
         let mut draft = SettingsDraft::new(values());
         draft.edited.start_at_sign_in = true;
-        let include = IncludeSettings {
+        let include = IndexSettings {
             exclude_hidden: true,
-            ..IncludeSettings::default()
+            ..IndexSettings::default()
         };
         draft.edited.include = Some(include.clone());
         // The window applies the Include settings only once they are saved.

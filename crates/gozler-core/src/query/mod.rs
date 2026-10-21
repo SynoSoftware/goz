@@ -17,7 +17,7 @@ mod paths;
 mod rows;
 pub(crate) mod wildcard;
 
-pub use dates::{DateRange, QueryStart};
+pub use dates::{DateField, DateRange, QueryStart};
 pub use engine::{CompiledQuery, MatchSums, MatchedParts, SizeOverflow, Totals, extension};
 pub use parse::{
     Clause, Kind, Malformed, ParseOptions, ParsedQuery, QueryError, SIZE_WORDS, SizeRange,

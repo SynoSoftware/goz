@@ -61,13 +61,27 @@ impl VolumeIndex {
     /// cannot bring back an entry that earlier rules removed: rules that add
     /// anything back need a rebuild ([`VolumeRules::adds_to`]). Call
     /// [`Self::optimize_storage`] after it to return the removed entries'
-    /// memory.
+    /// memory. Rules without Dates created drop the dates created.
     pub fn apply_rules(&mut self, rules: Arc<VolumeRules>) {
+        if !rules.dates_created {
+            self.keep_created(false);
+        }
         let mut buf = CodePointBuf::new();
         for top in self.left_out_tops(&rules, self.root, rules.root(), &mut buf) {
             self.leave_out(top);
         }
         self.include = (!rules.keeps_everything()).then_some(rules);
+    }
+
+    /// Whether `rules` keep anything the index lacks: an entry that the
+    /// applied rules left out, or the dates created. Applying them then
+    /// needs a read of the volume.
+    pub fn lacks_for(&self, rules: &VolumeRules) -> bool {
+        (rules.dates_created && !self.keeps_created())
+            || self
+                .include
+                .as_ref()
+                .is_some_and(|applied| rules.adds_to(applied))
     }
 
     /// The rules the index was cut down to; `None` while it keeps every

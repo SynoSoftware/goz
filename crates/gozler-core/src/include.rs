@@ -1,7 +1,7 @@
 //! The Include settings: which drives, folders and names gozlerd indexes.
 //!
 //! The window edits them, an administrator saves them in the registry, and
-//! gozlerd applies them. [`IncludeSettings::rules_for`] gives one volume's
+//! gozlerd applies them. [`IndexSettings::rules_for`] gives one volume's
 //! [`VolumeRules`], which [`VolumeIndex::apply_rules`] applies and
 //! [`VolumeIndex::count_kept`] counts, so the service, its preview and the
 //! window read one set of rules.
@@ -18,6 +18,7 @@
 
 use crate::attributes::PackedAttributes;
 use crate::fold::fold;
+use crate::query::ParsedQuery;
 use crate::query::wildcard::{CodePointBuf, Wildcard};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,8 @@ use serde::{Deserialize, Serialize};
 /// that an administrator saved them.
 pub const SETTINGS_KEY: &str = r"SOFTWARE\Gozler";
 
-/// The value of [`SETTINGS_KEY`] that holds [`IncludeSettings`] as JSON.
+/// The value of [`SETTINGS_KEY`] that holds [`IndexSettings`] as JSON. It
+/// keeps the name Include from before the settings held Dates created.
 pub const INCLUDE_VALUE: &str = "Include";
 
 /// The value of [`SETTINGS_KEY`] that the window's Rebuild index sets to a
@@ -42,7 +44,7 @@ pub const REBUILD_VALUE: &str = "Rebuild";
 /// is undone, or patterns that differ only in spaces, case or empty entries,
 /// is nothing to save or apply.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IncludeSettings {
+pub struct IndexSettings {
     /// One entry for each drive a person decided about. A drive without one
     /// follows [`Self::include_new_drives`].
     #[serde(default)]
@@ -57,6 +59,10 @@ pub struct IncludeSettings {
     pub exclude_hidden: bool,
     #[serde(default)]
     pub exclude_system: bool,
+    /// Dates created, on the Drives and service page: the index holds each
+    /// entry's date created, for `dc:` and the Date created column.
+    #[serde(default)]
+    pub dates_created: bool,
 }
 
 /// One drive's check box and the folders below it whose check box differs
@@ -87,34 +93,35 @@ fn on() -> bool {
     true
 }
 
-impl Default for IncludeSettings {
+impl Default for IndexSettings {
     fn default() -> Self {
-        IncludeSettings {
+        IndexSettings {
             drives: Vec::new(),
             include_new_drives: true,
             excluded_names: String::new(),
             exclude_hidden: false,
             exclude_system: false,
+            dates_created: false,
         }
     }
 }
 
-impl PartialEq for IncludeSettings {
+impl PartialEq for IndexSettings {
     fn eq(&self, other: &Self) -> bool {
         self.rules_key() == other.rules_key()
     }
 }
 
-impl Eq for IncludeSettings {}
+impl Eq for IndexSettings {}
 
-/// A drive's choices as [`IncludeSettings::rules_key`] compares them.
+/// A drive's choices as [`IndexSettings::rules_key`] compares them.
 type DriveKey = (String, bool, Vec<(Vec<Vec<u8>>, bool)>);
 
-impl IncludeSettings {
+impl IndexSettings {
     /// What decides the index: the switches, the patterns as
     /// [`Self::rules_for`] reads them, and each drive's choices in order of
     /// the folded volume and paths. A drive's name only labels its row.
-    fn rules_key(&self) -> (bool, bool, bool, Vec<Vec<u8>>, Vec<DriveKey>) {
+    fn rules_key(&self) -> (bool, bool, bool, bool, Vec<Vec<u8>>, Vec<DriveKey>) {
         let mut patterns = self.patterns();
         patterns.sort_unstable();
         patterns.dedup();
@@ -136,6 +143,7 @@ impl IncludeSettings {
             self.include_new_drives,
             self.exclude_hidden,
             self.exclude_system,
+            self.dates_created,
             patterns,
             drives,
         )
@@ -322,18 +330,41 @@ impl IncludeSettings {
             patterns: names.iter().map(|n| Wildcard::compile(n)).collect(),
             names,
             attributes: (attributes != 0).then(|| PackedAttributes::from_record(attributes)),
+            dates_created: self.dates_created,
         }
     }
 
     /// Whether these settings index something on any of `volumes`, GUID
     /// paths, that `applied` leaves out, so applying them must read it from
     /// the volume.
-    pub fn adds_to(&self, applied: &IncludeSettings, volumes: &[&str]) -> bool {
+    pub fn adds_to(&self, applied: &IndexSettings, volumes: &[&str]) -> bool {
         volumes
             .iter()
             .any(|v| self.rules_for(v).adds_to(&applied.rules_for(v)))
     }
+
+    /// Refuses `query` when it tests the date created and these settings
+    /// keep none, because an empty answer would read as "no file was
+    /// created then".
+    ///
+    /// # Errors
+    ///
+    /// [`DatesCreatedOff`] for such a query.
+    pub fn allows(&self, query: &ParsedQuery) -> Result<(), DatesCreatedOff> {
+        if query.tests_date_created() && !self.dates_created {
+            return Err(DatesCreatedOff);
+        }
+        Ok(())
+    }
 }
+
+/// A search for the date created while the index holds none.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "dc: needs Dates created, which is off; an administrator turns it on in Settings > Drives \
+     and service"
+)]
+pub struct DatesCreatedOff;
 
 /// How a folder's check box shows in Indexed folders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,7 +375,7 @@ pub enum FolderCheck {
     Partial,
 }
 
-/// One row of [`IncludeSettings::summary`]: an indexed folder, such as
+/// One row of [`IndexSettings::summary`]: an indexed folder, such as
 /// `Users\ana` below the root or the root itself as an empty path, and the
 /// folders left out inside it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,7 +404,7 @@ fn folded_parts(path: &str) -> Vec<Vec<u8>> {
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 
-/// One volume's rules, from [`IncludeSettings::rules_for`].
+/// One volume's rules, from [`IndexSettings::rules_for`].
 #[derive(Debug)]
 pub struct VolumeRules {
     choices: ChoiceTree,
@@ -382,6 +413,8 @@ pub struct VolumeRules {
     patterns: Vec<Wildcard>,
     /// The attributes that leave an entry out, when any do.
     attributes: Option<PackedAttributes>,
+    /// The index holds each entry's date created.
+    pub dates_created: bool,
 }
 
 /// Where a folder stands under the rules, which decides where its entries
@@ -422,12 +455,17 @@ impl VolumeRules {
             && self.choices.nodes.iter().all(|n| n.indexed != Some(false))
     }
 
-    /// Whether these rules keep an entry that `applied` leaves out.
+    /// Whether these rules keep an entry, or a date created, that `applied`
+    /// leaves out.
     ///
     /// The nearest choice changes only at a folder that one of the two sets
     /// names, so comparing the two at each of those folders, the root
     /// included, compares them everywhere.
     pub fn adds_to(&self, applied: &VolumeRules) -> bool {
+        // Only a read of the volume brings the dates.
+        if self.dates_created && !applied.dates_created {
+            return true;
+        }
         if applied.names.iter().any(|name| !self.names.contains(name)) {
             return true;
         }
@@ -582,11 +620,12 @@ impl ChoiceTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::{ParseOptions, QueryStart, parse_query_with};
 
     const C: &str = r"\\?\Volume{c}\";
 
-    fn settings(drive: bool, folders: &[(&str, bool)]) -> IncludeSettings {
-        IncludeSettings {
+    fn settings(drive: bool, folders: &[(&str, bool)]) -> IndexSettings {
+        IndexSettings {
             drives: vec![DriveChoice {
                 volume: C.into(),
                 name: r"C:\ Windows".into(),
@@ -599,7 +638,7 @@ mod tests {
                     })
                     .collect(),
             }],
-            ..IncludeSettings::default()
+            ..IndexSettings::default()
         }
     }
 
@@ -676,15 +715,14 @@ mod tests {
     /// automatically.
     #[test]
     fn a_drive_without_a_choice_follows_include_new_drives() {
-        let mut include = IncludeSettings::default();
+        let mut include = IndexSettings::default();
         assert!(include.rules_for(C).keeps_everything());
         include.include_new_drives = false;
         assert!(include.rules_for(C).leaves_out_volume());
 
         // A drive the window has shown keeps its check box when the person
         // turns Include new fixed drives off.
-        let mut shown =
-            IncludeSettings::default().with_drives(&[(C.into(), r"C:\ Windows".into())]);
+        let mut shown = IndexSettings::default().with_drives(&[(C.into(), r"C:\ Windows".into())]);
         shown.include_new_drives = false;
         assert!(shown.rules_for(C).keeps_everything());
     }
@@ -748,12 +786,12 @@ mod tests {
         assert_ne!(edited, original);
     }
 
-    /// Only a change that keeps something the applied settings leave out
-    /// needs a read of the volume.
+    /// Only a change that keeps something the applied settings leave out,
+    /// or the dates created, needs a read of the volume.
     #[test]
     fn adds_to_finds_what_a_change_brings_back() {
         let applied = settings(true, &[("Windows", false)]);
-        let adds = |edited: &IncludeSettings| edited.adds_to(&applied, &[C]);
+        let adds = |edited: &IndexSettings| edited.adds_to(&applied, &[C]);
         assert!(!adds(&settings(
             true,
             &[("Windows", false), ("Users", false)]
@@ -771,5 +809,40 @@ mod tests {
         assert!(!patterned.adds_to(&patterned, &[C]));
         assert!(applied.adds_to(&patterned, &[C]));
         assert!(!patterned.adds_to(&applied, &[C]));
+
+        // Dates created on needs a read of the volume, and its change alone
+        // is a change, or `Include::reload` would skip it.
+        let dated = IndexSettings {
+            dates_created: true,
+            ..applied.clone()
+        };
+        assert_ne!(dated, applied);
+        assert!(dated.adds_to(&applied, &[C]));
+        assert!(!applied.adds_to(&dated, &[C]));
+    }
+
+    /// `dc:` on an index without dates would answer nothing, which reads as
+    /// "no file was created then"; `dm:` needs no setting.
+    #[test]
+    fn dc_is_refused_while_dates_created_is_off() {
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        let parse = |text| {
+            let options = ParseOptions {
+                query_start: Some(&start),
+                ..ParseOptions::default()
+            };
+            parse_query_with(text, options).expect("the query parses")
+        };
+        let off = IndexSettings::default();
+        let on = IndexSettings {
+            dates_created: true,
+            ..IndexSettings::default()
+        };
+        assert!(off.allows(&parse("x dc:7days")).is_err());
+        assert!(off.allows(&parse("x dm:7days")).is_ok());
+        assert!(on.allows(&parse("x dc:7days")).is_ok());
     }
 }

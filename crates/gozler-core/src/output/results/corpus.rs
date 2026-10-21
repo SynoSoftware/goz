@@ -26,6 +26,7 @@ const MODIFIED_UNIX_MS: i64 = 1_792_240_496_000;
 fn results() -> QueryResults {
     let modified = Some(unix_ms_to_filetime(MODIFIED_UNIX_MS));
     let item = |path: &str, size, mtime_ft, is_dir, letters| ResultItem {
+        created_ft: None,
         path: path.to_string(),
         path_u16: None,
         size,

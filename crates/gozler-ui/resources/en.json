@@ -59,6 +59,7 @@
     "path": "&Path",
     "size": "&Size",
     "date_modified": "&Date modified",
+    "date_created": "Date c&reated",
     "extension": "&Extension",
     "attributes": "&Attributes",
     "fit": "&Fit column “{0}”",
@@ -69,6 +70,7 @@
     "path": "Path",
     "size": "Size",
     "date_modified": "Date modified",
+    "date_created": "Date created",
     "extension": "Extension",
     "attributes": "Attributes",
     "folder": "Folder"
@@ -78,6 +80,7 @@
     "path": "&Path",
     "size": "&Size",
     "date_modified": "&Date modified",
+    "date_created": "Date c&reated",
     "extension": "&Extension",
     "ascending": "&Ascending",
     "descending": "Des&cending"
@@ -371,10 +374,10 @@
     "or_without_terms": "| needs a term on each side, such as pdf|docx.",
     "operator_on_nothing": "{0} tests nothing, so ! and | can't apply to it. Remove the ! or the |.",
     "size": "{0} isn't a size. Use a size such as size:large or size:1mb..10mb.",
-    "reversed_dates": "{0} runs backwards. Write the earlier date first, such as dm:2026-01-01..2026-03-31.",
-    "date_out_of_range": "{0} is outside the dates you can search. Use a date such as dm:2026-01-31.",
-    "days": "{0} needs a number of days above 0, such as dm:7days.",
-    "date": "{0} isn't a date. Use a date such as dm:today, dm:yesterday or dm:2026-01-31.",
+    "reversed_dates": "{0} runs backwards. Write the earlier date first, such as {1}2026-01-01..2026-03-31.",
+    "date_out_of_range": "{0} is outside the dates you can search. Use a date such as {1}2026-01-31.",
+    "days": "{0} needs a number of days above 0, such as {1}7days.",
+    "date": "{0} isn't a date. Use a date such as {1}today, {1}yesterday or {1}2026-01-31.",
     "no_parent_folder": "parent: needs a folder, such as parent:C:\\Users\\Public.",
     "attribute_letter": "{0} isn't an attribute letter. Use a letter such as attrib:h for hidden items, or press F1 to see them all.",
     "regex": "The regular expression isn't valid. Change it, then search again.\n\n{0}"

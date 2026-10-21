@@ -757,6 +757,7 @@ pub(crate) mod tests {
                     path_u16: None,
                     size: None,
                     mtime_ft: None,
+                    created_ft: None,
                     is_dir: false,
                     attributes: None,
                 })

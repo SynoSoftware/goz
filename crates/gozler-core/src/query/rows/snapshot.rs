@@ -400,6 +400,7 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
                         is_dir: entry.is_dir(),
                         size: entry.size(),
                         mtime: entry.mtime(),
+                        created: entry.created(),
                         attributes: entry.attributes(),
                     })
                 }

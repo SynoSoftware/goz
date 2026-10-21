@@ -144,6 +144,8 @@ pub struct LayoutFile {
     /// 1601-01-01 UTC), from `FILE_LAYOUT_INFO_ENTRY.BasicInformation`.
     /// `None` when the info entry is absent.
     pub mtime_ft: Option<i64>,
+    /// `CreationTime`, from the same place as [`Self::mtime_ft`].
+    pub created_ft: Option<i64>,
     /// Every hard-link name of this file, in chain order (including DOS-only
     /// aliases, marked via [`LayoutName::dos_only`]).
     pub names: Vec<LayoutName>,
@@ -303,9 +305,8 @@ struct RawNameEntry {
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawInfoPrefix {
-    // Layout-bearing only; never read individually.
-    #[allow(dead_code)]
     creation_time: I64,
+    // Layout-bearing only; never read individually.
     #[allow(dead_code)]
     last_access_time: I64,
     last_write_time: I64,
@@ -445,8 +446,9 @@ fn parse_file(
         }
     }
 
-    // --- extra info (mtime) -----------------------------------------------
+    // --- extra info (mtime and date created) ------------------------------
     let mut mtime_ft = None;
+    let mut created_ft = None;
     if entry.extra_info_offset.get() != 0 {
         let info_off = follow_offset(
             buf,
@@ -467,6 +469,7 @@ fn parse_file(
         if available >= size_of::<RawInfoPrefix>() {
             let info: RawInfoPrefix = read_struct(buf, info_off, "FILE_LAYOUT_INFO_ENTRY")?;
             mtime_ft = Some(info.last_write_time.get());
+            created_ft = Some(info.creation_time.get());
         }
     }
 
@@ -520,6 +523,7 @@ fn parse_file(
         attributes,
         size,
         mtime_ft,
+        created_ft,
         names,
     })
 }

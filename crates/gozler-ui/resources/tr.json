@@ -59,6 +59,7 @@
     "path": "&Yol",
     "size": "&Boyut",
     "date_modified": "&Değiştirme tarihi",
+    "date_created": "&Oluşturma tarihi",
     "extension": "&Uzantı",
     "attributes": "Ö&znitelikler",
     "fit": "\"{0}\" sütununu sığdı&r",
@@ -69,6 +70,7 @@
     "path": "Yol",
     "size": "Boyut",
     "date_modified": "Değiştirme tarihi",
+    "date_created": "Oluşturma tarihi",
     "extension": "Uzantı",
     "attributes": "Öznitelikler",
     "folder": "Klasör"
@@ -78,6 +80,7 @@
     "path": "&Yol",
     "size": "&Boyut",
     "date_modified": "&Değiştirme tarihi",
+    "date_created": "&Oluşturma tarihi",
     "extension": "&Uzantı",
     "ascending": "A&rtan",
     "descending": "A&zalan"
@@ -371,10 +374,10 @@
     "or_without_terms": "| işaretinin her iki yanında pdf|docx gibi birer terim olmalıdır.",
     "operator_on_nothing": "{0} hiçbir şeyi sınamıyor, bu yüzden ! ve | ona uygulanamaz. ! veya | işaretini kaldırın.",
     "size": "{0} bir boyut değil. size:large veya size:1mb..10mb gibi bir boyut kullanın.",
-    "reversed_dates": "{0} geriye doğru gidiyor. Önce erken tarihi yazın, örneğin dm:2026-01-01..2026-03-31.",
-    "date_out_of_range": "{0}, arayabileceğiniz tarihlerin dışında. dm:2026-01-31 gibi bir tarih kullanın.",
-    "days": "{0} için 0'dan büyük bir gün sayısı gerekir, örneğin dm:7days.",
-    "date": "{0} bir tarih değil. dm:today, dm:yesterday veya dm:2026-01-31 gibi bir tarih kullanın.",
+    "reversed_dates": "{0} geriye doğru gidiyor. Önce erken tarihi yazın, örneğin {1}2026-01-01..2026-03-31.",
+    "date_out_of_range": "{0}, arayabileceğiniz tarihlerin dışında. {1}2026-01-31 gibi bir tarih kullanın.",
+    "days": "{0} için 0'dan büyük bir gün sayısı gerekir, örneğin {1}7days.",
+    "date": "{0} bir tarih değil. {1}today, {1}yesterday veya {1}2026-01-31 gibi bir tarih kullanın.",
     "no_parent_folder": "parent: için parent:C:\\Users\\Public gibi bir klasör gerekir.",
     "attribute_letter": "{0} bir öznitelik harfi değil. Gizli öğeler için attrib:h gibi bir harf kullanın veya hepsini görmek için F1'e basın.",
     "regex": "Normal ifade geçerli değil. Değiştirip yeniden arayın.\n\n{0}"

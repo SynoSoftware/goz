@@ -782,6 +782,9 @@ pub(crate) struct EntryTable {
     flags: Vec<EntryFlags>,
     size: Vec<u64>,
     mtime: Vec<i64>,
+    /// Each entry's date created, [`MTIME_UNKNOWN`] while unknown, held
+    /// only while Dates created is on, because it costs 8 bytes an entry.
+    created: Option<Vec<i64>>,
     attributes: Vec<PackedAttributes>,
     next_link: Vec<EntryIdx>,
     next_same: Vec<EntryIdx>,
@@ -856,6 +859,9 @@ impl EntryTable {
             self.flags[i] = flags;
             self.size[i] = size;
             self.mtime[i] = mtime;
+            if let Some(created) = &mut self.created {
+                created[i] = MTIME_UNKNOWN;
+            }
             self.attributes[i] = attributes;
             self.next_link[i] = next_link;
             self.next_same[i] = NIL;
@@ -872,6 +878,9 @@ impl EntryTable {
             push_eighth(&mut self.flags, flags);
             push_eighth(&mut self.size, size);
             push_eighth(&mut self.mtime, mtime);
+            if let Some(created) = &mut self.created {
+                push_eighth(created, MTIME_UNKNOWN);
+            }
             push_eighth(&mut self.attributes, attributes);
             push_eighth(&mut self.next_link, next_link);
             push_eighth(&mut self.next_same, NIL);
@@ -966,6 +975,12 @@ impl EntryTable {
     pub(crate) fn mtime(&self, idx: EntryIdx) -> i64 {
         self.mtime[idx as usize]
     }
+    /// The entry's date created, [`MTIME_UNKNOWN`] while unknown; `None`
+    /// while the table holds no dates created.
+    #[inline]
+    pub(crate) fn created(&self, idx: EntryIdx) -> Option<i64> {
+        self.created.as_ref().map(|created| created[idx as usize])
+    }
     #[inline]
     pub(crate) fn attributes(&self, idx: EntryIdx) -> PackedAttributes {
         self.attributes[idx as usize]
@@ -1014,6 +1029,28 @@ impl EntryTable {
     #[inline]
     pub(crate) fn set_mtime(&mut self, idx: EntryIdx, mtime: i64) {
         self.mtime[idx as usize] = mtime;
+    }
+    /// Sets the entry's date created, when the table holds them.
+    #[inline]
+    pub(crate) fn set_created(&mut self, idx: EntryIdx, created: i64) {
+        if let Some(column) = &mut self.created {
+            column[idx as usize] = created;
+        }
+    }
+
+    /// Whether the table holds each entry's date created.
+    pub(crate) fn keeps_created(&self) -> bool {
+        self.created.is_some()
+    }
+
+    /// Starts or stops holding each entry's date created. A column that
+    /// starts holds every date as unknown.
+    pub(crate) fn keep_created(&mut self, keep: bool) {
+        match (keep, &self.created) {
+            (true, None) => self.created = Some(vec![MTIME_UNKNOWN; self.capacity()]),
+            (false, Some(_)) => self.created = None,
+            _ => {}
+        }
     }
     #[inline]
     pub(crate) fn set_attributes(&mut self, idx: EntryIdx, attributes: PackedAttributes) {
@@ -1070,6 +1107,9 @@ impl EntryTable {
         compact_column(&mut self.flags, &remap, live, |flags| flags);
         compact_column(&mut self.size, &remap, live, |size| size);
         compact_column(&mut self.mtime, &remap, live, |mtime| mtime);
+        if let Some(created) = &mut self.created {
+            compact_column(created, &remap, live, |created| created);
+        }
         compact_column(&mut self.attributes, &remap, live, |a| a);
         compact_column(&mut self.next_link, &remap, live, link);
         compact_column(&mut self.next_same, &remap, live, link);
@@ -1095,6 +1135,10 @@ impl EntryTable {
             + ComponentBytes::of_vec(&self.flags)
             + ComponentBytes::of_vec(&self.size)
             + ComponentBytes::of_vec(&self.mtime)
+            + self
+                .created
+                .as_ref()
+                .map_or(ComponentBytes::default(), ComponentBytes::of_vec)
             + ComponentBytes::of_vec(&self.attributes)
             + ComponentBytes::of_vec(&self.next_link)
             + ComponentBytes::of_vec(&self.next_same)
@@ -1115,6 +1159,9 @@ impl EntryTable {
         shrink_vec(&mut self.flags);
         shrink_vec(&mut self.size);
         shrink_vec(&mut self.mtime);
+        if let Some(created) = &mut self.created {
+            shrink_vec(created);
+        }
         shrink_vec(&mut self.attributes);
         shrink_vec(&mut self.next_link);
         shrink_vec(&mut self.next_same);

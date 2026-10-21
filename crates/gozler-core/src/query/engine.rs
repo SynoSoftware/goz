@@ -236,6 +236,7 @@ enum Check {
     },
     Size(SizeRange),
     DateModified(DateRange),
+    DateCreated(DateRange),
     /// Folded whatever the query's case, as es compares extensions.
     Extension(Vec<Vec<u8>>),
     /// The folder's full path, without a trailing separator, which the full
@@ -576,6 +577,7 @@ impl Check {
             Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
             Test::Size(range) => Check::Size(*range),
             Test::DateModified(range) => Check::DateModified(*range),
+            Test::DateCreated(range) => Check::DateCreated(*range),
             Test::Kind(kind) => Check::Kind(*kind),
             Test::Attributes(attributes) => {
                 let (packed, folder) = attributes.pack();
@@ -589,7 +591,7 @@ impl Check {
     fn cost(&self) -> u8 {
         match self {
             Check::Kind(_) | Check::Attributes { .. } => 0,
-            Check::Size(_) | Check::DateModified(_) => 1,
+            Check::Size(_) | Check::DateModified(_) | Check::DateCreated(_) => 1,
             Check::Parent(_) => 2,
             Check::Text(_, matcher) => match matcher {
                 Matcher::Contains(_)
@@ -626,6 +628,7 @@ impl Check {
             }
             Check::Size(range) => range.contains(entry.size()?),
             Check::DateModified(range) => range.contains(entry.mtime()?),
+            Check::DateCreated(range) => range.contains(entry.created()?),
             Check::Extension(exts) => match extension(entry.name(), entry.is_dir()) {
                 Some(ext) => {
                     scratch.extension.clear();
@@ -1687,6 +1690,7 @@ fn key_records(
             }
             SortKey::Size => KeyValue::Size(entry.size()),
             SortKey::DateModified => KeyValue::DateModified(entry.mtime()),
+            SortKey::DateCreated => KeyValue::DateCreated(entry.created()),
             SortKey::Extension => KeyValue::Extension(extensions[&folded_extension(index, idx)]),
         };
         *record = SortRecord::keyed(primary_key(sort.dir, value), name_key, idx);
@@ -1767,6 +1771,9 @@ impl OrderFields for Ranked<'_> {
     }
     fn mtime(&self) -> Option<i64> {
         self.entry().mtime()
+    }
+    fn created(&self) -> Option<i64> {
+        self.entry().created()
     }
     fn volume(&self) -> &[u8] {
         b"" // one volume per query run
@@ -1965,6 +1972,7 @@ mod tests {
             attributes: 0x20,
             size: Some(size),
             mtime_ft: Some(1000),
+            created_ft: None,
             names: vec![LayoutName {
                 parent_frn,
                 name,
@@ -2820,6 +2828,7 @@ mod tests {
             attributes: 0x20,
             size,
             mtime_ft: mtime,
+            created_ft: None,
             names: links
                 .iter()
                 .map(|&(parent_frn, name)| LayoutName {

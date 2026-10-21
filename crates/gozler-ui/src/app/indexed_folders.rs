@@ -10,7 +10,7 @@ use crate::core::text::Strings;
 use crate::win::Hwnd;
 use crate::win::controls::{FolderTree, ReportList, TreeItem};
 use crate::win::dialog::{DialogMessage, DialogProc, Opened, TreeChange};
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use std::cell::{Cell, RefCell};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
@@ -39,7 +39,7 @@ pub(super) struct IndexedFolders<'a> {
     main: &'a MainWindow,
     strings: &'a Strings,
     drives: &'a [IncludeDrive],
-    settings: RefCell<IncludeSettings>,
+    settings: RefCell<IndexSettings>,
     /// The tree's folders; each item carries its index.
     nodes: RefCell<Vec<Node>>,
     /// The folders a thread lists, and where its subfolders arrive.
@@ -56,7 +56,7 @@ impl<'a> IndexedFolders<'a> {
         main: &'a MainWindow,
         strings: &'a Strings,
         drives: &'a [IncludeDrive],
-        settings: IncludeSettings,
+        settings: IndexSettings,
     ) -> IndexedFolders<'a> {
         IndexedFolders {
             main,
@@ -71,7 +71,7 @@ impl<'a> IndexedFolders<'a> {
     }
 
     /// The settings as the person left them; OK applies them to the page.
-    pub(super) fn into_settings(self) -> IncludeSettings {
+    pub(super) fn into_settings(self) -> IndexSettings {
         self.settings.into_inner()
     }
 

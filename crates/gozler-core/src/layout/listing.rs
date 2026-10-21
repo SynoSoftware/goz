@@ -28,7 +28,6 @@ struct RawDirEntry {
     // Layout-bearing only; never read individually.
     #[allow(dead_code)]
     file_index: U32,
-    #[allow(dead_code)]
     creation_time: I64,
     #[allow(dead_code)]
     last_access_time: I64,
@@ -81,6 +80,7 @@ pub fn walk_listing_buffer(folder: Frn, buf: &[u8]) -> Result<Vec<LayoutFile>, L
                 size: (attributes & FILE_ATTRIBUTE_DIRECTORY == 0)
                     .then(|| raw.end_of_file.get().max(0) as u64),
                 mtime_ft: Some(raw.last_write_time.get()),
+                created_ft: Some(raw.creation_time.get()),
                 names: vec![LayoutName {
                     parent_frn: folder,
                     name,
@@ -242,7 +242,7 @@ mod tests {
             };
             buf.extend_from_slice(&next.to_le_bytes());
             buf.extend_from_slice(&0u32.to_le_bytes());
-            for time in [0, 0, e.mtime, 0] {
+            for time in [e.mtime - 1, 0, e.mtime, 0] {
                 buf.extend_from_slice(&time.to_le_bytes());
             }
             buf.extend_from_slice(&e.size.to_le_bytes());
@@ -361,6 +361,7 @@ mod tests {
                     attributes: 0x10,
                     size: None,
                     mtime_ft: Some(133_800_000_000_000_000),
+                    created_ft: Some(133_799_999_999_999_999),
                     names: vec![name("src")],
                 },
                 LayoutFile {
@@ -368,6 +369,7 @@ mod tests {
                     attributes: 0x20,
                     size: Some(4096),
                     mtime_ft: Some(133_800_000_000_000_000),
+                    created_ft: Some(133_799_999_999_999_999),
                     names: vec![name("a.txt")],
                 },
             ]

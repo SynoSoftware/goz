@@ -62,6 +62,7 @@ pub trait VolumeReads {
 pub struct FileStat {
     pub size: u64,
     pub mtime: i64,
+    pub created: i64,
 }
 
 /// One hard-link name of a file.
@@ -264,6 +265,7 @@ pub fn settle_batch<R: VolumeReads>(
         index.write(|i| {
             for (frn, stat) in &stats {
                 i.set_stat(*frn, stat.size, stat.mtime);
+                i.set_created(*frn, stat.created);
             }
         });
     }
@@ -367,6 +369,7 @@ mod tests {
             attributes: attributes(is_dir),
             size: (!is_dir).then_some(0),
             mtime_ft: Some(0),
+            created_ft: None,
             names: vec![LayoutName {
                 parent_frn: folder,
                 name: name.as_bytes().to_vec(),
@@ -538,7 +541,7 @@ mod tests {
             (modules, old, "node_modules", true),
             (js, modules, "m.js", false),
         ]);
-        let settings = crate::include::IncludeSettings {
+        let settings = crate::include::IndexSettings {
             excluded_names: "node_modules".into(),
             drives: vec![crate::include::DriveChoice {
                 volume: "V".into(),
@@ -549,7 +552,7 @@ mod tests {
                     indexed: false,
                 }],
             }],
-            ..crate::include::IncludeSettings::default()
+            ..crate::include::IndexSettings::default()
         };
         index
             .borrow_mut()

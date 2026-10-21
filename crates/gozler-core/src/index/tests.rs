@@ -311,6 +311,7 @@ fn layout_pass_never_leaks_a_retenanted_record() {
         attributes: 0x20,
         size: Some(10),
         mtime_ft: Some(555),
+        created_ft: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"tenant.txt".to_vec(),
@@ -952,6 +953,7 @@ fn listed(f: Frn, folder: Frn, name: &str, is_dir: bool) -> LayoutFile {
         },
         size: (!is_dir).then_some(0),
         mtime_ft: Some(0),
+        created_ft: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: folder,
             name: name.as_bytes().to_vec(),
@@ -1008,7 +1010,11 @@ impl settle::VolumeReads for ModelReads<'_> {
 
     fn stat(&mut self, _: Frn) -> Result<Option<settle::FileStat>, Self::Error> {
         self.assert_unlocked();
-        Ok(Some(settle::FileStat { size: 0, mtime: 0 }))
+        Ok(Some(settle::FileStat {
+            size: 0,
+            mtime: 0,
+            created: 0,
+        }))
     }
 
     /// The model gives each file one name.
@@ -1228,6 +1234,7 @@ proptest! {
                 attributes: r.attributes,
                 size: None,
                 mtime_ft: None,
+                created_ft: None,
                 names: vec![crate::layout::LayoutName {
                     parent_frn: r.parent_frn,
                     name: r.name.clone(),
@@ -1378,6 +1385,7 @@ fn enrich_with_renamed_directory_never_orphans_children() {
         attributes: FILE_ATTRIBUTE_DIRECTORY,
         size: None,
         mtime_ft: Some(555),
+        created_ft: None,
         names: vec![crate::layout::LayoutName {
             parent_frn: root_frn(),
             name: b"docs".to_vec(),
@@ -1575,7 +1583,7 @@ proptest! {
 
 // -- the Include rules ---------------------------------------------------
 
-use crate::include::{DriveChoice, FolderChoice, IncludeSettings};
+use crate::include::{DriveChoice, FolderChoice, IndexSettings};
 use std::sync::Arc;
 
 /// The rules of a volume whose drive is `drive`, with `folders` and the
@@ -1585,7 +1593,7 @@ fn include_rules(
     folders: &[(&str, bool)],
     names: &str,
 ) -> Arc<crate::include::VolumeRules> {
-    let settings = IncludeSettings {
+    let settings = IndexSettings {
         drives: vec![DriveChoice {
             volume: "V".into(),
             name: String::new(),
@@ -1599,7 +1607,7 @@ fn include_rules(
                 .collect(),
         }],
         excluded_names: names.into(),
-        ..IncludeSettings::default()
+        ..IndexSettings::default()
     };
     Arc::new(settings.rules_for("V"))
 }
@@ -1694,9 +1702,9 @@ fn an_entry_that_is_no_longer_hidden_comes_back() {
         attributes: 0x2 | FILE_ATTRIBUTE_DIRECTORY,
         ..create(frn(10), r, "secret", true)
     }]);
-    let settings = IncludeSettings {
+    let settings = IndexSettings {
         exclude_hidden: true,
-        ..IncludeSettings::default()
+        ..IndexSettings::default()
     };
     idx.apply_rules(Arc::new(settings.rules_for("V")));
     assert!(path_set(&idx).is_empty());
@@ -1733,9 +1741,9 @@ fn a_hard_linked_file_that_becomes_hidden_leaves_the_index() {
         },
     ];
     idx.reconcile_links(frn(100), &names);
-    let settings = IncludeSettings {
+    let settings = IndexSettings {
         exclude_hidden: true,
-        ..IncludeSettings::default()
+        ..IndexSettings::default()
     };
     idx.apply_rules(Arc::new(settings.rules_for("V")));
     assert_eq!(

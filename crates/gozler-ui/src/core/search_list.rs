@@ -239,6 +239,7 @@ mod tests {
             path_u16: None,
             size,
             mtime_ft: None,
+            created_ft: None,
             is_dir,
             attributes: None,
         }

@@ -883,6 +883,7 @@ fn index(mount: &str, entries: &'static [Entry]) -> VolumeIndex {
             attributes,
             size,
             mtime_ft: day.map(|d| d * TICKS_PER_DAY),
+            created_ft: None,
             names,
         });
     }

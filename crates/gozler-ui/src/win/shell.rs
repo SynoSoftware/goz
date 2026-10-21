@@ -821,6 +821,7 @@ mod tests {
             path_u16: None,
             size: Some(0x1_0000_0002),
             mtime_ft: Some(0x0123_4567_89AB_CDEF),
+            created_ft: None,
             is_dir,
             attributes: None,
         };

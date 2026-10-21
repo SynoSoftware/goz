@@ -80,7 +80,7 @@ use crate::win::tray::{TrayEvent, TrayIcon};
 use crate::win::wake::{OpenWaker, Waker};
 use crate::win::window::{DEFERRED, Message, WindowProc};
 use crate::win::{self, Hwnd};
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortSpec};
@@ -4851,7 +4851,7 @@ impl MainWindow {
 
     /// The drives Settings > Include shows: the service's, and those
     /// `settings` names that are not connected.
-    pub(super) fn include_drives(&self, settings: &IncludeSettings) -> Vec<IncludeDrive> {
+    pub(super) fn include_drives(&self, settings: &IndexSettings) -> Vec<IncludeDrive> {
         let labels = self.volume_labels();
         let label = |prefix: &str| label_of(&labels, prefix);
         let model = self.model.borrow();
@@ -4885,7 +4885,7 @@ impl MainWindow {
         &self,
         strings: &Strings,
         drives: &[IncludeDrive],
-        settings: &IncludeSettings,
+        settings: &IndexSettings,
     ) -> Vec<SummaryRow> {
         summary_rows(drives, settings, strings, &*self.numbers.borrow())
     }
@@ -4904,7 +4904,7 @@ impl MainWindow {
 
     /// Settings > Include's preview: counts the entries the index keeps
     /// under `settings`, whose answer goes to the Settings dialog.
-    pub(super) fn count_included(&self, settings: IncludeSettings) {
+    pub(super) fn count_included(&self, settings: IndexSettings) {
         let fetch = self.model.borrow_mut().count_included(settings);
         self.start(fetch);
     }

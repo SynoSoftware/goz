@@ -62,16 +62,22 @@ impl LayoutNameFixture {
     }
 }
 
-/// Extra-info entry carrying the last-write time.
+/// Extra-info entry carrying the creation and last-write times.
 #[derive(Clone, Debug)]
 pub struct LayoutInfoFixture {
     /// `LastWriteTime` as a Windows FILETIME.
     pub mtime: i64,
+    /// `CreationTime`, one tick before `mtime`, so a parser that swaps the
+    /// two fails.
+    pub created: i64,
 }
 
 impl LayoutInfoFixture {
     pub fn with_mtime(mtime: i64) -> Self {
-        Self { mtime }
+        Self {
+            mtime,
+            created: mtime.wrapping_sub(1),
+        }
     }
 }
 
@@ -155,6 +161,7 @@ impl LayoutFileFixture {
             attributes: self.attributes,
             size,
             mtime_ft,
+            created_ft: self.info.as_ref().map(|i| i.created),
             names,
         }
     }
@@ -252,7 +259,7 @@ fn append_file(buf: &mut Vec<u8>, entry_off: usize, file: &LayoutFileFixture) {
         patch_u32(buf, extra_info_len_pos, INFO_ENTRY_LEN as u32);
         // FILE_LAYOUT_INFO_ENTRY.BasicInformation: the parser reads the first
         // 24 bytes (CreationTime, LastAccessTime, LastWriteTime).
-        push_i64(buf, 0); // CreationTime
+        push_i64(buf, info.created); // CreationTime
         push_i64(buf, 0); // LastAccessTime
         push_i64(buf, info.mtime); // LastWriteTime
         // Remainder up to INFO_ENTRY_LEN (ChangeTime, attrs, ids, Usn): the

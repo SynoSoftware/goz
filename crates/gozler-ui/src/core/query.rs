@@ -681,6 +681,7 @@ pub(crate) fn sort_key_label(key: SortKey) -> &'static str {
         SortKey::Path => "sort.path",
         SortKey::Size => "sort.size",
         SortKey::DateModified => "sort.date_modified",
+        SortKey::DateCreated => "sort.date_created",
         SortKey::Extension => "sort.extension",
     }
 }

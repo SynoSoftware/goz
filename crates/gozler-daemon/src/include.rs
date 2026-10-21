@@ -6,22 +6,22 @@
 
 use std::sync::Arc;
 
-use gozler_core::include::{INCLUDE_VALUE, IncludeSettings, REBUILD_VALUE, SETTINGS_KEY};
+use gozler_core::include::{INCLUDE_VALUE, IndexSettings, REBUILD_VALUE, SETTINGS_KEY};
 use gozler_core::proto::LeftOutVolume;
 use parking_lot::Mutex;
 
 /// The saved settings; the defaults, which index every drive, when none are
 /// saved or they cannot be read.
-pub(crate) fn read_saved() -> IncludeSettings {
+pub(crate) fn read_saved() -> IndexSettings {
     match gozler_winfs::machine_string(SETTINGS_KEY, INCLUDE_VALUE) {
-        Ok(None) => IncludeSettings::default(),
-        Ok(Some(json)) => IncludeSettings::from_json(&json).unwrap_or_else(|e| {
+        Ok(None) => IndexSettings::default(),
+        Ok(Some(json)) => IndexSettings::from_json(&json).unwrap_or_else(|e| {
             tracing::error!(error = %e, "the saved Include settings do not parse; indexing every drive");
-            IncludeSettings::default()
+            IndexSettings::default()
         }),
         Err(e) => {
             tracing::error!(error = %e, "could not read the saved Include settings; indexing every drive");
-            IncludeSettings::default()
+            IndexSettings::default()
         }
     }
 }
@@ -39,7 +39,7 @@ pub(crate) fn read_rebuild() -> Option<String> {
 /// by the supervisor, which applies them, and the pipe server, which reports
 /// them and reads them again.
 pub(crate) struct Include {
-    applied: Mutex<Arc<IncludeSettings>>,
+    applied: Mutex<Arc<IndexSettings>>,
     left_out: Mutex<Vec<LeftOutVolume>>,
     rebuild: Mutex<Rebuild>,
     /// Tells the supervisor that [`Self::applied`] changed or a rebuild was
@@ -58,7 +58,7 @@ impl Include {
     /// `rebuild` is the token saved when the service started, which asks
     /// for nothing, because a start builds every volume anyway.
     pub(crate) fn new(
-        applied: IncludeSettings,
+        applied: IndexSettings,
         rebuild: Option<String>,
         wake: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
@@ -74,7 +74,7 @@ impl Include {
     }
 
     /// The settings the service applies.
-    pub(crate) fn applied(&self) -> Arc<IncludeSettings> {
+    pub(crate) fn applied(&self) -> Arc<IndexSettings> {
         self.applied.lock().clone()
     }
 

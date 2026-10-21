@@ -15,7 +15,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use gozler_core::include::IncludeSettings;
+use gozler_core::include::IndexSettings;
 use gozler_core::index::VolumeIndex;
 use gozler_core::proto::{
     DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION,
@@ -288,6 +288,9 @@ fn serve(
         }
         Err(e) => return reply(emit, refusal(format!("malformed request: {e}"))),
     };
+    if let Err(off) = include.applied().allows(&search.query) {
+        return reply(emit, refusal(off.to_string()));
+    }
     let query = match CompiledQuery::new(&search.query) {
         Ok(query) => query,
         Err(e) => return reply(emit, refusal(e.to_string())),
@@ -378,6 +381,7 @@ fn make_snapshot(
         limit: rows.limit,
         want_size: rows.want_size,
         want_mtime: rows.want_mtime,
+        want_created: rows.want_created,
         want_attributes: rows.want_attributes,
     };
     let sums = rows.want_sums.then(|| snapshot.sums()).flatten();
@@ -546,7 +550,7 @@ fn all_volumes_live(volumes: &VolumeSet) -> bool {
 /// How many entries the indexed volumes would hold under `settings`. A
 /// volume that is not indexed now adds nothing, and neither does what the
 /// applied settings left out, because the index does not hold it.
-fn count_included(volumes: &VolumeSet, settings: &IncludeSettings) -> u64 {
+fn count_included(volumes: &VolumeSet, settings: &IndexSettings) -> u64 {
     volumes
         .iter()
         .map(|v| {
@@ -645,7 +649,7 @@ mod tests {
     use crate::include::Include;
     use crate::result_snapshots::ResultSnapshots;
     use crate::volume_state::{Indexed, VolumeSet, VolumeState};
-    use gozler_core::include::{DriveChoice, FolderChoice, IncludeSettings};
+    use gozler_core::include::{DriveChoice, FolderChoice, IndexSettings};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
         FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION, ProtoError, Request, Response,
@@ -711,7 +715,7 @@ mod tests {
 
     /// The default Include settings, which keep everything.
     fn defaults() -> Include {
-        Include::new(IncludeSettings::default(), None, Box::new(|| {}))
+        Include::new(IndexSettings::default(), None, Box::new(|| {}))
     }
 
     /// A Snapshot volume must NOT taint results.
@@ -775,21 +779,21 @@ mod tests {
             Response::IncludedCount { entries } => entries,
             other => panic!("an entry count, not {other:?}"),
         };
-        let drive = |indexed, folders| IncludeSettings {
+        let drive = |indexed, folders| IndexSettings {
             drives: vec![DriveChoice {
                 volume: vols[0].guid.clone(),
                 name: String::new(),
                 indexed,
                 folders,
             }],
-            ..IncludeSettings::default()
+            ..IndexSettings::default()
         };
         let windows = FolderChoice {
             path: "Windows".into(),
             indexed: false,
         };
 
-        assert_eq!(count(IncludeSettings::default()), all);
+        assert_eq!(count(IndexSettings::default()), all);
         assert_eq!(
             count(drive(true, vec![windows])),
             all - 2,
@@ -855,6 +859,7 @@ mod tests {
                 limit: q.limit,
                 want_size: q.want_size,
                 want_mtime: q.want_mtime,
+                want_created: false,
                 want_attributes: false,
                 want_sums: false,
             }),
@@ -975,6 +980,7 @@ mod tests {
                 attributes: 0x20,
                 size: Some(size),
                 mtime_ft: Some(5),
+                created_ft: None,
                 names: vec![LayoutName {
                     parent_frn: NTFS_ROOT_FRN,
                     name: format!("{frn}.bin").into_bytes(),
@@ -1002,6 +1008,7 @@ mod tests {
             attributes: 0x20,
             size: Some(5),
             mtime_ft: Some(5),
+            created_ft: None,
             names: vec![LayoutName {
                 parent_frn: Frn(101),
                 name: b"kernel32.dll".to_vec(),
@@ -1059,6 +1066,7 @@ mod tests {
                     limit: Some(1),
                     want_size: false,
                     want_mtime: false,
+                    want_created: false,
                     want_attributes: false,
                     want_sums: false,
                 },
@@ -1092,6 +1100,7 @@ mod tests {
                 limit: None,
                 want_size: false,
                 want_mtime: false,
+                want_created: false,
                 want_attributes: false,
             })
         };
@@ -1109,6 +1118,7 @@ mod tests {
                 limit: None,
                 want_size: false,
                 want_mtime: false,
+                want_created: false,
                 want_attributes: false,
                 want_sums: false,
             },
@@ -1494,6 +1504,7 @@ mod tests {
                 attributes: 0x20,
                 size: Some(size),
                 mtime_ft: Some(5),
+                created_ft: None,
                 names: links
                     .iter()
                     .map(|&(parent, name)| LayoutName {

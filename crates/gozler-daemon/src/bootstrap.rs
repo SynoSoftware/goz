@@ -308,6 +308,7 @@ pub(crate) fn build_index(
     // ReFS gives its own, so neither root is assumed.
     let root = Frn(root_folder_id(guid_path).context("reading the root folder's file ID")?);
     let mut index = VolumeIndex::with_ids(root, filesystem.ids());
+    index.keep_created(rules.dates_created);
 
     let read_start = Instant::now();
     let (read_secs, enum_secs) = match filesystem {
@@ -443,6 +444,7 @@ impl VolumeReads for Disk<'_> {
             Ok(stat) => Ok(stat.map(|s| FileStat {
                 size: s.size,
                 mtime: s.mtime_ft,
+                created: s.created_ft,
             })),
             Err(e) => {
                 tracing::debug!(volume = %self.volume, ?frn, error = %e, "live stat failed");
@@ -714,7 +716,7 @@ mod tests {
     /// folder size on that volume until a rescan.
     #[test]
     fn a_stopped_pass_still_gives_folder_sizes() {
-        use gozler_core::include::IncludeSettings;
+        use gozler_core::include::IndexSettings;
         use gozler_core::usn::ParsedUsnRecord;
         use gozler_core::usn::record::FILE_ATTRIBUTE_DIRECTORY;
 
@@ -738,7 +740,7 @@ mod tests {
         index.set_stat(read, 5, 0);
         finish_index(
             &mut index,
-            &Arc::new(IncludeSettings::default().rules_for("V")),
+            &Arc::new(IndexSettings::default().rules_for("V")),
         );
         let docs = index.head_of(docs).expect("docs is indexed");
         assert_eq!(index.entry(docs).size(), Some(5));
