@@ -36,19 +36,16 @@ is about 3,000–6,000 lines; a rendering-only experiment is about 500–1,000.
 
 ## Remaining work
 
-Main holds the code for #98's Settings part, #89, #90, #92, #95 and #96,
-merged from `synosoft/responsiveness` without a build. Its rules are in
-DESIGN.md ("Rows on demand", "Settings dialog", "The Include page",
-"Copy") and `fast-copy-delete-spec.md` (D19). It is done after one green
-`check.ps1` and a check in the running window:
-Settings opens and shows every page; Include's Apply asks for permission
-while the window keeps working; Indexed folders opens `C:\Windows`; Paste
-copies and moves; a scroll bar jump in a long list shows its rows.
+The fixes for #89, #90, #92, #95, #96 and #98's Settings part are on main
+(`b8b2054`), and so is #93's (`3b307e5`). Their rules are in DESIGN.md
+("Rows on demand", "Settings dialog", "The Include page", "Copy") and
+`fast-copy-delete-spec.md` (D19). `check.ps1` is green with them. #126
+lists the checks in the running window, the benchmarks and the tests that
+none of them has had yet.
 
 | Rank | Slow step | Issue | Measured | Fix | Needs |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `MainWindow::open` builds the main window's controls before the window shows. | #98 | 1,700–1,930 million cycles on the window thread before the window shows, in one build on a loaded processor: `Controls::create` with the fonts 500–560, `show_filters` 230–280, fonts and icons 170–190, the File operations window 140–170, the title and menu bar 130–160, the show 110, columns and images 100 | Not decided | One run with timers inside `Controls::create` and `show_filters`; the File operations window is made on first use by the UI plan's session |
-| 2 | `TaskbarProgress::show` makes two COM calls to the taskbar every 500 ms, also when nothing changed. | #93 | Not measured | Send only changes, and send again after `TaskbarButtonCreated` | The UI plan's session does it |
+| 1 | `MainWindow::open` builds the main window's controls before the window shows. | #98 | 1,700–1,930 million cycles on the window thread before the window shows, in one build on a loaded processor: `Controls::create` with the fonts 500–560, `show_filters` 230–280, fonts and icons 170–190, the title and menu bar 130–160, the show 110, columns and images 100. The File operations window's 140–170 is gone, because `3b307e5` makes it on first use. | Not decided | One run with timers inside `Controls::create` and `show_filters`; the per-step timings and four ideas are in #98 |
 
 ## Known remaining costs
 
