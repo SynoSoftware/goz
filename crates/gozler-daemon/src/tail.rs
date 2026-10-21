@@ -24,7 +24,7 @@ use gozler_core::usn::record::{
 use gozler_core::usn::walk_journal_buffer;
 use gozler_winfs::{
     ERROR_JOURNAL_DELETE_IN_PROGRESS, ERROR_JOURNAL_ENTRY_DELETED, ERROR_JOURNAL_NOT_ACTIVE,
-    JournalInfo, VolumeHandle, read_usn_journal,
+    JournalInfo, JournalQuery, VolumeHandle, query_usn_journal, read_usn_journal,
 };
 
 use crate::bootstrap::{self, Disk, Filesystem, JournalSetup};
@@ -194,21 +194,37 @@ struct ReadPosition {
     journal_id: u64,
     /// `None` while reads succeed.
     failures: Option<ReadFailures>,
-    /// The reads are still replaying the changes made while a folder walk
-    /// built the index: from the build's cursor until the first read that
-    /// finds nothing new.
-    replaying_walk: bool,
+    /// The reads replay the changes made while a folder walk listed the
+    /// volume, a build's or a missed folder's, up to this USN. `None` once
+    /// they passed it or a read found nothing new.
+    replay_until: Option<i64>,
 }
 
 impl ReadPosition {
-    /// Where the tail reads after a build of `filesystem` that took `cursor`.
-    fn at(cursor: JournalInfo, filesystem: Filesystem) -> Self {
+    /// Where the tail reads after a build of `filesystem` that took `cursor`
+    /// and has just ended.
+    fn at(cursor: JournalInfo, filesystem: Filesystem, handle: &VolumeHandle) -> Self {
         Self {
             start_usn: cursor.next_usn,
             journal_id: cursor.journal_id,
             failures: None,
-            replaying_walk: filesystem == Filesystem::Refs,
+            replay_until: (filesystem == Filesystem::Refs).then(|| walk_end(handle)),
         }
+    }
+
+    /// Whether the next read starts before the end of a walk's changes.
+    fn replaying_walk(&self) -> bool {
+        self.replay_until.is_some_and(|end| self.start_usn < end)
+    }
+}
+
+/// The journal's next USN now, so the end of the changes made during a folder
+/// walk that has just ended. When the journal cannot say, the end is unknown,
+/// and only a read that finds nothing new ends the replay.
+fn walk_end(handle: &VolumeHandle) -> i64 {
+    match query_usn_journal(handle) {
+        Ok(JournalQuery::Active(journal)) => journal.next_usn,
+        _ => i64::MAX,
     }
 }
 
@@ -353,8 +369,8 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         // Caught up (or only filtered-out records): advance and idle.
                         if bytes <= size_of::<i64>() {
                             // Nothing past the next USN: the reads have passed
-                            // every change made during the build.
-                            pos.replaying_walk = false;
+                            // every change made during a walk.
+                            pos.replay_until = None;
                         }
                         pos.start_usn = walk.next_usn;
                         std::thread::sleep(IDLE_POLL);
@@ -362,7 +378,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     }
                     let batch = Batch {
                         records: &walk.records,
-                        replaying_walk: pos.replaying_walk,
+                        replaying_walk: pos.replaying_walk(),
                     };
                     // The settle asks before each folder and file it reads.
                     // Teardown must not wait behind a long batch: each read is
@@ -389,6 +405,9 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                             entries = settled.missed_entries,
                             "listed folders the index missed"
                         );
+                        // That listing was a walk too, and the next batches
+                        // replay the changes made during it.
+                        pos.replay_until = Some(walk_end(handle));
                     }
                     if settled.wants_compact {
                         state.compact_index();
@@ -550,7 +569,7 @@ fn rescan(
                 entries,
                 "index built; tailing the journal"
             );
-            Some(ReadPosition::at(c, state.filesystem))
+            Some(ReadPosition::at(c, state.filesystem, handle))
         }
         JournalSetup::Refused => {
             // The tail stops, and the supervisor sees the Snapshot phase and

@@ -95,7 +95,8 @@ impl SharedIndex for std::cell::RefCell<VolumeIndex> {
 pub struct Batch<'a> {
     pub records: &'a [ParsedUsnRecord],
     /// The reads are still replaying the changes made while a folder walk
-    /// built the index.
+    /// listed the volume: a ReFS build's walk, or the walk of folders the
+    /// index missed.
     pub replaying_walk: bool,
 }
 
