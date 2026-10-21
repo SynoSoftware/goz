@@ -278,7 +278,8 @@ pub(crate) struct CaptionWidths {
     look_in: Px,
     /// The widest free space of a panel's status line.
     free: Px,
-    /// The widest key bar caption, its key and its word.
+    /// The widest key bar caption, its key and its word; each button also
+    /// shows its command's icon while icons show.
     key_bar: Px,
 }
 
@@ -1359,8 +1360,8 @@ impl Layout {
             }),
         );
         status.drop_view_group();
-        let key_min =
-            Px((captions.key_bar + px(BUTTON_PADDING)).0 * 6 + related.0 * 5 + margin.0 * 2);
+        let key_button = button_room(button_content(captions.key_bar, captions.icons, dpi), dpi);
+        let key_min = Px(key_button.0 * 6 + related.0 * 5 + margin.0 * 2);
         let path_row = related + control_height + related;
         let status_line = Px(1) + line_height;
         let key_row = Px(1) + related + control_height + related;
@@ -2207,15 +2208,22 @@ mod tests {
     }
 
     /// Two panels' controls split the window between them, so a control
-    /// that left the client area or overlapped another, or a list that took
-    /// more than its half, would show only when a person looks: at the
-    /// minimum size, at a size with an odd width, at 150 %, and with the
-    /// pseudo-language's longer captions.
+    /// that left the client area or overlapped another, a list that took
+    /// more than its half, or a key bar button too narrow for its caption
+    /// and icon would show only when a person looks: at the minimum size, at
+    /// a size with an odd width, at 150 %, and with the pseudo-language's
+    /// longer captions.
     #[test]
     fn the_two_panels_share_the_window() {
         for (dpi, stretch, show_memory) in [(96, 1.0, false), (144, 1.0, true), (96, 2.0, true)] {
             let dpi = Dpi::new(dpi).expect("a DPI is not zero");
+            // Key bar captions wide enough to set the minimum width, as
+            // Spanish's do.
             let captions = captions(dpi, stretch, show_memory);
+            let captions = CaptionWidths {
+                key_bar: captions.key_bar.max(Dip(140).to_px(dpi)),
+                ..captions
+            };
             let font_height = Dip(15).to_px(dpi);
             let status_height = StatusLayout::min_height(dpi, font_height) + Dip(4).to_px(dpi);
             let compute = |client| {
@@ -2243,6 +2251,14 @@ mod tests {
                 };
                 let panels = *panels;
                 let [left, right] = panels.map(|panel| panel.list);
+                // Each key bar button shows its caption whole after its
+                // icon, also at the minimum width.
+                let key_button =
+                    button_room(button_content(captions.key_bar, captions.icons, dpi), dpi);
+                assert!(
+                    key_bar.iter().all(|button| button.width >= key_button),
+                    "{key_bar:?} narrower than {key_button:?} at {dpi:?}, stretch {stretch}"
+                );
                 let mut controls: Vec<Rect> = key_bar.to_vec();
                 controls.extend(layout.dividers.iter().copied());
                 for panel in panels {

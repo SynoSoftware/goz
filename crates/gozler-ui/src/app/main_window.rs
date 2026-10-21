@@ -354,6 +354,10 @@ impl Controls {
         for (button, control) in inspector.text_buttons() {
             control.set_icon(button.command.glyph().map(ButtonIcon::Glyph));
         }
+        for (index, control) in self.key_bar.iter().enumerate() {
+            let command = commands::key_bar_command(index);
+            control.set_icon(command.glyph().map(ButtonIcon::Glyph));
+        }
         for (control, key) in [
             (self.filters.choose_folder, "filter.choose_folder"),
             (self.panels[0].retry, "panel.retry"),
