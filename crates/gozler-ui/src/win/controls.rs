@@ -70,7 +70,7 @@ use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CB_ADDSTRING,
+    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_ICON, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
     CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
     CreateWindowExW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_READONLY, GWL_STYLE,
@@ -547,13 +547,28 @@ impl Button {
     }
 
     /// Shows only `glyph`, in the button's middle, also while icons are
-    /// hidden, or no image for `None`: a button such as File operations'
-    /// Pause, whose caption is only its name for screen readers, at the
+    /// hidden, or its caption for `None`: a button such as File operations'
+    /// Pause, whose caption is then only its name for screen readers, at the
     /// button's DPI and in the system colours of now, so the owner calls
     /// this again when either changes.
     pub(crate) fn set_lone_icon(self, glyph: Option<Glyph>) {
         let side = icon_glyph_height(self.0.dpi());
         let images = glyph.and_then(|glyph| lone_button_images(glyph, side));
+        // A centred image alone does not hide the caption: Windows draws
+        // both, one over the other. `BS_ICON` has it draw only the image.
+        // SAFETY: plain values on a window of this thread.
+        unsafe {
+            let style = GetWindowLongPtrW(self.0.0, GWL_STYLE);
+            let changed = if images.is_some() {
+                style | BS_ICON as isize
+            } else {
+                style & !(BS_ICON as isize)
+            };
+            if changed != style {
+                SetWindowLongPtrW(self.0.0, GWL_STYLE, changed);
+                self.0.invalidate();
+            }
+        }
         self.set_images(images, BUTTON_IMAGELIST_ALIGN_CENTER, 0);
     }
 
