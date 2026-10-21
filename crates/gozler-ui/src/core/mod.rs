@@ -23,6 +23,7 @@ pub(crate) mod open;
 pub(crate) mod panel;
 pub(crate) mod query;
 pub(crate) mod results;
+pub(crate) mod search_list;
 pub(crate) mod selection;
 pub(crate) mod settings;
 pub(crate) mod shortcuts;

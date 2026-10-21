@@ -8,17 +8,18 @@
 //! necessary.
 
 use super::fetch::{
-    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, Local, Outcome, Programs,
-    Purpose, WriteFailure, inside,
+    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, Generation, List, Local, Outcome,
+    Programs, Purpose, WriteFailure, inside,
 };
 use super::file_operations::StatusOperation;
 use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
-use super::panel::{Panels, Side, View};
+use super::panel::{LookIn, Panels, Side, View, drive_root};
 use super::query::{self, Filters, LocationItem, Matching};
-use super::results::{Fix, ListButton, ListMessage, Results, RowsChange, Shown};
-use super::selection::{FolderContents, Selection, wide_path};
+use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
+use super::search_list::{SearchList, is_taken};
+use super::selection::{FolderContents, Selection};
 use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
@@ -33,7 +34,6 @@ use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
 use gozler_fileops::{OperationId, Request, Taken};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -47,20 +47,22 @@ pub(crate) struct Model {
     /// The columns the list shows, in the list's column order: Name first,
     /// because only the first column carries the icon.
     pub(super) columns: Vec<Column>,
-    /// The typed search text.
-    pub(super) text: String,
-    /// Whether the search for the typed text waits for the person to stop
-    /// typing (`Then::SearchSoon`).
+    /// Search's results list; each search panel holds its own
+    /// ([`Model::list`]).
+    pub(super) search_list: SearchList,
+    /// Whether Search's search for the typed text waits for the person to
+    /// stop typing (`Then::SearchSoon`); Search's only, because a search
+    /// panel always searches as the person types.
     pub(super) search_due: bool,
-    /// Whether `Enter` in the search box asked to open the first row of
-    /// the search in flight once it answers (DESIGN.md: window rule 8).
+    /// Whether `Enter` in Search's search box asked to open the first row
+    /// of the search in flight once it answers (DESIGN.md: window rule 8);
+    /// Search's only, because `Enter` in a search panel's box goes to the
+    /// list.
     pub(super) open_on_answer: bool,
-    pub(super) results: Results,
     /// The latest status reply.
     pub(super) status: Option<DaemonStatus>,
     /// The gozlerd.exe files, as the latest status reply found them.
     programs: Programs,
-    pub(super) selection: Selection,
     pub(super) export: Export,
     fix: Fixer,
     /// The file operation the middle group shows.
@@ -91,14 +93,11 @@ pub(crate) struct Model {
     file_operations: bool,
     /// Whether the clipboard holds files, which Paste copies or moves.
     clipboard_files: bool,
-    /// The entries that deletes and moves have taken, which the list shows
-    /// blank and the selection leaves out (file-manager-spec.md: The person
-    /// never waits for the disk).
+    /// The entries that deletes and moves have taken, which the lists show
+    /// blank and the selections leave out (file-manager-spec.md: The person
+    /// never waits for the disk); one for all lists, which each decide with
+    /// their own kept operations.
     taken: Arc<Taken>,
-    /// The ended deletes and moves whose rows the list still shows blank
-    /// until its next search, because the rows it shows are of the moment
-    /// its search ran: each one that took a fetched row when it ended.
-    search_kept: HashSet<OperationId>,
     panels: Panels,
 }
 
@@ -136,17 +135,17 @@ pub(crate) enum SearchBoxEnter {
 #[derive(Debug, PartialEq)]
 pub(crate) enum Then {
     Fetch(Fetch),
-    /// The search again, with the clock of the moment it starts: the
-    /// person changed a match control or the sort, the service answers
-    /// again, or every volume in scope became complete.
-    SearchAgain,
-    /// The search, once the person has stopped typing for a moment.
-    SearchSoon,
-    /// [`Model::read_selection`], once the selection has stopped changing
-    /// for a moment, so one request serves a run of Shift+Down presses. The
-    /// live `Selection` request ends now, because it reads an older
-    /// selection (DESIGN.md: T6).
-    ReadSelectionSoon,
+    /// The search of each list again, with the clock of the moment it
+    /// starts: the person changed a match control or the sort, the service
+    /// answers again, or every volume in scope became complete.
+    SearchAgain(Vec<List>),
+    /// The list's search, once the person has stopped typing for a moment.
+    SearchSoon(List),
+    /// [`Model::read_selection`] of the list, once the selection has
+    /// stopped changing for a moment, so one request serves a run of
+    /// Shift+Down presses. The list's live `Selection` request ends now,
+    /// because it reads an older selection (DESIGN.md: T6).
+    ReadSelectionSoon(List),
     /// Ends the live request of the purpose; its reply would be stale.
     Cancel(Purpose),
     /// Asks GitHub whether its latest release is older than the window.
@@ -185,33 +184,36 @@ pub(crate) enum Change {
     ColumnHidden {
         index: usize,
     },
-    /// A new search runs; the list keeps its rows.
-    Searching,
-    /// A new search's first rows replace the old ones, and nothing is
-    /// selected; `open_first` when `Enter` in the search box waited for
-    /// them to open the first row.
+    /// A new search of the list runs; the list keeps its rows.
+    Searching(List),
+    /// A new search's first rows replace the list's old ones, and nothing
+    /// is selected; `open_first` when `Enter` in Search's search box waited
+    /// for them to open the first row.
     NewSearch {
+        list: List,
         count: u64,
         open_first: bool,
     },
-    /// Rows of the shown search arrived, and the count is `count`.
+    /// Rows of the list's shown search arrived, and the count is `count`.
     Rows {
+        list: List,
         rows: Range<u64>,
         count: u64,
     },
     /// The list is empty and shows a message.
-    Message,
-    /// The service's state changed, which the status bar's right group
-    /// and the status poll follow.
+    Message(List),
+    /// The service's state changed, which the status bar's right group,
+    /// the status poll and every list's failure message follow.
     Status,
-    /// The selection changed.
-    Selection,
-    /// The selection's files arrived, and the cached rows in `rows` are
-    /// now the ones of their moment.
+    /// The list's selection changed.
+    Selection(List),
+    /// The list's selected files arrived, and its cached rows in `rows`
+    /// are now the ones of their moment.
     SelectionRead {
+        list: List,
         rows: Range<u64>,
     },
-    /// The selected folder's contents were counted, which only the
+    /// The folder selected in Search's list was counted, which only the
     /// inspector shows.
     FolderCounted,
     /// The export started, wrote more rows, ended or was cancelled.
@@ -363,13 +365,11 @@ impl Model {
             strings,
             columns,
             settings,
-            text: String::new(),
+            search_list: SearchList::new(),
             search_due: false,
             open_on_answer: false,
-            results: Results::new(),
             status: None,
             programs: Programs::UNKNOWN,
-            selection: Selection::None,
             export: Export::Idle,
             fix: Fixer::Idle,
             operation: None,
@@ -386,7 +386,6 @@ impl Model {
             file_operations: false,
             clipboard_files: false,
             taken: Arc::default(),
-            search_kept: HashSet::new(),
             panels,
         }
     }
@@ -418,86 +417,58 @@ impl Model {
         self.clipboard_files
     }
 
-    /// The row at `index` as the list shows it: `None` while its chunk has
+    /// The row at `index` as `list` shows it: `None` while its chunk has
     /// not arrived, or while a delete or a move has taken its entry.
-    pub(crate) fn shown_row(&self, index: u64) -> Option<&ResultItem> {
-        self.results
-            .row(index)
-            .filter(|row| !is_taken(&self.taken, &self.search_kept, row))
+    pub(crate) fn shown_row(&self, list: List, index: u64) -> Option<&ResultItem> {
+        self.list(list)?.shown_row(index, &self.taken)
     }
 
-    /// Whether a delete or a move has taken the entry of the row at `index`.
-    pub(crate) fn row_taken(&self, index: u64) -> bool {
-        self.results
-            .row(index)
-            .is_some_and(|row| is_taken(&self.taken, &self.search_kept, row))
+    /// Whether a delete or a move has taken the entry of `list`'s row at
+    /// `index`.
+    pub(crate) fn row_taken(&self, list: List, index: u64) -> bool {
+        self.list(list)
+            .is_some_and(|shown| shown.row_taken(index, &self.taken))
     }
 
     /// The operations `ended`, which ended since the window last told the
-    /// lists, and the taken entries `taken` that the lists show next: the
+    /// lists, and the taken entries `taken` that the lists show next: each
     /// search list keeps an ended delete or move that takes one of its
     /// fetched rows, until its next search (fast-copy-delete-spec.md:
-    /// Taken entries), and the panels decide for themselves. Returns the
-    /// panels that read their folders again or ask for their sizes, as
+    /// Taken entries), and the folder panels decide for themselves. Returns
+    /// the panels that read their folders again or ask for their sizes, as
     /// [`Panels::operations_ended`] does.
     pub(crate) fn operations_ended(
         &mut self,
         ended: &[(OperationId, Arc<Request>)],
         taken: &Taken,
     ) -> Vec<(Side, bool, bool)> {
-        for (id, request) in ended {
-            if matches!(**request, Request::Delete { .. } | Request::Move { .. })
-                && (self.results.fetched()).any(|row| taken.takes(&wide_path(row), *id))
-            {
-                self.search_kept.insert(*id);
+        self.search_list.ended(ended, taken);
+        for side in Side::BOTH {
+            if let Some(search) = self.panels.search_mut(side) {
+                search.list.ended(ended, taken);
             }
         }
-        // `taken` may be older than `ended`, so an operation that ended in
-        // this call stays even when `taken` does not have it as ended yet.
-        let in_queue: HashSet<OperationId> = (taken.ended())
-            .chain(ended.iter().map(|(id, _)| *id))
-            .collect();
-        self.search_kept.retain(|id| in_queue.contains(id));
         self.panels.operations_ended(ended)
     }
 
     /// Whether a list still shows the rows of the ended operation `id`
     /// blank, so it stays in the queue.
     pub(crate) fn keeps(&self, id: OperationId) -> bool {
-        self.search_kept.contains(&id) || self.panels.keep(id)
+        List::ALL
+            .into_iter()
+            .any(|list| self.list(list).is_some_and(|shown| shown.keeps(id)))
+            || self.panels.keep(id)
     }
 
-    /// Takes the entries of `taken` out of the selection; the list shows
-    /// their rows blank once it draws them again.
+    /// Takes the entries of `taken` out of Search's selection; its list
+    /// shows their rows blank once it draws them again. The panels take
+    /// them with [`Panels::set_taken`].
     pub(crate) fn set_taken(&mut self, taken: Arc<Taken>) -> Accepted {
         self.taken = taken;
-        let selected = self.selection.files().map_or(0, <[_]>::len);
-        let files = match std::mem::replace(&mut self.selection, Selection::None) {
-            Selection::Files(files) => files,
-            Selection::Folder { folder, contents } => {
-                if !is_taken(&self.taken, &self.search_kept, &folder) {
-                    self.selection = Selection::Folder { folder, contents };
-                }
-                Vec::new()
-            }
-            other => {
-                self.selection = other;
-                Vec::new()
-            }
-        };
-        if !files.is_empty() {
-            let kept: Vec<ResultItem> = files
-                .into_iter()
-                .filter(|file| !is_taken(&self.taken, &self.search_kept, file))
-                .collect();
-            if !kept.is_empty() {
-                self.selection = Selection::Files(kept);
-            }
-        }
-        let change = if self.selection.files().map_or(0, <[_]>::len) == selected {
-            Change::Nothing
+        let change = if self.search_list.drop_taken(&self.taken) {
+            Change::Selection(List::Search)
         } else {
-            Change::Selection
+            Change::Nothing
         };
         Accepted { change, then: None }
     }
@@ -523,7 +494,7 @@ impl Model {
         self.settings.choices = choices;
         Accepted {
             change: Change::Settings,
-            then: search_again.then_some(Then::SearchAgain),
+            then: search_again.then(|| Then::SearchAgain(vec![List::Search])),
         }
     }
 
@@ -721,8 +692,9 @@ impl Model {
     /// S8).
     pub(crate) fn list_buttons(&self) -> Vec<ListButton> {
         let filters = self.filters();
-        match self.results.shown() {
-            Shown::Rows(_) if self.results.total() == 0 => [
+        let results = self.search_list.results();
+        match results.shown() {
+            Shown::Rows(_) if results.total() == 0 => [
                 filters.is_set().then_some(ListButton::ClearFilters),
                 filters
                     .location
@@ -750,8 +722,25 @@ impl Model {
             ))
     }
 
-    pub(crate) fn results(&self) -> &Results {
-        &self.results
+    /// Search's results list.
+    pub(crate) fn search_list(&self) -> &SearchList {
+        &self.search_list
+    }
+
+    /// The state of `list`: always Search's, and a panel's while it is a
+    /// search panel.
+    pub(crate) fn list(&self, list: List) -> Option<&SearchList> {
+        match list {
+            List::Search => Some(&self.search_list),
+            List::Panel(side) => self.panels.search(side).map(|search| &search.list),
+        }
+    }
+
+    fn list_mut(&mut self, list: List) -> Option<&mut SearchList> {
+        match list {
+            List::Search => Some(&mut self.search_list),
+            List::Panel(side) => self.panels.search_mut(side).map(|search| &mut search.list),
+        }
     }
 
     pub(crate) fn matching(&self) -> Matching {
@@ -788,15 +777,12 @@ impl Model {
 
     /// What the latest status says about the volume of the active panel's
     /// folder: none when no volume holds it, so gozlerd does not index it.
+    /// `None` for a search panel, whose search's coverage shows instead.
     pub(crate) fn panel_coverage(&self) -> Option<Coverage<'_>> {
         self.status.as_ref()?;
         let panel = self.panels.panel(self.panels.active());
-        (*panel.view() == View::Folder)
+        matches!(panel.view(), View::Folder)
             .then(|| Coverage::of(self.volumes(), Some(panel.folder()), true))
-    }
-
-    pub(crate) fn selection(&self) -> &Selection {
-        &self.selection
     }
 
     /// The saved window placement, which the window opens at.
@@ -818,19 +804,30 @@ impl Model {
         Generation(self.last_generation)
     }
 
-    /// The person typed `text`; its search runs once they pause, or with
-    /// search as you type off, when they press `Enter` (DESIGN.md: C6).
-    pub(crate) fn set_typed_search(&mut self, text: String) -> Accepted {
-        if text == self.text {
+    /// The person typed `text` in `list`'s search box; its search runs once
+    /// they pause, or in Search with search as you type off, when they
+    /// press `Enter` (DESIGN.md: C6). A search panel always searches as the
+    /// person types (file-manager-spec.md: Search in a panel).
+    pub(crate) fn set_typed_search(&mut self, list: List, text: String) -> Accepted {
+        let Some(shown) = self.list_mut(list) else {
+            return Accepted::only(Change::Nothing);
+        };
+        if text == shown.text {
             return Accepted::only(Change::Nothing);
         }
-        self.text = text;
-        // An open that waits is for the text before this one.
-        self.open_on_answer = false;
-        self.search_due = self.choices().search_as_you_type;
+        shown.text = text;
+        let soon = match list {
+            List::Search => {
+                // An open that waits is for the text before this one.
+                self.open_on_answer = false;
+                self.search_due = self.choices().search_as_you_type;
+                self.search_due
+            }
+            List::Panel(_) => true,
+        };
         Accepted {
             change: Change::Typed,
-            then: self.search_due.then_some(Then::SearchSoon),
+            then: soon.then_some(Then::SearchSoon(list)),
         }
     }
 
@@ -843,7 +840,7 @@ impl Model {
         if !self.choices().search_as_you_type {
             return SearchBoxEnter::Search;
         }
-        if self.search_due || self.results.searching() {
+        if self.search_due || self.search_list.results.searching() {
             self.open_on_answer = true;
             return if self.search_due {
                 SearchBoxEnter::Search
@@ -859,7 +856,7 @@ impl Model {
         self.settings.window.matching = matching;
         Accepted {
             change: Change::Choice,
-            then: Some(Then::SearchAgain),
+            then: Some(Then::SearchAgain(vec![List::Search])),
         }
     }
 
@@ -868,7 +865,7 @@ impl Model {
         self.settings.window.sort = sort;
         Accepted {
             change: Change::Choice,
-            then: Some(Then::SearchAgain),
+            then: Some(Then::SearchAgain(vec![List::Search])),
         }
     }
 
@@ -884,7 +881,7 @@ impl Model {
         self.settings.window.filters = filters;
         Accepted {
             change: Change::Filters,
-            then: Some(Then::SearchAgain),
+            then: Some(Then::SearchAgain(vec![List::Search])),
         }
     }
 
@@ -912,7 +909,7 @@ impl Model {
     /// Location the one selected folder, or the folder that holds the one
     /// selected file (DESIGN.md: C12).
     pub(crate) fn search_in_this_folder(&mut self) -> Accepted {
-        let folder = match self.selected_files() {
+        let folder = match self.search_list.selection.files() {
             Some([entry]) if entry.is_dir => entry.path.clone(),
             Some([entry]) => parent_of(&entry.path),
             _ => return Accepted::only(Change::Nothing),
@@ -976,21 +973,39 @@ impl Model {
         })
     }
 
-    /// The search that the typed text and the controls ask for, or the
-    /// message that says why it cannot run, which starts no request: the
-    /// text does not parse, `scope` says the Location folder is missing, or
-    /// the search is empty and the settings say to show nothing (DESIGN.md:
-    /// S6). The shown rows and the selection stay until the new search's first
-    /// rows arrive.
-    pub(crate) fn start_search(&mut self, query_start: &QueryStart, scope: ScopeCheck) -> Accepted {
+    /// The search that `list`'s typed text and controls ask for, or the
+    /// message that says why it cannot run, which starts no request. In
+    /// Search: the text does not parse, `scope` says the Location folder is
+    /// missing, or the search is empty and the settings say to show nothing
+    /// (DESIGN.md: S6). The shown rows and the selection stay until the new
+    /// search's first rows arrive. A search panel's search is in
+    /// [`Model::start_panel_search`].
+    pub(crate) fn start_search(
+        &mut self,
+        list: List,
+        query_start: &QueryStart,
+        scope: ScopeCheck,
+    ) -> Accepted {
+        let List::Panel(side) = list else {
+            return self.start_search_list_search(query_start, scope);
+        };
+        self.start_panel_search(side, query_start)
+    }
+
+    fn start_search_list_search(
+        &mut self,
+        query_start: &QueryStart,
+        scope: ScopeCheck,
+    ) -> Accepted {
         self.search_due = false;
-        let search = query::search(&self.text, self.matching(), self.filters(), query_start);
+        let text = &self.search_list.text;
+        let search = query::search(text, self.matching(), self.filters(), query_start);
         let missing = self
             .location()
             .filter(|_| scope == ScopeCheck::Missing)
             .map(str::to_owned);
         let shows_nothing = !self.choices().show_all_when_empty
-            && self.text.trim().is_empty()
+            && text.trim().is_empty()
             && !self.filters().is_set();
         let message = match (search, missing) {
             (Err(error), _) => ListMessage::Parse(error),
@@ -998,30 +1013,109 @@ impl Model {
             (Ok(_), None) if shows_nothing => ListMessage::TypeToSearch,
             (Ok(search), None) => {
                 let generation = self.generation();
-                let ask = self.results.start_search(generation, search, self.sort());
+                let sort = self.sort();
+                let ask = self
+                    .search_list
+                    .results
+                    .start_search(generation, search, sort);
                 return Accepted {
-                    change: Change::Searching,
+                    change: Change::Searching(List::Search),
                     then: Some(Then::Fetch(Fetch {
                         generation,
-                        ask: Ask::Rows(ask),
+                        ask: Ask::Rows(List::Search, ask),
                     })),
                 };
             }
         };
-        self.results.show_message(message);
-        self.selection = Selection::None;
         self.open_on_answer = false;
-        Accepted::only(Change::Message)
+        self.show_message(List::Search, message)
     }
 
-    /// The chunk that the visible rows still lack, if no request for rows
-    /// is in flight.
-    pub(crate) fn rows_needed(&mut self, visible: Range<u64>) -> Option<Fetch> {
+    /// A search panel's search (file-manager-spec.md: Search in a panel):
+    /// its typed text in Start of words, without Search's match controls,
+    /// filters or sort, in the panel's folder and its subfolders or on all
+    /// drives, in the panel's sort. A folder that gozlerd does not index
+    /// says so before anything is typed, and an empty text asks the person
+    /// to type.
+    fn start_panel_search(&mut self, side: Side, query_start: &QueryStart) -> Accepted {
+        let list = List::Panel(side);
+        let panel = self.panels.panel(side);
+        let Some(search) = panel.search() else {
+            return Accepted::only(Change::Nothing);
+        };
+        let folder = panel.folder();
+        let filters = match search.look_in {
+            LookIn::ThisFolder => Filters {
+                location: Some(folder.to_owned()),
+                ..Filters::default()
+            },
+            LookIn::AllDrives => Filters::default(),
+        };
+        let text = search.list.text();
+        let message = if self.not_indexed(side) {
+            ListMessage::NotIndexed {
+                root: drive_root(folder),
+            }
+        } else if text.trim().is_empty() {
+            ListMessage::TypeToSearch
+        } else {
+            match query::search(text, Matching::default(), &filters, query_start) {
+                Err(error) => ListMessage::Parse(error),
+                Ok(search) => {
+                    let sort = panel.sort();
+                    let generation = self.generation();
+                    let shown = self.list_mut(list).expect("the panel searches");
+                    let ask = shown.results.start_search(generation, search, sort);
+                    return Accepted {
+                        change: Change::Searching(list),
+                        then: Some(Then::Fetch(Fetch {
+                            generation,
+                            ask: Ask::Rows(list, ask),
+                        })),
+                    };
+                }
+            }
+        };
+        self.show_message(list, message)
+    }
+
+    /// Whether `side` is a search panel of This folder and subfolders whose
+    /// folder no volume of the latest status holds, so gozlerd cannot
+    /// search it; `false` while no status is known.
+    fn not_indexed(&self, side: Side) -> bool {
+        let panel = self.panels.panel(side);
+        self.status.is_some()
+            && panel
+                .search()
+                .is_some_and(|search| search.look_in == LookIn::ThisFolder)
+            && (Coverage::of(self.volumes(), Some(panel.folder()), false).volumes())
+                .next()
+                .is_none()
+    }
+
+    /// Shows `message` in `list` instead of its rows, with nothing
+    /// selected.
+    fn show_message(&mut self, list: List, message: ListMessage) -> Accepted {
+        let Some(shown) = self.list_mut(list) else {
+            return Accepted::only(Change::Nothing);
+        };
+        shown.results.show_message(message);
+        shown.selection = Selection::None;
+        shown.chosen_bytes = None;
+        Accepted::only(Change::Message(list))
+    }
+
+    /// The chunk that `list`'s visible rows still lack, if no request for
+    /// its rows is in flight.
+    pub(crate) fn rows_needed(&mut self, list: List, visible: Range<u64>) -> Option<Fetch> {
         let generation = self.generation();
-        let ask = self.results.next_chunk(visible, generation)?;
+        let ask = self
+            .list_mut(list)?
+            .results
+            .next_chunk(visible, generation)?;
         Some(Fetch {
             generation,
-            ask: Ask::Rows(ask),
+            ask: Ask::Rows(list, ask),
         })
     }
 
@@ -1038,49 +1132,66 @@ impl Model {
         })
     }
 
-    /// The positions the list says are selected, sorted and apart, read once
+    /// The positions `list` says are selected, sorted and apart, read once
     /// per user action. When the cache holds every one, the selection is
     /// those rows, the files the person sees; otherwise it is read
     /// (DESIGN.md: The selection).
-    pub(crate) fn set_selection(&mut self, positions: Vec<Range<u64>>) -> Accepted {
-        let older = self.selection.asked();
+    pub(crate) fn set_selection(&mut self, list: List, positions: Vec<Range<u64>>) -> Accepted {
+        let Some(shown) = self.list_mut(list) else {
+            return Accepted::only(Change::Nothing);
+        };
+        let older = shown.selection.asked();
         let positions: Vec<Range<u64>> = positions.into_iter().filter(|r| !r.is_empty()).collect();
-        let then = if positions.is_empty() || self.results.shown_ask().is_none() {
-            self.selection = Selection::None;
+        let then = if positions.is_empty() || shown.results.shown_ask().is_none() {
+            shown.selection = Selection::None;
+            shown.chosen_bytes = None;
             None
         } else {
-            match self.results.cached_rows(&positions) {
-                Some(files) => self.select(files),
+            match shown.results.cached_rows(&positions) {
+                Some(files) => self.select(list, files),
                 None => {
-                    self.selection = Selection::Reading {
+                    shown.selection = Selection::Reading {
                         positions,
                         asked: None,
                     };
-                    Some(Then::ReadSelectionSoon)
+                    shown.chosen_bytes = None;
+                    Some(Then::ReadSelectionSoon(list))
                 }
             }
         };
         // The request for the older selection reads other files (DESIGN.md: T6,
         // T7); a new request of the purpose ends it too.
-        let then = then.or_else(|| older.map(|_| Then::Cancel(Purpose::Selection)));
+        let then = then.or_else(|| older.map(|_| Then::Cancel(Purpose::Selection(list))));
         Accepted {
-            change: Change::Selection,
+            change: Change::Selection(list),
             then,
         }
     }
 
-    /// Selects `files`, which are read; one folder alone also asks for its
-    /// contents, which the inspector shows (DESIGN.md: Inspector pane).
-    fn select(&mut self, mut files: Vec<ResultItem>) -> Option<Then> {
-        files.retain(|file| !is_taken(&self.taken, &self.search_kept, file));
+    /// Selects `files` of `list`, which are read. In Search's list, one
+    /// folder alone also asks for its contents, which the inspector shows
+    /// (DESIGN.md: Inspector pane); a search panel adds up the selection's
+    /// size for its status line instead.
+    fn select(&mut self, list: List, mut files: Vec<ResultItem>) -> Option<Then> {
+        let taken = Arc::clone(&self.taken);
+        let shown = self.list_mut(list)?;
+        files.retain(|file| !is_taken(&taken, &shown.kept, file));
         if files.is_empty() {
-            self.selection = Selection::None;
+            shown.selection = Selection::None;
+            shown.chosen_bytes = None;
             return None;
         }
-        let folder = match files.as_slice() {
-            [entry] if entry.is_dir => files.pop().expect("the selection is one folder"),
-            _ => {
-                self.selection = Selection::Files(files);
+        let folder = match (list, files.as_slice()) {
+            (List::Search, [entry]) if entry.is_dir => {
+                files.pop().expect("the selection is one folder")
+            }
+            (List::Search, _) => {
+                shown.selection = Selection::Files(files);
+                return None;
+            }
+            (List::Panel(_), _) => {
+                shown.selection = Selection::Files(files);
+                shown.count_chosen_bytes();
                 return None;
             }
         };
@@ -1092,7 +1203,7 @@ impl Model {
             },
             scope: Some(folder.path.clone()),
         };
-        self.selection = Selection::Folder {
+        self.search_list.selection = Selection::Folder {
             folder,
             contents: FolderContents::Calculating(generation),
         };
@@ -1102,35 +1213,34 @@ impl Model {
         }))
     }
 
-    /// The request for the selection's rows, if it waits for one.
-    pub(crate) fn read_selection(&mut self) -> Option<Fetch> {
+    /// The request for `list`'s selected rows, if it waits for one.
+    pub(crate) fn read_selection(&mut self, list: List) -> Option<Fetch> {
+        let shown = self.list(list)?;
         let Selection::Reading {
             positions,
             asked: None,
-        } = &self.selection
+        } = &shown.selection
         else {
             return None;
         };
-        let ask = self.results.selection_ask(positions.clone())?;
+        let ask = shown.results.selection_ask(positions.clone())?;
         let generation = self.generation();
-        if let Selection::Reading { asked, .. } = &mut self.selection {
+        if let Some(shown) = self.list_mut(list)
+            && let Selection::Reading { asked, .. } = &mut shown.selection
+        {
             *asked = Some(generation);
         }
         Some(Fetch {
             generation,
-            ask: Ask::Selection(ask),
+            ask: Ask::Selection(list, ask),
         })
     }
 
-    /// The selected files, once they are read.
-    pub(crate) fn selected_files(&self) -> Option<&[ResultItem]> {
-        self.selection.files()
-    }
-
-    /// Whether Export results… can run: the list shows results and no
+    /// Whether Export results… can run: Search's list shows results and no
     /// export runs (DESIGN.md: C4).
     pub(crate) fn can_export(&self) -> bool {
-        self.results.shown_ask().is_some() && self.results.total() > 0 && !self.exporting()
+        let results = self.search_list.results();
+        results.shown_ask().is_some() && results.total() > 0 && !self.exporting()
     }
 
     pub(crate) fn exporting(&self) -> bool {
@@ -1152,7 +1262,8 @@ impl Model {
         format: ExportFormat,
         display_order: &[usize],
     ) -> Accepted {
-        let Some(shown) = self.results.shown_ask().filter(|_| self.can_export()) else {
+        let Some(shown) = (self.search_list.results.shown_ask()).filter(|_| self.can_export())
+        else {
             return Accepted::only(Change::Nothing);
         };
         let (search, sort) = (shown.search.clone(), shown.sort);
@@ -1208,7 +1319,9 @@ impl Model {
     /// the person's action, so they start no poll.
     pub(crate) fn polls_status(&self) -> bool {
         self.failure.as_ref().is_some_and(DaemonFailure::recovers)
-            || self.indexing_in_scope()
+            || List::ALL
+                .into_iter()
+                .any(|list| self.indexing_in_scope(list))
             || self.index_page_shown
             || self.fix.waits_for_service()
     }
@@ -1340,30 +1453,46 @@ impl Model {
         }
     }
 
-    /// What the latest status says about the volumes the shown search
-    /// reaches.
-    pub(crate) fn coverage(&self) -> Coverage<'_> {
+    /// What the latest status says about the volumes that `list`'s shown
+    /// search reaches.
+    pub(crate) fn coverage(&self, list: List) -> Coverage<'_> {
         let volumes = self.volumes();
-        let scope = self
-            .results
-            .shown_search()
-            .and_then(|search| search.scope.as_deref());
-        Coverage::of(volumes, scope, self.reads_size_or_date())
+        let shown = self
+            .list(list)
+            .and_then(|shown| shown.results.shown_search());
+        let scope = shown.and_then(|search| search.scope.as_deref());
+        Coverage::of(volumes, scope, self.reads_size_or_date(list))
     }
 
-    fn reads_size_or_date(&self) -> bool {
-        self.results
-            .shown_search()
-            .is_some_and(|search| search.query.tests_size_or_date())
+    fn reads_size_or_date(&self, list: List) -> bool {
+        (self
+            .list(list)
+            .and_then(|shown| shown.results.shown_search()))
+        .is_some_and(|search| search.query.tests_size_or_date())
     }
 
-    /// Whether a volume the shown search reaches completes by itself once
-    /// it is read.
-    fn indexing_in_scope(&self) -> bool {
-        self.coverage().volumes().any(|v| {
+    /// Whether a volume that `list`'s shown search reaches completes by
+    /// itself once it is read.
+    fn indexing_in_scope(&self, list: List) -> bool {
+        let searched = self
+            .list(list)
+            .and_then(|shown| shown.results.shown_search());
+        searched.is_some()
+            && self.coverage(list).volumes().any(|v| {
+                matches!(
+                    v.phase,
+                    VolumePhase::Bootstrapping | VolumePhase::Rescanning
+                )
+            })
+    }
+
+    /// Whether `list` shows a failure that ends by itself, so it searches
+    /// again once the service answers.
+    fn shows_recovering_failure(&self, list: List) -> bool {
+        self.list(list).is_some_and(|shown| {
             matches!(
-                v.phase,
-                VolumePhase::Bootstrapping | VolumePhase::Rescanning
+                shown.results.shown(),
+                Shown::Message(ListMessage::Failure(failure)) if failure.recovers()
             )
         })
     }
@@ -1372,14 +1501,22 @@ impl Model {
     pub(crate) fn accept(&mut self, fetched: Fetched) -> Accepted {
         let generation = fetched.generation;
         match fetched.purpose {
-            Purpose::Results if self.results.awaits(generation) => {
-                self.accept_results(generation, fetched.outcome)
+            Purpose::Results(list)
+                if self
+                    .list(list)
+                    .is_some_and(|shown| shown.results.awaits(generation)) =>
+            {
+                self.accept_results(list, generation, fetched.outcome)
             }
             Purpose::Status if self.status_asked == Some(generation) => {
                 self.accept_status(fetched.outcome)
             }
-            Purpose::Selection if self.selection.asked() == Some(generation) => {
-                self.accept_selection(fetched.outcome)
+            Purpose::Selection(list)
+                if self
+                    .list(list)
+                    .is_some_and(|shown| shown.selection.asked() == Some(generation)) =>
+            {
+                self.accept_selection(list, fetched.outcome)
             }
             Purpose::Export if matches!(self.export, Export::Running { generation: g, .. } if g == generation) => {
                 self.accept_export(fetched.outcome)
@@ -1421,9 +1558,9 @@ impl Model {
                     Accepted::only(Change::Nothing)
                 }
             }
-            Purpose::Results
+            Purpose::Results(_)
             | Purpose::Status
-            | Purpose::Selection
+            | Purpose::Selection(_)
             | Purpose::Export
             | Purpose::Program
             | Purpose::IncludeCount
@@ -1431,57 +1568,68 @@ impl Model {
         }
     }
 
-    fn accept_results(&mut self, generation: Generation, outcome: Outcome) -> Accepted {
+    fn accept_results(&mut self, list: List, generation: Generation, outcome: Outcome) -> Accepted {
         match outcome {
             Outcome::Rows(chunk) => {
                 self.failure = None;
                 let flags = (chunk.volumes_incomplete, chunk.metadata_pending);
-                let change = match self.results.accept(generation, chunk) {
+                let shown = self
+                    .list_mut(list)
+                    .expect("accept checked that the list waits");
+                let change = match shown.results.accept(generation, chunk) {
                     RowsChange::Stale => Change::Nothing,
                     RowsChange::NewSearch { count } => {
                         // A new search's rows are other files (DESIGN.md: T2),
                         // and the disk as it is now.
-                        self.selection = Selection::None;
-                        self.search_kept.clear();
+                        shown.selection = Selection::None;
+                        shown.chosen_bytes = None;
+                        shown.kept.clear();
+                        let waits =
+                            list == List::Search && std::mem::take(&mut self.open_on_answer);
                         Change::NewSearch {
+                            list,
                             count,
-                            open_first: std::mem::take(&mut self.open_on_answer) && count > 0,
+                            open_first: waits && count > 0,
                         }
                     }
-                    RowsChange::Rows { rows, count } => Change::Rows { rows, count },
+                    RowsChange::Rows { rows, count } => Change::Rows { list, rows, count },
                 };
                 // A page's flags cover every volume in scope, and the status
                 // names which. The scope is the shown search's, so it is read
-                // after the rows are accepted.
-                let coverage = self.coverage();
+                // after the rows are accepted. Another list that shows a
+                // failure that ends by itself searches again when the status
+                // says the service answers ([`Model::accept_status`]).
+                let coverage = self.coverage(list);
                 let unexplained = flags.0 && coverage.incomplete().is_none()
-                    || leaves_matches_out(flags.1, self.reads_size_or_date())
+                    || leaves_matches_out(flags.1, self.reads_size_or_date(list))
                         && coverage.sizes_or_dates_unknown().is_none();
-                let then = if unexplained {
+                let another_failed = (List::ALL.into_iter())
+                    .any(|other| other != list && self.shows_recovering_failure(other));
+                let then = if unexplained || another_failed {
                     self.status_needed().map(Then::Fetch)
                 } else {
                     None
                 };
                 Accepted { change, then }
             }
-            Outcome::Failed(failure) => self.show_failure(failure),
+            Outcome::Failed(failure) => self.show_failure(list, failure),
             other => unreachable!("a results request's reply is rows or a failure: {other:?}"),
         }
     }
 
-    /// The service failed while rows are shown: the list shows the failure
-    /// instead of the rows, nothing is selected, and the status poll runs
-    /// the search again once a failure that ends by itself has ended
-    /// (DESIGN.md: T3, T4).
-    fn show_failure(&mut self, failure: DaemonFailure) -> Accepted {
+    /// The service failed while `list` shows rows: the list shows the
+    /// failure instead of the rows, nothing is selected, and the status
+    /// poll runs the search again once a failure that ends by itself has
+    /// ended (DESIGN.md: T3, T4).
+    fn show_failure(&mut self, list: List, failure: DaemonFailure) -> Accepted {
         let then = self.ask_latest_release(&failure);
         self.failure = Some(failure.clone());
-        self.results.show_message(ListMessage::Failure(failure));
-        self.selection = Selection::None;
-        self.open_on_answer = false;
+        if list == List::Search {
+            self.open_on_answer = false;
+        }
         Accepted {
-            change: Change::Message,
             then,
+            ..self.show_message(list, ListMessage::Failure(failure))
         }
     }
 
@@ -1489,47 +1637,90 @@ impl Model {
         self.status_asked = None;
         match outcome {
             Outcome::Status(status, programs) => {
-                let answers_again = self.failure.as_ref().is_some_and(DaemonFailure::recovers);
-                let was_indexing = self.indexing_in_scope();
+                // Each list's own message says whether it failed, because a
+                // list whose rows arrived cleared the shared failure while
+                // another list still shows one.
+                let failed: Vec<List> = (List::ALL.into_iter())
+                    .filter(|list| self.shows_recovering_failure(*list))
+                    .collect();
+                let was_indexing: Vec<List> = (List::ALL.into_iter())
+                    .filter(|list| self.indexing_in_scope(*list))
+                    .collect();
+                let not_indexed: Vec<(Side, bool)> = (Side::BOTH.into_iter())
+                    .map(|side| (side, self.not_indexed(side)))
+                    .collect();
                 self.failure = None;
                 self.status = Some(status);
                 self.programs = programs;
                 // The fix's end shows with this status.
                 self.fix.service_answered();
-                let completed = was_indexing && !self.indexing_in_scope();
-                let search_again =
-                    answers_again || completed && self.results.shown_search().is_some();
+                let completed =
+                    (was_indexing.into_iter()).filter(|list| !self.indexing_in_scope(*list));
+                let indexed_now = (not_indexed.into_iter())
+                    .filter(|&(side, was)| self.awaits_index(side) && was != self.not_indexed(side))
+                    .map(|(side, _)| List::Panel(side));
+                let mut lists: Vec<List> = Vec::new();
+                for list in failed.into_iter().chain(completed).chain(indexed_now) {
+                    if !lists.contains(&list) {
+                        lists.push(list);
+                    }
+                }
                 Accepted {
                     change: Change::Status,
-                    then: search_again.then_some(Then::SearchAgain),
+                    then: (!lists.is_empty()).then_some(Then::SearchAgain(lists)),
                 }
             }
             Outcome::Failed(failure) => {
-                // A failure the list shows follows the service, so its
+                // A failure a list shows follows the service, so its
                 // message and button never offer the fix for a state the
                 // service has left. A search in flight shows its own reply.
-                let shows_another = matches!(
-                    self.results.shown(),
-                    Shown::Message(ListMessage::Failure(shown)) if *shown != failure
-                );
-                let change = if shows_another && !self.results.searching() {
-                    self.results
-                        .show_message(ListMessage::Failure(failure.clone()));
-                    Change::Message
-                } else {
-                    Change::Status
-                };
+                for list in List::ALL {
+                    let Some(shown) = self.list_mut(list) else {
+                        continue;
+                    };
+                    let shows_another = matches!(
+                        shown.results.shown(),
+                        Shown::Message(ListMessage::Failure(shown)) if *shown != failure
+                    );
+                    if shows_another && !shown.results.searching() {
+                        (shown.results).show_message(ListMessage::Failure(failure.clone()));
+                    }
+                }
                 let then = self.ask_latest_release(&failure);
                 self.failure = Some(failure);
-                Accepted { change, then }
+                Accepted {
+                    change: Change::Status,
+                    then,
+                }
             }
             other => unreachable!("a status request's reply is status or a failure: {other:?}"),
         }
     }
 
-    fn accept_selection(&mut self, outcome: Outcome) -> Accepted {
+    /// Whether `side` is a search panel of This folder and subfolders that
+    /// shows a state a change of the index can change: "Type a name…",
+    /// "not indexed", or no results. A status reply checks it again, and
+    /// searches again only when the folder's index state changed, so a
+    /// poll every 2 seconds starts no request while nothing changes.
+    fn awaits_index(&self, side: Side) -> bool {
+        let Some(search) = self.panels.search(side) else {
+            return false;
+        };
+        let results = search.list.results();
+        search.look_in == LookIn::ThisFolder
+            && match results.shown() {
+                Shown::Message(ListMessage::TypeToSearch | ListMessage::NotIndexed { .. }) => true,
+                Shown::Rows(_) => results.total() == 0,
+                Shown::Nothing | Shown::Message(_) => false,
+            }
+    }
+
+    fn accept_selection(&mut self, list: List, outcome: Outcome) -> Accepted {
+        let shown = self
+            .list_mut(list)
+            .expect("accept checked that the list waits");
         match (
-            std::mem::replace(&mut self.selection, Selection::None),
+            std::mem::replace(&mut shown.selection, Selection::None),
             outcome,
         ) {
             (Selection::Reading { positions, .. }, Outcome::Selection(reply)) => {
@@ -1552,30 +1743,30 @@ impl Model {
                         (false, _) => cached.push((position, row)),
                     }
                 }
-                let rows = self.results.replace_cached(&reply.cached, cached);
+                let rows = shown.results.replace_cached(&reply.cached, cached);
                 let then = if files.is_empty() {
                     None
                 } else {
-                    self.select(files)
+                    self.select(list, files)
                 };
                 Accepted {
-                    change: Change::SelectionRead { rows },
+                    change: Change::SelectionRead { list, rows },
                     then,
                 }
             }
             (Selection::Folder { folder, .. }, Outcome::Totals(totals)) => {
-                self.selection = Selection::Folder {
+                shown.selection = Selection::Folder {
                     folder,
                     contents: FolderContents::Counted(totals),
                 };
                 Accepted::only(Change::FolderCounted)
             }
-            (_, Outcome::Failed(failure)) if !self.results.searching() => {
-                self.show_failure(failure)
+            (_, Outcome::Failed(failure)) if !shown.results.searching() => {
+                self.show_failure(list, failure)
             }
             // A search in flight shows its own reply, which clears the
             // list's selection.
-            (_, Outcome::Failed(_)) => Accepted::only(Change::Selection),
+            (_, Outcome::Failed(_)) => Accepted::only(Change::Selection(list)),
             (selection, other) => unreachable!(
                 "a selection request's reply is its rows, its folder's totals or a failure: \
                  {selection:?}, {other:?}"
@@ -1775,14 +1966,6 @@ impl Column {
     }
 }
 
-/// Whether a delete or a move has taken `row`'s entry, by its exact name
-/// when its UTF-8 path lost an unpaired surrogate. The window asks for every
-/// cell it paints and every selected file, so an empty set answers before
-/// the path is encoded.
-fn is_taken(taken: &Taken, kept: &HashSet<OperationId>, row: &ResultItem) -> bool {
-    !taken.is_empty() && taken.contains(&wide_path(row), |id| kept.contains(&id))
-}
-
 #[cfg(test)]
 #[allow(
     clippy::single_range_in_vec_init,
@@ -1793,6 +1976,7 @@ pub(crate) mod tests {
     use crate::core::captions::{self, list_message};
     use crate::core::fetch::{SelectionRows, WriteFailure};
     use crate::core::fixer::CommandEvent;
+    use crate::core::panel::ReadEvent;
     use crate::core::results::CHUNK_ROWS;
     use crate::core::results::tests::chunk;
     use crate::core::text::tests::{English, english};
@@ -1846,14 +2030,14 @@ pub(crate) mod tests {
 
     /// Types `text` and starts its search; returns the first chunk's fetch.
     pub(crate) fn search(model: &mut Model, text: &str) -> Fetch {
-        model.set_typed_search(text.to_owned());
+        model.set_typed_search(List::Search, text.to_owned());
         let start = QueryStart {
             now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
             time_zone: jiff::tz::TimeZone::UTC,
         };
-        match model.start_search(&start, ScopeCheck::Exists) {
+        match model.start_search(List::Search, &start, ScopeCheck::Exists) {
             Accepted {
-                change: Change::Searching,
+                change: Change::Searching(List::Search),
                 then: Some(Then::Fetch(fetch)),
             } => fetch,
             other => panic!("the search starts a request: {other:?}"),
@@ -1863,14 +2047,147 @@ pub(crate) mod tests {
     /// The reply to `fetch`: its first rows of a search with `total` matches.
     pub(crate) fn rows(fetch: &Fetch, total: u64) -> Fetched {
         let start = match &fetch.ask {
-            Ask::Rows(ask) => ask.start,
+            Ask::Rows(_, ask) => ask.start,
             other => panic!("a rows fetch: {other:?}"),
         };
         Fetched {
-            purpose: Purpose::Results,
+            purpose: fetch.purpose(),
             generation: fetch.generation,
             outcome: Outcome::Rows(chunk(start, CHUNK_ROWS.min(total - start), total)),
         }
+    }
+
+    /// The left panel shows `folder` and searches it for `text`.
+    fn panel_search(model: &mut Model, folder: &str, text: &str) -> Accepted {
+        crate::core::panel::tests::list(model.panels_mut(), folder, Vec::new());
+        model.panels_mut().enter_search(Side::Left);
+        model.set_typed_search(List::Panel(Side::Left), text.to_owned());
+        let start = QueryStart {
+            now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        model.start_search(List::Panel(Side::Left), &start, ScopeCheck::Exists)
+    }
+
+    fn fetch_of(accepted: Accepted) -> Fetch {
+        match accepted.then {
+            Some(Then::Fetch(fetch)) => fetch,
+            other => panic!("a request starts: {other:?}"),
+        }
+    }
+
+    /// T1: a request of one purpose ends the older request of that purpose,
+    /// so a panel's search that shared Search's purpose would leave Search
+    /// showing "Searching…" for ever.
+    #[test]
+    fn a_search_in_one_list_leaves_another_lists_request_alone() {
+        let mut model = model();
+        let fetch = search(&mut model, "report");
+        let panel = fetch_of(panel_search(&mut model, r"C:\Users\me", "report"));
+        assert_ne!(panel.purpose(), fetch.purpose());
+        assert_eq!(
+            model.accept(rows(&fetch, 3)).change,
+            Change::NewSearch {
+                list: List::Search,
+                count: 3,
+                open_first: false
+            }
+        );
+        assert_eq!(
+            model.accept(rows(&panel, 2)).change,
+            Change::NewSearch {
+                list: List::Panel(Side::Left),
+                count: 2,
+                open_first: false
+            }
+        );
+        assert_eq!(model.search_list().results().count(), 3);
+    }
+
+    /// T4: one list's new search must not show another list's deleted rows
+    /// again, and an ended delete must still leave the queue once no list
+    /// shows it.
+    #[test]
+    fn each_list_releases_only_its_own_ended_operations() {
+        let mut model = model();
+        let fetch = search(&mut model, "row");
+        model.accept(rows(&fetch, 3));
+        let panel = fetch_of(panel_search(&mut model, r"C:\", "row"));
+        model.accept(rows(&panel, 3));
+        let id = OperationId::for_tests(1);
+        let mut taken = Taken::default();
+        taken.insert(id, std::path::Path::new(r"C:\row1"), false);
+        let delete = Arc::new(Request::Delete {
+            sources: vec![r"C:\row1".into()],
+        });
+        model.operations_ended(&[(id, delete)], &taken);
+        let fetch = search(&mut model, "rows");
+        model.accept(rows(&fetch, 3));
+        assert!(
+            model.keeps(id),
+            "the panel's list still shows the row blank"
+        );
+        let ask = (model.panels_mut().leave_search(Side::Left)).expect("the panel searches");
+        let opened = ReadEvent::Opened {
+            generation: ask.generation,
+            folder: ask.path,
+        };
+        model.panels_mut().accept_read(Side::Left, opened, None);
+        assert!(!model.keeps(id));
+    }
+
+    /// T5: an empty list in a folder that gozlerd does not index reads as
+    /// "no such file".
+    #[test]
+    fn a_folder_that_is_not_indexed_says_so_before_typing() {
+        let mut model = model();
+        let ask = model.status_needed().expect("no status request runs");
+        model.accept(status(&ask, VolumePhase::Live));
+        panel_search(&mut model, r"E:\x", "");
+        let message = |model: &Model| {
+            let list = model.list(List::Panel(Side::Left)).expect("a search panel");
+            match list.results().shown() {
+                Shown::Message(message) => Some(message.clone()),
+                Shown::Nothing | Shown::Rows(_) => None,
+            }
+        };
+        assert_eq!(
+            message(&model),
+            Some(ListMessage::NotIndexed {
+                root: r"E:\".to_owned()
+            })
+        );
+        (model.panels_mut().search_mut(Side::Left))
+            .expect("a search panel")
+            .look_in = LookIn::AllDrives;
+        let start = QueryStart {
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        model.start_search(List::Panel(Side::Left), &start, ScopeCheck::Exists);
+        assert_eq!(message(&model), Some(ListMessage::TypeToSearch));
+    }
+
+    /// T6: a panel's search takes none of Search's controls and leaves
+    /// Search's sort alone (file-manager-spec.md: Search in a panel).
+    #[test]
+    fn a_panel_search_asks_with_the_default_match_and_the_panel_sort() {
+        let mut model = model();
+        model.set_matching(Matching {
+            case: true,
+            path: true,
+            ..model.matching()
+        });
+        model.sort_by(SortSpec::default_for(SortKey::Size));
+        (model.panels_mut()).sort(Side::Left, SortSpec::default_for(SortKey::DateModified));
+        let fetch = fetch_of(panel_search(&mut model, r"C:\Users\me", "report"));
+        let Ask::Rows(List::Panel(Side::Left), ask) = &fetch.ask else {
+            panic!("the left panel's rows: {fetch:?}")
+        };
+        assert_eq!(ask.sort.key, SortKey::DateModified);
+        assert_eq!(ask.search.scope.as_deref(), Some(r"C:\Users\me"));
+        assert!(!ask.search.query.match_case);
+        assert_eq!(model.sort().key, SortKey::Size);
     }
 
     fn failed(fetch: &Fetch, failure: DaemonFailure) -> Fetched {
@@ -1931,13 +2248,20 @@ pub(crate) mod tests {
             case: true,
             ..model.matching()
         };
-        assert_eq!(model.set_matching(case).then, Some(Then::SearchAgain));
+        assert_eq!(
+            model.set_matching(case).then,
+            Some(Then::SearchAgain(vec![List::Search]))
+        );
         let older = search(&mut model, "repo");
-        assert_eq!(model.results.count(), 10, "the previous rows stay");
+        assert_eq!(
+            model.search_list.results.count(),
+            10,
+            "the previous rows stay"
+        );
         assert_eq!(captions::results_status(&model, &English), "Searching…");
         let _newest = search(&mut model, "report f");
         assert_eq!(model.accept(rows(&older, 3)).change, Change::Nothing);
-        assert_eq!(model.results.count(), 10);
+        assert_eq!(model.search_list.results.count(), 10);
     }
 
     #[test]
@@ -1947,6 +2271,7 @@ pub(crate) mod tests {
         assert_eq!(
             model.accept(rows(&fetch, 3)).change,
             Change::NewSearch {
+                list: List::Search,
                 count: 3,
                 open_first: false
             }
@@ -1958,13 +2283,13 @@ pub(crate) mod tests {
     fn t3_a_failure_while_rows_are_shown_removes_them() {
         let mut model = showing(50_000);
         let chunk = model
-            .rows_needed(CHUNK_ROWS..CHUNK_ROWS + 40)
+            .rows_needed(List::Search, CHUNK_ROWS..CHUNK_ROWS + 40)
             .expect("the rows are not cached");
         assert_eq!(
             model.accept(failed(&chunk, DaemonFailure::Lost)).change,
-            Change::Message
+            Change::Message(List::Search)
         );
-        assert_eq!(model.results.count(), 0);
+        assert_eq!(model.search_list.results.count(), 0);
         let strings = english();
         assert_eq!(
             message(&model),
@@ -1985,7 +2310,7 @@ pub(crate) mod tests {
         let ask = model.status_needed().expect("no status request runs");
         assert_eq!(
             model.accept(status(&ask, VolumePhase::Live)).then,
-            Some(Then::SearchAgain)
+            Some(Then::SearchAgain(vec![List::Search]))
         );
 
         let mut model = showing(10);
@@ -1997,7 +2322,7 @@ pub(crate) mod tests {
         let ask = model.status_needed().expect("no status request runs");
         assert_eq!(
             model.accept(status(&ask, VolumePhase::Live)).then,
-            Some(Then::SearchAgain)
+            Some(Then::SearchAgain(vec![List::Search]))
         );
         assert!(!model.polls_status(), "nothing needs the poll any more");
     }
@@ -2013,7 +2338,7 @@ pub(crate) mod tests {
         let ask = model.status_needed().expect("no status request runs");
         let accepted = model.accept(status(&ask, VolumePhase::Rescanning));
         assert_eq!(accepted, Accepted::only(Change::Status));
-        assert_eq!(model.results.count(), 10);
+        assert_eq!(model.search_list.results.count(), 10);
         // S13.
         assert_eq!(
             captions::index_status(&model),
@@ -2030,7 +2355,7 @@ pub(crate) mod tests {
         let ask = model.status_needed().expect("no status request runs");
         model.accept(status(&ask, VolumePhase::Live));
         let fetch = model
-            .rows_needed(CHUNK_ROWS..CHUNK_ROWS + 40)
+            .rows_needed(List::Search, CHUNK_ROWS..CHUNK_ROWS + 40)
             .expect("the rows are not cached");
         let mut reply = rows(&fetch, 50_000);
         if let Outcome::Rows(chunk) = &mut reply.outcome {
@@ -2071,7 +2396,7 @@ pub(crate) mod tests {
             model.accept(failed(&ask, DaemonFailure::Lost)).change,
             Change::Status
         );
-        assert_eq!(model.results.count(), 10);
+        assert_eq!(model.search_list.results.count(), 10);
         assert_eq!(message(&model), None);
 
         let fetch = search(&mut model, "repo");
@@ -2080,9 +2405,9 @@ pub(crate) mod tests {
         };
         assert_eq!(
             model.accept(failed(&fetch, refused)).change,
-            Change::Message
+            Change::Message(List::Search)
         );
-        assert_eq!(model.results.count(), 0);
+        assert_eq!(model.search_list.results.count(), 0);
     }
 
     /// The list would otherwise keep offering Start the service for a
@@ -2097,7 +2422,7 @@ pub(crate) mod tests {
         ));
         let ask = model.status_needed().expect("no status request runs");
         let disabled = DaemonFailure::NotRunning(NotRunning::Disabled);
-        assert_eq!(model.accept(failed(&ask, disabled)).change, Change::Message);
+        assert_eq!(model.accept(failed(&ask, disabled)).change, Change::Status);
         let strings = english();
         assert_eq!(
             message(&model),
@@ -2112,14 +2437,14 @@ pub(crate) mod tests {
     #[test]
     fn a_search_that_does_not_parse_starts_no_request() {
         let mut model = model();
-        model.set_typed_search("dz:x".into());
+        model.set_typed_search(List::Search, "dz:x".into());
         let start = QueryStart {
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
         assert_eq!(
-            model.start_search(&start, ScopeCheck::Exists),
-            Accepted::only(Change::Message)
+            model.start_search(List::Search, &start, ScopeCheck::Exists),
+            Accepted::only(Change::Message(List::Search))
         );
         let strings = english();
         assert_eq!(
@@ -2140,8 +2465,8 @@ pub(crate) mod tests {
             time_zone: jiff::tz::TimeZone::UTC,
         };
         assert_eq!(
-            model.start_search(&start, ScopeCheck::Missing),
-            Accepted::only(Change::Message)
+            model.start_search(List::Search, &start, ScopeCheck::Missing),
+            Accepted::only(Change::Message(List::Search))
         );
         let strings = english();
         assert_eq!(
@@ -2191,7 +2516,9 @@ pub(crate) mod tests {
 
     fn paths(model: &Model) -> Vec<&str> {
         model
-            .selected_files()
+            .search_list()
+            .selection()
+            .files()
             .unwrap_or_default()
             .iter()
             .map(|f| f.path.as_str())
@@ -2203,16 +2530,16 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_of_cached_rows_is_built_from_the_cache() {
         let mut model = showing(50_000);
-        let accepted = model.set_selection(vec![3..5, 9..10]);
-        assert_eq!(accepted, Accepted::only(Change::Selection));
+        let accepted = model.set_selection(List::Search, vec![3..5, 9..10]);
+        assert_eq!(accepted, Accepted::only(Change::Selection(List::Search)));
         assert_eq!(paths(&model), [r"C:\row3", r"C:\row4", r"C:\row9"]);
-        assert_eq!(model.read_selection(), None);
+        assert_eq!(model.read_selection(List::Search), None);
     }
 
     /// The reply to the selection's one request: the rows it keeps, under
     /// the folder `folder`, so the test sees which rows came from it.
     fn selection_reply(fetch: &Fetch, folder: &str) -> Fetched {
-        let Ask::Selection(ask) = &fetch.ask else {
+        let Ask::Selection(_, ask) = &fetch.ask else {
             panic!("a selection fetch: {fetch:?}")
         };
         let span = ask.span.start..ask.span.start + ask.span.len;
@@ -2225,7 +2552,7 @@ pub(crate) mod tests {
             })
             .collect();
         Fetched {
-            purpose: Purpose::Selection,
+            purpose: Purpose::Selection(List::Search),
             generation: fetch.generation,
             outcome: Outcome::Selection(SelectionRows {
                 rows,
@@ -2240,15 +2567,17 @@ pub(crate) mod tests {
     #[test]
     fn a_selected_row_outside_the_cache_is_read_with_the_cached_rows_beside_it() {
         let mut model = showing(50_000);
-        let accepted = model.set_selection(vec![0..1, 40_000..40_001]);
-        assert_eq!(accepted.then, Some(Then::ReadSelectionSoon));
+        let accepted = model.set_selection(List::Search, vec![0..1, 40_000..40_001]);
+        assert_eq!(accepted.then, Some(Then::ReadSelectionSoon(List::Search)));
         assert_eq!(
             captions::selection_status(&model, &English),
             "Reading the selection…"
         );
-        let fetch = model.read_selection().expect("the selection is read");
-        assert_eq!(model.read_selection(), None, "one request");
-        let Ask::Selection(ask) = &fetch.ask else {
+        let fetch = model
+            .read_selection(List::Search)
+            .expect("the selection is read");
+        assert_eq!(model.read_selection(List::Search), None, "one request");
+        let Ask::Selection(_, ask) = &fetch.ask else {
             panic!("a selection fetch")
         };
         assert_eq!((ask.span.start, ask.span.len), (0, 40_001));
@@ -2257,11 +2586,12 @@ pub(crate) mod tests {
         assert_eq!(
             model.accept(selection_reply(&fetch, "D:")).change,
             Change::SelectionRead {
+                list: List::Search,
                 rows: 0..CHUNK_ROWS
             }
         );
         assert_eq!(paths(&model), [r"D:\row0", r"D:\row40000"]);
-        let shown = model.results.row(5).map(|r| r.path.as_str());
+        let shown = model.search_list.results.row(5).map(|r| r.path.as_str());
         assert_eq!(shown, Some(r"D:\row5"), "the cached rows are of its moment");
     }
 
@@ -2270,19 +2600,23 @@ pub(crate) mod tests {
     #[test]
     fn t6_a_selection_changed_while_it_is_read_drops_the_older_reply() {
         let mut model = showing(50_000);
-        model.set_selection(vec![40_000..40_001]);
-        let older = model.read_selection().expect("the selection is read");
+        model.set_selection(List::Search, vec![40_000..40_001]);
+        let older = model
+            .read_selection(List::Search)
+            .expect("the selection is read");
         // The window ends the older read when it schedules the new one.
         assert_eq!(
-            model.set_selection(vec![40_000..40_002]).then,
-            Some(Then::ReadSelectionSoon)
+            model.set_selection(List::Search, vec![40_000..40_002]).then,
+            Some(Then::ReadSelectionSoon(List::Search))
         );
         assert_eq!(
             model.accept(selection_reply(&older, "D:")).change,
             Change::Nothing
         );
         assert_eq!(paths(&model), Vec::<&str>::new());
-        let newer = model.read_selection().expect("the new selection is read");
+        let newer = model
+            .read_selection(List::Search)
+            .expect("the new selection is read");
         assert!(newer.generation > older.generation);
     }
 
@@ -2302,7 +2636,7 @@ pub(crate) mod tests {
 
     fn totals(fetch: &Fetch, count: u64) -> Fetched {
         Fetched {
-            purpose: Purpose::Selection,
+            purpose: Purpose::Selection(List::Search),
             generation: fetch.generation,
             outcome: Outcome::Totals(gozler_core::proto::QueryTotals {
                 count,
@@ -2331,9 +2665,9 @@ pub(crate) mod tests {
                 .clone()
         };
 
-        let first = folder_size(model.set_selection(vec![0..1]));
+        let first = folder_size(model.set_selection(List::Search, vec![0..1]));
         assert_eq!(size(&model), "Calculating…");
-        let second = folder_size(model.set_selection(vec![1..2]));
+        let second = folder_size(model.set_selection(List::Search, vec![1..2]));
         let Ask::FolderSize(search) = &second.ask else {
             unreachable!("folder_size returns a folder size request")
         };
@@ -2346,10 +2680,10 @@ pub(crate) mod tests {
         );
         assert_eq!(size(&model), "2.00 KB (2,048 bytes) in 7 items");
 
-        let _third = folder_size(model.set_selection(vec![0..1]));
+        let _third = folder_size(model.set_selection(List::Search, vec![0..1]));
         assert_eq!(
-            model.set_selection(vec![2..3]).then,
-            Some(Then::Cancel(Purpose::Selection))
+            model.set_selection(List::Search, vec![2..3]).then,
+            Some(Then::Cancel(Purpose::Selection(List::Search)))
         );
         assert_eq!(
             captions::InspectorCaptions::new(&model, &English).heading,
@@ -2364,13 +2698,15 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_read_that_fails_shows_the_failure_and_polls() {
         let mut model = showing(50_000);
-        model.set_selection(vec![40_000..40_001]);
-        let fetch = model.read_selection().expect("the selection is read");
+        model.set_selection(List::Search, vec![40_000..40_001]);
+        let fetch = model
+            .read_selection(List::Search)
+            .expect("the selection is read");
         assert_eq!(
             model.accept(failed(&fetch, DaemonFailure::Lost)).change,
-            Change::Message
+            Change::Message(List::Search)
         );
-        assert_eq!(model.selection, Selection::None);
+        assert_eq!(model.search_list.selection, Selection::None);
         let strings = english();
         assert_eq!(
             message(&model),
@@ -2379,13 +2715,16 @@ pub(crate) mod tests {
         assert!(model.polls_status());
 
         let mut model = showing(50_000);
-        model.set_selection(vec![40_000..40_001]);
-        let read = model.read_selection().expect("the selection is read");
+        model.set_selection(List::Search, vec![40_000..40_001]);
+        let read = model
+            .read_selection(List::Search)
+            .expect("the selection is read");
         let newer = search(&mut model, "repo");
         model.accept(failed(&read, DaemonFailure::Lost));
         assert_eq!(
             model.accept(rows(&newer, 3)).change,
             Change::NewSearch {
+                list: List::Search,
                 count: 3,
                 open_first: false
             },
@@ -2399,12 +2738,12 @@ pub(crate) mod tests {
     #[test]
     fn t12_a_language_switch_keeps_the_results_the_selection_and_the_text() {
         let mut model = showing(50_000);
-        model.set_selection(vec![3..5]);
-        model.set_typed_search(r"F:\ ext:cs".into());
+        model.set_selection(List::Search, vec![3..5]);
+        model.set_typed_search(List::Search, r"F:\ ext:cs".into());
         model.set_language(LanguageChoice::Tag("en".into()), english());
-        assert_eq!(model.results().count(), 50_000);
+        assert_eq!(model.search_list().results().count(), 50_000);
         assert_eq!(paths(&model), [r"C:\row3", r"C:\row4"]);
-        assert_eq!(model.text, r"F:\ ext:cs");
+        assert_eq!(model.search_list.text, r"F:\ ext:cs");
         assert_eq!(model.choices().language, LanguageChoice::Tag("en".into()));
     }
 
@@ -2412,11 +2751,11 @@ pub(crate) mod tests {
     #[test]
     fn a_new_search_clears_the_selection() {
         let mut model = showing(10);
-        model.set_selection(vec![1..2]);
+        model.set_selection(List::Search, vec![1..2]);
         let fetch = search(&mut model, "repo");
         assert_eq!(paths(&model), [r"C:\row1"], "the selection stays until");
         model.accept(rows(&fetch, 3));
-        assert_eq!(model.selection, Selection::None);
+        assert_eq!(model.search_list.selection, Selection::None);
     }
 
     /// Starts an export of the shown search as CSV; returns its fetch.
@@ -2503,7 +2842,7 @@ pub(crate) mod tests {
             "the main window shows the failure behind the dialog"
         );
         assert!(model.polls_status());
-        assert_eq!(model.results.count(), 10);
+        assert_eq!(model.search_list.results.count(), 10);
         // The service answers again: the page shows its state, and the
         // poll ends with the page.
         let ask = model.status_needed().expect("no status request runs");
@@ -2555,22 +2894,27 @@ pub(crate) mod tests {
             show_all_when_empty: false,
             ..Choices::default()
         });
-        assert_eq!(accepted.then, Some(Then::SearchAgain));
+        assert_eq!(accepted.then, Some(Then::SearchAgain(vec![List::Search])));
         let start = QueryStart {
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
         assert_eq!(
-            model.start_search(&start, ScopeCheck::Exists),
-            Accepted::only(Change::Message)
+            model.start_search(List::Search, &start, ScopeCheck::Exists),
+            Accepted::only(Change::Message(List::Search))
         );
         assert_eq!(
             message(&model),
             Some(("Type to search.".to_owned(), vec![]))
         );
-        assert_eq!(model.set_typed_search("report".into()).then, None);
+        assert_eq!(
+            model.set_typed_search(List::Search, "report".into()).then,
+            None
+        );
         assert!(matches!(
-            model.start_search(&start, ScopeCheck::Exists).then,
+            model
+                .start_search(List::Search, &start, ScopeCheck::Exists)
+                .then,
             Some(Then::Fetch(_))
         ));
     }
@@ -2598,7 +2942,7 @@ pub(crate) mod tests {
             Change::TotalCommander(Err(DaemonFailure::Lost))
         );
         assert!(!model.polls_status());
-        assert_eq!(model.results.count(), 10);
+        assert_eq!(model.search_list.results.count(), 10);
         let fetch = model.find_total_commander();
         assert_eq!(
             model.forget_total_commander().then,
@@ -2618,7 +2962,7 @@ pub(crate) mod tests {
         };
         Fetch {
             generation: fetch.generation,
-            ask: Ask::Rows(ask.clone()),
+            ask: Ask::Rows(List::Search, ask.clone()),
         }
     }
 

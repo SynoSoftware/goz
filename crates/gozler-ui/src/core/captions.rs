@@ -15,7 +15,7 @@ use super::commands::{
     self, CommandButton, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
     INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, MenuNode, SHOW_DETAILS,
 };
-use super::fetch::{Beside, DaemonFailure, Local, LocalService, ProgramFile, Programs};
+use super::fetch::{Beside, DaemonFailure, List, Local, LocalService, ProgramFile, Programs};
 use super::file_operations::{self, Bar};
 use super::fixer::{
     CommandFix, CommandResult, CommandStep, FixState, Fixer, SetupFix, SetupResult, SetupStep,
@@ -24,12 +24,15 @@ use super::glyph::Glyph;
 use super::ids::{ControlId, DialogId};
 use super::layout::WIDEST_TOTAL;
 use super::model::{Column, Export, Job, Model};
-use super::panel::{Counts, Row, Side, View};
+use super::panel::{
+    Counts, LookIn, Panel, PanelColumn, PanelSearch, Row, Side, View, relative_folder,
+};
 use super::query::{
     ATTRIBUTES, AttributeChoice, DateModified, DateRange, Day, Kind, LocationItem, MatchMode,
     RangeItem, SizeFilter, SizeRange, SizeUnit, SizeWord, date_items, size_items,
 };
 use super::results::{Fix, LIST_LIMIT, ListButton, ListMessage, Shown};
+use super::search_list::SearchList;
 use super::selection::{FolderContents, Selection, Sums};
 use super::settings::{Mode, SettingsPage};
 use super::text::{self, Numbers, Strings};
@@ -76,7 +79,10 @@ pub(crate) struct WindowCaptions {
     pub(crate) status_cancel: String,
     pub(crate) status_widest: StatusWidest,
     pub(crate) message: Option<ListCaption>,
-    pub(crate) panel_headers: [String; 4],
+    /// A search panel's Look in label, and its list's items in
+    /// [`LookIn::ALL`]'s order.
+    pub(crate) look_in_label: String,
+    pub(crate) look_in: Vec<String>,
     /// The key bar's buttons: each key, its word and its tooltip.
     pub(crate) key_bar: [(String, String, Option<String>); 6],
     pub(crate) retry: String,
@@ -691,6 +697,10 @@ impl CaptionTable {
                         Control(C::KeyboardCommandsGroup),
                         "settings_keyboard.commands",
                     ),
+                    (
+                        Control(C::KeyboardTwoPanelsNote),
+                        "settings_keyboard.two_panels",
+                    ),
                 ],
             },
             DialogId::SettingsIndex => CaptionTable {
@@ -1229,7 +1239,10 @@ impl WindowCaptions {
             status_cancel: strings.text("button.cancel").to_owned(),
             status_widest: status_widest(strings, numbers),
             message: list_message(model),
-            panel_headers: panel_headers(strings),
+            look_in_label: strings.text("panel.look_in").to_owned(),
+            look_in: LookIn::ALL
+                .map(|look_in| look_in_item(strings, look_in))
+                .to_vec(),
             key_bar: key_bar(strings),
             retry: strings.text("panel.retry").to_owned(),
             free_widest: strings.format("panel.free", &[&text::bytes(strings, numbers, 999 << 30)]),
@@ -1268,11 +1281,11 @@ impl StatusCaptions {
             },
             right: joined_parts(
                 model.strings(),
-                std::iter::once(ValuePart::plain(service.clone())).chain(if search {
-                    totals_status(model, numbers)
-                } else {
-                    Vec::new()
-                }),
+                std::iter::once(ValuePart::plain(service.clone())).chain(
+                    status_list(model)
+                        .map(|list| totals_status(model, list, numbers))
+                        .unwrap_or_default(),
+                ),
             ),
             service,
         }
@@ -1337,11 +1350,16 @@ impl InspectorCaptions {
     pub(crate) fn new(model: &Model, numbers: &dyn Numbers) -> InspectorCaptions {
         let strings = model.strings();
         let label = |key: &'static str| strings.text(key).to_owned();
-        match model.selection() {
+        match model.search_list().selection() {
             // The number of matches, and how to see an entry's details.
-            Selection::None => match model.results().shown() {
+            Selection::None => match model.search_list().results().shown() {
                 Shown::Rows(_) => InspectorCaptions {
-                    heading: strings.count("status.results", model.results().total(), numbers, &[]),
+                    heading: strings.count(
+                        "status.results",
+                        model.search_list().results().total(),
+                        numbers,
+                        &[],
+                    ),
                     note: label("inspector.nothing_selected"),
                     ..InspectorCaptions::default()
                 },
@@ -1676,11 +1694,29 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
         .chain(fix_ended)
         .chain(operation_ended)
         .collect(),
-        panel_index: vec![
-            strings.format("panel.not_indexed", &["C:\\"]),
-            strings.format("panel.indexing", &["C:\\"]),
-            update_text(strings, WIDEST_VERSION),
-        ],
+        panel_index: {
+            // An active search panel's index state and totals, as Search
+            // shows them; the layout adds the room of their two glyphs.
+            let total = |key| {
+                let size = text::bytes(strings, numbers, sizes[sizes.len() - 1]);
+                strings.count(key, WIDEST_TOTAL, numbers, &[&size])
+            };
+            let totals = joined(strings, total("status.files"), total("status.folders"));
+            let volumes = [
+                "status.volume_indexing",
+                "status.volume_offline",
+                "status.volume_failed",
+            ]
+            .map(|key| joined(strings, strings.format(key, &["C:"]), totals.clone()));
+            [
+                strings.format("panel.not_indexed", &["C:\\"]),
+                strings.format("panel.indexing", &["C:\\"]),
+                update_text(strings, WIDEST_VERSION),
+            ]
+            .into_iter()
+            .chain(volumes)
+            .collect()
+        },
     }
 }
 
@@ -1690,7 +1726,7 @@ fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
 /// wrong for the other (file-manager-spec.md: The window).
 pub(crate) fn title(model: &Model) -> String {
     let strings = model.strings();
-    let text = model.text.trim();
+    let text = model.search_list().text().trim();
     if text.is_empty() || model.mode() == Mode::TwoPanels {
         strings.text("window.title").to_owned()
     } else {
@@ -1729,12 +1765,27 @@ fn joined_parts(strings: &Strings, parts: impl Iterator<Item = ValuePart>) -> Ve
     joined
 }
 
-/// The shown search's files and folders, each kind after its icon and with
-/// the space it takes, and a kind no match is left out; none while a search
-/// runs, or when the service sent no sums (DESIGN.md: Status bar).
-fn totals_status(model: &Model, numbers: &dyn Numbers) -> Vec<ValuePart> {
+/// The list whose search the status bar describes: Search's, or in Two
+/// panels the active panel's while it searches (file-manager-spec.md: The
+/// status bar in Two panels).
+fn status_list(model: &Model) -> Option<List> {
+    match model.mode() {
+        Mode::Search => Some(List::Search),
+        Mode::TwoPanels => {
+            let active = model.panels().active();
+            model.panels().search(active).map(|_| List::Panel(active))
+        }
+    }
+}
+
+/// `list`'s files and folders, each kind after its icon and with the space
+/// it takes, and a kind no match is left out; none while a search runs, or
+/// when the service sent no sums (DESIGN.md: Status bar).
+fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValuePart> {
     let strings = model.strings();
-    let results = model.results();
+    let Some(results) = model.list(list).map(SearchList::results) else {
+        return Vec::new();
+    };
     let Some(sums) = results.sums().filter(|_| !results.searching()) else {
         return Vec::new();
     };
@@ -1768,7 +1819,7 @@ fn totals_status(model: &Model, numbers: &dyn Numbers) -> Vec<ValuePart> {
 /// cannot show adds "· Filtered" (DESIGN.md: S10).
 pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
-    let results = model.results();
+    let results = model.search_list().results();
     if results.searching() {
         return strings.text("status.searching").to_owned();
     }
@@ -1797,11 +1848,11 @@ pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
 /// that the selection is read.
 pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
-    match model.selection() {
+    match model.search_list().selection() {
         Selection::None => String::new(),
         Selection::Reading { .. } => strings.text("status.reading").to_owned(),
         Selection::Files(_) | Selection::Folder { .. } => {
-            let sums = Sums::of(model.selected_files().unwrap_or_default());
+            let sums = Sums::of(model.search_list().selection().files().unwrap_or_default());
             let count = numbers.integer(sums.entries());
             // The size counts files only, so folders alone have none.
             if sums.files == 0 {
@@ -2087,15 +2138,19 @@ pub(crate) fn use_local_question(strings: &Strings, local: &LocalService) -> Que
 /// page).
 pub(crate) fn index_status(model: &Model) -> String {
     let strings = model.strings();
-    if let (_, Some(failure)) = model.service()
-        && !matches!(
-            model.results().shown(),
+    let list = status_list(model);
+    let shows_failure = (list.and_then(|list| model.list(list))).is_some_and(|list| {
+        matches!(
+            list.results().shown(),
             Shown::Message(ListMessage::Failure(_))
         )
+    });
+    if let (_, Some(failure)) = model.service()
+        && !shows_failure
     {
         return failure_text(strings, failure);
     }
-    if model.mode() == Mode::TwoPanels {
+    let Some(list) = list else {
         return panel_index_status(model)
             .or_else(|| {
                 model
@@ -2103,8 +2158,8 @@ pub(crate) fn index_status(model: &Model) -> String {
                     .map(|version| update_text(strings, version))
             })
             .unwrap_or_default();
-    }
-    let coverage = model.coverage();
+    };
+    let coverage = model.coverage(list);
     if let Some(volume) = coverage.incomplete() {
         let key = match volume.phase {
             VolumePhase::Live | VolumePhase::Snapshot => {
@@ -2152,6 +2207,9 @@ pub(crate) struct PanelCaptions {
     pub(crate) quick: bool,
     /// The free space of the panel's drive, at the status line's right end.
     pub(crate) free: String,
+    /// A search panel's focused result's full folder, at the status line's
+    /// right end in place of the free space while it searches all drives.
+    pub(crate) folder: String,
     /// What the list area says instead of rows, and whether Retry shows
     /// under it.
     pub(crate) message: Option<String>,
@@ -2166,28 +2224,119 @@ impl PanelCaptions {
             View::Reading => (Some(strings.text("panel.reading").to_owned()), false),
             View::Folder => (None, false),
             View::NotReady { drive } => (Some(strings.format("panel.not_ready", &[drive])), true),
+            View::Search(_) => (panel_list_message(model, side), false),
         };
         let quick = panel.quick_text();
-        let counts = match quick {
-            Some(typed) => strings.format("panel.find", &[typed]),
-            None if *panel.view() == View::Folder => panel_counts(strings, numbers, panel.counts()),
-            None => String::new(),
+        let counts = match (quick, panel.view()) {
+            (Some(typed), _) => strings.format("panel.find", &[typed]),
+            (None, View::Folder) => panel_counts(strings, numbers, panel.counts()),
+            (None, View::Search(search)) => search_counts(strings, numbers, panel, search),
+            (None, View::Reading | View::NotReady { .. }) => String::new(),
+        };
+        let all_drives = panel
+            .search()
+            .is_some_and(|search| search.look_in == LookIn::AllDrives);
+        let free = match (panel.view(), panel.free()) {
+            (View::Folder | View::Search(_), Some(free)) if !all_drives => {
+                strings.format("panel.free", &[&text::bytes(strings, numbers, free)])
+            }
+            _ => String::new(),
+        };
+        let focused = panel
+            .focused()
+            .and_then(|row| model.panels().row(side, row));
+        let folder = match focused {
+            Some(Row::Result(item)) if all_drives => {
+                text::cell(strings, numbers, Column::Path, item)
+            }
+            _ => String::new(),
         };
         PanelCaptions {
             drive: panel.drive(),
             path: panel.path_box().to_owned(),
             counts,
             quick: quick.is_some(),
-            free: match (panel.view(), panel.free()) {
-                (View::Folder, Some(free)) => {
-                    strings.format("panel.free", &[&text::bytes(strings, numbers, free)])
-                }
-                _ => String::new(),
-            },
+            free,
+            folder,
             message,
             retry,
         }
     }
+}
+
+/// A search panel's status line: "Searching…" until its first answer,
+/// then its total and where it searched, or how many of them are selected
+/// and their size once read; nothing while the list shows a message
+/// (file-manager-spec.md: Search in a panel). The count is gozlerd's total,
+/// as Search's is, also past the rows the list reaches.
+fn search_counts(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    panel: &Panel,
+    search: &PanelSearch,
+) -> String {
+    let results = search.list.results();
+    if results.searching() {
+        return strings.text("status.searching").to_owned();
+    }
+    let total = results.total();
+    if !matches!(results.shown(), Shown::Rows(_)) || total == 0 {
+        return String::new();
+    }
+    let selected =
+        |count: u64| strings.count("panel.selected", count, numbers, &[&numbers.integer(total)]);
+    match search.list.selection() {
+        Selection::None if !panel.has_selection() => match search.look_in {
+            LookIn::ThisFolder => {
+                strings.count("panel.results_in", total, numbers, &[panel.folder()])
+            }
+            LookIn::AllDrives => strings.count("panel.results_everywhere", total, numbers, &[]),
+        },
+        Selection::None | Selection::Reading { .. } => selected(panel.selected_rows()),
+        Selection::Files(_) | Selection::Folder { .. } => {
+            let files = search.list.selection().files().unwrap_or_default();
+            let size = (search.list.chosen_bytes())
+                .map(|bytes| text::bytes(strings, numbers, bytes))
+                .unwrap_or_default();
+            joined(strings, selected(files.len() as u64), size)
+        }
+    }
+}
+
+/// What a search panel's list area says instead of rows, if anything: why
+/// it shows no results and how to search on (file-manager-spec.md: Search
+/// in a panel). Retry never shows in a search panel.
+pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
+    let strings = model.strings();
+    let panel = model.panels().panel(side);
+    let search = panel.search()?;
+    let results = search.list.results();
+    let this_folder = search.look_in == LookIn::ThisFolder;
+    Some(match results.shown() {
+        Shown::Rows(_) if results.total() == 0 => {
+            let none = strings.text("list.no_results");
+            if this_folder {
+                format!("{none}\n{}", strings.text("panel.try_all_drives"))
+            } else {
+                none.to_owned()
+            }
+        }
+        Shown::Nothing | Shown::Rows(_) => return None,
+        Shown::Message(ListMessage::Parse(error)) => query_error(strings, error),
+        Shown::Message(ListMessage::Failure(failure)) => failure_text(strings, failure),
+        Shown::Message(ListMessage::TypeToSearch) if this_folder => {
+            strings.format("panel.type_here", &[panel.folder()])
+        }
+        Shown::Message(ListMessage::TypeToSearch) => {
+            strings.text("panel.type_everywhere").to_owned()
+        }
+        Shown::Message(ListMessage::NotIndexed { root }) => {
+            strings.format("panel.search_not_indexed", &[root])
+        }
+        Shown::Message(ListMessage::MissingFolder(folder)) => {
+            strings.format("list.missing_folder", &[folder])
+        }
+    })
 }
 
 /// The status line's counts: "14 items · 5.2 GB" or "3 of 14 selected ·
@@ -2209,30 +2358,40 @@ fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> Str
     joined(strings, count, size)
 }
 
-/// A panel's cell: Name, Ext, Size or Date modified, by its column's
-/// index (file-manager-spec.md: A panel).
+/// A cell of `panel`'s `row` (file-manager-spec.md: A panel). A search
+/// panel's result shows as Search's results list shows it, and its Folder
+/// cell the folder below the searched one, or the full folder while it
+/// searches all drives.
 pub(crate) fn panel_cell(
     strings: &Strings,
     numbers: &dyn Numbers,
+    panel: &Panel,
     row: Row,
-    column: usize,
+    column: PanelColumn,
 ) -> String {
-    let Row::Entry(entry) = row else {
-        return if column == 0 {
-            "..".to_owned()
-        } else {
-            String::new()
-        };
+    let entry = match row {
+        Row::Up if column == PanelColumn::Name => return "..".to_owned(),
+        Row::Up => return String::new(),
+        Row::Result(item) => {
+            let this_folder =
+                panel.search().map(|search| search.look_in) == Some(LookIn::ThisFolder);
+            if column == PanelColumn::Folder && this_folder {
+                return relative_folder(panel.folder(), &item.path).to_owned();
+            }
+            return text::cell(strings, numbers, column.search_column(), item);
+        }
+        Row::Entry(entry) => entry,
     };
     match column {
-        0 => entry.display_name(),
-        1 => entry.extension(),
-        2 => match (entry.is_folder(), entry.folder_size()) {
+        PanelColumn::Name => entry.display_name(),
+        PanelColumn::Ext => entry.extension(),
+        PanelColumn::Folder => String::new(),
+        PanelColumn::Size => match (entry.is_folder(), entry.folder_size()) {
             (true, None) => strings.text("panel.folder").to_owned(),
             (true, Some(size)) | (false, Some(size)) => kilobytes(strings, numbers, size),
             (false, None) => kilobytes(strings, numbers, entry.size),
         },
-        _ => numbers.date_time(entry.modified),
+        PanelColumn::DateModified => numbers.date_time(entry.modified),
     }
 }
 
@@ -2242,14 +2401,27 @@ fn kilobytes(strings: &Strings, numbers: &dyn Numbers, size: u64) -> String {
     strings.format("size.kb", &[&numbers.integer(size.div_ceil(1024))])
 }
 
-/// The panels' column headers, in their order.
-pub(crate) fn panel_headers(strings: &Strings) -> [String; 4] {
-    [
-        strings.text("header.name").to_owned(),
-        strings.text("panel.ext").to_owned(),
-        strings.text("header.size").to_owned(),
-        strings.text("header.date_modified").to_owned(),
-    ]
+/// A Look in list's item.
+pub(crate) fn look_in_item(strings: &Strings, look_in: LookIn) -> String {
+    let key = match look_in {
+        LookIn::ThisFolder => "panel.this_folder",
+        LookIn::AllDrives => "panel.all_drives",
+    };
+    strings.text(key).to_owned()
+}
+
+/// The headers of a panel's `columns`, in their order.
+pub(crate) fn panel_headers(strings: &Strings, columns: &[PanelColumn]) -> Vec<String> {
+    let header = |column: &PanelColumn| match column {
+        PanelColumn::Name => "header.name",
+        PanelColumn::Ext => "panel.ext",
+        PanelColumn::Folder => "header.folder",
+        PanelColumn::Size => "header.size",
+        PanelColumn::DateModified => "header.date_modified",
+    };
+    (columns.iter())
+        .map(|column| strings.text(header(column)).to_owned())
+        .collect()
 }
 
 /// The key bar's buttons: each key and its word, and the tooltip where the
@@ -2294,8 +2466,8 @@ pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
         return None;
     }
     let strings = model.strings();
-    let text = match model.results().shown() {
-        Shown::Rows(_) if model.results().total() == 0 => {
+    let text = match model.search_list().results().shown() {
+        Shown::Rows(_) if model.search_list().results().total() == 0 => {
             strings.text("list.no_results").to_owned()
         }
         Shown::Nothing | Shown::Rows(_) => return None,
@@ -2305,6 +2477,9 @@ pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
         }
         Shown::Message(ListMessage::Failure(failure)) => failure_text(strings, failure),
         Shown::Message(ListMessage::TypeToSearch) => strings.text("list.type_to_search").to_owned(),
+        Shown::Message(ListMessage::NotIndexed { root }) => {
+            strings.format("panel.search_not_indexed", &[root])
+        }
     };
     let buttons = model
         .list_buttons()

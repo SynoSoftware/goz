@@ -70,7 +70,8 @@
     "size": "Grootte",
     "date_modified": "Gewijzigd op",
     "extension": "Extensie",
-    "attributes": "Kenmerken"
+    "attributes": "Kenmerken",
+    "folder": "Map"
   },
   "sort": {
     "name": "&Naam",
@@ -494,7 +495,8 @@
     "shortcut_taken": "Een ander programma gebruikt {0}. Kies een andere sneltoets.",
     "shortcut_failed": "Kan {0} niet gebruiken. {1}",
     "lock": "Windows reserveert {0} voor het vergrendelen van de computer. Kies een andere sneltoets.",
-    "two_modifiers": "Kies een sneltoets met twee van Ctrl, Alt en Shift, of met de Windows-toets."
+    "two_modifiers": "Kies een sneltoets met twee van Ctrl, Alt en Shift, of met de Windows-toets.",
+    "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L en Ctrl+R, en Alt met een letter of een cijfer. Een sneltoets op een van deze toetsen werkt alleen in Zoeken."
   },
   "settings_file_operations": {
     "speed": "Sne&lheidsinstellingen:",
@@ -774,7 +776,18 @@
     "drive_not_ready": "Station {0} is niet gereed. {1}",
     "open_title": "Openen",
     "indexing": "{0} wordt geïndexeerd — grootten kunnen ontbreken.",
-    "not_indexed": "{0} is niet geïndexeerd, dus mapgrootten worden niet getoond."
+    "not_indexed": "{0} is niet geïndexeerd, dus mapgrootten worden niet getoond.",
+    "look_in": "&Zoeken in:",
+    "this_folder": "Deze map en submappen",
+    "all_drives": "Alle stations",
+    "type_here": "Typ een naam om {0} en de submappen te doorzoeken.",
+    "type_everywhere": "Typ een naam om alle geïndexeerde stations te doorzoeken.",
+    "search_not_indexed": "{0} is niet geïndexeerd, dus Gozler kan er niet in zoeken.\nKies Alle stations bij Zoeken in om de geïndexeerde stations te doorzoeken.",
+    "try_all_drives": "Kies Alle stations bij Zoeken in om elk geïndexeerd station te doorzoeken.",
+    "results_in_one": "{0} resultaat in {1}",
+    "results_in_other": "{0} resultaten in {1}",
+    "results_everywhere_one": "{0} resultaat op alle geïndexeerde stations",
+    "results_everywhere_other": "{0} resultaten op alle geïndexeerde stations"
   },
   "key_bar": {
     "view": "Weergeven",

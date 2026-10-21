@@ -70,7 +70,8 @@
     "size": "Size",
     "date_modified": "Date modified",
     "extension": "Extension",
-    "attributes": "Attributes"
+    "attributes": "Attributes",
+    "folder": "Folder"
   },
   "sort": {
     "name": "&Name",
@@ -494,7 +495,8 @@
     "shortcut_taken": "Another program uses {0}. Choose another shortcut.",
     "shortcut_failed": "Couldn't use {0}. {1}",
     "lock": "Windows keeps {0} for locking the computer. Choose another shortcut.",
-    "two_modifiers": "Choose a shortcut with two of Ctrl, Alt and Shift, or with the Windows key."
+    "two_modifiers": "Choose a shortcut with two of Ctrl, Alt and Shift, or with the Windows key.",
+    "two_panels": "Two panels keeps F3 to F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L and Ctrl+R, and Alt with a letter or a digit. A shortcut on one of these keys works in Search only."
   },
   "settings_file_operations": {
     "speed": "S&peed settings:",
@@ -774,7 +776,18 @@
     "drive_not_ready": "Drive {0} is not ready. {1}",
     "open_title": "Open",
     "indexing": "{0} is indexing — sizes may be missing.",
-    "not_indexed": "{0} is not indexed, so folder sizes are not shown."
+    "not_indexed": "{0} is not indexed, so folder sizes are not shown.",
+    "look_in": "&Look in:",
+    "this_folder": "This folder and subfolders",
+    "all_drives": "All drives",
+    "type_here": "Type a name to search {0} and its subfolders.",
+    "type_everywhere": "Type a name to search all indexed drives.",
+    "search_not_indexed": "{0} is not indexed, so Gozler cannot search it.\nChoose All drives in Look in to search the indexed drives.",
+    "try_all_drives": "Choose All drives in Look in to search every indexed drive.",
+    "results_in_one": "{0} result in {1}",
+    "results_in_other": "{0} results in {1}",
+    "results_everywhere_one": "{0} result on all indexed drives",
+    "results_everywhere_other": "{0} results on all indexed drives"
   },
   "key_bar": {
     "view": "View",

@@ -70,7 +70,8 @@
     "size": "Tamaño",
     "date_modified": "Fecha de modificación",
     "extension": "Extensión",
-    "attributes": "Atributos"
+    "attributes": "Atributos",
+    "folder": "Carpeta"
   },
   "sort": {
     "name": "&Nombre",
@@ -494,7 +495,8 @@
     "shortcut_taken": "Otro programa usa {0}. Elige otro método abreviado.",
     "shortcut_failed": "No se pudo usar {0}. {1}",
     "lock": "Windows reserva {0} para bloquear el equipo. Elige otro método abreviado.",
-    "two_modifiers": "Elige un método abreviado con dos de Ctrl, Alt y Mayús, o con la tecla de Windows."
+    "two_modifiers": "Elige un método abreviado con dos de Ctrl, Alt y Mayús, o con la tecla de Windows.",
+    "two_panels": "Dos paneles reserva F3 a F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L y Ctrl+R, y Alt con una letra o un dígito. Un método abreviado en una de estas teclas solo funciona en Búsqueda."
   },
   "settings_file_operations": {
     "speed": "Ajustes de &velocidad:",
@@ -774,7 +776,18 @@
     "drive_not_ready": "La unidad {0} no está lista. {1}",
     "open_title": "Abrir",
     "indexing": "{0} se está indexando: puede que falten tamaños.",
-    "not_indexed": "{0} no está indexada, así que no se muestran los tamaños de las carpetas."
+    "not_indexed": "{0} no está indexada, así que no se muestran los tamaños de las carpetas.",
+    "look_in": "&Buscar en:",
+    "this_folder": "Esta carpeta y subcarpetas",
+    "all_drives": "Todas las unidades",
+    "type_here": "Escribe un nombre para buscar en {0} y sus subcarpetas.",
+    "type_everywhere": "Escribe un nombre para buscar en todas las unidades indexadas.",
+    "search_not_indexed": "{0} no está indexada, así que Gozler no puede buscar en ella.\nElige Todas las unidades en Buscar en para buscar en las unidades indexadas.",
+    "try_all_drives": "Elige Todas las unidades en Buscar en para buscar en todas las unidades indexadas.",
+    "results_in_one": "{0} resultado en {1}",
+    "results_in_other": "{0} resultados en {1}",
+    "results_everywhere_one": "{0} resultado en todas las unidades indexadas",
+    "results_everywhere_other": "{0} resultados en todas las unidades indexadas"
   },
   "key_bar": {
     "view": "Ver",

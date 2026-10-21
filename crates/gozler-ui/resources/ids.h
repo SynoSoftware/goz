@@ -62,6 +62,15 @@
 #define IDC_KEY_F6 98
 #define IDC_KEY_F7 99
 #define IDC_KEY_F8 100
+// Each search panel's search box, Look in and the status line's folder.
+#define IDC_LEFT_SEARCH 101
+#define IDC_LEFT_LOOK_IN_LABEL 102
+#define IDC_LEFT_LOOK_IN 103
+#define IDC_LEFT_FOLDER 104
+#define IDC_RIGHT_SEARCH 105
+#define IDC_RIGHT_LOOK_IN_LABEL 106
+#define IDC_RIGHT_LOOK_IN 107
+#define IDC_RIGHT_FOLDER 108
 
 // The filter pane, a window of its own that scrolls, and its controls.
 #define IDC_FILTER_PANE 20
@@ -208,6 +217,7 @@
 #define IDC_KEYBOARD_RESTORE 1716
 #define IDC_KEYBOARD_SHORTCUT_HINT 1717
 #define IDC_KEYBOARD_CLEAR 1718
+#define IDC_KEYBOARD_TWO_PANELS_NOTE 1719
 
 #define IDD_SETTINGS_INDEX 108
 #define IDC_INDEX_HEADING 1801

@@ -70,7 +70,8 @@
     "size": "Boyut",
     "date_modified": "Değiştirme tarihi",
     "extension": "Uzantı",
-    "attributes": "Öznitelikler"
+    "attributes": "Öznitelikler",
+    "folder": "Klasör"
   },
   "sort": {
     "name": "&Ad",
@@ -494,7 +495,8 @@
     "shortcut_taken": "{0} kısayolunu başka bir program kullanıyor. Başka bir kısayol seçin.",
     "shortcut_failed": "{0} kullanılamadı. {1}",
     "lock": "Windows, {0} kısayolunu bilgisayarı kilitlemek için ayırır. Başka bir kısayol seçin.",
-    "two_modifiers": "Ctrl, Alt ve Shift'ten ikisini veya Windows tuşunu içeren bir kısayol seçin."
+    "two_modifiers": "Ctrl, Alt ve Shift'ten ikisini veya Windows tuşunu içeren bir kısayol seçin.",
+    "two_panels": "İki panel F3–F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+L ve Ctrl+R tuşlarını ve Alt ile bir harf ya da rakamı kendine ayırır. Bu tuşlardan birindeki kısayol yalnızca Arama'da çalışır."
   },
   "settings_file_operations": {
     "speed": "&Hız ayarları:",
@@ -774,7 +776,18 @@
     "drive_not_ready": "{0} sürücüsü hazır değil. {1}",
     "open_title": "Aç",
     "indexing": "{0} dizinleniyor — boyutlar eksik olabilir.",
-    "not_indexed": "{0} dizinlenmiyor, bu yüzden klasör boyutları gösterilmiyor."
+    "not_indexed": "{0} dizinlenmiyor, bu yüzden klasör boyutları gösterilmiyor.",
+    "look_in": "&Arama yeri:",
+    "this_folder": "Bu klasör ve alt klasörleri",
+    "all_drives": "Tüm sürücüler",
+    "type_here": "{0} ve alt klasörlerinde aramak için bir ad yazın.",
+    "type_everywhere": "Dizinlenen tüm sürücülerde aramak için bir ad yazın.",
+    "search_not_indexed": "{0} dizinlenmiyor, bu yüzden Gozler orada arama yapamaz.\nDizinlenen sürücülerde aramak için Arama yeri'nde Tüm sürücüler'i seçin.",
+    "try_all_drives": "Dizinlenen her sürücüde aramak için Arama yeri'nde Tüm sürücüler'i seçin.",
+    "results_in_one": "{1} içinde {0} sonuç",
+    "results_in_other": "{1} içinde {0} sonuç",
+    "results_everywhere_one": "Dizinlenen tüm sürücülerde {0} sonuç",
+    "results_everywhere_other": "Dizinlenen tüm sürücülerde {0} sonuç"
   },
   "key_bar": {
     "view": "Görüntüle",

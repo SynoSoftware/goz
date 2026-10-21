@@ -461,11 +461,23 @@ pub(crate) enum RowBar {
     Inactive,
 }
 
+/// How a panel's cell fits its text in its column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CellFit {
+    /// From the left, ending in an ellipsis where it does not fit.
+    End,
+    /// From the right, as sizes, so their digits line up.
+    Right,
+    /// A path, which loses its middle, so the drive and the last folder
+    /// stay (`DT_PATH_ELLIPSIS`).
+    Path,
+}
+
 /// One of a panel's rows as the window draws it.
 pub(crate) struct PanelRow<'a> {
     /// In the order of the list's columns.
     pub(crate) cells: &'a [String],
-    pub(crate) right_aligned: &'a [bool],
+    pub(crate) fits: &'a [CellFit],
     pub(crate) icon: Option<(ImageList, i32)>,
     /// `..`, whose folder icon carries an arrow up.
     pub(crate) up: bool,
@@ -605,7 +617,7 @@ impl CustomDraw<'_> {
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, system_color(text));
             let previous = SelectObject(dc, HGDIOBJ(font.handle().0));
-            for (column, (cell, right)) in row.cells.iter().zip(row.right_aligned).enumerate() {
+            for (column, (cell, fit)) in row.cells.iter().zip(row.fits).enumerate() {
                 let label = self.part(column as i32, LVIR_LABEL);
                 let inset = cell_text_inset(column == 0, self.list.dpi());
                 let mut area = RECT {
@@ -613,10 +625,12 @@ impl CustomDraw<'_> {
                     right: label.right - inset.0,
                     ..label
                 };
-                let mut flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
-                if *right {
-                    flags |= DT_RIGHT;
-                }
+                let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+                let flags = match fit {
+                    CellFit::End => flags | DT_END_ELLIPSIS,
+                    CellFit::Right => flags | DT_END_ELLIPSIS | DT_RIGHT,
+                    CellFit::Path => flags | DT_PATH_ELLIPSIS,
+                };
                 draw_text(dc, cell, &mut area, flags);
             }
             SelectObject(dc, previous);

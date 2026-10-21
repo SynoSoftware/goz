@@ -11,38 +11,43 @@ use crate::core::captions::{DialogCaptions, DialogItem};
 use crate::core::commands::{
     self, CommandId, Focus, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey, State,
 };
-use crate::core::fetch::Purpose;
+use crate::core::fetch::{List, Purpose};
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
-use crate::core::layout::{self, ColumnFit, PanelLayout, Px, Rect};
+use crate::core::layout::{self, Body, ColumnFit, PanelLayout, Px, Rect};
 use crate::core::model::Column;
 use crate::core::open;
 use crate::core::panel::{
-    self, EnterAction, Entry, FolderChange, Place, ReadAsk, ReadChange, ReadEvent, ReadFailure,
-    Row, Side, Step, View,
+    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, Place, ReadAsk, ReadChange,
+    ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
 };
 use crate::core::settings::Mode;
-use crate::win::controls::{Button, Edit, Label, ListColumn, ListView};
+use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListView};
 use crate::win::dialog::DialogEnd;
 use crate::win::folder::{self, PanelEvent, Removal};
 use crate::win::gdi::{StaticColors, TextMeter};
 use crate::win::notify::{
-    CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify, PanelRow, RowBar, RowFonts,
+    CellFit, CustomDraw, DispInfo, DrawAnswer, DrawStage, ListNotify, PanelRow, RowBar, RowFonts,
 };
 use crate::win::{self, Hwnd, shell};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
+use gozler_core::winpath::parent_of;
 use gozler_fileops::{Destination, Request};
+use std::cell::Cell;
 use std::path::PathBuf;
 use windows::Win32::Foundation::LRESULT;
 
-/// The panels' columns, in order: each one's Search column, whose default
-/// width it takes, its sort key and whether it is right-aligned.
-const COLUMNS: [(Column, SortKey, bool); 4] = [
-    (Column::Name, SortKey::Name, false),
-    (Column::Extension, SortKey::Extension, false),
-    (Column::Size, SortKey::Size, true),
-    (Column::DateModified, SortKey::DateModified, false),
-];
+/// How a column's cells fit their text.
+fn fit_of(column: PanelColumn) -> CellFit {
+    match column {
+        PanelColumn::Size => CellFit::Right,
+        PanelColumn::Folder => CellFit::Path,
+        PanelColumn::Name | PanelColumn::Ext | PanelColumn::DateModified => CellFit::End,
+    }
+}
+
+/// Where a search panel's list puts its Folder column.
+const FOLDER_COLUMN: usize = 2;
 
 /// A panel asks gozlerd for its folder sizes and reads its free space this
 /// long after the last change in its folder (file-manager-spec.md: Folder
@@ -87,10 +92,16 @@ pub(super) const KEY_BAR: [ControlId; 6] = [
 ];
 
 /// One panel's controls, created in Tab order. The message and Retry come
-/// before the list, so they lie above it (`ListView::create`).
+/// before the list, so they lie above it (`ListView::create`). A search
+/// panel shows its search box and Look in in the path box's place
+/// (file-manager-spec.md: Search in a panel).
 pub(super) struct PanelControls {
     pub(super) drive: Button,
     pub(super) path: Edit,
+    pub(super) search: Edit,
+    /// Right before its list, so its access key focuses the list.
+    pub(super) look_in_label: Label,
+    pub(super) look_in: DropDownList,
     pub(super) message: Label,
     pub(super) retry: Button,
     pub(super) list: ListView,
@@ -98,6 +109,13 @@ pub(super) struct PanelControls {
     /// The quick search box, in the status line's place while it is open.
     pub(super) quick: Edit,
     pub(super) free: Label,
+    /// A search panel's focused result's folder, while it searches all
+    /// drives.
+    pub(super) folder: Label,
+    /// Where the controls show the panel searching, `None` for a folder
+    /// panel: which controls show, the list's columns, and the status
+    /// line's parts ([`MainWindow::follow_panel_kind`]).
+    pub(super) kind: Cell<Option<LookIn>>,
 }
 
 impl PanelControls {
@@ -107,43 +125,69 @@ impl PanelControls {
             Side::Left => [
                 C::LeftDrive,
                 C::LeftPath,
+                C::LeftSearch,
+                C::LeftLookInLabel,
+                C::LeftLookIn,
                 C::LeftMessage,
                 C::LeftRetry,
                 C::LeftPanel,
                 C::LeftCounts,
                 C::LeftQuick,
                 C::LeftFree,
+                C::LeftFolder,
             ],
             Side::Right => [
                 C::RightDrive,
                 C::RightPath,
+                C::RightSearch,
+                C::RightLookInLabel,
+                C::RightLookIn,
                 C::RightMessage,
                 C::RightRetry,
                 C::RightPanel,
                 C::RightCounts,
                 C::RightQuick,
                 C::RightFree,
+                C::RightFolder,
             ],
         };
-        let [drive, path, message, retry, list, counts, quick, free] = ids.map(ControlId::id);
+        let [
+            drive,
+            path,
+            search,
+            look_in_label,
+            look_in,
+            message,
+            retry,
+            list,
+            counts,
+            quick,
+            free,
+            folder,
+        ] = ids.map(ControlId::id);
         let controls = PanelControls {
             drive: Button::create_drop_down(parent, drive)?,
             path: Edit::create(parent, path)?,
+            search: Edit::create(parent, search)?,
+            look_in_label: Label::create(parent, look_in_label)?,
+            look_in: DropDownList::create(parent, look_in)?,
             message: Label::create_centred(parent, message)?,
             retry: Button::create(parent, retry)?,
             list: ListView::create(parent, list)?,
             counts: Label::create_line(parent, counts)?,
             quick: Edit::create_echo(parent, quick)?,
             free: Label::create_right_line(parent, free)?,
+            folder: Label::create_right_path(parent, folder)?,
+            kind: Cell::new(None),
         };
         let dpi = parent.dpi();
-        for (index, (column, _, right_aligned)) in COLUMNS.into_iter().enumerate() {
+        for (index, column) in PanelColumn::FOLDER.into_iter().enumerate() {
             controls.list.insert_column(
                 index,
                 &ListColumn {
                     header: "",
-                    width: layout::column_width(column, dpi),
-                    right_aligned,
+                    width: layout::column_width(column.search_column(), dpi),
+                    right_aligned: column.right_aligned(),
                 },
             );
         }
@@ -151,36 +195,63 @@ impl PanelControls {
     }
 
     /// Every control, which the window shows only in Two panels.
-    pub(super) fn hwnds(&self) -> [Hwnd; 8] {
+    pub(super) fn hwnds(&self) -> [Hwnd; 12] {
         [
             self.drive.hwnd(),
             self.path.hwnd(),
+            self.search.hwnd(),
+            self.look_in_label.hwnd(),
+            self.look_in.hwnd(),
             self.message.hwnd(),
             self.retry.hwnd(),
             self.list.hwnd(),
             self.counts.hwnd(),
             self.quick.hwnd(),
             self.free.hwnd(),
+            self.folder.hwnd(),
         ]
     }
 
     /// Where each control goes, the quick search box over the whole status
-    /// line.
-    pub(super) fn placed(&self, layout: &PanelLayout) -> [(Hwnd, Rect); 8] {
+    /// line, and the counts in its left half while the panel searches all
+    /// drives. The message and Retry go where their text needs
+    /// ([`MainWindow::show_panel`]).
+    pub(super) fn placed(&self, layout: &PanelLayout) -> [(Hwnd, Rect); 10] {
         let line = Rect {
             width: layout.free.right() - layout.counts.x,
             ..layout.counts
         };
+        let counts = match self.kind.get() {
+            Some(LookIn::AllDrives) => layout.counts_half,
+            Some(LookIn::ThisFolder) | None => layout.counts,
+        };
         [
             (self.drive.hwnd(), layout.drive),
             (self.path.hwnd(), layout.path),
-            (self.message.hwnd(), layout.message),
-            (self.retry.hwnd(), layout.retry),
+            (self.search.hwnd(), layout.search),
+            (self.look_in_label.hwnd(), layout.look_in_label),
+            // A drop-down list's height includes its open list.
+            (
+                self.look_in.hwnd(),
+                Rect {
+                    height: Px(layout.look_in.height.0 * 10),
+                    ..layout.look_in
+                },
+            ),
             (self.list.hwnd(), layout.list),
-            (self.counts.hwnd(), layout.counts),
+            (self.counts.hwnd(), counts),
             (self.quick.hwnd(), line),
             (self.free.hwnd(), layout.free),
+            (self.folder.hwnd(), layout.folder),
         ]
+    }
+
+    /// The columns the list shows.
+    fn columns(&self) -> &'static [PanelColumn] {
+        match self.kind.get() {
+            Some(_) => &PanelColumn::SEARCH,
+            None => &PanelColumn::FOLDER,
+        }
     }
 }
 
@@ -242,6 +313,28 @@ impl MainWindow {
             .find(|side| self.panel(*side).path.hwnd() == control)
     }
 
+    /// The panel whose search box is `control`.
+    pub(super) fn panel_search(&self, control: Hwnd) -> Option<Side> {
+        Side::BOTH
+            .into_iter()
+            .find(|side| self.panel(*side).search.hwnd() == control)
+    }
+
+    /// The panel whose Look in list is `control`.
+    pub(super) fn panel_look_in(&self, control: Hwnd) -> Option<Side> {
+        Side::BOTH
+            .into_iter()
+            .find(|side| self.panel(*side).look_in.hwnd() == control)
+    }
+
+    /// `side`'s place in the window's layout, while Two panels shows.
+    fn panel_layout(&self, side: Side) -> Option<PanelLayout> {
+        match &self.created().layout.borrow().as_ref()?.body {
+            Body::TwoPanels { panels, .. } => Some(panels[side.index()]),
+            Body::Search(_) => None,
+        }
+    }
+
     /// The list's place, after the panel has read a selection the list
     /// changed, so the place and the panel agree.
     fn place(&self, side: Side) -> Place {
@@ -279,11 +372,14 @@ impl MainWindow {
     }
 
     /// Shows everything of `side` but its rows: the drive button, the path
-    /// box, the status line or the quick search box, and the list's message
-    /// and Retry. A path box with the focus keeps what the person types.
+    /// box or the search row, the status line or the quick search box, and
+    /// the list's message and Retry, placed for their text. A path box with
+    /// the focus keeps what the person types.
     pub(super) fn show_panel(&self, side: Side) {
+        self.follow_panel_kind(side);
         let captions = PanelCaptions::new(&self.model.borrow(), side, &*self.numbers.borrow());
         let c = self.panel(side);
+        let kind = c.kind.get();
         show_text(c.drive.hwnd(), &captions.drive);
         if Hwnd::focused() != Some(c.path.hwnd()) {
             show_text(c.path.hwnd(), &captions.path);
@@ -291,19 +387,97 @@ impl MainWindow {
         show_text(c.counts.hwnd(), &captions.counts);
         show_text(c.quick.hwnd(), &captions.counts);
         show_text(c.free.hwnd(), &captions.free);
-        show_text(
-            c.message.hwnd(),
-            captions.message.as_deref().unwrap_or_default(),
-        );
+        show_text(c.folder.hwnd(), &captions.folder);
+        let message = captions.message.as_deref().unwrap_or_default();
+        show_text(c.message.hwnd(), message);
+        if captions.message.is_some()
+            && let Some(placed) = self.panel_layout(side)
+        {
+            let header = c.list.header().screen_rect().height;
+            let retry = [c.retry.hwnd()];
+            let buttons = if captions.retry { &retry[..] } else { &[] };
+            self.place_message(
+                placed.list,
+                header,
+                c.message.hwnd(),
+                message,
+                buttons,
+                true,
+            );
+        }
+        // A new search starts in this folder, whatever the last one chose.
+        if let Some(look_in) = kind {
+            c.look_in
+                .select(LookIn::ALL.iter().position(|l| *l == look_in).unwrap_or(0));
+        }
         let shown = self.model.borrow().mode() == Mode::TwoPanels;
+        let all_drives = kind == Some(LookIn::AllDrives);
+        c.path.hwnd().set_visible(shown && kind.is_none());
+        for control in [c.search.hwnd(), c.look_in_label.hwnd(), c.look_in.hwnd()] {
+            control.set_visible(shown && kind.is_some());
+        }
         c.quick.hwnd().set_visible(shown && captions.quick);
         c.counts.hwnd().set_visible(shown && !captions.quick);
-        c.free.hwnd().set_visible(shown && !captions.quick);
+        c.free
+            .hwnd()
+            .set_visible(shown && !captions.quick && !all_drives);
+        c.folder
+            .hwnd()
+            .set_visible(shown && !captions.quick && all_drives);
         c.message
             .hwnd()
             .set_visible(shown && captions.message.is_some());
         c.retry.hwnd().set_visible(shown && captions.retry);
         self.update_key_bar();
+    }
+
+    /// Makes `side`'s controls follow the panel when it became a search
+    /// panel, left its search, or searches elsewhere: the search row or
+    /// the path box, the Folder column, and the status line's parts. A
+    /// panel that left its search also ends its requests and its timers,
+    /// and lets go of the operations its list kept.
+    fn follow_panel_kind(&self, side: Side) {
+        let wanted = self.model.borrow().panels().search(side).map(|s| s.look_in);
+        let c = self.panel(side);
+        let shown = c.kind.replace(wanted);
+        if shown == wanted {
+            return;
+        }
+        if shown.is_none() != wanted.is_none() {
+            match wanted {
+                Some(_) => {
+                    let header = {
+                        let model = self.model.borrow();
+                        captions::panel_headers(model.strings(), &[PanelColumn::Folder])
+                    };
+                    let dpi = self.created().metrics.get().dpi;
+                    c.list.insert_column(
+                        FOLDER_COLUMN,
+                        &ListColumn {
+                            header: &header[0],
+                            width: layout::column_width(Column::Path, dpi),
+                            right_aligned: false,
+                        },
+                    );
+                }
+                None => {
+                    c.list.delete_column(FOLDER_COLUMN);
+                    let requests = &self.created().requests;
+                    requests.cancel(Purpose::Results(List::Panel(side)));
+                    requests.cancel(Purpose::Selection(List::Panel(side)));
+                    let hwnd = c.list.hwnd().parent();
+                    hwnd.kill_timer(timer::PANEL_SEARCH[side.index()]);
+                    hwnd.kill_timer(timer::PANEL_SELECTION[side.index()]);
+                    c.search.hwnd().set_text("");
+                    self.release_operations();
+                }
+            }
+            self.show_panel_sort(side);
+            self.fill_panel_columns();
+        }
+        if let Some(placed) = self.panel_layout(side) {
+            win::move_children(&c.placed(&placed));
+        }
     }
 
     /// Enables each key bar button as its command is, on the active panel's
@@ -329,22 +503,31 @@ impl MainWindow {
     /// The sort arrow on `side`'s header.
     fn show_panel_sort(&self, side: Side) {
         let sort = self.model.borrow().panels().panel(side).sort();
-        let column = COLUMNS.iter().position(|(_, key, _)| *key == sort.key);
+        let columns = self.panel(side).columns();
+        let column = columns.iter().position(|c| c.sort_key() == Some(sort.key));
         self.panel(side)
             .list
-            .show_sort(COLUMNS.len(), column.map(|c| (c, sort.dir == SortDir::Asc)));
+            .show_sort(columns.len(), column.map(|c| (c, sort.dir == SortDir::Asc)));
     }
 
-    /// Gives each panel's list its column headers, Retry its caption, and
-    /// the key bar its captions and tooltips.
+    /// Gives each panel's list its column headers, Retry its caption, the
+    /// search row its texts, and the key bar its captions and tooltips.
     pub(super) fn apply_panel_text(&self, captions: &captions::WindowCaptions) {
         let controls = &self.created().controls;
         for side in Side::BOTH {
             let c = self.panel(side);
-            for (index, header) in captions.panel_headers.iter().enumerate() {
+            let headers = {
+                let model = self.model.borrow();
+                captions::panel_headers(model.strings(), c.columns())
+            };
+            for (index, header) in headers.iter().enumerate() {
                 c.list.set_header(index, header);
             }
             c.retry.hwnd().set_text(&captions.retry);
+            c.search.set_cue(&captions.search_cue);
+            c.look_in_label.hwnd().set_text(&captions.look_in_label);
+            // `show_panel` selects the panel's choice.
+            c.look_in.set_items(&captions.look_in, 0);
             self.show_panel(side);
             self.show_panel_sort(side);
         }
@@ -361,26 +544,33 @@ impl MainWindow {
 
     /// Sizes each panel's columns to its list: Ext, Size and Date modified
     /// fit the widest text they show, in a selected row's font, and Name
-    /// takes the rest (file-manager-spec.md: A panel).
+    /// takes the rest, or shares it with a search panel's Folder
+    /// (file-manager-spec.md: A panel, Search in a panel).
     pub(super) fn fill_panel_columns(&self) {
         let created = self.created();
         let dpi = created.metrics.get().dpi;
+        let fitted = [
+            PanelColumn::Ext,
+            PanelColumn::Size,
+            PanelColumn::DateModified,
+        ];
         let (samples, headers) = {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
             let widest: Vec<Entry> = widest().collect();
-            let samples: Vec<Vec<String>> = (1..COLUMNS.len())
+            let panel = model.panels().panel(Side::Left);
+            let samples: Vec<Vec<String>> = (fitted.iter())
                 .map(|column| {
                     widest
                         .iter()
                         .map(|entry| {
                             let row = Row::Entry(entry);
-                            captions::panel_cell(model.strings(), &*numbers, row, column)
+                            captions::panel_cell(model.strings(), &*numbers, panel, row, *column)
                         })
                         .collect()
                 })
                 .collect();
-            (samples, captions::panel_headers(model.strings()))
+            (samples, captions::panel_headers(model.strings(), &fitted))
         };
         let widths: Vec<Px> = {
             let fonts = created.fonts.borrow();
@@ -388,7 +578,7 @@ impl MainWindow {
             let selected = [TextMeter::new(&fonts.semibold), TextMeter::new(&fonts.bold)];
             samples
                 .iter()
-                .zip(&headers[1..])
+                .zip(&headers)
                 .map(|(column, header)| {
                     // Segoe UI's semibold digits are wider than its bold
                     // ones, so a selected row takes the wider.
@@ -402,56 +592,95 @@ impl MainWindow {
                 .collect()
         };
         for side in Side::BOTH {
-            let list = self.panel(side).list;
-            for (index, width) in widths.iter().enumerate() {
-                list.set_column_width(index + 1, *width);
+            let c = self.panel(side);
+            for (index, column) in c.columns().iter().enumerate() {
+                if let Some(fit) = fitted.iter().position(|f| f == column) {
+                    c.list.set_column_width(index, widths[fit]);
+                }
             }
             self.fill_name_column(side);
         }
     }
 
     /// Gives Name the room the other columns leave in `side`'s list, to
-    /// its edge or its scroll bar, so the rows reach the divider.
+    /// its edge or its scroll bar, so the rows reach the divider; a search
+    /// panel's Name and Folder share it 1.3 to 1.
     fn fill_name_column(&self, side: Side) {
-        let list = self.panel(side).list;
+        let c = self.panel(side);
         let dpi = self.created().metrics.get().dpi;
-        let others = (1..COLUMNS.len()).fold(Px(0), |sum, index| sum + list.column_width(index));
-        let width = (list.hwnd().client_size().width - others).max(Px(layout::column_width(
+        let shared =
+            |column: &PanelColumn| matches!(column, PanelColumn::Name | PanelColumn::Folder);
+        let others = (c.columns().iter().enumerate())
+            .filter(|(_, column)| !shared(column))
+            .fold(Px(0), |sum, (index, _)| sum + c.list.column_width(index));
+        let room = (c.list.hwnd().client_size().width - others).max(Px(layout::column_width(
             Column::Name,
             dpi,
         )
         .0 / 2));
-        if list.column_width(0) != width {
-            list.set_column_width(0, width);
+        let (name, folder) = match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
+            Some(index) => {
+                let name = Px(room.0 * 13 / 23);
+                (name, Some((index, room - name)))
+            }
+            None => (room, None),
+        };
+        if c.list.column_width(0) != name {
+            c.list.set_column_width(0, name);
+        }
+        if let Some((index, width)) = folder
+            && c.list.column_width(index) != width
+        {
+            c.list.set_column_width(index, width);
         }
     }
 
-    /// Starts reading both panels' folders, when Two panels shows
-    /// (file-manager-spec.md: The window).
-    pub(super) fn start_panels(&self) {
+    /// Starts reading both panels' folders, or a search panel's search,
+    /// when Two panels shows (file-manager-spec.md: The window).
+    pub(super) fn start_panels(&self, hwnd: Hwnd) {
         for side in Side::BOTH {
             let ask = self
                 .model
                 .borrow_mut()
                 .panels_mut()
                 .start_reading(side, || first_folder(side));
-            self.read(side, Some(ask));
+            match ask {
+                Some(ask) => self.read(side, Some(ask)),
+                None => self.search(hwnd, List::Panel(side)),
+            }
         }
         self.created().panel_threads.read_labels();
     }
 
     /// Stops the panels' threads and requests, when Search shows, because
     /// a watched folder on a USB drive blocks its removal and nobody sees
-    /// the changes.
+    /// the changes. A search panel lets go of its rows, its selection and
+    /// its kept operations, but keeps its text and Look in, because it
+    /// searches again when Two panels shows.
     pub(super) fn stop_panels(&self, hwnd: Hwnd) {
         let created = self.created();
         created.panel_threads.stop_all();
         self.model.borrow_mut().panels_mut().stop_reading();
         for side in Side::BOTH {
             created.requests.cancel(Purpose::FolderSizes(side));
+            created.requests.cancel(Purpose::Results(List::Panel(side)));
+            created
+                .requests
+                .cancel(Purpose::Selection(List::Panel(side)));
             hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
             hwnd.kill_timer(timer::PANEL_AGAIN[side.index()]);
+            hwnd.kill_timer(timer::PANEL_SEARCH[side.index()]);
+            hwnd.kill_timer(timer::PANEL_SELECTION[side.index()]);
+            let dropped = {
+                let mut model = self.model.borrow_mut();
+                let search = model.panels_mut().search_mut(side);
+                search.map(|search| search.list.drop_rows()).is_some()
+            };
+            if dropped {
+                self.panel(side).list.set_count(0);
+            }
         }
+        self.release_operations();
     }
 
     pub(super) fn read(&self, side: Side, ask: Option<ReadAsk>) {
@@ -692,15 +921,20 @@ impl MainWindow {
     }
 
     /// Sorts `side` by `sort`. The header shows the new sort at once; the
-    /// rows follow when the reading thread has listed them in that order.
-    fn sort_panel(&self, side: Side, sort: SortSpec) {
+    /// rows follow when the reading thread has listed them in that order,
+    /// or when gozlerd has sorted a search panel's search again.
+    fn sort_panel(&self, hwnd: Hwnd, side: Side, sort: SortSpec) {
         let ask = self.model.borrow_mut().panels_mut().sort(side, sort);
-        self.read(side, ask);
+        let searches = self.model.borrow().panels().search(side).is_some();
+        match ask {
+            None if searches => self.search(hwnd, List::Panel(side)),
+            ask => self.read(side, ask),
+        }
         self.show_panel_sort(side);
     }
 
     /// View > Sort by in Two panels sorts the active panel.
-    pub(super) fn sort_active_panel(&self, key: Option<SortKey>, dir: Option<SortDir>) {
+    pub(super) fn sort_active_panel(&self, hwnd: Hwnd, key: Option<SortKey>, dir: Option<SortDir>) {
         let side = self.model.borrow().panels().active();
         let shown = self.model.borrow().panels().panel(side).sort();
         let sort = match (key, dir) {
@@ -709,15 +943,63 @@ impl MainWindow {
             (None, Some(dir)) => SortSpec { dir, ..shown },
             (None, None) => shown,
         };
-        self.sort_panel(side, sort);
+        self.sort_panel(hwnd, side, sort);
     }
 
     /// Ctrl+R: the active panel reads its folder again and asks for its
-    /// folder sizes again.
-    pub(super) fn refresh_panel(&self) {
+    /// folder sizes again, or a search panel searches again.
+    pub(super) fn refresh_panel(&self, hwnd: Hwnd) {
         let side = self.model.borrow().panels().active();
+        if self.model.borrow().panels().search(side).is_some() {
+            return self.search(hwnd, List::Panel(side));
+        }
         let ask = self.model.borrow_mut().panels_mut().read_again(side);
         self.read(side, ask);
+    }
+
+    /// Find in Two panels: the active panel becomes a search panel of its
+    /// folder, which ends its reading and its folder's requests, and its
+    /// search box takes the focus with its text selected
+    /// (file-manager-spec.md: Search in a panel).
+    pub(super) fn find_in_panel(&self, hwnd: Hwnd) {
+        let side = self.model.borrow().panels().active();
+        self.close_quick_search_of(side);
+        let shown = self.place(side);
+        let entered = self.model.borrow_mut().panels_mut().enter_search(side);
+        if entered {
+            let created = self.created();
+            created.panel_threads.cancel_read(side);
+            created.requests.cancel(Purpose::FolderSizes(side));
+            hwnd.kill_timer(timer::PANEL_SETTLE[side.index()]);
+            hwnd.kill_timer(timer::PANEL_AGAIN[side.index()]);
+            self.release_operations();
+            self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
+            self.search(hwnd, List::Panel(side));
+        }
+        let search = self.panel(side).search;
+        search.hwnd().focus();
+        search.select_all();
+    }
+
+    /// The text of `side`'s search box changed; its search runs once the
+    /// person pauses.
+    pub(super) fn on_panel_search_text(&self, hwnd: Hwnd, side: Side) {
+        let text = self.panel(side).search.text();
+        let accepted = (self.model.borrow_mut()).set_typed_search(List::Panel(side), text);
+        self.apply(hwnd, accepted);
+    }
+
+    /// The person chose where `side` searches; it searches there at once.
+    pub(super) fn on_look_in(&self, hwnd: Hwnd, side: Side) {
+        let Some(chosen) = (self.panel(side).look_in.selected()).and_then(|i| LookIn::ALL.get(i))
+        else {
+            return;
+        };
+        if let Some(search) = self.model.borrow_mut().panels_mut().search_mut(side) {
+            search.look_in = *chosen;
+        }
+        self.search(hwnd, List::Panel(side));
+        self.show_panel(side);
     }
 
     /// Makes `side` the active panel, and with `focus` gives its list the
@@ -764,7 +1046,11 @@ impl MainWindow {
         keystroke: Keystroke,
         key: PanelKey,
     ) -> bool {
-        let Some(side) = self.panel_list(target).or(self.panel_path(target)) else {
+        let Some(side) = (self.panel_list(target))
+            .or(self.panel_path(target))
+            .or(self.panel_search(target))
+            .or(self.panel_look_in(target))
+        else {
             return false;
         };
         let c = self.panel(side);
@@ -809,21 +1095,43 @@ impl MainWindow {
         match key {
             PanelKey::Enter => self.enter_row(hwnd, side),
             PanelKey::Back => {
-                let ask = self.model.borrow_mut().panels_mut().go_up(side);
+                let mut model = self.model.borrow_mut();
+                let panels = model.panels_mut();
+                let ask = match panels.search(side) {
+                    Some(_) => panels.leave_search(side),
+                    None => panels.go_up(side),
+                };
+                drop(model);
                 self.read(side, ask);
             }
             PanelKey::OtherPanel => self.activate_panel(side.other(), true),
-            PanelKey::Escape => c.list.set_selected(&[]),
+            // The selection the list holds now decides, which the panel may
+            // not have read yet.
+            PanelKey::Escape => {
+                self.read_selection(side);
+                let ask = self.model.borrow_mut().panels_mut().leave_on_escape(side);
+                match ask {
+                    Some(ask) => self.read(side, Some(ask)),
+                    None => c.list.set_selected(&[]),
+                }
+            }
+            PanelKey::ToList => {
+                c.list.hwnd().focus();
+                let count = self.model.borrow().panels().panel(side).count();
+                if c.list.focused().is_none() && count > 0 {
+                    c.list.set_focused(Some(0));
+                }
+            }
+            PanelKey::LeaveSearch => {
+                let ask = self.model.borrow_mut().panels_mut().leave_search(side);
+                c.list.hwnd().focus();
+                self.read(side, ask);
+            }
+            PanelKey::LookInEnter => c.search.hwnd().focus(),
             PanelKey::Toggle => {
                 if let Some(row) = c.list.focused() {
-                    let entry = self
-                        .model
-                        .borrow()
-                        .panels()
-                        .panel(side)
-                        .entry(row)
-                        .is_some();
-                    if entry {
+                    let selectable = self.model.borrow().panels().selectable(side, row);
+                    if selectable {
                         let (_, selected) = c.list.row_state(row);
                         c.list.select(row, !selected);
                     }
@@ -863,9 +1171,9 @@ impl MainWindow {
         if select && let Some(from) = from {
             let rows: Vec<u64> = {
                 let model = self.model.borrow();
-                let panel = model.panels().panel(side);
+                let panels = model.panels();
                 panel::passed(from, to, count)
-                    .filter(|row| panel.entry(*row).is_some())
+                    .filter(|row| panels.selectable(side, *row))
                     .collect()
             };
             for row in rows {
@@ -907,7 +1215,10 @@ impl MainWindow {
         if character.is_control() || alt && character == ' ' {
             return false;
         }
-        if *self.model.borrow().panels().panel(side).view() != View::Folder {
+        if !matches!(
+            self.model.borrow().panels().panel(side).view(),
+            View::Folder | View::Search(_)
+        ) {
             return false;
         }
         let row = self
@@ -925,9 +1236,15 @@ impl MainWindow {
     /// Two panels' fixed keys that run no command.
     pub(super) fn run_panel_action(&self, hwnd: Hwnd, action: PanelAction) {
         match action {
+            // A search panel's search box stands in its path box's place
+            // (file-manager-spec.md: Search in a panel).
             PanelAction::PathBox => {
                 let side = self.model.borrow().panels().active();
-                let path = self.panel(side).path;
+                let c = self.panel(side);
+                let path = match c.kind.get() {
+                    Some(_) => c.search,
+                    None => c.path,
+                };
                 path.hwnd().focus();
                 path.select_all();
             }
@@ -1028,12 +1345,18 @@ impl MainWindow {
                 self.fill_panel_cell(side, &mut info);
                 Some(LRESULT(0))
             }
-            ListNotify::CacheHint(_) => Some(LRESULT(0)),
+            // A folder panel has every row; a search panel asks for those
+            // it shows.
+            ListNotify::CacheHint(_) => {
+                self.fetch_visible(List::Panel(side));
+                Some(LRESULT(0))
+            }
             ListNotify::ColumnClick(index) => {
                 self.close_quick_search_of(side);
-                if let Some((_, key, _)) = COLUMNS.get(index) {
+                let column = self.panel(side).columns().get(index);
+                if let Some(key) = column.and_then(|c| c.sort_key()) {
                     let shown = self.model.borrow().panels().panel(side).sort();
-                    self.sort_panel(side, panel::header_sort(shown, *key));
+                    self.sort_panel(hwnd, side, panel::header_sort(shown, key));
                 }
                 Some(LRESULT(0))
             }
@@ -1093,34 +1416,45 @@ impl MainWindow {
     /// a change of the focus alone reads only the focused row, because an
     /// arrow key moves it and the selection can hold every row.
     /// `..` cannot be selected, and a change of the selection, such as a
-    /// click, closes the quick search box.
+    /// click, closes the quick search box. A search panel's list then reads
+    /// the selected results, as Search's does.
     fn read_selection(&self, side: Side) {
         let list = self.panel(side).list;
         match self.panel_changed[side.index()].replace(ListChanged::Nothing) {
             ListChanged::Nothing => return,
             ListChanged::Focus => {
                 (self.model.borrow_mut().panels_mut()).set_focused(side, list.focused());
+                // The status line shows the focused result's folder.
+                if self.panel(side).kind.get() == Some(LookIn::AllDrives) {
+                    self.show_panel(side);
+                }
                 self.update_key_bar();
                 return;
             }
             ListChanged::Selection => {}
         }
-        let up = matches!(
-            self.model.borrow().panels().panel(side).row(0),
-            Some(Row::Up)
-        );
+        let up = matches!(self.model.borrow().panels().row(side, 0), Some(Row::Up));
         if up && list.row_state(0).1 {
             list.select(0, false);
             self.panel_changed[side.index()].set(ListChanged::Nothing);
         }
         let selected = list.selected();
-        {
+        let search = {
             let mut model = self.model.borrow_mut();
             let panels = model.panels_mut();
-            if panels.set_selected(side, selected) {
+            let changed = panels.set_selected(side, selected.clone());
+            if changed {
                 panels.close_quick(side);
             }
             panels.set_focused(side, list.focused());
+            changed && panels.search(side).is_some()
+        };
+        if search {
+            let accepted = self
+                .model
+                .borrow_mut()
+                .set_selection(List::Panel(side), selected);
+            self.apply(list.hwnd().parent(), accepted);
         }
         self.show_panel(side);
     }
@@ -1149,7 +1483,10 @@ impl MainWindow {
         };
         let entry = row.is_some_and(|row| {
             let model = self.model.borrow();
-            model.panels().panel(side).entry(row).is_some()
+            matches!(
+                model.panels().row(side, row),
+                Some(Row::Entry(_) | Row::Result(_))
+            )
         });
         let (groups, default) = match entry {
             true => (
@@ -1167,20 +1504,15 @@ impl MainWindow {
         let folder = {
             let model = self.model.borrow();
             let panels = model.panels();
-            match panels.panel(panels.active()).chosen().as_slice() {
-                [entry] if entry.is_folder() => Some(entry.name.clone()),
+            match panels.chosen(panels.active()).as_slice() {
+                [entry] if entry.is_folder => Some(String::from_utf16_lossy(&entry.path)),
                 _ => None,
             }
         };
         match folder {
-            Some(name) => {
+            Some(path) => {
                 let side = self.model.borrow().panels().active();
-                let ask = {
-                    let mut model = self.model.borrow_mut();
-                    let panels = model.panels_mut();
-                    let path = panels.panel(side).path_of(&name);
-                    panels.go(side, path, None)
-                };
+                let ask = self.model.borrow_mut().panels_mut().go(side, path, None);
                 self.read(side, Some(ask));
             }
             None => self.open_selected(hwnd),
@@ -1243,6 +1575,9 @@ impl MainWindow {
             },
         };
         let id = self.start_operation(request, None);
+        // Submitting clears the selection (file-manager-spec.md: Copy and
+        // Move); Gozler's own rename selects the renamed entry again.
+        self.panel(side).list.set_selected(&[]);
         if let (Some(name), Some(id)) = (renamed, id) {
             self.model
                 .borrow_mut()
@@ -1253,8 +1588,9 @@ impl MainWindow {
 
     /// What the Copy and Move dialog opens with: the other panel's folder,
     /// with the entry's name for `F6` on one entry, selected without its
-    /// extension (file-manager-spec.md: Copy and Move, step 1). `None`
-    /// when no entry is chosen.
+    /// extension (file-manager-spec.md: Copy and Move, step 1). A rename
+    /// keeps a search panel's result in its own folder. `None` when no
+    /// entry is chosen.
     fn transfer_start(&self, moves: bool) -> Option<TransferStart> {
         let model = self.model.borrow();
         let strings = model.strings();
@@ -1262,10 +1598,13 @@ impl MainWindow {
         let panels = model.panels();
         let active = panels.panel(panels.active());
         let other = panels.panel(panels.active().other());
-        let chosen = active.chosen();
+        let chosen = panels.chosen(panels.active());
         let one = match chosen.as_slice() {
             [] => return None,
-            [entry] => Some((entry.display_name(), entry.is_folder())),
+            [entry] => {
+                let path = String::from_utf16_lossy(&entry.path);
+                Some((panel::last_name(&path).to_owned(), entry.is_folder))
+            }
             _ => None,
         };
         let (title, name_line, items_line) = match moves {
@@ -1301,12 +1640,16 @@ impl MainWindow {
             }
             _ => (0, units(&text)),
         };
+        let folder = match (active.search(), chosen.as_slice()) {
+            (Some(_), [entry]) => parent_of(&String::from_utf16_lossy(&entry.path)),
+            _ => active.folder().to_owned(),
+        };
         Some(TransferStart {
             title: strings.text(title).to_owned(),
             line,
             text,
             selected,
-            folder: active.folder().to_owned(),
+            folder,
             one: one.map(|(name, _)| name),
         })
     }
@@ -1337,13 +1680,23 @@ impl MainWindow {
     }
 
     /// After a delete is submitted, the focus moves to the first row after
-    /// the deleted ones (file-manager-spec.md: Delete).
+    /// the deleted ones, and the selection is cleared (file-manager-spec.md:
+    /// Delete). A search panel's rows stay in place, blank, so its focus
+    /// stays.
     pub(super) fn focus_after_chosen(&self) {
         let side = self.model.borrow().panels().active();
-        let row = self.model.borrow().panels().panel(side).row_after_chosen();
+        let row = {
+            let model = self.model.borrow();
+            let panel = model.panels().panel(side);
+            panel
+                .search()
+                .map_or_else(|| panel.row_after_chosen(), |_| None)
+        };
+        let list = self.panel(side).list;
         if let Some(row) = row {
-            self.panel(side).list.set_focused(Some(row));
+            list.set_focused(Some(row));
         }
+        list.set_selected(&[]);
     }
 
     /// The cell's text and the row's icon of `side`'s list, which screen
@@ -1352,14 +1705,17 @@ impl MainWindow {
         let (text, icon) = {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
-            match model.panels().panel(side).row(info.row()) {
-                Some(row) => (
+            let panels = model.panels();
+            let columns = self.panel(side).columns();
+            match (panels.row(side, info.row()), columns.get(info.column())) {
+                (Some(row), Some(column)) => (
                     info.wants_text().then(|| {
-                        captions::panel_cell(model.strings(), &*numbers, row, info.column())
+                        let panel = panels.panel(side);
+                        captions::panel_cell(model.strings(), &*numbers, panel, row, *column)
                     }),
                     Some(icon_of(row)),
                 ),
-                None => (None, None),
+                _ => (None, None),
             }
         };
         if info.wants_text() {
@@ -1379,14 +1735,15 @@ impl MainWindow {
             let model = self.model.borrow();
             let numbers = self.numbers.borrow();
             let panels = model.panels();
-            let Some(shown) = panels.panel(side).row(row) else {
+            let Some(shown) = panels.row(side, row) else {
                 return false;
             };
-            let cells: Vec<String> = (0..COLUMNS.len())
-                .map(|column| captions::panel_cell(model.strings(), &*numbers, shown, column))
+            let panel = panels.panel(side);
+            let cells: Vec<String> = (self.panel(side).columns().iter())
+                .map(|c| captions::panel_cell(model.strings(), &*numbers, panel, shown, *c))
                 .collect();
             let dimmed = matches!(shown, Row::Entry(entry) if entry.is_dimmed());
-            let up = shown == Row::Up;
+            let up = matches!(shown, Row::Up);
             (cells, icon_of(shown), dimmed, up, panels.active() == side)
         };
         let icon = self.icons.index(&icon.0, icon.1);
@@ -1397,10 +1754,16 @@ impl MainWindow {
         };
         let created = self.created();
         let fonts = created.fonts.borrow();
+        let fits: Vec<CellFit> = self
+            .panel(side)
+            .columns()
+            .iter()
+            .map(|c| fit_of(*c))
+            .collect();
         draw.draw_panel_row(
             &PanelRow {
                 cells: &cells,
-                right_aligned: &COLUMNS.map(|(_, _, right)| right),
+                fits: &fits,
                 icon: created.images.map(|images| (images, icon)),
                 up,
                 bar,
@@ -1461,18 +1824,20 @@ impl MainWindow {
         follow: Vec<(Side, bool, bool)>,
     ) {
         let shown = Side::BOTH.map(|side| self.place(side));
-        let places = self
+        let rows = self
             .model
             .borrow_mut()
             .panels_mut()
             .set_taken(taken, [shown[0].focused, shown[1].focused]);
-        for side in Side::BOTH {
-            self.show_place(
-                side,
-                &shown[side.index()],
-                &places[side.index()],
-                Scroll::Keep,
-            );
+        for (side, rows) in Side::BOTH.into_iter().zip(rows) {
+            match rows {
+                TakenRows::Folder(place) => {
+                    self.show_place(side, &shown[side.index()], &place, Scroll::Keep);
+                }
+                TakenRows::Search { deselect } => {
+                    self.show_list_taken(List::Panel(side), deselect);
+                }
+            }
             self.show_panel(side);
         }
         if self.model.borrow().mode() != Mode::TwoPanels {
@@ -1510,5 +1875,6 @@ fn icon_of(row: Row) -> (String, bool) {
     match row {
         Row::Up => (String::new(), true),
         Row::Entry(entry) => (entry.display_name(), entry.is_folder()),
+        Row::Result(item) => (panel::last_name(&item.path).to_owned(), item.is_dir),
     }
 }

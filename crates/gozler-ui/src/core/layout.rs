@@ -390,6 +390,9 @@ pub(crate) struct CaptionWidths {
     buttons: ButtonWidths,
     /// A drive button's widest text, such as `W:`.
     drive: Px,
+    /// A search panel's Look in label, and its list's widest item.
+    look_in_label: Px,
+    look_in: Px,
     /// The widest free space of a panel's status line.
     free: Px,
     /// The widest key bar caption, its key and its word.
@@ -524,6 +527,8 @@ impl CaptionWidths {
                 ..buttons
             },
             drive: measure("W:").max(measure(r"\\")),
+            look_in_label: measure(&captions.look_in_label),
+            look_in: widest(&captions.look_in),
             free: measure(&captions.free_widest),
             key_bar: captions
                 .key_bar
@@ -745,20 +750,26 @@ impl MessageArea {
     }
 
     /// The message's rectangle for a text `text_height` tall, and its
-    /// `buttons` buttons' in a row below it, each `width` wide.
+    /// `buttons` buttons' in a row below it, each `width` wide: from the
+    /// text's left edge, or `centred` under a centred text, as a panel's.
     pub(crate) fn place(
         &self,
         text_height: Px,
         font_height: Px,
         buttons: usize,
         width: Px,
+        centred: bool,
     ) -> (Rect, Vec<Rect>) {
         let px = |dip: Dip| dip.to_px(self.dpi);
         let text = Rect {
             height: text_height.min(self.text.height),
             ..self.text
         };
-        let mut x = text.x;
+        let row = Px(width.0 * buttons as i32 + px(RELATED).0 * (buttons as i32 - 1).max(0));
+        let mut x = match centred {
+            true => text.x + Px((text.width.0 - row.0) / 2),
+            false => text.x,
+        };
         let buttons = (0..buttons)
             .map(|_| {
                 let button = Rect {
@@ -1308,19 +1319,25 @@ pub(crate) enum Body {
 }
 
 /// One panel's controls, from the top: the drive button and the path box,
-/// the list, and the status line (file-manager-spec.md: A panel).
+/// or a search panel's search box and Look in, the list, and the status
+/// line (file-manager-spec.md: A panel, Search in a panel). The list's
+/// message lies over the list, as Search's does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PanelLayout {
     pub(crate) drive: Rect,
     pub(crate) path: Rect,
+    pub(crate) search: Rect,
+    pub(crate) look_in_label: Rect,
+    pub(crate) look_in: Rect,
     pub(crate) list: Rect,
-    /// The list area's message, under the header, and Retry under it.
-    pub(crate) message: Rect,
-    pub(crate) retry: Rect,
     /// The status line's counts, which the quick search box replaces.
     pub(crate) counts: Rect,
     /// The free space, at the status line's right end.
     pub(crate) free: Rect,
+    /// A search panel's counts while it searches all drives, in the status
+    /// line's left half, and the focused result's folder in its right half.
+    pub(crate) counts_half: Rect,
+    pub(crate) folder: Rect,
 }
 
 /// Search's controls between the menu bar and the status bar.
@@ -1418,17 +1435,36 @@ impl Layout {
         let path_row = related + control_height + related;
         let status_line = Px(1) + line_height;
         let key_row = Px(1) + related + control_height + related;
+        let drive_width = captions.drive + px(DROP_DOWN_CHROME);
+        let look_in_width = captions.look_in + px(DROP_DOWN_CHROME);
+        // Either panel may search at any moment, so each is as wide as the
+        // right panel's search row, which has a margin on both sides.
+        let search_row = margin
+            + drive_width
+            + related
+            + px(SEARCH_MIN_WIDTH)
+            + related
+            + captions.look_in_label
+            + related
+            + look_in_width
+            + margin;
+        let panel_min_width = list_min_width.max(search_row);
         let min_client = Size {
-            width: (list_min_width + Px(1) + list_min_width)
+            width: (panel_min_width + Px(1) + panel_min_width)
                 .max(status.min_width(dpi))
                 .max(key_min),
             height: path_row + list_min_height + status_line + key_row + status_height,
         };
         let width = client.width.max(min_client.width);
         let height = client.height.max(min_client.height);
-        // The right group keeps the room for its text and the size grip.
+        // The right group keeps the room for its text, an active search
+        // panel's two totals glyphs and the size grip.
         status.give_middle_the_rest(
-            width - captions.status.panel_index - px(STATUS_PART_PADDING) - px(SCROLL_BAR),
+            width
+                - captions.status.panel_index
+                - Px(glyph_room(dpi, true).0 * 2)
+                - px(STATUS_PART_PADDING)
+                - px(SCROLL_BAR),
         );
         let key_top = height - status_height - key_row;
         let half = Px((width.0 - 1) / 2);
@@ -1450,15 +1486,32 @@ impl Layout {
             let drive = Rect {
                 x: x + margin,
                 y: related,
-                width: captions.drive + px(DROP_DOWN_CHROME),
+                width: drive_width,
                 height: control_height,
             };
             let path_x = drive.right() + related;
+            let row_right = x + panel_width - inner;
             let path = Rect {
                 x: path_x,
                 y: related,
-                width: (x + panel_width - inner - path_x).max(Px(0)),
+                width: (row_right - path_x).max(Px(0)),
                 height: control_height,
+            };
+            // As Search's Match label and list stand at its row's end.
+            let look_in = Rect {
+                x: row_right - look_in_width,
+                width: look_in_width,
+                ..path
+            };
+            let look_in_label = Rect {
+                x: look_in.x - related - captions.look_in_label,
+                y: related + Px((control_height.0 - font_height.0) / 2),
+                width: captions.look_in_label,
+                height: font_height,
+            };
+            let search = Rect {
+                width: (look_in_label.x - related - path_x).max(Px(0)),
+                ..path
             };
             let line_top = key_top - status_line;
             let list = Rect {
@@ -1489,28 +1542,27 @@ impl Layout {
                 width: (free.x - related - line.x).max(Px(0)),
                 ..line
             };
-            // Under the header, as Search's message stands under its list's.
-            let message = Rect {
-                x: x + margin,
-                y: list.y + line_height + px(MESSAGE_TOP),
-                width: (panel_width - margin - margin).max(Px(0)),
-                height: Px(font_height.0 * 2),
+            let half = Px((line.width.0 - related.0) / 2);
+            let counts_half = Rect {
+                width: half.max(Px(0)),
+                ..line
             };
-            let retry_width = captions.button_width(dpi);
-            let retry = Rect {
-                x: x + Px((panel_width.0 - retry_width.0) / 2),
-                y: message.bottom() + related,
-                width: retry_width,
-                height: control_height,
+            let folder = Rect {
+                x: line.right() - half,
+                width: half.max(Px(0)),
+                ..line
             };
             PanelLayout {
                 drive,
                 path,
+                search,
+                look_in_label,
+                look_in,
                 list,
-                message,
-                retry,
                 counts,
                 free,
+                counts_half,
+                folder,
             }
         };
         let left = panel(Px(0), half, related, &mut dividers);
@@ -1909,6 +1961,23 @@ mod tests {
         a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
     }
 
+    /// Asserts that every control of `placed` lies in `client` above the
+    /// status bar and overlaps no other.
+    fn fits(placed: &[Rect], client: Size, status_height: Px, dpi: Dpi, stretch: f64) {
+        for (i, a) in placed.iter().enumerate() {
+            assert!(
+                a.x >= Px(0)
+                    && a.right() <= client.width
+                    && a.bottom() <= client.height - status_height
+                    && a.width > Px(0),
+                "{a:?} in {client:?} at {dpi:?}, stretch {stretch}"
+            );
+            for b in &placed[i + 1..] {
+                assert!(!overlaps(*a, *b), "{a:?} overlaps {b:?} at {dpi:?}");
+            }
+        }
+    }
+
     /// A control that overlaps another or leaves the client area is cut off
     /// or hidden, and no compiler or other test sees it before a person
     /// does. English and the pseudo-language's longer captions, at 100, 150
@@ -2106,8 +2175,33 @@ mod tests {
                 let mut controls: Vec<Rect> = key_bar.to_vec();
                 controls.extend(layout.dividers.iter().copied());
                 for panel in panels {
+                    // The path row shows the path box or the search row,
+                    // and the status line the counts and the free space or
+                    // the halves of all drives, so each set is checked
+                    // apart.
+                    let sets = [
+                        [panel.path, panel.counts, panel.free],
+                        [panel.search, panel.counts_half, panel.folder],
+                    ];
+                    for set in sets {
+                        let mut placed = vec![panel.drive, panel.list];
+                        placed.extend(set);
+                        if set[0] == panel.search {
+                            placed.extend([panel.look_in_label, panel.look_in]);
+                        }
+                        fits(&placed, client, status_height, dpi, stretch);
+                    }
                     // The message and Retry lie over the list, which is
-                    // empty while they show.
+                    // empty while they show: a "not ready" message of two
+                    // lines and Retry under it fit in the list.
+                    let area = MessageArea::new(panel.list, font_height + Dip(7).to_px(dpi), dpi);
+                    let button = captions.button_width(dpi);
+                    let (_, retry) =
+                        area.place(Px(font_height.0 * 2), font_height, 1, button, true);
+                    assert!(
+                        retry[0].bottom() <= panel.list.bottom(),
+                        "{retry:?} at {dpi:?}"
+                    );
                     controls.extend([
                         panel.drive,
                         panel.path,
@@ -2115,7 +2209,6 @@ mod tests {
                         panel.counts,
                         panel.free,
                     ]);
-                    assert!(panel.retry.bottom() <= panel.list.bottom());
                 }
                 for (i, a) in controls.iter().enumerate() {
                     assert!(
@@ -2131,6 +2224,12 @@ mod tests {
                 }
                 for list in [left, right] {
                     assert!(list.width >= Dip(300).to_px(dpi), "{list:?} at {dpi:?}");
+                }
+                for panel in panels {
+                    assert!(
+                        panel.search.width >= Dip(120).to_px(dpi),
+                        "{panel:?} at {dpi:?}"
+                    );
                 }
                 assert_eq!(right.right(), client.width);
                 assert!((right.width.0 - left.width.0).abs() <= 1);

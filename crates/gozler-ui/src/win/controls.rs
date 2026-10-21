@@ -369,6 +369,22 @@ impl Label {
         .map(Label)
     }
 
+    /// A path against its right edge that loses its middle when it is too
+    /// long, so the drive and the last folder stay, such as a search
+    /// panel's focused folder.
+    pub(crate) fn create_right_path(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        const SS_RIGHT: u32 = 0x2;
+        const SS_PATHELLIPSIS: u32 = 0x8000;
+        child(
+            parent,
+            w!("STATIC"),
+            SS_RIGHT | SS_NOPREFIX | SS_PATHELLIPSIS,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Label)
+    }
+
     /// A centred text that wraps at word ends and shows `&` as itself, such
     /// as a panel's message in its empty list.
     pub(crate) fn create_centred(parent: Hwnd, id: u16) -> windows::core::Result<Label> {

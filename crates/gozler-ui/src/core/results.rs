@@ -27,6 +27,7 @@ pub(crate) const CHUNK_ROWS: u64 = 16_384;
 const CACHE_ROWS: u64 = 32_768;
 
 /// What the list area shows. Rows and a message never show together.
+#[derive(Debug)]
 pub(crate) enum Shown {
     /// Before the first reply.
     Nothing,
@@ -45,8 +46,14 @@ pub(crate) enum ListMessage {
     MissingFolder(String),
     Failure(DaemonFailure),
     /// The search is empty, and Settings says to show nothing then (DESIGN.md:
-    /// S6).
+    /// S6); a search panel shows it for every empty search.
     TypeToSearch,
+    /// A search panel's folder, on the drive `root`, is on no indexed
+    /// volume, so gozlerd cannot search it (file-manager-spec.md: Search in
+    /// a panel).
+    NotIndexed {
+        root: String,
+    },
 }
 
 /// The button a message offers for its fix (DESIGN.md: Daemon failures).
@@ -95,9 +102,10 @@ impl ListMessage {
     /// The message's fixes, in the order their buttons show.
     pub(crate) fn fixes(&self) -> Vec<Fix> {
         match self {
-            ListMessage::Parse(_) | ListMessage::MissingFolder(_) | ListMessage::TypeToSearch => {
-                Vec::new()
-            }
+            ListMessage::Parse(_)
+            | ListMessage::MissingFolder(_)
+            | ListMessage::TypeToSearch
+            | ListMessage::NotIndexed { .. } => Vec::new(),
             ListMessage::Failure(failure) => [Fix::use_local(failure), Fix::of(failure)]
                 .into_iter()
                 .flatten()
@@ -224,6 +232,7 @@ struct CachedChunk {
 
 /// The request whose reply the results wait for; a reply of another
 /// generation is stale.
+#[derive(Debug)]
 enum InFlight {
     /// A new search, whose first chunk's ask its rows will be shown with.
     Search(Generation, ChunkAsk),
@@ -247,6 +256,7 @@ pub(crate) enum RowsChange {
     },
 }
 
+#[derive(Debug)]
 pub(crate) struct Results {
     shown: Shown,
     in_flight: Option<InFlight>,
@@ -315,6 +325,35 @@ impl Results {
             Shown::Nothing | Shown::Message(_) => &[],
         };
         chunks.iter().flat_map(|chunk| &chunk.rows)
+    }
+
+    /// The fetched rows with their positions in position order: from
+    /// `from` towards the end, or with `down` false from before `from`
+    /// towards the start. Only the cached chunks are walked, never the
+    /// positions between them.
+    pub(crate) fn fetched_from(
+        &self,
+        from: u64,
+        down: bool,
+    ) -> impl Iterator<Item = (u64, &ResultItem)> {
+        let mut chunks: Vec<&CachedChunk> = match &self.shown {
+            Shown::Rows(shown) => shown.chunks.iter().collect(),
+            Shown::Nothing | Shown::Message(_) => Vec::new(),
+        };
+        chunks.sort_unstable_by_key(|chunk| chunk.start);
+        if !down {
+            chunks.reverse();
+        }
+        chunks
+            .into_iter()
+            .flat_map(move |chunk| {
+                let len = chunk.rows.len();
+                (0..len).map(move |k| {
+                    let i = if down { k } else { len - 1 - k };
+                    (chunk.start + i as u64, &chunk.rows[i])
+                })
+            })
+            .filter(move |(at, _)| if down { *at >= from } else { *at < from })
     }
 
     /// The byte ranges of the row's full path that the shown search's text
@@ -541,6 +580,18 @@ impl Results {
             }
             None => RowsChange::Stale,
         }
+    }
+}
+
+/// By hand, because the compiled terms of `matched` have no `Debug`, and
+/// the cached rows would fill a test's failure message.
+impl std::fmt::Debug for ShownRows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShownRows")
+            .field("ask", &self.ask)
+            .field("total", &self.total)
+            .field("chunks", &self.chunks.len())
+            .finish_non_exhaustive()
     }
 }
 

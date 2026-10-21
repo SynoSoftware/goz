@@ -17,17 +17,34 @@ use std::io;
 use std::ops::Range;
 use std::path::PathBuf;
 
+/// A list that shows gozlerd's results: Search's results list, or a
+/// search panel's list (file-manager-spec.md: Search in a panel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum List {
+    Search,
+    Panel(Side),
+}
+
+impl List {
+    pub(crate) const ALL: [List; 3] = [
+        List::Search,
+        List::Panel(Side::Left),
+        List::Panel(Side::Right),
+    ];
+}
+
 /// What a request is for. At most one request of each purpose is live, so
 /// starting one cancels the live one of its purpose and no other (DESIGN.md:
-/// window rule 4).
+/// window rule 4). Each list has its own `Results` and `Selection`, so a
+/// search in one list never cancels another list's request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Purpose {
     /// The list's rows: a new search's first chunk, or a chunk of the shown
     /// search.
-    Results,
+    Results(List),
     /// The selected rows that the cache lacks, or the contents of the one
     /// selected folder.
-    Selection,
+    Selection(List),
     Status,
     Export,
     /// Settings' search for a program, which the Use Total Commander link
@@ -45,9 +62,13 @@ pub(crate) enum Purpose {
 }
 
 impl Purpose {
-    pub(crate) const ALL: [Purpose; 9] = [
-        Purpose::Results,
-        Purpose::Selection,
+    pub(crate) const ALL: [Purpose; 13] = [
+        Purpose::Results(List::Search),
+        Purpose::Results(List::Panel(Side::Left)),
+        Purpose::Results(List::Panel(Side::Right)),
+        Purpose::Selection(List::Search),
+        Purpose::Selection(List::Panel(Side::Left)),
+        Purpose::Selection(List::Panel(Side::Right)),
         Purpose::Status,
         Purpose::Export,
         Purpose::Program,
@@ -72,12 +93,13 @@ pub(crate) struct Fetch {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Ask {
-    /// One chunk of rows, gathered from all its pages.
-    Rows(ChunkAsk),
-    Selection(SelectionAsk),
-    /// The entries below the one selected folder and the summed size of its
-    /// files: the totals of an empty search scoped to it, as `gozler
-    /// -get-folder-size` asks.
+    /// One chunk of a list's rows, gathered from all its pages.
+    Rows(List, ChunkAsk),
+    Selection(List, SelectionAsk),
+    /// The entries below the one selected folder of Search's list and the
+    /// summed size of its files: the totals of an empty search scoped to
+    /// it, as `gozler -get-folder-size` asks. Only Search's inspector shows
+    /// them.
     FolderSize(Search),
     Export(ExportAsk),
     Status,
@@ -180,8 +202,9 @@ impl ExportAsk {
 impl Fetch {
     pub(crate) fn purpose(&self) -> Purpose {
         match self.ask {
-            Ask::Rows(_) => Purpose::Results,
-            Ask::Selection(_) | Ask::FolderSize(_) => Purpose::Selection,
+            Ask::Rows(list, _) => Purpose::Results(list),
+            Ask::Selection(list, _) => Purpose::Selection(list),
+            Ask::FolderSize(_) => Purpose::Selection(List::Search),
             Ask::Export(_) => Purpose::Export,
             Ask::Status => Purpose::Status,
             Ask::Program(_) => Purpose::Program,

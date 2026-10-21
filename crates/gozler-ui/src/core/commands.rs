@@ -212,8 +212,8 @@ impl CommandId {
                     None,
                 ),
                 // Delete, Cut and Paste are keys of the list (control_key).
-                C::CopyToFolder => ("command.copy_to_folder", &[], file_operation, None),
-                C::MoveToFolder => ("command.move_to_folder", &[], file_operation, None),
+                C::CopyToFolder => ("command.copy_to_folder", &[], transfer, None),
+                C::MoveToFolder => ("command.move_to_folder", &[], transfer, None),
                 C::Delete => ("command.delete", &[], file_operation, None),
                 C::Cut => ("command.cut", &[], cut, None),
                 C::Paste => ("command.paste", &[], paste, None),
@@ -241,10 +241,7 @@ impl CommandId {
                     &[],
                     |s| {
                         let panels = s.model.panels();
-                        panels
-                            .panel(panels.active())
-                            .focused_entry()
-                            .is_some_and(|entry| !entry.is_folder())
+                        (panels.focused(panels.active())).is_some_and(|entry| !entry.is_folder)
                     },
                     None,
                 ),
@@ -254,8 +251,10 @@ impl CommandId {
                     &[],
                     |s| {
                         s.model.offers_file_operations()
-                            && *s.model.panels().panel(s.model.panels().active()).view()
-                                == View::Folder
+                            && matches!(
+                                s.model.panels().panel(s.model.panels().active()).view(),
+                                View::Folder
+                            )
                     },
                     None,
                 ),
@@ -329,6 +328,7 @@ impl CommandId {
             | C::TwoPanels
             | C::SelectAll
             | C::Refresh
+            | C::Find
             | C::SortBy => true,
             C::Open | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => true,
             C::ClearSelection | C::View | C::Edit | C::NewFolder => mode == Mode::TwoPanels,
@@ -344,7 +344,6 @@ impl CommandId {
             | C::Filters
             | C::Inspector
             | C::Columns
-            | C::Find
             | C::Match
             | C::ClearFilters
             | C::Cut
@@ -394,6 +393,11 @@ pub(crate) enum Focus {
     /// A panel's path box, whose `Enter`, `Esc` and `Tab` the window
     /// takes.
     PathBox,
+    /// A search panel's search box (file-manager-spec.md: Search in a
+    /// panel).
+    PanelSearch,
+    /// A search panel's Look in list.
+    LookIn,
     Other,
 }
 
@@ -408,12 +412,12 @@ fn never(_: &State) -> bool {
 /// Refresh runs the shown search again (DESIGN.md: C17); in Two panels it
 /// reads the active panel's folder again.
 fn searched(state: &State) -> bool {
-    state.model.mode() == Mode::TwoPanels || state.model.results.has_searched()
+    state.model.mode() == Mode::TwoPanels || state.model.search_list().results().has_searched()
 }
 
 /// The selected entries, once the selection is read (DESIGN.md: The selection).
 fn files(state: &State) -> bool {
-    state.model.selected_files().is_some()
+    state.model.search_list().selection().files().is_some()
 }
 
 /// How many entries a file command acts on: Search's selected files, once
@@ -421,7 +425,7 @@ fn files(state: &State) -> bool {
 /// (file-manager-spec.md: Commands in Two panels).
 fn chosen(state: &State) -> usize {
     match state.model.mode() {
-        Mode::Search => state.model.selected_files().map_or(0, <[_]>::len),
+        Mode::Search => (state.model.search_list().selection().files()).map_or(0, <[_]>::len),
         Mode::TwoPanels => state.model.panels().chosen_count(),
     }
 }
@@ -444,6 +448,17 @@ fn file_operation(state: &State) -> bool {
     state.model.offers_file_operations() && chosen(state) > 0
 }
 
+/// Copy to folder… and Move to folder…, which in Two panels also need a
+/// folder to go to, so not while both panels search
+/// (file-manager-spec.md: Search in a panel).
+fn transfer(state: &State) -> bool {
+    let panels = state.model.panels();
+    let both_search = Side::BOTH
+        .into_iter()
+        .all(|side| panels.search(side).is_some());
+    file_operation(state) && !(state.model.mode() == Mode::TwoPanels && both_search)
+}
+
 /// Cut acts on the selected files while the list has the focus, as Copy
 /// does (DESIGN.md: C8); the search box cuts its own text.
 fn cut(state: &State) -> bool {
@@ -457,9 +472,7 @@ fn paste(state: &State) -> bool {
     state.focus == Focus::List
         && state.model.offers_file_operations()
         && state.model.clipboard_holds_files()
-        && state
-            .model
-            .selected_files()
+        && (state.model.search_list().selection().files())
             .is_some_and(|files| matches!(files, [folder] if folder.is_dir))
 }
 
@@ -468,7 +481,12 @@ fn copy(state: &State) -> bool {
     match state.focus {
         Focus::SearchBox { text_selected } | Focus::Value { text_selected } => text_selected,
         Focus::List => files(state),
-        Focus::RangeFilter | Focus::Panel | Focus::PathBox | Focus::Other => false,
+        Focus::RangeFilter
+        | Focus::Panel
+        | Focus::PathBox
+        | Focus::PanelSearch
+        | Focus::LookIn
+        | Focus::Other => false,
     }
 }
 
@@ -732,6 +750,15 @@ pub(crate) enum PanelKey {
     /// `Esc` in the path box: the folder's path is back and the list has
     /// the focus.
     PathEscape,
+    /// `Down` and `Enter` in a search panel's search box: the list takes
+    /// the focus, and its first row the focus when no row has it.
+    ToList,
+    /// `Esc` in a search panel's search box: the searched folder shows
+    /// again.
+    LeaveSearch,
+    /// `Enter` in a search panel's closed Look in list: the search box
+    /// takes the focus.
+    LookInEnter,
 }
 
 /// The meaning `key` has in the focused control, which the window takes
@@ -801,6 +828,36 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
                 ]
             }
         }
+        Focus::PanelSearch => {
+            const {
+                &[
+                    (
+                        Keystroke::plain(Key::Down),
+                        KeyAction::Panel(PanelKey::ToList),
+                    ),
+                    (
+                        Keystroke::plain(Key::Enter),
+                        KeyAction::Panel(PanelKey::ToList),
+                    ),
+                    (
+                        Keystroke::plain(Key::Escape),
+                        KeyAction::Panel(PanelKey::LeaveSearch),
+                    ),
+                    (
+                        Keystroke::plain(Key::Tab),
+                        KeyAction::Panel(PanelKey::OtherPanel),
+                    ),
+                ]
+            }
+        }
+        Focus::LookIn => {
+            const {
+                &[(
+                    Keystroke::plain(Key::Enter),
+                    KeyAction::Panel(PanelKey::LookInEnter),
+                )]
+            }
+        }
         Focus::Value { .. } | Focus::Other => &[],
     };
     table
@@ -857,7 +914,8 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
 /// Keys).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PanelAction {
-    /// `Ctrl+L`: the active panel's path box takes the focus.
+    /// `Ctrl+L`: the active panel's path box, or a search panel's search
+    /// box, takes the focus.
     PathBox,
     /// `Alt+F1`, `Alt+F2`: a panel's drive menu.
     Drives(Side),
@@ -875,8 +933,12 @@ impl PanelAction {
 }
 
 /// Two panels' fixed keys, which win over the person's shortcuts on the
-/// same keys.
+/// same keys. `Alt+F7` comes first so that Find's menu item shows it.
 const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
+    (
+        Keystroke::alt(Key::Function(7)),
+        MenuItem::Run(CommandId::Find),
+    ),
     (
         Keystroke::ctrl(Key::Letter(b'R')),
         MenuItem::Run(CommandId::Refresh),
@@ -1581,6 +1643,7 @@ pub(crate) fn accelerators(shortcuts: &CommandShortcuts, mode: Mode) -> Vec<(Key
 )]
 mod tests {
     use super::*;
+    use crate::core::fetch::List;
     use crate::core::model::ExportFormat;
     use crate::core::model::tests::{rows, search, showing};
     use crate::core::results::{Fix, ListButton};
@@ -1657,13 +1720,22 @@ mod tests {
                 Some(MenuItem::Run(CommandId::Settings))
             );
         }
+        // Find starts a search in a panel (file-manager-spec.md: Search in
+        // a panel), with Total Commander's `Alt+F7` besides `Ctrl+F`.
+        let find = Some(MenuItem::Run(CommandId::Find));
+        assert_eq!(
+            takes(Mode::TwoPanels, Keystroke::alt(Key::Function(7))),
+            find
+        );
+        for mode in Mode::ALL {
+            assert_eq!(takes(mode, Keystroke::ctrl(Key::Letter(b'F'))), find);
+        }
         let shown = |mode, command| items(&menu_bar(mode)).contains(&MenuItem::Run(command));
         assert!(shown(Mode::Search, CommandId::Refresh));
         assert!(!shown(Mode::TwoPanels, CommandId::Copy));
-        assert!(
-            shown(Mode::Search, CommandId::TwoPanels)
-                && shown(Mode::TwoPanels, CommandId::TwoPanels)
-        );
+        for command in [CommandId::TwoPanels, CommandId::Find] {
+            assert!(shown(Mode::Search, command) && shown(Mode::TwoPanels, command));
+        }
     }
 
     /// An access key that two items of one menu share opens the first only,
@@ -1777,13 +1849,13 @@ mod tests {
         for (selected, opens, shows_properties) in
             [(1, true, true), (15, true, false), (16, false, false)]
         {
-            model.set_selection(vec![0..selected]);
+            model.set_selection(List::Search, vec![0..selected]);
             assert_eq!(enabled(&model, CommandId::Open), opens, "{selected} rows");
             assert_eq!(enabled(&model, CommandId::OpenFileLocation), opens);
             assert_eq!(enabled(&model, CommandId::Properties), shows_properties);
             assert!(enabled(&model, CommandId::CopyAsPath));
         }
-        model.set_selection(vec![0..1, 40_000..40_001]);
+        model.set_selection(List::Search, vec![0..1, 40_000..40_001]);
         for command in [CommandId::Open, CommandId::Copy, CommandId::Properties] {
             assert!(
                 !enabled(&model, command),
@@ -1852,7 +1924,7 @@ mod tests {
     #[test]
     fn t11_a_command_chosen_after_new_rows_cleared_the_selection_does_nothing() {
         let mut model = showing(10);
-        model.set_selection(vec![2..3]);
+        model.set_selection(List::Search, vec![2..3]);
         assert!(
             enabled(&model, CommandId::Open),
             "the menu opens with it on"

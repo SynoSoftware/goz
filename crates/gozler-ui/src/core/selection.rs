@@ -115,8 +115,17 @@ impl Sums {
 /// The full path of `file` as UTF-16, exactly as Windows names it, also
 /// when the name holds an unpaired surrogate that its UTF-8 `path` lost.
 pub(crate) fn wide_path(file: &ResultItem) -> Vec<u16> {
+    let mut path = Vec::new();
+    wide_path_into(file, &mut path);
+    path
+}
+
+/// [`wide_path`] into `path`, which it empties first, so a pass over many
+/// rows reuses one buffer.
+pub(crate) fn wide_path_into(file: &ResultItem, path: &mut Vec<u16>) {
+    path.clear();
     match &file.path_u16 {
-        Some(units) => units.clone(),
-        None => file.path.encode_utf16().collect(),
+        Some(units) => path.extend_from_slice(units),
+        None => path.extend(file.path.encode_utf16()),
     }
 }
