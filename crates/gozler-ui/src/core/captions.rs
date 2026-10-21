@@ -2452,7 +2452,7 @@ pub(crate) fn panel_list_message(model: &Model, side: Side) -> Option<String> {
 
 /// The status line's counts: "14 items · 5.2 GB" or "3 of 14 selected ·
 /// 4.2 GB". The known sizes' sum says how many folder sizes are unknown,
-/// as "3.4 GB, 12 sizes unknown", and "size unknown" shows only when no
+/// as "(3.4 GB, 12 sizes unknown)", and "size unknown" shows only when no
 /// counted entry's size is known.
 fn panel_counts(strings: &Strings, numbers: &dyn Numbers, counts: Counts) -> String {
     let count = match counts.selected {
