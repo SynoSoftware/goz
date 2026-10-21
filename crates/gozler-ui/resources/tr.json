@@ -775,6 +775,8 @@
     "items_other": "{0} öğe",
     "sizes_unknown_one": "({1}, {0} boyut bilinmiyor)",
     "sizes_unknown_other": "({1}, {0} boyut bilinmiyor)",
+    "sizes_unknown_only_one": "({0} boyut bilinmiyor)",
+    "sizes_unknown_only_other": "({0} boyut bilinmiyor)",
     "selected_one": "{0}/{1} seçili",
     "selected_other": "{0}/{1} seçili",
     "free": "{0} boş",

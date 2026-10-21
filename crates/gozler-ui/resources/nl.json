@@ -775,6 +775,8 @@
     "items_other": "{0} items",
     "sizes_unknown_one": "({1}, {0} grootte onbekend)",
     "sizes_unknown_other": "({1}, {0} groottes onbekend)",
+    "sizes_unknown_only_one": "({0} grootte onbekend)",
+    "sizes_unknown_only_other": "({0} groottes onbekend)",
     "selected_one": "{0} van {1} geselecteerd",
     "selected_other": "{0} van {1} geselecteerd",
     "free": "{0} vrij",
