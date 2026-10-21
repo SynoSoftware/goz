@@ -9,8 +9,13 @@ use crate::core::drop_target::{DropEffect, DropKeys, SourceEffects};
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Mutex, PoisonError};
+use std::thread::JoinHandle;
 use windows::Win32::Foundation::{E_ABORT, E_FAIL, HWND, POINT, POINTL, S_OK};
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IBindCtx, IDataObject};
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    IBindCtx, IDataObject,
+};
 use windows::Win32::System::Ole::{
     DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl,
     MK_ALT, RegisterDragDrop, RevokeDragDrop,
@@ -21,7 +26,7 @@ use windows::Win32::System::SystemServices::{
 use windows::Win32::UI::Shell::{
     CLSID_DragDropHelper, IDataObjectAsyncCapability, IDropTargetHelper,
 };
-use windows::core::{HRESULT, Interface, Ref, implement};
+use windows::core::{AgileReference, HRESULT, Interface, Ref, implement};
 
 /// What the window does with files dragged over it.
 pub(crate) trait DropHandler {
@@ -216,9 +221,12 @@ impl IDropTarget_Impl for Target_Impl {
 /// says that it is done with them, so the queued operation can still read
 /// them. Dropping it without [`AsyncDrop::end`] tells the source that the
 /// operation failed.
+///
+/// The source is told on a thread of its own, because each call waits for
+/// the source's process, which may delete its files before it answers.
 pub(crate) struct AsyncDrop {
-    data: IDataObject,
-    operation: IDataObjectAsyncCapability,
+    data: AgileReference<IDataObject>,
+    operation: AgileReference<IDataObjectAsyncCapability>,
     /// What the source is told was done when the operation ends, which it
     /// takes as `CFSTR_PERFORMEDDROPEFFECT`: copy for a copy, and none for
     /// a move, because a source told move deletes its originals itself,
@@ -232,20 +240,24 @@ impl AsyncDrop {
     /// `effect`, or gives `None` when the source does not work
     /// asynchronously.
     fn start(data: &IDataObject, effect: DropEffect) -> Option<AsyncDrop> {
-        let operation: IDataObjectAsyncCapability = data.cast().ok()?;
+        let source: IDataObjectAsyncCapability = data.cast().ok()?;
+        // Made before the operation starts, so a source whose objects
+        // cannot reach another thread ends its drag as a synchronous one.
+        let data = AgileReference::new(data).ok()?;
+        let operation = AgileReference::new(&source).ok()?;
         // SAFETY: plain calls on the source's object.
         unsafe {
-            if !operation.GetAsyncMode().ok()?.as_bool() {
+            if !source.GetAsyncMode().ok()?.as_bool() {
                 return None;
             }
-            operation.StartOperation(None::<&IBindCtx>).ok()?;
+            source.StartOperation(None::<&IBindCtx>).ok()?;
         }
         let performed = match effect {
             DropEffect::Copy => DROPEFFECT_COPY,
             DropEffect::Move => DROPEFFECT_NONE,
         };
         Some(AsyncDrop {
-            data: data.clone(),
+            data,
             operation,
             performed,
             ended: false,
@@ -256,24 +268,56 @@ impl AsyncDrop {
     /// `succeeded`.
     pub(crate) fn end(mut self, succeeded: bool) {
         let performed = self.performed;
-        clipboard::set_effect(&self.data, clipboard::performed_drop_effect(), performed.0);
-        self.finish(if succeeded { S_OK } else { E_FAIL }, performed);
+        self.finish(if succeeded { S_OK } else { E_FAIL }, true, performed);
     }
 
-    fn finish(&mut self, result: HRESULT, performed: DROPEFFECT) {
+    /// Ends the operation with `result` and `performed` on a thread of its
+    /// own, first setting the source's performed effect when `sets_effect`.
+    fn finish(&mut self, result: HRESULT, sets_effect: bool, performed: DROPEFFECT) {
         self.ended = true;
-        // SAFETY: a plain call on the source's object.
-        let _ = unsafe {
-            self.operation
-                .EndOperation(result, None::<&IBindCtx>, performed.0)
-        };
+        let data = sets_effect.then(|| self.data.clone());
+        let operation = self.operation.clone();
+        let thread = std::thread::spawn(move || {
+            // SAFETY: the thread's first COM call; it ends COM below, after
+            // the source's objects are released.
+            if unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_err() {
+                return;
+            }
+            if let Some(Ok(data)) = data.as_ref().map(AgileReference::resolve) {
+                clipboard::set_effect(&data, clipboard::performed_drop_effect(), performed.0);
+            }
+            if let Ok(operation) = operation.resolve() {
+                // SAFETY: a plain call on the source's object.
+                let _ = unsafe { operation.EndOperation(result, None::<&IBindCtx>, performed.0) };
+            }
+            drop((data, operation));
+            // SAFETY: COM started above, and this thread holds none of its
+            // objects any more.
+            unsafe { CoUninitialize() };
+        });
+        let mut ending = ENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        ending.retain(|thread| !thread.is_finished());
+        ending.push(thread);
+    }
+}
+
+/// The threads that tell sources their operations ended, which the
+/// program waits for before it ends, so that each source hears it.
+static ENDING: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Waits until every source was told that its operation ended, after the
+/// window closed.
+pub(crate) fn wait_for_sources() {
+    let ending = std::mem::take(&mut *ENDING.lock().unwrap_or_else(PoisonError::into_inner));
+    for thread in ending {
+        let _ = thread.join();
     }
 }
 
 impl Drop for AsyncDrop {
     fn drop(&mut self) {
         if !self.ended {
-            self.finish(E_ABORT, DROPEFFECT_NONE);
+            self.finish(E_ABORT, false, DROPEFFECT_NONE);
         }
     }
 }

@@ -390,6 +390,10 @@ impl FileOperations {
     pub(super) fn close(&self) {
         self.waker.close();
         self.queue.close();
+        // The closed queue ends no more operations, so each source hears
+        // that its operation failed.
+        let sources = std::mem::take(&mut *self.sources.borrow_mut());
+        drop(sources);
         if let Some(hwnd) = self.made().and_then(|window| window.hwnd.take()) {
             hwnd.destroy();
         }
