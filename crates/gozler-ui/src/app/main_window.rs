@@ -2088,7 +2088,11 @@ impl MainWindow {
         let width = self.fill_width();
         let widths = (self.column_sizing.borrow_mut()).rows_arrived(width, || self.column_fits());
         if let Some(widths) = widths {
-            self.set_column_widths(widths);
+            // A list that draws itself paints every row it shows for each
+            // width it sets, and its first paints shape every text afresh.
+            let list = self.created().controls.list;
+            list.hwnd()
+                .draw_once_after(|| self.set_column_widths(widths));
         }
     }
 
