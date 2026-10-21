@@ -10,6 +10,20 @@ use gozler_fileops::{OperationId, Request, Taken};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Which rows a list's control unhighlights after its selection met taken
+/// entries, which its rows then show blank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Deselect {
+    /// The selection lost no file.
+    Nothing,
+    /// The selection lost every file, so every row, in one message,
+    /// without reading which rows are selected.
+    All,
+    /// Each selected row whose entry is taken: the selection lost some of
+    /// its files, or is read and may still name one.
+    Taken,
+}
+
 /// One list of gozlerd's results: its typed text, its rows, its selection
 /// and the ended operations it still shows blank
 /// (DESIGN.md: The person never waits for the disk).
@@ -160,6 +174,17 @@ impl SearchList {
     /// blank, so it stays in the queue.
     pub(crate) fn keeps(&self, id: OperationId) -> bool {
         self.kept.contains(&id)
+    }
+
+    /// Which rows the list's control unhighlights, after
+    /// [`SearchList::drop_taken`] said whether the selection `lost` files.
+    pub(crate) fn deselect(&self, lost: bool) -> Deselect {
+        match &self.selection {
+            Selection::Reading { .. } => Deselect::Taken,
+            Selection::None if lost => Deselect::All,
+            _ if lost => Deselect::Taken,
+            _ => Deselect::Nothing,
+        }
     }
 
     /// Takes the entries of `taken` out of the selection; the list shows

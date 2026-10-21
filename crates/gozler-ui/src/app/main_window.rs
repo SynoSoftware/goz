@@ -52,6 +52,7 @@ use crate::core::query::{
     date_items, size_items,
 };
 use crate::core::results::{Fix, ListButton};
+use crate::core::search_list::Deselect;
 use crate::core::selection::{DRAG_LIMIT, SELECTION_LIMIT, wide_path};
 use crate::core::settings::{Mode, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
@@ -4274,16 +4275,20 @@ impl MainWindow {
             };
             self.apply(hwnd, lost);
         }
-        self.show_list_taken(List::Search, shown.search_deselects);
+        self.show_list_taken(List::Search, shown.search_deselect);
     }
 
-    /// Shows `list`'s taken rows blank. With `deselect`, its selection lost
-    /// files or is read, so the list may still draw a taken row it selects
-    /// highlighted, and deselects each one.
-    fn show_list_taken(&self, list: List, deselect: bool) {
+    /// Shows `list`'s taken rows blank, and unhighlights the rows that
+    /// `deselect` says, because the list would still draw a taken row it
+    /// selects highlighted.
+    fn show_list_taken(&self, list: List, deselect: Deselect) {
         let control = self.list_control(list);
-        if deselect {
-            self.deselect_taken(list, &control.selected());
+        match deselect {
+            Deselect::Nothing => {}
+            Deselect::All => control.deselect_all(),
+            Deselect::Taken => {
+                self.deselect_taken(list, &control.selected());
+            }
         }
         control.redraw_rows(control.visible_rows());
     }

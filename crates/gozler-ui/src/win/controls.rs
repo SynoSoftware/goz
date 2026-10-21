@@ -1538,6 +1538,11 @@ impl ListView {
         self.set_state(usize::MAX, LVIS_SELECTED, LVIS_SELECTED);
     }
 
+    /// Deselects every row with one message, which notifies the window once.
+    pub(crate) fn deselect_all(self) {
+        self.set_state(usize::MAX, LVIS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS(0));
+    }
+
     pub(crate) fn deselect(self, row: u64) {
         self.set_state(row as usize, LVIS_SELECTED, LIST_VIEW_ITEM_STATE_FLAGS(0));
     }

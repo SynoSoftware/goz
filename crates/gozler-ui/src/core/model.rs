@@ -21,6 +21,7 @@ use super::operations::{
 use super::panel::{LookIn, PanelFollow, Panels, Side, TakenRows, View, drive_root};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
+use super::search_list::Deselect;
 use super::search_list::{SearchList, is_taken};
 use super::selection::{FolderContents, SELECTION_LIMIT, Selection};
 use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
@@ -141,9 +142,8 @@ pub(crate) struct TakenShown {
     pub(crate) panels: [TakenRows; 2],
     /// Search's selection lost files, which its status line counts.
     pub(crate) search_lost: bool,
-    /// Search's list may still highlight a taken row: its selection lost
-    /// files, or is read.
-    pub(crate) search_deselects: bool,
+    /// The rows Search's list unhighlights.
+    pub(crate) search_deselect: Deselect,
 }
 
 /// What `Enter` in the search box does ([`Model::enter_in_search_box`]).
@@ -651,11 +651,10 @@ impl Model {
     pub(crate) fn set_taken(&mut self, taken: Arc<Taken>, focused: [Option<u64>; 2]) -> TakenShown {
         let panels = self.panels.set_taken(taken, focused);
         let lost = self.search_list.drop_taken(self.panels.taken());
-        let reading = matches!(self.search_list.selection(), Selection::Reading { .. });
         TakenShown {
             panels,
             search_lost: lost,
-            search_deselects: lost || reading,
+            search_deselect: self.search_list.deselect(lost),
         }
     }
 
@@ -3309,6 +3308,26 @@ pub(crate) mod tests {
         assert_eq!(paths(&model), [r"C:\row3", r"C:\row4"]);
         assert_eq!(model.search_list.text, r"F:\ ext:cs");
         assert_eq!(model.choices().language, LanguageChoice::Tag("en".into()));
+    }
+
+    /// A delete of the whole selection unhighlights every row in one
+    /// message; one that takes part of it unhighlights only the taken rows,
+    /// because the list would otherwise drop the rest of the person's
+    /// selection, which the model still holds.
+    #[test]
+    fn only_a_selection_that_lost_every_file_deselects_every_row() {
+        let mut model = showing(10);
+        model.set_selection(List::Search, vec![1..3]);
+        let mut part = Taken::default();
+        part.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
+        let shown = model.set_taken(Arc::new(part), [None, None]);
+        assert_eq!(shown.search_deselect, Deselect::Taken);
+        assert_eq!(paths(&model), [r"C:\row2"]);
+        let mut all = Taken::default();
+        all.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
+        all.insert(OperationId::for_tests(2), Path::new(r"C:\row2"), false);
+        let shown = model.set_taken(Arc::new(all), [None, None]);
+        assert_eq!(shown.search_deselect, Deselect::All);
     }
 
     /// T2: the rows of a new search are other files.

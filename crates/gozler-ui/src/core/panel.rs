@@ -23,7 +23,7 @@
 use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
-use super::search_list::{SearchList, is_taken};
+use super::search_list::{Deselect, SearchList, is_taken};
 use super::selection::{Selection, wide_path};
 use gozler_core::fold::{fold, fold_into};
 use gozler_core::proto::ResultItem;
@@ -358,10 +358,9 @@ pub(crate) struct PanelFollow {
 pub(crate) enum TakenRows {
     /// A folder panel's rows moved; the list shows this place.
     Folder(Place),
-    /// A search panel's taken rows show blank in place. `deselect` when
-    /// its list may still highlight a taken row: its selection lost files,
-    /// or is read.
-    Search { deselect: bool },
+    /// A search panel's taken rows show blank in place, and its list
+    /// unhighlights the rows `deselect` says.
+    Search { deselect: Deselect },
 }
 
 /// A column of a panel's list (DESIGN.md: A panel, Search in a panel).
@@ -2594,9 +2593,8 @@ impl Panels {
                 if lost {
                     search.list.count_chosen_bytes();
                 }
-                let reading = matches!(search.list.selection(), Selection::Reading { .. });
                 return TakenRows::Search {
-                    deselect: lost || reading,
+                    deselect: search.list.deselect(lost),
                 };
             }
             let remembered = panel.remember(focused[side.index()]);
