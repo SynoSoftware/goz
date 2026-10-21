@@ -14,6 +14,7 @@ mod main_window;
 mod requests;
 mod settings;
 mod status_bar;
+mod viewer;
 
 use crate::core::ids::IconId;
 use crate::core::model::Model;

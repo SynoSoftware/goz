@@ -807,7 +807,7 @@ impl StaticColors {
 
 /// The colour of text that steps back from the content: gray, or the normal
 /// text colour in high contrast, where gray text means unavailable.
-fn muted_text() -> SYS_COLOR_INDEX {
+pub(super) fn muted_text() -> SYS_COLOR_INDEX {
     if high_contrast() {
         COLOR_WINDOWTEXT
     } else {

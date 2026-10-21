@@ -19,7 +19,7 @@ use super::panel::{Panels, Side, View};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, Results, RowsChange, Shown};
 use super::selection::{FolderContents, Selection, wide_path};
-use super::settings::{Choices, Mode, Placement, SavedColumn, Settings};
+use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
 use gozler_core::escompat::EsPlan;
@@ -802,6 +802,15 @@ impl Model {
     /// The saved window placement, which the window opens at.
     pub(crate) fn placement(&self) -> Option<Placement> {
         self.settings.window.placement
+    }
+
+    /// What the Viewer remembers, which the next Viewer opens with.
+    pub(crate) fn viewer(&self) -> ViewerState {
+        self.settings.window.viewer
+    }
+
+    pub(crate) fn set_viewer(&mut self, state: ViewerState) {
+        self.settings.window.viewer = state;
     }
 
     fn generation(&mut self) -> Generation {

@@ -515,6 +515,9 @@ pub(crate) struct WindowState {
     /// active (file-manager-spec.md: A panel).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) panels: SavedPanels,
+    /// The Viewer's size and place, and Wrap long lines.
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) viewer: ViewerState,
 }
 
 impl Default for WindowState {
@@ -533,6 +536,7 @@ impl Default for WindowState {
             last_update_check: None,
             destination_folder: None,
             panels: SavedPanels::default(),
+            viewer: ViewerState::default(),
         }
     }
 }
@@ -554,6 +558,30 @@ pub(crate) struct Placement {
     pub(crate) right: i32,
     pub(crate) bottom: i32,
     pub(crate) maximized: bool,
+}
+
+/// What the Viewer remembers (file-manager-spec.md: The Viewer): the size
+/// and place of the Viewer that was moved or closed last, and Wrap long
+/// lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ViewerState {
+    #[serde(
+        default,
+        deserialize_with = "placement",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) placement: Option<Placement>,
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) wrap: bool,
+}
+
+impl Default for ViewerState {
+    fn default() -> ViewerState {
+        ViewerState {
+            placement: None,
+            wrap: on(),
+        }
+    }
 }
 
 impl Settings {
@@ -856,6 +884,16 @@ mod tests {
                     },
                     right: SavedPanel::default(),
                     active: Side::Right,
+                },
+                viewer: ViewerState {
+                    placement: Some(Placement {
+                        left: 40,
+                        top: 30,
+                        right: 940,
+                        bottom: 730,
+                        maximized: true,
+                    }),
+                    wrap: false,
                 },
             },
         };

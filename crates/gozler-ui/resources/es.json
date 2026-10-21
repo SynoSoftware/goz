@@ -786,6 +786,20 @@
     "edit_tooltip": "La edición aún no está disponible.",
     "move_tooltip": "Mover al otro panel o cambiar el nombre."
   },
+  "viewer": {
+    "title": "{0} – Ver",
+    "close": "&Cerrar",
+    "text": "&Texto",
+    "hex": "&Hexadecimal",
+    "wrap": "&Ajustar líneas largas",
+    "removed": "Se quitó la unidad.",
+    "cannot_read": "Windows no pudo leer {0}: {1}",
+    "status_text": "{0} · {1} · {2}",
+    "status_hex": "{0} · {1}",
+    "top": "Inicio",
+    "end": "Final",
+    "percent": "{0} %"
+  },
   "message": {
     "internal_error": "Gozler tuvo que cerrarse. Los detalles están en {0}.",
     "settings_not_saved": "No se pudo guardar la configuración en {0}. {1} Los cambios se aplican hasta que salgas.",

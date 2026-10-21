@@ -786,6 +786,20 @@
     "edit_tooltip": "Düzenleme henüz kullanılamıyor.",
     "move_tooltip": "Diğer panele taşı veya yeniden adlandır."
   },
+  "viewer": {
+    "title": "{0} – Görüntüle",
+    "close": "&Kapat",
+    "text": "&Metin",
+    "hex": "&Onaltılık",
+    "wrap": "&Uzun satırları kaydır",
+    "removed": "Sürücü çıkarıldı.",
+    "cannot_read": "Windows {0} öğesini okuyamadı: {1}",
+    "status_text": "{0} · {1} · {2}",
+    "status_hex": "{0} · {1}",
+    "top": "Baş",
+    "end": "Son",
+    "percent": "%{0}"
+  },
   "message": {
     "internal_error": "Gozler kapanmak zorunda kaldı. Ayrıntılar şurada: {0}",
     "settings_not_saved": "Ayarlarınız {0} konumuna kaydedilemedi. {1} Değişiklikleriniz çıkış yapana kadar geçerlidir.",

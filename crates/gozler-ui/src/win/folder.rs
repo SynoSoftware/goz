@@ -98,7 +98,7 @@ pub(crate) enum PanelEvent {
 
 /// Asks a thread to stop: wakes its watch, and ends its wait in a
 /// synchronous call.
-struct Stop {
+pub(super) struct Stop {
     stopped: AtomicBool,
     thread: Mutex<Option<ThreadIoHandle>>,
     /// What a watch waits for beside its changes; `None` when Windows
@@ -107,7 +107,7 @@ struct Stop {
 }
 
 impl Stop {
-    fn new() -> Stop {
+    pub(super) fn new() -> Stop {
         Stop {
             stopped: AtomicBool::new(false),
             thread: Mutex::new(None),
@@ -117,18 +117,18 @@ impl Stop {
 
     /// Names the calling thread as the one to cancel; whether it is to stop
     /// already.
-    fn enter(&self) -> bool {
+    pub(super) fn enter(&self) -> bool {
         if let Ok(handle) = current_thread_io_handle() {
             *self.thread.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle);
         }
         self.stopped()
     }
 
-    fn stopped(&self) -> bool {
+    pub(super) fn stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
     }
 
-    fn stop(&self) {
+    pub(super) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         if let Some(signal) = &self.signal {
             signal.set();
@@ -460,15 +460,21 @@ fn label(letter: char) -> Option<String> {
 }
 
 /// `path` with the prefix that lets Windows take it longer than `MAX_PATH`.
-fn verbatim(path: &str) -> Vec<u16> {
-    let prefixed = if path.starts_with(r"\\?\") {
-        path.to_owned()
-    } else if let Some(share) = path.strip_prefix(r"\\") {
-        format!(r"\\?\UNC\{share}")
+pub(super) fn verbatim(path: &str) -> Vec<u16> {
+    verbatim_wide(&path.encode_utf16().collect::<Vec<u16>>())
+}
+
+/// [`verbatim`] of a path in UTF-16, which holds every name a folder can
+/// hold, also one that is not valid Unicode.
+pub(super) fn verbatim_wide(path: &[u16]) -> Vec<u16> {
+    let wide = |text: &str| -> Vec<u16> { text.encode_utf16().collect() };
+    if path.starts_with(&wide(r"\\?\")) {
+        path.to_vec()
+    } else if let Some(share) = path.strip_prefix(&wide(r"\\")[..]) {
+        [&wide(r"\\?\UNC\")[..], share].concat()
     } else {
-        format!(r"\\?\{path}")
-    };
-    prefixed.encode_utf16().collect()
+        [&wide(r"\\?\")[..], path].concat()
+    }
 }
 
 fn failure_of(error: &WinError) -> ReadFailure {
@@ -482,7 +488,7 @@ fn failure_of(error: &WinError) -> ReadFailure {
     }
 }
 
-fn reason(error: &WinError) -> String {
+pub(super) fn reason(error: &WinError) -> String {
     super::error_text(&std::io::Error::from_raw_os_error(error.code as i32))
 }
 
@@ -691,9 +697,10 @@ fn follow(
     }
 }
 
-/// Registers the watch's handle for its drive's removal with the window;
-/// `None` when Windows refuses, as for a network share.
-fn register(window: isize, handle: isize) -> Option<isize> {
+/// Registers `handle`, a watched folder's or a viewed file's, for its
+/// drive's removal with `window`; `None` when Windows refuses, as for a
+/// network share.
+pub(super) fn register(window: isize, handle: isize) -> Option<isize> {
     let filter = DEV_BROADCAST_HANDLE {
         dbch_size: size_of::<DEV_BROADCAST_HANDLE>() as u32,
         dbch_devicetype: DBT_DEVTYP_HANDLE.0,
@@ -715,7 +722,7 @@ fn register(window: isize, handle: isize) -> Option<isize> {
 }
 
 /// Ends a registration that [`register`] made, from any thread.
-fn unregister(notification: Option<isize>) {
+pub(super) fn unregister(notification: Option<isize>) {
     if let Some(notification) = notification {
         // SAFETY: a registration that `register` made and nothing ended,
         // because whoever takes it from `Watched` ends it once.

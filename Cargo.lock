@@ -501,6 +501,7 @@ dependencies = [
  "gozler-fileops",
  "gozler-winfs",
  "jiff",
+ "proptest",
  "serde",
  "serde_json",
  "windows",

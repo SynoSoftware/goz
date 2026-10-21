@@ -755,7 +755,8 @@ main window to the notification area leaves them open.
 - **Text:**
   - The encoding comes from the byte order mark: UTF-8, UTF-16 LE or UTF-16
     BE. Without one, the text is UTF-8 when the first 64 KB is valid UTF-8,
-    and Windows' ANSI code page otherwise.
+    and Windows' ANSI code page otherwise, which the status bar names
+    "ANSI".
   - A line ends at CR LF, LF or CR. A tab moves to the next multiple of 8
     columns. Bytes that the encoding cannot read show as �, as Notepad shows
     them.
@@ -773,7 +774,7 @@ main window to the notification area leaves them open.
   bar. `Home` or `Ctrl+Home` goes to the start, and `End` or `Ctrl+End` to the
   end. The scroll bar maps to the byte position in the file, so dragging it
   to the middle of a 50 GB file shows the middle at once. In Text, a jump
-  shows the first line that starts after that byte. When the whole file
+  shows the first line that starts at or after that byte. When the whole file
   shows, the scroll bar is disabled, as Notepad's is.
 - **Closing:** `Esc` or `F3`, as in Norton Commander, or File > Close.
   Closing a Viewer that a panel opened activates the main window, with the
@@ -785,7 +786,9 @@ main window to the notification area leaves them open.
   the first row's offset in Hex.
 - **Menus:** File: Close. View: Text, Hex | Wrap long lines.
 - **A file that cannot be opened:** the Viewer's area says "Windows could
-  not open settings.ini: Access is denied.", with Retry.
+  not open settings.ini: Access is denied.", with Retry. A file that fails
+  while the Viewer reads it says "Windows could not read settings.ini: The
+  network name is no longer available.", with Retry.
 - **The font** is Consolas, at the height of the window's message font,
   because columns of text and hex must line up.
 - **The Viewer remembers** its size and position, and Wrap long lines, in

@@ -753,6 +753,11 @@ impl Panel {
         }
     }
 
+    /// The focused entry, which View opens; never `..`.
+    pub(crate) fn focused_entry(&self) -> Option<&Entry> {
+        self.focused.and_then(|row| self.entry(row))
+    }
+
     /// The full path of `entry` in the shown folder.
     pub(crate) fn path_of(&self, name: &[u16]) -> String {
         join(&self.folder, &String::from_utf16_lossy(name))
@@ -811,11 +816,7 @@ impl Panel {
     /// focused one; never `..` (file-manager-spec.md: Selecting entries).
     pub(crate) fn chosen(&self) -> Vec<&Entry> {
         if self.selected.is_empty() {
-            return self
-                .focused
-                .and_then(|row| self.entry(row))
-                .into_iter()
-                .collect();
+            return self.focused_entry().into_iter().collect();
         }
         (self.selected.iter())
             .flat_map(Clone::clone)
@@ -836,7 +837,7 @@ impl Panel {
     /// How many entries [`Panel::chosen`] holds, without a pass over them.
     fn chosen_count(&self) -> usize {
         match self.selected.as_slice() {
-            [] => usize::from(self.focused.and_then(|row| self.entry(row)).is_some()),
+            [] => usize::from(self.focused_entry().is_some()),
             selected => selected.iter().map(|r| (r.end - r.start) as usize).sum(),
         }
     }

@@ -6,9 +6,9 @@ use super::wide;
 use crate::core::text::Numbers;
 use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Globalization::{
-    CP_OEMCP, DATE_SHORTDATE, GetDateFormatEx, GetLocaleInfoEx, GetNumberFormatEx, GetTimeFormatEx,
-    GetUserPreferredUILanguages, LOCALE_ILZERO, LOCALE_INEGNUMBER, LOCALE_RETURN_NUMBER,
-    LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND, MUI_LANGUAGE_NAME,
+    CP_ACP, CP_OEMCP, DATE_SHORTDATE, GetDateFormatEx, GetLocaleInfoEx, GetNumberFormatEx,
+    GetTimeFormatEx, GetUserPreferredUILanguages, LOCALE_ILZERO, LOCALE_INEGNUMBER,
+    LOCALE_RETURN_NUMBER, LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND, MUI_LANGUAGE_NAME,
     MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar, NUMBERFMTW, TIME_FORMAT_FLAGS,
     TIME_NOSECONDS,
 };
@@ -17,6 +17,16 @@ use windows::core::{PCWSTR, PWSTR};
 /// `bytes` in the console's code page, in which a program such as `net`
 /// writes to a file, as text.
 pub(crate) fn console_text(bytes: &[u8]) -> String {
+    code_page_text(CP_OEMCP, bytes)
+}
+
+/// `bytes` in Windows' ANSI code page, as the Viewer shows a text file that
+/// has no byte order mark and is not UTF-8.
+pub(crate) fn ansi_text(bytes: &[u8]) -> String {
+    code_page_text(CP_ACP, bytes)
+}
+
+fn code_page_text(code_page: u32, bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
@@ -24,9 +34,9 @@ pub(crate) fn console_text(bytes: &[u8]) -> String {
     // SAFETY: the first call measures; the second writes at most the
     // buffer's length.
     unsafe {
-        let length = MultiByteToWideChar(CP_OEMCP, flags, bytes, None);
+        let length = MultiByteToWideChar(code_page, flags, bytes, None);
         let mut text = vec![0u16; usize::try_from(length).unwrap_or(0)];
-        let written = MultiByteToWideChar(CP_OEMCP, flags, bytes, Some(&mut text));
+        let written = MultiByteToWideChar(code_page, flags, bytes, Some(&mut text));
         String::from_utf16_lossy(&text[..usize::try_from(written).unwrap_or(0)])
     }
 }

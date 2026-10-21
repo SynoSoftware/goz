@@ -28,7 +28,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo,
     FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo, FileIdInfo,
     FileStandardInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW, OPEN_EXISTING,
@@ -57,6 +57,9 @@ pub enum Access {
     /// Also delete it and clear its read-only attribute, which the classic
     /// delete of a read-only entry needs.
     DeleteReadOnly,
+    /// Also read its content with [`Entry::read_at`], as the window's Viewer
+    /// does.
+    Read,
 }
 
 impl Access {
@@ -83,6 +86,7 @@ impl Access {
             Access::List => FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
             Access::Delete => FILE_READ_ATTRIBUTES | DELETE,
             Access::DeleteReadOnly => FILE_READ_ATTRIBUTES | DELETE | FILE_WRITE_ATTRIBUTES,
+            Access::Read => FILE_READ_ATTRIBUTES | FILE_READ_DATA,
         }
     }
 
@@ -299,6 +303,12 @@ impl Entry {
         Ok(path)
     }
 
+    /// The handle's value, which `RegisterDeviceNotificationW` names so
+    /// Windows asks before it removes the entry's drive.
+    pub fn handle_value(&self) -> isize {
+        self.0.as_handle() as isize
+    }
+
     /// The entry's size and last write time, as a listing gives them.
     pub fn stat(&self) -> Result<EntryStat, WinError> {
         // SAFETY: as in `attribute_tag`, for each class's struct.
@@ -458,5 +468,30 @@ impl Entry {
             return Err(last_error(context));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A Viewer that did not share writing would refuse a log file that a
+    /// program writes, and one that did not share deleting would make a
+    /// delete of the shown file fail.
+    #[test]
+    fn a_file_that_a_program_writes_opens_to_read_and_can_still_be_deleted() {
+        let path = std::env::temp_dir().join(format!("gozler-read-{}.log", std::process::id()));
+        let mut writer = std::fs::File::create(&path).expect("the temporary folder takes a file");
+        writer
+            .write_all(b"line\r\n")
+            .expect("the file takes a line");
+        let verbatim: Vec<u16> = format!(r"\\?\{}", path.display()).encode_utf16().collect();
+        let read = open_entry(&verbatim, Access::Read, Reparse::Follow)
+            .expect("a file open for writing opens");
+        let mut bytes = [0u8; 16];
+        assert_eq!(read.read_at(0, &mut bytes).expect("the file reads"), 6);
+        drop(writer);
+        std::fs::remove_file(&path).expect("the read file can be deleted");
     }
 }

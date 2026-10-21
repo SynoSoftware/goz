@@ -12,7 +12,7 @@ use super::{Hwnd, from_rect, to_rect, wide};
 use crate::core::commands::{Key, Keystroke};
 use crate::core::layout::{Dpi, Px, Rect, ScrollRequest, Size};
 use crate::core::settings::Placement;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -82,13 +82,15 @@ pub(crate) enum Message<'a> {
         point: Option<(i32, i32)>,
     },
     /// A key that [`run_message_loop`] offers the window before
-    /// `IsDialogMessageW`, sent to the focused control `target`. A handler
+    /// `IsDialogMessageW`, sent to the focused control `target`, and
+    /// `repeat` when Windows repeats it because it is held down. A handler
     /// that takes it answers 1, and no `WM_CHAR` follows (DESIGN.md:
     /// window rule 8). A key that no [`Key`] names arrives as
     /// [`Message::Other`].
     KeyDown {
         target: Hwnd,
         keystroke: Keystroke,
+        repeat: bool,
     },
     /// A character typed in the control `target`, with `Alt` when `alt`,
     /// which [`run_message_loop`] offers the window before the control sees
@@ -431,8 +433,8 @@ pub(crate) fn window_size(hwnd: Hwnd, client: Size, dpi: Dpi) -> Size {
     }
 }
 
-/// The private message that offers a key to the main window
-/// ([`Message::KeyDown`]).
+/// The private message that offers a key to the main window, or to a window
+/// that [`own_keys`] names ([`Message::KeyDown`]).
 const KEY_DOWN: u32 = super::wake::WAKE + 1;
 
 /// The private message a window posts itself ([`Message::Deferred`]).
@@ -449,6 +451,8 @@ const CHAR: u32 = super::wake::WAKE + 7;
 thread_local! {
     /// The window that [`set_modeless`] names, or none.
     static MODELESS: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+    /// The windows that [`own_keys`] names.
+    static OWN_KEYS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Names the top-level window besides the main one whose controls take Tab,
@@ -457,6 +461,39 @@ thread_local! {
 /// accelerators and keys, which would act on the main window's selection.
 pub(crate) fn set_modeless(window: Option<Hwnd>) {
     MODELESS.set(window.map_or(HWND(std::ptr::null_mut()), |window| window.0));
+}
+
+/// Names `window`, a top-level window besides the main one, as one that
+/// takes its own keys, or, with `own` false, no longer, as a Viewer does
+/// while it is open (file-manager-spec.md: The Viewer). The message loop
+/// offers each key pressed in it to the window first, as
+/// [`Message::KeyDown`], then to its `IsDialogMessageW` for `Tab` and the
+/// access keys among its controls.
+pub(crate) fn own_keys(window: Hwnd, own: bool) {
+    OWN_KEYS.with_borrow_mut(|windows| {
+        windows.retain(|named| *named != window.0);
+        if own {
+            windows.push(window.0);
+        }
+    });
+}
+
+/// Offers the `WM_KEYDOWN` of `target` whose parameters are `key` and
+/// `flags` to `window` as [`Message::KeyDown`]; whether the window took it.
+pub(super) fn offer_key(window: HWND, target: HWND, key: WPARAM, flags: LPARAM) -> bool {
+    // Bit 30 of a WM_KEYDOWN's flags: the key was down before.
+    let repeat = (flags.0 as usize >> 30) & 1;
+    // SAFETY: plain values; `target` is decoded as a handle, never used as
+    // a pointer.
+    unsafe {
+        SendMessageW(
+            window,
+            KEY_DOWN,
+            Some(WPARAM(key.0 & 0xffff | repeat << 31)),
+            Some(LPARAM(target.0 as isize)),
+        )
+    }
+    .0 != 0
 }
 
 /// Runs the thread's message loop until `WM_QUIT`, giving each message to
@@ -468,8 +505,10 @@ pub(crate) fn set_modeless(window: Option<Hwnd>) {
 /// rule 8). A key that `IsDialogMessageW` moves the focus with is reported
 /// to the main window, which no control notifies of it. A message for the
 /// window that [`set_modeless`] names, or for one of its controls, goes only
-/// through that window's `IsDialogMessageW`, and one for any other window,
-/// such as a tooltip, is only dispatched.
+/// through that window's `IsDialogMessageW`. A message for a window that
+/// [`own_keys`] names, or for one of its controls, goes to that window's
+/// keys first and then its `IsDialogMessageW`, and one for any other
+/// window, such as a tooltip, is only dispatched.
 ///
 /// `accelerators` gives the table of the moment, because Settings and the
 /// mode replace it; the loop holds each table until the command it sent
@@ -486,6 +525,18 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
                 GetAncestor(msg.hwnd, GA_ROOT)
             };
             if root != main.0 {
+                if OWN_KEYS.with_borrow(|windows| windows.contains(&root)) {
+                    if msg.message == WM_KEYDOWN
+                        && offer_key(root, msg.hwnd, msg.wParam, msg.lParam)
+                    {
+                        continue;
+                    }
+                    if !IsDialogMessageW(root, &msg).as_bool() {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                    continue;
+                }
                 let modeless = MODELESS.get();
                 if modeless.is_invalid()
                     || root != modeless
@@ -499,15 +550,7 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
             if accelerators().translate(main, &msg) {
                 continue;
             }
-            if msg.message == WM_KEYDOWN
-                && SendMessageW(
-                    main.0,
-                    KEY_DOWN,
-                    Some(msg.wParam),
-                    Some(LPARAM(msg.hwnd.0 as isize)),
-                )
-                .0 != 0
-            {
+            if msg.message == WM_KEYDOWN && offer_key(main.0, msg.hwnd, msg.wParam, msg.lParam) {
                 continue;
             }
             // Before IsDialogMessageW, whose access keys would take Alt with
@@ -704,6 +747,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             Some(keystroke) => Message::KeyDown {
                 target: Hwnd(HWND(lparam.0 as *mut _)),
                 keystroke,
+                repeat: wparam.0 & (1 << 31) != 0,
             },
             None => Message::Other(msg),
         },

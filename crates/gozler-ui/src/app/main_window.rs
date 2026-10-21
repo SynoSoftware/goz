@@ -13,6 +13,7 @@ use super::include::{self, NotSaved};
 use super::requests::Requests;
 use super::settings::SettingsDialog;
 use super::status_bar::StatusBar;
+use super::viewer::Viewers;
 use crate::core::captions::{
     self, ATTRIBUTES_ROW, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions,
     InspectorCaptions, JobCaption, JobProgress, ListCaption, MODIFIED_ROW, StatusCaptions,
@@ -756,6 +757,8 @@ pub(crate) struct MainWindow {
     /// The File operations window and its queue, which only the first
     /// window has (file-manager-spec.md: Interrupted operations).
     file_operations: RefCell<Option<FileOperations>>,
+    /// The open Viewers (file-manager-spec.md: The Viewer).
+    viewers: Viewers,
     /// What each panel's list changed since the panel last read it; a
     /// [`Message::Deferred`] is posted to read it.
     panel_changed: [Cell<panels::ListChanged>; 2],
@@ -783,6 +786,7 @@ impl MainWindow {
         }
         let accelerators = accelerator_table(&model.choices().shortcuts, model.mode())
             .expect("the accelerator table builds");
+        let viewers = Viewers::new(model.viewer());
         let window = Rc::new(MainWindow {
             created: OnceCell::new(),
             instance,
@@ -817,6 +821,7 @@ impl MainWindow {
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
             file_operations: RefCell::new(None),
+            viewers,
             panel_changed: Default::default(),
             panel_typed: RefCell::new([None, None]),
         });
@@ -947,6 +952,7 @@ impl MainWindow {
         if let Some(operations) = self.file_operations.borrow().as_ref() {
             operations.set_strings(Strings::load(language));
         }
+        self.viewers.set_strings(&Strings::load(language));
     }
 
     fn apply_text(&self, hwnd: Hwnd, captions: &WindowCaptions) {
@@ -2107,9 +2113,10 @@ impl MainWindow {
                 CommandId::MoveToFolder => return self.copy_to_folder(hwnd, true),
                 CommandId::Delete => return self.delete_selected(hwnd),
                 CommandId::NewFolder => return self.new_folder(hwnd),
-                // Not available in this version (file-manager-spec.md: The
-                // Viewer).
-                CommandId::View | CommandId::Edit => return,
+                CommandId::View => return self.view_focused(hwnd),
+                // Not available in this version (file-manager-spec.md:
+                // Commands in Two panels).
+                CommandId::Edit => return,
                 CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
                 CommandId::Paste => return self.paste(),
                 CommandId::FileOperations => {
@@ -3221,6 +3228,26 @@ impl MainWindow {
         }
     }
 
+    /// `F3`: opens a Viewer of the active panel's focused file
+    /// (file-manager-spec.md: The Viewer).
+    fn view_focused(&self, hwnd: Hwnd) {
+        let (path, strings) = {
+            let model = self.model.borrow();
+            let panels = model.panels();
+            let panel = panels.panel(panels.active());
+            let Some(entry) = panel.focused_entry().filter(|entry| !entry.is_folder()) else {
+                return;
+            };
+            (panel.wide_path_of(&entry.name), model.strings().clone())
+        };
+        if let Err(error) = self.viewers.open(path, strings, hwnd) {
+            super::write_log(
+                &self.settings_file.with_file_name("ui-error.log"),
+                &format!("The Viewer did not open: {error}"),
+            );
+        }
+    }
+
     /// Opens the File operations window and its queue, hidden, and starts
     /// following the clipboard for Paste.
     fn open_file_operations(&self, hwnd: Hwnd) {
@@ -3549,6 +3576,9 @@ impl MainWindow {
                 operations.stop_all();
             }
         }
+        // Each Viewer leaves its size, place and Wrap long lines as it
+        // closes, so the save holds them.
+        self.viewers.close_all();
         if self.instance == Instance::First {
             self.save_settings(hwnd, true);
         }
@@ -3796,6 +3826,7 @@ impl MainWindow {
             if let Some(operations) = self.file_operations.borrow().as_ref() {
                 operations.apply_glyphs();
             }
+            self.viewers.apply_glyphs();
             // The menus, the button widths and the Kind list follow.
             self.refresh_text(hwnd);
         }
@@ -3974,6 +4005,7 @@ impl MainWindow {
     fn save_settings(&self, hwnd: Hwnd, report_failure: bool) {
         let placement = hwnd.placement();
         let columns = self.saved_columns();
+        self.model.borrow_mut().set_viewer(self.viewers.state());
         let saved =
             self.model
                 .borrow_mut()
@@ -4308,9 +4340,9 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::ContextMenu { .. } => None,
-            Message::KeyDown { target, keystroke } => {
-                Some(LRESULT(isize::from(self.on_key(hwnd, target, keystroke))))
-            }
+            Message::KeyDown {
+                target, keystroke, ..
+            } => Some(LRESULT(isize::from(self.on_key(hwnd, target, keystroke)))),
             Message::Char {
                 target,
                 character,
@@ -4473,6 +4505,8 @@ impl WindowProc for MainWindow {
                     operations.close();
                     std::mem::forget(operations);
                 }
+                // No Viewer outlives the message loop.
+                self.viewers.close_all();
                 win::window::quit();
                 Some(LRESULT(0))
             }

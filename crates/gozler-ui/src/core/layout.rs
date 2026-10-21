@@ -570,6 +570,65 @@ pub(crate) fn button_room(content: Px, dpi: Dpi) -> Px {
     content + BUTTON_PADDING.to_px(dpi)
 }
 
+/// The width of a push button whose caption is `caption` wide, with an icon
+/// before it, as Retry under a message has.
+pub(crate) fn image_button_width(caption: Px, dpi: Dpi) -> Px {
+    button_width(button_content(caption, true, dpi), dpi)
+}
+
+/// The width of a status bar's last part, for a text `text` wide: the
+/// part's borders and inset, and the size grip.
+pub(crate) fn status_last_part(text: Px, dpi: Dpi) -> Px {
+    text + STATUS_PART_PADDING.to_px(dpi) + SCROLL_BAR.to_px(dpi)
+}
+
+/// The space above the Viewer's message in the area that shows the file,
+/// as the prototype draws it.
+const VIEWER_MESSAGE_TOP: Dip = Dip(60);
+
+/// The part of `area`, the area that shows the file, left of its vertical
+/// scroll bar, which the area always shows.
+fn viewer_page(area: Rect, dpi: Dpi) -> Rect {
+    Rect {
+        width: (area.width - SCROLL_BAR.to_px(dpi)).max(Px(0)),
+        ..area
+    }
+}
+
+/// The width the Viewer's message wraps at in `area`, the area that shows
+/// the file.
+pub(crate) fn viewer_message_width(area: Rect, dpi: Dpi) -> Px {
+    (viewer_page(area, dpi).width - MARGIN.to_px(dpi) - MARGIN.to_px(dpi)).max(Px(0))
+}
+
+/// Where the Viewer's message, `text_height` tall, and Retry, `retry_width`
+/// wide, go in `area`: both centred left of its scroll bar, the message
+/// below the area's top as the prototype draws it, and Retry under it, as a
+/// panel's Retry is.
+pub(crate) fn viewer_message(
+    area: Rect,
+    text_height: Px,
+    font_height: Px,
+    retry_width: Px,
+    dpi: Dpi,
+) -> (Rect, Rect) {
+    let px = |dip: Dip| dip.to_px(dpi);
+    let area = viewer_page(area, dpi);
+    let message = Rect {
+        x: area.x + px(MARGIN),
+        y: area.y + px(VIEWER_MESSAGE_TOP),
+        width: viewer_message_width(area, dpi),
+        height: text_height,
+    };
+    let retry = Rect {
+        x: area.x + Px((area.width.0 - retry_width.0) / 2),
+        y: message.bottom() + px(RELATED),
+        width: retry_width,
+        height: font_height + px(CONTROL_PADDING),
+    };
+    (message, retry)
+}
+
 /// The places that give the push buttons of one dialog or page, `buttons`,
 /// one width `width` (DESIGN.md: Look). A row is the buttons with one top,
 /// and its buttons farther apart than `margin` are groups of their own,

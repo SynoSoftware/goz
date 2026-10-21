@@ -786,6 +786,20 @@
     "edit_tooltip": "Bewerken is nog niet beschikbaar.",
     "move_tooltip": "Verplaatsen naar het andere paneel, of de naam wijzigen."
   },
+  "viewer": {
+    "title": "{0} – Weergeven",
+    "close": "&Sluiten",
+    "text": "&Tekst",
+    "hex": "&Hex",
+    "wrap": "&Lange regels afbreken",
+    "removed": "Het station is verwijderd.",
+    "cannot_read": "Windows kan {0} niet lezen: {1}",
+    "status_text": "{0} · {1} · {2}",
+    "status_hex": "{0} · {1}",
+    "top": "Begin",
+    "end": "Einde",
+    "percent": "{0}%"
+  },
   "message": {
     "internal_error": "Gozler moest worden gesloten. De details staan in {0}.",
     "settings_not_saved": "Kan uw instellingen niet opslaan in {0}. {1} Uw wijzigingen gelden totdat u afsluit.",

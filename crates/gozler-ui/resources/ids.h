@@ -350,3 +350,10 @@
 #define IDC_FILE_OPERATIONS_LIST 3023
 #define IDC_FILE_OPERATIONS_HINT 3024
 #define IDC_FILE_OPERATIONS_HIDE 3025
+
+// The Viewer, a window of its own for each file it shows: the message and
+// Retry, which lie above the area that shows the file, then the status bar.
+#define IDC_VIEWER_MESSAGE 3501
+#define IDC_VIEWER_RETRY 3502
+#define IDC_VIEWER_AREA 3503
+#define IDC_VIEWER_STATUS 3504

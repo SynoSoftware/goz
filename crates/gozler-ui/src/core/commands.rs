@@ -236,8 +236,18 @@ impl CommandId {
                     |s| s.model.panels().has_selection(),
                     None,
                 ),
-                // The Viewer comes in stage 6 of file-manager-spec.md.
-                C::View => ("command.view", &[], never, None),
+                C::View => (
+                    "command.view",
+                    &[],
+                    |s| {
+                        let panels = s.model.panels();
+                        panels
+                            .panel(panels.active())
+                            .focused_entry()
+                            .is_some_and(|entry| !entry.is_folder())
+                    },
+                    None,
+                ),
                 C::Edit => ("command.edit", &[], never, None),
                 C::NewFolder => (
                     "command.new_folder",

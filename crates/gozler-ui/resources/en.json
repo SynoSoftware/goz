@@ -786,6 +786,20 @@
     "edit_tooltip": "Editing is not available yet.",
     "move_tooltip": "Move to the other panel, or rename."
   },
+  "viewer": {
+    "title": "{0} – View",
+    "close": "&Close",
+    "text": "&Text",
+    "hex": "&Hex",
+    "wrap": "&Wrap long lines",
+    "removed": "The drive was removed.",
+    "cannot_read": "Windows could not read {0}: {1}",
+    "status_text": "{0} · {1} · {2}",
+    "status_hex": "{0} · {1}",
+    "top": "Top",
+    "end": "End",
+    "percent": "{0} %"
+  },
   "message": {
     "internal_error": "Gozler had to close. The details are in {0}.",
     "settings_not_saved": "Couldn't save your settings to {0}. {1} Your changes apply until you exit.",
