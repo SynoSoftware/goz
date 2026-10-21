@@ -534,7 +534,6 @@ impl MainWindow {
             self.show_panel_sort(side);
         }
         for (button, (key, word, _)) in controls.key_bar.iter().zip(&captions.key_bar) {
-            // What screen readers say; the window draws the button.
             button.hwnd().set_text(&format!("{key} {word}"));
         }
         for (area, index) in KEY_TIPS.into_iter().enumerate() {

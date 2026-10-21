@@ -5,37 +5,31 @@
 
 use super::Hwnd;
 use super::controls::{Button, IconList, ListView, StatusBar};
-use super::gdi::{
-    Font, ImageList, disabled_color, draw_icon_mark, draw_text, inactive_bar_color, system_color,
-};
+use super::gdi::{Font, ImageList, draw_icon_mark, draw_text, inactive_bar_color, system_color};
 use crate::core::glyph::Glyph;
 use crate::core::layout::{Px, cell_text_inset};
 use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
-    COLOR_WINDOW, COLOR_WINDOWTEXT, DC_BRUSH, DFC_BUTTON, DFCS_BUTTONPUSH, DFCS_INACTIVE,
-    DFCS_PUSHED, DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_RIGHT,
-    DT_SINGLELINE, DT_VCENTER, DrawFrameControl, FillRect, FrameRect, GetStockObject, GetSysColor,
-    GetSysColorBrush, HBRUSH, HGDIOBJ, SelectObject, SetBkMode, SetDCBrushColor, SetTextColor,
-    TRANSPARENT,
+    COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, DC_BRUSH,
+    DT_CALCRECT, DT_END_ELLIPSIS, DT_NOPREFIX, DT_PATH_ELLIPSIS, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, FillRect, FrameRect, GetStockObject, GetSysColor, GetSysColorBrush, HBRUSH,
+    HGDIOBJ, SelectObject, SetBkMode, SetDCBrushColor, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    BCN_DROPDOWN, BP_PUSHBUTTON, CDDS_ITEMPOSTPAINT, CDDS_ITEMPREPAINT, CDDS_PREPAINT,
-    CDDS_SUBITEM, CDIS_DISABLED, CDIS_HOT, CDIS_SELECTED, CDRF_DODEFAULT, CDRF_NEWFONT,
-    CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT,
-    CloseThemeData, DrawThemeBackground, DrawThemeParentBackground, HDN_DIVIDERDBLCLICKW,
-    LVIF_IMAGE, LVIF_STATE, LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED,
-    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT,
-    LVN_BEGINDRAG, LVN_BEGINRDRAG, LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE,
-    LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK,
-    NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMCUSTOMDRAW, NMHDR, NMHEADERW, NMLISTVIEW,
-    NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE, NMMOUSE, OpenThemeData,
-    PBS_DISABLED, PBS_HOT, PBS_NORMAL, PBS_PRESSED,
+    BCN_DROPDOWN, CDDS_ITEMPOSTPAINT, CDDS_ITEMPREPAINT, CDDS_PREPAINT, CDDS_SUBITEM,
+    CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW, CDRF_NOTIFYPOSTPAINT,
+    CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDN_DIVIDERDBLCLICKW, LVIF_IMAGE, LVIF_STATE,
+    LVIF_TEXT, LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED,
+    LVITEMW, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
+    LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT,
+    LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS,
+    NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVODSTATECHANGE,
+    NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
-use windows::core::{PWSTR, w};
+use windows::core::PWSTR;
 
 /// A `WM_COMMAND`.
 #[derive(Clone, Copy, Debug)]
@@ -238,93 +232,6 @@ impl Button {
     pub(crate) fn dropped_down(self, notification: &Notification) -> bool {
         let header = notification.header();
         header.hwndFrom == self.hwnd().0 && header.code == BCN_DROPDOWN
-    }
-
-    /// Draws this key bar button, if `notification` is its
-    /// `NM_CUSTOMDRAW`, as a push button with `key` in `fonts.1`, bold,
-    /// then `word` in `fonts.0`, centred, as Total Commander's key bar
-    /// shows them (file-manager-spec.md: The key bar). The button's caption
-    /// stays the name that screen readers say. Returns the answer to the
-    /// notification.
-    pub(crate) fn draw_key(
-        self,
-        notification: &Notification,
-        key: &str,
-        word: &str,
-        fonts: (&Font, &Font),
-    ) -> Option<LRESULT> {
-        let header = notification.header();
-        if header.hwndFrom != self.hwnd().0 || header.code != NM_CUSTOMDRAW {
-            return None;
-        }
-        // SAFETY: a button sends NM_CUSTOMDRAW with an NMCUSTOMDRAW, valid
-        // for the notification's lifetime.
-        let draw = unsafe { &*notification.header.cast::<NMCUSTOMDRAW>() };
-        if draw.dwDrawStage != CDDS_PREPAINT {
-            return Some(LRESULT(CDRF_DODEFAULT as isize));
-        }
-        let state = draw.uItemState;
-        let disabled = state.contains(CDIS_DISABLED);
-        let pressed = state.contains(CDIS_SELECTED);
-        let dc = draw.hdc;
-        let mut rect = draw.rc;
-        let color = if disabled {
-            disabled_color(COLOR_BTNFACE)
-        } else {
-            system_color(COLOR_BTNTEXT)
-        };
-        let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
-        let word = format!(" {word}");
-        // SAFETY: the DC is the notification's, which the button holds for
-        // it; the theme is closed and the font restored before the answer.
-        unsafe {
-            // High contrast has no theme, and the classic frame shows the
-            // state instead.
-            let theme = OpenThemeData(Some(self.hwnd().0), w!("Button"));
-            if theme.is_invalid() {
-                let mut look = DFCS_BUTTONPUSH;
-                if pressed {
-                    look |= DFCS_PUSHED;
-                }
-                if disabled {
-                    look |= DFCS_INACTIVE;
-                }
-                let _ = DrawFrameControl(dc, &mut rect, DFC_BUTTON, look);
-            } else {
-                let look = if disabled {
-                    PBS_DISABLED
-                } else if pressed {
-                    PBS_PRESSED
-                } else if state.contains(CDIS_HOT) {
-                    PBS_HOT
-                } else {
-                    PBS_NORMAL
-                };
-                let _ = DrawThemeParentBackground(self.hwnd().0, dc, Some(&rect));
-                let _ = DrawThemeBackground(theme, dc, BP_PUSHBUTTON.0, look.0, &rect, None);
-                let _ = CloseThemeData(theme);
-            }
-            SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, color);
-            let previous = SelectObject(dc, HGDIOBJ(fonts.1.handle().0));
-            let mut key_size = RECT::default();
-            draw_text(dc, key, &mut key_size, flags | DT_CALCRECT);
-            SelectObject(dc, HGDIOBJ(fonts.0.handle().0));
-            let mut word_size = RECT::default();
-            draw_text(dc, &word, &mut word_size, flags | DT_CALCRECT);
-            let width = key_size.right + word_size.right;
-            let left = rect.left + ((rect.right - rect.left - width) / 2).max(0);
-            let mut area = RECT {
-                left: left + key_size.right,
-                ..rect
-            };
-            draw_text(dc, &word, &mut area, flags | DT_END_ELLIPSIS);
-            SelectObject(dc, HGDIOBJ(fonts.1.handle().0));
-            let mut area = RECT { left, ..rect };
-            draw_text(dc, key, &mut area, flags);
-            SelectObject(dc, previous);
-        }
-        Some(LRESULT(CDRF_SKIPDEFAULT as isize))
     }
 }
 
