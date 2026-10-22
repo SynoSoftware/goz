@@ -257,9 +257,9 @@ What enforces it, stated as what each part catches:
   and again each second while the stop lasts: how long, the window
   thread's CPU cycles over the same time (`QueryThreadCycleTime`), so
   waiting is told from working, and the message in progress, from a
-  stack that the window procedure wrapper in `win::window` pushes and
-  pops around each message of a Gozler window, whichever loop dispatched
-  it, so a nested loop never overwrites the outer record. A message to a
+  stack that the window procedure wrappers in `win::window` and
+  `win::dialog` push and pop around each message of a Gozler window or
+  dialog, whichever loop dispatched it, so a nested loop never overwrites the outer record. A message to a
   system dialog leaves the record of the message that opened it on top,
   which is the one to name.
   It records message IDs and control IDs or classes, never window text,
@@ -537,33 +537,36 @@ a regression in focus, selection or speed, which their proofs watch.
   Settings > Drives and service and Settings > Include with a drive
   asleep or offline.
 
-### Stage 2: every thread onto the owner, and the scan
+### Stage 2: every thread onto the owner, exit without waiting, the scan
 
-A move, with no change of behavior, before the stage that changes it
-(AGENTS.md: restructuring is its own stage):
+A move before the stage that changes what a person sees (AGENTS.md:
+restructuring is its own stage). The one change of behavior is at exit,
+because the owner joins no task:
 
 1. The threads of today move onto the owner, each with the rules it has
    now: the requests, the panels' folder threads, the Viewer's reader,
    the Include save, Paste, the entry checks with `present()`, the update
    check, the service check, the fix thread, Indexed folders, the
    clipboard and drops.
-2. The scan test, with its listed exceptions and the `…_thread` and
+2. Joins go with them: at exit the window hides, cancels every task and
+   releases the threads through the `OpenWaker` flag; only the final
+   writes of `ui.json` and `operations.json` are waited for, after the
+   window is hidden.
+3. The scan test, with its listed exceptions and the `…_thread` and
    `work` modules; files that mix window-thread code and thread code
    split.
 
 **Proof:** the existing tests pass unchanged, and the scan test passes
 with only its listed exceptions; its first run, before item 1 ends,
-lists what is left.
+lists what is left. In `ui-after-install.md`: closing the window during
+a search, a folder reading on a share that stopped answering and a copy,
+and the window's place kept at the next start.
 
-### Stage 3: slow tasks say so, exit without waiting, the watchdog
+### Stage 3: slow tasks say so, and the watchdog
 
 1. Each area shows its slow task in its message place, with Cancel where
    the rules say, and replaces or gives up its tasks by the kinds.
-2. Joins go: at exit the window hides, cancels every task and releases
-   the threads through the `OpenWaker` flag; only the final writes of
-   `ui.json` and `operations.json` are waited for, after the window is
-   hidden.
-3. The watchdog and `ui-slow.log`.
+2. The watchdog and `ui-slow.log`.
 
 **Proof:**
 - `core` tests of the area rules, with fixed times, where stage 1's
@@ -602,6 +605,7 @@ lists what is left.
      columns are fitted before the move when the list narrows;
    - a half-drawn page on a Viewer scroll: its area paints through
      `BeginBufferedPaint`.
+
 **Proof:** the same recording after the stage. A frame that shows a
 cleared, half-drawn or doubled control is a defect of the stage.
 
