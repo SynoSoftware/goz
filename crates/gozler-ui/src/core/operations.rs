@@ -9,7 +9,9 @@
 use super::file_operations::{self, Choices, Failure, LastEnded, StatusOperation, Taskbar};
 use super::panel::PanelFollow;
 use super::text::{Numbers, Strings};
-use gozler_fileops::{Choice, End, Operation, OperationId, Prepared, Request, State};
+use gozler_fileops::{
+    Choice, End, Operation, OperationId, Prepared, Request, SourcesFolder, State,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -140,6 +142,7 @@ enum Phase {
     Asking {
         request: Arc<Request>,
         prepared: Prepared,
+        folder: SourcesFolder,
     },
     /// Answered; the queue accepts the submit next.
     Answered { choice: Option<Choice>, moves: bool },
@@ -167,10 +170,6 @@ impl Phase {
 pub(crate) struct Operations {
     phases: HashMap<OperationId, Phase>,
     sources: HashMap<OperationId, Source>,
-    /// Each operation's [`file_operations::sources_folder`], worked out
-    /// once, because the sources never change and reading every one of a
-    /// large operation takes long.
-    folders: HashMap<OperationId, Option<String>>,
     /// When each preparing, waiting or running operation was first seen
     /// so. One whose conflict question is open has none, so the time the
     /// person takes to answer does not count.
@@ -203,7 +202,6 @@ impl Operations {
     pub(super) fn accept(&mut self, snapshot: &[Operation], now: Instant) -> Seen {
         let present: HashSet<OperationId> = snapshot.iter().map(|operation| operation.id).collect();
         self.phases.retain(|id, _| present.contains(id));
-        self.folders.retain(|id, _| present.contains(id));
         self.hidden.retain(|id| present.contains(id));
         let last = self.last_ended.as_ref().map(|(id, ..)| *id);
         (self.numbered).retain(|id| present.contains(id) || Some(*id) == last);
@@ -217,7 +215,6 @@ impl Operations {
         for operation in snapshot {
             let id = operation.id;
             let request = &operation.request;
-            (self.folders.entry(id)).or_insert_with(|| file_operations::sources_folder(request));
             let phase = self.phases.entry(id).or_insert(Phase::Live);
             match &operation.state {
                 State::Prepared(prepared) if matches!(phase, Phase::Live) => {
@@ -225,6 +222,7 @@ impl Operations {
                         *phase = Phase::Asking {
                             request: Arc::clone(request),
                             prepared: *prepared,
+                            folder: operation.folder.clone(),
                         };
                         seen.dialogs.push(OperationDialog::Ask(id));
                     } else {
@@ -327,10 +325,14 @@ impl Operations {
         strings: &Strings,
         numbers: &dyn Numbers,
     ) -> Option<Choices> {
-        let Some(Phase::Asking { request, prepared }) = self.phases.get(&id) else {
+        let Some(Phase::Asking {
+            request,
+            prepared,
+            folder,
+        }) = self.phases.get(&id)
+        else {
             return None;
         };
-        let folder = self.folders.get(&id).and_then(Option::as_deref);
         file_operations::conflict_question(strings, numbers, request, prepared, folder)
     }
 
@@ -453,12 +455,6 @@ impl Operations {
             &self.numbered,
         )
     }
-
-    /// Each operation's [`file_operations::sources_folder`], which the File
-    /// operations window shows.
-    pub(super) fn folders(&self) -> HashMap<OperationId, Option<String>> {
-        self.folders.clone()
-    }
 }
 
 /// Whether `request` moves its entries, so a move of cut files tells the
@@ -484,6 +480,7 @@ mod tests {
         Operation {
             id: id(n),
             request: Arc::new(request),
+            folder: SourcesFolder::Pending,
             state,
         }
     }

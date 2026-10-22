@@ -38,7 +38,6 @@ use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
 use gozler_fileops::{Operation, OperationId, Request, State, Taken};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -592,12 +591,6 @@ impl Model {
     /// `snapshot`.
     pub(crate) fn hide_operations(&mut self, snapshot: &[Operation]) {
         self.operations.hide(snapshot);
-    }
-
-    /// Each operation's folder of its sources, which the File operations
-    /// window shows.
-    pub(crate) fn operation_folders(&self) -> HashMap<OperationId, Option<String>> {
-        self.operations.folders()
     }
 
     /// Removes from the queue the reported deletes and moves that no list

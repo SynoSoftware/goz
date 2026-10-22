@@ -4139,8 +4139,7 @@ impl MainWindow {
     fn show_operations(&self, select: Option<OperationId>, front: bool) {
         if let Some(operations) = self.file_operations.get() {
             let snapshot = operations.snapshot();
-            let folders = self.model.borrow().operation_folders();
-            operations.show(&snapshot, &folders, select, front);
+            operations.show(&snapshot, select, front);
         }
     }
 
@@ -4148,8 +4147,7 @@ impl MainWindow {
     fn refresh_operations(&self) {
         if let Some(operations) = self.file_operations.get() {
             let snapshot = operations.snapshot();
-            let folders = self.model.borrow().operation_folders();
-            operations.refresh(&snapshot, &folders);
+            operations.refresh(&snapshot);
         }
     }
 
@@ -4177,8 +4175,7 @@ impl MainWindow {
         let snapshot = operations.snapshot();
         let progress = self.model.borrow_mut().poll_operations(&snapshot);
         self.show_progress(hwnd, progress);
-        let folders = self.model.borrow().operation_folders();
-        operations.refresh(&snapshot, &folders);
+        operations.refresh(&snapshot);
     }
 
     /// The person hid the File operations window.

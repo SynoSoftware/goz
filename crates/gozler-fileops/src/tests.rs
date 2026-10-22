@@ -33,7 +33,7 @@ use crate::volumes::{CopyPlan, VolumeClass};
 use crate::{
     Choice, Conflicts, Count, Destination, End, LargeFileLimit, Listed, OperationId, Outcome,
     Preset, Queue, Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk,
-    RingSsd, SpeedSettings, State, Total,
+    RingSsd, SourcesFolder, SpeedSettings, State, Total,
 };
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -1686,6 +1686,38 @@ fn an_unfinished_operation_is_offered_again() {
         let _ = fs::remove_file(scratch.saved());
     }
     drop(handle);
+}
+
+/// Each operation's folder is worked out on a queue thread, by prepare for
+/// a new one and when the queue opens for an interrupted one; without it,
+/// the window names only how many entries the operation has.
+#[test]
+fn the_queue_works_out_each_operations_folder() {
+    let scratch = Scratch::new("folder");
+    let request = Request::Delete {
+        sources: vec![scratch.file(r"src\a.txt"), scratch.file(r"src\b\c.txt")],
+    };
+    let folder = SourcesFolder::Shared(scratch.path("src").to_string_lossy().into_owned());
+    let watched = Watched::new(&scratch.saved());
+    let (id, _) = watched.prepared(request.clone());
+    let operations = watched.queue.operations();
+    assert_eq!(operations[0].folder, folder, "prepared");
+    watched.queue.cancel(id);
+    drop(watched);
+
+    save(&scratch, &request, None, system_time());
+    let watched = Watched::new(&scratch.saved());
+    loop {
+        let operations = watched.queue.operations();
+        if operations[0].folder != SourcesFolder::Pending {
+            assert_eq!(operations[0].folder, folder, "interrupted");
+            break;
+        }
+        watched
+            .wakes
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the folder is worked out within 30 s");
+    }
 }
 
 /// Ring settings small enough that a test's files are larger than the

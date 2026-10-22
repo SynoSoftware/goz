@@ -293,16 +293,9 @@ impl FileOperations {
         }
     }
 
-    /// Shows the window with `snapshot`, whose operations' source folders
-    /// are in `folders`, and with `select` selected; `front` brings it to
-    /// the front, as View > File operations does.
-    pub(super) fn show(
-        &self,
-        snapshot: &[Operation],
-        folders: &HashMap<OperationId, Option<String>>,
-        select: Option<OperationId>,
-        front: bool,
-    ) {
+    /// Shows the window with `snapshot`, and with `select` selected;
+    /// `front` brings it to the front, as View > File operations does.
+    pub(super) fn show(&self, snapshot: &[Operation], select: Option<OperationId>, front: bool) {
         let Some(window) = self.window() else {
             return;
         };
@@ -312,7 +305,7 @@ impl FileOperations {
         if select.is_some() {
             window.selected.set(select);
         }
-        window.show_snapshot(hwnd, snapshot, folders);
+        window.show_snapshot(hwnd, snapshot);
         if front {
             hwnd.bring_to_front();
         } else {
@@ -321,15 +314,11 @@ impl FileOperations {
     }
 
     /// Shows `snapshot` in the window, if it was made.
-    pub(super) fn refresh(
-        &self,
-        snapshot: &[Operation],
-        folders: &HashMap<OperationId, Option<String>>,
-    ) {
+    pub(super) fn refresh(&self, snapshot: &[Operation]) {
         if let Some(window) = self.made()
             && let Some(hwnd) = window.hwnd.get()
         {
-            window.show_snapshot(hwnd, snapshot, folders);
+            window.show_snapshot(hwnd, snapshot);
         }
     }
 
@@ -776,15 +765,9 @@ impl Window {
         hwnd.invalidate();
     }
 
-    /// Shows `snapshot`, whose operations' source folders are in
-    /// `folders`, with the speeds of the running ones from the counts the
-    /// window saw before.
-    fn show_snapshot(
-        &self,
-        hwnd: Hwnd,
-        snapshot: &[Operation],
-        folders: &HashMap<OperationId, Option<String>>,
-    ) {
+    /// Shows `snapshot`, with the speeds of the running ones from the
+    /// counts the window saw before.
+    fn show_snapshot(&self, hwnd: Hwnd, snapshot: &[Operation]) {
         let now = Instant::now();
         {
             let mut meters = self.meters.borrow_mut();
@@ -803,22 +786,12 @@ impl Window {
                 }
             }
         }
-        let view = {
-            let operations: Vec<file_operations::Operation> = (snapshot.iter())
-                .map(|entry| file_operations::Operation {
-                    id: entry.id,
-                    request: &entry.request,
-                    state: &entry.state,
-                    folder: folders.get(&entry.id).and_then(Option::as_deref),
-                })
-                .collect();
-            file_operations::view(
-                &self.strings.borrow(),
-                &*self.numbers.borrow(),
-                &operations,
-                &self.meters.borrow(),
-            )
-        };
+        let view = file_operations::view(
+            &self.strings.borrow(),
+            &*self.numbers.borrow(),
+            snapshot,
+            &self.meters.borrow(),
+        );
         self.show_view(hwnd, view);
     }
 

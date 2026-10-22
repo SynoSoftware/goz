@@ -21,7 +21,7 @@ use crate::moves::{Moving, move_by_rename};
 use crate::names::Names;
 use crate::operation::{
     Current, CurrentFile, End, Listed, Operation, OperationId, OrderRefused, Outcome, Pause,
-    Progress, Request, RingCounts, Running, State, Total, Wait,
+    Progress, Request, RingCounts, Running, SourcesFolder, State, Total, Wait,
 };
 use crate::place::Target;
 use crate::prepare::{Ready, Transfer, Work, check_space, prepare};
@@ -84,6 +84,7 @@ struct Operations {
 
 struct Tracked {
     request: Arc<Request>,
+    folder: SourcesFolder,
     settings: SpeedSettings,
     phase: Phase,
     cancel: Arc<AtomicBool>,
@@ -161,18 +162,17 @@ impl Queue {
         let saved_path = saved.into();
         let mut operations = Operations::default();
         let mut saved_operations = BTreeMap::new();
+        let mut requests = Vec::new();
         for (saved, restored) in saved::read(&saved_path) {
             let id = OperationId(operations.next_id);
             operations.next_id += 1;
-            let operation = Tracked::new(
-                Arc::new(restored.request.clone()),
-                restored.settings,
-                Phase::Interrupted(restored),
-            );
+            let request = Arc::new(restored.request.clone());
+            requests.push((id, Arc::clone(&request)));
+            let operation = Tracked::new(request, restored.settings, Phase::Interrupted(restored));
             operations.by_id.insert(id, operation);
             saved_operations.insert(id, Arc::new(saved));
         }
-        Queue {
+        let queue = Queue {
             shared: Arc::new(Shared {
                 operations: Mutex::new(operations),
                 wake: Box::new(wake),
@@ -186,7 +186,16 @@ impl Queue {
                 closing: AtomicBool::new(false),
                 threads: Mutex::default(),
             }),
+        };
+        if !requests.is_empty() {
+            let thread = Arc::clone(&queue.shared);
+            queue.shared.spawn(move || {
+                for (id, request) in requests {
+                    thread.set_folder(id, &request);
+                }
+            });
         }
+        queue
     }
 
     /// Starts preparing `request` on a queue thread and returns its id at
@@ -342,7 +351,16 @@ impl Queue {
                     Phase::Interrupted(_) => ((2, id.0), State::Interrupted),
                 };
                 let request = Arc::clone(&operation.request);
-                (place, Operation { id, request, state })
+                let folder = operation.folder.clone();
+                (
+                    place,
+                    Operation {
+                        id,
+                        request,
+                        folder,
+                        state,
+                    },
+                )
             })
             .collect();
         listed.sort_unstable_by_key(|&(place, _)| place);
@@ -493,6 +511,7 @@ impl Tracked {
     fn new(request: Arc<Request>, settings: SpeedSettings, phase: Phase) -> Tracked {
         Tracked {
             request,
+            folder: SourcesFolder::Pending,
             settings,
             phase,
             cancel: Arc::default(),
@@ -516,6 +535,16 @@ impl Shared {
         let mut threads = self.threads.lock().expect("no queue thread panics");
         threads.retain(|thread| !thread.is_finished());
         threads.push(std::thread::spawn(thread));
+    }
+
+    /// Works out the folder of the sources of `id`, whose request is
+    /// `request`, sets it, and wakes the window.
+    fn set_folder(&self, id: OperationId, request: &Request) {
+        let folder = SourcesFolder::of(request);
+        if let Some(operation) = self.lock().by_id.get_mut(&id) {
+            operation.folder = folder;
+        }
+        (self.wake)();
     }
 
     /// Prepares the operation `id`, which is preparing, on its own thread.
@@ -542,6 +571,7 @@ impl Shared {
                 drop(operations);
                 (thread.wake)();
             }
+            thread.set_folder(id, &request);
             let entered = io.enter();
             let first = Rule {
                 choice: None,

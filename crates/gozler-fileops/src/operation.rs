@@ -80,7 +80,85 @@ impl OperationId {
 pub struct Operation {
     pub id: OperationId,
     pub request: Arc<Request>,
+    pub folder: SourcesFolder,
     pub state: State,
+}
+
+/// The folder that holds every source of an operation, which the window
+/// names instead of each source. A queue thread works it out, because
+/// reading every source of a large operation takes the window several
+/// frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourcesFolder {
+    /// Not worked out yet: while the operation prepares, and for a moment
+    /// after the queue opens for an interrupted one. A new operation's
+    /// folder is known before it is prepared.
+    Pending,
+    /// The deepest folder that holds every source, also of one, as text.
+    Shared(String),
+    /// No folder holds every source, because they are on different drives
+    /// or servers, or because there are none, as for a new folder.
+    Several,
+}
+
+impl SourcesFolder {
+    /// The folder of `request`'s sources.
+    pub(crate) fn of(request: &Request) -> SourcesFolder {
+        let sources = match request {
+            Request::Copy { sources, .. }
+            | Request::Move { sources, .. }
+            | Request::Delete { sources } => sources,
+            Request::NewFolder { .. } => return SourcesFolder::Several,
+        };
+        common_folder(sources.iter().map(|path| path.to_string_lossy()))
+            .map_or(SourcesFolder::Several, SourcesFolder::Shared)
+    }
+}
+
+/// The deepest folder that holds every path of `paths`, compared as Windows
+/// compares names, ignoring case; `None` when they share no drive or
+/// server. It allocates nothing for each path, because an operation can
+/// have 100,000 sources.
+fn common_folder(paths: impl IntoIterator<Item = impl AsRef<str>>) -> Option<String> {
+    let mut paths = paths.into_iter();
+    let first = paths.next()?;
+    let first = parent_of(first.as_ref());
+    // How many of `first`'s parts every path shares.
+    let mut common = first.split('\\').count();
+    for path in paths {
+        common = (first.split('\\').zip(parent_of(path.as_ref()).split('\\')))
+            .take(common)
+            .take_while(|(a, b)| same_name(a, b))
+            .count();
+    }
+    let parts = || first.split('\\').take(common);
+    // Two drives share nothing, and two servers share only the `\\` that
+    // starts each path.
+    if parts().all(str::is_empty) {
+        return None;
+    }
+    let end = parts().map(str::len).sum::<usize>() + common - 1;
+    let folder = &first[..end];
+    Some(if folder.ends_with(':') {
+        format!("{folder}\\")
+    } else {
+        folder.to_owned()
+    })
+}
+
+/// The parent folder of a Windows path, without its last `\`; a drive's
+/// root keeps its `\`.
+fn parent_of(path: &str) -> &str {
+    match path.trim_end_matches('\\').rfind('\\') {
+        Some(cut) if path[..cut].ends_with(':') => &path[..=cut],
+        Some(cut) => &path[..cut],
+        None => path,
+    }
+}
+
+/// Whether `a` and `b` are one name to Windows, which ignores case.
+fn same_name(a: &str, b: &str) -> bool {
+    a == b || (a.chars().flat_map(char::to_lowercase)).eq(b.chars().flat_map(char::to_lowercase))
 }
 
 /// An operation's state, as the window reads it.
@@ -471,5 +549,27 @@ impl Progress {
 
     pub(crate) fn passed(&self) -> u64 {
         self.passed.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sources_folder_holds_every_source() {
+        assert_eq!(
+            common_folder([r"C:\Photos\2026\a.jpg", r"C:\photos\2025\b.jpg"]).as_deref(),
+            Some(r"C:\Photos")
+        );
+        assert_eq!(
+            common_folder([r"C:\a.txt", r"C:\b\c.txt"]).as_deref(),
+            Some(r"C:\")
+        );
+        assert_eq!(common_folder([r"C:\a.txt", r"D:\b.txt"]), None);
+        assert_eq!(
+            common_folder([r"\\one\share\a.txt", r"\\two\share\b.txt"]),
+            None
+        );
     }
 }

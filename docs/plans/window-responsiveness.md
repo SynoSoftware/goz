@@ -51,7 +51,5 @@ none of them has had yet.
 
 - A 2,000-character Cyrillic path with a path term costs about 49 ms a
   paint, three frames.
-- An operation of 100,000 sources pauses the window once, for 272 ms, when
-  it appears, while the window computes its common folder.
 - `DRAG_LIMIT` (1,000) no longer has a measured reason: naming 1,000 files
   for a drag takes 9.6 ms. The owner decides its value.

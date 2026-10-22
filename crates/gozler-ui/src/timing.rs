@@ -6,16 +6,18 @@
 //! --test-threads=1`. A time is the median of 15 runs after one warm-up.
 
 use crate::core::clipboard::{ClipboardData, ClipboardFormat};
-use crate::core::file_operations::sources_folder;
+use crate::core::file_operations;
 use crate::core::model::Column;
 use crate::core::selection::{Sums, wide_path};
 use crate::core::text::{SizeFormat, cell, tests::english};
 use crate::win::locale::WindowsNumbers;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{MatchedParts, parse_query};
-use gozler_fileops::Taken;
+use gozler_fileops::{Destination, Operation, OperationId, Request, SourcesFolder, State, Taken};
+use std::collections::HashMap;
 use std::hint::black_box;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The rows a maximized list shows at 100% on a 1080p screen.
@@ -159,22 +161,33 @@ fn timing_large_selection_per_reply() {
     });
 }
 
-/// Rank 2: the window works out an operation's common source folder once,
-/// when the operation first appears.
+/// Rank 2: when an operation first appears, the File operations window
+/// shows its row, which names its common source folder. The queue works
+/// the folder out on its own thread, so the window only reads it.
 #[test]
 #[ignore = "timing; run in release"]
 fn timing_progress_folder_per_operation() {
-    for (kind, sources) in [("1,000 sources", 1_000), ("100,000 sources", 100_000)] {
-        let sources: Vec<PathBuf> = (0..sources)
-            .map(|i| PathBuf::from(format!(r"{}\file{i}.txt", path("Projects", 9))))
-            .collect();
-        let request = gozler_fileops::Request::Copy {
-            sources,
-            destination: gozler_fileops::Destination::Folder(PathBuf::from(r"D:\Backup")),
-        };
-        time(&format!("common folder, {kind}"), || {
-            sources_folder(&request)
-        });
+    let strings = english();
+    let numbers = WindowsNumbers::new();
+    let sources: Vec<PathBuf> = (0..100_000)
+        .map(|i| PathBuf::from(format!(r"{}\file{i}.txt", path("Projects", 9))))
+        .collect();
+    let request = Arc::new(Request::Copy {
+        sources,
+        destination: Destination::Folder(PathBuf::from(r"D:\Backup")),
+    });
+    let shared = SourcesFolder::Shared(path("Projects", 9));
+    for (kind, folder) in [("pending", SourcesFolder::Pending), ("known", shared)] {
+        let snapshot = [Operation {
+            id: OperationId::for_tests(1),
+            request: Arc::clone(&request),
+            folder,
+            state: State::Preparing,
+        }];
+        time(
+            &format!("operation row, 100,000 sources, folder {kind}"),
+            || file_operations::view(&strings, &numbers, &snapshot, &HashMap::new()),
+        );
     }
 }
 

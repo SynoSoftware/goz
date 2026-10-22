@@ -13,8 +13,8 @@ use super::layout::{Dpi, Px, Rect};
 use super::panel::same_folder;
 use super::text::{Numbers, Strings, bytes, name_of, without_access_key};
 use gozler_fileops::{
-    Choice, Destination, End, Listed, OperationId, Outcome, Prepared, Reason, Refusal, Request,
-    RingCounts, Running, State, Total,
+    Choice, Destination, End, Listed, Operation, OperationId, Outcome, Prepared, Reason, Refusal,
+    Request, RingCounts, Running, SourcesFolder, State, Total,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -598,23 +598,25 @@ fn joined(folder: &str, name: &str) -> String {
     }
 }
 
-fn ends_of(strings: &Strings, operation: &Operation) -> Ends {
+fn ends_of(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) -> Ends {
     let entries = |sources: &[PathBuf]| match sources {
         [one] => text_of(one),
-        _ => folder_or(
+        _ => sources_text(
             strings,
-            operation.folder,
+            numbers,
+            &operation.folder,
+            sources.len(),
             "file_operations.several_folders_inline",
         ),
     };
-    if let Some((path, name)) = renamed(operation.request) {
+    if let Some((path, name)) = renamed(&operation.request) {
         let to = joined(parent_of(&path), &name);
         return Ends {
             from: path,
             to: Some(to),
         };
     }
-    match operation.request {
+    match &*operation.request {
         Request::Copy {
             sources,
             destination,
@@ -637,56 +639,58 @@ fn ends_of(strings: &Strings, operation: &Operation) -> Ends {
     }
 }
 
-/// The folder that holds every source of a copy, a move or a delete, also
-/// of one; `None` when they are on different drives or servers, and for a
-/// rename and a new folder.
-pub(crate) fn sources_folder(request: &Request) -> Option<String> {
-    match request {
-        _ if renamed(request).is_some() => None,
-        Request::Copy { sources, .. }
-        | Request::Move { sources, .. }
-        | Request::Delete { sources } => {
-            common_folder(sources.iter().map(|path| path.to_string_lossy()))
+/// The folder that holds an operation's `count` sources; the text
+/// `several` when they are on different drives or servers: "Several
+/// folders" on its own, or "several folders" inside a sentence; and their
+/// count, "4,210 items", until the queue has worked the folder out.
+fn sources_text(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    folder: &SourcesFolder,
+    count: usize,
+    several: &str,
+) -> String {
+    match folder {
+        SourcesFolder::Shared(folder) => folder.clone(),
+        SourcesFolder::Several => strings.text(several).to_owned(),
+        SourcesFolder::Pending => {
+            strings.count("file_operations.size_items", count as u64, numbers, &[])
         }
-        Request::NewFolder { .. } => None,
     }
-}
-
-/// `folder`, or the text `several` when the sources are on different drives
-/// or servers: "Several folders" on its own, or "several folders" inside a
-/// sentence.
-fn folder_or(strings: &Strings, folder: Option<&str>, several: &str) -> String {
-    folder.unwrap_or_else(|| strings.text(several)).to_owned()
 }
 
 /// Where the card says an operation reads and writes, which stays the same
 /// for the whole operation while the file line names each file: as
 /// [`ends_of`] says, except that a copy, a move and a delete read from the
 /// folder that holds their entries, also for one.
-fn card_ends(strings: &Strings, operation: &Operation) -> Ends {
-    let from = || folder_or(strings, operation.folder, "file_operations.several_folders");
-    match operation.request {
-        Request::Copy { destination, .. } | Request::Move { destination, .. } => Ends {
-            from: from(),
+fn card_ends(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) -> Ends {
+    let from = |sources: &[PathBuf]| {
+        sources_text(
+            strings,
+            numbers,
+            &operation.folder,
+            sources.len(),
+            "file_operations.several_folders",
+        )
+    };
+    match &*operation.request {
+        Request::Copy {
+            sources,
+            destination,
+        }
+        | Request::Move {
+            sources,
+            destination,
+        } => Ends {
+            from: from(sources),
             to: Some(text_of(&destination.path())),
         },
-        Request::Delete { .. } => Ends {
-            from: from(),
+        Request::Delete { sources } => Ends {
+            from: from(sources),
             to: None,
         },
-        _ => ends_of(strings, operation),
+        Request::NewFolder { .. } => ends_of(strings, numbers, operation),
     }
-}
-
-/// An operation as the window reads it from the queue.
-pub(crate) struct Operation<'a> {
-    pub(crate) id: OperationId,
-    pub(crate) request: &'a Request,
-    pub(crate) state: &'a State,
-    /// [`sources_folder`] of `request`, which the window works out once per
-    /// operation, because the sources never change, and reading every one
-    /// of a large operation's on each refresh stalls the window.
-    pub(crate) folder: Option<&'a str>,
 }
 
 /// The window's view of `operations`, in the queue's order, with the speeds
@@ -789,7 +793,7 @@ fn measure_of(running: &Running) -> Option<Measure> {
 /// Every running operation's progress together, as File Explorer shows its
 /// copies on the taskbar button: measured while any running operation
 /// knows its total, moving while none does.
-pub(crate) fn taskbar(operations: &[gozler_fileops::Operation]) -> Taskbar {
+pub(crate) fn taskbar(operations: &[Operation]) -> Taskbar {
     let running: Vec<&Running> = operations
         .iter()
         .filter_map(|operation| match &operation.state {
@@ -829,8 +833,8 @@ fn card(
     running: &Running,
     speed: Option<Speed>,
 ) -> Card {
-    let kind = kind_of(operation.request);
-    let ends = card_ends(strings, operation);
+    let kind = kind_of(&operation.request);
+    let ends = card_ends(strings, numbers, operation);
     let measure = measure_of(running);
     let moves_bytes = moves_bytes(running);
     let mut title = strings.text(kind.name).to_owned();
@@ -865,7 +869,7 @@ fn card(
         // line names their one selected entry, as it does before a copy's
         // first file.
         None => {
-            let one = match operation.request {
+            let one = match &*operation.request {
                 Request::Copy { sources, .. }
                 | Request::Move { sources, .. }
                 | Request::Delete { sources } => match sources.as_slice() {
@@ -902,13 +906,13 @@ fn card(
             },
         ),
         None => (
-            items_done(strings, numbers, operation.request, running.items),
+            items_done(strings, numbers, &operation.request, running.items),
             String::new(),
         ),
     };
     Card {
         id: operation.id,
-        glyph: glyph_of(operation.request),
+        glyph: glyph_of(&operation.request),
         title,
         status,
         paused: running.paused,
@@ -978,8 +982,8 @@ fn row(
     operations: &[Operation],
     speed: Option<Speed>,
 ) -> Option<Row> {
-    let ends = ends_of(strings, operation);
-    let kind = kind_of(operation.request);
+    let ends = ends_of(strings, numbers, operation);
+    let kind = kind_of(&operation.request);
     let (detail, phase) = match &operation.state {
         State::Running(running) => {
             let progress = match measure_of(running) {
@@ -996,7 +1000,7 @@ fn row(
                     numbers,
                     &[&numbers.integer(measure.done)],
                 ),
-                None => items_done(strings, numbers, operation.request, running.items),
+                None => items_done(strings, numbers, &operation.request, running.items),
             };
             let detail = if running.paused {
                 joined_parts(
@@ -1021,16 +1025,16 @@ fn row(
             )
         }
         State::Waiting { on, total, .. } => {
-            let size = size_of_total(strings, numbers, operation.request, *total);
+            let size = size_of_total(strings, numbers, &operation.request, *total);
             let detail = match operations.iter().find(|other| other.id == *on) {
                 Some(other) => {
-                    let ends = ends_of(strings, other);
-                    let place = match (other.request, ends.to) {
+                    let ends = ends_of(strings, numbers, other);
+                    let place = match (&*other.request, ends.to) {
                         (Request::Copy { .. } | Request::Move { .. }, Some(to)) => to,
                         _ => ends.from,
                     };
                     RowLine::Paths {
-                        key: kind_of(other.request).waiting_for,
+                        key: kind_of(&other.request).waiting_for,
                         paths: vec![place],
                         after: if size.is_empty() {
                             size
@@ -1049,7 +1053,7 @@ fn row(
         ),
         State::Prepared(prepared) => {
             let size = match prepared.total {
-                Some(total) => size_of_total(strings, numbers, operation.request, Some(total)),
+                Some(total) => size_of_total(strings, numbers, &operation.request, Some(total)),
                 None => strings.count(
                     "file_operations.selected",
                     prepared.entries as u64,
@@ -1070,7 +1074,7 @@ fn row(
             // A copy and a move leave unfinished files that Continue
             // finishes (fast-copy-delete-spec.md: What a stopped operation
             // leaves).
-            let detail = match operation.request {
+            let detail = match &*operation.request {
                 Request::Copy { .. } | Request::Move { .. } => joined_parts(
                     strings,
                     [
@@ -1086,7 +1090,7 @@ fn row(
     };
     Some(Row {
         id: operation.id,
-        glyph: glyph_of(operation.request),
+        glyph: glyph_of(&operation.request),
         title: RowLine::Paths {
             key: kind.row,
             paths: [Some(ends.from), ends.to].into_iter().flatten().collect(),
@@ -1182,7 +1186,7 @@ impl StatusOperation {
     /// `ended` tells which operation ended last. Each operation in
     /// `numbered` was answered with Keep both.
     pub(crate) fn of(
-        operations: &[gozler_fileops::Operation],
+        operations: &[Operation],
         ended: Option<&LastEnded>,
         reported: &HashSet<OperationId>,
         numbered: &HashSet<OperationId>,
@@ -1473,42 +1477,6 @@ fn folder_name(path: &str) -> &str {
     }
 }
 
-/// The deepest folder that holds every path of `paths`, compared as Windows
-/// compares names, ignoring case; `None` when they share no drive or
-/// server. It allocates nothing for each path, because an operation can
-/// have 100,000 sources.
-fn common_folder(paths: impl IntoIterator<Item = impl AsRef<str>>) -> Option<String> {
-    let mut paths = paths.into_iter();
-    let first = paths.next()?;
-    let first = parent_of(first.as_ref());
-    // How many of `first`'s parts every path shares.
-    let mut common = first.split('\\').count();
-    for path in paths {
-        common = (first.split('\\').zip(parent_of(path.as_ref()).split('\\')))
-            .take(common)
-            .take_while(|(a, b)| same_name(a, b))
-            .count();
-    }
-    let parts = || first.split('\\').take(common);
-    // Two drives share nothing, and two servers share only the `\\` that
-    // starts each path.
-    if parts().all(str::is_empty) {
-        return None;
-    }
-    let end = parts().map(str::len).sum::<usize>() + common - 1;
-    let folder = &first[..end];
-    Some(if folder.ends_with(':') {
-        format!("{folder}\\")
-    } else {
-        folder.to_owned()
-    })
-}
-
-/// Whether `a` and `b` are one name to Windows, which ignores case.
-fn same_name(a: &str, b: &str) -> bool {
-    a == b || (a.chars().flat_map(char::to_lowercase)).eq(b.chars().flat_map(char::to_lowercase))
-}
-
 /// `path` relative to the folder `from`, or `path` whole when it is not
 /// inside it.
 fn relative_to<'a>(path: &'a str, from: &str) -> &'a str {
@@ -1555,13 +1523,13 @@ pub(crate) fn conflict_choice(index: usize) -> Option<Choice> {
 /// question does, it names the folders by their own names, so a long path
 /// never widens the dialog. Without a total from gozlerd it counts the
 /// selected entries, as File Explorer does before it has counted. `folder`
-/// is the request's [`sources_folder`].
+/// holds the request's sources; the queue works it out before it prepares.
 pub(crate) fn conflict_question(
     strings: &Strings,
     numbers: &dyn Numbers,
     request: &Request,
     prepared: &Prepared,
-    folder: Option<&str>,
+    folder: &SourcesFolder,
 ) -> Option<Choices> {
     let found = prepared.conflicts?;
     let (key, destination) = match request {
@@ -1569,7 +1537,13 @@ pub(crate) fn conflict_question(
         Request::Move { destination, .. } => ("file_operations.conflict_moving", destination),
         Request::Delete { .. } | Request::NewFolder { .. } => return None,
     };
-    let from = folder_or(strings, folder, "file_operations.several_folders_inline");
+    let from = sources_text(
+        strings,
+        numbers,
+        folder,
+        prepared.entries,
+        "file_operations.several_folders_inline",
+    );
     let to = text_of(&destination.path());
     let items = prepared
         .total
@@ -1634,7 +1608,7 @@ pub(crate) fn delete_question(
 pub(crate) fn exit_question(
     strings: &Strings,
     numbers: &dyn Numbers,
-    operations: &[gozler_fileops::Operation],
+    operations: &[Operation],
 ) -> Option<Question> {
     let (mut running, mut waiting) = (0, 0);
     for operation in operations {
@@ -2081,9 +2055,10 @@ mod tests {
         let request = Arc::new(Request::Delete {
             sources: vec![PathBuf::from(r"C:\f\a")],
         });
-        let queued = |id| gozler_fileops::Operation {
+        let queued = |id| Operation {
             id: OperationId::for_tests(id),
             request: Arc::clone(&request),
+            folder: SourcesFolder::Pending,
             state: State::Ended(Arc::clone(&outcome)),
         };
         let last = |id| {
@@ -2173,20 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn the_from_folder_holds_every_source() {
-        assert_eq!(
-            common_folder([r"C:\Photos\2026\a.jpg", r"C:\photos\2025\b.jpg"]).as_deref(),
-            Some(r"C:\Photos")
-        );
-        assert_eq!(
-            common_folder([r"C:\a.txt", r"C:\b\c.txt"]).as_deref(),
-            Some(r"C:\")
-        );
-        assert_eq!(common_folder([r"C:\a.txt", r"D:\b.txt"]), None);
-        assert_eq!(
-            common_folder([r"\\one\share\a.txt", r"\\two\share\b.txt"]),
-            None
-        );
+    fn a_file_is_named_relative_to_the_from_folder() {
         assert_eq!(
             relative_to(r"C:\Photos\2026\a.jpg", r"C:\photos"),
             r"2026\a.jpg"
@@ -2219,10 +2181,9 @@ mod tests {
                 ..Conflicts::default()
             }),
         };
-        let folder = sources_folder(&request);
-        let question =
-            conflict_question(&strings, &English, &request, &prepared, folder.as_deref())
-                .expect("12 conflicts ask");
+        let folder = SourcesFolder::Shared(r"C:\Users\user\Photos\2026".to_owned());
+        let question = conflict_question(&strings, &English, &request, &prepared, &folder)
+            .expect("12 conflicts ask");
         assert!(!question.body.contains('\\'), "{}", question.body);
         assert!(question.body.contains("2026") && question.body.contains("Photos"));
     }
@@ -2245,7 +2206,8 @@ mod tests {
                 ..Conflicts::default()
             }),
         };
-        assert!(conflict_question(&strings, &English, &request, &prepared, None).is_some());
+        let folder = SourcesFolder::Shared(r"C:\Users\user".to_owned());
+        assert!(conflict_question(&strings, &English, &request, &prepared, &folder).is_some());
     }
 
     /// The queue moves only waiting operations, after the running ones and
