@@ -87,14 +87,18 @@ Measured on `main` at `5146bc2`:
 2. **"`WM_SETREDRAW` is turned off only around a change that would draw a
    control several times"**, and **"the main window erases only its own
    background between controls, once after each layout."** Both may cost a
-   visible flash on a resize step: the list moves while its drawing is
-   off, so it has no `WS_VISIBLE` bit and the main window does not clip
-   it; `draw_once_after` erases the double-buffered list before it paints;
-   and the whole window is erased after each layout. This is suspected,
-   not filmed. The list moves inside `draw_once_after` on purpose, so a
-   narrower window does not flash its horizontal scroll bar, and a resize
-   step measures about 12 ms of layout and 22 ms of list paint
-   (`docs/research/measurements/window-resize`). So stage 4's first
+   visible flash on a resize step: `draw_once_after` erases the
+   double-buffered list before it paints, and the whole window is erased
+   after each layout. This is suspected, not measured. A list view keeps
+   its `WS_VISIBLE` bit while its drawing is off (tested in a comctl32 v6
+   window), so the main window still clips it while it moves. The list
+   moves inside `draw_once_after` on purpose, so a narrower window does
+   not flash its horizontal scroll bar, and a resize step measures about
+   12 ms of layout and 22 ms of list paint
+   (`docs/research/measurements/window-resize`). The painting session
+   tested the `WS_VISIBLE` claim on 2026-10-22 in a small comctl32 v6 test
+   window: after `WM_SETREDRAW` off, a list view still had the bit and a
+   static did not. So stage 4's first
    recording decides: these change only if it shows a flash a regular
    user would see.
 
@@ -133,9 +137,17 @@ the same failure.
 | The watchdog is a heartbeat that every message loop dispatches | The filter hook fires only before a message and misses the size/move loop and drag and drop; a heartbeat stops only when the thread is blocked | Every open dialog or border drag logged as a hang, and real hangs mislabelled |
 | The watchdog logs CPU cycles beside wall time, repeats while a stop lasts, records only message and control IDs, writes from its own thread, caps the log | Tells waiting from working; a long hang reads as long; window titles hold typed searches and file names; the log must not itself wait or grow | Noise, short readings of long hangs, private text in a log, a log that is a wait |
 | The owner's day of use and the field checks go to `ui-after-install.md` | AGENTS.md: what only the owner can check waits for no stage | A stage that stalls on the owner |
-| Painting starts with a recording, and its riskier changes happen only if the recording shows a flash | The list moves inside `draw_once_after` to stop a scroll bar flash; the suspected flashes are not filmed; a resize step is about 34 ms | A flash brought back to fix one nobody saw |
+| Painting starts with a recording, and its riskier changes happen only if the recording shows a flash; one recording before and one after, each run once and saved for the owner, never a loop (owner) | The list moves inside `draw_once_after` to stop a scroll bar flash; the suspected flashes are not filmed; a resize step is about 34 ms; paint counts cannot tell a visible flash from the list's own erase and paint on every step | A flash brought back to fix one nobody saw, or windows flashing in front of the owner for an hour |
 | `RDW_ERASE` stays in the main window's `draw_once_after` | A mode or language switch must erase the other mode's pixels | Garbage after a mode or language switch |
 | Toolbar double buffering is checked in light, high contrast and 150 % DPI, and dropped if no blink is filmed | A double-buffered transparent toolbar can paint a wrong background | Black or wrong toolbar backgrounds |
+| A list's changed column widths are set together, inside one `draw_once_after` on that list | Each `LVM_SETCOLUMNWIDTH` paints the whole list and header before it returns, twice when the scroll bar comes or goes (5–8 paints per panel list before `set_panel_widths`) | The paints that f96343c removed come back |
+| One `DeferWindowPos` batch for each parent | A batch takes only windows of one parent; the filter pane's controls are the pane's children | The batch fails and every control moves and draws on its own |
+| The owner has an inline size beside its slow constant; every pass over the selection, the fetched rows, a folder's entries or an operation's sources goes through `work::pass`, inline at or under the size and as a task above it | The token and the scan see calls, not loops, and the watchdog sees only stops over 200 ms; a 60 ms pass over 100,000 rows is a wait for what should be instant | Each feature decides again whether its loop is too long, and the next pass over 100,000 rows ships unseen |
+| The collections a pass walks are shared snapshots (`Arc<[…]>`) that offer whole-collection iteration only through `work::pass` or with the `OffThread` token | A task must take them without copying, and the compiler then refuses a long loop on the window's thread | A clone of 100,000 rows on the window's thread, or a loop the scan cannot see |
+| A selection whose taken-file filter is a task has its own state, which unhighlights nothing until the answer arrives; the answer is filtered again if the taken entries changed meanwhile | `Selection::Reading` already means a gozlerd request, and `deselect` maps it to the row-by-row pass; the taken entries can change while the task runs | About 300,000 messages for a whole-selection delete, or a command acting on files a running operation has taken (window rule 10) |
+| A pass that sends messages to a control stays on the window's thread in a one-message form or bounded by `SELECTION_LIMIT` | Only the thread that owns a control may send it messages | A row-by-row pass over 100,000 rows, as before 730f93a's `Deselect::All` |
+| `Saved::new` stays in `Queue::submit` on the caller's thread; a write of `operations.json` waits for its read | The run's `started` time and choice exist only in the `Start` the run thread takes, and `Queue::close` must find every running operation saved (D19); a write before the read replaces the file with only the new operations | Continue and Skip treat partial copies as files that were there before, or interrupted operations are lost |
+| The waits after the window hides are listed and bounded: `ui.json`, `operations.json`, a stopped export's removal of its partial file, and telling each drag source that its drop ended, for at most a few seconds | Each keeps a promise in DESIGN.md; an unbounded wait at exit is a hang a person sees as a program that will not end | Lost settings or operations, a partial export left behind, or a frozen 7-Zip holding Exit forever |
 | Unchanged sets are removed early, the File operations window first | Its card is set every 500 ms during a copy, the one blink on every update | The blink stays until the maintenance stages |
 | Setters read the control; no saved copy of what was set, no `Screen` type | Controls change themselves, icons depend on DPI and colours, pages are made anew | The window shows a value the model does not hold, or never sets one after a DPI or theme change |
 | The inspector's file icon, the shield and the marquee are kept beside their control in `Controls` | They cannot be read back: a new icon copy each time, no getter for `BCM_SETSHIELD` or `PBM_SETMARQUEE`; the wrappers are `Copy` handles | Sets on every refresh, or a restarted marquee |
@@ -174,8 +186,9 @@ this area".
 
 - **`core::work` holds the rules,** with no Win32 type, tested on Ubuntu:
   the kind of each task, when a task counts as slow (one constant, a few
-  seconds without an answer or progress), what then happens, and the one
-  captions function that words "Waiting for …".
+  seconds without an answer or progress), what then happens, the inline
+  size of "Passes over many items" below, and the one captions function
+  that words "Waiting for …".
 - **`win::work` is the only code that starts a thread** for a task. It
   gives the task an `OffThread` token, which is `!Send`, so it cannot
   reach the window's thread, a cancel token, and a registration that lets
@@ -198,6 +211,49 @@ The kinds of task:
 | Background, nobody watching | the status, folder sizes, drive labels and free space, the update check | It gives up silently after its limit and runs again at the next natural moment |
 | Changing files | a copy, move, delete or export | Never cancelled by another action; only its Cancel ends it. The engine (`gozler-fileops`) does the work; the owner shows its slowness in the card and the status bar when its progress stops |
 
+A task reports progress when it can, but the owner, not the task,
+notices that a task is slow: it times how long each task has gone
+without an answer or progress, because a task blocked inside a call
+cannot report that it is blocked.
+
+**Passes over many items.** Time is not the only way to stop the window:
+a pass over 100,000 selected rows takes 58–80 ms with no call that waits.
+So the owner has the size as it has the time. `core::work` holds the
+inline size, how many items a pass may walk on the window's thread, set
+by one measurement so that a pass at that size takes a few milliseconds.
+Every pass over the selection, the fetched rows, a folder's entries or an
+operation's sources goes through `work::pass(items, f)`, which runs `f`
+inline at or under the size and as a task above it, and delivers the
+answer the same way in both cases: as an effect of the current update, at
+once or on a later wake. A feature has one code path and never chooses.
+
+- The collections a pass walks are shared snapshots: `Selection::Files`
+  holds an `Arc<[ResultItem]>`, and a filter yields a new one, because a
+  task must take them without copying 100,000 rows on the window's
+  thread. Their type offers `len`, `get` and the range of rows on screen,
+  which `LVN_GETDISPINFO` and the cell fill need, and iteration over the
+  whole collection only through `work::pass` or with the `OffThread`
+  token, so the compiler refuses a long loop on the window's thread and
+  the scan needs no loop detector. A panel's entries change in place
+  with each disk event, so while a task holds a panel's snapshot, the
+  panel's changes wait for the task's answer, in the order its moment
+  counter and `ReadChange` already keep; otherwise the next change would
+  copy the whole listing on the window's thread inside `Arc::make_mut`.
+- A pass that sends messages to a control cannot leave the thread that
+  owns the control. It takes a one-message form where Windows offers one,
+  as `Deselect::All` clears every highlight with one `LVM_SETITEMSTATE`
+  (730f93a), and is otherwise bounded by `SELECTION_LIMIT`. This is the
+  one place where the rule stays per control.
+- While a pass runs as a task, the data it works on is in a state of its
+  own, so nothing acts on the old data meanwhile. For the selection's
+  taken-file filter, that state unhighlights nothing, a command waits for
+  the answer (`MainWindow::run` settles a pending selection before it
+  enables a command, so no command acts on files a running operation has
+  taken, window rule 10), and an answer filtered against older taken
+  entries than the current ones is filtered again. A delete or move of
+  Search's whole selection needs no filter: the window knows the
+  selection loses every file.
+
 Scrolling, opening Settings, switching to the other panel or opening the
 Viewer cancel nothing. A call that Windows does not let go of is cut
 loose and its thread released, never waited for. There is never a modal
@@ -217,9 +273,21 @@ The window's thread runs the message loop and nothing that can wait:
   or out, never across a read, a write or a call; a channel is preferred.
 - **At exit** the window hides, every task is cancelled, and the threads
   are released through the `OpenWaker` flag, not joined. The waits after
-  the window is hidden are the final writes of `ui.json`, which keeps the
-  window's place and columns, and of `operations.json`, which lets the
-  operations continue at the next start.
+  the window is hidden are bounded, each keeping a promise of DESIGN.md:
+  the final writes of `ui.json`, which keeps the window's place and
+  columns, and of `operations.json`, which lets the operations continue at
+  the next start; a stopped export's removal of its partial file, bounded
+  because the export checks its cancel token after each page; and telling
+  each drag source that its drop ended (`wait_for_sources`), which waits
+  for the source's process and so ends after a few seconds with one log
+  line, so a frozen source such as a stuck 7-Zip no longer holds Exit
+  forever.
+- **Exit no longer waits for a permission prompt.** Today `WM_DESTROY`
+  joins the Include save and the fix thread, which wait for the prompt's
+  answer. With the owner, Exit ends at once; an elevated helper the
+  person allows still runs to its end on its own, and the Include save's
+  temporary file, which its thread removes after the helper ends, can be
+  left behind.
 
 What enforces it, stated as what each part catches:
 
@@ -235,7 +303,10 @@ What enforces it, stated as what each part catches:
   `join()` with no arguments, `thread::sleep`, a `recv()` with no
   timeout, and `Command` or `Child::wait`; a named list of waiting Win32
   calls (`ShellExecuteW`, `SHOpenFolderAndSelectItems`,
-  `GetVolumeInformationW`, the registry calls, `OpenClipboard`); and a
+  `GetVolumeInformationW`, the registry calls, `OpenClipboard`,
+  `Shell_NotifyIconW`, which waits for Explorer's tray and fails only
+  after a timeout when Explorer hangs), seeded by one pass over `win` for
+  calls that reach another process; and a
   named list of other crates' waiting functions
   (`gozler_client::folder_is_missing`, `gozler_fileops::Queue::new` and
   `close`). It also fails on `thread::spawn` or `thread::Builder` outside
@@ -245,7 +316,7 @@ What enforces it, stated as what each part catches:
   their reasons: the panic hook's join, which keeps the window's thread
   from dispatching while its state is half changed (window rule 11), the
   keyboard hook's thread, which needs its own message loop, start-up
-  before the window exists, and the final writes after the window
+  before the window exists, and the bounded waits after the window
   hides. `core` holds no file call: `core` builds and parses the
   settings text, `app` reads the file at start-up and a task writes it.
 - **The watchdog** catches the rest. A watchdog thread posts a heartbeat
@@ -259,8 +330,9 @@ What enforces it, stated as what each part catches:
   waiting is told from working, and the message in progress, from a
   stack that the window procedure wrappers in `win::window` and
   `win::dialog` push and pop around each message of a Gozler window or
-  dialog, whichever loop dispatched it, so a nested loop never overwrites the outer record. A message to a
-  system dialog leaves the record of the message that opened it on top,
+  dialog, whichever loop dispatched it, so a nested loop never
+  overwrites the outer record. A message to a system dialog leaves the
+  record of the message that opened it on top,
   which is the one to name.
   It records message IDs and control IDs or classes, never window text,
   which holds typed searches and file names. Only the watchdog thread
@@ -268,9 +340,60 @@ What enforces it, stated as what each part catches:
   folder or `--data-dir`. A line names the message, not the slow call;
   the issue names the call after reading the code.
 
-The window's own work, such as making every control at start-up (#98), is
-not background work; it is tracked in `window-responsiveness.md`, and the
-watchdog finds it too.
+### The window's own work
+
+Some slow work is not background work: it handles the controls, or it is
+a pass over many items. The rules above cover it; what is measured
+today, and what happens to each:
+
+**Fixed in stage 1:**
+
+- The File operations window's first open, 536 ms, in `Window::open`
+  (#110). It was not sampled, so one sampled run finds the slow step
+  first; the fix follows from it.
+- A delete or move of 100,000 selected entries (#107):
+  - `selected_paths`, about 15 ms when the command runs, and a panel's
+    `chosen()`, 67 ms, go through `work::pass`. `transfer` builds
+    `chosen()` twice today, through `selected_paths` and again in
+    `transfer_start`, which needs only the count and the single entry
+    (`chosen_count`), so the second build goes first and the rest is
+    measured again.
+  - `retain_untaken`, 58–80 ms at 100,000, which `SearchList::drop_taken`
+    runs on the wake after the taken entries change and `Model::select`
+    on every selection read while they are not empty, goes through
+    `work::pass` with the selection's own state of "Passes over many
+    items". The answer sets `Selection::Files` directly; it does not run
+    `Model::select`, which would filter on the window's thread again.
+  - `Saved::new`, about 20 ms, stays in `submit`, as the decisions table
+    says.
+- Copying 100,000 paths, 59 ms (#91): the clipboard block is built by
+  `work::pass`. Reading the selected positions from the list stays, a
+  message pass bounded by `SELECTION_LIMIT` (15.6 ms at 100,000).
+- A resize step with 100,000 selected, 33–52 ms: `layout` calls
+  `show_panel` for both panels, and `Panel::counts` walks every selected
+  entry each time. The counts go through `work::pass` and are kept until
+  the panel's selection or entries change.
+- An ended delete or move scans every fetched row (#104), through
+  `work::pass`.
+
+**Only on evidence,** when the watchdog's log or a measured run shows a
+person waits, each in one sentence until then:
+
+- The window waits 59–183 ms while Windows creates the folder picker.
+- The first paint of `C:\Windows\Fonts` (387 entries, 104 ms) spent 37 ms
+  filling cells, inferred from the code to be icon lookups; not measured.
+- A panel list's whole paint takes 28–30 ms, of which Gozler's cell
+  filling is 0.65 ms (#110); one run turns off the list's settings in
+  turn to find the cost.
+- A 2,000-character Cyrillic path with a path term costs 49 ms a paint
+  (#120).
+
+Measured as cheap, so not listed: saving `ui.json` (2 ms, but it moves as
+a disk write), compiling a regex (0.75 ms) and the inspector's sums
+(0.5 ms at 100,000), in
+`git show f6a8e7e:docs/plans/window-responsiveness.md`. Of #126's
+benchmarks, stage 1's measured run takes the submit of 100,000 sources;
+the rest of #126 stays in that issue.
 
 ### Setters that read the control
 
@@ -306,8 +429,10 @@ animation. The wrappers are `Copy` handles, so each window's `Controls`
 struct keeps the last such value beside the control, made and dropped
 with it.
 
-A window inside its own `draw_once_after` has no `WS_VISIBLE` bit, so no
-setter reads that window's visibility there.
+A control that leaves `WM_SETREDRAW` to `DefWindowProc`, such as a
+static, loses its `WS_VISIBLE` bit inside its own `draw_once_after`,
+while a list view keeps it (tested), so no setter reads a window's
+visibility inside its own `draw_once_after`.
 
 ### What a refresh never sets
 
@@ -315,9 +440,10 @@ Some values belong to the control or the person, and a refresh never sets
 them: the selection, the focus, the scroll position, the text a person
 types, and the column widths and order, which a person drags. They change
 only through an effect: selecting rows, moving the focus, setting the
-search box's text for Clear, filling the columns. The list's item count
-is an effect too, because setting it also redraws every row, which a new
-search with the same total needs.
+search box's text for Clear, filling the columns. Filling sets all of a
+list's changed widths inside one `draw_once_after` on that list. The
+list's item count is an effect too, because setting it also redraws
+every row, which a new search with the same total needs.
 
 A value that the person changes and the model then decides, such as a
 check box, a toolbar check button or the Match: list, is set from the
@@ -376,7 +502,9 @@ The rules around the steps:
 - **The main window.** Its model goes through this loop. A notification
   that only records state a control owns, such as each `LVN_ITEMCHANGED`,
   which records the told rows and posts one `Message::Deferred`, is not an
-  update; the loop runs at most once for each message it handles.
+  update. Each message it handles runs one update, not one per
+  notification; an effect's own `Accepted` and a repeated refresh run
+  inside that update.
 - **Settings, the File operations window and each Viewer** keep their own
   state and their own small loop of the same shape: Settings edits its
   draft (window rule 1), the File operations window words what the queue
@@ -427,7 +555,9 @@ Windows' own means only:
   because a label, a button, a toolbar and a status bar part draw again on
   every set, also of an unchanged value.
 - **A control is moved only when its rectangle changes,** all of a
-  layout's moves in one `DeferWindowPos` batch, every control with
+  layout's moves in one `DeferWindowPos` batch for each parent, because
+  a batch takes only windows of one parent (`place_filters` keeps its
+  own for the filter pane's children), every control with
   `WS_CLIPSIBLINGS` and every parent with `WS_CLIPCHILDREN`, as now.
 - **`WM_SETREDRAW` only around a change that would draw one control
   several times,** such as the list's resize step or a language switch.
@@ -469,8 +599,6 @@ cite rules 1 to 13 by number:
     shows for one representative state, given fixed measures, or the
     effects of an update in their order, against literals the scenario
     predicts. No test needs a window.
-22. **A file over 2,500 lines is split:** `core` and `app` along their
-    areas, `win` by control, test modules included in the count.
 
 ## Stages
 
@@ -513,10 +641,13 @@ a regression in focus, selection or speed, which their proofs watch.
      kept for each refresh;
    - the clipboard open (#144): retried on a short timer, not a sleep;
    - `is_paired`, which hashes gozlerd.exe; the registry read and write
-     for start at sign-in; `Queue::new`'s read of `operations.json`; the
-     drop's `GetData` from another process; and `EmptyClipboard`'s
-     message to another process: each moved onto the owner, or shown to
-     return at once, with the evidence in the stage's report;
+     for start at sign-in; `Queue::new`'s read of `operations.json` (17.6
+     MB for 100,000 sources), and if it moves, a write of the file waits
+     until the read has ended, because a write before it would replace
+     the file with only the new operations; the drop's `GetData` from
+     another process; and `EmptyClipboard`'s message to another process:
+     each moved onto the owner, or shown to return at once, with the
+     evidence in the stage's report;
    - the locks the window takes that a thread also holds: the
      operations queue's, which the File operations window's poll takes,
      and its write lock, which `Queue::close` waits on while a queue
@@ -524,6 +655,11 @@ a regression in focus, selection or speed, which their proofs watch.
      shown to be held only to copy a value, or replaced by a message,
      with the evidence in the stage's report; `Queue::close` runs only
      after the window hides.
+4. `work::pass`, its inline size from one measurement, and the snapshot
+   types of "Passes over many items" for the selection and a panel's
+   entries, a panel's changes waiting while a task holds its snapshot;
+   then the items under "Fixed in stage 1" in "The window's own
+   work".
 
 **Proof:**
 - `core` tests of the rules, with fixed times: a new task in the same
@@ -531,6 +667,12 @@ a regression in focus, selection or speed, which their proofs watch.
   that changes files is never cancelled by another action; a task the
   person waits for shows Cancel only after the slow constant; background
   work gives up silently; nothing is delivered after the window closes.
+- For item 4, `core` tests that `work::pass` runs inline at the inline
+  size and as a task above it and delivers the same answer both ways;
+  that a filter answer for a selection that is no longer current changes
+  nothing; and that an answer filtered against older taken entries is
+  filtered again. One measured run of the first open and of a delete of
+  100,000 selected entries, reported beside the figures above.
 - The After install items in `ui-after-install.md`: a Location on a
   sleeping disk; Enter, F3 and Properties on a share that stopped
   answering; a pulled USB drive; a clipboard another program holds;
@@ -541,7 +683,9 @@ a regression in focus, selection or speed, which their proofs watch.
 
 A move before the stage that changes what a person sees (AGENTS.md:
 restructuring is its own stage). The one change of behavior is at exit,
-because the owner joins no task:
+because the owner joins no task: Exit no longer waits for an open
+permission prompt, as "Nothing stops the window" says, which reverses
+what #126's check 2 expects today.
 
 1. The threads of today move onto the owner, each with the rules it has
    now: the requests, the panels' folder threads, the Viewer's reader,
@@ -549,16 +693,21 @@ because the owner joins no task:
    check, the service check, the fix thread, Indexed folders, the
    clipboard and drops.
 2. Joins go with them: at exit the window hides, cancels every task and
-   releases the threads through the `OpenWaker` flag; only the final
-   writes of `ui.json` and `operations.json` are waited for, after the
-   window is hidden.
+   releases the threads through the `OpenWaker` flag; only the bounded
+   waits of "Nothing stops the window" follow, after the window is
+   hidden: the final writes of `ui.json` and `operations.json`, a stopped
+   export's removal of its partial file, and telling each drag source,
+   for a few seconds at most.
 3. The scan test, with its listed exceptions and the `…_thread` and
    `work` modules; files that mix window-thread code and thread code
    split.
 
-**Proof:** the existing tests pass unchanged, and the scan test passes
-with only its listed exceptions; its first run, before item 1 ends,
-lists what is left. In `ui-after-install.md`: closing the window during
+**Proof:** no existing test covers the moved threads' cancel, wake and
+exit paths, so passing tests prove only that nothing else broke. The
+proof is a code review that traces each moved thread's cancel, wake and
+exit against the rules it had, and the scan test, which passes with only
+its listed exceptions; its first run, before item 1 ends, lists what is
+left. In `ui-after-install.md`: closing the window during
 a search, a folder reading on a share that stopped answering and a copy,
 and the window's place kept at the next start.
 
@@ -585,7 +734,11 @@ and the window's place kept at the next start.
 1. One screen recording before any change: a border drag in both modes,
    a splitter drag, typing a search, a mode switch, a status update and a
    copy with the File operations window open. It runs once as part of the
-   stage and is saved for the owner to review later.
+   stage, never as a loop, and is saved for the owner to review later.
+   The border drag is driven through the window's own handlers between
+   `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`, because a drag by
+   `SetWindowPos` alone skips the path a person's drag takes
+   (`column_sizing.is_dragging()`), and real input needs the foreground.
 2. The setters that set every time compare first: `Hwnd::set_text`,
    button captions, `Toolbar::set_text`, the status bar's and the
    tooltips' tips, `ListView::set_header`, `Edit::set_cue`,
@@ -594,20 +747,26 @@ and the window's place kept at the next start.
    on each poll.
 3. Only if the first recording, at normal speed, shows a flash a regular
    user would see:
-   - toolbar blink: `TBSTYLE_EX_DOUBLEBUFFER`, with screenshots in light,
-     high contrast and at 150 % DPI;
+   - toolbar blink: `TBSTYLE_EX_DOUBLEBUFFER`, with its look in light,
+     high contrast and at 150 % DPI in `ui-after-install.md`, because
+     switching them changes the owner's whole system;
    - the list flashing on a resize step: the list moves with the other
      controls, only its column widths stay inside its `draw_once_after`,
      whose redraw for the list drops `RDW_ERASE` but keeps `RDW_FRAME` and
      `RDW_ALLCHILDREN`; then the whole-window `InvalidateRect` after a
      layout goes, with any area the window paints itself named; and if
      the horizontal scroll bar then flashes on a narrowing drag, the
-     columns are fitted before the move when the list narrows;
+     columns are fitted before the move when the list narrows, a panel's
+     widths taken from the layout's planned rectangle because
+     `set_panel_widths` reads the list's client size, which changes only
+     with the move;
    - a half-drawn page on a Viewer scroll: its area paints through
      `BeginBufferedPaint`.
 
-**Proof:** the same recording after the stage. A frame that shows a
-cleared, half-drawn or doubled control is a defect of the stage.
+**Proof:** the same recording after the stage, which the implementer
+judges frame by frame; the owner's later review is a check, and the
+stage does not wait for it. A frame that shows a cleared, half-drawn or
+doubled control is a defect of the stage.
 
 ### Stage 5: state types (maintenance)
 
@@ -657,8 +816,9 @@ A move, with no change of behavior or of what an update returns:
    `win/controls.rs` by control.
 
 **Proof:** the existing tests pass with only their paths and names
-changed. Done when no area's field is in `Model` or `MainWindow` and no
-file breaks rule 22.
+changed. Done when no area's field is in `Model` or `MainWindow`, no file
+of `core` or `app` is over 2,500 lines with its test module, and `win`
+is split by control.
 
 ### Stage 7: what an update returns (maintenance)
 
@@ -673,7 +833,8 @@ file breaks rule 22.
    step that opens the first result; `Message` clears the list's selection
    and count and cancels its `Selection` request; `Rows` and
    `SelectionRead` set the count or redraw rows and fetch the rows in
-   view, and `Rows` for Search's list also fills around the first rows; `Status` reads the window's memory; `Fix`, `TotalCommander` and
+   view, and `Rows` for Search's list also fills around the first rows;
+   `Status` reads the window's memory; `Fix`, `TotalCommander` and
    `IncludedCount` post to Settings; `Settings` replaces the menu bar and
    updates the tray icon; `ExportFailed` queues a `ModalStep`;
    `Searching` starts the searching timer; `Mode` starts or stops the
@@ -715,12 +876,20 @@ change.
 
 ### Stage 9: the docs
 
-DESIGN.md "The window" takes rules 14 to 22, the owner for background
-work, the watchdog, the three steps and the areas; window rule 5 is
-rewritten for threads released through the `OpenWaker` flag instead of
-joined; its Painting item takes the painting rules; the paragraph on the
-rejected diffed view says that the controls hold what they show and the
-setters read it. This plan is deleted.
+DESIGN.md "The window" takes rules 14 to 21, the owner for background
+work with its inline size and `work::pass`, the watchdog, the three
+steps and the areas; window rule 5 is rewritten for threads released
+through the `OpenWaker` flag instead of joined; window rule 4 lists the 8
+kinds of request purpose the code has, `FolderSizes` among them, not 7;
+its Painting item takes the painting rules; the paragraph on the rejected
+diffed view says that the controls hold what they show and the setters
+read it. The sentences this plan makes false are rewritten: "Shared
+code", that `core`'s only filesystem calls load and save the settings
+file; "Requests", that Exit joins every request thread; "The selection",
+for the filter's own state and the rows unhighlighted when its answer
+arrives; and the drag sources at exit, which are told for a few seconds
+at most. The bullet in `AGENTS.md` "Writing code" that points at this plan
+points at DESIGN.md instead. This plan is deleted.
 
 ## Not in this plan
 
@@ -736,8 +905,9 @@ setters read it. This plan is deleted.
   instead.
 - No crate of its own for `core`, unless a measured rebuild of an edit to
   `app` shows a large saving.
-- The start-up cost of making every control before the window shows
-  (#98) belongs to `window-responsiveness.md`; stage 6 makes it easier.
+- The start-up cost of making every control before the window shows,
+  and a Settings page's first show (#98), stay in that issue; stage 6
+  makes them easier, because an area then makes its own controls.
 - The 2-second status poll (#139) is a protocol change, outside this
   plan.
 - No feature and no change a person can see, other than waits moved off

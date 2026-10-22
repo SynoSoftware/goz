@@ -1,6 +1,6 @@
-//! Timings of the window-thread work that `docs/plans/window-responsiveness.md`
-//! ranked, as `git show 2c66b40:docs/plans/window-responsiveness.md` numbers
-//! the ranks, on synthetic rows, without a window, a daemon or a disk. Each test
+//! Timings of the window-thread work that
+//! `git show 2c66b40:docs/plans/window-responsiveness.md` ranked and
+//! numbered, on synthetic rows, without a window, a daemon or a disk. Each test
 //! is ignored, because only an optimized build gives meaningful times:
 //! `cargo test --release --workspace timing -- --ignored --nocapture
 //! --test-threads=1`. A time is the median of 15 runs after one warm-up.

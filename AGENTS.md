@@ -102,10 +102,22 @@ responsibly resolve yourself.
   behind a safe function. `gozler-ui` keeps its Win32 `unsafe` in its `win`
   module the same way. The daemon's few allocator and pipe-constructor calls
   are the only `unsafe` elsewhere.
-- **Keep the async runtime free.** Tokio serves the pipe. Blocking calls and
-  heavy work go to their own thread or `spawn_blocking`, as the journal tail and
-  the result encoder do, so one slow volume or one broad query cannot stall
-  other clients.
+- **Keep the daemon's async runtime free.** Tokio serves the pipe. In
+  `gozlerd`, blocking calls and heavy work go to their own thread or
+  `spawn_blocking`, as the journal tail and the result encoder do, so one
+  slow volume or one broad query cannot stall other clients.
+- **Never stop the window: slow work runs in the background, through one
+  owner.** In `gozler-ui`, a call that can wait on a disk, the network,
+  the service or another program, and a pass over more items than the
+  owner's inline size, run through the one owner for background work,
+  which decides cancelling, what a slow task shows and what happens at
+  exit. A wait written without those rules is how the window freezes on a
+  dead share: the freezes still open are calls nobody moved to a thread,
+  and each thread somebody did write carries its own copy of the rules.
+  Until `docs/plans/window-architecture.md` builds the owner, put such
+  work on a thread the way the nearest existing code does, never on the
+  window's thread. Messages to a control stay on the window's thread,
+  which owns it.
 - **Count allocations.** The index holds millions of entries, so a byte per
   entry or an allocation per hit is a real cost. Borrow instead of cloning on
   hot paths and size buffers up front. Measure with the criterion benches in
