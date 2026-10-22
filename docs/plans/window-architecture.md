@@ -604,7 +604,7 @@ cite rules 1 to 13 by number:
 
 One implementer keeps its context through the stages and fixes the
 review's findings; one reviewer reads each stage and reports. Each stage
-is its own commits and lands on `main` with `check.ps1` green. A defect
+is its own commits and lands on `main` with `build.ps1` green. A defect
 found on the way is filed, or fixed in its own commit when it is small.
 Stages 1 to 4 change what a person feels; stages 5 to 9 are maintenance,
 change nothing a person should notice, and come after them. Their risk is

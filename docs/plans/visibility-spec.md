@@ -286,7 +286,7 @@ shows the files in folders you can open, and folder sizes only if you see
 every file. The users and groups that `gozlerd see-every-file` lists see
 every file." The quick help does not
 change. `docs/WRITING.md` governs the final wording.
-Checked by: plan, the help tests in `check.ps1` (stage 2b).
+Checked by: plan, the help tests in `build.ps1` (stage 2b).
 
 ## Beside the Include page
 

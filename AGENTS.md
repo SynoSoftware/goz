@@ -122,7 +122,7 @@ responsibly resolve yourself.
   entry or an allocation per hit is a real cost. Borrow instead of cloning on
   hot paths and size buffers up front. Measure with the criterion benches in
   `crates/gozler-core/benches` before you claim a speed-up: run
-  `pwsh ./check.ps1 -Bench <name filter>` once before your change and once
+  `pwsh ./build.ps1 -Bench <name filter>` once before your change and once
   after, because criterion compares each run against the run before it, which
   may be another agent's. On Windows the benches count the bench thread's CPU
   cycles, not wall time, because other work on this machine moves wall-clock
@@ -132,7 +132,7 @@ responsibly resolve yourself.
 
 ## Tests
 
-Every test adds compile time to each `check.ps1` run and is code the next
+Every test adds compile time to each `build.ps1` run and is code the next
 change must keep passing, so a test earns its place by the failure it watches.
 
 - **Name the failure first:** what breaks, what a script or user would see,
@@ -243,34 +243,34 @@ instructions differ.
 
 Builds share the machine with interactive work and other agents, and a first
 build compiles every dependency. A change only to Markdown or `ci.yml` needs
-no build. A change to `check.ps1` is verified by running it.
+no build. A change to `build.ps1` is verified by running it.
 
 Build when the change is reviewed: you have read the final diff as its next
 maintainer, traced each changed behavior from its callers, and named the
 failure each new test watches. Build earlier only when your next edit depends
 on the answer, such as `-Test <name filter>` on a test that reproduces a bug
 before you fix it, or the first of two `-Bench` runs. Build only through
-`check.ps1`; it owns the cargo commands and their priority, and says why
+`build.ps1`; it owns the cargo commands and their priority, and says why
 `RUSTFLAGS` stays unset.
 
-1. Run `pwsh ./check.ps1`. You are done when it is green.
+1. Run `pwsh ./build.ps1`. You are done when it is green.
 2. Fix every error that run reported before you run it again. To recheck a
-   test fix, run `pwsh ./check.ps1 -Test <name filter>`, then the full script.
+   test fix, run `pwsh ./build.ps1 -Test <name filter>`, then the full script.
 3. Stop and report instead when the same error returns after your fix, or when
    the error is in a file that holds changes you did not make, because another
    session may be editing it.
 
-`check.ps1` runs the Windows half of CI's test job. CI runs on pushes to
+`build.ps1` runs the Windows half of CI's test job. CI runs on pushes to
 `main` and on pull requests: it also compiles on Ubuntu, where the
 `cfg(not(windows))` code in `gozler-cli` and `gozler-daemon` is checked, asserts
 `gozler-core`'s dependency allowlist, builds with the minimum Rust version and
-runs cargo-deny. Locally, the full CI set passes when `check.ps1` is green and
+runs cargo-deny. Locally, the full CI set passes when `build.ps1` is green and
 each of those checks that your change can affect is run or reported as left to
 CI. When you add a dependency and `cargo deny --version` answers, also run
 `cargo deny check advisories bans licenses sources`. Use the tools already
 installed; the owner installs new ones.
 
-Report, in this order: `check.ps1` green and the number of full runs, or the
+Report, in this order: `build.ps1` green and the number of full runs, or the
 step it stopped at; each
 `-Test` and `-Bench` run; each new test with the failure it watches; each CI
 check left to CI that your change can affect.

@@ -20,7 +20,7 @@ Every check reports "passed", "failed" or "not run" with what it saw.
 param(
     # The window to test. The gozler.exe beside it lists the fixture folder.
     [string] $Exe = (Join-Path $PSScriptRoot '..\..\target\release\gozler-ui.exe'),
-    # Set when -Exe was built with check.ps1 -Release -Pseudo; the
+    # Set when -Exe was built with build.ps1 -Release -Pseudo; the
     # pseudo-language checks run only then.
     [switch] $Pseudo,
     # A folder for the screenshots; none are taken without it.
@@ -1630,7 +1630,7 @@ try {
             [void](Close-Window $window)
         }
         else {
-            Report 'pseudo-language' 'not run' 'run with -Pseudo on a check.ps1 -Release -Pseudo build'
+            Report 'pseudo-language' 'not run' 'run with -Pseudo on a build.ps1 -Release -Pseudo build'
         }
     }
 
@@ -2809,7 +2809,7 @@ try {
         $switchChecks = 'Language switches at once and keeps the place', 'a parser message in the pseudo-language',
         'the chosen language after a restart', 'the Language menu and list show one choice'
         if (-not $Pseudo -or -not $filesListed) {
-            $why = $Pseudo ? 'gozler did not list the fixture' : 'run with -Pseudo on a check.ps1 -Release -Pseudo build'
+            $why = $Pseudo ? 'gozler did not list the fixture' : 'run with -Pseudo on a build.ps1 -Release -Pseudo build'
             foreach ($name in $switchChecks) { Report $name 'not run' $why }
         }
         else {

@@ -843,4 +843,4 @@ is in the engine's checks of [After install](ui-after-install.md).
 - Stage D's measurements are in `docs/BENCHMARKS.md`, and each decision they
   test (D2, D7, D8, D9, D10) is confirmed or changed with the numbers beside
   it.
-- `check.ps1` is green.
+- `build.ps1` is green.

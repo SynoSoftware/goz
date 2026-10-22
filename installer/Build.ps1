@@ -45,7 +45,7 @@ try {
         Where-Object name -eq 'gozler-daemon'
     if (-not $package) { throw 'cargo metadata did not list gozler-daemon.' }
 
-    # Below normal, as in check.ps1, so the build does not slow interactive
+    # Below normal, as in build.ps1, so the build does not slow interactive
     # work. RUSTFLAGS would replace the static CRT flag in .cargo/config.toml,
     # and the installed service would then need vcruntime140.dll.
     $process.PriorityClass = 'BelowNormal'

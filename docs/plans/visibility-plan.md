@@ -28,7 +28,7 @@ changes.
   users of a shared PC also carries the page where an administrator changes
   who sees every file.
 
-Each stage is one or more commits, each of which passes `check.ps1`
+Each stage is one or more commits, each of which passes `build.ps1`
 (`AGENTS.md`, "Before you finish"), with the tests that "Tests" names for it.
 
 ## What the code does now
@@ -803,17 +803,17 @@ and each design point that an answer changes is changed here.
 
 | Stage | Builds | Size | Starts | Done when |
 |---|---|---|---|---|
-| 1a | "Descriptor IDs", "The journal", `read_folder_descriptor` and `Folder::descriptor`, the ReFS build's reads, "Status and memory", `PROTO_VERSION` 10 | about 500 lines | at once | `check.ps1` passes with T2 and T4 |
-| 1b | "The NTFS build", "NTFS metadata folders", and with the sharing `read_folder_security` and `record_usn` | about 350 lines, or 150 without the sharing | after stage 0 item 1, scheduled last in stage 1 | `check.ps1` passes with T1, T3 and T9 when the sharing stays, and with T4's metadata case when the predicate stays |
-| 2a | "The caller" without the account names, "Who sees what", "The filter", "Folder sizes" with the window's empty Size cell, "Logging", the client's identification level, the stored list's reader | about 850 lines | at once | `check.ps1` passes with T5 to T8, T11 and W1 to W3; agent check A4 |
-| 2b | `gozlerd see-every-file`, `install --see-every-file`, the account names, the writer, the setup's page, the help note | about 300 lines | at once | `check.ps1` passes with T10 and the help tests |
+| 1a | "Descriptor IDs", "The journal", `read_folder_descriptor` and `Folder::descriptor`, the ReFS build's reads, "Status and memory", `PROTO_VERSION` 10 | about 500 lines | at once | `build.ps1` passes with T2 and T4 |
+| 1b | "The NTFS build", "NTFS metadata folders", and with the sharing `read_folder_security` and `record_usn` | about 350 lines, or 150 without the sharing | after stage 0 item 1, scheduled last in stage 1 | `build.ps1` passes with T1, T3 and T9 when the sharing stays, and with T4's metadata case when the predicate stays |
+| 2a | "The caller" without the account names, "Who sees what", "The filter", "Folder sizes" with the window's empty Size cell, "Logging", the client's identification level, the stored list's reader | about 850 lines | at once | `build.ps1` passes with T5 to T8, T11 and W1 to W3; agent check A4 |
+| 2b | `gozlerd see-every-file`, `install --see-every-file`, the account names, the writer, the setup's page, the help note | about 300 lines | at once | `build.ps1` passes with T10 and the help tests |
 | 2c | "Text" | about 150 lines of prose | at once | the text is changed |
 | 3 | the list on Settings > Drives and service ([service settings plan](service-settings.md)) | about 400 lines | at once | as that plan says |
 
 Stage 1 alone changes no answer: nothing reads the column yet.
 
 **Reviews.** Each reviewer reads and reports; the implementer fixes the
-findings and runs `check.ps1` again.
+findings and runs `build.ps1` again.
 
 - **Stage 1 code review**, when 1a and 1b are complete: `index/volume.rs`,
   `index/store.rs`, `index/descriptors.rs`, `read_build_descriptors` and the
@@ -826,7 +826,7 @@ findings and runs `check.ps1` again.
   holds, and the setup's grant. These decide which names each user reads,
   and one wrong path shows every name to every user with no error.
 
-**Release candidate.** Built once with `check.ps1 -Release` after both
+**Release candidate.** Built once with `build.ps1 -Release` after both
 reviews. The owner installs it, runs his after-install script and the After
 install list ("Checks"); an agent then runs its checks. Only the public
 release waits for these.
@@ -837,7 +837,7 @@ Each check names the failure it watches. A check reads the state when it
 tests it and never waits a fixed time; one that waits for a change polls
 until a deadline.
 
-### Tests in `check.ps1`
+### Tests in `build.ps1`
 
 T1 to T11 and W1 to W3 ("Tests"), and the existing help tests.
 
@@ -860,7 +860,7 @@ T1 to T11 and W1 to W3 ("Tests"), and the existing help tests.
   entries and ends with the off-switch line; `gozlerd see-every-file add x`
   fails with the elevation message. Watches: a list that needs elevation to
   read, or a change made without it (spec `V16`).
-- **A4.** `pwsh ./check.ps1 -Bench query` once before stage 2a and once after
+- **A4.** `pwsh ./build.ps1 -Bench query` once before stage 2a and once after
   it. The `query` bench gains one case with a caller that cannot list half
   the folders. For `SeenBy::Everything`, every case is within noise of the
   run before; for the caller, a broad query costs at most 10 % more. If it
