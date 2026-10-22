@@ -13,8 +13,8 @@ use super::layout::{Dpi, Px, Rect};
 use super::panel::same_folder;
 use super::text::{Numbers, Strings, bytes, name_of, without_access_key};
 use gozler_fileops::{
-    Choice, Destination, End, Listed, Operation, OperationId, Outcome, Prepared, Reason, Refusal,
-    Request, RingCounts, Running, SourcesFolder, State, Total,
+    Choice, Destination, End, Listed, NoRoom, Operation, OperationId, Outcome, Prepared, Reason,
+    Refusal, Request, RingCounts, Running, SourcesFolder, State, Total,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -1422,7 +1422,7 @@ fn ended_line(
     let cancelled = match outcome.end {
         End::Complete => false,
         End::Cancelled => true,
-        End::DiskFull | End::Refused(_) => return String::new(),
+        End::DiskFull(_) | End::Refused(_) => return String::new(),
     };
     let failed = (outcome.listed.iter())
         .filter(|listed| matches!(listed.reason, Reason::Failed(_) | Reason::Skipped))
@@ -1703,15 +1703,18 @@ pub(crate) fn failure(
         .collect();
     let count = rows.len() as u64;
     let done = strings.count("file_operations.done", outcome.items, numbers, &[]);
-    let (instruction, body) = match outcome.end {
+    let (instruction, body) = match &outcome.end {
         End::Complete | End::Cancelled => (
             strings.count("file_operations.failed", count, numbers, &[]),
             joined_sentences([done, strings.text("file_operations.failed_body").to_owned()]),
         ),
-        End::DiskFull => (strings.text("file_operations.disk_full").to_owned(), done),
+        End::DiskFull(no_room) => (
+            strings.text("file_operations.disk_full").to_owned(),
+            joined_sentences([no_room_text(strings, numbers, no_room), done]),
+        ),
         End::Refused(refusal) => (
             strings.text("file_operations.not_started").to_owned(),
-            refusal_text(strings, numbers, refusal, windows_text),
+            refusal_text(strings, numbers, *refusal, windows_text),
         ),
     };
     Some(Failure {
@@ -1731,6 +1734,21 @@ pub(crate) fn reports(outcome: &Outcome) -> bool {
 
 fn joined_sentences(sentences: impl IntoIterator<Item = String>) -> String {
     sentences.into_iter().collect::<Vec<_>>().join(" ")
+}
+
+/// Which file found the destination disk full and how much room it needs,
+/// with the free space only when it is less, as [`NoRoom::free`] says why.
+fn no_room_text(strings: &Strings, numbers: &dyn Numbers, no_room: &NoRoom) -> String {
+    let path = text_of(&no_room.path);
+    let name = name_of(&path);
+    let size = bytes(strings, numbers, no_room.size);
+    match no_room.free.filter(|&free| free < no_room.size) {
+        Some(free) => strings.format(
+            "file_operations.disk_full_needs_free",
+            &[name, &size, &bytes(strings, numbers, free)],
+        ),
+        None => strings.format("file_operations.disk_full_needs", &[name, &size]),
+    }
 }
 
 /// Why the engine did not start an operation.
@@ -2000,6 +2018,43 @@ mod tests {
                 r"Copied 3,310 items to D:\Backup · 1 failed or skipped".to_owned(),
                 None
             )
+        );
+    }
+
+    /// A full disk names the file that did not fit, so a copy that stops
+    /// says why the free space the panel shows was not enough. A free space
+    /// read after other files' partial copies were deleted can exceed the
+    /// file's size, and "only" would then be false.
+    #[test]
+    fn a_full_disk_names_the_file_and_the_room_it_needs() {
+        let body = |free| {
+            let outcome = Outcome {
+                end: End::DiskFull(NoRoom {
+                    path: PathBuf::from(r"Y:\backup\image.mrimg"),
+                    size: 198_572_310_960,
+                    free,
+                }),
+                items: 2,
+                bytes: 0,
+                listed: Vec::new(),
+                ring: RingCounts::default(),
+            };
+            let request = Request::Copy {
+                sources: vec![PathBuf::from(r"Y:\backup")],
+                destination: Destination::Folder(PathBuf::from(r"C:\b")),
+            };
+            failure(&english(), &English, &request, &outcome, &|_| String::new())
+                .expect("a full disk reports")
+                .body
+        };
+        assert_eq!(
+            body(Some(117_706_141_696)),
+            "image.mrimg needs 184 GB, but the destination has only 109 GB free. \
+             2 items are done."
+        );
+        assert_eq!(
+            body(Some(200 << 30)),
+            "image.mrimg needs 184 GB. 2 items are done."
         );
     }
 

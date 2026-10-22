@@ -14,13 +14,16 @@ mod ring;
 mod streams;
 
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use gozler_core::layout::FolderEntry;
 use gozler_winfs::{
     Access, CopyOptions, CopySource, Entry, EntryStat, Existing, FileIdentity, Reparse, copy_file,
-    create_folder, open_entry, path_attributes, windows_build,
+    create_folder, free_space, open_entry, path_attributes, windows_build,
 };
 
 use crate::conflicts::{Decision, Rule, Run, Wanted, decide, interrupted_replace};
@@ -28,7 +31,7 @@ use crate::delete::{Disposition, remove};
 use crate::io_threads::IoThreads;
 use crate::listing::{FILES_PER_ITEM, LISTING_WORDS, is_folder, join, kind, list, read_names};
 use crate::names::{Kind, Names};
-use crate::operation::{Listed, Pause, Progress, Reason, RingCounts};
+use crate::operation::{Listed, NoRoom, Pause, Progress, Reason, RingCounts};
 use crate::place::{Placed, Placing, Target, place, remove_replaced};
 use crate::pool::{Lane, Pool};
 use crate::receive::{Selected, listed};
@@ -80,7 +83,7 @@ pub(crate) struct Copied {
     /// In the order they happened.
     pub(crate) listed: Vec<Listed>,
     /// The destination disk filled, which stopped the copy.
-    pub(crate) disk_full: bool,
+    pub(crate) disk_full: Option<NoRoom>,
     pub(crate) ring: RingCounts,
 }
 
@@ -112,8 +115,8 @@ pub(crate) fn copy(
             Work::Selected(source, Arc::clone(&destination), disposition)
         })
         .collect();
-    let full = AtomicBool::new(false);
-    let stopped = || copying.cancel.load(Ordering::Relaxed) || full.load(Ordering::Relaxed);
+    let full = OnceLock::new();
+    let stopped = || copying.cancel.load(Ordering::Relaxed) || full.get().is_some();
     // The buffer exists only while the copy runs, and only when the ring has
     // files to copy, so a first run that the settings give the Windows
     // engine allocates nothing.
@@ -154,7 +157,11 @@ pub(crate) fn copy(
     });
     Copied {
         listed: walk.listed.into_inner().expect("no worker panics"),
-        disk_full: full.load(Ordering::Relaxed),
+        // Read when every file the copy gave up is deleted.
+        disk_full: full.get().map(|no_room| NoRoom {
+            free: free_space(&destination.verbatim).ok(),
+            ..no_room.clone()
+        }),
         ring: RingCounts {
             to_windows: walk.to_windows.into_inner(),
             clones_refused: walk.clones_refused.into_inner(),
@@ -234,7 +241,8 @@ struct Handed {
 
 struct Walk<'a> {
     copying: &'a Copying<'a>,
-    full: &'a AtomicBool,
+    /// The file that found the destination disk full, which stops the walk.
+    full: &'a OnceLock<NoRoom>,
     listed: Mutex<Vec<Listed>>,
     pool: Pool<'a, Work>,
     /// How the destination volume deletes, for the files the ring gives up.
@@ -286,7 +294,17 @@ impl Walk<'_> {
     }
 
     fn stopped(&self) -> bool {
-        self.cancelled() || self.full.load(Ordering::Relaxed)
+        self.cancelled() || self.full.get().is_some()
+    }
+
+    /// Stops the copy, because `file` found the destination disk full. The
+    /// result names the first such file.
+    fn disk_full(&self, file: &File) {
+        let _ = self.full.set(NoRoom {
+            path: PathBuf::from(OsString::from_wide(&file.path)),
+            size: file.size,
+            free: None,
+        });
     }
 
     /// Counts an entry that is not copied, with the `bytes` of its file
@@ -863,7 +881,7 @@ impl Walk<'_> {
         match error {
             ERROR_REQUEST_ABORTED if self.cancelled() => {}
             ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL => {
-                self.full.store(true, Ordering::Relaxed);
+                self.disk_full(file);
                 if let Some(folder) = folder_ref {
                     folder.keep();
                 }

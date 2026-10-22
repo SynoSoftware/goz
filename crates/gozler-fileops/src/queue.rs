@@ -940,7 +940,7 @@ fn run(
         run,
     } = start;
     let rule = Rule { choice, run };
-    let mut disk_full = false;
+    let mut disk_full = None;
     let mut ring = RingCounts::default();
     match work {
         Work::Delete { entries, missing } => {
@@ -990,8 +990,8 @@ fn run(
             Err(error) => failures.push(failure(&path, error.code)),
         },
     }
-    let end = if disk_full {
-        End::DiskFull
+    let end = if let Some(no_room) = disk_full {
+        End::DiskFull(no_room)
     } else if cancel.load(Ordering::Relaxed) {
         End::Cancelled
     } else {
@@ -1095,7 +1095,7 @@ fn run_transfer(
     }
     let mut done = Copied {
         listed,
-        disk_full: false,
+        disk_full: None,
         ring: RingCounts::default(),
     };
     if !copied.is_empty() && !cancel.load(Ordering::Relaxed) {

@@ -741,6 +741,8 @@
     "refused_unreadable": "Hedef klasör okunamıyor. {0}",
     "refused_space": "{0} gerekiyor, ancak hedefte yalnızca {1} boş alan var.",
     "disk_full": "Hedef disk dolu, bu yüzden işlem durdu.",
+    "disk_full_needs": "{0} için {1} gerekiyor.",
+    "disk_full_needs_free": "{0} için {1} gerekiyor, ancak hedefte yalnızca {2} boş alan var.",
     "not_started": "İşlem başlamadı.",
     "reason_skipped": "Atlandı. Hedefte bu adda bir dosya zaten var.",
     "reason_source_kept": "Kaynağında tutuldu, çünkü hedefteki dosya aynı görünüyor.",

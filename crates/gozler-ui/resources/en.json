@@ -741,6 +741,8 @@
     "refused_unreadable": "Can't read the destination folder. {0}",
     "refused_space": "It needs {0}, but the destination has only {1} free.",
     "disk_full": "The destination disk is full, so the operation stopped.",
+    "disk_full_needs": "{0} needs {1}.",
+    "disk_full_needs_free": "{0} needs {1}, but the destination has only {2} free.",
     "not_started": "The operation didn't start.",
     "reason_skipped": "Skipped. A file with this name is already at the destination.",
     "reason_source_kept": "Kept at its source, because the file at the destination looks the same.",

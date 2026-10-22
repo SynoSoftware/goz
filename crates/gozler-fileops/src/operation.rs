@@ -304,13 +304,26 @@ pub enum Wait {
 }
 
 /// How an operation ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum End {
     Complete,
     Cancelled,
     /// The destination disk filled, which would fail every later file too.
-    DiskFull,
+    DiskFull(NoRoom),
     Refused(Refusal),
+}
+
+/// The first file that found the destination disk full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoRoom {
+    /// As the window gave it.
+    pub path: PathBuf,
+    pub size: u64,
+    /// The destination's free space after the copy stopped, or `None` when
+    /// it cannot be read. It can be more than `size` when files copied at
+    /// the same time filled the disk, because the copy deletes what it wrote
+    /// of the files it stops.
+    pub free: Option<u64>,
 }
 
 /// What an operation refuses at prepare, or a copy at its start.

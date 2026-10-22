@@ -328,7 +328,7 @@ impl Ring {
                 return None;
             }
             Placed::Failed(ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL) => {
-                walk.full.store(true, Ordering::Relaxed);
+                walk.disk_full(file);
                 if let Some(folder) = folder {
                     folder.keep();
                 }
@@ -553,7 +553,7 @@ impl Ring {
         // writes it again.
         drop((source, destination));
         if matches!(error, ERROR_DISK_FULL | ERROR_HANDLE_DISK_FULL) {
-            walk.full.store(true, Ordering::Relaxed);
+            walk.disk_full(&handed.file);
         }
         if walk.stopped() {
             if let Some(folder) = &handed.folder {

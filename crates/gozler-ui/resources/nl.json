@@ -741,6 +741,8 @@
     "refused_unreadable": "Kan de doelmap niet lezen. {0}",
     "refused_space": "Er is {0} nodig, maar de bestemming heeft maar {1} vrij.",
     "disk_full": "De doelschijf is vol, dus de bewerking is gestopt.",
+    "disk_full_needs": "{0} heeft {1} nodig.",
+    "disk_full_needs_free": "{0} heeft {1} nodig, maar de bestemming heeft maar {2} vrij.",
     "not_started": "De bewerking is niet gestart.",
     "reason_skipped": "Overgeslagen. Er staat al een bestand met deze naam in de bestemming.",
     "reason_source_kept": "Op de bron bewaard, omdat het bestand in de bestemming hetzelfde lijkt.",

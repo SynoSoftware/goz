@@ -741,6 +741,8 @@
     "refused_unreadable": "No se puede leer la carpeta de destino. {0}",
     "refused_space": "Necesita {0}, pero el destino solo tiene {1} libres.",
     "disk_full": "El disco de destino está lleno, así que la operación se detuvo.",
+    "disk_full_needs": "{0} necesita {1}.",
+    "disk_full_needs_free": "{0} necesita {1}, pero el destino solo tiene {2} libres.",
     "not_started": "La operación no se inició.",
     "reason_skipped": "Omitido. Ya hay un archivo con este nombre en el destino.",
     "reason_source_kept": "Se conservó en su origen, porque el archivo del destino parece el mismo.",
