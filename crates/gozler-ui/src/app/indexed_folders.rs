@@ -21,11 +21,8 @@ use std::time::{Duration, Instant};
 /// sets the check boxes after a click, a slice at a time.
 const WORK_TIMER: usize = 1;
 const WORK_POLL_MS: u32 = 15;
-/// The longest one slice of that work keeps the dialog from the person.
-/// Each tree item that is added or changes its check box raises an
-/// accessibility event, which costs up to a few tenths of a millisecond
-/// while another program listens for them, so `C:\Windows\WinSxS`, with
-/// tens of thousands of subfolders, takes seconds.
+/// The longest one slice of that work keeps the dialog from the person,
+/// because each item costs the tree an accessibility event ([`FolderTree`]).
 const SLICE: Duration = Duration::from_millis(15);
 
 /// One folder the tree shows: a drive's root, as an empty path, or a folder

@@ -2400,6 +2400,11 @@ pub(crate) struct TreeItem(pub(crate) HTREEITEM);
 /// A tree view with a check box on each item, which a dialog's template
 /// declares, such as Indexed folders' folders. Each item carries a number,
 /// which the dialog gives it, and a check box that shows a [`FolderCheck`].
+///
+/// Each item that the tree adds, removes or checks raises an accessibility
+/// event, which costs up to a few tenths of a millisecond while another
+/// program listens for them, so a folder such as `C:\Windows\WinSxS`, with
+/// tens of thousands of subfolders, takes seconds.
 #[derive(Clone, Copy)]
 pub(crate) struct FolderTree(Hwnd);
 
@@ -2440,7 +2445,7 @@ impl FolderTree {
     /// last child of `parent`, or as the last top item. With
     /// `may_have_children`, it shows the button that expands it, before its
     /// children are added. The check box is set with the item, because
-    /// setting it afterwards raises one more accessibility event per item.
+    /// setting it afterwards costs one more accessibility event.
     pub(crate) fn insert(
         self,
         parent: Option<TreeItem>,
@@ -2556,10 +2561,8 @@ impl FolderTree {
 
     /// Takes the tree out of its dialog, which can then close at once, and
     /// removes its items a slice at a time on a timer of this thread before
-    /// it destroys it. Each item's removal raises an accessibility event,
-    /// which costs up to a few tenths of a millisecond while another program
-    /// listens for them, so a folder such as `C:\Windows\WinSxS`, with tens
-    /// of thousands of subfolders, would stop the thread for seconds.
+    /// it destroys it, because removing them all at once would stop the
+    /// thread for seconds.
     pub(crate) fn destroy_later(self) {
         // SAFETY: plain values on a window of this thread; a message-only
         // window is never shown.
