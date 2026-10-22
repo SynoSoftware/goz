@@ -18,14 +18,21 @@ use std::cell::{Cell, OnceCell, RefCell};
 /// The About Gozler dialog (DESIGN.md: C23).
 pub(super) struct About {
     version: String,
+    service: String,
 }
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 impl About {
-    pub(super) fn new(strings: &Strings) -> About {
+    /// `service_version` is the version of the service the window is
+    /// connected to, if any.
+    pub(super) fn new(strings: &Strings, service_version: Option<&str>) -> About {
         About {
             version: strings.format("about.version", &[gozler_core::escompat::version()]),
+            service: match service_version {
+                Some(version) => strings.format("about.service", &[version]),
+                None => strings.text("about.service_unknown").to_owned(),
+            },
         }
     }
 }
@@ -39,6 +46,9 @@ impl DialogProc for About {
                 version.set_font(&font);
                 fonts.push(font);
             }
+        }
+        if let Some(service) = dialog::item(dialog, ControlId::AboutService.id()) {
+            service.set_text(&self.service);
         }
         // The address is not translated, so it is the link's text.
         let address = REPOSITORY.trim_start_matches("https://");

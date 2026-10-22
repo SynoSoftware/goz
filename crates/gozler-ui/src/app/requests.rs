@@ -137,9 +137,16 @@ fn slot(purpose: Purpose) -> usize {
 fn run(ask: Ask, cancel: &CancelToken, reply: &dyn Fn(Outcome)) -> Option<Outcome> {
     let result =
         Client::connect(PIPE_NAME, true, cancel.clone()).and_then(|mut client| match ask {
-            Ask::Status => client
-                .status()
-                .map(|status| Outcome::Status(status, super::local_service::local_service())),
+            Ask::Status => client.status().map(|status| {
+                // The hello names the service as `gozlerd <version>`.
+                let server = client.server();
+                let version = server.strip_prefix("gozlerd ").unwrap_or(server);
+                Outcome::Status(
+                    status,
+                    version.to_owned(),
+                    super::local_service::local_service(),
+                )
+            }),
             Ask::Rows(_, ask) => rows(&mut client, &ask, Some(reply)).map(Outcome::Rows),
             Ask::Program(ask) | Ask::FolderSizes(_, ask) => {
                 rows(&mut client, &ask, None).map(Outcome::Rows)

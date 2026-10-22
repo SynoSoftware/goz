@@ -2432,7 +2432,10 @@ impl MainWindow {
                     return;
                 }
                 CommandId::About => {
-                    let about = About::new(self.model.borrow().strings());
+                    let about = {
+                        let model = self.model.borrow();
+                        About::new(model.strings(), model.service_version())
+                    };
                     self.open_dialog(hwnd, DialogId::About, &about);
                     return;
                 }

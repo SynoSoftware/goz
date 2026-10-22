@@ -20,6 +20,7 @@ mod timing;
 
 #[cfg(windows)]
 fn main() {
+    gozler_core::escompat::set_linked(gozler_winfs::program_linked());
     app::run();
 }
 

@@ -534,7 +534,7 @@ fn hello(volumes: &VolumeSet, proto_min: u16, proto_max: u16) -> Response {
     }
     Response::Hello {
         proto,
-        server: concat!("gozlerd ", env!("CARGO_PKG_VERSION")).to_string(),
+        server: format!("gozlerd {}", gozler_core::escompat::version()),
         ready: all_volumes_live(volumes),
     }
 }

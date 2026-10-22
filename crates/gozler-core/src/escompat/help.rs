@@ -11,11 +11,42 @@ use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling};
 use crate::attributes::LETTERS;
 use crate::output::style::{ColorToken, paint};
 use crate::query::parse::SEARCH_FUNCTIONS;
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
-/// gozler's version, as `-version` prints it; `build.rs` appends the build
-/// date unless the build is a release.
+/// When the running program was linked, which its `main` records.
+static LINKED: OnceLock<SystemTime> = OnceLock::new();
+
+/// Records when the running program was linked, for [`version`]. Each
+/// program's `main` calls it first, because this crate is built once for
+/// every program and so cannot know when each one was linked.
+pub fn set_linked(linked: SystemTime) {
+    let _ = LINKED.set(linked);
+}
+
+/// gozler's version, as `-version` prints it. A release build prints the
+/// Cargo version. Every other build appends the local date and time its
+/// program was linked, as `0.2.1 (2026-10-18 11:51)`, so a build from a
+/// working tree cannot pass for the release, and two builds of one version
+/// tell apart.
 pub fn version() -> &'static str {
-    env!("GOZLER_VERSION")
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        let linked = LINKED
+            .get()
+            .filter(|_| !cfg!(gozler_release))
+            .and_then(|&linked| jiff::Timestamp::try_from(linked).ok());
+        match linked {
+            Some(linked) => format!(
+                "{version} ({})",
+                linked
+                    .to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%Y-%m-%d %H:%M")
+            ),
+            None => version.to_owned(),
+        }
+    })
 }
 
 /// The help screen a [`Command::Help`](super::Command::Help) asks for, with

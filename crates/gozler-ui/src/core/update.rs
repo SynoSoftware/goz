@@ -151,7 +151,7 @@ fn numbers(version: &str) -> Option<Vec<u64>> {
 
 /// When the local build of version `current`, such as
 /// `0.3.0 (2026-10-19 21:10)`, was built, in this computer's time zone, as
-/// `gozler-core`'s build script writes it; `None` for a release build.
+/// `gozler_core::escompat::version` writes it; `None` for a release build.
 fn built(current: &str) -> Option<Timestamp> {
     let time = current.split_once(" (")?.1.strip_suffix(')')?;
     let time = DateTime::strptime("%Y-%m-%d %H:%M", time).ok()?;

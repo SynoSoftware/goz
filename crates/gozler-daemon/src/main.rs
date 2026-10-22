@@ -108,6 +108,7 @@ fn tune_allocator() {
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
+    gozler_core::escompat::set_linked(gozler_winfs::program_linked());
     tune_allocator();
     let cli = Cli::parse();
     let result = match cli.command {

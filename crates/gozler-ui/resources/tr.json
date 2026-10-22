@@ -397,6 +397,8 @@
   "about": {
     "title": "Gozler hakkında",
     "version": "Gozler {0}",
+    "service": "Hizmet {0}",
+    "service_unknown": "Hizmet bağlı değil",
     "description": "Dosyaları anında bulun. Tam hızda kopyalayın, taşıyın ve silin.",
     "copyright": "Telif hakkı © 2026 Synapse N.V. Mustafa Ahci'nin goz uygulamasını temel alır. MIT lisansı."
   },

@@ -24,6 +24,8 @@ use gozler_core::escompat::{Command, ExitCode, help, parse_argv, version};
 use std::io::Write;
 
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    gozler_core::escompat::set_linked(gozler_winfs::program_linked());
     // A panic is an internal failure: exit 1 after the panic message, not
     // Rust's 101, which the exit-code table does not list.
     let report_panic = std::panic::take_hook();

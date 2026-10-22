@@ -64,6 +64,8 @@ pub struct Client {
     names: ResultNames,
     buf: Vec<u8>,
     cancel: CancelToken,
+    /// The daemon's name and version, from its reply to the hello.
+    server: String,
 }
 
 impl Client {
@@ -148,22 +150,24 @@ impl Client {
             // overhead, and the main thread's 1 MiB stack stays safe.
             buf: vec![0u8; 256 * 1024],
             cancel,
+            server: String::new(),
         };
-        client.hello()?;
+        client.server = client.hello()?;
         Ok(client)
     }
 
-    /// Asks the daemon for this client's protocol version alone. A daemon
-    /// older than the client refuses it; without the question, an old daemon
-    /// would refuse each request as malformed, which reads as invalid input.
-    fn hello(&mut self) -> Result<(), ClientError> {
+    /// Asks the daemon for this client's protocol version alone, and
+    /// returns the daemon's name and version. A daemon older than the client
+    /// refuses it; without the question, an old daemon would refuse each
+    /// request as malformed, which reads as invalid input.
+    fn hello(&mut self) -> Result<String, ClientError> {
         self.send(&Request::Hello {
             proto_min: PROTO_VERSION,
             proto_max: PROTO_VERSION,
             client: concat!("gozler ", env!("CARGO_PKG_VERSION")).to_string(),
         })?;
         match self.next_response()? {
-            Response::Hello { .. } => Ok(()),
+            Response::Hello { server, .. } => Ok(server),
             Response::Error {
                 code: ProtoError::Unsupported,
                 ..
@@ -172,6 +176,12 @@ impl Client {
                 "unexpected reply to hello".into(),
             )),
         }
+    }
+
+    /// The daemon's name and version, such as `gozlerd 0.4.0 (2026-10-22
+    /// 07:09)`.
+    pub fn server(&self) -> &str {
+        &self.server
     }
 
     /// Asks for the daemon's state.

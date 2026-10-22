@@ -397,6 +397,8 @@
   "about": {
     "title": "About Gozler",
     "version": "Gozler {0}",
+    "service": "Service {0}",
+    "service_unknown": "Service not connected",
     "description": "Find files instantly. Copy, move and delete them at full speed.",
     "copyright": "Copyright © 2026 Synapse N.V. Based on goz by Mustafa Ahci. MIT licence."
   },

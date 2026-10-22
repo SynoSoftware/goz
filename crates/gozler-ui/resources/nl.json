@@ -397,6 +397,8 @@
   "about": {
     "title": "Over Gozler",
     "version": "Gozler {0}",
+    "service": "Service {0}",
+    "service_unknown": "Service niet verbonden",
     "description": "Vind bestanden direct. Kopieer, verplaats en verwijder ze op volle snelheid.",
     "copyright": "Copyright © 2026 Synapse N.V. Gebaseerd op goz van Mustafa Ahci. MIT-licentie."
   },

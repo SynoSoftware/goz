@@ -81,7 +81,7 @@ fn programs_of(
     print: &dyn Fn(&Path, &str) -> Option<String>,
 ) -> Programs {
     // What `gozlerd.exe --version` prints after the program's name, such as
-    // `0.3.0 (2026-10-20 09:14)`.
+    // `0.3.0`.
     let version = |program: &Path| {
         let printed = print(program, "--version")?;
         printed.trim().strip_prefix("gozlerd ").map(str::to_owned)

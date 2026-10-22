@@ -73,6 +73,9 @@ pub(crate) struct Model {
     pub(super) enter_on_answer: bool,
     /// The latest status reply.
     pub(super) status: Option<DaemonStatus>,
+    /// The service's version, from the connection of the latest status
+    /// reply.
+    service_version: Option<String>,
     /// The gozlerd.exe files, as the latest status reply found them.
     programs: Programs,
     /// The app's own working set, read when it last asked for status;
@@ -401,6 +404,7 @@ impl Model {
             search_due: false,
             enter_on_answer: false,
             status: None,
+            service_version: None,
             programs: Programs::UNKNOWN,
             app_working_set: None,
             export: Export::Idle,
@@ -677,6 +681,15 @@ impl Model {
     pub(crate) fn service_working_set(&self) -> Option<u64> {
         match (&self.status, &self.failure) {
             (Some(status), None) => Some(status.process_working_set).filter(|&bytes| bytes != 0),
+            _ => None,
+        }
+    }
+
+    /// The version of the service the window is connected to, which About
+    /// shows; `None` while the service does not answer.
+    pub(crate) fn service_version(&self) -> Option<&str> {
+        match (&self.service_version, &self.failure) {
+            (Some(version), None) => Some(version),
             _ => None,
         }
     }
@@ -1955,7 +1968,7 @@ impl Model {
     fn accept_status(&mut self, outcome: Outcome) -> Accepted {
         self.status_asked = None;
         match outcome {
-            Outcome::Status(status, programs) => {
+            Outcome::Status(status, version, programs) => {
                 // Each list's own message says whether it failed, because a
                 // list whose rows arrived cleared the shared failure while
                 // another list still shows one.
@@ -1970,6 +1983,7 @@ impl Model {
                     .collect();
                 self.failure = None;
                 self.status = Some(status);
+                self.service_version = Some(version);
                 self.programs = programs;
                 // The fix's end shows with this status.
                 self.fix.service_answered();
@@ -2738,6 +2752,7 @@ pub(crate) mod tests {
                     include: None,
                     left_out: Vec::new(),
                 },
+                "0.4.0".to_owned(),
                 Programs::UNKNOWN,
             ),
         }
@@ -2889,7 +2904,7 @@ pub(crate) mod tests {
 
         let ask = model.status_needed().expect("no status request runs");
         let mut answered = status(&ask, VolumePhase::Live);
-        if let Outcome::Status(status, _) = &mut answered.outcome {
+        if let Outcome::Status(status, _, _) = &mut answered.outcome {
             status.process_working_set = 400_000_000;
         }
         model.accept(answered);

@@ -276,8 +276,9 @@ pub(crate) enum Outcome {
     IncludedCount(u64),
     /// The reply to [`Ask::SettingsSaved`].
     SettingsApplied,
-    /// The service's status, and the gozlerd.exe files around it.
-    Status(DaemonStatus, Programs),
+    /// The service's status, its version, and the gozlerd.exe files around
+    /// it.
+    Status(DaemonStatus, String, Programs),
     /// The rows an export has written so far.
     ExportProgress {
         rows: u64,
@@ -401,11 +402,12 @@ pub(crate) enum Beside {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProgramFile {
     pub(crate) path: PathBuf,
-    /// As the program prints it, such as `0.3.0 (2026-10-20 09:14)`; `None`
+    /// As the program prints it for `--version`, such as `0.3.0`; `None`
     /// when it was not run or did not answer.
     pub(crate) version: Option<String>,
     /// Its last write time, as a FILETIME. It tells two builds apart, which
-    /// the version's time does not: that is when gozler-core last changed.
+    /// the version does not, because `--version` prints the Cargo version
+    /// alone.
     pub(crate) modified: i64,
 }
 

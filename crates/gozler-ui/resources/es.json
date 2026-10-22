@@ -397,6 +397,8 @@
   "about": {
     "title": "Acerca de Gozler",
     "version": "Gozler {0}",
+    "service": "Servicio {0}",
+    "service_unknown": "Servicio no conectado",
     "description": "Encuentra archivos al instante. Cópialos, muévelos y elimínalos a toda velocidad.",
     "copyright": "Copyright © 2026 Synapse N.V. Basado en goz de Mustafa Ahci. Licencia MIT."
   },

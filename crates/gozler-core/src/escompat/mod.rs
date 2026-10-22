@@ -30,5 +30,5 @@ pub use argv::{
     Command, Count, DEFAULT_LIMIT, EsFatal, EsPlan, HelpScreen, Limit, ScopeFolder, parse_argv,
 };
 pub use exit::ExitCode;
-pub use help::{help, search_syntax, version};
+pub use help::{help, search_syntax, set_linked, version};
 pub use request::build_search;
