@@ -487,7 +487,11 @@
     "as_you_type": "&Zoeken tijdens het typen",
     "show_all": "&Alle bestanden en mappen weergeven als het vak leeg is",
     "select_on_click": "De tekst selecteren als ik in het vak &klik",
-    "select_on_activate": "De tekst selecteren als het venster wordt geacti&veerd"
+    "select_on_activate": "De tekst selecteren als het venster wordt geacti&veerd",
+    "results": "Resultaten",
+    "enter_label": "Enter en dubbelklikken op een resultaat:",
+    "enter_panels": "In Twee &panelen weergeven",
+    "enter_open": "&Openen"
   },
   "settings_keyboard": {
     "show_gozler": "Gozler weergeven",

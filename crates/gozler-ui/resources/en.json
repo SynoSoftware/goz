@@ -487,7 +487,11 @@
     "as_you_type": "Search as you &type",
     "show_all": "Show &every file and folder when the box is empty",
     "select_on_click": "Select the text when I &click the box",
-    "select_on_activate": "Select the text when the window is acti&vated"
+    "select_on_activate": "Select the text when the window is acti&vated",
+    "results": "Results",
+    "enter_label": "Enter and double-click on a result:",
+    "enter_panels": "&Show it in Two panels",
+    "enter_open": "&Open it"
   },
   "settings_keyboard": {
     "show_gozler": "Show Gozler",

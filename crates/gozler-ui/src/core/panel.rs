@@ -1570,6 +1570,17 @@ pub(crate) fn same_folder(a: &str, b: &str) -> bool {
     folder_key(a) == folder_key(b)
 }
 
+/// Where a panel shows a search result: the folder that holds it, with the
+/// result's name to focus, or a folder result's own folder (DESIGN.md:
+/// Search in a panel).
+pub(crate) fn result_place(item: &ResultItem) -> (String, Option<Box<[u16]>>) {
+    if item.is_dir {
+        (item.path.clone(), None)
+    } else {
+        (parent_of(&item.path), Some(result_name(item)))
+    }
+}
+
 /// A search result's name, after the last `\` of its full path.
 fn result_name(item: &ResultItem) -> Box<[u16]> {
     let wide = wide_path(item);
@@ -2078,14 +2089,9 @@ impl Panels {
                     EnterAction::Open(path)
                 }
             }
-            Some(Row::Result(item)) if item.is_dir => {
-                let path = item.path.clone();
-                EnterAction::Read(self.go(side, path, None))
-            }
             Some(Row::Result(item)) => {
-                let name = result_name(item);
-                let folder = parent_of(&item.path);
-                EnterAction::Read(self.go(side, folder, Some(name)))
+                let (path, focus) = result_place(item);
+                EnterAction::Read(self.go(side, path, focus))
             }
         }
     }
@@ -2106,8 +2112,7 @@ impl Panels {
             ),
             Some(Row::Entry(entry)) if entry.is_folder() => (panel.path_of(&entry.name), None),
             Some(Row::Entry(entry)) => (panel.folder.clone(), Some(entry.name.clone())),
-            Some(Row::Result(item)) if item.is_dir => (item.path.clone(), None),
-            Some(Row::Result(item)) => (parent_of(&item.path), Some(result_name(item))),
+            Some(Row::Result(item)) => result_place(item),
         };
         let target = self.panel(to);
         if path.is_empty() || target.search().is_none() && same_folder(&path, &target.folder) {

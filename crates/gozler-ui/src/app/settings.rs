@@ -22,7 +22,7 @@ use crate::core::model::Model;
 use crate::core::open::browse_command;
 use crate::core::results::Fix;
 use crate::core::settings::{
-    ContextItem, ItemVisibility, SettingsDraft, SettingsPage, SettingsValues,
+    ContextItem, ItemVisibility, ResultEnter, SettingsDraft, SettingsPage, SettingsValues,
 };
 use crate::core::shortcuts::{
     CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows,
@@ -151,6 +151,13 @@ const VISIBILITY_BUTTONS: [(ControlId, ItemVisibility); 3] = [
         ItemVisibility::WithShift,
     ),
     (ControlId::ContextMenuHide, ItemVisibility::Hidden),
+];
+
+/// The Search page's option buttons and what each makes `Enter` on a
+/// result do.
+const RESULT_ENTER_BUTTONS: [(ControlId, ResultEnter); 2] = [
+    (ControlId::SearchEnterPanels, ResultEnter::ShowInPanels),
+    (ControlId::SearchEnterOpen, ResultEnter::Open),
 ];
 
 /// The Include setting that a check box shows.
@@ -477,6 +484,12 @@ impl<'a> SettingsDialog<'a> {
                     let place = SizeFormat::ALL.iter().position(|each| *each == format);
                     if let (Some(list), Some(place)) = (self.size_list(), place) {
                         list.select(place);
+                    }
+                } else {
+                    for (control, enter) in RESULT_ENTER_BUTTONS {
+                        if let Some(button) = self.check_box(page, control) {
+                            button.set_checked(enter == values.choices.result_enter);
+                        }
                     }
                 }
             }
@@ -1801,6 +1814,9 @@ impl<'a> SettingsDialog<'a> {
                 .is_some_and(CheckBox::is_checked);
             *value(&mut self.draft.borrow_mut().edited) = checked;
             self.show_closed_note();
+        } else if let Some((_, enter)) = RESULT_ENTER_BUTTONS.into_iter().find(|(c, _)| is(id, *c))
+        {
+            self.draft.borrow_mut().edited.choices.result_enter = enter;
         } else if let Some((_, shown)) = VISIBILITY_BUTTONS.into_iter().find(|(c, _)| is(id, *c)) {
             if let Some(item) = self.selected_context_item() {
                 *self

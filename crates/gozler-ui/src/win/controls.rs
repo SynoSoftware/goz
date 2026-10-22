@@ -1807,23 +1807,28 @@ impl ListView {
         send(self.0, WM_VSCROLL, code.0 as usize, 0);
     }
 
-    /// Where a context menu for the focused row opens, in screen
-    /// coordinates: the bottom left of the row, as File Explorer opens it
-    /// for Shift+F10. Select all selects rows without focusing one, so
-    /// without a focused row the first selected one stands for it. The row
-    /// is scrolled into view first.
+    /// The focused row, or the first selected one without a focused row,
+    /// because Select all selects rows without focusing one.
+    pub(crate) fn focused_or_first_selected(self) -> Option<u64> {
+        [LVNI_FOCUSED, LVNI_SELECTED].into_iter().find_map(|flag| {
+            u64::try_from(send(self.0, LVM_GETNEXTITEM, usize::MAX, flag as isize)).ok()
+        })
+    }
+
+    /// Where a context menu for the focused row
+    /// ([`Self::focused_or_first_selected`]) opens, in screen coordinates:
+    /// the bottom left of the row, as File Explorer opens it for Shift+F10.
+    /// The row is scrolled into view first.
     pub(crate) fn focused_row_point(self) -> Option<(i32, i32)> {
-        let row = [LVNI_FOCUSED, LVNI_SELECTED].into_iter().find_map(|flag| {
-            usize::try_from(send(self.0, LVM_GETNEXTITEM, usize::MAX, flag as isize)).ok()
-        })?;
-        self.ensure_visible(row as u64);
+        let row = self.focused_or_first_selected()?;
+        self.ensure_visible(row);
         let mut rect = RECT {
             left: LVIR_BOUNDS as i32,
             ..RECT::default()
         };
         // SAFETY: `rect` is a local that the list reads the part from and
         // fills in.
-        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, row, &raw mut rect) } == 0 {
+        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, row as usize, &raw mut rect) } == 0 {
             return None;
         }
         let mut point = POINT {

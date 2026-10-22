@@ -487,7 +487,11 @@
     "as_you_type": "Buscar mientras &escribo",
     "show_all": "Mostrar &todos los archivos y carpetas cuando el cuadro está vacío",
     "select_on_click": "Seleccionar el texto al hacer &clic en el cuadro",
-    "select_on_activate": "Seleccionar el texto al acti&var la ventana"
+    "select_on_activate": "Seleccionar el texto al acti&var la ventana",
+    "results": "Resultados",
+    "enter_label": "Enter y doble clic en un resultado:",
+    "enter_panels": "&Mostrarlo en Dos paneles",
+    "enter_open": "A&brirlo"
   },
   "settings_keyboard": {
     "show_gozler": "Mostrar Gozler",

@@ -89,8 +89,8 @@ pub(crate) enum Glyph {
     MusicNote,
     /// A folder with a star: New folder….
     NewFolder,
-    /// A page with an arrow: Open, and the Context menu page's Open with
-    /// group.
+    /// A page with an arrow: Open, the Context menu page's Open with group
+    /// and the Search page's results group.
     OpenFile,
     /// An arrow pointing left, into a bar at the left: hides the filter
     /// pane, which closes to the left.

@@ -487,7 +487,11 @@
     "as_you_type": "&Yazarken ara",
     "show_all": "Kutu boşken &tüm dosya ve klasörleri göster",
     "select_on_click": "Kutuya tı&kladığımda metni seç",
-    "select_on_activate": "Pencere etkinleştirildiğinde &metni seç"
+    "select_on_activate": "Pencere etkinleştirildiğinde &metni seç",
+    "results": "Sonuçlar",
+    "enter_label": "Bir sonuçta Enter ve çift tıklama:",
+    "enter_panels": "İki &panelde göster",
+    "enter_open": "&Aç"
   },
   "settings_keyboard": {
     "show_gozler": "Gozler'i göster",

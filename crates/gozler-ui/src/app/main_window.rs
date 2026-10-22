@@ -54,7 +54,7 @@ use crate::core::query::{
 use crate::core::results::{Fix, ListButton};
 use crate::core::search_list::Deselect;
 use crate::core::selection::{DRAG_LIMIT, SELECTION_LIMIT, ToldRows, wide_path};
-use crate::core::settings::{Mode, SettingsValues};
+use crate::core::settings::{Mode, ResultEnter, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
@@ -957,9 +957,9 @@ enum ModalStep {
     },
     /// A panel's folder could not be opened.
     PanelRefused(panels::Refused),
-    /// Opens the first row of `ask`'s search, which `Enter` in the search
-    /// box waited for, while the list still shows it.
-    OpenFirst(ChunkAsk),
+    /// Gives `Enter` to the first row of `ask`'s search, which `Enter` in
+    /// the search box waited for, while the list still shows it.
+    EnterFirst(ChunkAsk),
     /// A file operation's conflict question or failure dialog.
     Operation(OperationDialog),
     /// An action on Search's selected entries, which a thread found
@@ -2880,7 +2880,7 @@ impl MainWindow {
             Change::NewSearch {
                 list: List::Search,
                 count,
-                open_first,
+                enter_first,
             } => {
                 // A new search shows its results from the top, with nothing
                 // selected (DESIGN.md: T2).
@@ -2897,7 +2897,7 @@ impl MainWindow {
                 self.update_message();
                 self.fetch_visible(List::Search);
                 self.fill_around_first_rows();
-                if open_first {
+                if enter_first {
                     let shown = self
                         .model
                         .borrow()
@@ -2906,7 +2906,7 @@ impl MainWindow {
                         .shown_ask()
                         .cloned();
                     if let Some(ask) = shown {
-                        self.defer(hwnd, ModalStep::OpenFirst(ask));
+                        self.defer(hwnd, ModalStep::EnterFirst(ask));
                     }
                 }
             }
@@ -3028,11 +3028,11 @@ impl MainWindow {
                     self.show_export_failure(hwnd, &path, &error);
                 }
                 ModalStep::PanelRefused(refused) => self.refuse(hwnd, refused),
-                ModalStep::OpenFirst(ask) => {
+                ModalStep::EnterFirst(ask) => {
                     let shown =
                         self.model.borrow().search_list().results().shown_ask() == Some(&ask);
                     if shown {
-                        self.open_first_or_selected(hwnd);
+                        self.enter_first_or_selected(hwnd);
                     }
                 }
                 ModalStep::Operation(dialog) => self.operation_dialog(hwnd, dialog),
@@ -3526,7 +3526,7 @@ impl MainWindow {
                 None
             }
             ListNotify::Activated => {
-                self.run(hwnd, MenuItem::Run(CommandId::Open));
+                self.enter_result(hwnd);
                 None
             }
             ListNotify::BeginDrag => {
@@ -3690,10 +3690,11 @@ impl MainWindow {
                 let enter = self.model.borrow_mut().enter_in_search_box();
                 match enter {
                     SearchBoxEnter::Search => self.search(hwnd, List::Search),
-                    SearchBoxEnter::Open => self.open_first_or_selected(hwnd),
+                    SearchBoxEnter::Enter => self.enter_first_or_selected(hwnd),
                     SearchBoxEnter::Wait => {}
                 }
             }
+            KeyAction::ResultEnter => self.enter_result(hwnd),
             KeyAction::ClearSearch => controls.search.hwnd().set_text(""),
             KeyAction::MoveTab { backward } => self.move_tab_focus(hwnd, target, backward),
             KeyAction::CancelJob => {
@@ -3743,16 +3744,31 @@ impl MainWindow {
         }
     }
 
-    /// Opens the selected rows, or the first row when none is selected,
-    /// with the Open command that `Enter` in the list runs (DESIGN.md:
-    /// window rule 8).
-    fn open_first_or_selected(&self, hwnd: Hwnd) {
+    /// Gives the selected row `Enter`, as `Enter` in the list does, or the
+    /// first row when none is selected (DESIGN.md: window rule 8).
+    fn enter_first_or_selected(&self, hwnd: Hwnd) {
         let list = self.created().controls.list;
         if list.selected_count() == 0 && self.model.borrow().search_list().results().count() > 0 {
             list.select_only(Some(0));
             list.ensure_visible(0);
         }
-        self.run(hwnd, MenuItem::Run(CommandId::Open));
+        self.enter_result(hwnd);
+    }
+
+    /// `Enter` or a double-click on Search's focused result: as Settings
+    /// chooses, Two panels shows it, or Open opens the selection (DESIGN.md:
+    /// Searching).
+    fn enter_result(&self, hwnd: Hwnd) {
+        let choice = self.model.borrow().choices().result_enter;
+        match choice {
+            ResultEnter::ShowInPanels => {
+                let row = self.created().controls.list.focused_or_first_selected();
+                if let Some(row) = row {
+                    self.show_result_in_panels(hwnd, row);
+                }
+            }
+            ResultEnter::Open => self.run(hwnd, MenuItem::Run(CommandId::Open)),
+        }
     }
 
     /// Whether `point`, in client coordinates, is on the splitter above the

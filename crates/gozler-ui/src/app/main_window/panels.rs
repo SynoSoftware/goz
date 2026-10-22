@@ -1261,6 +1261,22 @@ impl MainWindow {
         }
     }
 
+    /// Two panels shows Search's result at `row` in the active panel, as a
+    /// search panel's `Enter` shows its result (DESIGN.md: Searching).
+    /// Two panels shows first, because its first reading of each panel
+    /// would replace a newer one.
+    pub(super) fn show_result_in_panels(&self, hwnd: Hwnd, row: u64) {
+        let place = (self.model.borrow().search_list().results().row(row)).map(panel::result_place);
+        let Some((path, focus)) = place else {
+            return;
+        };
+        let shown = self.model.borrow_mut().show_mode(Mode::TwoPanels);
+        self.apply(hwnd, shown);
+        let side = self.model.borrow().panels().active();
+        let ask = self.model.borrow_mut().panels_mut().go(side, path, focus);
+        self.read(side, Some(ask));
+    }
+
     /// A character typed in a panel's list: quick search (DESIGN.md: Quick
     /// search). Returns whether the window took it.
     pub(super) fn on_panel_char(&self, target: Hwnd, character: char, alt: bool) -> bool {
@@ -1307,6 +1323,12 @@ impl MainWindow {
             }
             PanelAction::Drives(side) => self.drive_menu(hwnd, side),
             PanelAction::MenuBar => win::window::open_menu_bar(hwnd),
+            // Find in Search focuses the search box with its text selected.
+            PanelAction::SearchBox => {
+                let shown = self.model.borrow_mut().show_mode(Mode::Search);
+                self.apply(hwnd, shown);
+                self.run(hwnd, MenuItem::Run(CommandId::Find));
+            }
         }
     }
 

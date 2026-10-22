@@ -487,7 +487,7 @@ impl DialogItem {
 
 /// The groups of the Settings pages: each title, the static icon before it
 /// and the icon it shows.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 15] = [
+pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 16] = [
     (
         ControlId::GeneralDisplay,
         ControlId::GeneralDisplayIcon,
@@ -502,6 +502,11 @@ pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 15] = [
         ControlId::SearchBoxGroup,
         ControlId::SearchBoxGroupIcon,
         Glyph::Search,
+    ),
+    (
+        ControlId::SearchResultsGroup,
+        ControlId::SearchResultsGroupIcon,
+        Glyph::OpenFile,
     ),
     (
         ControlId::ContextMenuItemGroup,
@@ -797,11 +802,18 @@ impl CaptionTable {
                         Control(C::SearchSelectOnActivate),
                         "settings_search.select_on_activate",
                     ),
+                    (
+                        Control(C::SearchEnterPanels),
+                        "settings_search.enter_panels",
+                    ),
+                    (Control(C::SearchEnterOpen), "settings_search.enter_open"),
                     (Control(C::SearchRestore), "settings.reset"),
                 ],
                 plain: &[
                     (Control(C::SearchHeading), "settings.search"),
                     (Control(C::SearchBoxGroup), "settings_search.search_box"),
+                    (Control(C::SearchResultsGroup), "settings_search.results"),
+                    (Control(C::SearchEnterLabel), "settings_search.enter_label"),
                 ],
             },
             DialogId::SettingsKeyboard => CaptionTable {

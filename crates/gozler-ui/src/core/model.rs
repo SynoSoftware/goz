@@ -66,11 +66,11 @@ pub(crate) struct Model {
     /// stop typing (`Then::SearchSoon`); Search's only, because a search
     /// panel always searches as the person types.
     pub(super) search_due: bool,
-    /// Whether `Enter` in Search's search box asked to open the first row
-    /// of the search in flight once it answers (DESIGN.md: window rule 8);
-    /// Search's only, because `Enter` in a search panel's box goes to the
-    /// list.
-    pub(super) open_on_answer: bool,
+    /// Whether `Enter` in Search's search box asked to give the first row
+    /// of the search in flight `Enter` once it answers (DESIGN.md: window
+    /// rule 8); Search's only, because `Enter` in a search panel's box goes
+    /// to the list.
+    pub(super) enter_on_answer: bool,
     /// The latest status reply.
     pub(super) status: Option<DaemonStatus>,
     /// The gozlerd.exe files, as the latest status reply found them.
@@ -151,9 +151,10 @@ pub(crate) struct TakenShown {
 pub(crate) enum SearchBoxEnter {
     /// The search runs at once.
     Search,
-    /// The selected rows open, or the first row when none is selected.
-    Open,
-    /// The search in flight opens its first row when it answers.
+    /// The selected row takes `Enter`, as in the list, or the first row
+    /// when none is selected.
+    Enter,
+    /// The search in flight gives its first row `Enter` when it answers.
     Wait,
 }
 
@@ -215,13 +216,13 @@ pub(crate) enum Change {
     /// A new search of the list runs; the list keeps its rows.
     Searching(List),
     /// A new search's first rows replace the list's old ones, and nothing
-    /// is selected; `open_first` when `Enter` in Search's search box waited
-    /// for them to open the first row. The list's live `Selection` request
-    /// ends, because it reads the old rows (DESIGN.md: T2).
+    /// is selected; `enter_first` when `Enter` in Search's search box waited
+    /// for them to give the first row `Enter`. The list's live `Selection`
+    /// request ends, because it reads the old rows (DESIGN.md: T2).
     NewSearch {
         list: List,
         count: u64,
-        open_first: bool,
+        enter_first: bool,
     },
     /// Rows of the list's shown search arrived, and the count is `count`.
     Rows {
@@ -398,7 +399,7 @@ impl Model {
             settings,
             search_list: SearchList::new(),
             search_due: false,
-            open_on_answer: false,
+            enter_on_answer: false,
             status: None,
             programs: Programs::UNKNOWN,
             app_working_set: None,
@@ -1045,7 +1046,7 @@ impl Model {
         let soon = match list {
             List::Search => {
                 // An open that waits is for the text before this one.
-                self.open_on_answer = false;
+                self.enter_on_answer = false;
                 self.search_due = self.choices().search_as_you_type;
                 self.search_due
             }
@@ -1059,22 +1060,22 @@ impl Model {
 
     /// What `Enter` in the search box does (DESIGN.md: window rule 8). With
     /// search as you type off, the search runs. On, the selected row or the
-    /// first opens; while the search for the text has not answered, it runs
-    /// at once if it still waits for the pause, and its first row opens
-    /// when it answers.
+    /// first takes `Enter`; while the search for the text has not answered,
+    /// it runs at once if it still waits for the pause, and its first row
+    /// takes `Enter` when it answers.
     pub(crate) fn enter_in_search_box(&mut self) -> SearchBoxEnter {
         if !self.choices().search_as_you_type {
             return SearchBoxEnter::Search;
         }
         if self.search_due || self.search_list.results.searching() {
-            self.open_on_answer = true;
+            self.enter_on_answer = true;
             return if self.search_due {
                 SearchBoxEnter::Search
             } else {
                 SearchBoxEnter::Wait
             };
         }
-        SearchBoxEnter::Open
+        SearchBoxEnter::Enter
     }
 
     /// The person changed a match control; the search runs again. The
@@ -1261,7 +1262,7 @@ impl Model {
                 };
             }
         };
-        self.open_on_answer = false;
+        self.enter_on_answer = false;
         self.show_message(List::Search, message)
     }
 
@@ -1889,11 +1890,11 @@ impl Model {
                             shown.results.mark_matches();
                         }
                         let waits =
-                            list == List::Search && std::mem::take(&mut self.open_on_answer);
+                            list == List::Search && std::mem::take(&mut self.enter_on_answer);
                         Change::NewSearch {
                             list,
                             count,
-                            open_first: waits && count > 0,
+                            enter_first: waits && count > 0,
                         }
                     }
                     RowsChange::Rows { rows, count } => Change::Rows { list, rows, count },
@@ -1943,7 +1944,7 @@ impl Model {
         let then = self.ask_latest_release(&failure);
         self.failure = Some(failure.clone());
         if list == List::Search {
-            self.open_on_answer = false;
+            self.enter_on_answer = false;
         }
         Accepted {
             then,
@@ -2602,7 +2603,7 @@ pub(crate) mod tests {
             Change::NewSearch {
                 list: List::Search,
                 count: 3,
-                open_first: false
+                enter_first: false
             }
         );
         assert_eq!(
@@ -2610,7 +2611,7 @@ pub(crate) mod tests {
             Change::NewSearch {
                 list: List::Panel(Side::Left),
                 count: 2,
-                open_first: false
+                enter_first: false
             }
         );
         assert_eq!(model.search_list().results().count(), 3);
@@ -2794,7 +2795,7 @@ pub(crate) mod tests {
             Change::NewSearch {
                 list: List::Search,
                 count: 3,
-                open_first: false
+                enter_first: false
             }
         );
         assert_eq!(captions::results_status(&model, &English), "3 results");
@@ -3356,7 +3357,7 @@ pub(crate) mod tests {
             Change::NewSearch {
                 list: List::Search,
                 count: 3,
-                open_first: false
+                enter_first: false
             },
             "a search in flight shows its own reply"
         );

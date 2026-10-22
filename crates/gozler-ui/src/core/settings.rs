@@ -87,6 +87,8 @@ pub(crate) struct Choices {
     pub(crate) select_on_click: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) select_on_activate: bool,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) result_enter: ResultEnter,
     #[serde(
         default,
         deserialize_with = "or_default",
@@ -119,6 +121,7 @@ impl Default for Choices {
             show_all_when_empty: on(),
             select_on_click: on(),
             select_on_activate: false,
+            result_enter: ResultEnter::default(),
             show_shortcut: None,
             shortcuts: CommandShortcuts::default(),
             speed: Speed::default(),
@@ -229,6 +232,7 @@ impl SettingsValues {
                 choices.show_all_when_empty = defaults.show_all_when_empty;
                 choices.select_on_click = defaults.select_on_click;
                 choices.select_on_activate = defaults.select_on_activate;
+                choices.result_enter = defaults.result_enter;
             }
             SettingsPage::ContextMenu => {
                 choices.open_folders = defaults.open_folders;
@@ -339,6 +343,19 @@ impl ContextItem {
             item => item.command().row().label,
         }
     }
+}
+
+/// What `Enter` and a double-click on a result in Search do, which the
+/// Search page chooses (DESIGN.md: Searching).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResultEnter {
+    /// Two panels shows, its active panel with the result's folder and the
+    /// result focused, as a search panel's `Enter` does.
+    #[default]
+    ShowInPanels,
+    /// Open, with the Context menu page's open commands.
+    Open,
 }
 
 /// When a row's context menu shows an item.

@@ -182,12 +182,15 @@ impl CommandId {
                     searched,
                     None,
                 ),
+                // `Alt+F7` reaches Find in Search only; Two panels keeps it
+                // to show Search (`PanelAction::SearchBox`).
                 C::Find => (
                     "command.find",
                     const {
                         &[
                             Keystroke::ctrl(Key::Letter(b'F')),
                             Keystroke::ctrl(Key::Letter(b'E')),
+                            Keystroke::alt(Key::Function(7)),
                         ]
                     },
                     always,
@@ -746,9 +749,12 @@ pub(crate) enum KeyAction {
     CancelJob,
     /// `Down` in the search box: the focus moves to the list's first row.
     FocusList,
-    /// `Enter` in the search box: the search runs, or the result opens
-    /// ([`Model::enter_in_search_box`]).
+    /// `Enter` in the search box: the search runs, or the result takes
+    /// `Enter` ([`Model::enter_in_search_box`]).
     SearchBoxEnter,
+    /// `Enter` in the results list: Two panels shows the focused result, or
+    /// Open opens the selection, as Settings chooses (DESIGN.md: Searching).
+    ResultEnter,
     /// `Esc` in the search box: the box is emptied.
     ClearSearch,
     /// `Enter` in a closed Date modified or Size list.
@@ -826,10 +832,7 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
         Focus::List => {
             const {
                 &[
-                    (
-                        Keystroke::plain(Key::Enter),
-                        KeyAction::Run(CommandId::Open),
-                    ),
+                    (Keystroke::plain(Key::Enter), KeyAction::ResultEnter),
                     // Gozler never uses the Recycle Bin, so Shift+Delete,
                     // File Explorer's permanent delete, deletes as Delete
                     // does.
@@ -966,23 +969,27 @@ pub(crate) enum PanelAction {
     Drives(Side),
     /// `F9`: the menu bar, because `Alt` with a letter is quick search.
     MenuBar,
+    /// `Alt+F7`, Total Commander's search key: Search shows, with its
+    /// search box focused and its text selected.
+    SearchBox,
 }
 
 impl PanelAction {
-    const ALL: [PanelAction; 4] = [
+    const ALL: [PanelAction; 5] = [
         PanelAction::PathBox,
         PanelAction::Drives(Side::Left),
         PanelAction::Drives(Side::Right),
         PanelAction::MenuBar,
+        PanelAction::SearchBox,
     ];
 }
 
 /// Two panels' fixed keys, which win over the person's shortcuts on the
-/// same keys. `Alt+F7` comes first so that Find's menu item shows it.
+/// same keys.
 const TWO_PANEL_KEYS: &[(Keystroke, MenuItem)] = &[
     (
         Keystroke::alt(Key::Function(7)),
-        MenuItem::Run(CommandId::Find),
+        MenuItem::Panel(PanelAction::SearchBox),
     ),
     (
         Keystroke::ctrl(Key::Letter(b'F')),
@@ -1758,13 +1765,15 @@ mod tests {
                 Some(MenuItem::Run(CommandId::Settings))
             );
         }
-        // Find starts a search in a panel (DESIGN.md: Search in a panel), with
-        // Total Commander's `Alt+F7` besides `Ctrl+F`.
+        // Find starts a search in a panel (DESIGN.md: Search in a panel),
+        // and Total Commander's `Alt+F7` shows Search, where it is Find.
         let find = Some(MenuItem::Run(CommandId::Find));
+        let alt_f7 = Keystroke::alt(Key::Function(7));
         assert_eq!(
-            takes(Mode::TwoPanels, Keystroke::alt(Key::Function(7))),
-            find
+            takes(Mode::TwoPanels, alt_f7),
+            Some(MenuItem::Panel(PanelAction::SearchBox))
         );
+        assert_eq!(takes(Mode::Search, alt_f7), find);
         let ctrl_f = Keystroke::ctrl(Key::Letter(b'F'));
         for mode in Mode::ALL {
             assert_eq!(takes(mode, ctrl_f), find);

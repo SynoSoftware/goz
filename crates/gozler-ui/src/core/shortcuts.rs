@@ -439,7 +439,7 @@ mod tests {
             .expect("Ctrl+K is free");
         assert_eq!(
             table.of(CommandId::Find),
-            [key("Ctrl+F"), key("Ctrl+E"), key("Ctrl+K")]
+            [key("Ctrl+F"), key("Ctrl+E"), key("Alt+F7"), key("Ctrl+K")]
         );
         for (name, refusal) in [
             ("Alt+F", Refusal::Typing),
