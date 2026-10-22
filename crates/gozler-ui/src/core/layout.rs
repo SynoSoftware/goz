@@ -1765,6 +1765,31 @@ pub(crate) fn status_part_width(text: Px, icon: bool, dpi: Dpi) -> Px {
     icon + text + STATUS_PART_PADDING.to_px(dpi)
 }
 
+/// The widths that a part of the status bar's right group needs to show
+/// its text whole and, if it has a shorter text, that one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RightWidth {
+    pub(crate) whole: Px,
+    pub(crate) short: Option<Px>,
+}
+
+impl RightWidth {
+    /// The width that `form` needs.
+    pub(crate) fn of(&self, form: TextForm) -> Px {
+        match form {
+            TextForm::Short => self.short.unwrap_or(self.whole),
+            TextForm::Whole => self.whole,
+        }
+    }
+}
+
+/// The text that a status bar part with two forms shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextForm {
+    Whole,
+    Short,
+}
+
 impl StatusLayout {
     /// The height of the status bar's drawing area, which fits Cancel;
     /// Windows adds the bar's borders.
@@ -1870,23 +1895,29 @@ impl StatusLayout {
         self.memory.is_some() || self.show_details.is_some()
     }
 
-    /// How many of the right group's parts show, of parts that need
-    /// `widths` to show their texts whole: the first always, cut off where
-    /// it does not fit, and each other only while it fits whole, so a total
-    /// never shows in part (DESIGN.md: Status bar).
-    pub(crate) fn right_parts_shown(&self, widths: &[Px]) -> usize {
+    /// Which of the right group's parts show and in which form: the first
+    /// always, cut off where it does not fit, and each other only while it
+    /// fits whole, so a total never shows in part (DESIGN.md: Status bar).
+    /// A part with a short form shows it where its whole form does not fit.
+    pub(crate) fn right_parts_shown(&self, widths: &[RightWidth]) -> Vec<TextForm> {
         let Some(room) = self.right else {
-            return widths.len();
+            return vec![TextForm::Whole; widths.len()];
         };
         let mut used = Px(0);
-        let fitting = widths
-            .iter()
-            .take_while(|width| {
-                used = used + **width;
-                used <= room
-            })
-            .count();
-        fitting.max(1).min(widths.len())
+        let mut shown = Vec::new();
+        for width in widths {
+            let form = match width.short {
+                Some(_) if used + width.whole > room => TextForm::Short,
+                _ => TextForm::Whole,
+            };
+            let needed = used + width.of(form);
+            if needed > room && !shown.is_empty() {
+                break;
+            }
+            used = needed;
+            shown.push(form);
+        }
+        shown
     }
 
     /// The widths of the status bar's parts but the last, which takes the
@@ -1925,11 +1956,9 @@ mod tests {
     use crate::core::model::tests::model;
     use crate::core::text::tests::English;
 
-    /// A cut-off total would show a partial sum (DESIGN.md: Status bar), so
-    /// a right part after the first shows only while it fits whole, and the
-    /// first shows even when it does not fit.
-    #[test]
-    fn right_group_shows_only_parts_that_fit_whole() {
+    /// The main window's right group of 800 px, and the width it has room
+    /// for.
+    fn right_room() -> (StatusLayout, Px) {
         let dpi = Dpi::new(96).expect("96 is not zero");
         let widths = StatusWidths {
             view: Px(100),
@@ -1947,8 +1976,48 @@ mod tests {
         let room = layout
             .right
             .expect("the main window's right group has a width");
-        assert_eq!(layout.right_parts_shown(&[room - Px(50), Px(50), Px(1)]), 2);
-        assert_eq!(layout.right_parts_shown(&[room + Px(1), Px(1)]), 1);
+        (layout, room)
+    }
+
+    /// A cut-off total would show a partial sum (DESIGN.md: Status bar), so
+    /// a right part after the first shows only while it fits whole, and the
+    /// first shows even when it does not fit.
+    #[test]
+    fn right_group_shows_only_parts_that_fit_whole() {
+        let (layout, room) = right_room();
+        let whole = |width: Px| RightWidth {
+            whole: width,
+            short: None,
+        };
+        let shown = |widths: &[Px]| {
+            let widths: Vec<RightWidth> = widths.iter().copied().map(whole).collect();
+            layout.right_parts_shown(&widths).len()
+        };
+        assert_eq!(shown(&[room - Px(50), Px(50), Px(1)]), 2);
+        assert_eq!(shown(&[room + Px(1), Px(1)]), 1);
+    }
+
+    /// The files total drops its size before it is cut off, so a narrow
+    /// window still shows the number of files whole.
+    #[test]
+    fn files_total_shows_its_short_form_where_the_whole_form_does_not_fit() {
+        let (layout, room) = right_room();
+        let files = |whole: Px| RightWidth {
+            whole,
+            short: Some(room - Px(100)),
+        };
+        let folders = RightWidth {
+            whole: Px(100),
+            short: None,
+        };
+        assert_eq!(
+            layout.right_parts_shown(&[files(room - Px(100)), folders]),
+            [TextForm::Whole, TextForm::Whole]
+        );
+        assert_eq!(
+            layout.right_parts_shown(&[files(room + Px(1)), folders]),
+            [TextForm::Short, TextForm::Whole]
+        );
     }
 
     /// A row of buttons keeps its right edge and its gap, and the edit box

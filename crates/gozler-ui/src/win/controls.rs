@@ -44,10 +44,10 @@ use windows::Win32::UI::Controls::{
     LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSICF_NOSCROLL, LVSIL_SMALL, NMHDR,
     PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SB_GETICON,
-    SB_GETPARTS, SB_GETTEXTLENGTHW, SB_GETTEXTW, SB_SETICON, SB_SETMINHEIGHT, SB_SETPARTS,
-    SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, STATUSCLASSNAMEW, SetWindowTheme,
-    TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS,
-    TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
+    SB_GETPARTS, SB_GETRECT, SB_GETTEXTLENGTHW, SB_GETTEXTW, SB_SETICON, SB_SETMINHEIGHT,
+    SB_SETPARTS, SB_SETTEXTW, SB_SETTIPTEXTW, SBARS_SIZEGRIP, SBARS_TOOLTIPS, STATUSCLASSNAMEW,
+    SetWindowTheme, TOOLTIPS_CLASSW, TREE_VIEW_ITEM_STATE_FLAGS, TTF_ABSOLUTE, TTF_IDISHWND,
+    TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
     TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, TVE_EXPAND,
     TVGN_CARET, TVGN_CHILD, TVGN_FIRSTVISIBLE, TVGN_NEXT, TVGN_NEXTVISIBLE, TVGN_ROOT, TVI_LAST,
     TVI_ROOT, TVIF_CHILDREN, TVIF_PARAM, TVIF_STATE, TVIF_TEXT, TVINSERTSTRUCTW, TVINSERTSTRUCTW_0,
@@ -2019,6 +2019,15 @@ impl StatusBar {
     pub(crate) fn part_width(self, text: &str, glyph: Option<Glyph>) -> Px {
         let text = Font::of(self.0).map_or(Px(0), |font| TextMeter::new(&font).width(text));
         layout::status_part_width(text, glyph.is_some() && icons_shown(), self.0.dpi())
+    }
+
+    /// Where `part` is, in the bar's client coordinates, after
+    /// [`Self::set_parts`].
+    pub(crate) fn part_rect(self, part: usize) -> layout::Rect {
+        let mut rect = RECT::default();
+        // SAFETY: `rect` is a local the message fills in.
+        unsafe { send_pointer(self.0, SB_GETRECT, part, &raw mut rect) };
+        super::from_rect(rect)
     }
 
     /// Sets the tooltip of `part`, which shows while its text is cut off.

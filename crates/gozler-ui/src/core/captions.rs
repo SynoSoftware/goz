@@ -163,10 +163,12 @@ impl MemoryCaptions {
             service: ValuePart {
                 glyph: Some(Glyph::Component),
                 text: strings.format("status.service_memory", &[&service]),
+                narrow: None,
             },
             app: ValuePart {
                 glyph: Some(Glyph::Favicon),
                 text: strings.format("status.ui_memory", &[&app]),
+                narrow: None,
             },
             service_tip: strings.format("status.service_memory_tooltip", &[&service]),
             app_tip: strings.format("status.ui_memory_tooltip", &[&app]),
@@ -1521,12 +1523,29 @@ impl InspectorCaptions {
 pub(crate) struct ValuePart {
     pub(crate) glyph: Option<Glyph>,
     pub(crate) text: String,
+    pub(crate) narrow: Option<Narrow>,
 }
 
 impl ValuePart {
     pub(crate) fn plain(text: String) -> ValuePart {
-        ValuePart { glyph: None, text }
+        ValuePart {
+            glyph: None,
+            text,
+            narrow: None,
+        }
     }
+}
+
+/// What the status bar's files total shows where its `text` does not fit
+/// (DESIGN.md: Status bar).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Narrow {
+    /// The files total without its size, so the number of files stays
+    /// whole.
+    pub(crate) text: String,
+    /// Both totals whole, one on each line, for the tooltip that shows
+    /// while a total is shortened or left out.
+    pub(crate) tip: String,
 }
 
 impl InspectorCaptions {
@@ -1971,7 +1990,7 @@ fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValueP
     } else {
         text::bytes(strings, numbers, sums.folder_bytes)
     };
-    [
+    let mut parts: Vec<ValuePart> = [
         (Glyph::Page, "status.files", sums.files, file_bytes),
         (Glyph::Folder, "status.folders", sums.folders, folder_bytes),
     ]
@@ -1980,8 +1999,21 @@ fn totals_status(model: &Model, list: List, numbers: &dyn Numbers) -> Vec<ValueP
     .map(|(glyph, key, count, size)| ValuePart {
         glyph: Some(glyph),
         text: strings.count(key, count, numbers, &[&size]),
+        narrow: None,
     })
-    .collect()
+    .collect();
+    if sums.files > 0 {
+        let tip = (parts.iter())
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        parts[0].narrow = Some(Narrow {
+            // The inspector counts files in the same words.
+            text: strings.count("inspector.files", sums.files, numbers, &[]),
+            tip,
+        });
+    }
+    parts
 }
 
 /// A folder sum that counts only the files whose size was read: "at least

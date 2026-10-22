@@ -11,7 +11,7 @@ use crate::core::captions::{
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
-use crate::core::layout::{Px, StatusLayout};
+use crate::core::layout::{Px, Rect, RightWidth, StatusLayout, TextForm};
 use crate::win::controls::{self, Button, ProgressBar, Tooltip};
 use crate::win::notify::{ControlEvent, Notification};
 use crate::win::toolbar::{Tool, Toolbar};
@@ -23,9 +23,11 @@ const JOB_GROUP: usize = 1;
 /// Update. In the main window, the right group's other parts follow it,
 /// then the memory figures' parts while they show.
 const RIGHT_GROUP: usize = 2;
-/// The memory figures, by their tooltip's area.
+/// The tooltip areas of the main window's status bar: the memory figures,
+/// then the files total.
 const SERVICE_MEMORY: usize = 0;
 const APP_MEMORY: usize = 1;
+const FILES_TOTAL: usize = 2;
 
 #[derive(Clone, Copy)]
 pub(super) struct StatusBar {
@@ -34,8 +36,8 @@ pub(super) struct StatusBar {
     cancel: Button,
     /// The main window's Show details, a toolbar of its one icon.
     show_details: Option<Toolbar>,
-    /// The tooltips of the main window's memory figures.
-    memory_tips: Option<Tooltip>,
+    /// The tooltips of the main window's memory figures and files total.
+    part_tips: Option<Tooltip>,
 }
 
 impl StatusBar {
@@ -55,7 +57,7 @@ impl StatusBar {
         )?;
         show.hwnd().set_visible(false);
         status.show_details = Some(show);
-        status.memory_tips = Some(Tooltip::create_areas(status.bar.hwnd(), 2)?);
+        status.part_tips = Some(Tooltip::create_areas(status.bar.hwnd(), 3)?);
         Ok(status)
     }
 
@@ -71,7 +73,7 @@ impl StatusBar {
             progress: ProgressBar::create(bar.hwnd(), ControlId::StatusProgress.id())?,
             cancel: Button::create(bar.hwnd(), ControlId::StatusCancel.id())?,
             show_details: None,
-            memory_tips: None,
+            part_tips: None,
         };
         status.progress.hwnd().set_visible(false);
         status.cancel.hwnd().set_visible(false);
@@ -132,7 +134,7 @@ impl StatusBar {
     }
 
     fn place_controls(&self, layout: &StatusLayout) {
-        if let Some(tips) = &self.memory_tips {
+        if let Some(tips) = &self.part_tips {
             // A hidden group's tips cover nothing.
             let (service, app) = layout
                 .memory
@@ -176,39 +178,91 @@ impl StatusBar {
     /// while they show, and shows them, each after its icon. A part keeps
     /// the text and icon of the part that had its index before, so every
     /// part after the middle group is shown again, or emptied.
+    ///
+    /// The files total shows without its size where it does not fit whole.
+    /// While that happens, or a total after it is left out, its tooltip
+    /// shows both totals whole.
     fn show_window_end(
         &self,
         layout: &StatusLayout,
         right: &[ValuePart],
         memory: Option<&MemoryCaptions>,
     ) {
-        let widths: Vec<Px> = right
+        let widths: Vec<RightWidth> = right
             .iter()
-            .map(|item| self.bar.part_width(&item.text, item.glyph))
+            .map(|item| RightWidth {
+                whole: self.bar.part_width(&item.text, item.glyph),
+                short: (item.narrow.as_ref())
+                    .map(|narrow| self.bar.part_width(&narrow.text, item.glyph)),
+            })
             .collect();
-        let shown = layout.right_parts_shown(&widths);
-        let part_widths = layout.part_widths(&widths[..shown]);
+        let forms = layout.right_parts_shown(&widths);
+        let shown = forms.len();
+        let shown_widths: Vec<Px> = (widths.iter().zip(&forms))
+            .map(|(width, form)| width.of(*form))
+            .collect();
+        let part_widths = layout.part_widths(&shown_widths);
         self.bar.set_parts(&part_widths);
         let memory = memory.filter(|_| layout.memory.is_some());
-        if let (Some(tips), Some(memory)) = (&self.memory_tips, memory) {
+        if let (Some(tips), Some(memory)) = (&self.part_tips, memory) {
             tips.set_area(SERVICE_MEMORY, &memory.service_tip);
             tips.set_area(APP_MEMORY, &memory.app_tip);
         }
         let figures = memory.map(|memory| [&memory.service, &memory.app]);
+        // The text of a right part is the one its form says.
+        let right_items = (right.iter().zip(&forms)).map(|(item, form)| {
+            let text = match (&item.narrow, form) {
+                (Some(narrow), TextForm::Short) => narrow.text.as_str(),
+                _ => item.text.as_str(),
+            };
+            Some((item, text))
+        });
         // The right group has a part also while it shows nothing.
-        let items = right[..shown]
-            .iter()
-            .map(Some)
-            .chain((shown == 0).then_some(None))
-            .chain(figures.into_iter().flatten().map(Some));
+        let items = right_items.chain((shown == 0).then_some(None)).chain(
+            figures
+                .into_iter()
+                .flatten()
+                .map(|figure| Some((figure, figure.text.as_str()))),
+        );
         // The parts after them, Show details' or none, show nothing.
         let parts = (RIGHT_GROUP..=part_widths.len()).zip(items.chain(std::iter::repeat(None)));
         for (part, item) in parts {
-            let text = item.map_or("", |item| item.text.as_str());
+            let text = item.map_or("", |(_, text)| text);
             self.bar.set_text(part, text);
-            // A part's tip shows only while its text is cut off.
-            self.bar.set_tip(part, text);
-            self.bar.set_icon(part, item.and_then(|item| item.glyph));
+            // A part's tip shows only while its text is cut off. The files
+            // total has the tooltip of its own, which also shows while its
+            // text is whole but shortened.
+            let own_tip = item.is_some_and(|(item, _)| item.narrow.is_some());
+            self.bar.set_tip(part, if own_tip { "" } else { text });
+            self.bar
+                .set_icon(part, item.and_then(|(item, _)| item.glyph));
+        }
+        self.show_files_tip(right, &forms);
+    }
+
+    /// Gives the files total's part the tooltip of both totals while its
+    /// text is shortened or a total after it is left out, and no tooltip
+    /// otherwise.
+    fn show_files_tip(&self, right: &[ValuePart], forms: &[TextForm]) {
+        let Some(tips) = &self.part_tips else {
+            return;
+        };
+        let tip = (right[..forms.len()].iter())
+            .position(|item| item.narrow.is_some())
+            .and_then(|index| {
+                let narrow = right[index].narrow.as_ref()?;
+                let cut = forms[index] == TextForm::Short || forms.len() < right.len();
+                cut.then_some((index, narrow.tip.as_str()))
+            });
+        match tip {
+            Some((index, tip)) => {
+                tips.place_area(FILES_TOTAL, self.bar.part_rect(RIGHT_GROUP + index));
+                tips.set_area(FILES_TOTAL, tip);
+            }
+            None => {
+                tips.place_area(FILES_TOTAL, Rect::default());
+                tips.set_area(FILES_TOTAL, "");
+            }
         }
     }
 
