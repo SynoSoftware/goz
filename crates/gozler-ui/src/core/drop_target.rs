@@ -46,9 +46,10 @@ pub(crate) struct SourceEffects {
     pub(crate) moves: bool,
 }
 
-/// The files of one drag, read once when it enters the window.
+/// The files of one drag, as read when it enters the window, which choose
+/// the effect. The drop reads them again, because a source can make its
+/// files only then.
 pub(crate) struct Dragged {
-    paths: Vec<PathBuf>,
     /// Each path in [`fold`]'s form.
     folded: Vec<String>,
 }
@@ -59,11 +60,7 @@ impl Dragged {
             .iter()
             .map(|path| fold(&path.to_string_lossy()))
             .collect();
-        Dragged { paths, folded }
-    }
-
-    pub(crate) fn into_paths(self) -> Vec<PathBuf> {
-        self.paths
+        Dragged { folded }
     }
 
     /// What dropping the files on `row`, the row under the pointer, does:

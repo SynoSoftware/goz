@@ -24,7 +24,7 @@ use crate::core::text::Strings;
 use crate::win::clipboard::ClipboardFiles;
 use crate::win::controls::{Button, GlyphLabel, Label, ProgressBar, ReportList, Tooltip};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
-use crate::win::drop_target::AsyncDrop;
+use crate::win::drop_target::DropSource;
 use crate::win::file_operations::{
     PathLabel, QUEUE_CHANGED, QueueList, QueueNotify, TaskbarProgress, Tile, set_client_size,
     show_drag_cursor, show_paused, tell_hidden, window_size,
@@ -189,7 +189,7 @@ pub(super) enum FilesSource {
     /// they moved.
     Paste(ClipboardFiles),
     /// A drop whose source keeps its files until the operation ends.
-    Drop(AsyncDrop),
+    Drop(DropSource),
 }
 
 impl FilesSource {

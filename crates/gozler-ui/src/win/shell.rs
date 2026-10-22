@@ -187,6 +187,7 @@ pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
             SHCreateDataObject(None, Some(absolute.as_slice()), None::<&IDataObject>)
         };
         if let Ok(data) = data {
+            let _own = super::drop_target::own_drag(&data);
             // A move needs nothing here: the index follows the journal.
             let _ = SHDoDragDrop(
                 None,

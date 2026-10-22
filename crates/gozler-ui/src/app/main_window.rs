@@ -64,7 +64,7 @@ use crate::win::controls::{
     ListColumn, ListView, ScrollEdge, Tooltip,
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
-use crate::win::drop_target::{self, AsyncDrop, DropHandler, DropRegistration};
+use crate::win::drop_target::{self, DropData, DropHandler, DropRegistration, DropSource};
 use crate::win::file_operations::{HIDDEN, QUEUE_CHANGED};
 use crate::win::folder::PanelThreads;
 use crate::win::gdi::{Font, ImageList, TextMeter};
@@ -929,6 +929,8 @@ pub(crate) struct MainWindow {
     drop_target: RefCell<Option<DropRegistration>>,
     /// While files are dragged over the window.
     drag_in: RefCell<Option<DragIn>>,
+    /// The drops whose paths a thread still reads from their source.
+    dropping: RefCell<Vec<Dropping>>,
     /// The modal steps that wait for [`Message::Deferred`], in the order
     /// they came.
     modal_steps: RefCell<VecDeque<ModalStep>>,
@@ -964,6 +966,15 @@ enum ModalStep {
         present: Vec<Selected>,
         missing: Option<Vec<u16>>,
     },
+}
+
+/// A drop whose paths a thread reads from its source.
+struct Dropping {
+    /// The folder the files were dropped on.
+    destination: PathBuf,
+    moves: bool,
+    files: Receiver<Vec<PathBuf>>,
+    source: Option<DropSource>,
 }
 
 /// Files dragged over the window.
@@ -1055,6 +1066,7 @@ impl MainWindow {
             panel_typed: RefCell::new([None, None]),
             drop_target: RefCell::new(None),
             drag_in: RefCell::new(None),
+            dropping: RefCell::new(Vec::new()),
             modal_steps: RefCell::new(VecDeque::new()),
             modal_running: Cell::new(false),
         });
@@ -3088,6 +3100,7 @@ impl MainWindow {
         }
         self.finish_include_save();
         self.finish_paste();
+        self.finish_drops();
         self.finish_checks(hwnd);
         self.on_panel_events(hwnd);
         let newer = self
@@ -4328,6 +4341,30 @@ impl MainWindow {
         }));
     }
 
+    /// Copies or moves the dropped files whose paths their threads have
+    /// read. A drop that holds no paths drops nothing, which tells its
+    /// source that the operation failed.
+    fn finish_drops(&self) {
+        let read = {
+            let mut dropping = self.dropping.borrow_mut();
+            let mut read = Vec::new();
+            let mut index = 0;
+            while index < dropping.len() {
+                match dropping[index].files.try_recv() {
+                    Err(TryRecvError::Empty) => index += 1,
+                    paths => read.push((dropping.remove(index), paths.unwrap_or_default())),
+                }
+            }
+            read
+        };
+        for (dropped, paths) in read {
+            if !paths.is_empty() {
+                let source = dropped.source.map(FilesSource::Drop);
+                self.transfer_into(paths, dropped.destination, dropped.moves, source);
+            }
+        }
+    }
+
     /// Paste's files, once their thread has read them from the clipboard.
     fn finish_paste(&self) {
         let read =
@@ -5220,10 +5257,16 @@ impl DropHandler for MainWindow {
         // Two panels accepts no drop (DESIGN.md: Not planned), and the hidden
         // Search list keeps its place and its rows.
         let search = self.model.borrow().mode() == Mode::Search;
-        let row = (search && list.hwnd().screen_rect().contains(point) && !self.on_header(point))
+        // A modal step blocks drops, as a modal dialog does
+        // (`win::drop_target`): a step can wait on a call into another
+        // program, such as Open's, which a drop held under it would never
+        // let return, and the drop's own conflict question would wait for
+        // the step to end.
+        let accepts = search && !self.modal_running.get();
+        let row = (accepts && list.hwnd().screen_rect().contains(point) && !self.on_header(point))
             .then(|| list.row_at(point))
             .flatten();
-        let edge = list.drag_scroll_edge(point).filter(|_| search);
+        let edge = list.drag_scroll_edge(point).filter(|_| accepts);
         let (effect, changed, scrolling) = {
             let model = self.model.borrow();
             let mut drag_in = self.drag_in.borrow_mut();
@@ -5308,17 +5351,27 @@ impl DropHandler for MainWindow {
         self.end_drag_in(drag.as_ref());
     }
 
-    fn dropped(&self, effect: DropEffect, source: Option<AsyncDrop>) {
+    fn dropped(&self, effect: DropEffect, data: DropData, source: Option<DropSource>) {
         let Some(drag) = self.drag_in.take() else {
             return;
         };
         self.end_drag_in(Some(&drag));
-        if let Some(target) = drag.target {
-            let destination = PathBuf::from(OsString::from_wide(&wide_path(&target.folder)));
-            let moves = effect == DropEffect::Move;
-            let source = source.map(FilesSource::Drop);
-            self.transfer_into(drag.dragged.into_paths(), destination, moves, source);
-        }
+        let Some(target) = drag.target else {
+            return;
+        };
+        let (sender, files) = channel();
+        let waker = self.created().waker.clone();
+        data.read_files(move |paths| waker.deliver(|| sender.send(paths).is_ok()));
+        self.dropping.borrow_mut().push(Dropping {
+            destination: PathBuf::from(OsString::from_wide(&wide_path(&target.folder))),
+            moves: effect == DropEffect::Move,
+            files,
+            source,
+        });
+    }
+
+    fn run_until(&self, window: Hwnd, done: &dyn Fn() -> bool) {
+        win::window::run_messages_until(window, &|| self.accelerators(), done);
     }
 }
 
@@ -5723,6 +5776,7 @@ impl WindowProc for MainWindow {
                     saving.join();
                 }
                 self.drop_target.replace(None);
+                self.dropping.borrow_mut().clear();
                 if let Some(operations) = self.file_operations.get() {
                     operations.close();
                 }

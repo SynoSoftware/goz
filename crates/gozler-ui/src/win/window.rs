@@ -567,10 +567,34 @@ fn route_other(root: HWND, msg: &MSG) -> bool {
 /// returns.
 pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Accelerators>) {
     let _filter = MessageFilter::install();
+    run_messages(main, accelerators, &|| false);
+}
+
+/// Runs [`run_message_loop`]'s loop inside a call that must not return
+/// yet, until `done` gives true after a message. A `WM_QUIT` ends it too,
+/// and is posted again for the loop under it.
+pub(crate) fn run_messages_until(
+    main: Hwnd,
+    accelerators: &dyn Fn() -> Rc<Accelerators>,
+    done: &dyn Fn() -> bool,
+) {
+    if let Some(code) = run_messages(main, accelerators, done) {
+        // SAFETY: posts WM_QUIT to this thread's queue.
+        unsafe { PostQuitMessage(code) };
+    }
+}
+
+/// The loop of [`run_message_loop`], until `done` gives true; gives the
+/// exit code of the `WM_QUIT` that ended it.
+fn run_messages(
+    main: Hwnd,
+    accelerators: &dyn Fn() -> Rc<Accelerators>,
+    done: &dyn Fn() -> bool,
+) -> Option<i32> {
     let mut msg = MSG::default();
     // SAFETY: `msg` is a local that each call fills in or reads.
     unsafe {
-        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+        while !done() && GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             // A thread message has no window, and belongs to the main one.
             let root = if msg.hwnd.is_invalid() {
                 main.0
@@ -624,6 +648,7 @@ pub(crate) fn run_message_loop(main: Hwnd, accelerators: &dyn Fn() -> Rc<Acceler
             DispatchMessageW(&msg);
         }
     }
+    (msg.message == WM_QUIT).then_some(msg.wParam.0 as i32)
 }
 
 /// The thread's `WH_MSGFILTER` hook, removed on drop. The loops of dialog
