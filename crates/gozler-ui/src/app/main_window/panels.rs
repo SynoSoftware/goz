@@ -1218,7 +1218,7 @@ impl MainWindow {
         };
         if select && let Some(from) = from {
             let adding = (self.model.borrow().panels())
-                .selectable_ranges(side, panel::passed(from, to, count));
+                .selectable_ranges(side, panel::passed(step, from, to, count));
             match panel::add_selected(&adding, count) {
                 AddSelected::EachRow => {
                     for row in adding.iter().cloned().flatten() {

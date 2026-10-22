@@ -1772,12 +1772,16 @@ pub(crate) fn step(step: Step, focused: Option<u64>, count: u64, page: u64) -> O
     .map(|row| row.min(last))
 }
 
-/// The rows that `Shift` with a key that moves the focus from `from` to
-/// `to` selects: each row the focus passes, as in Total Commander, so the
-/// row it lands on is selected only when it cannot move on.
-pub(crate) fn passed(from: u64, to: u64, count: u64) -> Range<u64> {
+/// The rows that `Shift` with `step`, which moves the focus from `from` to
+/// `to`, selects: each row the focus passes, as in Total Commander, so the
+/// row it lands on is selected only when it cannot move on, or when `step`
+/// goes to the first or last row, which `Shift+Home` and `Shift+End` select.
+pub(crate) fn passed(step: Step, from: u64, to: u64, count: u64) -> Range<u64> {
+    let to_edge = matches!(step, Step::Home | Step::End);
     match from.cmp(&to) {
+        Ordering::Less if to_edge => from..to + 1,
         Ordering::Less => from..to,
+        Ordering::Greater if to_edge => to..from + 1,
         Ordering::Greater => to + 1..from + 1,
         Ordering::Equal => from..(from + 1).min(count),
     }
@@ -3262,7 +3266,8 @@ pub(crate) mod tests {
     }
 
     /// The arrow keys move only the focus; `Shift` selects the rows the
-    /// focus passes, and the last row once the focus cannot move on.
+    /// focus passes, and the last row once the focus cannot move on;
+    /// `Shift+End` and `Shift+Home` also select the row they land on.
     #[test]
     fn the_focus_moves_without_the_selection() {
         assert_eq!(step(Step::Down, Some(3), 10, 5), Some(4));
@@ -3270,9 +3275,11 @@ pub(crate) mod tests {
         assert_eq!(step(Step::End, Some(3), 10, 5), Some(9));
         assert_eq!(step(Step::Up, None, 10, 5), Some(0));
         assert_eq!(step(Step::Down, Some(0), 0, 5), None);
-        assert_eq!(passed(3, 4, 10), 3..4);
-        assert_eq!(passed(4, 3, 10), 4..5);
-        assert_eq!(passed(9, 9, 10), 9..10);
+        assert_eq!(passed(Step::Down, 3, 4, 10), 3..4);
+        assert_eq!(passed(Step::Up, 4, 3, 10), 4..5);
+        assert_eq!(passed(Step::Down, 9, 9, 10), 9..10);
+        assert_eq!(passed(Step::End, 3, 9, 10), 3..10);
+        assert_eq!(passed(Step::Home, 4, 0, 10), 0..5);
     }
 
     /// Shift+End from the top of 100,000 rows selects every row in one

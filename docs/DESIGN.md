@@ -924,7 +924,7 @@ A panel has a focused row and selected entries, as Norton Commander has a cursor
 | Key or mouse | Does |
 | --- | --- |
 | `Insert`, `Space` | select the focused row, or clear it when it is selected, and move the focus down |
-| `Shift+Up`, `Shift+Down`, `Shift+PgUp`, `Shift+PgDn`, `Shift+Home`, `Shift+End` | select each row the focus passes, as in Total Commander |
+| `Shift+Up`, `Shift+Down`, `Shift+PgUp`, `Shift+PgDn`, `Shift+Home`, `Shift+End` | select each row the focus passes, as in Total Commander; `Shift+Home` and `Shift+End` also select the first or last row, so `Shift+End` from the top selects every entry but `..` |
 | `Ctrl+A` | select every entry |
 | a click | select only that row and focus it, as in File Explorer |
 | `Ctrl`+click | select the row, or clear it when it is selected |
