@@ -246,8 +246,8 @@ What enforces it, stated as what each part catches:
   from dispatching while its state is half changed (window rule 11), the
   keyboard hook's thread, which needs its own message loop, start-up
   before the window exists, and the final writes after the window
-  hides. `core` holds no file call: the settings file is read at
-  start-up and written by a task.
+  hides. `core` holds no file call: `core` builds and parses the
+  settings text, `app` reads the file at start-up and a task writes it.
 - **The watchdog** catches the rest. A watchdog thread posts a heartbeat
   message to the window every 100 ms while a Gozler window is on screen.
   Every message loop on the thread dispatches it, modal ones included
