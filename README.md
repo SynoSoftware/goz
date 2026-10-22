@@ -11,6 +11,8 @@ Gozler-UI, its app, is a two-panel file manager with that instant search. It cop
 
 **[Download the installer](https://github.com/SynoSoftware/goz/releases/latest)** for Windows 10 and 11, x64.
 
+![Gozler's two panels: C:\Windows on the left, a Chrome profile folder on the right, and the F3 to F8 key bar below](docs/images/two-panels.png)
+
 [Synapse N.V.](http://synapse.sr) develops Gozler at [SynoSoftware/goz](https://github.com/SynoSoftware/goz). Gozler started as a fork of [goz](https://github.com/mustafaahci/goz) *(göz, "eye")* 0.2.0 by [Mustafa Ahci](https://github.com/mustafaahci), as vim started from vi.
 
 ## Highlights
@@ -25,12 +27,19 @@ Gozler-UI, its app, is a two-panel file manager with that instant search. It cop
 
 #### Search
 
+![Gozler's Search: 2,320,777 results with the filters on the left and the selected file's details below](docs/images/search.png)
+
 - **Results as you type.** Filters narrow the list by kind, folder, date, size and attributes.
 - **Search by folder as fast as by name.** With Match path on, part of a folder name lists every file below it.
 - **Act on a result where it is.** Open it, copy its path, export the list, or drag it into another program. The inspector shows the selected file's details, and a folder's size and item count.
 - **No waiting.** Copying 100,000 paths to the clipboard takes 59 ms. A drag of 1,000 files starts in 10 ms. The app stays under 16 MB of private memory.
 - **One-click repair.** When the service is stopped, missing or older than the app, a button in the app repairs it.
 - **In your language:** English, Spanish, Dutch and Turkish.
+
+<p>
+  <img src="docs/images/settings.png" alt="Settings, General page: language, sizes, icons and start-up options" width="49%">
+  <img src="docs/images/indexed-folders.png" alt="Indexed folders: a tree of check boxes that chooses which folders the index keeps" width="49%">
+</p>
 
 #### Copy, move and delete
 
