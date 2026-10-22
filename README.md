@@ -7,7 +7,7 @@
 
 **gozler** *(gözler, Turkish for "eyes")* finds any file on Windows as you type: every name on your NTFS and ReFS drives, in milliseconds. It is an open-source alternative to voidtools Everything, written in Rust.
 
-Gozler-UI, its app, searches the same way, and copies, moves and deletes what you find blazingly fast, without File Explorer. It deletes small files 3 times faster than `rmdir`, and copies them 1.8 times faster than `robocopy`.
+Gozler-UI, its app, is a two-panel file manager with that instant search. It copies, moves and deletes blazingly fast, without File Explorer: it deletes small files 3 times faster than `rmdir`, and copies them 1.8 times faster than `robocopy`.
 
 **[Download the installer](https://github.com/SynoSoftware/goz/releases/latest)** for Windows 10 and 11, x64.
 
@@ -16,6 +16,12 @@ Gozler-UI, its app, searches the same way, and copies, moves and deletes what yo
 ## Highlights
 
 ### Gozler-UI
+
+#### Two panels
+
+- **A file manager in the style of Norton Commander and Total Commander.** Browse two folders side by side: F5 copies, F6 moves, F7 creates a folder and F8 deletes. Copy and Move offer the other panel's folder.
+- **Search takes you to the file.** Enter on a search result shows it in its folder, and Ctrl+F searches from a panel.
+- **A Viewer opens any file at once** with F3, in Text or Hex, even when it is several gigabytes.
 
 #### Search
 
