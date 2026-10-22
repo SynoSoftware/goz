@@ -556,3 +556,149 @@ they show and the setters read it. This plan is deleted.
 - No feature and no change a person can see, other than waits moved off
   the window's thread and the flashes and unchanged sets that stages 2 and
   6 remove.
+
+## Round 3: decided, not yet worked into the stages above
+
+Decided after the round-2 code review, a review from the side of the
+people who use Gozler, and the owner's answers. Where this section and the
+text above disagree, this section wins until the stages are rewritten.
+
+### Owner decisions
+
+- **One owner for all background work, at architecture level,** used by
+  search, the file manager, copying, the Viewer, Settings and every later
+  window, so no window restates the rules. `core::work` holds the rules
+  (task kinds, when a task counts as slow, what then happens, one wording
+  for "Waiting for …"), tested on Ubuntu. `win::work` is the only place
+  that starts a thread: it gives each task a `!Send` `OffThread` token, a
+  cancel token, a way to cut loose a stuck disk call
+  (`CancelSynchronousIo`), and delivers answers through the one channel
+  and an `OpenWaker`, which wakes the window only while it is open, so no
+  task is joined at exit. It lives in `win`, so `win`'s own threads
+  (folders, the Viewer, drops, clipboard) use it without `win` calling
+  `app`. `app::work` starts tasks for areas and routes Cancel. A window
+  says only "start this work, of this kind, shown in this area". Today
+  about 19 places in 12 files start threads, each with its own rules.
+- **Cancel by doing something else.** An action that replaces the work in
+  the same place cancels it (a new search, another folder). Scrolling,
+  opening Settings, the other panel or the Viewer cancel nothing.
+- **Work that changes files is never cancelled by another action:** a
+  copy, move, delete or export runs until it ends or its Cancel is
+  pressed.
+- **Cancel shows only when needed:** a task the person waits for, with no
+  answer for a few seconds (one constant in `core::work`), shown where its
+  result will appear ("Waiting for \\server\share…" with Cancel), in the
+  area's existing message place with its button.
+- **No automatic time limit for work the person started;** background
+  work nobody watches (status, folder sizes, labels, free space, update
+  check) gives up silently and tries again at the next natural moment.
+- **The bar is decency, not smoothness:** never freeze, never wait for
+  what should be instant, never visibly flash. 60 or 120 fps is no goal;
+  work whose only gain is smoothness a regular user would not notice is
+  cut or made conditional.
+- **Why:** in Total Commander, changing to `\\server\share` that does not
+  answer freezes the whole window until it answers. This must never
+  happen in Gozler, in any window.
+
+### Waits on the window's thread found by the reviews
+
+Filed under the owner ruling: #140 (Settings reads drive labels), #141
+(the Location check on each search), #142 (Open, Explore, Properties,
+Open file location and open commands call the shell), #143 (`ui.json`
+saved), #144 (the clipboard retry sleeps). Also to move or prove instant:
+`is_paired` hashes gozlerd.exe on the window's thread (`main_window.rs`
+around 1705); `present()` stats each selected entry (around 5234); the
+registry read and write for start at sign-in; `Queue::new` reading and
+`Queue::close` writing `operations.json` under a lock queue threads hold;
+the drop's cross-process `GetData`; `EmptyClipboard`'s message to another
+process; start-up waits before the window (`Settings::load`,
+`wait_for_end`). The update check's lock and `LATEST` are not window-thread
+waits. The operation's common folder no longer runs on the window's
+thread.
+
+### Corrections to the stages
+
+- **Stage order:** 1. the owner for background work, with the known waits
+  above moved onto it (the user-visible gain first); 2. the existing
+  threads moved onto the owner, the scan, the watchdog and the "Waiting
+  for …" display; 3. painting and unchanged sets (below); then the
+  maintenance stages: state types, areas, what an update returns, the
+  remaining setters, the docs. The maintenance stages are labelled as
+  such.
+- **Enforcement, stated honestly:** the token guards the functions marked
+  with it; a test scans `app`, `win` and `core` for waiting `std` calls
+  (`std::fs` in every form, `File::open`, `Path::exists`, `is_dir`,
+  `metadata`, `symlink_metadata`, `canonicalize`, `sleep`, `join`, a
+  blocking `recv`, `std::process`), for a named list of waiting Win32
+  calls (`ShellExecuteW`, `SHOpenFolderAndSelectItems`,
+  `GetVolumeInformationW`, the registry calls, `OpenClipboard`), and for a
+  named list of other crates' waiting functions
+  (`gozler_client::folder_is_missing`, `gozler_fileops::Queue::new` and
+  `close`); thread code lives only in modules named `…_thread` or under
+  `work`, which hold nothing else, so mixed files split; the few
+  exceptions (the panic hook's join, the keyboard hook thread, start-up
+  before the window) are listed with their reasons. The watchdog catches
+  the rest.
+- **Joins:** no join of a thread that may still run. At exit the window
+  hides, every task is cancelled, and threads are released through the
+  `OpenWaker` flag instead of joined; DESIGN.md window rule 5 is
+  rewritten to match in the docs stage.
+- **The watchdog** is a heartbeat: a watchdog thread posts a message to
+  the window every 100 ms while a Gozler window is on screen; every
+  message loop on the thread, modal ones included (dialogs, menus, the
+  size/move loop, drag and drop), dispatches it, and a blocked thread
+  does not. When a heartbeat is not answered in time, the watchdog writes
+  a line, and repeats it each second while the stop lasts: how long, the
+  window thread's CPU cycles over the same time (`QueryThreadCycleTime`),
+  so waiting is told from working, and the message in progress, from a
+  stack that the message loop and the filter hook push and pop, recording
+  only message IDs and control IDs or classes, never window text, which
+  holds typed searches and file names. Only the watchdog thread writes
+  `ui-slow.log`, capped at its newest 64 KB, in the settings folder or
+  `--data-dir`. It names the message, not the slow call: the issue names
+  the call after reading the code.
+- **The owner's day of use** with the new build is an item in
+  `ui-after-install.md`, not a stage proof; the implementer files one
+  issue for each distinct message and cause in the log, adding repeats to
+  the existing issue. Also there: a Location on a sleeping disk, Enter,
+  F3 and Properties on a share that stopped answering, a pulled USB drive,
+  a clipboard another program holds, Settings > Include with an offline
+  drive.
+- **Painting starts with the "before" recording.** Moving the list out of
+  `draw_once_after`, removing the whole-window erase and the Viewer's
+  buffered paint happen only if the recording, at normal speed, shows a
+  flash a regular user would see: the list moves inside
+  `draw_once_after` on purpose, so a narrower window does not flash its
+  horizontal scroll bar, and a resize step measures about 12 ms of layout
+  and 22 ms of list paint (`docs/research/measurements/window-resize`).
+  `RDW_ERASE` stays in the main window's `draw_once_after` (mode and
+  language switch), or the other mode's pixels stay. Toolbar double
+  buffering is checked with screenshots in light, high contrast and at
+  150 % DPI, and dropped if the recording shows no toolbar blink.
+- **Unchanged sets come early,** in the painting stage: `Hwnd::set_text`,
+  button captions, `Toolbar::set_text`, the tips and the shield compare
+  before they set, and the File operations window stops setting every
+  text on each 500 ms poll, the one blink on every update a person sees.
+  `BCM_SETSHIELD` has no getter and `Button::set_icon` sends it on every
+  call, so the shield is kept beside the button in `Controls`, with the
+  inspector's file icon and the marquee. The table also needs
+  `ListView::set_header`, `Edit::set_cue` and `DatePicker::set_day`.
+- **The inspector** keeps, in `core`, the facts it last showed, not its
+  captions (window rule 12), to decide when to restart its age timer; its
+  file icon is kept once, beside the control.
+- **Areas make their own controls,** so #98 can make them when an area
+  first shows; #98 stays in `window-responsiveness.md`.
+- **What an update returns:** the refresh repeats while the model's
+  change count moves, a few times at most (`debug_assert` after that).
+  The acting `Change` arms also include `NewSearch` cancelling its
+  `Selection` request, `fill_around_first_rows`, `Mode` replacing the
+  menu bar and moving the focus, the column arms updating
+  `column_sizing`, and the tail of `apply`: the age, status and save
+  timers and `set_viewer`, which changes the model.
+- **Stage 5's proof** (what an update returns) includes the measured run,
+  against today's figures from `8db8f37` (Ctrl+click 15.6 ms, Shift+End
+  5.3 ms, end of a move 39 ms, a status reply under 15 ms); an After
+  install list checks the focus after Enter, Esc, Tab and a mode switch,
+  header texts after a language switch, and Settings' Apply.
+- **What DESIGN.md says that does not hold,** items 2 and 3, are
+  suspected, not filmed: the recording decides them.
