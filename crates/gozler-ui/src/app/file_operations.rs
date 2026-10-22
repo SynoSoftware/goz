@@ -860,9 +860,7 @@ impl Window {
                 c.tips.set(c.pause.hwnd(), strings.text(pause));
             }
             None => {
-                c.title
-                    .hwnd()
-                    .set_text(strings.text("file_operations.nothing_running"));
+                c.title.hwnd().set_text(&view.idle);
                 for label in [
                     c.status.hwnd(),
                     c.doing.hwnd(),

@@ -46,14 +46,14 @@ use crate::core::model::{
 };
 use crate::core::open::{self, CommandLine};
 use crate::core::operations::{Answer, OperationDialog, OperationProgress, QueueStep, WindowStep};
-use crate::core::panel::Side;
+use crate::core::panel::{ChosenEntry, Side};
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
     date_items, size_items,
 };
 use crate::core::results::{Fix, ListButton};
 use crate::core::search_list::Deselect;
-use crate::core::selection::{DRAG_LIMIT, SELECTION_LIMIT, wide_path};
+use crate::core::selection::{DRAG_LIMIT, SELECTION_LIMIT, ToldRows, wide_path};
 use crate::core::settings::{Mode, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
@@ -844,6 +844,9 @@ pub(crate) struct MainWindow {
     /// Whether a [`Message::Deferred`] is posted to read the list's
     /// selection, so one user action reads it once (DESIGN.md: The selection).
     selection_pending: Cell<bool>,
+    /// The rows each list's notifications told it selects, in the order of
+    /// [`List::ALL`] ([`MainWindow::selected_rows`]).
+    told: [RefCell<ToldRows>; 3],
     /// Whether a [`Message::Deferred`] is posted to read the header's order
     /// after the person dragged a column.
     column_dragged: Cell<bool>,
@@ -1032,6 +1035,7 @@ impl MainWindow {
             icons: Icons::default(),
             polling: Cell::new(false),
             selection_pending: Cell::new(false),
+            told: Default::default(),
             column_dragged: Cell::new(false),
             filter_scroll: Cell::new(Px(0)),
             range_closing: Cell::new(None),
@@ -2888,7 +2892,7 @@ impl MainWindow {
                 created.requests.cancel(Purpose::Selection(List::Search));
                 // The new rows no longer hold what the ended deletes and
                 // moves took, and show again what they failed on.
-                self.release_operations(hwnd);
+                self.release_operations();
                 self.update_status();
                 self.update_message();
                 self.fetch_visible(List::Search);
@@ -2920,7 +2924,7 @@ impl MainWindow {
                     control.set_focused(Some(0));
                 }
                 created.requests.cancel(Purpose::Selection(list));
-                self.release_operations(hwnd);
+                self.release_operations();
                 self.show_panel(side);
                 self.update_status();
                 self.fetch_visible(list);
@@ -3469,7 +3473,7 @@ impl MainWindow {
         let accepted = if count > SELECTION_LIMIT {
             self.model.borrow_mut().select_too_many(List::Search, count)
         } else {
-            let positions = list.selected();
+            let positions = self.selected_rows(List::Search);
             self.model
                 .borrow_mut()
                 .set_selection(List::Search, positions)
@@ -3514,7 +3518,8 @@ impl MainWindow {
                 }
                 DrawStage::Other => DrawAnswer::Default,
             })),
-            ListNotify::SelectionChanged => {
+            ListNotify::SelectionChanged(change) => {
+                self.told_rows(List::Search).borrow_mut().change(change);
                 if !self.selection_pending.replace(true) {
                     hwnd.post(DEFERRED);
                 }
@@ -3743,7 +3748,7 @@ impl MainWindow {
     /// window rule 8).
     fn open_first_or_selected(&self, hwnd: Hwnd) {
         let list = self.created().controls.list;
-        if list.selected().is_empty() && self.model.borrow().search_list().results().count() > 0 {
+        if list.selected_count() == 0 && self.model.borrow().search_list().results().count() > 0 {
             list.select_only(Some(0));
             list.ensure_visible(0);
         }
@@ -3769,30 +3774,36 @@ impl MainWindow {
         list.hwnd().is_visible() && list.header().screen_rect().contains(point)
     }
 
-    /// The entries a file command acts on: Search's selected entries, or the
-    /// active panel's chosen ones.
-    fn selected_entries(&self) -> Vec<Selected> {
+    /// The entries a file command acts on, each as `chosen` makes the
+    /// active panel's chosen ones in Two panels, or as `file` makes Search's
+    /// selected entries.
+    fn selected_as<T>(
+        &self,
+        chosen: impl FnMut(ChosenEntry) -> T,
+        file: impl FnMut(&ResultItem) -> T,
+    ) -> Vec<T> {
         let model = self.model.borrow();
         if model.mode() == Mode::TwoPanels {
             let panels = model.panels();
             return (panels.chosen(panels.active()).into_iter())
-                .map(|entry| Selected {
-                    path: entry.path,
-                    is_folder: entry.is_folder,
-                })
+                .map(chosen)
                 .collect();
         }
-        model
-            .search_list()
-            .selection()
-            .files()
-            .unwrap_or_default()
-            .iter()
-            .map(|file| Selected {
+        let files = model.search_list().selection().files().unwrap_or_default();
+        files.iter().map(file).collect()
+    }
+
+    fn selected_entries(&self) -> Vec<Selected> {
+        self.selected_as(
+            |entry| Selected {
+                path: entry.path,
+                is_folder: entry.is_folder,
+            },
+            |file| Selected {
                 path: wide_path(file),
                 is_folder: file.is_dir,
-            })
-            .collect()
+            },
+        )
     }
 
     /// Does `action` on the selected entries. Search's rows come from the
@@ -4089,7 +4100,7 @@ impl MainWindow {
         let taken = operations.taken();
         let snapshot = operations.snapshot();
         let steps = (self.model.borrow_mut()).accept_operations(&snapshot, &taken, Instant::now());
-        self.run_queue_steps(hwnd, steps.queue);
+        self.run_queue_steps(steps.queue);
         if !self.model.borrow().shows_taken(&taken) {
             self.show_taken(hwnd, taken);
         }
@@ -4115,13 +4126,12 @@ impl MainWindow {
         }
     }
 
-    /// Runs `steps` on the queue. A removal changes the taken entries, so
-    /// the window reads the queue again after it.
-    fn run_queue_steps(&self, hwnd: Hwnd, steps: Vec<QueueStep>) {
+    /// Runs `steps` on the queue. A removal wakes the window once the queue
+    /// has taken the removed operation's sources out of the taken entries.
+    fn run_queue_steps(&self, steps: Vec<QueueStep>) {
         let Some(operations) = self.file_operations.get() else {
             return;
         };
-        let mut removed = false;
         for step in steps {
             let accepted = operations.run(step);
             match step {
@@ -4131,20 +4141,16 @@ impl MainWindow {
                         operations.tell_source(told);
                     }
                 }
-                QueueStep::Remove(_) => removed = true,
-                QueueStep::Submit { .. } | QueueStep::Cancel(_) => {}
+                QueueStep::Submit { .. } | QueueStep::Remove(_) | QueueStep::Cancel(_) => {}
             }
-        }
-        if removed {
-            hwnd.post(QUEUE_CHANGED);
         }
     }
 
     /// Lets the queue remove the ended deletes and moves that no list keeps
     /// any more, after a list let go of them.
-    fn release_operations(&self, hwnd: Hwnd) {
+    fn release_operations(&self) {
         let steps = self.model.borrow_mut().release_operations();
-        self.run_queue_steps(hwnd, steps);
+        self.run_queue_steps(steps);
     }
 
     /// Shows the File operations window, with `select` selected, in front
@@ -4216,7 +4222,7 @@ impl MainWindow {
                 // borrowed here.
                 let answer = Answer::of(win::dialog::choose(hwnd, &question));
                 let step = self.model.borrow_mut().answer_operation(id, answer);
-                self.run_queue_steps(hwnd, step.into_iter().collect());
+                self.run_queue_steps(step.into_iter().collect());
             }
             OperationDialog::Report(id) => {
                 let windows_text =
@@ -4232,7 +4238,7 @@ impl MainWindow {
                 };
                 super::file_operations::show_failure(hwnd, &strings, failure);
                 let steps = self.model.borrow_mut().operation_reported(id);
-                self.run_queue_steps(hwnd, steps);
+                self.run_queue_steps(steps);
             }
         }
         // The status bar and the File operations window show the answer or
@@ -4268,9 +4274,10 @@ impl MainWindow {
     /// The full paths of the entries a file command acts on, as Windows
     /// names them.
     fn selected_paths(&self) -> Vec<PathBuf> {
-        (self.selected_entries().into_iter())
-            .map(|entry| PathBuf::from(OsString::from_wide(&entry.path)))
-            .collect()
+        self.selected_as(
+            |entry| PathBuf::from(OsString::from_wide(&entry.path)),
+            os_path,
+        )
     }
 
     /// Copy to folder… and Move to folder…: the folder picker, at the folder
@@ -4387,7 +4394,11 @@ impl MainWindow {
     /// through in Search's list and blank in a search panel, and takes them
     /// out of the selections (fast-copy-delete-spec.md: Taken entries).
     fn show_taken(&self, hwnd: Hwnd, taken: Arc<Taken>) {
+        let replaced = Arc::clone(self.model.borrow().panels().taken());
         let shown = self.show_panels_taken(taken);
+        // Freed on a thread of its own, because freeing the entries of a
+        // large operation's sources is a wait the window would show.
+        std::thread::spawn(move || drop(replaced));
         if shown.search_lost {
             let lost = Accepted {
                 change: Change::Selection(List::Search),
@@ -4407,10 +4418,29 @@ impl MainWindow {
             Deselect::Nothing => {}
             Deselect::All => control.deselect_all(),
             Deselect::Taken => {
-                self.deselect_taken(list, &control.selected());
+                self.deselect_taken(list, &self.selected_rows(list));
             }
         }
         control.redraw_rows(control.visible_rows());
+    }
+
+    /// The rows `list`'s control selects, from the rows its notifications
+    /// told, which the control confirms in a few messages, where reading
+    /// them takes one for each selected row (DESIGN.md: The selection).
+    fn selected_rows(&self, list: List) -> Vec<Range<u64>> {
+        let told = self.told_rows(list);
+        // Taken out, because a message to the list could notify the window.
+        let mut rows = told.take();
+        let selected = self.list_control(list).selected_told(&mut rows);
+        told.replace(rows);
+        selected
+    }
+
+    fn told_rows(&self, list: List) -> &RefCell<ToldRows> {
+        let index = (List::ALL.iter())
+            .position(|each| *each == list)
+            .expect("ALL holds every list");
+        &self.told[index]
     }
 
     /// Deselects the rows of `selected`, `list`'s selected rows, whose
@@ -5159,6 +5189,16 @@ enum EntryAction {
 struct Checking {
     action: EntryAction,
     checked: Receiver<(Vec<Selected>, Option<Vec<u16>>)>,
+}
+
+/// The full path of `file` as Windows names it, as [`wide_path`] gives it,
+/// converted once instead of through UTF-16, which takes several times as
+/// long for each selected file.
+fn os_path(file: &ResultItem) -> PathBuf {
+    match &file.path_u16 {
+        Some(units) => PathBuf::from(OsString::from_wide(units)),
+        None => PathBuf::from(&file.path),
+    }
 }
 
 /// A selected entry, by its path as Windows names it.

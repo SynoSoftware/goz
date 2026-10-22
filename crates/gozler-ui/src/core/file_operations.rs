@@ -120,6 +120,9 @@ pub(crate) struct View {
     pub(crate) title: String,
     /// `None` while no operation runs.
     pub(crate) card: Option<Card>,
+    /// What the card says while no operation runs: "Preparing…" while one
+    /// prepares, or that none runs.
+    pub(crate) idle: String,
     pub(crate) rows: Vec<Row>,
     /// The header over the list, such as "Queue · 3 waiting".
     pub(crate) queue: String,
@@ -735,6 +738,13 @@ pub(crate) fn view(
         }
         None => strings.text("file_operations.title").to_owned(),
     };
+    let preparing =
+        (operations.iter()).any(|operation| matches!(operation.state, State::Preparing));
+    let idle = strings.text(if preparing {
+        "file_operations.preparing"
+    } else {
+        "file_operations.nothing_running"
+    });
     // A row that runs beside the card's operation or was interrupted does
     // not wait, and its own line says what it does.
     let waiting = rows
@@ -749,6 +759,7 @@ pub(crate) fn view(
     View {
         title,
         card,
+        idle: idle.to_owned(),
         queue,
         rows,
     }

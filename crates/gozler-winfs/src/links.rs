@@ -15,8 +15,6 @@
 //! surrogates, so decoding is left to `gozler-core`'s WTF-8 layer rather than being
 //! lossily flattened here.
 
-use core::ptr;
-
 use windows_sys::Win32::Foundation::{
     ERROR_HANDLE_EOF, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_NAME, ERROR_MORE_DATA,
     ERROR_TOO_MANY_LINKS, HANDLE, INVALID_HANDLE_VALUE,
@@ -106,12 +104,23 @@ pub fn file_links(volume: &VolumeHandle, id: u128) -> Result<Option<Vec<Link>>, 
 
 /// `GetFinalPathNameByHandleW` into an owned NUL-terminated UTF-16 buffer.
 pub(crate) fn final_path(file: HANDLE, flags: u32) -> Result<Vec<u16>, WinError> {
-    // SAFETY: `file` is live for this call. The first call passes a zero-length
-    // buffer, which the API documents as "return the required length".
-    let needed = unsafe { GetFinalPathNameByHandleW(file, ptr::null_mut(), 0, flags) };
-    if needed == 0 {
+    // Most paths fit, so most cost one call instead of two. A call for
+    // `VOLUME_NAME_GUID` asks the mount manager for the volume's GUID path,
+    // which takes most of its time, and an operation reads that path for
+    // every selected entry.
+    let mut fits = [0u16; 512];
+    // SAFETY: `file` is live for this call, and `fits` holds the length
+    // passed; the API writes at most that many units including the NUL.
+    let written =
+        unsafe { GetFinalPathNameByHandleW(file, fits.as_mut_ptr(), fits.len() as u32, flags) };
+    if written == 0 {
         return Err(last_error("GetFinalPathNameByHandleW"));
     }
+    if (written as usize) < fits.len() {
+        return Ok(fits[..=written as usize].to_vec()); // keep the NUL for PCWSTR
+    }
+    // Too long: `written` is the length the path needs, the NUL included.
+    let needed = written;
     let mut buf = vec![0u16; needed as usize];
     // SAFETY: `buf` holds `needed` units, which is the length the call above
     // asked for; the API writes at most that many including the NUL.

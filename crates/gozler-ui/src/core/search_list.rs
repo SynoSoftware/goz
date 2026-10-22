@@ -131,12 +131,18 @@ impl SearchList {
             .is_some_and(|row| is_taken(taken, &self.kept, row))
     }
 
-    /// The operations `ended`, and the taken entries `taken` that the list
-    /// shows next: the list keeps an ended delete or move that takes one of
-    /// its fetched rows, until its next search. The fetched rows are walked
+    /// The operations `ended`, the operations `in_queue`, and the taken
+    /// entries `taken` that the list shows next: the list keeps an ended
+    /// delete or move that takes one of its fetched rows, until its next
+    /// search or until it leaves the queue. The fetched rows are walked
     /// once, each encoded and folded into one buffer and looked up once for
     /// every ended delete or move, and only while one is not yet kept.
-    pub(crate) fn ended(&mut self, ended: &[(OperationId, Arc<Request>)], taken: &Taken) {
+    pub(crate) fn ended(
+        &mut self,
+        ended: &[(OperationId, Arc<Request>)],
+        in_queue: &HashSet<OperationId>,
+        taken: &Taken,
+    ) {
         let mut wanted: Vec<OperationId> = (ended.iter())
             .filter(|(id, request)| {
                 matches!(**request, Request::Delete { .. } | Request::Move { .. })
@@ -160,14 +166,9 @@ impl SearchList {
                 });
             });
         }
-        // `taken` may be older than `ended`, so an operation that ended in
-        // this call stays even when `taken` does not have it as ended yet.
-        if !self.kept.is_empty() {
-            let in_queue: HashSet<OperationId> = (taken.ended())
-                .chain(ended.iter().map(|(id, _)| *id))
-                .collect();
-            self.kept.retain(|id| in_queue.contains(id));
-        }
+        // From the queue, not from `taken`, which can be older and miss an
+        // operation that ended earlier.
+        self.kept.retain(|id| in_queue.contains(id));
     }
 
     /// Whether the list still shows the rows of the ended operation `id`
@@ -195,7 +196,7 @@ impl SearchList {
             return false;
         }
         let selected = self.selection.files().map_or(0, <[_]>::len);
-        let files = match std::mem::replace(&mut self.selection, Selection::None) {
+        let mut files = match std::mem::replace(&mut self.selection, Selection::None) {
             Selection::Files(files) => files,
             Selection::Folder { folder, contents } => {
                 if !is_taken(taken, &self.kept, &folder) {
@@ -208,14 +209,9 @@ impl SearchList {
                 Vec::new()
             }
         };
+        retain_untaken(taken, &self.kept, &mut files);
         if !files.is_empty() {
-            let kept: Vec<ResultItem> = files
-                .into_iter()
-                .filter(|file| !is_taken(taken, &self.kept, file))
-                .collect();
-            if !kept.is_empty() {
-                self.selection = Selection::Files(kept);
-            }
+            self.selection = Selection::Files(files);
         }
         self.selection.files().map_or(0, <[_]>::len) != selected
     }
@@ -223,10 +219,27 @@ impl SearchList {
 
 /// Whether a delete or a move has taken `row`'s entry, by its exact name
 /// when its UTF-8 path lost an unpaired surrogate. The window asks for every
-/// cell it paints and every selected file, so an empty set answers before
-/// the path is encoded.
+/// cell it paints, so an empty set answers before the path is encoded.
 pub(super) fn is_taken(taken: &Taken, kept: &HashSet<OperationId>, row: &ResultItem) -> bool {
     !taken.is_empty() && taken.contains(&super::selection::wide_path(row), |id| kept.contains(&id))
+}
+
+/// Keeps the `files` that no delete or move has taken, as [`is_taken`]
+/// says, encoding and folding every path into the same two buffers, because
+/// a selection can hold [`super::selection::SELECTION_LIMIT`] files.
+pub(crate) fn retain_untaken(
+    taken: &Taken,
+    kept: &HashSet<OperationId>,
+    files: &mut Vec<ResultItem>,
+) {
+    if taken.is_empty() {
+        return;
+    }
+    let (mut path, mut folded) = (Vec::new(), Vec::new());
+    files.retain(|file| {
+        wide_path_into(file, &mut path);
+        !taken.contains_folding(&path, &mut folded, |id| kept.contains(&id))
+    });
 }
 
 #[cfg(test)]

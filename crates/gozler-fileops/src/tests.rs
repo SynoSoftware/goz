@@ -33,7 +33,7 @@ use crate::volumes::{CopyPlan, VolumeClass};
 use crate::{
     Choice, Conflicts, Count, Destination, End, LargeFileLimit, Listed, OperationId, Outcome,
     Preset, Queue, Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk,
-    RingSsd, SourcesFolder, SpeedSettings, State, Total,
+    RingSsd, SourcesFolder, SpeedSettings, State, Taken, Total,
 };
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -186,6 +186,20 @@ impl Watched {
         match self.wait(id, |state| matches!(state, State::Ended(_))) {
             State::Ended(outcome) => (*outcome).clone(),
             _ => unreachable!("waited for the end"),
+        }
+    }
+
+    /// The taken entries once `done` says they followed the operations,
+    /// which they do a moment after a change, with a wake of their own.
+    fn taken_when(&self, done: impl Fn(&Taken) -> bool) -> Arc<Taken> {
+        loop {
+            let taken = self.queue.taken();
+            if done(&taken) {
+                return taken;
+            }
+            self.wakes
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the taken entries follow within 30 s");
         }
     }
 
@@ -418,19 +432,16 @@ fn an_ended_delete_is_taken_only_where_kept() {
     let file = scratch.file("gone.txt");
     let watched = Watched::new(&scratch.saved());
 
-    watched.run(
-        Request::Delete {
-            sources: vec![file.clone()],
-        },
-        None,
-    );
-    let taken = watched.queue.taken();
-    let id = taken.ended().next().expect("the ended delete");
+    let (id, _) = watched.prepared(Request::Delete {
+        sources: vec![file.clone()],
+    });
+    watched.queue.submit(id, None).expect("prepared");
+    watched.ended(id);
     let row = units(&file);
+    let taken = watched.taken_when(|taken| !taken.contains(&row, |_| false));
     assert!(taken.contains(&row, |kept| kept == id));
-    assert!(!taken.contains(&row, |_| false));
     watched.queue.remove(id);
-    assert!(watched.queue.taken().is_empty());
+    watched.taken_when(Taken::is_empty);
 }
 
 /// A delete takes its source from the lists while it prepares and asks,
@@ -448,7 +459,7 @@ fn a_delete_takes_its_source_before_its_submit() {
     });
     assert!(watched.queue.taken().contains(&units(&file), |_| false));
     watched.queue.cancel(id);
-    assert!(watched.queue.taken().is_empty());
+    watched.taken_when(Taken::is_empty);
 }
 
 /// A folder panel compares its entries' paths only where a taken path is
@@ -456,7 +467,7 @@ fn a_delete_takes_its_source_before_its_submit() {
 /// backslash, must find the taken entries in it.
 #[test]
 fn a_drive_root_holds_its_taken_entries() {
-    let mut taken = crate::Taken::default();
+    let mut taken = Taken::default();
     taken.insert(
         OperationId::for_tests(1),
         Path::new(r"C:\Data\a.txt"),

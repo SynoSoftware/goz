@@ -5,6 +5,7 @@
 
 use super::fetch::Generation;
 use gozler_core::proto::{QueryTotals, ResultItem};
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 /// Open and Open file location stop here, because File Explorer asks before
@@ -136,5 +137,149 @@ pub(crate) fn wide_path_into(file: &ResultItem, path: &mut Vec<u16>) {
     match &file.path_u16 {
         Some(units) => path.extend_from_slice(units),
         None => path.extend(file.path.encode_utf16()),
+    }
+}
+
+/// A change of a list's selected rows, as the list's notification tells
+/// it (DESIGN.md: The selection).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RowsChange {
+    /// One row, as a Ctrl+click tells it.
+    Row { row: u64, selected: bool },
+    /// A range of rows, as Shift+End tells it.
+    Rows { rows: Range<u64>, selected: bool },
+    /// Every row, as Select all, or a click that clears the others, tells
+    /// it.
+    All { selected: bool },
+}
+
+/// The rows a list selects, as its notifications told them, so the window
+/// knows a large selection after a change without a message for each
+/// selected row. The list stays the owner: the window checks these rows
+/// against it before it uses them (DESIGN.md: The selection).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ToldRows {
+    /// Each run of selected rows, by its first row, to the row after its
+    /// last; runs neither overlap nor touch. A run can reach past the list's
+    /// rows, which a shorter list dropped without a notification.
+    runs: BTreeMap<u64, u64>,
+}
+
+impl ToldRows {
+    /// The rows `ranges`, sorted ranges that do not touch, read from the
+    /// list.
+    pub(crate) fn read(ranges: &[Range<u64>]) -> ToldRows {
+        ToldRows {
+            runs: ranges
+                .iter()
+                .map(|range| (range.start, range.end))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn change(&mut self, change: RowsChange) {
+        match change {
+            RowsChange::Row { row, selected } => self.set(row..row + 1, selected),
+            RowsChange::Rows { rows, selected } => self.set(rows, selected),
+            RowsChange::All { selected } => {
+                self.runs.clear();
+                if selected {
+                    self.runs.insert(0, u64::MAX);
+                }
+            }
+        }
+    }
+
+    fn set(&mut self, rows: Range<u64>, selected: bool) {
+        if rows.is_empty() {
+            return;
+        }
+        // The runs that `rows` overlaps, and for a selection also those it
+        // touches, which merge with it.
+        let last_start = if selected { rows.end } else { rows.end - 1 };
+        let met: Vec<(u64, u64)> = (self.runs.range(..=last_start).rev())
+            .take_while(|&(_, &end)| end > rows.start || selected && end == rows.start)
+            .map(|(&start, &end)| (start, end))
+            .collect();
+        for (start, _) in &met {
+            self.runs.remove(start);
+        }
+        if selected {
+            let start = met.iter().map(|run| run.0).fold(rows.start, u64::min);
+            let end = met.iter().map(|run| run.1).fold(rows.end, u64::max);
+            self.runs.insert(start, end);
+        } else {
+            for (start, end) in met {
+                if start < rows.start {
+                    self.runs.insert(start, rows.start);
+                }
+                if end > rows.end {
+                    self.runs.insert(rows.end, end);
+                }
+            }
+        }
+    }
+
+    /// The selected rows of a list of `count` rows, as sorted ranges that
+    /// do not touch.
+    pub(crate) fn rows(&self, count: u64) -> Vec<Range<u64>> {
+        (self.runs.range(..count))
+            .map(|(&start, &end)| start..end.min(count))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    fn change() -> impl Strategy<Value = RowsChange> {
+        prop_oneof![
+            (0..40u64, any::<bool>()).prop_map(|(row, selected)| RowsChange::Row { row, selected }),
+            (0..40u64, 0..12u64, any::<bool>()).prop_map(|(start, len, selected)| {
+                RowsChange::Rows {
+                    rows: start..start + len,
+                    selected,
+                }
+            }),
+            any::<bool>().prop_map(|selected| RowsChange::All { selected }),
+        ]
+    }
+
+    proptest! {
+        /// The window acts on these rows in place of the list's, so after
+        /// any notifications they are the rows the list selects: one row
+        /// too many or too few is a command on a file the person did not
+        /// select, or none on one they did.
+        #[test]
+        fn told_rows_follow_every_change(changes in proptest::collection::vec(change(), 0..30)) {
+            let count = 32;
+            let mut told = ToldRows::default();
+            let mut list = BTreeSet::new();
+            for change in changes {
+                match &change {
+                    RowsChange::Row { row, selected } => {
+                        if *selected { list.insert(*row); } else { list.remove(row); }
+                    }
+                    RowsChange::Rows { rows, selected } => {
+                        for row in rows.clone() {
+                            if *selected { list.insert(row); } else { list.remove(&row); }
+                        }
+                    }
+                    RowsChange::All { selected } => {
+                        list.clear();
+                        if *selected { list.extend(0..count); }
+                    }
+                }
+                told.change(change);
+            }
+            let rows: Vec<u64> = told.rows(count).into_iter().flatten().collect();
+            let expected: Vec<u64> = list.into_iter().filter(|row| *row < count).collect();
+            prop_assert_eq!(rows, expected);
+            let runs = told.rows(u64::MAX);
+            prop_assert!(runs.windows(2).all(|pair| pair[0].end < pair[1].start));
+        }
     }
 }

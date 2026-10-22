@@ -349,7 +349,7 @@ impl MainWindow {
         let list = self.panel(side).list;
         Place {
             focused: list.focused(),
-            selected: list.selected(),
+            selected: self.selected_rows(List::Panel(side)),
         }
     }
 
@@ -676,7 +676,7 @@ impl MainWindow {
             self.end_folder_work(hwnd, side);
             self.end_search_work(hwnd, side);
         }
-        self.release_operations(hwnd);
+        self.release_operations();
     }
 
     /// Ends what `side` does as a folder panel besides its reading and
@@ -702,7 +702,7 @@ impl MainWindow {
     /// `side` left its search, whose box is empty for the next one.
     fn left_search(&self, hwnd: Hwnd, side: Side) {
         self.end_search_work(hwnd, side);
-        self.release_operations(hwnd);
+        self.release_operations();
         self.panel(side).search.hwnd().set_text("");
     }
 
@@ -853,7 +853,7 @@ impl MainWindow {
                 threads.read_free(side, &folder);
                 // The listing may release the ended operations that it
                 // started after.
-                self.release_operations(hwnd);
+                self.release_operations();
             }
             ReadChange::Refused {
                 path,
@@ -1014,7 +1014,7 @@ impl MainWindow {
         if entered {
             self.created().panel_threads.cancel_read(side);
             self.end_folder_work(hwnd, side);
-            self.release_operations(hwnd);
+            self.release_operations();
             self.show_place(side, &shown, &Place::default(), Scroll::ToFocus);
             self.search(hwnd, List::Panel(side));
             self.note_saved_state(hwnd);
@@ -1428,7 +1428,10 @@ impl MainWindow {
             })),
             // Read later, because the list tells them while the window may
             // hold the model.
-            ListNotify::SelectionChanged => {
+            ListNotify::SelectionChanged(change) => {
+                self.told_rows(List::Panel(side))
+                    .borrow_mut()
+                    .change(change);
                 self.list_changed(hwnd, side, ListChanged::Selection);
                 None
             }
@@ -1511,12 +1514,12 @@ impl MainWindow {
             self.show_panel(side);
             return;
         }
-        // Each read sends a message per selected row, so it runs again only
-        // when Ctrl+A or a drag also selected a search panel's taken rows.
-        let mut selected = list.selected();
+        // Read again only after Ctrl+A or a drag also selected a search
+        // panel's taken rows, which are then deselected.
+        let mut selected = self.selected_rows(List::Panel(side));
         if searching && self.deselect_taken(List::Panel(side), &selected) {
             self.panel_changed[side.index()].set(ListChanged::Nothing);
-            selected = list.selected();
+            selected = self.selected_rows(List::Panel(side));
         }
         let focused = list.focused();
         let search = {

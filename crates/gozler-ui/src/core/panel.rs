@@ -29,7 +29,7 @@ use gozler_core::fold::{fold, fold_into};
 use gozler_core::proto::ResultItem;
 use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortKey, SortSpec};
-use gozler_core::winpath::{absolute, parent_of};
+use gozler_core::winpath::{absolute, is_root, parent_of};
 use gozler_core::wtf8;
 use gozler_fileops::{OperationId, Request, Taken};
 use serde::{Deserialize, Serialize};
@@ -894,7 +894,8 @@ impl Panel {
         }
     }
 
-    /// Whether the list shows `..` first; a search panel has none.
+    /// Whether the list shows `..` first: a folder panel's folder that is
+    /// not a drive's or a share's root; a search panel has none.
     fn has_up(&self) -> bool {
         matches!(self.view, View::Folder) && !self.folder.is_empty() && !is_root(&self.folder)
     }
@@ -1607,11 +1608,6 @@ pub(crate) fn relative_folder<'p>(searched: &str, path: &'p str) -> &'p str {
         rest = trimmed.find('\\').map_or("", |at| &trimmed[at..]);
     }
     rest.trim_start_matches('\\')
-}
-
-/// Whether `folder` is a drive's or a share's root, which has no `..`.
-pub(crate) fn is_root(folder: &str) -> bool {
-    folder_key(&parent_of(folder)) == folder_key(folder)
 }
 
 pub(crate) fn drive_root(folder: &str) -> String {
@@ -2694,7 +2690,7 @@ impl Panels {
     }
 
     /// The entries that deletes and moves have taken, for every list.
-    pub(super) fn taken(&self) -> &Arc<Taken> {
+    pub(crate) fn taken(&self) -> &Arc<Taken> {
         &self.taken
     }
 

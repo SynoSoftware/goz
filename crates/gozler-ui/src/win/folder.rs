@@ -19,10 +19,10 @@ use super::Hwnd;
 use super::wake::OpenWaker;
 use crate::core::panel::{
     Entry, FolderChange, FolderSort, ReadAsk, ReadEvent, ReadFailure, Side, SortedFolders,
-    give_sizes, is_root, join, sort_listing,
+    give_sizes, join, sort_listing,
 };
 use gozler_core::layout::{NotifyAction, walk_full_listing_buffer, walk_notify_buffer};
-use gozler_core::winpath::parent_of;
+use gozler_core::winpath::{is_root, parent_of};
 use gozler_winfs::{
     Access, FileIdentity, FolderWatch, Reparse, Signal, ThreadIoHandle, WatchEvent, WatchRelease,
     WinError, cancel_synchronous_io, current_thread_io_handle, open_entry, watch_folder,

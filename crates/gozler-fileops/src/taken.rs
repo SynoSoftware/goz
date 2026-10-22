@@ -131,7 +131,18 @@ impl Taken {
     /// case. `keeps` answers from the list's own set of the ended
     /// operations whose rows it still leaves out.
     pub fn contains(&self, path: &[u16], keeps: impl Fn(OperationId) -> bool) -> bool {
-        self.contains_where(path, &mut Vec::new(), |ids| self.any_takes(ids, &keeps))
+        self.contains_folding(path, &mut Vec::new(), keeps)
+    }
+
+    /// [`contains`](Self::contains) with `folded`, a buffer that the caller
+    /// reuses for many paths.
+    pub fn contains_folding(
+        &self,
+        path: &[u16],
+        folded: &mut Vec<u16>,
+        keeps: impl Fn(OperationId) -> bool,
+    ) -> bool {
+        self.contains_where(path, folded, |ids| self.any_takes(ids, &keeps))
     }
 
     /// Whether one of `ids` takes rows from a list that `keeps` the ended
@@ -160,14 +171,6 @@ impl Taken {
             self.lengths.binary_search(&end).is_ok()
                 && (self.paths.get(&folded[..end])).is_some_and(|&at| taken(&self.ids[at]))
         })
-    }
-
-    /// The ended operations whose sources it holds. The window decides
-    /// which lists keep each one from the same snapshot that the lists then
-    /// use, so no list shows an ended operation's rows before it has
-    /// decided.
-    pub fn ended(&self) -> impl Iterator<Item = OperationId> + '_ {
-        self.ended.iter().copied()
     }
 }
 

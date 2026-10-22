@@ -22,7 +22,7 @@ use super::panel::{LookIn, PanelFollow, Panels, Side, TakenRows, View, drive_roo
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
 use super::search_list::Deselect;
-use super::search_list::{SearchList, is_taken};
+use super::search_list::{SearchList, retain_untaken};
 use super::selection::{FolderContents, SELECTION_LIMIT, Selection};
 use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
 use super::text::{self, LanguageChoice, Numbers, Strings};
@@ -38,6 +38,7 @@ use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
 use gozler_fileops::{Operation, OperationId, Request, State, Taken};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -515,7 +516,8 @@ impl Model {
         let panels = if seen.ended.is_empty() {
             Vec::new()
         } else {
-            self.operations_ended(&seen.ended, taken)
+            let in_queue = snapshot.iter().map(|operation| operation.id).collect();
+            self.operations_ended(&seen.ended, &in_queue, taken)
         };
         let mut queue = seen.queue;
         queue.extend(self.release_operations());
@@ -603,20 +605,22 @@ impl Model {
     }
 
     /// The operations `ended`, which ended since the window last told the
-    /// lists, and the taken entries `taken` that the lists show next: each
-    /// search list keeps an ended delete or move that takes one of its
-    /// fetched rows, until its next search (fast-copy-delete-spec.md:
-    /// Taken entries), and the folder panels decide for themselves. Returns
-    /// what the folder panels do, as [`Panels::operations_ended`] does.
+    /// lists, the operations `in_queue`, and the taken entries `taken` that
+    /// the lists show next: each search list keeps an ended delete or move
+    /// that takes one of its fetched rows, until its next search
+    /// (fast-copy-delete-spec.md: Taken entries), and the folder panels
+    /// decide for themselves. Returns what the folder panels do, as
+    /// [`Panels::operations_ended`] does.
     fn operations_ended(
         &mut self,
         ended: &[(OperationId, Arc<Request>)],
+        in_queue: &HashSet<OperationId>,
         taken: &Taken,
     ) -> Vec<PanelFollow> {
-        self.search_list.ended(ended, taken);
+        self.search_list.ended(ended, in_queue, taken);
         for side in Side::BOTH {
             if let Some(search) = self.panels.search_mut(side) {
-                search.list.ended(ended, taken);
+                search.list.ended(ended, in_queue, taken);
             }
         }
         self.panels.operations_ended(ended)
@@ -1440,7 +1444,8 @@ impl Model {
         let taken = Arc::clone(self.panels.taken());
         let shown = self.list_mut(list)?;
         // A result snapshot's row whose file is gone holds no file.
-        files.retain(|file| !file.is_gone() && !is_taken(&taken, &shown.kept, file));
+        files.retain(|file| !file.is_gone());
+        retain_untaken(&taken, &shown.kept, &mut files);
         if files.is_empty() {
             shown.selection = Selection::None;
             shown.chosen_bytes = None;
@@ -2399,7 +2404,8 @@ pub(crate) mod tests {
     /// search; a delete elsewhere would otherwise stay in the queue until
     /// the next search (fast-copy-delete-spec.md: Taken entries). The
     /// snapshot of the taken entries may be older than the end, so it
-    /// still has the delete as running.
+    /// still has the delete as running, and a later end must not let go of
+    /// the delete while the queue still holds it, or its rows show again.
     #[test]
     fn the_search_list_keeps_only_a_delete_of_its_rows() {
         let mut model = model();
@@ -2416,7 +2422,17 @@ pub(crate) mod tests {
         };
         model.operations_ended(
             &[(ours, delete(r"C:\row1")), (other, delete(r"D:\elsewhere"))],
+            &HashSet::from([ours, other]),
             &taken,
+        );
+        assert!(model.keeps(ours));
+        // Taken entries older than the queue, which do not have it as
+        // ended yet, while another operation ends.
+        let later = OperationId::for_tests(3);
+        model.operations_ended(
+            &[(later, delete(r"E:\later"))],
+            &HashSet::from([ours, other, later]),
+            &Taken::default(),
         );
         assert!(model.keeps(ours));
         assert!(!model.keeps(other));
@@ -2616,7 +2632,7 @@ pub(crate) mod tests {
         let delete = Arc::new(Request::Delete {
             sources: vec![r"C:\row1".into()],
         });
-        model.operations_ended(&[(id, delete)], &taken);
+        model.operations_ended(&[(id, delete)], &HashSet::from([id]), &taken);
         let fetch = search(&mut model, "rows");
         model.accept(rows(&fetch, 3));
         assert!(

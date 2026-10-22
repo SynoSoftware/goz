@@ -159,6 +159,18 @@ fn timing_large_selection_per_reply() {
             .filter(|file| taken.is_empty() || !taken.contains(&wide_path(file), |_| false))
             .count()
     });
+    let mut taken = Taken::default();
+    taken.insert(
+        OperationId::for_tests(1),
+        &PathBuf::from(r"D:\other.txt"),
+        false,
+    );
+    let kept = std::collections::HashSet::new();
+    // The other path takes none of them, so each run checks them all.
+    let mut files = rows.clone();
+    time("set_taken over the selection, one other taken path", || {
+        crate::core::search_list::retain_untaken(&taken, &kept, &mut files);
+    });
 }
 
 /// Rank 2: when an operation first appears, the File operations window
@@ -639,5 +651,33 @@ fn timing_clipboard_retry_sleeps() {
         for _ in 0..4 {
             std::thread::sleep(Duration::from_millis(20));
         }
+    });
+}
+
+/// A folder panel with every one of 100,000 entries selected: each status
+/// reply and each step of a window edge drag shows the panel's status line,
+/// which sums the selected entries, and a file command lists them.
+#[test]
+#[ignore = "timing; run in release"]
+#[allow(
+    clippy::single_range_in_vec_init,
+    reason = "a selection is a list of row ranges"
+)]
+fn timing_large_panel_selection() {
+    use crate::core::panel::tests::{file, list};
+    use crate::core::panel::{Panels, Side};
+    let folder = path("Projects", 9);
+    let folder = folder.trim_end_matches(r"\report 2026.txt");
+    let entries = (0..100_000)
+        .map(|i| file(&format!("report {i}.txt"), 1_000, 0))
+        .collect();
+    let mut panels = Panels::new(&Default::default());
+    list(&mut panels, folder, entries);
+    panels.set_selected(Side::Left, vec![1..100_001]);
+    time("panel status counts, 100,000 selected", || {
+        panels.panel(Side::Left).counts()
+    });
+    time("panel chosen entries, 100,000 selected", || {
+        panels.chosen(Side::Left)
     });
 }

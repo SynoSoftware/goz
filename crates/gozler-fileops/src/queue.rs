@@ -80,6 +80,12 @@ struct Operations {
     next_start: u64,
     by_id: BTreeMap<OperationId, Tracked>,
     taken: Arc<Taken>,
+    /// Counts the reads of the operations that rebuild `taken`
+    /// ([`Shared::retake`]).
+    taken_reads: u64,
+    /// The read that `taken` was built from, so an older rebuild that ends
+    /// last does not replace a newer one.
+    taken_from: u64,
 }
 
 struct Tracked {
@@ -238,7 +244,7 @@ impl Queue {
     /// running one stops within one `CopyFile2` chunk, or one delete and its
     /// retries, also while it is paused.
     pub fn cancel(&self, id: OperationId) {
-        let starts = {
+        let (starts, left) = {
             let mut operations = self.shared.lock();
             let Some(operation) = operations.by_id.get_mut(&id) else {
                 return;
@@ -248,14 +254,14 @@ impl Queue {
             operation.io.cancel();
             match operation.phase {
                 Phase::Preparing | Phase::Prepared(_) | Phase::Waiting { .. } => {
-                    operation.phase = Phase::Ended(Arc::new(Outcome::ended(End::Cancelled)));
-                    let starts = self.shared.schedule(&mut operations);
-                    operations.taken = taken(&operations);
-                    starts
+                    let cancelled = Phase::Ended(Arc::new(Outcome::ended(End::Cancelled)));
+                    let left = std::mem::replace(&mut operation.phase, cancelled);
+                    (self.shared.schedule(&mut operations), left)
                 }
                 Phase::Running { .. } | Phase::Ended(_) | Phase::Interrupted(_) => return,
             }
         };
+        Shared::retake_later(&self.shared, left);
         // A Continue cancelled before its run started ends too.
         Shared::unsave_later(&self.shared, id);
         self.shared.start(starts);
@@ -264,14 +270,18 @@ impl Queue {
 
     /// Removes an ended operation, once no list of the window keeps it.
     pub fn remove(&self, id: OperationId) {
-        let mut operations = self.shared.lock();
-        if let Some(Tracked {
-            phase: Phase::Ended(_),
-            ..
-        }) = operations.by_id.get(&id)
-        {
-            operations.by_id.remove(&id);
-            operations.taken = taken(&operations);
+        let removed = {
+            let mut operations = self.shared.lock();
+            match operations.by_id.get(&id) {
+                Some(Tracked {
+                    phase: Phase::Ended(_),
+                    ..
+                }) => operations.by_id.remove(&id),
+                _ => None,
+            }
+        };
+        if let Some(removed) = removed {
+            Shared::retake_later(&self.shared, removed);
         }
     }
 
@@ -430,8 +440,10 @@ impl Queue {
     }
 
     /// The taken entries, which the window leaves out of its lists. Take
-    /// it once per wake. An ended operation stays in it until
-    /// [`Queue::remove`].
+    /// it once per wake. It follows a change of the operations a moment
+    /// later, with a wake of its own, so an operation can show as ended or
+    /// be gone while its sources are still taken as before. An ended
+    /// operation stays in it until [`Queue::remove`].
     pub fn taken(&self) -> Arc<Taken> {
         Arc::clone(&self.shared.lock().taken)
     }
@@ -566,9 +578,7 @@ impl Shared {
             // open per entry on a share, so a deleted row goes at once. The
             // rebuild runs here, not on the window's thread.
             if matches!(*request, Request::Delete { .. } | Request::Move { .. }) {
-                let mut operations = thread.lock();
-                operations.taken = taken(&operations);
-                drop(operations);
+                thread.retake();
                 (thread.wake)();
             }
             thread.set_folder(id, &request);
@@ -592,8 +602,8 @@ impl Shared {
                     Err(refusal) => {
                         let outcome = Outcome::ended(End::Refused(refusal));
                         operation.phase = Phase::Ended(Arc::new(outcome));
-                        operations.taken = taken(&operations);
                         drop(operations);
+                        thread.retake();
                         // A refused Continue ends, as any operation does.
                         thread.unsave(id);
                         (thread.wake)();
@@ -650,9 +660,9 @@ impl Shared {
             order,
             on: None,
         };
-        let starts = self.schedule(operations);
-        operations.taken = taken(operations);
-        starts
+        // Its sources are taken from the moment it began to prepare, so the
+        // taken entries stay as they are.
+        self.schedule(operations)
     }
 
     /// Starts each waiting operation that no running operation, and no
@@ -750,19 +760,66 @@ impl Shared {
                 if !shared.closing.load(Ordering::Relaxed) {
                     shared.unsave(id);
                 }
-                let starts = {
+                let (starts, left) = {
                     let mut operations = shared.lock();
-                    if let Some(operation) = operations.by_id.get_mut(&id) {
-                        operation.phase = Phase::Ended(Arc::new(outcome));
-                    }
-                    let starts = shared.schedule(&mut operations);
-                    operations.taken = taken(&operations);
-                    starts
+                    let left = (operations.by_id.get_mut(&id)).map(|operation| {
+                        std::mem::replace(&mut operation.phase, Phase::Ended(Arc::new(outcome)))
+                    });
+                    (shared.schedule(&mut operations), left)
                 };
+                // Its plan holds every source, so it is freed outside the
+                // lock.
+                drop(left);
+                shared.retake();
                 shared.start(starts);
                 (shared.wake)();
             });
         }
+    }
+
+    /// Builds the taken entries again from the operations as they are now,
+    /// and installs them unless a rebuild from a later read already has.
+    /// The build runs outside the queue's lock, because it folds and hashes
+    /// every source, which takes a large delete or move long enough that
+    /// the window, which takes that lock, would stop answering. Each change
+    /// of which sources are taken calls it after it releases the lock.
+    fn retake(&self) {
+        let (read, takers) = {
+            let mut operations = self.lock();
+            operations.taken_reads += 1;
+            (operations.taken_reads, takers(&operations))
+        };
+        let mut taken = Taken::default();
+        for (id, request, ended) in takers {
+            if let Request::Delete { sources } | Request::Move { sources, .. } = &*request {
+                for source in sources {
+                    taken.insert(id, source, ended);
+                }
+            }
+        }
+        let mut taken = Arc::new(taken);
+        {
+            let mut operations = self.lock();
+            if read > operations.taken_from {
+                operations.taken_from = read;
+                std::mem::swap(&mut operations.taken, &mut taken);
+            }
+        }
+        // The replaced entries, or these when a later read's are installed,
+        // are freed here, outside the lock.
+        drop(taken);
+    }
+
+    /// [`Shared::retake`] for a change on the window's call, on a queue
+    /// thread of its own, which first frees `left`, what the change took
+    /// out of the queue, and then wakes the window.
+    fn retake_later(shared: &Arc<Shared>, left: impl Send + 'static) {
+        let thread = Arc::clone(shared);
+        shared.spawn(move || {
+            drop(left);
+            thread.retake();
+            (thread.wake)();
+        });
     }
 
     /// Asks gozlerd for a running delete's total on a thread of its own, and
@@ -849,23 +906,21 @@ fn current(file: &CurrentFile) -> Current {
     }
 }
 
-/// The sources of every delete or move that prepares, asks its question, or
+/// The operations that take their sources if they delete or move them, each
+/// with whether it has ended: every one that prepares, asks its question, or
 /// was submitted and has not been removed. One that ended before it was
 /// submitted, refused or cancelled, changed nothing and takes nothing.
-fn taken(operations: &Operations) -> Arc<Taken> {
-    let mut taken = Taken::default();
+fn takers(operations: &Operations) -> Vec<(OperationId, Arc<Request>, bool)> {
     let takes = |operation: &Tracked| {
         operation.submitted || matches!(operation.phase, Phase::Preparing | Phase::Prepared(_))
     };
-    for (&id, operation) in (operations.by_id.iter()).filter(|(_, operation)| takes(operation)) {
-        if let Request::Delete { sources } | Request::Move { sources, .. } = &*operation.request {
+    (operations.by_id.iter())
+        .filter(|(_, operation)| takes(operation))
+        .map(|(&id, operation)| {
             let ended = matches!(operation.phase, Phase::Ended(_));
-            for source in sources {
-                taken.insert(id, source, ended);
-            }
-        }
-    }
-    Arc::new(taken)
+            (id, Arc::clone(&operation.request), ended)
+        })
+        .collect()
 }
 
 /// Runs an operation on its own thread, with its workers.

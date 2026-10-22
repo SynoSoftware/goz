@@ -7,6 +7,7 @@ use super::Hwnd;
 use super::controls::{Button, IconList, ListView, StatusBar};
 use super::gdi::{Font, ImageList, draw_text, system_color};
 use crate::core::layout::Px;
+use crate::core::selection::RowsChange;
 use std::marker::PhantomData;
 use std::ops::Range;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -107,9 +108,9 @@ pub(crate) enum ListNotify<'a> {
     /// Rows were selected or deselected: `LVN_ITEMCHANGED` with a change of
     /// `LVIS_SELECTED`, item -1 (every row) included, and
     /// `LVN_ODSTATECHANGED`, which a virtual list sends for a range such as
-    /// a Shift+click. The handler reads the selection from the list once
-    /// per user action (DESIGN.md: The selection).
-    SelectionChanged,
+    /// a Shift+click. The handler reads the selection once per user action
+    /// (DESIGN.md: The selection).
+    SelectionChanged(RowsChange),
     /// The focused row changed, and the selection did not.
     FocusChanged,
     /// A double-click on a row.
@@ -181,7 +182,11 @@ impl ListView {
                     if !change.uChanged.contains(LVIF_STATE) {
                         ListNotify::Other
                     } else if selection_changed(change.uNewState, change.uOldState) {
-                        ListNotify::SelectionChanged
+                        let selected = change.uNewState & LVIS_SELECTED.0 != 0;
+                        ListNotify::SelectionChanged(match u64::try_from(change.iItem) {
+                            Ok(row) => RowsChange::Row { row, selected },
+                            Err(_) => RowsChange::All { selected },
+                        })
                     } else if changed & LVIS_FOCUSED.0 != 0 {
                         ListNotify::FocusChanged
                     } else {
@@ -191,7 +196,12 @@ impl ListView {
                 LVN_ODSTATECHANGED => {
                     let change = &*pointer.cast::<NMLVODSTATECHANGE>();
                     if selection_changed(change.uNewState.0, change.uOldState.0) {
-                        ListNotify::SelectionChanged
+                        let from = u64::try_from(change.iFrom).unwrap_or(0);
+                        let to = u64::try_from(change.iTo).unwrap_or(0);
+                        ListNotify::SelectionChanged(RowsChange::Rows {
+                            rows: from..to.max(from) + 1,
+                            selected: change.uNewState.0 & LVIS_SELECTED.0 != 0,
+                        })
                     } else {
                         ListNotify::Other
                     }

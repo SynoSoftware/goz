@@ -85,6 +85,13 @@ pub fn parent_of(path: &str) -> String {
     }
 }
 
+/// Whether [`parent_of`] gives `path` back, ignoring trailing `\`: a
+/// drive's or a share's root, or a path that is not absolute. It allocates
+/// nothing, because a panel asks for each row it reads.
+pub fn is_root(path: &str) -> bool {
+    root(path).is_none_or(|(_, rest)| rest.bytes().all(|c| c == b'\\'))
+}
+
 fn is_separator(c: u8) -> bool {
     c == b'\\' || c == b'/'
 }
@@ -112,5 +119,22 @@ fn root(path: &str) -> Option<(&str, &str)> {
             Some(path.split_at(2))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// A panel shows `..` unless [`is_root`] says its folder is a root.
+        /// Where it differs from [`parent_of`], a root shows a `..` that
+        /// leads to itself, or a folder loses its `..`.
+        #[test]
+        fn a_root_is_its_own_parent(path in r"(\\\\|[A-Za-z]:|)[\\/a-z]{0,8}") {
+            let same = parent_of(&path).trim_end_matches('\\') == path.trim_end_matches('\\');
+            prop_assert_eq!(is_root(&path), same);
+        }
     }
 }

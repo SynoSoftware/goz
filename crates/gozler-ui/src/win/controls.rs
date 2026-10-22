@@ -14,6 +14,7 @@ use crate::core::glyph::Glyph;
 use crate::core::layout::column_sizing::{self, ColumnFit};
 use crate::core::layout::{self, Dpi, Px, Size, glyph_gap, icon_glyph_height};
 use crate::core::panel::difference;
+use crate::core::selection::ToldRows;
 use gozler_core::include::FolderCheck;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -1614,8 +1615,11 @@ impl ListView {
     }
 
     /// Changes the selection from `shown`, the rows the list selects, to
-    /// `wanted`, both sorted ranges that do not touch, writing only the rows
-    /// that differ, because each write notifies the parent.
+    /// `wanted`, both sorted ranges that do not touch, with the fewest
+    /// writes, because each write is a message that notifies the parent: one
+    /// for each row that differs, or, when that is more, one that clears
+    /// every row and one for each wanted row, as when a move took most of
+    /// the selected entries.
     pub(crate) fn change_selected(self, shown: &[Range<u64>], wanted: &[Range<u64>]) {
         let count = self.count();
         if let [all] = wanted
@@ -1629,10 +1633,16 @@ impl ListView {
             }
             return;
         }
-        for row in difference(shown, wanted).into_iter().flatten() {
+        let deselected = difference(shown, wanted);
+        let selected = difference(wanted, shown);
+        let rows = |ranges: &[Range<u64>]| ranges.iter().map(|r| r.end - r.start).sum::<u64>();
+        if rows(&deselected) + rows(&selected) > 1 + rows(wanted) {
+            return self.set_selected(wanted);
+        }
+        for row in deselected.into_iter().flatten() {
             self.select(row, false);
         }
-        for row in difference(wanted, shown).into_iter().flatten() {
+        for row in selected.into_iter().flatten() {
             self.select(row, true);
         }
     }
@@ -1679,6 +1689,33 @@ impl ListView {
             after = next;
         }
         ranges
+    }
+
+    /// The selected rows, as [`Self::selected`] gives them, from `told`,
+    /// the rows the list's notifications told: the list confirms them with
+    /// its count, how many rows it selects, the first, and that it selects
+    /// the last, where reading them takes a message for each selected row.
+    /// When it does not, they are read, and `told` holds them from then on.
+    /// Told rows past the list's count are left out, because a shorter list
+    /// drops them without a notification.
+    pub(crate) fn selected_told(self, told: &mut ToldRows) -> Vec<Range<u64>> {
+        let rows = told.rows(self.count());
+        let selected: u64 = rows.iter().map(|range| range.end - range.start).sum();
+        let first = send(self.0, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
+        let confirmed = selected == self.selected_count()
+            && match (rows.first(), rows.last()) {
+                (Some(first_run), Some(last_run)) => {
+                    u64::try_from(first) == Ok(first_run.start)
+                        && self.row_state(last_run.end - 1).1
+                }
+                _ => true,
+            };
+        if confirmed {
+            return rows;
+        }
+        let read = self.selected();
+        *told = ToldRows::read(&read);
+        read
     }
 
     /// The selected rows outside `span`, as sorted ranges that do not
