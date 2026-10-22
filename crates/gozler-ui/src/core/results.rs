@@ -547,7 +547,10 @@ impl Results {
     /// scrolling never queues a request for every chunk it passes: `None`
     /// while a search is, or while the chunk in flight is still in view. A
     /// chunk that left the view is replaced, so a scrollbar jump never waits
-    /// for the rows it jumped away from.
+    /// for the rows it jumped away from, unless its request makes the list's
+    /// result snapshot: a replacement would sort every match again, so a
+    /// drag of the thumb would start one sort for each step, and the rows
+    /// where it stopped would wait for all of them.
     pub(crate) fn next_chunk(
         &mut self,
         visible: Range<u64>,
@@ -583,6 +586,14 @@ impl Results {
             Some(InFlight::Search(..)) => return None,
             Some(InFlight::Chunk(_, asked))
                 if asked < visible.end && visible.start < asked + CHUNK_ROWS =>
+            {
+                return None;
+            }
+            Some(InFlight::Chunk(_, asked))
+                if matches!(
+                    shown.source_of(self.last_snapshot, asked + CHUNK_ROWS),
+                    FromSnapshot::Make { .. }
+                ) =>
             {
                 return None;
             }
@@ -807,6 +818,7 @@ pub(crate) mod tests {
     #[test]
     fn one_chunk_is_in_flight_and_follows_the_view_but_none_while_a_search_is() {
         let mut results = showing(50_000);
+        results.adopt_snapshot(ResultSnapshotId(7));
         let far = 2 * CHUNK_ROWS + 5;
         let asked = results.next_chunk(far..far + 40, Generation(2));
         assert_eq!(asked.map(|a| a.start), Some(2 * CHUNK_ROWS));
@@ -860,6 +872,36 @@ pub(crate) mod tests {
         assert_eq!(
             asked.map(|a| a.snapshot),
             Some(FromSnapshot::Make { replaces: Some(id) })
+        );
+    }
+
+    /// A drag of the scroll bar thumb before the list has a result snapshot
+    /// keeps the request that makes it in flight. Were each step to replace
+    /// it, the service would sort every match once for each step, and the
+    /// rows where the thumb stopped would wait for all of those sorts. Once
+    /// its first page names the result snapshot, the rows in view are read
+    /// from it.
+    #[test]
+    fn the_request_that_makes_the_result_snapshot_stays_in_flight() {
+        let total = 2_000_000;
+        let mut results = showing(total);
+        let asked = results.next_chunk(100_000..100_040, Generation(2));
+        let asked = asked.expect("the rows are not cached");
+        assert_eq!(asked.snapshot, FromSnapshot::Make { replaces: None });
+        let end = total - 40..total;
+        assert_eq!(results.next_chunk(end.clone(), Generation(3)), None);
+
+        let id = ResultSnapshotId(7);
+        let first_page = Chunk {
+            made: Some(id),
+            rest_follows: true,
+            ..chunk(asked.start, 4_096, total)
+        };
+        results.accept(Generation(2), first_page);
+        let asked = results.next_chunk(end, Generation(4));
+        assert_eq!(
+            asked.map(|a| (a.start, a.snapshot)),
+            Some((total / CHUNK_ROWS * CHUNK_ROWS, FromSnapshot::Read(id)))
         );
     }
 
