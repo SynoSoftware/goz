@@ -1647,11 +1647,6 @@ impl ListView {
         }
     }
 
-    /// How many whole rows the list shows at a time.
-    pub(crate) fn page_rows(self) -> u64 {
-        send(self.0, LVM_GETCOUNTPERPAGE, 0, 0).max(1) as u64
-    }
-
     /// The selected rows, as sorted ranges that do not touch. A virtual
     /// list knows them only row by row, so a selection of every row from
     /// the first selected one on, which Select all makes, also without a
@@ -1718,32 +1713,6 @@ impl ListView {
         read
     }
 
-    /// The selected rows outside `span`, as sorted ranges that do not
-    /// touch, read without asking for the rows inside it.
-    pub(crate) fn selected_outside(self, span: Range<u64>) -> Vec<Range<u64>> {
-        let mut ranges: Vec<Range<u64>> = Vec::new();
-        let mut after = -1isize;
-        loop {
-            let next = send(
-                self.0,
-                LVM_GETNEXTITEM,
-                after as usize,
-                LVNI_SELECTED as isize,
-            );
-            let Ok(row) = u64::try_from(next) else { break };
-            if span.contains(&row) {
-                after = span.end as isize - 1;
-                continue;
-            }
-            match ranges.last_mut() {
-                Some(last) if last.end == row => last.end = row + 1,
-                _ => ranges.push(row..row + 1),
-            }
-            after = next;
-        }
-        ranges
-    }
-
     /// The row at `point`, in screen coordinates, if one is there.
     pub(crate) fn row_at(self, point: (i32, i32)) -> Option<u64> {
         let mut hit = LVHITTESTINFO {
@@ -1805,6 +1774,26 @@ impl ListView {
             ScrollEdge::Bottom => SB_LINEDOWN,
         };
         send(self.0, WM_VSCROLL, code.0 as usize, 0);
+    }
+
+    /// Takes the focus for the row the person left in this list of `count`
+    /// rows: the focused row, else the first selected one, else the first
+    /// row. With no row selected, that row is selected too, so the row with
+    /// the focus shows filled (DESIGN.md: window rule 8).
+    pub(crate) fn focus_left_row(self, count: u64) {
+        self.hwnd().focus();
+        let Some(row) = self
+            .focused_or_first_selected()
+            .or((count > 0).then_some(0))
+        else {
+            return;
+        };
+        if self.selected_count() == 0 {
+            self.select_only(Some(row));
+            self.ensure_visible(row);
+        } else {
+            self.set_focused(Some(row));
+        }
     }
 
     /// The focused row, or the first selected one without a focused row,

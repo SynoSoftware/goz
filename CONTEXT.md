@@ -272,11 +272,12 @@ A panel that shows the results of a search in place of a folder. `Alt+F7` or
 folder again.
 
 **Focused row**:
-The row with the focus outline, which the arrow keys move.
+The row with the focus outline, which the arrow keys move together with the
+selection.
 
 **Selected entries**:
-The entries the person selected in a panel with `Insert`, `Space`, `Shift`
-or `Ctrl`; commands act on them, or on the focused row when there are none.
+The entries the person selected in a panel with the arrow keys, `Insert`,
+`Space`, `Shift` or `Ctrl`; commands act on them, or on the focused row when there are none.
 
 **Quick search**:
 Going to a name in a panel by typing its start, with or without `Alt`.

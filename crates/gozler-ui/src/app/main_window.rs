@@ -3680,14 +3680,9 @@ impl MainWindow {
         let controls = &self.created().controls;
         match action {
             KeyAction::Run(command) => self.run(hwnd, MenuItem::Run(command)),
-            // The focus moves to the first row (DESIGN.md: Search box).
             KeyAction::FocusList => {
                 let count = self.model.borrow().search_list().results().count();
-                controls.list.hwnd().focus();
-                if count > 0 {
-                    controls.list.select_only(Some(0));
-                    controls.list.ensure_visible(0);
-                }
+                controls.list.focus_left_row(count);
             }
             KeyAction::SearchBoxEnter => {
                 let enter = self.model.borrow_mut().enter_in_search_box();

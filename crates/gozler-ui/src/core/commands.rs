@@ -6,7 +6,7 @@
 use super::glyph::Glyph;
 use super::ids::ControlId;
 use super::model::{Column, Model};
-use super::panel::{Side, Step, View};
+use super::panel::{Side, View};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
 use super::selection::OPEN_LIMIT;
 use super::settings::{ContextItem, ContextMenu, Mode};
@@ -747,7 +747,8 @@ pub(crate) enum KeyAction {
     /// operation, which one stray key must not stop
     /// (DESIGN.md: Keys).
     CancelJob,
-    /// `Down` in the search box: the focus moves to the list's first row.
+    /// `Down` in the search box: the list takes the focus, on the row the
+    /// person left there (`ListView::focus_left_row`).
     FocusList,
     /// `Enter` in the search box: the search runs, or the result takes
     /// `Enter` ([`Model::enter_in_search_box`]).
@@ -783,17 +784,17 @@ pub(crate) enum PanelKey {
     /// `Insert` and `Space`: the focused row is selected or cleared, and
     /// the focus moves down.
     Toggle,
-    /// The focus moves, the selection stays.
-    Move(Step),
-    /// The focus moves and selects each row it passes.
-    Select(Step),
+    /// `Up` and `Down`: the previous or the next match while the quick
+    /// search box is open; otherwise the list's own keys, which move the
+    /// selection with the focus, as in Search.
+    Arrow { down: bool },
     /// `Enter` in the path box: the panel goes to the typed path.
     PathEnter,
     /// `Esc` in the path box: the folder's path is back and the list has
     /// the focus.
     PathEscape,
     /// `Down` and `Enter` in a search panel's search box: the list takes
-    /// the focus, and its first row the focus when no row has it.
+    /// the focus, on the row the person left there, as in Search.
     ToList,
     /// `Esc` in a search panel's search box: the searched folder shows
     /// again.
@@ -911,8 +912,8 @@ pub(crate) fn control_key(focus: Focus, key: Keystroke) -> Option<KeyAction> {
         .map(|(_, action)| *action)
 }
 
-/// The keys of a panel's list. The arrow keys are the window's here, not
-/// the list's, because the list moves the selection with the focus.
+/// The keys of a panel's list. Every other arrow key is the list's own, as
+/// in Search.
 const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
     use KeyAction::Panel as P;
     const fn shift(key: Key) -> Keystroke {
@@ -938,24 +939,14 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
             KeyAction::Run(CommandId::Delete),
         ),
         (shift(Key::Delete), KeyAction::Run(CommandId::Delete)),
-        (Keystroke::plain(Key::Up), P(PanelKey::Move(Step::Up))),
-        (Keystroke::plain(Key::Down), P(PanelKey::Move(Step::Down))),
         (
-            Keystroke::plain(Key::PageUp),
-            P(PanelKey::Move(Step::PageUp)),
+            Keystroke::plain(Key::Up),
+            P(PanelKey::Arrow { down: false }),
         ),
         (
-            Keystroke::plain(Key::PageDown),
-            P(PanelKey::Move(Step::PageDown)),
+            Keystroke::plain(Key::Down),
+            P(PanelKey::Arrow { down: true }),
         ),
-        (Keystroke::plain(Key::Home), P(PanelKey::Move(Step::Home))),
-        (Keystroke::plain(Key::End), P(PanelKey::Move(Step::End))),
-        (shift(Key::Up), P(PanelKey::Select(Step::Up))),
-        (shift(Key::Down), P(PanelKey::Select(Step::Down))),
-        (shift(Key::PageUp), P(PanelKey::Select(Step::PageUp))),
-        (shift(Key::PageDown), P(PanelKey::Select(Step::PageDown))),
-        (shift(Key::Home), P(PanelKey::Select(Step::Home))),
-        (shift(Key::End), P(PanelKey::Select(Step::End))),
     ]
 };
 

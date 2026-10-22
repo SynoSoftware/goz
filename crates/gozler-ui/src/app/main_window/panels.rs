@@ -19,8 +19,8 @@ use crate::core::layout::{Body, PanelLayout, Px, Rect};
 use crate::core::model::{Column, TakenShown};
 use crate::core::open;
 use crate::core::panel::{
-    self, AddSelected, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels,
-    Place, ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, Step, TakenRows, View,
+    self, EnterAction, Entry, FolderChange, LookIn, PanelColumn, PanelFollow, Panels, Place,
+    ReadAsk, ReadChange, ReadEvent, ReadFailure, Row, Side, TakenRows, View,
 };
 use crate::core::selection::SELECTION_LIMIT;
 use crate::core::settings::Mode;
@@ -345,7 +345,7 @@ impl MainWindow {
     /// The list's place, after the panel has read a selection the list
     /// changed, so the place and the panel agree.
     fn place(&self, side: Side) -> Place {
-        self.read_selection(side);
+        self.read_selection(side, true);
         let list = self.panel(side).list;
         Place {
             focused: list.focused(),
@@ -373,6 +373,15 @@ impl MainWindow {
             .borrow_mut()
             .panels_mut()
             .set_focused(side, focused);
+        // In another folder the focused row shows filled, as an arrow key
+        // leaves it (DESIGN.md: Selecting entries); the panel reads that
+        // selection as the person's.
+        if let (Scroll::ToFocus, Some(row)) = (scroll, focused)
+            && place.selected.is_empty()
+            && self.model.borrow().panels().selectable(side, row)
+        {
+            list.select(row, true);
+        }
         list.redraw_rows(list.visible_rows());
         self.show_panel_sort(side);
         // A vertical scroll bar that came or went changed the room.
@@ -1106,13 +1115,9 @@ impl MainWindow {
             .is_some();
         if quick {
             let moved = match key {
-                PanelKey::Move(step @ (Step::Up | Step::Down)) => {
+                PanelKey::Arrow { down } => {
                     let focused = c.list.focused();
-                    Some(self.model.borrow_mut().panels_mut().quick_step(
-                        side,
-                        focused,
-                        step == Step::Down,
-                    ))
+                    Some((self.model.borrow_mut().panels_mut()).quick_step(side, focused, down))
                 }
                 PanelKey::Back => Some(self.model.borrow_mut().panels_mut().quick_back(side)),
                 // A space is a character while the box is open, which the
@@ -1123,8 +1128,8 @@ impl MainWindow {
                 _ => None,
             };
             if let Some(row) = moved {
-                if row.is_some() {
-                    c.list.set_focused(row);
+                if let Some(row) = row {
+                    self.quick_go(side, row);
                 }
                 self.show_panel(side);
                 return true;
@@ -1156,7 +1161,7 @@ impl MainWindow {
             // The selection the list holds now decides, which the panel may
             // not have read yet.
             PanelKey::Escape => {
-                self.read_selection(side);
+                self.read_selection(side, true);
                 let ask = self.model.borrow_mut().panels_mut().leave_on_escape(side);
                 match ask {
                     Some(ask) => self.read(side, Some(ask)),
@@ -1164,11 +1169,8 @@ impl MainWindow {
                 }
             }
             PanelKey::ToList => {
-                c.list.hwnd().focus();
                 let count = self.model.borrow().panels().panel(side).count();
-                if c.list.focused().is_none() && count > 0 {
-                    c.list.set_focused(Some(0));
-                }
+                c.list.focus_left_row(count);
             }
             PanelKey::LeaveSearch => {
                 let ask = self.model.borrow_mut().panels_mut().leave_search(side);
@@ -1177,17 +1179,21 @@ impl MainWindow {
             }
             PanelKey::LookInEnter => c.search.hwnd().focus(),
             PanelKey::Toggle => {
-                if let Some(row) = c.list.focused() {
+                let focused = c.list.focused();
+                if let Some(row) = focused {
                     let selectable = self.model.borrow().panels().selectable(side, row);
                     if selectable {
                         let (_, selected) = c.list.row_state(row);
                         c.list.select(row, !selected);
                     }
                 }
-                self.move_focus(side, Step::Down, false);
+                let next = focused.map_or(0, |row| row + 1);
+                if next < self.model.borrow().panels().panel(side).count() {
+                    c.list.set_focused(Some(next));
+                }
             }
-            PanelKey::Move(step) => self.move_focus(side, step, false),
-            PanelKey::Select(step) => self.move_focus(side, step, true),
+            // The list moves the selection with the focus, as Search's does.
+            PanelKey::Arrow { .. } => return false,
             PanelKey::PathEnter => {
                 let typed = c.path.text();
                 let ask = self
@@ -1207,37 +1213,14 @@ impl MainWindow {
         true
     }
 
-    /// Moves the focus of `side` by `step`; with `select`, each row it
-    /// passes is selected, as in Total Commander.
-    fn move_focus(&self, side: Side, step: Step, select: bool) {
+    /// Selects and focuses `row` of `side`, which quick search went to, as
+    /// an arrow key would, and reads that selection at once, because a
+    /// later read of a changed selection closes the quick search box.
+    fn quick_go(&self, side: Side, row: u64) {
         let list = self.panel(side).list;
-        let from = list.focused();
-        let count = self.model.borrow().panels().panel(side).count();
-        let Some(to) = panel::step(step, from, count, list.page_rows()) else {
-            return;
-        };
-        if select && let Some(from) = from {
-            let adding = (self.model.borrow().panels())
-                .selectable_ranges(side, panel::passed(step, from, to, count));
-            match panel::add_selected(&adding, count) {
-                AddSelected::EachRow => {
-                    for row in adding.iter().cloned().flatten() {
-                        list.select(row, true);
-                    }
-                }
-                AddSelected::AllThenClear { span } => {
-                    let selected = list.selected_outside(span);
-                    list.select_all();
-                    for row in panel::clears_after_all(&selected, &adding, count)
-                        .into_iter()
-                        .flatten()
-                    {
-                        list.select(row, false);
-                    }
-                }
-            }
-        }
-        list.set_focused(Some(to));
+        list.select_only(Some(row));
+        list.ensure_visible(row);
+        self.read_selection(side, false);
     }
 
     /// `Enter` or a double-click on the focused row of `side`.
@@ -1299,8 +1282,8 @@ impl MainWindow {
             .borrow_mut()
             .panels_mut()
             .quick_char(side, character);
-        if row.is_some() {
-            self.panel(side).list.set_focused(row);
+        if let Some(row) = row {
+            self.quick_go(side, row);
         }
         self.show_panel(side);
         true
@@ -1487,7 +1470,7 @@ impl MainWindow {
     /// selection).
     pub(super) fn read_panel_selection(&self) {
         for side in Side::BOTH {
-            self.read_selection(side);
+            self.read_selection(side, true);
         }
     }
 
@@ -1502,12 +1485,12 @@ impl MainWindow {
     }
 
     /// Reads `side`'s selection and focused row when its list changed them;
-    /// a change of the focus alone reads only the focused row, because an
-    /// arrow key moves it and the selection can hold every row.
-    /// `..` cannot be selected, and a change of the selection, such as a
-    /// click, closes the quick search box. A search panel's list then reads
-    /// the selected results, as Search's does.
-    fn read_selection(&self, side: Side) {
+    /// a change of the focus alone reads only the focused row, because
+    /// `Insert` moves it and the selection can hold every row.
+    /// `..` cannot be selected, and with `closes_quick` a change of the
+    /// selection, such as a click, closes the quick search box. A search
+    /// panel's list then reads the selected results, as Search's does.
+    fn read_selection(&self, side: Side, closes_quick: bool) {
         let list = self.panel(side).list;
         match self.panel_changed[side.index()].replace(ListChanged::Nothing) {
             ListChanged::Nothing => return,
@@ -1548,7 +1531,7 @@ impl MainWindow {
             let mut model = self.model.borrow_mut();
             let panels = model.panels_mut();
             let changed = panels.set_selected(side, selected.clone());
-            if changed {
+            if changed && closes_quick {
                 panels.close_quick(side);
             }
             panels.set_focused(side, focused);
@@ -1574,7 +1557,7 @@ impl MainWindow {
         }
         self.activate_panel(side, false);
         // The right-click focused and selected its row a moment ago.
-        self.read_selection(side);
+        self.read_selection(side, true);
         let (point, row) = match point {
             Some(point) => (point, list.row_at(point)),
             None => match list.focused_row_point() {
@@ -1782,9 +1765,10 @@ impl MainWindow {
         }
     }
 
-    /// After a delete is submitted, the focus moves to the first row after
-    /// the deleted ones, and the selection is cleared (DESIGN.md: Delete). A
-    /// search panel's rows stay in place, struck through, so its focus stays.
+    /// After a delete is submitted, the first row after the deleted ones is
+    /// selected and focused alone (DESIGN.md: Delete). A search panel's rows
+    /// stay in place, struck through, so its focus stays and its selection
+    /// is cleared.
     pub(super) fn focus_after_chosen(&self) {
         let side = self.model.borrow().panels().active();
         let row = {
@@ -1795,10 +1779,13 @@ impl MainWindow {
                 .map_or_else(|| panel.row_after_chosen(), |_| None)
         };
         let list = self.panel(side).list;
-        if let Some(row) = row {
-            list.set_focused(Some(row));
+        match row {
+            Some(row) => {
+                list.select_only(Some(row));
+                list.ensure_visible(row);
+            }
+            None => list.set_selected(&[]),
         }
-        list.set_selected(&[]);
     }
 
     /// The cell's text and the row's icon of `side`'s list, which the list
