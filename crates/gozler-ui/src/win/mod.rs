@@ -277,8 +277,15 @@ impl Hwnd {
     /// Runs `change`, which changes many of the window's controls, with the
     /// window's drawing stopped (`WM_SETREDRAW`), then draws the window, its
     /// menu bar and every control once, instead of each control drawing
-    /// itself as it changes.
+    /// itself as it changes. A hidden window only runs `change`, because
+    /// `DefWindowProc` answers `WM_SETREDRAW` TRUE by making the window
+    /// visible, as a regional-format change would make the main window
+    /// while it is hidden in the notification area.
     pub(crate) fn draw_once_after(self, change: impl FnOnce()) {
+        if !self.styles().0.contains(WS_VISIBLE) {
+            change();
+            return;
+        }
         // SAFETY: plain values.
         unsafe { SendMessageW(self.0, WM_SETREDRAW, Some(WPARAM(0)), None) };
         change();

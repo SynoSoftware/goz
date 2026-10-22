@@ -588,42 +588,54 @@ impl MainWindow {
         };
         for side in Side::BOTH {
             let c = self.panel(side);
-            for (index, column) in c.columns().iter().enumerate() {
-                if let Some(fit) = fitted.iter().position(|f| f == column) {
-                    c.list.set_column_width(index, widths[fit]);
-                }
-            }
-            self.fill_name_column(side);
+            let fitted_widths = (c.columns().iter().enumerate())
+                .filter_map(|(index, column)| {
+                    let fit = fitted.iter().position(|f| f == column)?;
+                    Some((index, widths[fit]))
+                })
+                .collect();
+            self.set_panel_widths(side, fitted_widths);
         }
     }
 
-    /// Gives Name the room the other columns leave in `side`'s list, to
-    /// its edge or its scroll bar, so the rows reach the divider; a search
-    /// panel's Name and Folder share it 1.3 to 1.
+    /// Gives Name the room the other columns leave in `side`'s list.
     pub(super) fn fill_name_column(&self, side: Side) {
+        self.set_panel_widths(side, Vec::new());
+    }
+
+    /// Gives `side`'s columns `widths`, as column index and width, and Name
+    /// the room the other columns leave, to the list's edge or its scroll
+    /// bar, so the rows reach the divider; a search panel's Name and Folder
+    /// share it 1.3 to 1. The list draws once, and only when a width
+    /// changes, because each width it takes draws every row it shows,
+    /// twice when the horizontal scroll bar comes and goes.
+    fn set_panel_widths(&self, side: Side, mut widths: Vec<(usize, Px)>) {
         let c = self.panel(side);
         let dpi = self.created().metrics.get().dpi;
         let shared =
             |column: &PanelColumn| matches!(column, PanelColumn::Name | PanelColumn::Folder);
         let others = (c.columns().iter().enumerate())
             .filter(|(_, column)| !shared(column))
-            .fold(Px(0), |sum, (index, _)| sum + c.list.column_width(index));
+            .fold(Px(0), |sum, (index, _)| {
+                let given = widths.iter().find(|(column, _)| *column == index);
+                sum + given.map_or_else(|| c.list.column_width(index), |(_, width)| *width)
+            });
         let room = (c.list.hwnd().client_size().width - others)
             .max(Px(column_sizing::column_width(Column::Name, dpi).0 / 2));
-        let (name, folder) = match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
-            Some(index) => {
+        match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
+            Some(folder) => {
                 let name = Px(room.0 * 13 / 23);
-                (name, Some((index, room - name)))
+                widths.extend([(0, name), (folder, room - name)]);
             }
-            None => (room, None),
-        };
-        if c.list.column_width(0) != name {
-            c.list.set_column_width(0, name);
+            None => widths.push((0, room)),
         }
-        if let Some((index, width)) = folder
-            && c.list.column_width(index) != width
-        {
-            c.list.set_column_width(index, width);
+        widths.retain(|(index, width)| c.list.column_width(*index) != *width);
+        if !widths.is_empty() {
+            c.list.hwnd().draw_once_after(|| {
+                for (index, width) in widths {
+                    c.list.set_column_width(index, width);
+                }
+            });
         }
     }
 
