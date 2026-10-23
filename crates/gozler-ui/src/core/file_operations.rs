@@ -8,6 +8,7 @@
 
 pub(super) mod batch;
 mod layout;
+#[cfg(windows)]
 pub(crate) use layout::{CARD_ICON, Layout, Metrics, ROW_ICON};
 
 use super::captions::{Guard, Question, QuestionBody};
