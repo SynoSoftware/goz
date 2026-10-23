@@ -4,10 +4,9 @@
 //! The list owns the focus and the selection, as Search's list does (DESIGN.md:
 //! The selection).
 
-use super::super::dialogs::{NewFolder, Transfer, TransferStart};
+use super::super::dialogs::{NewFolder, TransferStart};
 use super::{EntryAction, MainWindow, timer};
 use crate::core::captions::{self, PanelCaptions};
-use crate::core::captions::{DialogCaptions, DialogItem};
 use crate::core::commands::{
     self, CommandId, Focus, Key, Keystroke, Mark, MenuItem, MenuNode, PanelAction, PanelKey, State,
 };
@@ -1637,25 +1636,7 @@ impl MainWindow {
             let model = self.model.borrow();
             model.panels().panel(side).has_selection()
         };
-        let (dialog, captions) = {
-            let model = self.model.borrow();
-            let strings = model.strings();
-            let mut captions = DialogCaptions::new(DialogId::Transfer, strings);
-            // Move to folder's title and button; the table has Copy's.
-            if moves {
-                captions.title = start.title.clone();
-                let ok = captions
-                    .items
-                    .iter_mut()
-                    .find(|(id, _)| *id == DialogItem::Ok.id());
-                if let Some((_, text)) = ok {
-                    *text = strings.text("file_operations.move").to_owned();
-                }
-            }
-            (Transfer::new(strings, start), captions)
-        };
-        let ended = win::dialog::run_modal(hwnd, DialogId::Transfer, &captions, &dialog);
-        let Some(destination) = ended.ok().and_then(|_| dialog.chosen()) else {
+        let Some((destination, policy)) = self.ask_transfer(hwnd, start, moves) else {
             return;
         };
         let renamed = match (&destination, one) {
@@ -1668,14 +1649,17 @@ impl MainWindow {
         };
         let request = match moves {
             true => Request::Move {
+                policy,
                 sources,
                 destination,
             },
             false => Request::Copy {
+                policy,
                 sources,
                 destination,
             },
         };
+        self.remember_copy_policy(hwnd, policy);
         let id = self.start_operation(request, None);
         // Submitting clears the selection (DESIGN.md: Copy and Move); Gozler's
         // own rename selects the renamed entry again.
@@ -1745,6 +1729,7 @@ impl MainWindow {
             _ => active.folder().to_owned(),
         };
         Some(TransferStart {
+            policy: model.choices().copy_policy,
             title: strings.text(title).to_owned(),
             line,
             text,

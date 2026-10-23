@@ -10,7 +10,7 @@ use gozler_winfs::{Access, AttributeTag, Entry, EntryStat, Reparse, open_entry};
 use crate::identity::{Identity, PathTrie, outermost};
 use crate::listing::{BACKSLASH, read_names};
 use crate::names::Names;
-use crate::operation::{Listed, Reason, Refusal};
+use crate::operation::{Listed, Pause, Reason, Refusal};
 use crate::win32::{FILE_ATTRIBUTE_DIRECTORY, is_gone};
 
 /// Windows' "The directory name is invalid", for a destination that is a
@@ -57,7 +57,7 @@ impl Destination {
     /// through a handle of its own, because a handle's listing goes on where
     /// its last read stopped, so a second listing of one handle would find
     /// the folder empty.
-    pub(crate) fn names(&self, page: &mut [u64]) -> Result<Names, u32> {
+    pub(crate) fn names(&self, page: &mut [u64], stopped: impl Fn() -> bool) -> Result<Names, u32> {
         if !self.missing.is_empty() {
             return Ok(Names::default());
         }
@@ -65,7 +65,7 @@ impl Destination {
             .entry
             .reopen(Access::List)
             .map_err(|error| error.code)?;
-        read_names(&folder, page)
+        read_names(&folder, page, stopped)
     }
 }
 
@@ -88,10 +88,14 @@ pub(crate) fn receive(
     sources: &[PathBuf],
     destination: Option<&Path>,
     cancel: &AtomicBool,
+    pause: Option<&Pause>,
 ) -> Result<(Received, Option<Destination>), Refusal> {
     let mut received = Received::default();
     let mut selected = Vec::new();
     for source in sources {
+        if let Some(pause) = pause {
+            pause.wait(cancel);
+        }
         if cancel.load(Ordering::Relaxed) {
             break;
         }
@@ -114,7 +118,7 @@ pub(crate) fn receive(
     let identities: Vec<Identity> = selected.iter().map(|s| s.identity.clone()).collect();
     let (kept, trie) = outermost(&identities);
     let destination = match destination {
-        Some(destination) => Some(open_destination(destination, &trie)?),
+        Some(destination) => Some(open_destination(destination, &trie, cancel, pause)?),
         None => None,
     };
     let mut selected: Vec<Option<Selected>> = selected.into_iter().map(Some).collect();
@@ -129,7 +133,12 @@ pub(crate) fn receive(
 /// links, and its identity is its target's. A folder that does not exist is
 /// opened at the nearest folder above it that exists; any other error
 /// refuses, and so does a file in its place.
-fn open_destination(destination: &Path, sources: &PathTrie) -> Result<Destination, Refusal> {
+fn open_destination(
+    destination: &Path,
+    sources: &PathTrie,
+    cancel: &AtomicBool,
+    pause: Option<&Pause>,
+) -> Result<Destination, Refusal> {
     let path: Vec<u16> = destination.as_os_str().encode_wide().collect();
     let mut verbatim = verbatim(&path);
     while verbatim.last() == Some(&BACKSLASH) && !is_volume_root(&verbatim) {
@@ -137,6 +146,12 @@ fn open_destination(destination: &Path, sources: &PathTrie) -> Result<Destinatio
     }
     let mut missing = Vec::new();
     let entry = loop {
+        if let Some(pause) = pause {
+            pause.wait(cancel);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Refusal::SourceUnavailable);
+        }
         match open_entry(&verbatim, Access::List, Reparse::Follow) {
             Ok(entry) => break entry,
             Err(error) if is_gone(error.code) => {

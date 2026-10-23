@@ -5,7 +5,7 @@
 use crate::ring_plan::{Layout, RingPlan};
 use crate::settings::{Count, Engine, SpeedSettings};
 
-/// The four classes that the worker counts and the disk waits read. Ordered
+/// The four classes that decide copy plans. Ordered
 /// from fastest to slowest, so the slower end of a pair decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum VolumeClass {
@@ -29,16 +29,10 @@ impl VolumeClass {
             Some(false) => VolumeClass::Ssd,
         }
     }
-
-    /// Whether two copies that move bytes on its disk wait for each other
-    /// (D14): only a disk that seeks, and a share, which counts as one.
-    pub(crate) fn seeks(self) -> bool {
-        matches!(self, VolumeClass::HardDisk | VolumeClass::Share)
-    }
 }
 
-/// A physical disk, for the disk waits (D14).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A physical device counted once in a transfer's admission.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Disk {
     Number(u32),
     /// A share counts as one disk, named by its server, folded.

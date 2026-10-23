@@ -5,6 +5,10 @@ Two panels and Search. This spec says what the engine does and why each
 method was chosen. [DESIGN.md](../DESIGN.md), in "Two panels" and "File
 operations", owns what the person sees.
 
+Queue admits copy, move and synchronization work by physical device. Ordinary
+Delete keeps its independent execution and existing status progress, outside
+the transfer drawer. Mirror cleanup belongs to its synchronization operation.
+
 Every claim about another tool or a Windows API, with its source and its
 numbers, is in [the research record](../research/fast-copy-delete.md). This
 spec names the record's section beside each decision and does not repeat its
@@ -33,7 +37,7 @@ the research record that holds the evidence.
 | D2 | How many delete workers | A speed setting: one per logical processor in most presets; a work item is one folder, at most 256 files of it. Stage D confirmed it: on 30,000 small files with 8 processors, one per processor and 4 workers cost the same CPU cycles within 3 %, one per processor ran 13 % faster, and 16 workers cost 15 % more cycles (`docs/BENCHMARKS.md`) | One thread (`rd /s`); a fixed 8 (AngelCOPY) | rmbrr and FastDelete use one per processor; AngelCOPY found 16 no better than 8 on 10,000 files, which leaves the count open. The 256-file split lets one large folder use several workers, which FastDelete cannot | Deleters |
 | D3 | When a folder is deleted | As soon as its last file and subfolder are gone, by the worker that removed the last one | One pass at the end, as AngelCOPY deletes folders deepest first after its files | A combination of two sources. The counter that deletes a folder when its last child goes is rmbrr's (`broker.rs`), but rmbrr first walks the whole tree on one thread and holds every path. The streaming walk in items of up to 256 files of one folder is AngelCOPY's (`Delete.cpp`). Together, folders go while the walk runs elsewhere, and no list of the whole tree is held; stage A's "partly deleted" test proves the combination | Deleters |
 | D4 | How to list a folder | `GetFileInformationByHandleEx` with `FileFullDirectoryInfo` on a folder handle, parsed in `gozler_core::layout` | `FileIdExtdDirectoryInfo`, which gozlerd's ReFS walk parses; `FindFirstFileExW` (rmbrr, FastCopy); `NtQueryDirectoryFile` | The engine needs the name, attributes, size, date and reparse tag, not file IDs. `FileFullDirectoryInfo` gives all of them, the tag in `EaSize` for a reparse point (MS-FSCC), and every Windows file system answers it, FAT included. `FileIdExtdDirectoryInfo` is not handled by the FAT driver sample, so it would need this class as a fallback anyway | Listing APIs |
-| D5 | Where an operation's totals come from | **Owner ruling: the person never waits for a count, and the work starts at once.** Prepare of a copy or a move takes its item and byte totals from gozlerd. A delete asks gozlerd for nothing at prepare: when it starts, a thread of its own asks gozlerd for its total, and the window shows it when it arrives. When gozlerd's index may hold less than the disk below a selected folder (its volume is not indexed or not live, a size is unknown, or the Include settings leave entries out on that volume), the operation has no total and shows the count of items done, and a copy has no free-space refusal at prepare. Prepare compares only the selected entries' own names with the destination folder: a selected folder that merges into a folder of its name counts as a merge, the window asks as for a conflict, and the run applies the answer to each file it meets inside, because gozlerd's results lack the creation time and reparse tag that the conflict rules read (Conflicts). The delete and the copy's run list each folder from disk as they reach it (D3, Copy step 1), so no pass counts before the work | Walking the disk to count, as File Explorer does before it starts; deleting from gozlerd's list of the entries below the selection | A count by walking makes the person wait before anything happens, and the index already holds the totals: a count of 2,156,101 entries took 0.1 s. A list from gozlerd makes the delete wait instead: gozlerd builds and sorts every result's full path before it sends the first row, which took 5.6 s for those entries, and in a deep tree each path grows with the depth, to gigabytes in gozlerd. The walk deletes from the first folder it lists, and it opens each folder relative to the one above it, so a deep folder costs the same as a shallow one. SynoSoftware/goz#84 holds a gozlerd request that would make a list fit. The visibility filter hides only the entries of folders the person may not list, which a walk with the person's token could not list either | — |
+| D5 | Where an operation's totals come from | **Owner ruling: the person never waits for a count, and the work starts at once.** Prepare of a copy or a move takes its item and byte totals from gozlerd. A delete asks gozlerd for nothing at prepare: when it starts, a thread of its own asks gozlerd for its total, and the window shows it when it arrives. When gozlerd's index may hold less than the disk below a selected folder (its volume is not indexed or not live, a size is unknown, or the Include settings leave entries out on that volume), the operation has no total and shows the count of items done, and a copy has no free-space refusal at prepare. Prepare compares only the selected entries' own names with the destination folder: a selected folder that merges into a folder of its name counts as a merge, and the run applies the accepted policy to each file it meets inside, because gozlerd's results lack the creation time and reparse tag that the conflict rules read (Conflicts). The delete and the copy's run list each folder from disk as they reach it (D3, Copy step 1), so no pass counts before the work | Walking the disk to count, as File Explorer does before it starts; deleting from gozlerd's list of the entries below the selection | A count by walking makes the person wait before anything happens, and the index already holds the totals: a count of 2,156,101 entries took 0.1 s. A list from gozlerd makes the delete wait instead: gozlerd builds and sorts every result's full path before it sends the first row, which took 5.6 s for those entries, and in a deep tree each path grows with the depth, to gigabytes in gozlerd. The walk deletes from the first folder it lists, and it opens each folder relative to the one above it, so a deep folder costs the same as a shallow one. SynoSoftware/goz#84 holds a gozlerd request that would make a list fit. The visibility filter hides only the entries of folders the person may not list, which a walk with the person's token could not list either | — |
 | D6 | The Recycle Bin | Not used (owner ruling) | `IFileOperation` with `FOFX_RECYCLEONDELETE`, as TinyTorrent2's `RecycleBin.cs` does | Recycling runs at File Explorer's speed and only through File Explorer's engine, which would also need its own thread, its own wait rules and its own questions | Delete APIs |
 | D7 | Which copy engine | **Both, and the person chooses** (owner decisions 4 and 5): the Windows copy engine (`CopyFile2`) and Gozler's ring, combined for each case by the speed settings. The default preset, Automatic, holds Parallel copy's values, which stage D confirmed on an SSD: for one 8 GiB file the Windows engine with D9's `ioDesiredSize` cost 9 % fewer CPU cycles than the ring's SSD profile, and 8 MiB ring blocks 40 % fewer than 2 MiB blocks; stage E's 1,600 MiB file gave the Windows engine the shorter wall time in 3 of 4 runs (`docs/BENCHMARKS.md`). The After install checks replace the hard-disk, USB and share values they measure; the other presets are the configurations of the copiers that were read ("Speed settings") | One engine; a choice between whole engines only | The research does not settle it: no source compares a ring with `CopyFile2` and `COPY_FILE_NO_BUFFERING`, and no source measured a hard disk. The ring wins in theory on one hard disk with two partitions and measured +32 % on one large NVMe file; it also writes every byte itself, so a defect damages files with nothing to detect it | Copiers; What the research leaves open |
 | D8 | The Windows engine's rules | Rename on one volume; `CopyFile2` across volumes; `COPY_FILE_NO_BUFFERING` from 32 MiB between local volumes; files under 32 MiB on 16 workers between volumes without a seek penalty, 2 on a USB volume or a share; one file at a time otherwise | Explorer's defaults; robocopy `/MT` | Copied from AngelCOPY's `NativeCopy.cpp`, through TinyTorrent2's `Payload::Move`: the rename, the 16 workers with 256-file items, and `CopyFile2` for shares, each measured by AngelCOPY. Not copied: for files of 32 MiB and more AngelCOPY uses its ring, and TinyTorrent2 put unbuffered `CopyFile2` there instead, with AngelCOPY's size limit, when it decided not to build a ring. Stage D measured it: for files of 32, 64 and 128 MiB the unbuffered copy one at a time cost 32 % to 45 % fewer CPU cycles than the buffered copy on 16 workers, so the limit stays at AngelCOPY's 32 MiB rather than BetterCopy's 256 MiB (`docs/BENCHMARKS.md`). BetterCopy's 2 workers for a USB bulk-only device and for a share | Copiers |
@@ -41,8 +45,8 @@ the research record that holds the evidence.
 | D10 | Where a copy is written, and where an interrupted file resumes | At its final name (owner ruling), created only when the name is free. An interrupted file stays (What a stopped operation leaves), and Continue resumes it on the ring: it compares the file with the source block by block from the start, and writes from the first block that differs (Saved operations). Replace on the ring writes over the existing file the same way. A normal copy does no extra work for this: no checkpoint, no flush, no record | A temporary name renamed when complete (rsync's default, browsers); `COPY_FILE_RESTARTABLE`, as robocopy `/z`; a checkpoint flushed as the copy runs; a check of the last block only; rsync `--append-verify`, which resumes at the destination's size, useless for a file preallocated to its full size, and verifies the whole file afterwards | No copier that the research read gives both full speed and crash recovery, so this is Gozler's own design, proven by stage E's tests rather than by another tool's use; SynoSoftware/goz#80 tracks what to revisit. FastCopy opens every file with `CREATE_ALWAYS` and AngelCOPY deletes a partial file; robocopy `/z` slows every copy, Microsoft says "significantly", and recovery must not (owner ruling); Ultracopier resumes only within one running process. The compare is correct whatever happened before it: a block is kept only when it equals the source, and the source stays open without write sharing from the compare to the end of the copy. So a gap from out-of-order writes, the zero tail of a preallocated file, a power loss, an interrupted Replace and a source changed since the crash all end at the first block that differs. A last block that matches would prove nothing about the blocks before it. The compare read 1.11 GB/s against 0.41 GB/s for a copy, so a 50 GB file stopped at 49 GB resumes in about 47 s instead of 120 s. Stage D measured the temporary name at 43 % more CPU cycles on 30,000 small files, which stage E removed (`docs/BENCHMARKS.md`) | Resuming inside a file |
 | D11 | When the file list is made | When the work starts, by walking the disk as the work goes (D5) | When the person asks | An operation can wait in the queue for minutes. TinyTorrent2 rejected a design that took the names at the request, because renames still running changed them | Lessons from TinyTorrent2 |
 | D12 | How paths are compared | By identity: the final path (`GetFinalPathNameByHandleW`), component by component, with `VOLUME_NAME_GUID` on a local volume and `VOLUME_NAME_DOS` on a share, which has no volume GUID path | The path text | Two strings name one folder through case, short names, mount points and junctions; a text compare would miss an overlap or move a folder into itself | Lessons from TinyTorrent2 |
-| D13 | What may be deleted | The entries of a delete; a moved source after its copy is complete; an emptied source folder; a file this operation was writing when the person cancelled it; the file that Replace replaces; a link at a name that Replace replaces, never its target; the operation's own unfinished file when its streams cannot be kept | Anything else, such as a folder a copy merged into | A path that an operation protects is never also a path it deletes | Lessons from TinyTorrent2 |
-| D14 | Which operations wait, and who decides | The engine's queue: an operation waits for an earlier one that has not ended when one of them writes or deletes a path that the other reads or writes, a path counting as the entry and everything below it; copies that move bytes on one disk with a seek penalty wait for each other; nothing else waits | One queue for everything; one queue per disk; a queue in the window | Overlap protects files: with parallel workers nothing else orders work on one path, as TinyTorrent2's single payload worker did. The disk rule protects speed, so it applies only to a disk with a seek penalty: copies between SSDs run at once, as in File Explorer and robocopy. An ended operation makes nothing wait. A copy writes only `<destination>\<source name>` and its numbered names, not its whole destination folder, so a delete inside a backup folder does not wait for a copy into it. The wait is a file-safety rule, so it lives in the engine, where no caller can skip it, and never with the person | Lessons from TinyTorrent2 |
+| D13 | What may be deleted | The entries of a delete; a moved source after its copy is complete; an emptied source folder; a file this operation was writing when the person cancelled it; the file that Replace replaces; a link at a name that Replace replaces, never its target; the operation's own unfinished file when its streams cannot be kept; unchanged destination-only entries approved by a complete Mirror comparison, after required output is revalidated | Anything else, such as a folder a copy merged into | A path that an operation protects is never also a path it deletes; Mirror separately revalidates its approved extras | Lessons from TinyTorrent2; Synchronize folders |
+| D14 | Device admission | Queue admits all distinct devices of each source/destination volume pair together or none, default 1 transfer per device and configurable from 1 to 3. Waiting work reserves nothing. Delete and New folder bypass admission; no paths are reserved | Path dependencies; HDD-only serialization; a scheduler in the window | One scheduler limits contention independently of drive class. Pause releases grants after quiescence and Resume requests admission. Run now yields only conflicting transfers | Copy behaviour |
 | D15 | Where the engine runs | In the window's process, with the person's token | In gozlerd | A pipe request to an elevated service would let any local user delete files as SYSTEM | — |
 | D16 | Rename on one volume | Yes, for a move | Copy and delete, as FastCopy does | A rename changes only the folder entry, so 100 GB moves in milliseconds; AngelCOPY, BetterCopy and Ultracopier rename too | Copiers |
 | D17 | Our own copy loop for the Windows engine | No: `CopyFile2` | A loop of `ReadFile`/`WriteFile` | BetterCopy deleted its own loop in favour of `CopyFileExW`; the ring (D7) is the one own loop, chosen by the person | Copiers |
@@ -76,9 +80,8 @@ the files of one moment (window rule 10).
   copy lists it as a failure.
 - A selected entry whose identity cannot be read, for example a file whose
   permissions deny the person every right, is listed as a failure with
-  Windows' error and left out; the operation does not touch it, so the
-  overlap test of D14 runs without it. Only a destination whose identity
-  cannot be read refuses the operation.
+  Windows' error and left out; the operation does not touch it. An unreadable destination identity
+  refuses the operation, as does an unreadable standalone rename source.
 
 Each test uses the identity comparison of D12.
 
@@ -101,7 +104,7 @@ opens from redirecting the walk.
 
 **One volume or two** is decided at prepare, from the identities of the
 sources and the resolved destination, because it decides whether the
-operation moves bytes, its disk waits (D14) and its free-space check. A
+transfer moves bytes, its device admission and its free-space check. A
 rename that fails at run time with `ERROR_NOT_SAME_DEVICE` is a listed
 failure, never a copy that nothing waited for or counted.
 
@@ -172,7 +175,7 @@ failure, never a copy that nothing waited for or counted.
    but never into a junction or folder link at the destination: that is a
    listed failure, because writing through it would write outside the
    destination. Prepare applies the same rules to the selected entries'
-   own names, and counts a folder that merges without reading inside it
+   own names without walking a folder that merges
    (D5).
 3. **Free space.** A copy that needs more bytes than the destination volume
    has free is refused at prepare when gozlerd gave its total (D5), as File
@@ -200,7 +203,7 @@ failure, never a copy that nothing waited for or counted.
    (`GetFileAttributesExW`). A name that exists is a conflict with someone
    else's file, never deleted (D13): the operation's choice applies (Keep
    both takes the next free number, Replace writes over it), and with Skip
-   or no choice the file is listed as skipped. Otherwise the error is a
+   the file is listed as skipped. The accepted default updates changed files. Otherwise the error is a
    failure. A file of one of two selected entries with one name never
    replaces the other's copy (Conflicts).
 6. **Replace** clears the read-only, hidden and system attributes of the
@@ -238,7 +241,7 @@ robocopy.
 | --- | --- |
 | Both volumes local, file of 32 MiB or more | `CopyFile2` with `COPY_FILE_NO_BUFFERING`, one file at a time |
 | Both volumes local without a seek penalty, file under 32 MiB | `CopyFile2` on 16 workers, 2 when either volume is on USB, each taking up to 256 files of one folder |
-| A network share at either end | `CopyFile2`, buffered, on the share's workers (2 in Parallel copy, as BetterCopy uses), so the round trips of one file overlap another's. A share's seek penalty cannot be read, so it counts as a hard disk for D14: two copies to one server wait for each other |
+| A network share at either end | `CopyFile2`, buffered, on the share's workers (2 in Parallel copy, as BetterCopy uses), so the round trips of one file overlap another's. Shares use their server identity for device admission, with the same transfer limit as local disks |
 | Every other case | `CopyFile2`, buffered, one file at a time. A volume whose seek penalty is unknown counts as a hard disk |
 
 The 32 MiB limit and the worker counts are speed settings; the table shows
@@ -275,7 +278,7 @@ Rules that TinyTorrent2's `Payload.cpp` and the copiers learned:
   `IOCTL_STORAGE_QUERY_PROPERTY` on a volume handle opened with no access
   rights, as BetterCopy reads them, so no administrator right is needed.
 - **A volume's class** is one of four, and the worker counts, the ring's
-  profile and the disk wait (D14) all read it: a share, by its path; a
+  profile read it: a share, by its path; a
   hard disk, with a seek penalty or an unknown one; USB, without a seek
   penalty and a USB bulk-only device by BetterCopy's test in
   `profiler.rs`; otherwise an SSD.
@@ -458,18 +461,24 @@ hard-disk mode is in Ring copy.
 
 ## Conflicts
 
-The person gives one answer for all conflicts that prepare found:
+Copy/Move captures its policy before preparation and runs without conflict questions.
+Settings and the command dialogs share the saved policy; Paste and Drop snapshot
+it on acceptance. Late intake cannot change it.
 
-| Choice | A file that exists at the destination | Two selected entries with one name |
+| Policy | Existing same-name file | Second selected entry of one name |
 | --- | --- | --- |
-| Replace | replaced | the second gets a number |
-| Skip | left as it is; the source is not copied or moved | the second is skipped |
-| Keep both | the new one gets the first free number: `report (2).pdf` | the second gets a number |
+| Update changed files (default) | Skip equal size/time; replace otherwise, including a newer destination | Number it |
+| Update newer files | Replace only if the source last-write time is later | Number it |
+| Keep both | First free numbered name | Number it |
+| Skip existing files | Skip and retain source | Skip |
 
-- **The run applies the choice to every conflict it meets,** also to a file
-  that appeared after prepare. When prepare found no conflict, the person
-  was not asked, and the run skips each conflict it meets and lists it in the
-  result, because nobody chose to replace that file.
+Equal metadata does not verify contents. A skipped move retains its source.
+A file/folder mismatch remains a failure. The policy also governs entries
+appearing after the destination listing; no-follow placement checks still
+protect link targets. Interrupted legacy requests retain an explicitly saved
+Replace, Skip or Keep both. A missing legacy choice uses Update changed files
+after recovery checks for completed and unfinished outputs.
+
 - Two selected entries never replace each other: on a move that would delete
   one of the person's files, and on a copy the result would depend on the
   order. This holds inside two selected folders with one name, which merge
@@ -508,23 +517,23 @@ reads the states. It posts only while a flag that the window clears in
 by up to 3 seconds, and a message to a destroyed window handle can reach a
 new window that reuses it.
 
-1. **Prepare** takes the kind (copy, move, delete or new folder), the
+1. **Prepare** takes the kind (copy, move, synchronize, delete or new folder), the
    speed settings, the sources and the destination, and returns an id at once.
    On a queue thread it applies "What an operation receives" and ends
    prepared, or ended with a typed refusal: a destination inside a source,
    a destination that does not exist, a destination whose identity cannot
    be read, or too little free space. A selected entry that no longer exists counts as
    "What an operation receives" says. A
-   prepared operation holds the sources and the destination as identities
-   (D12), the paths it reads and the paths it writes or deletes (D14),
-   whether it moves bytes, and its disks. A copy or a move takes its items
+   prepared operation holds identities (D12), volume-pair transfers with
+   their copy plans and distinct devices, and shared operation-wide
+   destination name ownership. A copy or a move takes its items
    and bytes from gozlerd, and a delete takes its items from gozlerd while
    it runs; neither walks to count them (D5), so prepare ends at once; with
-   no total, the progress is the count of items done. For a copy or a move it
-   also counts the file conflicts and the selected entries that share a
-   name, so the window can ask the person. It keeps no list of files (D11).
-2. **Submit** takes the id of a prepared operation and the conflict choice,
-   if the person was asked. The queue starts the operation as soon as D14
+   no total, the progress is the count of items done. It keeps no conflict
+   counts or list of files (D11). Synchronization instead opens its two roots
+   and prepares a comparison; enumeration starts only after device admission.
+2. **Submit** takes the id of a prepared operation whose request already
+   holds its policy. The queue starts the operation as soon as D14
    lets it.
 3. **The operation runs** on its own thread: it checks the free space again
    (Copy, step 3), walks as it copies, applies "Conflicts", and ends complete, cancelled, or stopped
@@ -532,33 +541,48 @@ new window that reuses it.
    skipped file with its path and Windows error, in the order they happened.
 
 **Each operation's state** is one of: preparing; prepared, waiting for the
-person's answer; waiting, with the id of the operation it waits for,
-whether for its paths or its disk, and the totals prepare counted; running;
+submission; waiting for device capacity, with its blocker and totals; running;
+compared, waiting for explicit synchronization commitment;
 ended, with its result; or interrupted. A running operation carries its
 counts of items and bytes, its totals, whether it only renames, whether it
 is paused, and its current file. An ended operation stays until the window
 removes it. The queue is the one owner of which operations exist.
 `Queue::operations()` lists each with its request: the running ones in the
 order they started, then the waiting ones in run order, then the rest in
-the order they were prepared.
+the order they were prepared. Snapshots hold a weak comparison reference;
+the dialog releases its strong preview through Queue's worker so destroying
+a large preview never holds the window.
 
-**Run order.** A waiting operation waits for one that runs, wherever it
-stands, and for one before it in the run order (D14). `move_waiting` moves
-a waiting operation to just before another waiting one, or last, and
-`check_move` answers whether that move is allowed without making it; both
-make the same check. A move never passes an operation whose paths it
-overlaps, because the later one would then change files that the earlier one
-uses first. It is refused with the nearest such operation and the side the
-moved one must stay on (`OrderRefused`), and nothing changes. So only the
-order of operations that wait for one disk really changes. After a move
-every wait is decided again, so an operation that no longer waits starts.
+**Synchronize** compares complete source and destination trees under the same
+device grant. It rejects identical/nested roots and unknown or name-surrogate
+subtrees. The retained comparison holds source fingerprints and approved
+destination-only candidates. It releases its grant for review; explicit
+commitment reacquires the devices and uses the existing Update changed files
+copy executor, with totals from comparison rather than another daemon read.
+Mirror verifies required output before removing extras. Relative no-follow
+opens, matched cloud-filter views and chosen-root identity checks prevent
+unknown or redirected output from authorizing deletion. Candidate removal
+checks source absence and unchanged identity/metadata on the same handle it
+deletes; extra folders are removed only if empty. It never recursively deletes
+new children. Failed required copies or cancellation prevent starting the
+deletion phase. These are
+point-in-time checks; ordinary copy remains path-based and does not lock
+intermediate names. Overall synchronization progress uses processed entries,
+including approved deletions; current-copy progress still uses bytes.
 
-**Pause** holds a running operation: the ring between blocks, once nothing
-it wrote is in flight; `CopyFile2` inside its progress callback; the copy,
-move and delete workers between entries. A paused operation keeps its paths
-and its disks, so the operations that wait for it go on waiting. Cancel
-works while paused, and so does `close()`: a paused `CopyFile2` then goes on
-toward the process end, as at Exit.
+**Run order.** Ready transfers are scanned in explicit queue priority,
+including pairs in one operation. Blocked work reserves nothing. Run now
+yields only transfers on conflicting devices; unrelated pairs continue.
+Nested priority changes retain the return order. No paths are reserved.
+
+**Pause** closes an operation's transfer gates. Each transfer keeps its
+grants until its workers and native I/O are quiet, then releases them.
+Resume requests fresh admission. Cancelled previously admitted work must
+reacquire its devices before cleanup. Never-started work needs no worker.
+The ring pauses between blocks; CopyFile2 pauses through its native return;
+other workers pause between entries. Shared destination initialization
+publishes before releasing its initializer's grant; waiting consumers are
+idle and reacquire their gate before returning.
 
 **The current file** is the file the operation most recently started, with
 its destination, its bytes copied and its size; for a delete, the entry
@@ -581,8 +605,7 @@ of the list's fetched results, and then until its next search, because
 gozlerd applies a large delete's journal records for some time after the
 delete.
 The window removes an ended operation from the queue when no list keeps it.
-This is a display rule on the path text the window gave; the safety rule
-stays D14 on identities.
+This display rule on the original path text creates no scheduler dependency.
 
 The test runs for every row Windows paints, about 50 rows per paint, so it
 must not compare a row with every taken path: 100,000 deleted rows would
@@ -595,15 +618,15 @@ At each wake the window takes a snapshot of the map (`Arc`), so a paint
 never waits for the engine's lock while a worker holds it, and decides from
 that snapshot which lists keep each operation that ended.
 
-**The overlap test (D14)** compares the paths of two operations through a
-trie of their identity components: each path of one operation walks the
-other's trie once. Two selections of 100,000 entries then cost about a
-million steps instead of 10 billion pairwise compares. The same trie
-answers "an entry below another selected folder" and "a destination inside
-a source".
+**Identity comparisons** use a trie for selection deduplication,
+entries below another selected folder and destinations inside a source.
+Device admission creates no path dependency.
 
-**Cancel** takes an id. A preparing, prepared or waiting operation ends at
-once. A running one stops within one `CopyFile2` chunk (its callback returns
+**Cancel** takes an id. **Cancel all** atomically cancels every accepted
+copy, move and synchronization, including pending source intake, before scheduling other
+work; ordinary Delete and dormant Interrupted work are independent.
+An operation shows Cancelling until its workers and required recovery
+removal finish. A running one stops within one `CopyFile2` chunk (its callback returns
 `COPYFILE2_PROGRESS_CANCEL`), one ring block, or one delete and its 200 ms of
 retries. A `CreateFileW` blocked on a share that stopped answering is ended
 with `CancelSynchronousIo` on its thread, as `gozler_winfs`'s
@@ -628,10 +651,17 @@ run's. It removes the operation when it ends, cancelled included.
 A waiting operation is not saved, because it has changed no file. The
 operation's own thread, and for a removal the window asked for, a thread
 of the queue, writes the file, because the file lists every source of
-every saved operation and the window's calls wait for no disk write. Exit
-writes it for a run whose thread has not yet, so every operation that runs
-is in the file when the window ends. When the
-queue is created, each saved operation becomes an interrupted one.
+every saved operation and the window's calls wait for no disk write. A
+failed initial save refuses the operation before mutation; failed removal
+is reported without reducing the count of successful file operations.
+Explicit cancellation makes the id ineligible for a delayed first save.
+Exit keeps the process alive for the background persistence result, also
+when setup ended the message loop first. When the queue is created, each
+saved operation becomes an interrupted one.
+
+Synchronization saves only roots and Mirror intent, never the approved
+deletion list. Continue makes a fresh comparison for explicit review and
+commitment before further changes. Copy/Move retain the recovery rules below.
 
 - **Continue** prepares and submits it again with two more rules, which its
   prepare applies while it counts, from the destination listing it reads
@@ -672,18 +702,18 @@ queue is created, each saved operation becomes an interrupted one.
 - The file's keys are a saved format: an older entry that lacks a key keeps
   its old meaning, as `AGENTS.md` asks of the wire.
 
-**Disks.** A prepared operation names the physical disks of every volume it
-reads or writes (`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` on a volume handle
-opened with no access rights; a volume can span disks). A network share
-counts as one disk, named by its server. A volume whose disks cannot be read
-counts as a disk of its own.
+**Devices.** Each transfer names its source and destination volumes'
+physical disks (IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS; volumes may span disks).
+Count each device once. Shares group by server; unreadable device data falls
+back to the volume identity. Settings permits 1, 2 or 3 transfers per device,
+default 1. Increasing the limit admits fitting work; lowering it drains
+existing transfers without preemption. Copy plans are chosen per volume pair.
 
-**Rename and new folder** go through the queue like the others. A rename,
-which prepare makes of a move of one entry to another spelling of its name
-in its own folder, reads and writes its old and new names, and a new folder writes its own
-name, so each waits only for an operation on those paths. A rename uses
-`MoveFileExW` without a replace flag, and a new folder `CreateDirectoryW`,
-so an existing name is refused, never replaced.
+**Rename and new folder** retain their existing engine calls. Same-volume
+moves and standalone rename require admission; standalone rename refuses an
+unreadable source identity. Ordinary Delete and New folder bypass admission.
+Rename uses MoveFileExW without replacement and New folder uses
+CreateDirectoryW, so an existing name is refused.
 
 **Progress** is atomic counters of bytes or entries and the current file,
 which the window reads about twice a second. A file the run counts without
@@ -694,11 +724,12 @@ the total, because gozlerd's total can miss entries, such as those a
 delete removed before gozlerd answered.
 
 **Threads.** The queue owns every engine thread: one for each preparing or
-running operation, and the workers of each run, which are scoped threads
+admitted transfer, and the workers of each transfer, which are scoped threads
 that the run creates and joins. Dropping the queue cancels every operation
 and joins every thread, so no engine thread outlives it. At Exit the window
-cancels every operation and waits at most 3 seconds for the threads; then
-the process ends. An operation that had not ended stays in the saved file
+signals the operations to stop and waits off the window thread for recovery
+state to be written; the process does not join all engine workers. An
+operation that had not ended stays in the saved file
 and shows as Interrupted at the next start, which is the truth. The process
 keeps its single-instance mutex until it ends, because a second Gozler
 started earlier would read and rewrite the same saved file.
@@ -724,7 +755,7 @@ never make a delete fail. TinyTorrent2's mark writer opens without
   `gozler-fileops`.
 - **`gozler-fileops`:** everything in this spec. No `unsafe`, no window code.
   Its decisions (the numbers for Keep both, which file is unfinished, nested
-  selections, a destination inside a source, the overlap test, taken paths,
+  selections, a destination inside a source, device admission, taken paths,
   the method for a pair of volumes, the ring's block plan) build and test on
   every OS; the disk work is Windows only.
 - **`gozler-ui`:** the window that [DESIGN.md](../DESIGN.md) describes. It

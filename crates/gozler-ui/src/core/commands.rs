@@ -60,10 +60,11 @@ pub(crate) enum CommandId {
     View,
     Edit,
     NewFolder,
+    Synchronize,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 37] = [
+    pub(crate) const ALL: [CommandId; 38] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::Explore,
@@ -101,6 +102,7 @@ impl CommandId {
         CommandId::View,
         CommandId::Edit,
         CommandId::NewFolder,
+        CommandId::Synchronize,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -220,6 +222,12 @@ impl CommandId {
                 // Delete, Cut and Paste are keys of the list (control_key).
                 C::CopyToFolder => ("command.copy_to_folder", &[], transfer, None),
                 C::MoveToFolder => ("command.move_to_folder", &[], transfer, None),
+                C::Synchronize => (
+                    "command.synchronize",
+                    &[],
+                    |s| s.model.offers_file_operations(),
+                    None,
+                ),
                 C::Delete => ("command.delete", &[], file_operation, None),
                 C::Cut => ("command.cut", &[], cut, None),
                 C::Paste => ("command.paste", &[], paste, None),
@@ -298,6 +306,7 @@ impl CommandId {
             C::ShowWindow => Glyph::BackToWindow,
             C::CopyToFolder => Glyph::CopyTo,
             C::MoveToFolder => Glyph::MoveToFolder,
+            C::Synchronize => Glyph::Refresh,
             C::Delete => Glyph::Delete,
             C::Cut => Glyph::Cut,
             C::Paste => Glyph::Paste,
@@ -332,6 +341,7 @@ impl CommandId {
             | C::ShowWindow
             | C::FileOperations
             | C::TwoPanels
+            | C::Synchronize
             | C::SelectAll
             | C::Refresh
             | C::Find
@@ -1325,6 +1335,7 @@ fn every_menu() -> Vec<Menu> {
                     C::Properties,
                 ]),
                 run(&[C::CopyToFolder, C::MoveToFolder, C::NewFolder, C::Delete]),
+                run(&[C::Synchronize]),
                 run(&[C::ExportResults, C::Cancel]),
                 run(&[C::Settings]),
                 run(&[C::Exit]),

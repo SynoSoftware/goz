@@ -1,15 +1,17 @@
 //! What a copy or a move does with each entry whose name a destination
-//! folder already holds ("Conflicts" in the spec). Prepare counts the
-//! conflicts with [`classify`], and the run applies the person's choice with
-//! [`decide`], so both read one rule.
+//! folder already holds. Preparation and execution share [`classify`];
+//! [`decide`] also reserves the chosen name for the operation.
 
 use crate::names::{Found, Holder, Kind, Names};
 
-/// The person's one answer for all conflicts that prepare found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Choice {
-    /// A file at the destination is replaced; of two selected entries with
-    /// one name, the second gets a number.
+/// The file conflict rule captured when a copy or move is accepted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Policy {
+    #[default]
+    UpdateChanged,
+    UpdateNewer,
+    /// Unconditional replacement retained for legacy interrupted operations.
     Replace,
     /// A file at the destination stays, and the source is not copied or
     /// moved; of two selected entries with one name, the second is skipped.
@@ -18,13 +20,29 @@ pub enum Choice {
     KeepBoth,
 }
 
+impl Policy {
+    pub const ALL: [Policy; 4] = [
+        Self::UpdateChanged,
+        Self::UpdateNewer,
+        Self::KeepBoth,
+        Self::Skip,
+    ];
+
+    pub(crate) fn replaces(self, source_size: u64, source_time: i64, size: u64, time: i64) -> bool {
+        match self {
+            Self::UpdateChanged => source_size != size || source_time != time,
+            Self::UpdateNewer => source_time > time,
+            Self::Replace => true,
+            Self::Skip | Self::KeepBoth => false,
+        }
+    }
+}
+
 /// How the run treats a conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Rule {
-    /// `None` when prepare found no conflict, so the person was not asked:
-    /// then every conflict the run meets is skipped and listed, because
-    /// nobody chose to replace that file.
-    pub(crate) choice: Option<Choice>,
+    /// Copies and moves capture their policy before preparation; other work has none.
+    pub(crate) choice: Option<Policy>,
     pub(crate) run: Run,
 }
 
@@ -33,7 +51,7 @@ pub(crate) struct Rule {
 pub(crate) enum Run {
     First {
         /// When the run started, as a `FILETIME`; `None` while prepare
-        /// counts the conflicts, before anything is written.
+        /// prepares the selected entries, before anything is written.
         started: Option<i64>,
     },
     /// Continue after an interruption: a file already at the destination
@@ -77,6 +95,7 @@ pub(crate) enum Clash {
     OwnFolder,
     /// A file, or a link, that the destination holds.
     Conflict,
+    Skipped,
     /// Another selected entry already took the name.
     SameName,
     /// A folder into a folder of its name: they merge, as in File Explorer.
@@ -102,7 +121,7 @@ pub(crate) fn classify(names: &Names, name: &[u16], wanted: Wanted, rule: Rule) 
         && wanted.kind == Kind::File
     {
         // Keep both, and a copy into its own folder, wrote a numbered name.
-        let numbered = wanted.own_folder || rule.choice == Some(Choice::KeepBoth);
+        let numbered = wanted.own_folder || rule.choice == Some(Policy::KeepBoth);
         let mut written = Vec::new();
         if !wanted.own_folder
             && let Some(holder) = names.get(name)
@@ -163,7 +182,22 @@ pub(crate) fn classify(names: &Names, name: &[u16], wanted: Wanted, rule: Rule) 
             {
                 Clash::SameName
             }
-            (wanted, found) if wanted == found => Clash::Conflict,
+            (wanted_kind, found_kind) if wanted_kind == found_kind => {
+                let policy = rule.choice.unwrap_or_default();
+                if wanted_kind == Kind::File
+                    && matches!(policy, Policy::UpdateChanged | Policy::UpdateNewer)
+                    && !policy.replaces(
+                        wanted.size,
+                        wanted.last_write,
+                        found.size,
+                        found.last_write,
+                    )
+                {
+                    Clash::Skipped
+                } else {
+                    Clash::Conflict
+                }
+            }
             _ => Clash::Mismatch,
         },
     }
@@ -212,20 +246,26 @@ pub(crate) fn decide(names: &mut Names, name: &[u16], wanted: Wanted, rule: Rule
         // Two selected entries never replace each other: on a move that
         // would delete one of the person's files, and on a copy the result
         // would depend on the order.
-        Clash::SameName => match rule.choice {
-            Some(Choice::Replace | Choice::KeepBoth) => numbered(names),
-            Some(Choice::Skip) | None => Decision::Skip,
+        Clash::SameName => match rule.choice.unwrap_or_default() {
+            Policy::Replace | Policy::UpdateChanged | Policy::UpdateNewer | Policy::KeepBoth => {
+                numbered(names)
+            }
+            Policy::Skip => Decision::Skip,
         },
-        Clash::Conflict => match rule.choice {
-            Some(Choice::Replace) => {
+        Clash::Skipped => {
+            names.insert(name, Holder::Ours);
+            Decision::Skip
+        }
+        Clash::Conflict => match rule.choice.unwrap_or_default() {
+            Policy::Replace | Policy::UpdateChanged | Policy::UpdateNewer => {
                 names.insert(name, Holder::Ours);
                 Decision::Write {
                     name: name.to_vec(),
                     replace: true,
                 }
             }
-            Some(Choice::KeepBoth) => numbered(names),
-            Some(Choice::Skip) | None => Decision::Skip,
+            Policy::KeepBoth => numbered(names),
+            Policy::Skip => Decision::Skip,
         },
         Clash::Merge => Decision::Merge,
         // So no later entry of this name takes the copy for its own.
@@ -319,9 +359,9 @@ mod tests {
             replace: false,
         };
         for (choice, second) in [
-            (Some(Choice::Replace), write("C (2).TXT")),
-            (Some(Choice::Skip), Decision::Skip),
-            (None, Decision::Skip),
+            (Some(Policy::Replace), write("C (2).TXT")),
+            (Some(Policy::Skip), Decision::Skip),
+            (None, write("C (2).TXT")),
         ] {
             let rule = Rule {
                 choice,
@@ -347,6 +387,72 @@ mod tests {
         assert_eq!(
             decide(&mut names, &utf16("d.txt"), own, rule),
             write("d (2).txt")
+        );
+    }
+
+    #[test]
+    fn the_default_updates_changed_files_without_replacing_metadata_matches() {
+        let rule = Rule {
+            choice: None,
+            run: Run::First { started: None },
+        };
+        let mut names = Names::default();
+        names.insert(&utf16("same.txt"), found(Kind::File, 10, FILE.last_write));
+        names.insert(&utf16("size.txt"), found(Kind::File, 11, FILE.last_write));
+        names.insert(
+            &utf16("newer.txt"),
+            found(Kind::File, 10, FILE.last_write + 1),
+        );
+        assert_eq!(
+            decide(&mut names, &utf16("same.txt"), FILE, rule),
+            Decision::Skip
+        );
+        assert_eq!(
+            decide(&mut names, &utf16("size.txt"), FILE, rule),
+            Decision::Write {
+                name: utf16("size.txt"),
+                replace: true,
+            }
+        );
+        assert_eq!(
+            decide(&mut names, &utf16("newer.txt"), FILE, rule),
+            Decision::Write {
+                name: utf16("newer.txt"),
+                replace: true,
+            }
+        );
+    }
+
+    #[test]
+    fn update_newer_never_replaces_an_equal_or_newer_destination() {
+        let rule = Rule {
+            choice: Some(Policy::UpdateNewer),
+            run: Run::First { started: None },
+        };
+        let mut names = Names::default();
+        names.insert(&utf16("equal.txt"), found(Kind::File, 99, FILE.last_write));
+        names.insert(
+            &utf16("newer.txt"),
+            found(Kind::File, 99, FILE.last_write + 1),
+        );
+        names.insert(
+            &utf16("older.txt"),
+            found(Kind::File, 10, FILE.last_write - 1),
+        );
+        assert_eq!(
+            decide(&mut names, &utf16("equal.txt"), FILE, rule),
+            Decision::Skip
+        );
+        assert_eq!(
+            decide(&mut names, &utf16("newer.txt"), FILE, rule),
+            Decision::Skip
+        );
+        assert_eq!(
+            decide(&mut names, &utf16("older.txt"), FILE, rule),
+            Decision::Write {
+                name: utf16("older.txt"),
+                replace: true,
+            }
         );
     }
 
@@ -425,10 +531,10 @@ mod tests {
         assert_eq!(clash("other.txt", FILE, None), Clash::Conflict);
         assert_eq!(clash("late.txt", FILE, None), Clash::Conflict);
         assert_eq!(
-            clash("kept.txt", FILE, Some(Choice::KeepBoth)),
+            clash("kept.txt", FILE, Some(Policy::KeepBoth)),
             done("kept (2).txt")
         );
-        assert_eq!(clash("kept.txt", FILE, Some(Choice::Skip)), Clash::Conflict);
+        assert_eq!(clash("kept.txt", FILE, Some(Policy::Skip)), Clash::Conflict);
         let own = Wanted {
             own_folder: true,
             ..FILE
@@ -444,7 +550,7 @@ mod tests {
         assert_eq!(clash("theirs.txt", FILE, None), Clash::Conflict);
         assert_eq!(clash("edited.txt", FILE, None), Clash::Conflict);
         assert_eq!(
-            clash("theirs.txt", FILE, Some(Choice::KeepBoth)),
+            clash("theirs.txt", FILE, Some(Policy::KeepBoth)),
             unfinished("theirs (2).txt")
         );
         let renamed = Wanted {
@@ -458,13 +564,13 @@ mod tests {
             ..FILE
         };
         assert_eq!(
-            clash("half.txt", shared, Some(Choice::Replace)),
+            clash("half.txt", shared, Some(Policy::Replace)),
             Clash::SameName
         );
         // In a first run, only a file created since the run started may be
         // the other entry's copy.
         let first = Rule {
-            choice: Some(Choice::Replace),
+            choice: Some(Policy::Replace),
             run: Run::First {
                 started: Some(STARTED),
             },

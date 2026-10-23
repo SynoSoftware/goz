@@ -1337,9 +1337,7 @@ impl CheckBox {
 }
 
 /// The results list: a list view in report and virtual mode, drawn as File
-/// Explorer draws its list (DESIGN.md: Look). Only [`ListView::create`] makes
-/// one, so its handle is a list view's, which decoding its notifications
-/// relies on.
+/// Explorer draws its virtual list (DESIGN.md: Look).
 #[derive(Clone, Copy)]
 pub(crate) struct ListView(Hwnd);
 
@@ -1378,6 +1376,17 @@ impl ListView {
             WINDOW_EX_STYLE(0),
             id,
         )?;
+        Self::initialize(list);
+        Ok(ListView(list))
+    }
+
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<ListView> {
+        let list = super::dialog::item(dialog, id)?;
+        Self::initialize(list);
+        Some(ListView(list))
+    }
+
+    fn initialize(list: Hwnd) {
         // LVS_EX_LABELTIP shows a cut-off cell's whole text in a tooltip.
         let extended =
             LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP | LVS_EX_LABELTIP;
@@ -1392,7 +1401,6 @@ impl ListView {
         send(list, LVM_SETCALLBACKMASK, LVIS_DROPHILITED.0 as usize, 0);
         // SAFETY: plain values; a missing theme leaves the classic look.
         let _ = unsafe { SetWindowTheme(list.0, w!("Explorer"), PCWSTR::null()) };
-        Ok(ListView(list))
     }
 
     pub(crate) fn hwnd(self) -> Hwnd {

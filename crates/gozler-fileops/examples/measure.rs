@@ -265,9 +265,7 @@ mod measure {
             let id = self.queue.prepare(request, settings);
             let state = self.wait(id, |state| !matches!(state, State::Preparing));
             if let State::Prepared(_) = state {
-                self.queue
-                    .submit(id, None)
-                    .expect("the operation is prepared");
+                self.queue.submit(id).expect("the operation is prepared");
             }
             let State::Ended(outcome) = self.wait(id, |state| matches!(state, State::Ended(_)))
             else {
@@ -298,6 +296,7 @@ mod measure {
         fn copy(&self, sources: &[PathBuf], destination: &Path, settings: SpeedSettings) -> Ran {
             let outcome = self.run(
                 Request::Copy {
+                    policy: gozler_fileops::Policy::default(),
                     sources: sources.to_vec(),
                     destination: Destination::Folder(destination.to_owned()),
                 },
@@ -884,12 +883,13 @@ mod measure {
     fn interrupt(saved: &Path, source: &Path, out: &Path) {
         let engine = Engine::new(saved);
         let request = Request::Copy {
+            policy: gozler_fileops::Policy::default(),
             sources: vec![source.to_owned()],
             destination: Destination::Folder(out.to_owned()),
         };
         let id = engine.queue.prepare(request, SpeedSettings::automatic());
         engine.wait(id, |state| !matches!(state, State::Preparing));
-        engine.queue.submit(id, None).expect("the copy is prepared");
+        engine.queue.submit(id).expect("the copy is prepared");
         let seen = engine.wait(id, |state| {
             matches!(state, State::Running { .. } | State::Ended(_))
         });

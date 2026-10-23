@@ -53,17 +53,11 @@ impl Batch {
                 State::Ended(outcome) => {
                     let work = self.work.entry(op.id).or_insert(None);
                     if work.is_none() {
-                        let done = if outcome.bytes > 0 {
-                            outcome.bytes
-                        } else {
-                            outcome.items
-                        };
+                        let bytes = outcome.bytes > 0
+                            && !matches!(*op.request, Request::Synchronize { .. });
+                        let done = if bytes { outcome.bytes } else { outcome.items };
                         *work = Some(Contribution {
-                            unit: if outcome.bytes > 0 {
-                                Unit::Bytes
-                            } else {
-                                Unit::Items
-                            },
+                            unit: if bytes { Unit::Bytes } else { Unit::Items },
                             measure: Measure { done, total: done },
                         });
                     }
@@ -90,6 +84,7 @@ impl Batch {
                 }
                 State::Preparing
                 | State::Prepared(_)
+                | State::Compared(_)
                 | State::Waiting { .. }
                 | State::Cancelling => {
                     let total = match &op.state {
@@ -99,21 +94,18 @@ impl Batch {
                     };
                     let contribution = self.work.entry(op.id).or_insert(None);
                     if let Some(total) = total.filter(|total| {
-                        total.bytes == 0 || matches!(*op.request, Request::Copy { .. })
+                        total.bytes == 0
+                            || matches!(
+                                *op.request,
+                                Request::Copy { .. } | Request::Synchronize { .. }
+                            )
                     }) {
+                        let bytes = total.bytes > 0 && matches!(*op.request, Request::Copy { .. });
                         contribution.get_or_insert(Contribution {
-                            unit: if total.bytes > 0 {
-                                Unit::Bytes
-                            } else {
-                                Unit::Items
-                            },
+                            unit: if bytes { Unit::Bytes } else { Unit::Items },
                             measure: Measure {
                                 done: 0,
-                                total: if total.bytes > 0 {
-                                    total.bytes
-                                } else {
-                                    total.items
-                                },
+                                total: if bytes { total.bytes } else { total.items },
                             },
                         });
                     }

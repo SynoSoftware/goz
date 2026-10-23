@@ -1,18 +1,15 @@
-//! The life of each file operation as the window follows it: which operation
-//! asks its conflict question, which reports remain available on request,
-//! which one the status bar shows, and when an ended one leaves the queue.
-//! The engine's queue
-//! owns the operations and their states; `app` reads a snapshot after each
-//! of the queue's wakes, and runs the steps that [`Operations::accept`]
-//! returns for it.
+//! The life of each file operation as the window follows it: which reports
+//! remain available, which operation the status bar shows, and when an ended
+//! one leaves the queue. The engine owns the operations and their states;
+//! `app` reads a snapshot after each wake and runs the steps that
+//! [`Operations::accept`] returns.
 
 use super::file_operations::{
-    self, Choices, Completion, Detail, Failure, LastEnded, Meter, Speed, StatusOperation, Taskbar,
-    View,
+    self, Completion, Detail, Failure, LastEnded, Meter, Speed, StatusOperation, Taskbar, View,
 };
 use super::panel::PanelFollow;
 use super::text::{Numbers, Strings};
-use gozler_fileops::{Choice, Operation, OperationId, Prepared, Request, SourcesFolder, State};
+use gozler_fileops::{Operation, OperationId, Outcome, Policy, Request, State};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,29 +25,12 @@ pub(crate) enum Source {
     Drop,
 }
 
-/// The person's answer to a conflict question.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Answer {
-    Chose(Choice),
-    Cancelled,
-}
-
-impl Answer {
-    /// The answer of the question's link `index`, or of no link.
-    pub(crate) fn of(index: Option<usize>) -> Answer {
-        (index.and_then(file_operations::conflict_choice)).map_or(Answer::Cancelled, Answer::Chose)
-    }
-}
-
 /// A call to the queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueueStep {
-    /// Submits the prepared operation with the answer `choice`, or with
-    /// `None` when it asked nothing. Once the queue accepts it, the window
-    /// calls [`super::model::Model::operation_submitted`].
+    /// The window records acceptance through `Model::operation_submitted`.
     Submit {
         id: OperationId,
-        choice: Option<Choice>,
     },
     Cancel(OperationId),
     /// Removes an ended operation, which changes the queue's taken entries.
@@ -70,8 +50,6 @@ pub(crate) enum SourceStep {
 /// it runs its own message loop (DESIGN.md: window rule 13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OperationDialog {
-    /// The conflict question ([`super::model::Model::operation_question`]).
-    Ask(OperationId),
     /// The failure dialog ([`super::model::Model::operation_failure`]).
     Report(OperationId),
 }
@@ -117,14 +95,9 @@ enum Phase {
     /// Nothing waits for the window: the operation prepares, waits, runs or
     /// was interrupted.
     Live,
-    /// Its conflict question waits to be asked, or is open.
-    Asking {
-        request: Arc<Request>,
-        prepared: Prepared,
-        folder: SourcesFolder,
+    Submitting {
+        numbered: bool,
     },
-    /// Answered; the queue accepts the submit next.
-    Answered { choice: Option<Choice> },
     /// Ended; it stays in the queue while a list keeps its taken entries.
     Kept,
     /// Ended, and leaving the queue.
@@ -150,8 +123,7 @@ pub(crate) struct Operations {
     reports_changed: bool,
     meters: HashMap<OperationId, Meter>,
     counts: Counts,
-    /// The operations whose conflict question Keep both answered, whose
-    /// status line cannot name an entry's numbered name.
+    /// Keep both can choose a numbered name the window does not know.
     numbered: HashSet<OperationId>,
     /// The operation reported last, which the status bar shows after the
     /// queue let it go.
@@ -177,7 +149,10 @@ impl Operations {
                 running.insert(operation.id);
             }
             match &operation.state {
-                State::Preparing | State::Prepared(_) | State::Waiting { .. } => counts.queued += 1,
+                State::Preparing
+                | State::Prepared(_)
+                | State::Compared(_)
+                | State::Waiting { .. } => counts.queued += 1,
                 State::Running(running) if running.is_active() => counts.running += 1,
                 State::Cancelling => counts.running += 1,
                 State::Interrupted => counts.interrupted += 1,
@@ -216,7 +191,7 @@ impl Operations {
         let queued = self.counts.queued.saturating_sub(u64::from(matches!(
             operation,
             StatusOperation::Pending {
-                phase: Pending::Preparing | Pending::Waiting,
+                phase: Pending::Preparing | Pending::Waiting | Pending::Review,
                 ..
             }
         )));
@@ -321,7 +296,7 @@ impl Operations {
     }
 
     /// Follows `snapshot`, the queue's operations at `now`. A prepared
-    /// operation asks its question, or is submitted when it has none, and
+    /// operation is submitted, and
     /// an ended one reports what failed, or is reported at once; each only
     /// once.
     pub(super) fn accept(&mut self, snapshot: &[Operation], _now: Instant) -> Seen {
@@ -339,22 +314,20 @@ impl Operations {
             let request = &operation.request;
             let phase = self.phases.entry(id).or_insert(Phase::Live);
             match &operation.state {
-                State::Prepared(prepared) if matches!(phase, Phase::Live) => {
-                    if file_operations::asks(request, prepared) {
-                        *phase = Phase::Asking {
-                            request: Arc::clone(request),
-                            prepared: *prepared,
-                            folder: operation.folder.clone(),
-                        };
-                        seen.dialogs.push(OperationDialog::Ask(id));
-                    } else {
-                        *phase = Phase::Answered { choice: None };
-                        seen.queue.push(QueueStep::Submit { id, choice: None });
-                    }
+                State::Prepared(_) if matches!(phase, Phase::Live) => {
+                    *phase = Phase::Submitting {
+                        numbered: request.policy() == Some(Policy::KeepBoth),
+                    };
+                    seen.queue.push(QueueStep::Submit { id });
                 }
                 State::Ended(outcome) if !phase.ended() => {
                     let took = outcome.items > 0
-                        && matches!(**request, Request::Delete { .. } | Request::Move { .. });
+                        && matches!(
+                            **request,
+                            Request::Delete { .. }
+                                | Request::Move { .. }
+                                | Request::Synchronize { .. }
+                        );
                     *phase = if took { Phase::Kept } else { Phase::Removed };
                     self.last_ended = Some((
                         id,
@@ -390,57 +363,14 @@ impl Operations {
         seen
     }
 
-    /// The conflict question of `id`, while it waits to be asked.
-    pub(super) fn question(
-        &self,
-        id: OperationId,
-        strings: &Strings,
-        numbers: &dyn Numbers,
-    ) -> Option<Choices> {
-        let Some(Phase::Asking {
-            request,
-            prepared,
-            folder,
-        }) = self.phases.get(&id)
-        else {
-            return None;
-        };
-        file_operations::conflict_question(strings, numbers, request, prepared, folder)
-    }
-
-    /// The person answered the question of `id`: it is submitted, or
-    /// cancelled. `None` when it no longer waits for an answer, as when the
-    /// person cancelled it in the File operations window meanwhile.
-    pub(super) fn answer(&mut self, id: OperationId, answer: Answer) -> Option<QueueStep> {
-        let phase = self.phases.get_mut(&id)?;
-        let Phase::Asking { .. } = phase else {
-            return None;
-        };
-        Some(match answer {
-            Answer::Chose(choice) => {
-                *phase = Phase::Answered {
-                    choice: Some(choice),
-                };
-                QueueStep::Submit {
-                    id,
-                    choice: Some(choice),
-                }
-            }
-            Answer::Cancelled => {
-                *phase = Phase::Live;
-                QueueStep::Cancel(id)
-            }
-        })
-    }
-
     /// Records the accepted choice; source acknowledgement waits for completion.
     pub(super) fn submitted(&mut self, id: OperationId) -> Option<SourceStep> {
         let phase = self.phases.get_mut(&id)?;
-        let Phase::Answered { choice, .. } = *phase else {
+        let Phase::Submitting { numbered } = *phase else {
             return None;
         };
         *phase = Phase::Live;
-        if choice == Some(Choice::KeepBoth) {
+        if numbered {
             self.numbered.insert(id);
         }
         None
@@ -459,6 +389,13 @@ impl Operations {
             return None;
         };
         file_operations::failure(strings, numbers, &operation.request, outcome, windows_text)
+    }
+
+    pub(super) fn outcome(&self, id: OperationId) -> Option<Arc<Outcome>> {
+        let State::Ended(outcome) = &self.reports.get(&id)?.state else {
+            return None;
+        };
+        Some(Arc::clone(outcome))
     }
 
     pub(super) fn reported(&mut self, id: OperationId) -> Option<QueueStep> {
@@ -593,6 +530,7 @@ impl Operations {
                         | match &*op.request {
                             Request::Copy { .. } => 1,
                             Request::Move { .. } => 2,
+                            Request::Synchronize { .. } => 4,
                             _ => 0,
                         }
                 }),
@@ -631,7 +569,8 @@ mod tests {
     use super::*;
     use crate::core::text::tests::{English, english};
     use gozler_fileops::{
-        Conflicts, Destination, End, Listed, Outcome, Reason, Refusal, RingCounts, Running, Wait,
+        Destination, End, Listed, Outcome, Prepared, Reason, Refusal, RingCounts, Running,
+        SourcesFolder, Wait,
     };
     use std::path::PathBuf;
 
@@ -650,6 +589,7 @@ mod tests {
 
     fn copy() -> Request {
         Request::Copy {
+            policy: gozler_fileops::Policy::default(),
             sources: vec![PathBuf::from(r"C:\f\a")],
             destination: Destination::Folder(PathBuf::from(r"D:\b")),
         }
@@ -657,6 +597,7 @@ mod tests {
 
     fn move_to() -> Request {
         Request::Move {
+            policy: gozler_fileops::Policy::default(),
             sources: vec![PathBuf::from(r"C:\f\a")],
             destination: Destination::Folder(PathBuf::from(r"D:\b")),
         }
@@ -670,6 +611,7 @@ mod tests {
 
     fn running() -> State {
         State::Running(Running {
+            phase: gozler_fileops::RunningPhase::Executing,
             items: 0,
             bytes: 0,
             passed: 0,
@@ -684,20 +626,15 @@ mod tests {
     fn waiting() -> State {
         State::Waiting {
             on: id(99),
-            reason: Wait::Paths,
+            reason: Wait::Disk,
             total: None,
         }
     }
 
-    /// Prepared, with `conflicts` files at the destination.
-    fn prepared(conflicts: u64) -> State {
+    fn prepared(_conflicts: u64) -> State {
         State::Prepared(Prepared {
             entries: 1,
             total: None,
-            conflicts: Some(Conflicts {
-                files: conflicts,
-                ..Conflicts::default()
-            }),
         })
     }
 
@@ -759,11 +696,15 @@ mod tests {
     #[test]
     fn keep_both_counts_only_once_the_queue_accepts_the_submit() {
         let mut operations = Operations::default();
-        let asked = [op(1, copy(), prepared(1)), op(2, copy(), prepared(1))];
-        operations.accept(&asked, Instant::now());
-        for n in [1, 2] {
-            operations.answer(id(n), Answer::Chose(Choice::KeepBoth));
+        let mut request = copy();
+        if let Request::Copy { policy, .. } = &mut request {
+            *policy = Policy::KeepBoth;
         }
+        let prepared = [
+            op(1, request.clone(), prepared(1)),
+            op(2, request, prepared(1)),
+        ];
+        operations.accept(&prepared, Instant::now());
         operations.submitted(id(2));
         let first = [
             op(1, copy(), ended(End::Complete, 1, false)),
@@ -783,13 +724,7 @@ mod tests {
         let mut operations = Operations::default();
         operations.started(id(1), Source::Paste { cut: true });
         let seen = operations.accept(&[op(1, move_to(), prepared(0))], Instant::now());
-        assert_eq!(
-            seen.queue,
-            [QueueStep::Submit {
-                id: id(1),
-                choice: None
-            }]
-        );
+        assert_eq!(seen.queue, [QueueStep::Submit { id: id(1) }]);
         assert!(seen.sources.is_empty());
         assert_eq!(operations.submitted(id(1)), None);
         let complete = [op(1, move_to(), ended(End::Complete, 1, false))];
@@ -903,10 +838,6 @@ mod tests {
             op(3, copy(), running()),
         ];
         operations.accept(&started, Instant::now());
-        assert_eq!(
-            operations.answer(id(1), Answer::Cancelled),
-            Some(QueueStep::Cancel(id(1)))
-        );
         let refused = End::Refused(Refusal::DestinationMissing);
         let all_ended = [
             op(1, copy(), ended(End::Cancelled, 0, false)),
@@ -1108,6 +1039,7 @@ mod tests {
 
     fn measured(done: u64, total: u64, paused: bool, renames: bool) -> State {
         State::Running(Running {
+            phase: gozler_fileops::RunningPhase::Executing,
             items: done,
             bytes: if renames { 0 } else { done },
             passed: 0,
@@ -1359,27 +1291,14 @@ mod tests {
         assert!(operations.transfer_caption(&strings, &English).is_none());
     }
 
-    /// Each wake while the question is open reads the operation prepared
-    /// again; a second question would stack over the first.
     #[test]
-    fn a_question_is_asked_once() {
-        let strings = english();
+    fn a_prepared_copy_submits_once_without_a_conflict_question() {
         let mut operations = Operations::default();
-        let asked = [op(1, copy(), prepared(2))];
-        assert_eq!(
-            operations.accept(&asked, Instant::now()).dialogs,
-            [OperationDialog::Ask(id(1))]
-        );
-        assert!(operations.accept(&asked, Instant::now()).dialogs.is_empty());
-        assert!(operations.question(id(1), &strings, &English).is_some());
-        assert_eq!(
-            operations.answer(id(1), Answer::Chose(Choice::Replace)),
-            Some(QueueStep::Submit {
-                id: id(1),
-                choice: Some(Choice::Replace)
-            })
-        );
-        assert!(operations.question(id(1), &strings, &English).is_none());
-        assert_eq!(operations.answer(id(1), Answer::Cancelled), None);
+        let prepared = [op(1, copy(), prepared(2))];
+        let first = operations.accept(&prepared, Instant::now());
+        assert_eq!(first.queue, [QueueStep::Submit { id: id(1) }]);
+        assert!(first.dialogs.is_empty());
+        let next = operations.accept(&prepared, Instant::now());
+        assert!(next.queue.is_empty() && next.dialogs.is_empty());
     }
 }

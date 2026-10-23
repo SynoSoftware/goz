@@ -111,6 +111,7 @@ impl Names {
 
 /// Whether the folded name `candidate` is one of Keep both's numbered names
 /// for the folded name `name`.
+#[cfg(test)]
 pub(crate) fn is_numbered(candidate: &[u16], name: &[u16], is_folder: bool) -> bool {
     let (stem, extension) = split(name, is_folder);
     let Some(rest) = candidate.strip_prefix(stem) else {

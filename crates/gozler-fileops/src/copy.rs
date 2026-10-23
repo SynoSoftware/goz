@@ -201,6 +201,7 @@ struct File {
     final_name: Vec<u16>,
     write: Write,
     size: u64,
+    last_write: i64,
     attributes: u32,
     reparse_tag: u32,
     /// [`Wanted::shared`].
@@ -229,6 +230,12 @@ impl File {
             name: self.final_name.clone(),
             replace: self.write != Write::New,
             is_folder: self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+            size: self.size,
+            last_write: self.last_write,
+            recovering: matches!(
+                self.write,
+                Write::Resume | Write::Replace { interrupted: true }
+            ),
             shared: self.shared,
         }
     }
@@ -682,6 +689,7 @@ impl Walk<'_> {
             final_name,
             write,
             size: entry.size,
+            last_write: wanted.last_write,
             attributes: entry.attributes,
             reparse_tag: entry.reparse_tag.unwrap_or(0),
             shared: wanted.shared,
@@ -722,47 +730,54 @@ impl Walk<'_> {
             }
             Decision::Resume { .. } => unreachable!("only a file is unfinished"),
         };
-        let made = !merge && {
-            // A folder this operation made can briefly answer that it does
-            // not exist below it, as folders on a file server did for
-            // AngelCOPY, whose subtrees were then lost.
-            let retry_missing = target.made;
-            let created = retry_also(
-                self.copying.cancel,
-                |code| retry_missing && code == ERROR_PATH_NOT_FOUND,
-                || create_folder(&to, Some(from)).map_err(|error| error.code),
-            );
-            match created {
-                Ok(()) => true,
-                // Another program made it after the listing: merge, as the
-                // listing would have.
-                Err(ERROR_ALREADY_EXISTS) if is_folder_path(&to) => false,
-                Err(error) => {
-                    self.fail(path, error, folder);
-                    return None;
-                }
+        let into = target.child(
+            &to,
+            wanted.shared,
+            self.copying.pause,
+            self.copying.cancel,
+            || {
+                let made = !merge && {
+                    // A folder this operation made can briefly answer that it does
+                    // not exist below it, as folders on a file server did for
+                    // AngelCOPY, whose subtrees were then lost.
+                    let retry_missing = target.made;
+                    let created = retry_also(
+                        self.copying.cancel,
+                        |code| retry_missing && code == ERROR_PATH_NOT_FOUND,
+                        || create_folder(&to, Some(from)).map_err(|error| error.code),
+                    );
+                    match created {
+                        Ok(()) => true,
+                        // Another program made it after the listing: merge, as the
+                        // listing would have.
+                        Err(ERROR_ALREADY_EXISTS) if is_folder_path(&to) => false,
+                        Err(error) => return Err(error),
+                    }
+                };
+                let names = if made {
+                    Names::default()
+                } else {
+                    let names = open_entry(&to, Access::List, Reparse::Open)
+                        .map_err(|error| error.code)
+                        .and_then(|entry| read_names(&entry, page, || self.stopped()));
+                    match names {
+                        Ok(names) => names,
+                        Err(error) => return Err(error),
+                    }
+                };
+                Ok(Target::new(to.clone(), names, made))
+            },
+        );
+        match into {
+            Ok(into) => {
+                self.copying.progress.add_items(1);
+                Some(into)
             }
-        };
-        let names = if made {
-            Names::default()
-        } else {
-            let names = open_entry(&to, Access::List, Reparse::Open)
-                .map_err(|error| error.code)
-                .and_then(|entry| read_names(&entry, page));
-            match names {
-                Ok(names) => names,
-                Err(error) => {
-                    self.fail(path, error, folder);
-                    return None;
-                }
+            Err(error) => {
+                self.fail(path, error, folder);
+                None
             }
-        };
-        self.copying.progress.add_items(1);
-        Some(Arc::new(Target {
-            verbatim: to,
-            names: Mutex::new(names),
-            made,
-        }))
+        }
     }
 
     fn is_large(&self, file: &File) -> bool {

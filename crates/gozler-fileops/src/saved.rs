@@ -2,6 +2,8 @@
 //! its first file, the queue writes it to the saved file, and it removes it
 //! when the operation ends. At the next start each saved operation is
 //! offered as interrupted, for Continue or Dismiss.
+//! Synchronization saves only its roots and Mirror intent; Continue requires
+//! a fresh comparison and explicit commitment, never stale deletion approval.
 //!
 //! The keys are a saved format: an older entry that lacks a key keeps its
 //! old meaning, as `AGENTS.md` asks of the wire, so a new key gets
@@ -12,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::conflicts::Choice;
+use crate::conflicts::Policy;
 use crate::operation::{Destination, Request};
 use crate::settings::{
     CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, RingBlock, RingBuffer, RingHardDisk,
@@ -32,9 +34,11 @@ pub(crate) struct Saved {
     /// operation out instead of continuing it under the entry's old name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     named: Option<SavedNamed>,
-    /// No key: the person was not asked.
+    /// Legacy entries without a choice use the current default after recovery checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     choice: Option<SavedChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mirror: Option<bool>,
     /// When the operation first ran, as a `FILETIME`, kept across Continue.
     /// No key: saved before it was recorded, so Continue finds no file
     /// unfinished.
@@ -47,7 +51,6 @@ pub(crate) struct Saved {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Restored {
     pub(crate) request: Request,
-    pub(crate) choice: Option<Choice>,
     pub(crate) started: Option<i64>,
     pub(crate) settings: SpeedSettings,
 }
@@ -57,21 +60,34 @@ impl Saved {
     /// to continue, and for a typed destination, which prepare decides
     /// before any run. A rename is a move to a named destination, and is
     /// saved.
-    pub(crate) fn new(
-        request: &Request,
-        choice: Option<Choice>,
-        started: i64,
-        settings: &SpeedSettings,
-    ) -> Option<Saved> {
+    pub(crate) fn new(request: &Request, started: i64, settings: &SpeedSettings) -> Option<Saved> {
         let paths = |paths: &[PathBuf]| paths.iter().map(|path| SavedPath::new(path)).collect();
         let (kind, sources, destination) = match request {
+            Request::Synchronize {
+                source,
+                destination,
+                mirror,
+            } => {
+                return Some(Saved {
+                    kind: Kind::Synchronize,
+                    sources: vec![SavedPath::new(source)],
+                    destination: Some(SavedPath::new(destination)),
+                    named: None,
+                    choice: None,
+                    mirror: Some(*mirror),
+                    started: Some(started),
+                    settings: SavedSettings::from(settings),
+                });
+            }
             Request::Copy {
                 sources,
                 destination,
+                ..
             } => (Kind::Copy, paths(sources), Some(destination)),
             Request::Move {
                 sources,
                 destination,
+                ..
             } => (Kind::Move, paths(sources), Some(destination)),
             Request::Delete { sources } => (Kind::Delete, paths(sources), None),
             Request::NewFolder { .. } => return None,
@@ -93,7 +109,8 @@ impl Saved {
             sources,
             destination,
             named,
-            choice: choice.map(SavedChoice::from),
+            choice: request.policy().map(SavedChoice::from),
+            mirror: None,
             started: Some(started),
             settings: SavedSettings::from(settings),
         })
@@ -115,11 +132,21 @@ impl Saved {
             (None, None) => None,
         };
         let request = match (self.kind, destination) {
+            (Kind::Synchronize, Some(Destination::Folder(destination))) if sources.len() == 1 => {
+                Request::Synchronize {
+                    source: sources.into_iter().next()?,
+                    destination,
+                    mirror: self.mirror.unwrap_or_default(),
+                }
+            }
+            (Kind::Synchronize, _) => return None,
             (Kind::Copy, Some(destination)) => Request::Copy {
+                policy: self.choice.map(Policy::from).unwrap_or_default(),
                 sources,
                 destination,
             },
             (Kind::Move, Some(destination)) => Request::Move {
+                policy: self.choice.map(Policy::from).unwrap_or_default(),
                 sources,
                 destination,
             },
@@ -129,7 +156,6 @@ impl Saved {
         };
         Some(Restored {
             request,
-            choice: self.choice.map(Choice::from),
             started: self.started,
             settings,
         })
@@ -139,6 +165,7 @@ impl Saved {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Kind {
+    Synchronize,
     Copy,
     Move,
     Delete,
@@ -147,27 +174,33 @@ enum Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum SavedChoice {
+    UpdateChanged,
+    UpdateNewer,
     Replace,
     Skip,
     KeepBoth,
 }
 
-impl From<Choice> for SavedChoice {
-    fn from(choice: Choice) -> Self {
+impl From<Policy> for SavedChoice {
+    fn from(choice: Policy) -> Self {
         match choice {
-            Choice::Replace => SavedChoice::Replace,
-            Choice::Skip => SavedChoice::Skip,
-            Choice::KeepBoth => SavedChoice::KeepBoth,
+            Policy::UpdateChanged => SavedChoice::UpdateChanged,
+            Policy::UpdateNewer => SavedChoice::UpdateNewer,
+            Policy::Replace => SavedChoice::Replace,
+            Policy::Skip => SavedChoice::Skip,
+            Policy::KeepBoth => SavedChoice::KeepBoth,
         }
     }
 }
 
-impl From<SavedChoice> for Choice {
+impl From<SavedChoice> for Policy {
     fn from(choice: SavedChoice) -> Self {
         match choice {
-            SavedChoice::Replace => Choice::Replace,
-            SavedChoice::Skip => Choice::Skip,
-            SavedChoice::KeepBoth => Choice::KeepBoth,
+            SavedChoice::UpdateChanged => Policy::UpdateChanged,
+            SavedChoice::UpdateNewer => Policy::UpdateNewer,
+            SavedChoice::Replace => Policy::Replace,
+            SavedChoice::Skip => Policy::Skip,
+            SavedChoice::KeepBoth => Policy::KeepBoth,
         }
     }
 }
@@ -377,18 +410,18 @@ mod tests {
         settings.ring_hard_disk.buffer = RingBuffer::from_mib(512).expect("in range");
         settings.delete_workers = DeleteWorkers::Fixed(Count::new(8).expect("in range"));
         let request = Request::Move {
+            policy: Policy::KeepBoth,
             sources: vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\b c")],
             destination: Destination::Folder(PathBuf::from(r"D:\out")),
         };
         const STARTED: i64 = 134_000_000_000_000_000;
-        let saved =
-            Saved::new(&request, Some(Choice::KeepBoth), STARTED, &settings).expect("saved");
+        let saved = Saved::new(&request, STARTED, &settings).expect("saved");
         let text = serde_json::to_string(&saved).expect("serialize");
         let read: Saved = serde_json::from_str(&text).expect("parse");
         let restored = read.restore().expect("restore");
         assert_eq!(restored.settings, settings);
         assert_eq!(restored.request, request);
-        assert_eq!(restored.choice, Some(Choice::KeepBoth));
+        assert_eq!(restored.request.policy(), Some(Policy::KeepBoth));
         assert_eq!(restored.started, Some(STARTED));
 
         let mut damaged = read.clone();
@@ -401,6 +434,33 @@ mod tests {
         assert_eq!(older.restore().expect("restore").started, None);
     }
 
+    #[test]
+    fn legacy_policies_keep_their_recovery_meaning() {
+        let settings = SpeedSettings::automatic();
+        let request = Request::Copy {
+            sources: vec![PathBuf::from(r"C:\a.txt")],
+            destination: Destination::Folder(PathBuf::from(r"D:\out")),
+            policy: Policy::UpdateChanged,
+        };
+        let saved = Saved::new(&request, 1, &settings).unwrap();
+        let value = serde_json::to_value(saved).unwrap();
+        for (legacy, expected) in [
+            (None, Policy::UpdateChanged),
+            (Some("replace"), Policy::Replace),
+            (Some("skip"), Policy::Skip),
+            (Some("keep-both"), Policy::KeepBoth),
+        ] {
+            let mut value = value.clone();
+            let fields = value.as_object_mut().unwrap();
+            fields.remove("choice");
+            if let Some(legacy) = legacy {
+                fields.insert("choice".into(), legacy.into());
+            }
+            let saved: Saved = serde_json::from_value(value).unwrap();
+            assert_eq!(saved.restore().unwrap().request.policy(), Some(expected));
+        }
+    }
+
     /// One entry's new name reads back, so Continue writes the file it
     /// wrote; a new name for two entries, as a hand-edited file can hold,
     /// is refused. It has no `destination`, so v0.4.0, which ignores the new
@@ -409,13 +469,14 @@ mod tests {
     fn a_new_name_is_saved() {
         let settings = SpeedSettings::automatic();
         let request = Request::Copy {
+            policy: crate::Policy::default(),
             sources: vec![PathBuf::from(r"C:\report.pdf")],
             destination: Destination::Named {
                 folder: PathBuf::from(r"D:\out"),
                 name: "report-old.pdf".into(),
             },
         };
-        let saved = Saved::new(&request, None, 1, &settings).expect("saved");
+        let saved = Saved::new(&request, 1, &settings).expect("saved");
         let text = serde_json::to_string(&saved).expect("serialize");
         assert!(!text.contains(r#""destination""#), "{text}");
         let read: Saved = serde_json::from_str(&text).expect("parse");

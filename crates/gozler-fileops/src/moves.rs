@@ -4,7 +4,6 @@
 //! the move rename each child into it, merge child folders the same way,
 //! and delete each emptied source folder.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gozler_winfs::{Access, Entry, Reparse, open_entry, rename};
@@ -139,6 +138,9 @@ impl Run<'_> {
                     name,
                     replace,
                     is_folder: moved.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    size: stat.size,
+                    last_write: stat.last_write,
+                    recovering: false,
                     shared: moved.shared,
                 };
                 let renamed = |to: &[u16], existing| {
@@ -183,20 +185,28 @@ impl Run<'_> {
     /// empty. Returns whether it went.
     fn merge(&mut self, target: &Target, moved: &Moved<'_>) -> bool {
         let into = join(&target.verbatim, moved.name);
-        let names = open_entry(&into, Access::List, Reparse::Open)
-            .map_err(|error| error.code)
-            .and_then(|folder| read_names(&folder, &mut self.page));
-        let names = match names {
-            Ok(names) => names,
+        let into = target.child(
+            &into,
+            moved.shared,
+            self.moving.pause,
+            self.moving.cancel,
+            || {
+                let names = open_entry(&into, Access::List, Reparse::Open)
+                    .map_err(|error| error.code)
+                    .and_then(|folder| {
+                        read_names(&folder, &mut self.page, || {
+                            self.moving.cancel.load(Ordering::Relaxed)
+                        })
+                    })?;
+                Ok(Target::new(into.clone(), names, false))
+            },
+        );
+        let into = match into {
+            Ok(into) => into,
             Err(error) => {
                 self.fail(moved.path, error);
                 return false;
             }
-        };
-        let into = Target {
-            verbatim: into,
-            names: Mutex::new(names),
-            made: false,
         };
         // A folder whose reparse tag is not a name surrogate, such as a
         // OneDrive folder, is listed through its filter, as the delete does.

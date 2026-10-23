@@ -3,25 +3,30 @@
 //! The window talks to one object, the [`Queue`]. It prepares an operation,
 //! which reads the selected entries from the disk on a queue thread, asks
 //! gozlerd for their totals instead of walking to count them, and ends
-//! prepared; the window asks the person, then submits it, and the
-//! operation runs on its own thread with its workers. The window never
+//! prepared; the window submits that operation with its accepted policy.
+//! It runs on its own thread with its workers. The window never
 //! waits for the disk: every call returns at once, and the queue calls the
 //! window's wake function after each change of an operation's state.
+//! Synchronization compares complete trees under device admission, releases
+//! its grants for preview, and reacquires them only after explicit commit.
+//! Mirror verifies required output before deleting unchanged approved extras;
+//! recovery always compares again rather than restoring deletion approval.
 //!
 //! The engine runs in the window's process with the person's token, never
 //! in gozlerd, because a pipe request to an elevated service would let any
 //! local user delete files as SYSTEM. It never uses the Recycle Bin (owner
 //! ruling): every delete is permanent.
 //!
-//! The engine never acts on a link's target by accident. It opens every
-//! selected entry, and every entry its walks meet, without following a
-//! reparse point, and reads what the entry is on its own handle; a junction,
-//! a symbolic link or a mount point is deleted, never entered. Paths are
-//! compared by what they name on disk (`identity`), not by their text.
+//! Walks open entries relative to their parents without following name
+//! surrogates. Copy, move and delete handle a selected link as the link
+//! itself. Copy output still uses full paths, without locking intermediate
+//! names against replacement. Mirror separately verifies required output and
+//! approved deletions through relative no-follow opens. Paths are compared by
+//! what they name on disk (`identity`), not by their text.
 //!
 //! A file is copied straight to its final name with a create that refuses
 //! an existing name, so a name that another program took meanwhile is never
-//! replaced without the person's choice. An interrupted copy leaves its file
+//! replaced outside the accepted policy. An interrupted copy leaves its file
 //! there unfinished, and Continue resumes it.
 //!
 //! The decisions (names, conflicts, identities, the waits between
@@ -67,6 +72,7 @@ mod saved;
 mod settings;
 #[cfg(windows)]
 mod survey;
+mod sync;
 mod taken;
 mod totals;
 #[cfg(windows)]
@@ -75,20 +81,21 @@ mod volumes;
 mod waits;
 mod win32;
 
-pub use conflicts::Choice;
+pub use conflicts::Policy;
 pub use operation::{
-    Conflicts, Current, Destination, End, Listed, NoRoom, Operation, OperationId, OrderRefused,
-    Outcome, Prepared, Reason, Refusal, Request, RingCounts, Running, Side, SourcesFolder, State,
+    Current, Destination, End, Listed, NoRoom, Operation, OperationId, OrderRefused, Outcome,
+    Prepared, Reason, Refusal, Request, RingCounts, Running, RunningPhase, SourcesFolder, State,
     Total, Wait,
 };
 #[cfg(windows)]
-pub use queue::{NotInterrupted, NotPrepared, Queue};
+pub use queue::{NotCompared, NotInterrupted, NotPrepared, Queue};
 pub use settings::{
     CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, Preset, RingBlock, RingBuffer,
-    RingHardDisk, RingSsd, SettingError, SpeedSettings,
+    RingHardDisk, RingSsd, SettingError, SpeedSettings, TransferLimit,
 };
 #[cfg(windows)]
 pub use survey::{Measured, measure};
+pub use sync::{Comparison, ComparisonEntry, ComparisonSummary, SyncAction};
 pub use taken::{Taken, TakenFolder};
 
 #[cfg(all(test, windows))]

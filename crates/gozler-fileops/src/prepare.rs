@@ -1,14 +1,14 @@
-//! Prepare: what an operation reads before the person answers. It applies
-//! "What an operation receives", takes a copy's or a move's totals from
-//! gozlerd and never walks to count (D5), counts its conflicts, checks the
-//! free space, and records the paths and disks that the waits compare
-//! (D14). It keeps no list of files (D11): the run walks the disk.
+//! Preparation applies "What an operation receives", takes copy/move totals
+//! from gozlerd without walking to count (D5), checks free space, and splits
+//! transfers by source and destination volume with
+//! their physical devices. Copy and move keep no file list: the run walks
+//! the disk. Synchronization opens its roots here and compares after admission.
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gozler_winfs::{Access, Reparse, cluster_size, free_space, open_entry, windows_build};
 
@@ -17,13 +17,16 @@ use crate::copy::{Source, TargetVolume};
 use crate::identity::Identity;
 use crate::listing::BACKSLASH;
 use crate::names::fold;
-use crate::operation::{Destination as Asked, Listed, Prepared, Refusal, Request, Total};
+use crate::operation::{
+    Destination as Asked, End, Initialization, Listed, Pause, Prepared, Refusal, Request, Total,
+};
+use crate::place::Target;
 use crate::receive::{Destination, Selected, receive, verbatim};
 use crate::ring_plan::Layout;
 use crate::settings::SpeedSettings;
 use crate::survey::{Surveying, survey};
 use crate::totals::Index;
-use crate::volumes::{CopyPlan, VolumeClass, read_volume};
+use crate::volumes::{CopyPlan, read_volume};
 use crate::waits::Plan;
 use crate::win32::FILE_ATTRIBUTE_DIRECTORY;
 use crate::win32::{
@@ -33,8 +36,7 @@ use crate::win32::{
 /// A prepared operation.
 pub(crate) struct Ready {
     pub(crate) prepared: Prepared,
-    pub(crate) plan: Plan,
-    pub(crate) work: Work,
+    pub(crate) work: Vec<(Plan, Work)>,
     /// Selected entries whose identity cannot be read.
     pub(crate) failures: Vec<Listed>,
     /// The request with prepare's decision for a [`Asked::Typed`]
@@ -44,6 +46,8 @@ pub(crate) struct Ready {
 }
 
 pub(crate) enum Work {
+    Compare(Box<crate::sync::windows::Roots>),
+    Synchronize(Box<crate::sync::windows::Review>),
     Delete {
         entries: Vec<Selected>,
         /// Selected entries that no longer exist, which count as deleted.
@@ -65,7 +69,7 @@ pub(crate) enum Work {
 
 /// A copy or a move.
 pub(crate) struct Transfer {
-    pub(crate) destination: Destination,
+    pub(crate) destination: Arc<TransferDestination>,
     /// The new name of the one entry of a [`Asked::Named`] destination.
     pub(crate) name: Option<Vec<u16>>,
     /// Selected entries that no longer exist, as the window gave them.
@@ -77,51 +81,61 @@ pub(crate) struct Transfer {
     pub(crate) moving: bool,
     pub(crate) plan: CopyPlan,
     pub(crate) target: TargetVolume,
-    /// The bytes the destination needs; `None` when prepare cannot know
-    /// them, and within one volume that can clone blocks, where both
-    /// engines clone (D20).
-    pub(crate) needed: Option<u64>,
 }
 
-/// Prepares `request` for a run under `rule`: for Continue, the choice and
-/// the start of the interrupted run. `index` gives the totals.
-pub(crate) fn prepare(
-    request: &Request,
-    settings: &SpeedSettings,
-    rule: Rule,
-    index: &dyn Index,
-    cancel: &Arc<AtomicBool>,
-) -> Result<Ready, Refusal> {
+pub(crate) struct TransferDestination {
+    pub(crate) received: Destination,
+    pub(crate) needed: Option<u64>,
+    pub(crate) ready: Initialization<Result<Arc<Target>, End>>,
+}
+
+pub(crate) struct Preparation<'a> {
+    pub(crate) settings: &'a SpeedSettings,
+    pub(crate) rule: Rule,
+    pub(crate) index: &'a dyn Index,
+    pub(crate) cancel: &'a Arc<AtomicBool>,
+    pub(crate) pause: Option<&'a Pause>,
+}
+
+pub(crate) fn prepare(request: &Request, preparing: &Preparation<'_>) -> Result<Ready, Refusal> {
+    let Preparation { cancel, pause, .. } = *preparing;
     match request {
+        Request::Synchronize {
+            source,
+            destination,
+            mirror,
+        } => {
+            let (plan, roots) = crate::sync::windows::Roots::open(source, destination, *mirror)?;
+            Ok(one(plan, Work::Compare(Box::new(roots))))
+        }
         Request::Delete { sources } => {
-            let (received, _) = receive(sources, None, cancel)?;
-            let mut plan = Plan::default();
-            for entry in &received.entries {
-                plan.writes.insert(&entry.identity);
-            }
+            let (received, _) = receive(sources, None, cancel, pause)?;
             Ok(Ready {
                 prepared: Prepared {
                     entries: received.entries.len(),
                     // The queue asks gozlerd once the delete runs (`Counting`).
                     total: None,
-                    conflicts: None,
                 },
-                plan,
                 failures: received.failures,
-                work: Work::Delete {
-                    entries: received.entries,
-                    missing: received.missing.len() as u64,
-                },
+                work: vec![(
+                    Plan::default(),
+                    Work::Delete {
+                        entries: received.entries,
+                        missing: received.missing.len() as u64,
+                    },
+                )],
                 resolved: None,
             })
         }
         Request::Copy {
             sources,
             destination,
+            policy,
         }
         | Request::Move {
             sources,
             destination,
+            policy,
         } => {
             let moving = matches!(request, Request::Move { .. });
             let decided = match destination {
@@ -131,18 +145,20 @@ pub(crate) fn prepare(
             let destination = decided.as_ref().unwrap_or(destination);
             let renamed = moving.then(|| rename_in_place(sources, destination));
             let mut ready = match renamed.flatten() {
-                Some(rename) => rename,
-                None => transfer(sources, destination, moving, settings, rule, index, cancel)?,
+                Some(rename) => rename?,
+                None => transfer(sources, destination, moving, preparing)?,
             };
             ready.resolved = decided.map(|destination| {
                 let sources = sources.clone();
                 if moving {
                     Request::Move {
+                        policy: *policy,
                         sources,
                         destination,
                     }
                 } else {
                     Request::Copy {
+                        policy: *policy,
                         sources,
                         destination,
                     }
@@ -153,16 +169,7 @@ pub(crate) fn prepare(
         Request::NewFolder { path } => {
             let path: Vec<u16> = path.as_os_str().encode_wide().collect();
             let verbatim = verbatim(&path);
-            let mut plan = Plan::default();
-            if let Some(at) = verbatim.iter().rposition(|&unit| unit == BACKSLASH) {
-                let parent = open_entry(&verbatim[..at], Access::Inspect, Reparse::Follow)
-                    .and_then(|entry| entry.final_path())
-                    .map(Identity::new);
-                if let Ok(parent) = parent {
-                    plan.writes.insert(&parent.child(&verbatim[at + 1..]));
-                }
-            }
-            Ok(one(plan, Work::NewFolder { path, verbatim }))
+            Ok(one(Plan::default(), Work::NewFolder { path, verbatim }))
         }
     }
 }
@@ -172,10 +179,8 @@ fn one(plan: Plan, work: Work) -> Ready {
         prepared: Prepared {
             entries: 1,
             total: None,
-            conflicts: None,
         },
-        plan,
-        work,
+        work: vec![(plan, work)],
         failures: Vec::new(),
         resolved: None,
     }
@@ -183,7 +188,7 @@ fn one(plan: Plan, work: Work) -> Ready {
 
 /// Renames the entry `path`, as the window gave it, to `name` in its
 /// folder.
-fn rename(path: Vec<u16>, name: Vec<u16>) -> Ready {
+fn rename(path: Vec<u16>, name: Vec<u16>) -> Result<Ready, Refusal> {
     let from = verbatim(&path);
     let folder = from.iter().rposition(|&unit| unit == BACKSLASH);
     let to = folder.map_or_else(Vec::new, |at| {
@@ -191,26 +196,19 @@ fn rename(path: Vec<u16>, name: Vec<u16>) -> Ready {
         to.extend_from_slice(&name);
         to
     });
-    // A rename reads and writes its old and new names.
-    let mut plan = Plan::default();
     let identity = open_entry(&from, Access::Inspect, Reparse::Open)
         .and_then(|entry| entry.final_path())
-        .map(Identity::new);
-    if let Ok(identity) = identity {
-        if let Some(parent) = identity.parent() {
-            plan.writes.insert(&parent.child(&name));
-        }
-        plan.writes.insert(&identity);
-    }
-    one(
-        plan,
+        .map(Identity::new)
+        .map_err(|_| Refusal::SourceUnavailable)?;
+    Ok(one(
+        Plan::new(read_volume(identity.volume()).disks),
         Work::Rename {
             path,
             from,
             to,
             name,
         },
-    )
+    ))
 }
 
 /// Decides a typed destination for the one entry `sources` holds: the
@@ -245,7 +243,7 @@ fn decide_typed(sources: &[PathBuf], path: &Path) -> Asked {
 /// A move of one entry to a new name in its own folder that differs from
 /// its name only in case, which is a rename: as a move, the new name would
 /// meet the entry itself in its folder's names.
-fn rename_in_place(sources: &[PathBuf], destination: &Asked) -> Option<Ready> {
+fn rename_in_place(sources: &[PathBuf], destination: &Asked) -> Option<Result<Ready, Refusal>> {
     let (Asked::Named { folder, name }, [source]) = (destination, sources) else {
         return None;
     };
@@ -273,12 +271,16 @@ fn transfer(
     sources: &[PathBuf],
     asked: &Asked,
     moving: bool,
-    settings: &SpeedSettings,
-    rule: Rule,
-    index: &dyn Index,
-    cancel: &Arc<AtomicBool>,
+    preparing: &Preparation<'_>,
 ) -> Result<Ready, Refusal> {
-    let (received, destination) = receive(sources, Some(asked.folder()), cancel)?;
+    let Preparation {
+        settings,
+        rule,
+        index,
+        cancel,
+        pause,
+    } = *preparing;
+    let (received, destination) = receive(sources, Some(asked.folder()), cancel, pause)?;
     let destination = destination.expect("a destination was given");
     let new_name: Option<Vec<u16>> = match asked {
         Asked::Named { name, .. } => Some(name.encode_wide().collect()),
@@ -287,7 +289,6 @@ fn transfer(
     let name_of = |selected: &Selected| {
         (new_name.clone()).unwrap_or_else(|| selected.identity.name().to_vec())
     };
-    let mut plan = Plan::default();
     let mut renamed = Vec::new();
     let mut copied = Vec::new();
     let mut named: HashMap<Vec<u16>, usize> = HashMap::new();
@@ -295,14 +296,13 @@ fn transfer(
         *named.entry(fold(&name_of(selected))).or_default() += 1;
     }
     for selected in received.entries {
-        let name = name_of(&selected);
-        plan.writes
-            .insert_named(&destination.identity, &name, selected.folder());
-        if moving {
-            plan.writes.insert(&selected.identity);
-        } else {
-            plan.reads.insert(&selected.identity);
+        if let Some(pause) = pause {
+            pause.wait(cancel);
         }
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let name = name_of(&selected);
         // Left alone only under its own name; a new name in its own folder
         // is a copy or a rename beside it.
         let own_folder = selected.identity.parent().as_ref() == Some(&destination.identity)
@@ -321,40 +321,19 @@ fn transfer(
         }
     }
 
-    // The volumes it moves bytes on decide the method and the disk waits.
     let mut volumes = BTreeMap::new();
-    if !copied.is_empty() {
-        for volume in (copied
-            .iter()
-            .map(|source| source.selected.identity.volume()))
+    for volume in copied
+        .iter()
+        .chain(&renamed)
+        .map(|source| source.selected.identity.volume())
         .chain(Some(destination.identity.volume()))
-        {
-            volumes
-                .entry(volume.to_vec())
-                .or_insert_with(|| read_volume(volume));
-        }
-    }
-    let pair = (volumes.values().map(|volume| volume.class))
-        .max()
-        .unwrap_or(VolumeClass::Ssd);
-    plan.moves_bytes = !copied.is_empty();
-    for volume in volumes.values() {
-        for disk in &volume.disks {
-            plan.disks.push((disk.clone(), volume.class.seeks()));
-        }
+    {
+        volumes
+            .entry(volume.to_vec())
+            .or_insert_with(|| read_volume(volume));
     }
     let target_volume = destination.identity.volume();
-    let target_disks = volumes.get(target_volume).map(|volume| &volume.disks);
-    let one_disk = (copied.iter())
-        .filter_map(|source| volumes.get(source.selected.identity.volume()))
-        .any(|volume| {
-            (volume.disks.iter()).any(|disk| target_disks.is_some_and(|disks| disks.contains(disk)))
-        });
-    let layout = if one_disk {
-        Layout::OneDisk
-    } else {
-        Layout::TwoDisks
-    };
+    let target_storage = &volumes[target_volume];
     let flags = destination.entry.volume_flags().unwrap_or(0);
     let one_volume =
         (copied.iter()).all(|source| source.selected.identity.volume() == target_volume);
@@ -372,7 +351,9 @@ fn transfer(
         sparse_files,
         fat: file_system.to_ascii_uppercase().contains("FAT"),
         // A cluster size that cannot be read leaves the ring's copy.
-        clone_cluster: clones.then(|| cluster_size(&root).ok()).flatten(),
+        clone_cluster: (flags & FILE_SUPPORTS_BLOCK_REFCOUNTING != 0)
+            .then(|| cluster_size(&root).ok())
+            .flatten(),
     };
 
     let surveying = Surveying {
@@ -380,6 +361,7 @@ fn transfer(
         sparse_stays: sparse,
         index,
         cancel,
+        pause,
     };
     let sources: Vec<(&Source, bool)> = (renamed.iter().map(|source| (source, false)))
         .chain(copied.iter().map(|source| (source, true)))
@@ -391,31 +373,102 @@ fn transfer(
         check_space(&destination, needed)?;
     }
 
+    let entries = renamed.len() + copied.len();
+    let mut pairs: BTreeMap<Vec<u16>, (Vec<Source>, Vec<Source>)> = BTreeMap::new();
+    for source in renamed {
+        pairs
+            .entry(source.selected.identity.volume().to_vec())
+            .or_default()
+            .0
+            .push(source);
+    }
+    for source in copied {
+        pairs
+            .entry(source.selected.identity.volume().to_vec())
+            .or_default()
+            .1
+            .push(source);
+    }
+    if pairs.is_empty() {
+        pairs.insert(target_volume.to_vec(), (Vec::new(), Vec::new()));
+    }
+    let missing_count = received.missing.len() as u64;
+    let mut missing = received.missing;
+    let work = pairs
+        .into_iter()
+        .map(|(volume, (renamed, copied))| {
+            let source_storage = &volumes[&volume];
+            let layout = if source_storage
+                .disks
+                .iter()
+                .any(|disk| target_storage.disks.contains(disk))
+            {
+                Layout::OneDisk
+            } else {
+                Layout::TwoDisks
+            };
+            let devices = Plan::new(
+                source_storage
+                    .disks
+                    .iter()
+                    .chain(&target_storage.disks)
+                    .cloned()
+                    .collect(),
+            );
+            let mut target = target;
+            if volume != target_volume {
+                target.clone_cluster = None;
+            }
+            (
+                devices,
+                renamed,
+                copied,
+                CopyPlan::new(
+                    source_storage.class.max(target_storage.class),
+                    settings,
+                    layout,
+                ),
+                target,
+                std::mem::take(&mut missing),
+            )
+        })
+        .collect::<Vec<_>>();
+    let destination = Arc::new(TransferDestination {
+        received: destination,
+        needed,
+        ready: Initialization::default(),
+    });
+    let work = work
+        .into_iter()
+        .map(|(devices, renamed, copied, plan, target, missing)| {
+            (
+                devices,
+                Work::Transfer(Box::new(Transfer {
+                    destination: Arc::clone(&destination),
+                    name: new_name.clone(),
+                    missing,
+                    renamed,
+                    copied,
+                    moving,
+                    plan,
+                    target,
+                })),
+            )
+        })
+        .collect();
     Ok(Ready {
         prepared: Prepared {
-            entries: renamed.len() + copied.len(),
+            entries,
             // The run counts each selected entry that no longer exists as
             // an item done.
             total: surveyed.total.map(|total| Total {
-                items: total.items + received.missing.len() as u64,
+                items: total.items + missing_count,
                 ..total
             }),
-            conflicts: Some(surveyed.conflicts),
         },
-        plan,
         failures: received.failures,
         resolved: None,
-        work: Work::Transfer(Box::new(Transfer {
-            destination,
-            name: new_name,
-            missing: received.missing,
-            renamed,
-            copied,
-            moving,
-            plan: CopyPlan::new(pair, settings, layout),
-            target,
-            needed,
-        })),
+        work,
     })
 }
 

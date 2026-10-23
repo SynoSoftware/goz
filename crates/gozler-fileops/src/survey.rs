@@ -1,6 +1,4 @@
-//! Prepare's counts of a copy or a move, so the window can ask the person:
-//! the names that the selected entries find taken in the destination
-//! folder, the total from gozlerd's index, and the bytes the destination
+//! Preparation obtains the total from gozlerd's index and the bytes the destination
 //! needs. Prepare reads one folder, the destination, and walks none (D5).
 //! Measure, which counts a folder outside the queue, is the one walk that
 //! counts.
@@ -17,11 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gozler_winfs::{Access, Entry, Reparse, allocated_size, open_entry};
 
-use crate::conflicts::{Clash, Rule, Wanted, classify};
+use crate::conflicts::{Clash, Policy, Rule, Wanted, classify};
 use crate::copy::Source;
 use crate::listing::{LISTING_WORDS, is_folder, join, kind, list};
 use crate::names::Holder;
-use crate::operation::{Conflicts, Total};
+use crate::operation::{Pause, Total};
 use crate::receive::{Destination, Selected, verbatim};
 use crate::totals::{Index, totals};
 use crate::tree::same_entry;
@@ -29,7 +27,6 @@ use crate::win32::FILE_ATTRIBUTE_SPARSE_FILE;
 
 /// What prepare counts.
 pub(crate) struct Surveyed {
-    pub(crate) conflicts: Conflicts,
     pub(crate) total: Option<Total>,
     /// The bytes the destination needs; `None` without a total, and when a
     /// selected folder merges into one whose files may already be there. A
@@ -44,6 +41,7 @@ pub(crate) struct Surveying<'a> {
     pub(crate) sparse_stays: bool,
     pub(crate) index: &'a dyn Index,
     pub(crate) cancel: &'a Arc<AtomicBool>,
+    pub(crate) pause: Option<&'a Pause>,
 }
 
 /// Counts `sources` against the names of `destination`. Each source says
@@ -54,7 +52,12 @@ pub(crate) fn survey(
     destination: &Destination,
     surveying: &Surveying<'_>,
 ) -> Result<Surveyed, u32> {
-    let mut names = destination.names(&mut vec![0u64; LISTING_WORDS])?;
+    let mut names = destination.names(&mut vec![0u64; LISTING_WORDS], || {
+        if let Some(pause) = surveying.pause {
+            pause.wait(surveying.cancel);
+        }
+        surveying.cancel.load(Ordering::Relaxed)
+    })?;
     let copied: Vec<&Selected> = (sources.iter())
         .filter(|(_, copies)| *copies)
         .map(|(source, _)| &source.selected)
@@ -62,8 +65,13 @@ pub(crate) fn survey(
     let mut copied_totals = totals(&copied, surveying.index, surveying.cancel).map(Vec::into_iter);
     let mut total = Some(Total::default());
     let mut needed = Some(0);
-    let mut conflicts = Conflicts::default();
     for &(source, copies) in sources {
+        if let Some(pause) = surveying.pause {
+            pause.wait(surveying.cancel);
+        }
+        if surveying.cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let selected = &source.selected;
         let entry_total = if copies {
             (copied_totals.as_mut())
@@ -99,6 +107,10 @@ pub(crate) fn survey(
                 names.insert(&name, Holder::Ours);
                 Some(0)
             }
+            Clash::Skipped => {
+                names.insert(name, Holder::Ours);
+                Some(0)
+            }
             Clash::Mismatch => Some(0),
             // Its bytes at the destination already take their space.
             Clash::Unfinished { name, size } => {
@@ -106,8 +118,11 @@ pub(crate) fn survey(
                 Some(selected.stat.size.saturating_sub(size))
             }
             Clash::Merge => {
-                conflicts.merges += 1;
-                if copies { None } else { Some(0) }
+                if copies {
+                    None
+                } else {
+                    Some(0)
+                }
             }
             // The name becomes the operation's, as the run takes it, so a
             // second selected entry of this name counts as one with the same
@@ -117,23 +132,25 @@ pub(crate) fn survey(
                 written()
             }
             Clash::Conflict => {
-                conflicts.files += 1;
                 names.insert(name, Holder::Ours);
-                written()
+                if surveying.rule.choice == Some(Policy::Skip) {
+                    Some(0)
+                } else {
+                    written()
+                }
             }
             Clash::SameName => {
-                conflicts.same_name += 1;
-                written()
+                if surveying.rule.choice == Some(Policy::Skip) {
+                    Some(0)
+                } else {
+                    written()
+                }
             }
             Clash::OwnFolder => written(),
         };
         needed = needed.zip(entry_needs).map(|(sum, entry)| sum + entry);
     }
-    Ok(Surveyed {
-        conflicts,
-        total,
-        needed,
-    })
+    Ok(Surveyed { total, needed })
 }
 
 /// What Measure counts.

@@ -17,6 +17,7 @@
     "turkish": "&Turks"
   },
   "command": {
+    "synchronize": "Mappen s&ynchroniseren…",
     "open": "&Openen",
     "open_file_location": "Bestands&locatie openen",
     "explore": "&Verkennen",
@@ -429,7 +430,16 @@
     "not_a_number": "Voer een getal in, zoals {0}.",
     "order": "Minimum kan niet groter zijn dan Maximum."
   },
+  "copy_policy": {
+    "label": "Bestanden die al op de &bestemming staan:",
+    "update_changed": "Gewijzigde bestanden bijwerken",
+    "update_newer": "Nieuwere bestanden bijwerken",
+    "keep_both": "Beide behouden",
+    "skip": "Bestaande bestanden overslaan",
+    "hint": "Gewijzigde bestanden bijwerken vervangt ook nieuwere doelbestanden."
+  },
   "settings": {
+    "performance": "Prestaties",
     "title": "Instellingen",
     "unsaved": "Niet-toegepaste wijzigingen",
     "saving": "Instellingen opslaan…",
@@ -536,6 +546,7 @@
     "two_panels": "Twee panelen reserveert F3 tot en met F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R en Alt met een letter, cijfer, komma of punt. Een sneltoets op een van deze toetsen werkt alleen in Zoeken."
   },
   "settings_file_operations": {
+    "transfers_per_device": "&Overdrachten per apparaat:",
     "speed": "Sne&lheidsinstellingen:",
     "automatic": "Automatisch",
     "automatic_description": "De aanbevolen waarden van Gozler.",
@@ -736,8 +747,6 @@
     "size_items_other": "{0} items",
     "selected_one": "{0} geselecteerd item",
     "selected_other": "{0} geselecteerde items",
-    "must_stay_after": "Deze moet na {0} blijven, omdat beide dezelfde bestanden gebruiken.",
-    "must_stay_before": "Deze moet vóór {0} blijven, omdat beide dezelfde bestanden gebruiken.",
     "pause": "Pauzeren",
     "resume": "Hervatten",
     "cancel": "Annuleren",
@@ -907,6 +916,43 @@
     "open_failed": "Kan {0} niet starten. {1} Controleer de opdracht in Bestand > Instellingen > Snelmenu.",
     "shortcut_taken": "Een ander programma gebruikt {0}, dus deze sneltoets geeft Gozler niet meer weer. Kies een andere sneltoets in Bestand > Instellingen > Toetsenbord.",
     "registry_failed": "Kan \"{0}\" niet opslaan in het register. {1}"
+  },
+  "sync": {
+    "title": "Mappen synchroniseren",
+    "source": "&Bron:",
+    "destination": "&Doel:",
+    "mirror": "&Extra bestanden verwijderen (Spiegelen)",
+    "compare": "&Vergelijken",
+    "synchronize": "Synchroniseren",
+    "direction": "Wijzigingen gaan van Bron naar Doel.",
+    "initial": "Vergelijk de mappen voordat u synchroniseert.",
+    "action": "Actie",
+    "add": "Toevoegen",
+    "replace": "Vervangen",
+    "conflict": "Conflict",
+    "unchanged": "Ongewijzigd",
+    "keep": "Behouden",
+    "summary": "Nieuw {0} · Vervangen {1} · Gelijk {2} · Extra {3} · Conflicten {4}",
+    "conflicts": "Los conflicterende bestands- en mapnamen op en vergelijk opnieuw.",
+    "delete_hint": "Spiegelen verwijdert de als Verwijderen gemarkeerde items definitief.",
+    "ready": "Extra doelitems blijven behouden. Synchroniseren past deze vergelijking toe.",
+    "review": "Vergelijking bekijken",
+    "comparing": "Mappen vergelijken",
+    "synchronizing": "Synchroniseren",
+    "row": "Synchroniseren {0} → {1}",
+    "waiting_for": "Wachten op Synchroniseren: {0}",
+    "processed_one": "{0} verwerkt",
+    "processed_other": "{0} verwerkt",
+    "running": "Synchroniseren: {0}",
+    "completed": "Gesynchroniseerd: {0}",
+    "cancelled": "Synchronisatie geannuleerd: {0}",
+    "changed": "De mappen zijn na de vergelijking gewijzigd. Vergelijk opnieuw.",
+    "overlap": "Kies afzonderlijke mappen. Geen van beide mag de andere bevatten.",
+    "failed": "Kan de mappen niet vergelijken. {0}",
+    "failed_short": "Vergelijking gestopt",
+    "copy_sync": "Kopiëren en synchroniseren",
+    "move_sync": "Verplaatsen en synchroniseren",
+    "copy_move_sync": "Kopiëren, verplaatsen en synchroniseren"
   },
   "transfer": {
     "copy_name": "{0} kopiëren naar:",

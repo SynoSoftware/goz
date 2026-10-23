@@ -5,7 +5,7 @@
 //! and calls Win32 after the borrow ends, because many calls send messages back
 //! to this window before they return.
 
-use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax};
+use super::dialogs::{About, CustomDate, CustomSize, SearchSyntax, Transfer, TransferStart};
 use super::file_operations::{FileOperations, FilesSource};
 use super::fix_thread::FixThread;
 use super::icons::Icons;
@@ -15,8 +15,9 @@ use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use super::viewer::Viewers;
 use crate::core::captions::{
-    self, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions, Inspected, InspectorCaptions,
-    JobCaption, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart, WindowCaptions,
+    self, ButtonIcon, DialogCaptions, DialogItem, FilterCaptions, IndexCaptions, Inspected,
+    InspectorCaptions, JobCaption, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest,
+    ValuePart, WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
 use crate::core::commands::{
@@ -45,7 +46,7 @@ use crate::core::model::{
     SearchBoxEnter, Then,
 };
 use crate::core::open::{self, CommandLine};
-use crate::core::operations::{Answer, OperationDialog, OperationProgress, QueueStep};
+use crate::core::operations::{OperationDialog, OperationProgress, QueueStep};
 use crate::core::panel::{ChosenEntry, Side};
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
@@ -99,6 +100,7 @@ use std::time::{Instant, SystemTime};
 use windows::Win32::Foundation::LRESULT;
 
 mod panels;
+mod synchronize;
 
 use panels::{KEY_BAR, KEY_TIPS, PanelControls};
 
@@ -961,8 +963,9 @@ enum ModalStep {
     /// Gives `Enter` to the first row of `ask`'s search, which `Enter` in
     /// the search box waited for, while the list still shows it.
     EnterFirst(ChunkAsk),
-    /// A file operation's conflict question or failure dialog.
+    /// A file operation's retained failure dialog.
     Operation(OperationDialog),
+    Synchronize(OperationId),
     /// An action on Search's selected entries, which a thread found
     /// `present`, and the first that is `missing`.
     Checked {
@@ -1654,7 +1657,12 @@ impl MainWindow {
                 ..JobCaption::default()
             };
         }
-        let cancel = self.model.borrow().strings().text("button.cancel").to_owned();
+        let cancel = self
+            .model
+            .borrow()
+            .strings()
+            .text("button.cancel")
+            .to_owned();
         controls.status.set_cancel_caption(&cancel);
         self.status_memory.replace(status.memory.clone());
         let layout = self
@@ -2620,6 +2628,7 @@ impl MainWindow {
                 }
                 CommandId::CopyToFolder => return self.copy_to_folder(hwnd, false),
                 CommandId::MoveToFolder => return self.copy_to_folder(hwnd, true),
+                CommandId::Synchronize => return self.synchronize_folders(hwnd, None),
                 CommandId::Delete => return self.delete_selected(hwnd),
                 CommandId::NewFolder => return self.new_folder(hwnd),
                 CommandId::View => return self.view_focused(hwnd),
@@ -3166,6 +3175,7 @@ impl MainWindow {
                     }
                 }
                 ModalStep::Operation(dialog) => self.operation_dialog(hwnd, dialog),
+                ModalStep::Synchronize(id) => self.synchronize_folders(hwnd, Some(id)),
                 ModalStep::Checked {
                     action,
                     present,
@@ -4286,6 +4296,7 @@ impl MainWindow {
         let saved = self.settings_file.with_file_name("operations.json");
         let error_log = self.settings_file.with_file_name("ui-error.log");
         let operations = FileOperations::new(hwnd, &saved, strings, error_log);
+        operations.set_transfer_limit(self.model.borrow().choices().transfers_per_device);
         let _ = self.file_operations.set(operations);
         clipboard::listen(hwnd);
         self.model
@@ -4328,6 +4339,13 @@ impl MainWindow {
                 PaneAction::Command(id, QueueAction::Clear) => {
                     let steps = self.model.borrow_mut().operation_reported(id);
                     self.run_queue_steps(steps);
+                }
+                PaneAction::Command(id, QueueAction::Continue)
+                    if operations.operation(id).is_some_and(|operation| {
+                        matches!(*operation.request, Request::Synchronize { .. })
+                    }) =>
+                {
+                    self.defer(hwnd, ModalStep::Synchronize(id));
                 }
                 PaneAction::Command(id, action) => operations.act(id, action),
                 PaneAction::Move(id, before) => operations.move_before(id, before),
@@ -4467,24 +4485,9 @@ impl MainWindow {
         operations.refresh(shown);
     }
 
-    /// Asks an operation's conflict question, or shows what failed in it,
-    /// while it still waits for that.
+    /// Shows the retained failure without holding model borrows across its message loop.
     fn operation_dialog(&self, hwnd: Hwnd, dialog: OperationDialog) {
         match dialog {
-            OperationDialog::Ask(id) => {
-                let question = {
-                    let model = self.model.borrow();
-                    model.operation_question(id, &*self.numbers.borrow())
-                };
-                let Some(question) = question else {
-                    return;
-                };
-                // The question runs its own message loop, so nothing is
-                // borrowed here.
-                let answer = Answer::of(win::dialog::choose(hwnd, &question));
-                let step = self.model.borrow_mut().answer_operation(id, answer);
-                self.run_queue_steps(step.into_iter().collect());
-            }
             OperationDialog::Report(id) => {
                 let transfer = self.file_operations.get().is_some_and(|ops| {
                     self.model
@@ -4515,33 +4518,26 @@ impl MainWindow {
                 self.run_queue_steps(steps);
             }
         }
-        // The status bar and the transfer pane show the answer or
-        // the report.
+        // The report may have released the last retained operation.
         hwnd.post(QUEUE_CHANGED);
     }
 
-    /// Copies `sources` into the folder `destination`, or moves them, for
-    /// Copy to folder…, Move to folder…, Paste and a drop; `from` is where
-    /// a pasted or dropped file list came from.
-    fn transfer_into(
-        &self,
+    fn transfer_request(
         sources: Vec<PathBuf>,
         destination: PathBuf,
         moves: bool,
-        from: Option<FilesSource>,
-    ) {
-        self.start_operation(Self::transfer_request(sources, destination, moves), from);
-    }
-
-    fn transfer_request(sources: Vec<PathBuf>, destination: PathBuf, moves: bool) -> Request {
+        policy: gozler_fileops::Policy,
+    ) -> Request {
         let destination = Destination::Folder(destination);
         if moves {
             Request::Move {
+                policy,
                 sources,
                 destination,
             }
         } else {
             Request::Copy {
+                policy,
                 sources,
                 destination,
             }
@@ -4552,7 +4548,12 @@ impl MainWindow {
         let operations = self.file_operations.get()?;
         let settings = self.model.borrow().choices().speed.settings();
         Some(operations.accept(
-            Self::transfer_request(Vec::new(), destination, moves),
+            Self::transfer_request(
+                Vec::new(),
+                destination,
+                moves,
+                self.model.borrow().choices().copy_policy,
+            ),
             settings,
         ))
     }
@@ -4573,13 +4574,19 @@ impl MainWindow {
             return;
         }
         let kind = from.as_ref().map(FilesSource::kind);
+        let policy = self.model.borrow().choices().copy_policy;
         if operations.resolve(
             id,
-            Self::transfer_request(sources, destination, moves),
+            Self::transfer_request(sources, destination, moves, policy),
             from,
         ) {
             self.model.borrow_mut().file_operation_started(id, kind);
         }
+    }
+
+    fn remember_copy_policy(&self, hwnd: Hwnd, policy: gozler_fileops::Policy) {
+        self.model.borrow_mut().set_copy_policy(policy);
+        self.note_saved_state(hwnd);
     }
 
     /// The full paths of the entries a file command acts on, as Windows
@@ -4591,34 +4598,112 @@ impl MainWindow {
         )
     }
 
-    /// Copy to folder… and Move to folder…: the folder picker, at the folder
-    /// chosen last, then the operation (DESIGN.md: File operations).
-    fn copy_to_folder(&self, hwnd: Hwnd, moves: bool) {
-        let sources = self.selected_paths();
-        if sources.is_empty() {
-            return;
-        }
-        let (start, title, ok) = {
+    fn ask_transfer(
+        &self,
+        hwnd: Hwnd,
+        start: TransferStart,
+        moves: bool,
+    ) -> Option<(Destination, gozler_fileops::Policy)> {
+        let (dialog, captions) = {
             let model = self.model.borrow();
             let strings = model.strings();
-            let (title, ok) = if moves {
-                ("file_operations.move_to_title", "file_operations.move")
-            } else {
-                ("file_operations.copy_to_title", "file_operations.copy")
-            };
-            (
-                model.destination_folder().map(str::to_owned),
-                strings.text(title).to_owned(),
-                strings.text(ok).to_owned(),
-            )
+            let mut captions = DialogCaptions::new(DialogId::Transfer, strings);
+            captions.title = start.title.clone();
+            if moves {
+                let ok = captions
+                    .items
+                    .iter_mut()
+                    .find(|(id, _)| *id == DialogItem::Ok.id());
+                if let Some((_, text)) = ok {
+                    *text = strings.text("file_operations.move").to_owned();
+                }
+            }
+            (Transfer::new(strings, start), captions)
         };
-        // The picker runs its own message loop, so nothing is borrowed here.
-        let Some(folder) = shell::pick_destination(hwnd, start.as_deref(), &title, &ok) else {
+        win::dialog::run_modal(hwnd, DialogId::Transfer, &captions, &dialog)
+            .ok()
+            .and_then(|_| dialog.chosen())
+    }
+
+    fn copy_to_folder(&self, hwnd: Hwnd, moves: bool) {
+        let sources = self.selected_paths();
+        let Some(first) = sources.first() else {
             return;
         };
-        let accepted = (self.model.borrow_mut()).set_destination_folder(folder.clone());
-        self.apply(hwnd, accepted);
-        self.transfer_into(sources, PathBuf::from(folder), moves, None);
+        let start = {
+            let model = self.model.borrow();
+            let strings = model.strings();
+            let (title, name_line, items_line) = if moves {
+                (
+                    "file_operations.move_to_title",
+                    "transfer.move_name",
+                    "transfer.move_items",
+                )
+            } else {
+                (
+                    "file_operations.copy_to_title",
+                    "transfer.copy_name",
+                    "transfer.copy_items",
+                )
+            };
+            let one = (sources.len() == 1).then(|| {
+                first
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            let line = match &one {
+                Some(name) => strings.format(name_line, &[name]),
+                None => strings.count(
+                    items_line,
+                    sources.len() as u64,
+                    &*self.numbers.borrow(),
+                    &[],
+                ),
+            };
+            let folder = first
+                .parent()
+                .unwrap_or(first)
+                .to_string_lossy()
+                .into_owned();
+            let text = crate::core::panel::join(model.destination_folder().unwrap_or(&folder), "");
+            TransferStart {
+                policy: model.choices().copy_policy,
+                title: strings.text(title).to_owned(),
+                line,
+                selected: (0, text.encode_utf16().count()),
+                other: text.clone(),
+                text,
+                folder,
+                one,
+            }
+        };
+        let Some((destination, policy)) = self.ask_transfer(hwnd, start, moves) else {
+            return;
+        };
+        if let Destination::Folder(folder) = &destination {
+            let accepted = self
+                .model
+                .borrow_mut()
+                .set_destination_folder(folder.to_string_lossy().into_owned());
+            self.apply(hwnd, accepted);
+        }
+        self.remember_copy_policy(hwnd, policy);
+        let request = if moves {
+            Request::Move {
+                policy,
+                sources,
+                destination,
+            }
+        } else {
+            Request::Copy {
+                policy,
+                sources,
+                destination,
+            }
+        };
+        self.start_operation(request, None);
     }
 
     /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete
@@ -5259,6 +5344,11 @@ impl MainWindow {
             }
         });
         self.save_settings(hwnd, true);
+        if edited.choices.transfers_per_device != last.choices.transfers_per_device
+            && let Some(operations) = self.file_operations.get()
+        {
+            operations.set_transfer_limit(edited.choices.transfers_per_device);
+        }
         Ok(Applied { values, failures })
     }
 
@@ -5638,8 +5728,7 @@ impl DropHandler for MainWindow {
         // A modal step blocks drops, as a modal dialog does
         // (`win::drop_target`): a step can wait on a call into another
         // program, such as Open's, which a drop held under it would never
-        // let return, and the drop's own conflict question would wait for
-        // the step to end.
+        // let return.
         let accepts = search && !self.modal_running.get();
         let row = (accepts && list.hwnd().screen_rect().contains(point) && !self.on_header(point))
             .then(|| list.row_at(point))

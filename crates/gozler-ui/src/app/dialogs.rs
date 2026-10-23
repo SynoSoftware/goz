@@ -10,9 +10,9 @@ use crate::core::text::Strings;
 use crate::core::typed::{self, Refusal};
 use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
-use crate::win::gdi::Font;
+use crate::win::gdi::{Font, TextMeter};
 use crate::win::{self, Hwnd};
-use gozler_fileops::Destination;
+use gozler_fileops::{Destination, Policy};
 use std::cell::{Cell, OnceCell, RefCell};
 
 /// The About Gozler dialog (DESIGN.md: C23).
@@ -417,7 +417,7 @@ impl DialogProc for CustomSize {
     }
 }
 
-/// Two panels' Copy to folder… and Move to folder…: the destination as
+/// Copy to folder… and Move to folder…: the destination as
 /// text, which only the text decides, so the dialog closes at once
 /// (DESIGN.md: Copy and Move).
 pub(super) struct Transfer {
@@ -427,19 +427,21 @@ pub(super) struct Transfer {
     selected: (usize, usize),
     /// The active panel's folder, which a relative path is in.
     folder: String,
-    /// The other panel's folder that the box opens with, which
-    /// [`typed::destination`] keeps unexpanded.
-    other: String,
+    /// The known folder prefix, which [`typed::destination`] keeps unexpanded.
+    other: RefCell<String>,
     /// The name of the one entry it acts on; `None` for several.
     one: Option<String>,
     title: String,
     characters: String,
     reserved: String,
-    chosen: RefCell<Option<Destination>>,
+    policy: Policy,
+    policies: [String; 4],
+    chosen: RefCell<Option<(Destination, Policy)>>,
 }
 
 /// What [`Transfer`] opens with.
 pub(super) struct TransferStart {
+    pub(super) policy: Policy,
     /// The dialog's title, which names its command.
     pub(super) title: String,
     /// What it acts on, such as "Copy report.pdf to:".
@@ -454,11 +456,13 @@ pub(super) struct TransferStart {
 impl Transfer {
     pub(super) fn new(strings: &Strings, start: TransferStart) -> Transfer {
         Transfer {
+            policy: start.policy,
+            policies: crate::core::file_operations::policy_names(strings).map(str::to_owned),
             line: start.line,
             start: start.text,
             selected: start.selected,
             folder: start.folder,
-            other: start.other,
+            other: RefCell::new(start.other),
             one: start.one,
             title: start.title,
             characters: strings.text("name.characters").to_owned(),
@@ -468,7 +472,7 @@ impl Transfer {
     }
 
     /// The destination Copy or Move chose.
-    pub(super) fn chosen(&self) -> Option<Destination> {
+    pub(super) fn chosen(&self) -> Option<(Destination, Policy)> {
         self.chosen.take()
     }
 
@@ -487,12 +491,28 @@ impl Transfer {
 
 impl DialogProc for Transfer {
     fn init(&self, dialog: Hwnd) -> Opened {
+        if let Some(hint) = dialog::item(dialog, ControlId::TransferPolicyHint.id())
+            && let Ok(font) = Font::of(hint)
+        {
+            let rect = hint.rect_in(dialog);
+            let extra = TextMeter::new(&font).width(&hint.text()) - rect.width;
+            if extra > crate::core::layout::Px(0) {
+                dialog::widen(dialog, rect.x + crate::core::layout::Px(1), extra);
+            }
+        }
         if let Some(line) = dialog::item(dialog, ControlId::TransferLine.id()) {
             line.set_text(&self.line);
         }
         if let Some(path) = Transfer::path(dialog) {
             path.hwnd().set_text(&self.start);
             path.select(self.selected.0, self.selected.1);
+        }
+        if let Some(list) = DropDownList::of_dialog(dialog, ControlId::TransferPolicy.id()) {
+            let selected = Policy::ALL
+                .iter()
+                .position(|policy| *policy == self.policy)
+                .unwrap_or(0);
+            list.set_items(&self.policies, selected);
         }
         Transfer::update_ok(dialog);
         Opened {
@@ -507,6 +527,18 @@ impl DialogProc for Transfer {
                 Transfer::update_ok(dialog);
                 true
             }
+            DialogMessage::Command { id } if id == ControlId::TransferBrowse.id() => {
+                if let Some(path) = Transfer::path(dialog) {
+                    let start = path.text();
+                    if let Some(folder) = win::shell::pick_folder(dialog, Some(&start)) {
+                        let text = crate::core::panel::join(&folder, "");
+                        self.other.replace(text.clone());
+                        path.hwnd().set_text(&text);
+                        path.hwnd().focus();
+                    }
+                }
+                true
+            }
             DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
                 let Some(path) = Transfer::path(dialog) else {
                     return true;
@@ -514,13 +546,18 @@ impl DialogProc for Transfer {
                 let resolved = typed::destination(
                     &path.text(),
                     &self.folder,
-                    &self.other,
+                    &self.other.borrow(),
                     self.one.as_deref(),
                     |name| std::env::var(name).ok(),
                 );
                 match resolved {
                     Ok(Some(destination)) => {
-                        self.chosen.replace(Some(destination));
+                        let policy =
+                            DropDownList::of_dialog(dialog, ControlId::TransferPolicy.id())
+                                .and_then(DropDownList::selected)
+                                .and_then(|i| Policy::ALL.get(i).copied())
+                                .unwrap_or(self.policy);
+                        self.chosen.replace(Some((destination, policy)));
                         dialog::end(dialog, DialogEnd::Ok);
                     }
                     // Copy or Move is disabled then.

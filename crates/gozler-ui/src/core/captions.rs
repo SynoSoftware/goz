@@ -686,13 +686,38 @@ impl CaptionTable {
             // Move to folder's title and button are the dialog's own.
             DialogId::Transfer => CaptionTable {
                 title: "file_operations.copy_to_title",
-                keyed: &[],
-                plain: &[(Ok, "file_operations.copy"), (Cancel, "button.cancel")],
+                keyed: &[(Control(C::TransferPolicyLabel), "copy_policy.label")],
+                plain: &[
+                    (Control(C::TransferPolicyHint), "copy_policy.hint"),
+                    (Control(C::TransferBrowse), "settings_context_menu.browse"),
+                    (Ok, "file_operations.copy"),
+                    (Cancel, "button.cancel"),
+                ],
             },
             DialogId::NewFolder => CaptionTable {
                 title: "file_operations.new_folder",
                 keyed: &[(Control(C::NewFolderLabel), "new_folder.name")],
                 plain: &[(Ok, "new_folder.create"), (Cancel, "button.cancel")],
+            },
+            DialogId::Synchronize => CaptionTable {
+                title: "sync.title",
+                keyed: &[
+                    (Control(C::SyncSourceLabel), "sync.source"),
+                    (Control(C::SyncDestinationLabel), "sync.destination"),
+                    (Control(C::SyncMirror), "sync.mirror"),
+                    (Control(C::SyncCompare), "sync.compare"),
+                ],
+                plain: &[
+                    (Control(C::SyncSourceBrowse), "settings_context_menu.browse"),
+                    (
+                        Control(C::SyncDestinationBrowse),
+                        "settings_context_menu.browse",
+                    ),
+                    (Control(C::SyncDirection), "sync.direction"),
+                    (Control(C::SyncHint), "sync.initial"),
+                    (Ok, "sync.synchronize"),
+                    (Cancel, "button.cancel"),
+                ],
             },
             DialogId::Settings => CaptionTable {
                 title: "settings.title",
@@ -913,6 +938,24 @@ impl CaptionTable {
             DialogId::SettingsFileOperations => CaptionTable {
                 title: "settings.file_operations",
                 keyed: &[
+                    (Control(C::FileOperationsPolicyLabel), "copy_policy.label"),
+                    (
+                        Control(C::SpeedTransfersLabel),
+                        "settings_file_operations.transfers_per_device",
+                    ),
+                    (Control(C::FileOperationsRestore), "settings.reset"),
+                ],
+                plain: &[
+                    (
+                        Control(C::FileOperationsSettingsHeading),
+                        "settings.file_operations",
+                    ),
+                    (Control(C::FileOperationsPolicyHint), "copy_policy.hint"),
+                ],
+            },
+            DialogId::SettingsPerformance => CaptionTable {
+                title: "settings.performance",
+                keyed: &[
                     (
                         Control(C::SpeedPresetLabel),
                         "settings_file_operations.speed",
@@ -964,7 +1007,7 @@ impl CaptionTable {
                     (Control(C::SpeedRestore), "settings.reset"),
                 ],
                 plain: &[
-                    (Control(C::SpeedHeading), "settings.file_operations"),
+                    (Control(C::SpeedHeading), "settings.performance"),
                     (
                         Control(C::SpeedCopyingGroup),
                         "settings_file_operations.copying",
@@ -1044,12 +1087,14 @@ impl CaptionTable {
             | DialogId::SettingsKeyboard
             | DialogId::SettingsIndex
             | DialogId::SettingsInclude
-            | DialogId::SettingsFileOperations => Some(DialogId::Settings),
+            | DialogId::SettingsFileOperations
+            | DialogId::SettingsPerformance => Some(DialogId::Settings),
             DialogId::About
             | DialogId::SearchSyntax
             | DialogId::CustomDate
             | DialogId::CustomSize
             | DialogId::Transfer
+            | DialogId::Synchronize
             | DialogId::NewFolder
             | DialogId::Settings
             | DialogId::IndexedFolders
@@ -2960,7 +3005,10 @@ mod tests {
     fn a_settings_search_matches_the_start_of_words() {
         let strings = Strings::load(&LANGUAGES[0]);
         let pages = |search| settings_pages_matching(&strings, search);
-        assert_eq!(pages("UPD"), [SettingsPage::General]);
+        assert_eq!(
+            pages("UPD"),
+            [SettingsPage::General, SettingsPage::FileOperations]
+        );
         assert!(pages("pdates").is_empty());
         assert_eq!(pages("cont ite"), [SettingsPage::ContextMenu]);
         assert_eq!(pages(" "), SettingsPage::ALL);

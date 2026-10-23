@@ -1,10 +1,11 @@
 //! What the window asks the queue for, and what it reads back.
 
+use crate::conflicts::Policy;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, TryLockError, Weak};
 
 /// An operation the window asks for. Every path is a full path: the active
 /// panel's selection, or Search's selection, which is the files of one
@@ -15,17 +16,41 @@ pub enum Request {
     Copy {
         sources: Vec<PathBuf>,
         destination: Destination,
+        policy: Policy,
     },
     /// Moves the entries to `destination`: a rename on one volume, a copy
     /// and a delete across volumes.
     Move {
         sources: Vec<PathBuf>,
         destination: Destination,
+        policy: Policy,
     },
     /// Deletes the entries permanently.
     Delete { sources: Vec<PathBuf> },
     /// Creates the folder `path`; an existing name is refused.
     NewFolder { path: PathBuf },
+    Synchronize {
+        source: PathBuf,
+        destination: PathBuf,
+        mirror: bool,
+    },
+}
+
+impl Request {
+    pub fn is_transfer(&self) -> bool {
+        matches!(
+            self,
+            Self::Copy { .. } | Self::Move { .. } | Self::Synchronize { .. }
+        )
+    }
+
+    pub fn policy(&self) -> Option<Policy> {
+        match self {
+            Self::Copy { policy, .. } | Self::Move { policy, .. } => Some(*policy),
+            Self::Synchronize { .. } => Some(Policy::UpdateChanged),
+            Self::Delete { .. } | Self::NewFolder { .. } => None,
+        }
+    }
 }
 
 /// Where a copy or a move writes. Prepare decides what the window cannot
@@ -110,6 +135,9 @@ impl SourcesFolder {
             | Request::Move { sources, .. }
             | Request::Delete { sources } => sources,
             Request::NewFolder { .. } => return SourcesFolder::Several,
+            Request::Synchronize { source, .. } => {
+                return SourcesFolder::Shared(source.to_string_lossy().into_owned());
+            }
         };
         common_folder(sources.iter().map(|path| path.to_string_lossy()))
             .map_or(SourcesFolder::Several, SourcesFolder::Shared)
@@ -167,8 +195,10 @@ fn same_name(a: &str, b: &str) -> bool {
 pub enum State {
     Preparing,
     Cancelling,
-    /// Waiting for the person's answer.
+    /// Prepared for submission with its accepted policy.
     Prepared(Prepared),
+    /// Observes the preview without keeping its potentially large tree alive.
+    Compared(Weak<crate::Comparison>),
     /// Submitted, and waiting for an operation that runs, or for one before
     /// it in the run order.
     Waiting {
@@ -186,9 +216,17 @@ pub enum State {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunningPhase {
+    Comparing,
+    Synchronizing,
+    Executing,
+}
+
 /// A running operation's progress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Running {
+    pub phase: RunningPhase,
     /// Items done so far: entries copied, moved or deleted, skipped and
     /// failed ones included.
     pub items: u64,
@@ -237,20 +275,9 @@ pub enum OrderRefused {
     /// It, or the operation it would move before, is no longer waiting.
     #[error("the operation is no longer waiting")]
     NotWaiting,
-    /// The move would pass `other`, whose paths it overlaps (D14), so it
-    /// stays on `side` of it.
-    #[error("the operation must stay {side:?} an operation it overlaps")]
-    Overlaps { other: OperationId, side: Side },
 }
 
-/// Where an operation stays relative to another in the run order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    After,
-    Before,
-}
-
-/// What prepare found, so the window can ask the person.
+/// The accepted selection and its indexed progress total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prepared {
     /// The selected entries the operation acts on.
@@ -258,8 +285,6 @@ pub struct Prepared {
     /// For a copy, a move or a delete, from gozlerd's index; `None` when
     /// gozlerd cannot answer exactly, and then the progress has no total.
     pub total: Option<Total>,
-    /// For a copy or a move.
-    pub conflicts: Option<Conflicts>,
 }
 
 /// What an operation covers: the selected entries and everything below
@@ -289,26 +314,10 @@ impl std::iter::Sum for Total {
     }
 }
 
-/// The names that a copy or a move finds taken in its destination folder.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Conflicts {
-    /// Files at the destination that a source would replace.
-    pub files: u64,
-    /// Selected entries that share a name with another selected entry.
-    pub same_name: u64,
-    /// Selected folders that merge into a folder of their name. Prepare does
-    /// not read the files inside them, so the window asks the person as for
-    /// a conflict, and the run applies the answer to each file it meets.
-    pub merges: u64,
-}
-
-/// Why a submitted operation waits (D14).
+/// Why a submitted transfer waits for admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wait {
-    /// One of the two writes or deletes a path that the other reads or
-    /// writes.
-    Paths,
-    /// Both move bytes on one disk that seeks.
+    /// A required physical device has reached its transfer limit.
     Disk,
 }
 
@@ -338,6 +347,12 @@ pub struct NoRoom {
 /// What an operation refuses at prepare, or a copy at its start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
+    #[error("the synchronization roots are identical or nested")]
+    SynchronizationRootsOverlap,
+    #[error("the folders changed since comparison")]
+    SynchronizationChanged,
+    #[error("the folders cannot be compared: Windows error {0}")]
+    ComparisonFailed(u32),
     #[error("the clipboard or dropped files are no longer available")]
     SourceUnavailable,
     #[error("the operation's recovery state cannot be saved: Windows error {0}")]
@@ -362,6 +377,7 @@ pub struct Listed {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
+    SynchronizationChanged,
     /// With Windows' error code.
     Failed(u32),
     RecoveryFailed(u32),
@@ -497,6 +513,17 @@ struct PauseState {
     manual: bool,
     yielded: bool,
     active: HashMap<std::thread::ThreadId, bool>,
+    quiet: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl PauseState {
+    fn take_quiet(&mut self) -> Option<Box<dyn FnOnce() + Send>> {
+        if self.yielded && !self.active.values().any(|&active| active) {
+            self.quiet.take()
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) struct Activity<'a>(&'a Pause);
@@ -505,7 +532,12 @@ impl Drop for Activity<'_> {
     fn drop(&mut self) {
         let mut state = self.0.state.lock().expect("no engine thread panics");
         state.active.remove(&std::thread::current().id());
+        let quiet = state.take_quiet();
+        drop(state);
         self.0.resumed.notify_all();
+        if let Some(quiet) = quiet {
+            quiet();
+        }
     }
 }
 
@@ -521,6 +553,9 @@ impl Pause {
     pub(crate) fn yield_to_priority(&self, yielded: bool) {
         let mut state = self.state.lock().expect("no engine thread panics");
         state.yielded = yielded;
+        if !yielded {
+            state.quiet = None;
+        }
         self.paused
             .store(state.manual || state.yielded, Ordering::Relaxed);
         self.resumed.notify_all();
@@ -548,12 +583,47 @@ impl Pause {
         Activity(self)
     }
 
-    pub(crate) fn quiesce(&self) -> bool {
+    /// Waiting for shared initialization uses no device. The caller
+    /// reacquires its gate before returning.
+    pub(crate) fn idle<T>(&self, cancel: &AtomicBool, work: impl FnOnce() -> T) -> T {
+        let thread = std::thread::current().id();
+        let quiet = {
+            let mut state = self.state.lock().expect("no engine thread panics");
+            let active = state
+                .active
+                .get_mut(&thread)
+                .expect("an activity surrounds the idle wait");
+            *active = false;
+            state.take_quiet()
+        };
+        if let Some(quiet) = quiet {
+            quiet();
+        }
+        let result = work();
         let mut state = self.state.lock().expect("no engine thread panics");
-        while state.yielded && state.active.values().any(|&active| active) {
+        while state.yielded || (state.manual && !cancel.load(Ordering::Relaxed)) {
             state = self.resumed.wait(state).expect("no engine thread panics");
         }
-        state.yielded
+        *state
+            .active
+            .get_mut(&thread)
+            .expect("the surrounding activity is still live") = true;
+        result
+    }
+
+    /// Calls once outside the lock when the closed gate has no active worker.
+    pub(crate) fn on_quiet(&self, quiet: impl FnOnce() + Send + 'static) {
+        let quiet = {
+            let mut state = self.state.lock().expect("no engine thread panics");
+            if !state.yielded {
+                return;
+            }
+            state.quiet = Some(Box::new(quiet));
+            state.take_quiet()
+        };
+        if let Some(quiet) = quiet {
+            quiet();
+        }
     }
 
     pub(crate) fn is_quiet(&self) -> bool {
@@ -590,6 +660,11 @@ impl Pause {
             *active = false;
             self.resumed.notify_all();
         }
+        if let Some(quiet) = state.take_quiet() {
+            drop(state);
+            quiet();
+            state = self.state.lock().expect("no engine thread panics");
+        }
         #[cfg(test)]
         self.waiting.fetch_add(1, Ordering::Relaxed);
         while state.yielded || (state.manual && !cancel.load(Ordering::Relaxed)) {
@@ -600,6 +675,47 @@ impl Pause {
         }
         #[cfg(test)]
         self.waiting.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The initializer keeps its device grant until publication; consumers
+/// waiting for it are idle and reacquire their gate before returning.
+#[derive(Debug)]
+pub(crate) struct Initialization<T> {
+    ready: OnceLock<T>,
+    initializing: Mutex<()>,
+}
+
+impl<T> Default for Initialization<T> {
+    fn default() -> Self {
+        Self {
+            ready: OnceLock::new(),
+            initializing: Mutex::new(()),
+        }
+    }
+}
+
+impl<T: Clone> Initialization<T> {
+    pub(crate) fn get_or_init(
+        &self,
+        pause: &Pause,
+        cancel: &AtomicBool,
+        initialize: impl FnOnce() -> T,
+    ) -> T {
+        if let Some(ready) = self.ready.get() {
+            return ready.clone();
+        }
+        match self.initializing.try_lock() {
+            Ok(_initializing) => self.ready.get_or_init(initialize).clone(),
+            Err(TryLockError::WouldBlock) => pause.idle(cancel, || {
+                let _initializing = self.initializing.lock().expect("no initializer panics");
+                self.ready
+                    .get()
+                    .expect("the initializer publishes before unlocking")
+                    .clone()
+            }),
+            Err(TryLockError::Poisoned(_)) => panic!("no initializer panics"),
+        }
     }
 }
 
@@ -726,8 +842,12 @@ mod tests {
             active.recv().expect("the worker enters");
             pause.yield_to_priority(true);
             let was_active = !pause.is_quiet();
+            let (quiet, noticed) = std::sync::mpsc::channel();
+            pause.on_quiet(move || quiet.send(()).expect("the test receives quiescence"));
+            assert!(noticed.try_recv().is_err());
             release.send(()).expect("the worker waits for release");
-            let was_quiet = pause.quiesce();
+            noticed.recv().expect("the worker becomes quiet");
+            let was_quiet = pause.is_quiet();
             pause.set(true);
             pause.yield_to_priority(false);
             let stayed_paused = pause.is_paused();
@@ -738,6 +858,57 @@ mod tests {
         assert!(was_active);
         assert!(was_quiet);
         assert!(stayed_paused);
+    }
+
+    #[test]
+    fn shared_initialization_keeps_its_grant_and_waiters_need_readmission() {
+        let initialization = Initialization::default();
+        let initializer = Pause::default();
+        let consumer = Pause::default();
+        let cancel = AtomicBool::new(false);
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let (returned, result) = std::sync::mpsc::channel();
+        let (entered_consumer, consuming) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let initialization = &initialization;
+            let initializer = &initializer;
+            let consumer = &consumer;
+            let cancel = &cancel;
+            let first = scope.spawn(move || {
+                let _active = initializer.enter(cancel);
+                initialization.get_or_init(initializer, cancel, || {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    7
+                })
+            });
+            started.recv().unwrap();
+            let second = scope.spawn(move || {
+                let _active = consumer.enter(cancel);
+                entered_consumer.send(()).unwrap();
+                let value = initialization.get_or_init(consumer, cancel, || {
+                    panic!("the first worker initializes once")
+                });
+                returned.send(value).unwrap();
+            });
+            consuming.recv().unwrap();
+            consumer.yield_to_priority(true);
+            let (quiet, noticed) = std::sync::mpsc::channel();
+            consumer.on_quiet(move || quiet.send(()).unwrap());
+            noticed.recv().unwrap();
+            initializer.yield_to_priority(true);
+            let (quiet, published) = std::sync::mpsc::channel();
+            initializer.on_quiet(move || quiet.send(()).unwrap());
+            assert!(published.try_recv().is_err());
+            release.send(()).unwrap();
+            published.recv().unwrap();
+            assert!(result.try_recv().is_err());
+            consumer.yield_to_priority(false);
+            assert_eq!(result.recv().unwrap(), 7);
+            assert_eq!(first.join().unwrap(), 7);
+            second.join().unwrap();
+        });
     }
 
     #[test]

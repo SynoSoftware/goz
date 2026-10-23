@@ -405,26 +405,6 @@ pub(crate) fn save_dialog(
 /// cancels. It runs its own message loop, so the caller holds no borrow
 /// across it (DESIGN.md: window rule 1).
 pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
-    pick_folder_for(owner, start, None)
-}
-
-/// [`pick_folder`] for a destination, with the title `title` and `ok` as
-/// its OK button's caption, such as "Copy to folder" and "Copy"
-/// (DESIGN.md: File operations).
-pub(crate) fn pick_destination(
-    owner: Hwnd,
-    start: Option<&str>,
-    title: &str,
-    ok: &str,
-) -> Option<String> {
-    pick_folder_for(owner, start, Some((title, ok)))
-}
-
-fn pick_folder_for(
-    owner: Hwnd,
-    start: Option<&str>,
-    labels: Option<(&str, &str)>,
-) -> Option<String> {
     // SAFETY: every string outlives the call that reads it; the chosen
     // path is copied, then freed as the call requires.
     unsafe {
@@ -442,10 +422,6 @@ fn pick_folder_for(
             )
         {
             let _ = dialog.SetFolder(&folder);
-        }
-        if let Some((title, ok)) = labels {
-            let _ = dialog.SetTitle(&HSTRING::from(title));
-            let _ = dialog.SetOkButtonLabel(&HSTRING::from(ok));
         }
         dialog.Show(Some(owner.0)).ok()?;
         let path = dialog

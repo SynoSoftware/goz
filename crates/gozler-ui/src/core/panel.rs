@@ -1718,16 +1718,19 @@ pub(crate) fn ends_in(request: &Request, folder: &str) -> bool {
         Request::Copy {
             sources,
             destination,
+            ..
         }
         | Request::Move {
             sources,
             destination,
+            ..
         } => {
             lands(&destination.path())
                 || matches!(request, Request::Move { .. }) && sources.iter().any(|s| takes(s))
         }
         Request::Delete { sources } => sources.iter().any(|s| takes(s)),
         Request::NewFolder { path } => lands(path),
+        Request::Synchronize { destination, .. } => lands(destination),
     }
 }
 
@@ -1740,13 +1743,16 @@ pub(crate) fn changes_sizes(request: &Request, folder: &str) -> bool {
         Request::Copy {
             sources,
             destination,
+            ..
         }
         | Request::Move {
             sources,
             destination,
+            ..
         } => below(&destination.path()) || sources.iter().any(|s| below(s)),
         Request::Delete { sources } => sources.iter().any(|s| below(s)),
         Request::NewFolder { path } => below(path),
+        Request::Synchronize { destination, .. } => below(destination),
     }
 }
 

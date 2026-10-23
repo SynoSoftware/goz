@@ -17,6 +17,7 @@
     "turkish": "&Türkçe"
   },
   "command": {
+    "synchronize": "Klasörleri eşi&tle…",
     "open": "&Aç",
     "open_file_location": "Dosya konu&munu aç",
     "explore": "Araş&tır",
@@ -429,7 +430,16 @@
     "not_a_number": "{0} gibi bir sayı girin.",
     "order": "En az, En çok değerinden büyük olamaz."
   },
+  "copy_policy": {
+    "label": "&Hedefte zaten bulunan dosyalar:",
+    "update_changed": "Değişen dosyaları güncelle",
+    "update_newer": "Daha yeni dosyaları güncelle",
+    "keep_both": "İkisini de tut",
+    "skip": "Var olan dosyaları atla",
+    "hint": "Değişen dosyaları güncelle, hedefteki daha yeni dosyaları da değiştirir."
+  },
   "settings": {
+    "performance": "Performans",
     "title": "Ayarlar",
     "unsaved": "Uygulanmamış değişiklikler",
     "saving": "Ayarlar kaydediliyor…",
@@ -536,6 +546,7 @@
     "two_panels": "İki panel F3–F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L ve Ctrl+R tuşlarını ve Alt ile bir harf, rakam, virgül ya da noktayı kendine ayırır. Bu tuşlardan birindeki kısayol yalnızca Arama'da çalışır."
   },
   "settings_file_operations": {
+    "transfers_per_device": "Aygıt başına ak&tarım:",
     "speed": "&Hız ayarları:",
     "automatic": "Otomatik",
     "automatic_description": "Gozler'in önerilen değerleri.",
@@ -736,8 +747,6 @@
     "size_items_other": "{0} öğe",
     "selected_one": "{0} seçili öğe",
     "selected_other": "{0} seçili öğe",
-    "must_stay_after": "{0} işleminden sonra kalmalı, çünkü ikisi aynı dosyaları kullanıyor.",
-    "must_stay_before": "{0} işleminden önce kalmalı, çünkü ikisi aynı dosyaları kullanıyor.",
     "pause": "Duraklat",
     "resume": "Sürdür",
     "cancel": "İptal",
@@ -907,6 +916,43 @@
     "open_failed": "{0} başlatılamadı. {1} Dosya > Ayarlar > Bağlam menüsü bölümündeki komutu denetleyin.",
     "shortcut_taken": "{0} kısayolunu başka bir program kullanıyor, bu yüzden artık Gozler'i göstermiyor. Dosya > Ayarlar > Klavye bölümünde başka bir kısayol seçin.",
     "registry_failed": "\"{0}\" kayıt defterine kaydedilemedi. {1}"
+  },
+  "sync": {
+    "title": "Klasörleri eşitle",
+    "source": "&Kaynak:",
+    "destination": "&Hedef:",
+    "mirror": "&Fazla dosyaları sil (Yansıt)",
+    "compare": "Karşı&laştır",
+    "synchronize": "Eşitle",
+    "direction": "Değişiklikler Kaynaktan Hedefe uygulanır.",
+    "initial": "Eşitlemeden önce klasörleri karşılaştırın.",
+    "action": "İşlem",
+    "add": "Ekle",
+    "replace": "Değiştir",
+    "conflict": "Çakışma",
+    "unchanged": "Değişmedi",
+    "keep": "Koru",
+    "summary": "Ekle {0} · Değiştir {1} · Aynı {2} · Fazla {3} · Çakışma {4}",
+    "conflicts": "Çakışan dosya ve klasör adlarını düzeltip yeniden karşılaştırın.",
+    "delete_hint": "Yansıt, Sil olarak işaretlenen öğeleri kalıcı olarak siler.",
+    "ready": "Yalnızca hedefteki öğeler korunur. Eşitle bu karşılaştırmayı uygular.",
+    "review": "Karşılaştırmayı incele",
+    "comparing": "Klasörler karşılaştırılıyor",
+    "synchronizing": "Eşitleniyor",
+    "row": "Eşitle {0} → {1}",
+    "waiting_for": "Eşitle bekleniyor: {0}",
+    "processed_one": "{0} işlendi",
+    "processed_other": "{0} işlendi",
+    "running": "Eşitleniyor: {0}",
+    "completed": "Eşitlendi: {0}",
+    "cancelled": "Eşitleme iptal edildi: {0}",
+    "changed": "Klasörler karşılaştırmadan sonra değişti. Yeniden karşılaştırın.",
+    "overlap": "Ayrı klasörler seçin. Hiçbiri diğerini içeremez.",
+    "failed": "Klasörler karşılaştırılamadı. {0}",
+    "failed_short": "Karşılaştırma durdu",
+    "copy_sync": "Kopyala ve eşitle",
+    "move_sync": "Taşı ve eşitle",
+    "copy_move_sync": "Kopyala, taşı ve eşitle"
   },
   "transfer": {
     "copy_name": "{0} şuraya kopyalanacak:",

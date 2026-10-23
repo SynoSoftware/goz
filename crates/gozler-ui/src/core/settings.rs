@@ -17,7 +17,7 @@ use super::speed::{OutOfRange, Speed, SpeedNumber};
 use super::text::{LanguageChoice, SizeFormat};
 use gozler_core::include::IndexSettings;
 use gozler_core::types::SortSpec;
-use gozler_fileops::DeleteWorkers;
+use gozler_fileops::{DeleteWorkers, Policy, TransferLimit};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -104,6 +104,19 @@ pub(crate) struct Choices {
     /// (DESIGN.md: The File operations page).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) speed: Speed,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) transfers_per_device: TransferLimit,
+    #[serde(default, deserialize_with = "copy_policy")]
+    pub(crate) copy_policy: Policy,
+}
+
+fn copy_policy<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Policy, D::Error> {
+    let policy = or_default(deserializer)?;
+    Ok(if Policy::ALL.contains(&policy) {
+        policy
+    } else {
+        Policy::default()
+    })
 }
 
 impl Choices {
@@ -144,6 +157,8 @@ impl Default for Choices {
             show_shortcut: None,
             shortcuts: CommandShortcuts::default(),
             speed: Speed::default(),
+            transfers_per_device: TransferLimit::default(),
+            copy_policy: Policy::default(),
         }
     }
 }
@@ -168,9 +183,8 @@ pub(crate) enum SettingsPage {
     Search,
     ContextMenu,
     Keyboard,
-    /// The speed settings of file operations (DESIGN.md: The File operations
-    /// page).
     FileOperations,
+    Performance,
     /// The service's index, which the page shows and does not change yet
     /// (DESIGN.md: Settings dialog).
     Index,
@@ -179,12 +193,13 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) const ALL: [SettingsPage; 7] = [
+    pub(crate) const ALL: [SettingsPage; 8] = [
         SettingsPage::General,
         SettingsPage::Search,
         SettingsPage::ContextMenu,
         SettingsPage::Keyboard,
         SettingsPage::FileOperations,
+        SettingsPage::Performance,
         SettingsPage::Index,
         SettingsPage::Include,
     ];
@@ -197,6 +212,7 @@ impl SettingsPage {
             SettingsPage::ContextMenu => DialogId::SettingsContextMenu,
             SettingsPage::Keyboard => DialogId::SettingsKeyboard,
             SettingsPage::FileOperations => DialogId::SettingsFileOperations,
+            SettingsPage::Performance => DialogId::SettingsPerformance,
             SettingsPage::Index => DialogId::SettingsIndex,
             SettingsPage::Include => DialogId::SettingsInclude,
         }
@@ -210,6 +226,7 @@ impl SettingsPage {
             SettingsPage::ContextMenu => "settings.context_menu",
             SettingsPage::Keyboard => "settings.keyboard",
             SettingsPage::FileOperations => "settings.file_operations",
+            SettingsPage::Performance => "settings.performance",
             SettingsPage::Index => "settings.index",
             SettingsPage::Include => "settings.include",
         }
@@ -222,7 +239,8 @@ impl SettingsPage {
             SettingsPage::Search => Glyph::Search,
             SettingsPage::ContextMenu => Glyph::BulletedList,
             SettingsPage::Keyboard => Glyph::KeyboardClassic,
-            SettingsPage::FileOperations => Glyph::SpeedHigh,
+            SettingsPage::FileOperations => Glyph::Copy,
+            SettingsPage::Performance => Glyph::SpeedHigh,
             SettingsPage::Index => Glyph::HardDrive,
             SettingsPage::Include => Glyph::CheckList,
         }
@@ -264,7 +282,13 @@ impl SettingsValues {
                 choices.show_shortcut = defaults.show_shortcut;
                 choices.shortcuts = defaults.shortcuts;
             }
-            SettingsPage::FileOperations => choices.speed = defaults.speed,
+            SettingsPage::FileOperations => {
+                choices.copy_policy = defaults.copy_policy;
+                choices.transfers_per_device = defaults.transfers_per_device;
+            }
+            SettingsPage::Performance => {
+                choices.speed = defaults.speed;
+            }
             SettingsPage::Index => {}
             SettingsPage::Include => {
                 if let Some(include) = &mut self.include {
@@ -1065,11 +1089,12 @@ mod tests {
     #[test]
     fn a_damaged_value_falls_back_to_its_default() {
         let text = r#"{
-            "settings": { "language": 5 },
+            "settings": { "language": 5, "copy_policy": "replace" },
             "window": { "placement": { "left": 10, "top": 20, "right": 900, "bottom": 700, "maximized": true } }
         }"#;
         let settings: Settings = serde_json::from_str(text).expect("the file is an object");
         assert_eq!(settings.choices.language, LanguageChoice::Windows);
+        assert_eq!(settings.choices.copy_policy, Policy::UpdateChanged);
         assert_eq!(
             settings.window.placement,
             Some(Placement {

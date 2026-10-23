@@ -4,15 +4,18 @@
 //! else's entry, never replaced without the person's choice and never
 //! deleted (D13).
 
-use std::sync::Mutex;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use gozler_winfs::{Access, Existing, Reparse, open_entry, path_attributes, set_path_attributes};
 
-use crate::conflicts::Choice;
+use crate::conflicts::Policy;
 use crate::delete::{Disposition, remove};
 use crate::listing::join;
 use crate::names::Names;
+use crate::names::fold;
+use crate::operation::{Initialization, Pause};
 use crate::win32::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM,
@@ -27,6 +30,42 @@ pub(crate) struct Target {
     pub(crate) names: Mutex<Names>,
     /// This operation created it.
     pub(crate) made: bool,
+    children: Mutex<HashMap<Vec<u16>, Arc<Child>>>,
+}
+
+type Child = Initialization<Result<Arc<Target>, u32>>;
+
+impl Target {
+    pub(crate) fn new(verbatim: Vec<u16>, names: Names, made: bool) -> Self {
+        Self {
+            verbatim,
+            names: Mutex::new(names),
+            made,
+            children: Mutex::default(),
+        }
+    }
+
+    /// One name authority for every source merged into this child folder.
+    pub(crate) fn child(
+        &self,
+        name: &[u16],
+        shared: bool,
+        pause: &Pause,
+        cancel: &AtomicBool,
+        initialize: impl FnOnce() -> Result<Target, u32>,
+    ) -> Result<Arc<Target>, u32> {
+        if !shared {
+            return initialize().map(Arc::new);
+        }
+        let child = self
+            .children
+            .lock()
+            .expect("no worker panics")
+            .entry(fold(name))
+            .or_default()
+            .clone();
+        child.get_or_init(pause, cancel, || initialize().map(Arc::new))
+    }
 }
 
 /// How an entry ended up.
@@ -35,8 +74,7 @@ pub(crate) enum Placed<T> {
     /// It has its name, possibly numbered after the listing, with what the
     /// write returned.
     Named(T),
-    /// Another program took the name, and the choice, or the lack of one,
-    /// skips it. Nothing was written.
+    /// The accepted policy keeps the destination. Nothing was written.
     Skipped,
     /// With Windows' error.
     Failed(u32),
@@ -52,6 +90,10 @@ pub(crate) struct Placing<'a> {
     /// Write over the file found at `name`.
     pub(crate) replace: bool,
     pub(crate) is_folder: bool,
+    pub(crate) size: u64,
+    pub(crate) last_write: i64,
+    /// Recovery may finish its own partial file regardless of the policy.
+    pub(crate) recovering: bool,
     /// [`Wanted::shared`](crate::conflicts::Wanted::shared): a file that
     /// takes the name after the listing may be the other entry's copy, so
     /// Replace gives this entry a number instead, as two selected entries
@@ -69,7 +111,7 @@ pub(crate) struct Placing<'a> {
 pub(crate) fn place<T>(
     target: &Target,
     placing: Placing<'_>,
-    choice: Option<Choice>,
+    choice: Option<Policy>,
     mut write: impl FnMut(&[u16], Existing) -> Result<T, u32>,
 ) -> Placed<T> {
     let Placing {
@@ -77,10 +119,31 @@ pub(crate) fn place<T>(
         mut name,
         mut replace,
         is_folder,
+        size,
+        last_write,
+        recovering,
         shared,
     } = placing;
+    let policy = choice.unwrap_or_default();
     loop {
         let to = join(&target.verbatim, &name);
+        if replace && !recovering && matches!(policy, Policy::UpdateChanged | Policy::UpdateNewer) {
+            let inspected = open_entry(&to, Access::Inspect, Reparse::Open)
+                .and_then(|entry| Ok((entry.attribute_tag()?, entry.stat()?)));
+            match inspected {
+                Ok((tag, _)) if (tag.attributes & FILE_ATTRIBUTE_DIRECTORY != 0) != is_folder => {
+                    return Placed::Failed(ERROR_ALREADY_EXISTS);
+                }
+                Ok((_, found))
+                    if !policy.replaces(size, last_write, found.size, found.last_write) =>
+                {
+                    return Placed::Skipped;
+                }
+                Ok(_) => {}
+                Err(error) if crate::win32::is_gone(error.code) => {}
+                Err(error) => return Placed::Failed(error.code),
+            }
+        }
         if replace && let Err(error) = clear_protection(&to) {
             return Placed::Failed(error);
         }
@@ -115,13 +178,17 @@ pub(crate) fn place<T>(
         if replace {
             return Placed::Failed(error);
         }
-        match choice {
-            Some(Choice::Replace) if !is_folder && !shared => replace = true,
-            Some(Choice::KeepBoth) | Some(Choice::Replace) => {
+        match policy {
+            Policy::Replace | Policy::UpdateChanged | Policy::UpdateNewer
+                if !is_folder && !shared =>
+            {
+                replace = true
+            }
+            Policy::KeepBoth | Policy::Replace | Policy::UpdateChanged | Policy::UpdateNewer => {
                 let mut names = target.names.lock().expect("no worker panics");
                 name = names.keep_both(base, is_folder);
             }
-            Some(Choice::Skip) | None => return Placed::Skipped,
+            Policy::Skip => return Placed::Skipped,
         }
     }
 }

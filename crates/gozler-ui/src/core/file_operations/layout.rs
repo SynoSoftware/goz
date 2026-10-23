@@ -40,7 +40,6 @@ pub(crate) struct Layout {
     pub(crate) hide: Rect,
     pub(crate) queue: Rect,
     pub(crate) list: Rect,
-    pub(crate) hint: Rect,
     pub(crate) icon: Rect,
     pub(crate) title: Rect,
     pub(crate) status: Rect,
@@ -126,7 +125,6 @@ impl Layout {
             queue_width,
             bottom - y - line - gap,
         );
-        l.hint = rect(queue_x, y, queue_width, line);
         let end = x + width;
         let icon = d(CARD_ICON);
         l.icon = rect(x, y, icon, icon);

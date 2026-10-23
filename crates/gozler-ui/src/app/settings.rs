@@ -77,7 +77,8 @@ fn heading(page: SettingsPage) -> ControlId {
         SettingsPage::Search => ControlId::SearchHeading,
         SettingsPage::ContextMenu => ControlId::ContextMenuHeading,
         SettingsPage::Keyboard => ControlId::KeyboardHeading,
-        SettingsPage::FileOperations => ControlId::SpeedHeading,
+        SettingsPage::FileOperations => ControlId::FileOperationsSettingsHeading,
+        SettingsPage::Performance => ControlId::SpeedHeading,
         SettingsPage::Index => ControlId::IndexHeading,
         SettingsPage::Include => ControlId::IncludeHeading,
     }
@@ -236,12 +237,16 @@ const SPEED_BLOCKS: [(ControlId, SpeedField<RingBlock>); 2] = [
 ];
 
 /// Each page's Reset.
-const RESTORE: [(SettingsPage, ControlId); 6] = [
+const RESTORE: [(SettingsPage, ControlId); 7] = [
     (SettingsPage::General, ControlId::GeneralRestore),
     (SettingsPage::Search, ControlId::SearchRestore),
     (SettingsPage::ContextMenu, ControlId::ContextMenuRestore),
     (SettingsPage::Keyboard, ControlId::KeyboardRestore),
-    (SettingsPage::FileOperations, ControlId::SpeedRestore),
+    (
+        SettingsPage::FileOperations,
+        ControlId::FileOperationsRestore,
+    ),
+    (SettingsPage::Performance, ControlId::SpeedRestore),
     (SettingsPage::Include, ControlId::IncludeRestore),
 ];
 
@@ -514,18 +519,30 @@ impl<'a> SettingsDialog<'a> {
                 self.show_shortcut();
                 self.fill_commands(self.selected_command());
             }
-            SettingsPage::FileOperations => self.fill_speed(&values.choices.speed),
+            SettingsPage::FileOperations => {
+                if let Some(list) = self.file_operations_list(ControlId::SpeedTransfers) {
+                    list.select((values.choices.transfers_per_device.get() - 1) as usize);
+                }
+                if let Some(list) = self.file_operations_list(ControlId::FileOperationsPolicy) {
+                    let selected = gozler_fileops::Policy::ALL
+                        .iter()
+                        .position(|policy| *policy == values.choices.copy_policy)
+                        .unwrap_or(0);
+                    list.select(selected);
+                }
+            }
+            SettingsPage::Performance => self.fill_speed(&values.choices.speed),
             SettingsPage::Index => self.fill_dates_created(values.include.as_ref()),
             SettingsPage::Include => self.fill_include(values.include.as_mut()),
         });
         self.show_closed_note();
     }
 
-    /// Sets the File operations page's controls from `speed`.
+    /// Sets the Performance page's controls from `speed`.
     fn fill_speed(&self, speed: &Speed) {
         self.draft.borrow_mut().speed_shown();
         self.show_preset(speed.preset);
-        let page = SettingsPage::FileOperations;
+        let page = SettingsPage::Performance;
         let mut settings = speed.settings();
         for (control, number) in SPEED_NUMBERS {
             if let Some(edit) = self.control(page, control) {
@@ -562,17 +579,20 @@ impl<'a> SettingsDialog<'a> {
         if let (Some(list), Some(place)) = (self.speed_list(ControlId::SpeedPreset), place) {
             list.select(place);
         }
-        if let Some(label) = self.control(SettingsPage::FileOperations, ControlId::SpeedDescription)
-        {
+        if let Some(label) = self.control(SettingsPage::Performance, ControlId::SpeedDescription) {
             label.set_text(self.strings.text(preset.texts().1));
         }
     }
 
-    fn speed_list(&self, control: ControlId) -> Option<DropDownList> {
+    fn file_operations_list(&self, control: ControlId) -> Option<DropDownList> {
         DropDownList::of_dialog(self.page(SettingsPage::FileOperations)?, control.id())
     }
 
-    /// Changes one of the File operations page's values, which makes its
+    fn speed_list(&self, control: ControlId) -> Option<DropDownList> {
+        DropDownList::of_dialog(self.page(SettingsPage::Performance)?, control.id())
+    }
+
+    /// Changes one of the Performance page's values, which makes its
     /// choice Custom.
     fn change_speed(&self, change: impl FnOnce(&mut SpeedSettings)) {
         let preset = {
@@ -1174,6 +1194,17 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
             SettingsPage::FileOperations => {
+                if let Some(list) = self.file_operations_list(ControlId::SpeedTransfers) {
+                    list.set_items(&["1", "2", "3"], 0);
+                }
+                if let Some(list) = self.file_operations_list(ControlId::FileOperationsPolicy) {
+                    list.set_items(
+                        &crate::core::file_operations::policy_names(&self.strings),
+                        0,
+                    );
+                }
+            }
+            SettingsPage::Performance => {
                 if let Some(list) = self.speed_list(ControlId::SpeedPreset) {
                     let names: Vec<&str> = SpeedPreset::ALL
                         .iter()
@@ -1578,7 +1609,7 @@ impl<'a> SettingsDialog<'a> {
     /// what the dialog does then.
     fn apply(&self, dialog: Hwnd, after: AfterSave) -> bool {
         if let Err((control, message)) = self.read_speed() {
-            self.refuse(dialog, SettingsPage::FileOperations, control, &message);
+            self.refuse(dialog, SettingsPage::Performance, control, &message);
             return false;
         }
         let (edited, last) = {
@@ -1819,6 +1850,23 @@ impl<'a> SettingsDialog<'a> {
             self.fill_keys(0);
         } else if is(id, ControlId::KeyboardKeys) {
             self.update_key_buttons();
+        } else if is(id, ControlId::FileOperationsPolicy) {
+            if let Some(policy) = self
+                .file_operations_list(ControlId::FileOperationsPolicy)
+                .and_then(DropDownList::selected)
+                .and_then(|i| gozler_fileops::Policy::ALL.get(i).copied())
+            {
+                self.draft.borrow_mut().edited.choices.copy_policy = policy;
+            }
+        } else if is(id, ControlId::SpeedTransfers) {
+            if let Some(place) = self
+                .file_operations_list(ControlId::SpeedTransfers)
+                .and_then(DropDownList::selected)
+            {
+                self.draft.borrow_mut().edited.choices.transfers_per_device =
+                    gozler_fileops::TransferLimit::try_from(place as u32 + 1)
+                        .expect("the list contains transfer limits 1 through 3");
+            }
         } else if is(id, ControlId::SpeedPreset) {
             let chosen = self
                 .speed_list(ControlId::SpeedPreset)
@@ -1826,12 +1874,12 @@ impl<'a> SettingsDialog<'a> {
                 .and_then(|place| SpeedPreset::ALL.get(place).copied());
             if let Some(preset) = chosen {
                 self.draft.borrow_mut().edited.choices.speed.preset = preset;
-                self.fill(SettingsPage::FileOperations);
+                self.fill(SettingsPage::Performance);
             }
         } else if let Some((control, number)) = SPEED_NUMBERS.into_iter().find(|(c, _)| is(id, *c))
         {
             let text = self
-                .control(SettingsPage::FileOperations, control)
+                .control(SettingsPage::Performance, control)
                 .map(Hwnd::text)
                 .unwrap_or_default();
             // A number out of its range is refused when OK or Apply is
@@ -1922,10 +1970,10 @@ impl<'a> SettingsDialog<'a> {
             }
         } else if is(id, ControlId::SpeedPerProcessor) {
             let per_processor = self
-                .check_box(SettingsPage::FileOperations, ControlId::SpeedPerProcessor)
+                .check_box(SettingsPage::Performance, ControlId::SpeedPerProcessor)
                 .is_some_and(CheckBox::is_checked);
             self.change_speed(|settings| speed::set_per_processor(settings, per_processor));
-            self.fill(SettingsPage::FileOperations);
+            self.fill(SettingsPage::Performance);
         } else if is(id, ControlId::IncludeModify) {
             self.modify_folders(dialog);
         } else if is(id, ControlId::KeyboardClear) {

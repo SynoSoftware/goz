@@ -17,6 +17,7 @@
     "turkish": "&Turco"
   },
   "command": {
+    "synchronize": "Sincroni&zar carpetas…",
     "open": "&Abrir",
     "open_file_location": "Abrir &ubicación del archivo",
     "explore": "E&xplorar",
@@ -429,7 +430,16 @@
     "not_a_number": "Escribe un número, como {0}.",
     "order": "Mínimo no puede ser mayor que Máximo."
   },
+  "copy_policy": {
+    "label": "Archivos que ya están en el &destino:",
+    "update_changed": "Actualizar archivos modificados",
+    "update_newer": "Actualizar archivos más recientes",
+    "keep_both": "Conservar ambos",
+    "skip": "Omitir archivos existentes",
+    "hint": "Actualizar archivos modificados también reemplaza destinos más recientes."
+  },
   "settings": {
+    "performance": "Rendimiento",
     "title": "Configuración",
     "unsaved": "Cambios sin aplicar",
     "saving": "Guardando la configuración…",
@@ -536,6 +546,7 @@
     "two_panels": "Dos paneles reserva de F3 a F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L, Ctrl+R y Alt con una letra, un dígito, una coma o un punto. Un método abreviado en una de estas teclas solo funciona en Búsqueda."
   },
   "settings_file_operations": {
+    "transfers_per_device": "&Transferencias por dispositivo:",
     "speed": "Ajustes de &velocidad:",
     "automatic": "Automático",
     "automatic_description": "Valores recomendados de Gozler.",
@@ -736,8 +747,6 @@
     "size_items_other": "{0} elementos",
     "selected_one": "{0} elemento seleccionado",
     "selected_other": "{0} elementos seleccionados",
-    "must_stay_after": "Debe quedar después de {0}, porque ambas usan los mismos archivos.",
-    "must_stay_before": "Debe quedar antes de {0}, porque ambas usan los mismos archivos.",
     "pause": "Pausar",
     "resume": "Reanudar",
     "cancel": "Cancelar",
@@ -907,6 +916,43 @@
     "open_failed": "No se pudo iniciar {0}. {1} Revisa el comando en Archivo > Configuración > Menú contextual.",
     "shortcut_taken": "Otro programa usa {0}, así que ya no muestra Gozler. Elige otro método abreviado en Archivo > Configuración > Teclado.",
     "registry_failed": "No se pudo guardar \"{0}\" en el Registro. {1}"
+  },
+  "sync": {
+    "title": "Sincronizar carpetas",
+    "source": "&Origen:",
+    "destination": "&Destino:",
+    "mirror": "&Eliminar archivos adicionales (Espejo)",
+    "compare": "&Comparar",
+    "synchronize": "Sincronizar",
+    "direction": "Los cambios van del Origen al Destino.",
+    "initial": "Compare las carpetas antes de sincronizar.",
+    "action": "Acción",
+    "add": "Añadir",
+    "replace": "Reemplazar",
+    "conflict": "Conflicto",
+    "unchanged": "Sin cambios",
+    "keep": "Conservar",
+    "summary": "Añadir {0} · Reemplazar {1} · Iguales {2} · Extra {3} · Conflictos {4}",
+    "conflicts": "Resuelva los nombres de archivo y carpeta en conflicto y vuelva a comparar.",
+    "delete_hint": "Espejo elimina permanentemente las entradas marcadas Eliminar.",
+    "ready": "Se conservan las entradas adicionales. Sincronizar aplica esta comparación.",
+    "review": "Revisar comparación",
+    "comparing": "Comparando carpetas",
+    "synchronizing": "Sincronizando",
+    "row": "Sincronizar {0} → {1}",
+    "waiting_for": "Esperando a Sincronizar: {0}",
+    "processed_one": "{0} procesado",
+    "processed_other": "{0} procesados",
+    "running": "Sincronizando {0}",
+    "completed": "Sincronizado: {0}",
+    "cancelled": "Sincronización cancelada: {0}",
+    "changed": "Las carpetas cambiaron tras la comparación. Vuelva a comparar.",
+    "overlap": "Elija carpetas separadas. Ninguna puede contener a la otra.",
+    "failed": "No se pudieron comparar las carpetas. {0}",
+    "failed_short": "Comparación detenida",
+    "copy_sync": "Copiar y sincronizar",
+    "move_sync": "Mover y sincronizar",
+    "copy_move_sync": "Copiar, mover y sincronizar"
   },
   "transfer": {
     "copy_name": "Copiar {0} en:",

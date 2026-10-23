@@ -306,12 +306,44 @@ shows each byte. The Viewer chooses from the file's first bytes, and `F4`
 switches.
 
 **File operation**:
-A copy, a move, a delete, a rename or a new folder, which the engine's queue
-runs. Every delete is permanent.
+A person's command to copy, move, synchronize, delete, rename or create a
+folder. An operation includes its whole selection; every delete is permanent.
+
+**Transfer**:
+The work of a copy, move or synchronization between one source volume and
+one destination volume. An operation can contain several transfers.
+
+**Copy policy**:
+The rule chosen before a copy or move for files whose names already exist at
+the destination: update changed files, update only newer files, keep both or
+skip existing files. A metadata match does not verify equal contents.
+
+**Synchronization**:
+A one-way update of a destination folder tree from an authoritative source
+folder tree, after comparing and reviewing their differences.
+
+**Comparison**:
+The differences found between synchronization's source and destination,
+including new, changed, unchanged and destination-only entries.
+
+**Mirror**:
+Synchronization that also permanently deletes the reviewed destination-only
+entries after the required additions and updates succeed.
+
+**Device admission**:
+Permission for a transfer to use all its physical storage devices together,
+within each device's transfer limit.
 
 **Queue**:
-The file operations that wait, each for an earlier operation whose paths
-overlap its own or whose copy uses the same hard disk.
+The accepted transfers waiting for device admission, in the person's chosen
+priority order.
+
+**Paused transfer**:
+A transfer the person stopped until they choose Resume.
+
+**Yielded transfer**:
+A transfer temporarily stopped for higher-priority work, which returns
+automatically when that work releases its devices.
 
 **Taken entry**:
 An entry that a waiting or running delete or move takes. It leaves the folder
@@ -319,7 +351,8 @@ panels, and shows struck through in the search lists, at once, before the
 disk work ends.
 
 **Transfer pane**:
-The pane that shows copies, moves, their queue and reports in the window.
+The pane that shows copies, moves, synchronizations, their queue and reports
+in the window.
 _Avoid_: File operations window
 
 **Color token**:

@@ -34,6 +34,36 @@ fn in_range(setting: &'static str, value: u32, min: u32, max: u32) -> Result<u32
 
 const MIB: u32 = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct TransferLimit(u32);
+
+impl Default for TransferLimit {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+impl TransferLimit {
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for TransferLimit {
+    type Error = SettingError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        in_range("transfers per device", value, 1, 3).map(Self)
+    }
+}
+
+impl From<TransferLimit> for u32 {
+    fn from(limit: TransferLimit) -> u32 {
+        limit.0
+    }
+}
+
 /// From this size, a file between two local volumes is large.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LargeFileLimit(u32);
@@ -271,6 +301,8 @@ mod tests {
         assert!(LargeFileLimit::from_mib(1025).is_err());
         assert!(Count::new(0).is_err());
         assert!(Count::new(65).is_err());
+        assert!(TransferLimit::try_from(0).is_err());
+        assert!(TransferLimit::try_from(4).is_err());
         assert!(RingBlock::from_bytes(32 * 1024).is_err());
         assert!(RingBlock::from_bytes(128 * MIB).is_err());
         assert!(RingBuffer::from_mib(15).is_err());

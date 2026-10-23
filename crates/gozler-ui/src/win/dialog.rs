@@ -10,30 +10,31 @@
 
 use super::controls::{Button, TreeItem, has_image};
 use super::gdi::{Font, TextMeter, icons_shown};
+use super::notify::DispInfo;
 use super::{Hwnd, wide};
 use crate::core::captions::{ButtonIcon, DialogCaptions, Guard, Question, QuestionBody};
 use crate::core::commands::Keystroke;
-use crate::core::file_operations::Choices;
 use crate::core::glyph::Glyph;
 use crate::core::ids::DialogId;
-use crate::core::layout::{self, Px, Rect};
+use crate::core::layout::{self, Px, Rect, Size};
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    DTN_DATETIMECHANGE, EMF_CENTERED, LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED,
-    NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR, NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMTREEVIEWW,
-    NMTVITEMCHANGE, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1,
-    TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
-    TDF_POSITION_RELATIVE_TO_WINDOW, TDF_USE_COMMAND_LINKS, TVE_EXPAND, TVIS_STATEIMAGEMASK,
-    TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
+    DTN_DATETIMECHANGE, EMF_CENTERED, LVN_GETDISPINFOW, LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW,
+    LVN_ITEMCHANGED, NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR, NMLVDISPINFOW, NMLVEMPTYMARKUP,
+    NMLVGETINFOTIPW, NMTREEVIEWW, NMTVITEMCHANGE, TASKDIALOG_BUTTON, TASKDIALOGCONFIG,
+    TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_INFORMATION_ICON, TD_WARNING_ICON,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW, TVE_EXPAND,
+    TVIS_STATEIMAGEMASK, TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_SELCHANGE, CreateDialogParamW,
     DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE,
     GetClassNameW, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK,
-    MB_ICONERROR, MB_OK, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
-    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_INITDIALOG, WM_NOTIFY, WM_TIMER,
+    MB_ICONERROR, MB_OK, MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
+    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE,
+    WM_TIMER,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR};
 
@@ -121,6 +122,13 @@ pub(crate) trait DialogProc {
     /// Answers `true` for a message it handled. An OK or Cancel that it
     /// leaves ends the dialog with that result.
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool;
+    fn list_cell(&self, _id: u16, _row: u64, _column: usize) -> Option<String> {
+        None
+    }
+    fn resized(&self, _dialog: Hwnd) {}
+    fn minimum_size(&self) -> Option<Size> {
+        None
+    }
     /// What the empty list view `id` says in its empty area, as File
     /// Explorer says that a folder is empty; `None` for nothing.
     fn empty_text(&self, _id: u16) -> Option<String> {
@@ -248,6 +256,17 @@ unsafe extern "system" fn procedure<D: DialogProc>(
             let header = unsafe { &*(lparam.0 as *const NMHDR) };
             let id = header.idFrom as u16;
             match header.code {
+                LVN_GETDISPINFOW => {
+                    // SAFETY: LVN_GETDISPINFOW supplies this mutable structure
+                    // for the duration of the notification.
+                    let mut cell = DispInfo(unsafe { &mut *(lparam.0 as *mut NMLVDISPINFOW) });
+                    if cell.wants_text()
+                        && let Some(text) = running.state.list_cell(id, cell.row(), cell.column())
+                    {
+                        cell.set_text(&text);
+                    }
+                    return 0;
+                }
                 LVN_GETEMPTYMARKUP => {
                     let Some(text) = running.state.empty_text(id) else {
                         return 0;
@@ -319,6 +338,20 @@ unsafe extern "system" fn procedure<D: DialogProc>(
             }
         }
         WM_TIMER => DialogMessage::Timer { id: wparam.0 },
+        WM_SIZE => {
+            running.state.resized(dialog);
+            return 0;
+        }
+        WM_GETMINMAXINFO => {
+            if let Some(size) = running.state.minimum_size() {
+                // SAFETY: WM_GETMINMAXINFO supplies a mutable MINMAXINFO.
+                let limits = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                limits.ptMinTrackSize.x = size.width.0;
+                limits.ptMinTrackSize.y = size.height.0;
+                return 1;
+            }
+            return 0;
+        }
         REPLY => DialogMessage::Reply,
         super::shortcut::CAPTURED => match super::shortcut::captured(wparam, lparam) {
             Some((windows, keystroke)) => DialogMessage::KeysCaptured { windows, keystroke },
@@ -800,54 +833,6 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
     // when the dialog closes.
     let shown = unsafe { TaskDialogIndirect(&config, Some(&raw mut chosen), None, None) };
     shown.is_ok() && chosen == CONFIRM
-}
-
-/// Asks `choices` in a task dialog with a command link for each answer and
-/// Cancel, as File Explorer asks about files with the same names; the index
-/// of the answer, or `None` when the person cancelled.
-pub(crate) fn choose(owner: Hwnd, choices: &Choices) -> Option<usize> {
-    const FIRST: i32 = 100;
-    let [title, instruction, body] =
-        [&choices.title, &choices.instruction, &choices.body].map(|text| wide(text));
-    let answers: Vec<Vec<u16>> = choices.answers.iter().map(|answer| wide(answer)).collect();
-    let buttons: Vec<TASKDIALOG_BUTTON> = answers
-        .iter()
-        .zip(FIRST..)
-        .map(|(answer, id)| TASKDIALOG_BUTTON {
-            nButtonID: id,
-            pszButtonText: PCWSTR(answer.as_ptr()),
-        })
-        .collect();
-    let config = TASKDIALOGCONFIG {
-        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
-        hwndParent: owner.0,
-        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION
-            | TDF_POSITION_RELATIVE_TO_WINDOW
-            | TDF_USE_COMMAND_LINKS,
-        // A task dialog shows its own buttons only in Windows' language; a
-        // command link is a button too, so Cancel is the one common button.
-        dwCommonButtons: TDCBF_CANCEL_BUTTON,
-        pszWindowTitle: PCWSTR(title.as_ptr()),
-        pszMainInstruction: PCWSTR(instruction.as_ptr()),
-        pszContent: if choices.body.is_empty() {
-            PCWSTR::null()
-        } else {
-            PCWSTR(body.as_ptr())
-        },
-        cButtons: buttons.len() as u32,
-        pButtons: buttons.as_ptr(),
-        // Enter must not replace files at the destination.
-        nDefaultButton: IDCANCEL.0,
-        ..Default::default()
-    };
-    let mut chosen = 0;
-    // SAFETY: the texts and the buttons outlive the call, which returns
-    // when the dialog closes.
-    let shown = unsafe { TaskDialogIndirect(&config, Some(&raw mut chosen), None, None) };
-    shown.ok()?;
-    usize::try_from(chosen - FIRST)
-        .ok()
-        .filter(|index| *index < choices.answers.len())
 }
 
 /// `lines` of labels and values as one body for [`ask`], with spaces after

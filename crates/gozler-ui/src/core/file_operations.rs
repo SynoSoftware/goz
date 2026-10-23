@@ -17,13 +17,28 @@ use super::layout::Px;
 use super::panel::same_folder;
 use super::text::{Numbers, Strings, bytes, name_of, without_access_key};
 use gozler_fileops::{
-    Choice, Destination, End, Listed, NoRoom, Operation, OperationId, Outcome, Prepared, Reason,
-    Refusal, Request, RingCounts, Running, SourcesFolder, State, Total,
+    Destination, End, Listed, NoRoom, Operation, OperationId, Outcome, Reason, Refusal, Request,
+    RingCounts, Running, SourcesFolder, State, Total,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+pub(crate) fn policy_name(strings: &Strings, policy: gozler_fileops::Policy) -> &str {
+    use gozler_fileops::Policy;
+    strings.text(match policy {
+        Policy::UpdateChanged => "copy_policy.update_changed",
+        Policy::UpdateNewer => "copy_policy.update_newer",
+        Policy::KeepBoth => "copy_policy.keep_both",
+        Policy::Skip => "copy_policy.skip",
+        Policy::Replace => "file_operations.replace",
+    })
+}
+
+pub(crate) fn policy_names(strings: &Strings) -> [&str; 4] {
+    gozler_fileops::Policy::ALL.map(|policy| policy_name(strings, policy))
+}
 
 /// How far back the speed looks: long enough that one slow file does not
 /// make the speed jump, short enough that a change shows within seconds.
@@ -135,7 +150,7 @@ pub(crate) struct Report {
 }
 
 pub(crate) fn is_transfer(request: &Request) -> bool {
-    matches!(request, Request::Copy { .. } | Request::Move { .. })
+    request.is_transfer()
 }
 
 /// The selected operation's progress, independently of the status target.
@@ -510,6 +525,7 @@ pub(crate) fn glyph_of(request: &Request) -> Glyph {
     match request {
         _ if renamed(request).is_some() => Glyph::Rename,
         Request::Copy { .. } => Glyph::Copy,
+        Request::Synchronize { .. } => Glyph::Refresh,
         Request::Move { .. } => Glyph::MoveToFolder,
         Request::Delete { .. } => Glyph::Delete,
         Request::NewFolder { .. } => Glyph::Folder,
@@ -523,6 +539,7 @@ fn renamed(request: &Request) -> Option<(String, String)> {
     let Request::Move {
         sources,
         destination: Destination::Named { folder, name },
+        ..
     } = request
     else {
         return None;
@@ -536,7 +553,8 @@ fn renamed(request: &Request) -> Option<(String, String)> {
 }
 
 /// The icons the queue list shows, in the order [`icon_index`] numbers.
-pub(crate) const ROW_GLYPHS: [Glyph; 5] = [
+pub(crate) const ROW_GLYPHS: [Glyph; 6] = [
+    Glyph::Refresh,
     Glyph::Copy,
     Glyph::MoveToFolder,
     Glyph::Delete,
@@ -590,6 +608,12 @@ fn kind_of(request: &Request) -> Kind {
             "file_operations.row_move",
             "file_operations.waiting_for_move",
         ),
+        Request::Synchronize { .. } => kind(
+            "sync.synchronize",
+            "sync.synchronizing",
+            "sync.row",
+            "sync.waiting_for",
+        ),
         Request::Delete { .. } => kind(
             "file_operations.delete",
             "file_operations.deleting",
@@ -602,6 +626,14 @@ fn kind_of(request: &Request) -> Kind {
             "file_operations.row_new_folder",
             "file_operations.waiting_for_new_folder",
         ),
+    }
+}
+
+fn doing(request: &Request, running: &Running) -> &'static str {
+    if running.phase == gozler_fileops::RunningPhase::Comparing {
+        "sync.comparing"
+    } else {
+        kind_of(request).doing
     }
 }
 
@@ -651,10 +683,12 @@ fn ends_of(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) -> E
         Request::Copy {
             sources,
             destination,
+            ..
         }
         | Request::Move {
             sources,
             destination,
+            ..
         } => Ends {
             from: entries(sources),
             to: Some(text_of(&destination.path())),
@@ -662,6 +696,14 @@ fn ends_of(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) -> E
         Request::Delete { sources } => Ends {
             from: entries(sources),
             to: None,
+        },
+        Request::Synchronize {
+            source,
+            destination,
+            ..
+        } => Ends {
+            from: text_of(source),
+            to: Some(text_of(destination)),
         },
         Request::NewFolder { path } => Ends {
             from: text_of(path),
@@ -708,10 +750,12 @@ fn card_ends(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) ->
         Request::Copy {
             sources,
             destination,
+            ..
         }
         | Request::Move {
             sources,
             destination,
+            ..
         } => Ends {
             from: from(sources),
             to: Some(text_of(&destination.path())),
@@ -720,7 +764,9 @@ fn card_ends(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) ->
             from: from(sources),
             to: None,
         },
-        Request::NewFolder { .. } => ends_of(strings, numbers, operation),
+        Request::NewFolder { .. } | Request::Synchronize { .. } => {
+            ends_of(strings, numbers, operation)
+        }
     }
 }
 
@@ -875,7 +921,9 @@ fn card_for(
 /// across volumes with data to move. A move by rename and a copy of empty
 /// files count their entries.
 pub(super) fn moves_bytes(running: &Running) -> bool {
-    !running.renames && running.total.is_some_and(|total| total.bytes > 0)
+    running.phase != gozler_fileops::RunningPhase::Synchronizing
+        && !running.renames
+        && running.total.is_some_and(|total| total.bytes > 0)
 }
 
 /// What a running operation has done, and its total; `None` without a
@@ -954,12 +1002,13 @@ fn card(
     running: &Running,
     speed: Option<Speed>,
 ) -> Card {
-    let kind = kind_of(&operation.request);
     let ends = card_ends(strings, numbers, operation);
     let measure = measure_of(running);
     let moves_bytes = moves_bytes(running);
     let title = operation_title(strings, numbers, &operation.request);
-    let status = strings.text(held(running).unwrap_or(kind.doing)).to_owned();
+    let status = strings
+        .text(held(running).unwrap_or_else(|| doing(&operation.request, running)))
+        .to_owned();
     let (file, file_tip, file_bar) = match &running.current {
         Some(current) => {
             let source = text_of(&current.source);
@@ -968,10 +1017,13 @@ fn card(
                 Some(destination) => format!("{source}\n→ {}", text_of(destination)),
                 None => source.clone(),
             };
-            let bar = moves_bytes.then_some(Bar::Measured(Measure {
-                done: current.done,
-                total: current.size,
-            }));
+            let bar = current
+                .destination
+                .is_some()
+                .then_some(Bar::Measured(Measure {
+                    done: current.done,
+                    total: current.size,
+                }));
             (file, tip, bar)
         }
         // A delete and a move by rename report no current file, so the
@@ -985,7 +1037,7 @@ fn card(
                     [one] => text_of(one),
                     _ => String::new(),
                 },
-                Request::NewFolder { .. } => String::new(),
+                Request::NewFolder { .. } | Request::Synchronize { .. } => String::new(),
             };
             (
                 relative_to(&one, &ends.from).to_owned(),
@@ -1047,10 +1099,14 @@ fn operation_title(strings: &Strings, numbers: &dyn Numbers, request: &Request) 
             &[],
         ),
     };
-    strings.format(
+    let title = strings.format(
         "file_operations.running_label",
         &[strings.text(kind_of(request).name), &name],
-    )
+    );
+    match request.policy() {
+        Some(policy) => joined_parts(strings, [title, policy_name(strings, policy).to_owned()]),
+        None => title,
+    }
 }
 
 fn held(running: &Running) -> Option<&'static str> {
@@ -1079,7 +1135,7 @@ pub(crate) fn transfer_caption(
             request, running, ..
         } => (
             kind_of(request).name,
-            held(running).unwrap_or(kind_of(request).doing),
+            held(running).unwrap_or_else(|| doing(request, running)),
             Some(running.paused),
         ),
         StatusOperation::Pending { request, phase, .. } => (
@@ -1089,6 +1145,7 @@ pub(crate) fn transfer_caption(
                 Pending::Waiting => "file_operations.waiting",
                 Pending::Cancelling => "file_operations.cancelling",
                 Pending::Interrupted => "file_operations.interrupted",
+                Pending::Review => "sync.review",
             },
             None,
         ),
@@ -1108,6 +1165,7 @@ pub(crate) fn transfer_caption(
         StatusOperation::Summary { completion, .. } => (
             match completion.kind {
                 Completed::Copy(_) => "file_operations.copy",
+                Completed::Synchronize(_) => "sync.synchronize",
                 _ => "file_operations.move",
             },
             if errors > 0 {
@@ -1128,7 +1186,11 @@ pub(crate) fn transfer_caption(
         match errors {
             1 => "file_operations.copy",
             2 => "file_operations.move",
-            _ => "file_operations.copy_move",
+            3 => "file_operations.copy_move",
+            4 => "sync.synchronize",
+            5 => "sync.copy_sync",
+            6 => "sync.move_sync",
+            _ => "sync.copy_move_sync",
         }
     } else {
         kind
@@ -1151,6 +1213,10 @@ pub(crate) fn transfer_caption(
                 &[],
             ),
         };
+        let name = match &**request {
+            Request::Synchronize { destination, .. } => name_of(&text_of(destination)).to_owned(),
+            _ => name,
+        };
         (
             strings.format(
                 "file_operations.running_label",
@@ -1171,7 +1237,7 @@ pub(crate) fn transfer_caption(
         _ if matches!(
             operation,
             StatusOperation::Pending {
-                phase: Pending::Interrupted,
+                phase: Pending::Interrupted | Pending::Review,
                 ..
             }
         ) =>
@@ -1207,6 +1273,9 @@ pub(crate) fn transfer_caption(
         activity: activity.clone(),
         glyph: Some(match kind {
             "file_operations.copy" => Glyph::Copy,
+            "sync.synchronize" | "sync.copy_sync" | "sync.move_sync" | "sync.copy_move_sync" => {
+                Glyph::Refresh
+            }
             _ => Glyph::MoveToFolder,
         }),
         progress,
@@ -1241,7 +1310,7 @@ fn counts(
                 numbers,
                 &[&numbers.integer(done.items)],
             ),
-            if moves_bytes(running) {
+            if !running.renames && total.bytes > 0 {
                 strings.format(
                     "file_operations.bytes_of",
                     &[
@@ -1352,6 +1421,10 @@ fn row(
             RowLine::Plain(strings.text("file_operations.preparing").to_owned()),
             RowPhase::Starting,
         ),
+        State::Compared(_) => (
+            RowLine::Plain(strings.text("sync.review").to_owned()),
+            RowPhase::Starting,
+        ),
         State::Cancelling => (
             RowLine::Plain(strings.text("file_operations.cancelling").to_owned()),
             RowPhase::Cancelling,
@@ -1452,7 +1525,7 @@ fn size_of_total(
             numbers,
             &[],
         ),
-        (None, Request::NewFolder { .. }) => String::new(),
+        (None, Request::NewFolder { .. } | Request::Synchronize { .. }) => String::new(),
     }
 }
 
@@ -1465,6 +1538,7 @@ fn items_done(strings: &Strings, numbers: &dyn Numbers, request: &Request, items
         Request::Copy { .. } => "file_operations.copied",
         Request::Move { .. } => "file_operations.moved",
         Request::Delete { .. } => "file_operations.deleted",
+        Request::Synchronize { .. } => "sync.processed",
         Request::NewFolder { .. } => return String::new(),
     };
     strings.count(key, items, numbers, &[])
@@ -1487,6 +1561,7 @@ pub(crate) struct Completion {
 enum Completed {
     Copy(PathBuf),
     Move(PathBuf),
+    Synchronize(PathBuf),
     Rename { source: String, name: String },
     Delete,
     NewFolder(PathBuf),
@@ -1501,6 +1576,7 @@ impl Completion {
             }
             Request::Copy { destination, .. } => Completed::Copy(destination.path()),
             Request::Move { destination, .. } => Completed::Move(destination.path()),
+            Request::Synchronize { destination, .. } => Completed::Synchronize(destination.clone()),
             Request::Delete { .. } => Completed::Delete,
             Request::NewFolder { path } => Completed::NewFolder(path.clone()),
         };
@@ -1548,6 +1624,7 @@ pub(crate) enum Pending {
     Waiting,
     Cancelling,
     Interrupted,
+    Review,
 }
 
 impl StatusOperation {
@@ -1565,7 +1642,7 @@ impl StatusOperation {
             self,
             StatusOperation::Running { .. }
                 | StatusOperation::Pending {
-                    phase: Pending::Preparing | Pending::Waiting,
+                    phase: Pending::Preparing | Pending::Waiting | Pending::Review,
                     ..
                 }
         )
@@ -1576,14 +1653,17 @@ impl StatusOperation {
             Self::Summary { completion, .. } => {
                 return matches!(
                     completion.kind,
-                    Completed::Copy(_) | Completed::Move(_) | Completed::Rename { .. }
+                    Completed::Copy(_)
+                        | Completed::Move(_)
+                        | Completed::Synchronize(_)
+                        | Completed::Rename { .. }
                 );
             }
             Self::Running { request, .. }
             | Self::Ended { request, .. }
             | Self::Pending { request, .. } => request,
         };
-        matches!(**request, Request::Copy { .. } | Request::Move { .. })
+        is_transfer(request)
     }
 
     /// The newest of the running `operations`, else the newest that ended
@@ -1619,6 +1699,7 @@ impl StatusOperation {
                     operation.state,
                     State::Preparing
                         | State::Prepared(_)
+                        | State::Compared(_)
                         | State::Waiting { .. }
                         | State::Cancelling
                 )
@@ -1652,6 +1733,7 @@ impl StatusOperation {
                         State::Cancelling => Pending::Cancelling,
                         State::Waiting { .. } => Pending::Waiting,
                         State::Interrupted => Pending::Interrupted,
+                        State::Compared(_) => Pending::Review,
                         _ => Pending::Preparing,
                     },
                 },
@@ -1694,6 +1776,7 @@ pub(crate) fn status_line(
                 Pending::Waiting => "file_operations.waiting",
                 Pending::Cancelling => "file_operations.cancelling",
                 Pending::Interrupted => "file_operations.interrupted",
+                Pending::Review => "sync.review",
             };
             let text = joined_parts(
                 strings,
@@ -1704,7 +1787,7 @@ pub(crate) fn status_line(
             );
             (
                 text,
-                (!matches!(phase, Pending::Interrupted)).then_some(Bar::Moving),
+                (!matches!(phase, Pending::Interrupted | Pending::Review)).then_some(Bar::Moving),
             )
         }
         StatusOperation::Running {
@@ -1745,7 +1828,11 @@ fn running_line(
         strings,
         [
             if running.is_active() {
-                doing_line(strings, numbers, request)
+                if running.phase == gozler_fileops::RunningPhase::Comparing {
+                    strings.text("sync.comparing").to_owned()
+                } else {
+                    doing_line(strings, numbers, request)
+                }
             } else {
                 operation_title(strings, numbers, request)
             },
@@ -1770,15 +1857,18 @@ pub(crate) fn status_widest(
     let destination = || Destination::Folder(PathBuf::from(r"D:\Backup"));
     let requests = [
         Request::Copy {
+            policy: gozler_fileops::Policy::default(),
             sources: one(),
             destination: destination(),
         },
         Request::Move {
+            policy: gozler_fileops::Policy::default(),
             sources: several(),
             destination: destination(),
         },
         Request::Delete { sources: several() },
         Request::Move {
+            policy: gozler_fileops::Policy::default(),
             sources: one(),
             destination: Destination::Named {
                 folder: PathBuf::from(r"C:\Users"),
@@ -1796,6 +1886,7 @@ pub(crate) fn status_widest(
         });
         [measured, None].map(|known| {
             let running = Running {
+                phase: gozler_fileops::RunningPhase::Executing,
                 items: total,
                 bytes: total,
                 passed: 0,
@@ -1850,6 +1941,7 @@ fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> St
         Request::Copy {
             sources,
             destination,
+            ..
         } => strings.format(
             "file_operations.status_copying",
             &[&what(sources), &text_of(&destination.path())],
@@ -1857,6 +1949,7 @@ fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> St
         Request::Move {
             sources,
             destination,
+            ..
         } => strings.format(
             "file_operations.status_moving",
             &[&what(sources), &text_of(&destination.path())],
@@ -1866,6 +1959,9 @@ fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> St
         }
         Request::NewFolder { path } => {
             strings.format("file_operations.status_creating", &[&text_of(path)])
+        }
+        Request::Synchronize { destination, .. } => {
+            strings.format("sync.running", &[&text_of(destination)])
         }
     }
 }
@@ -1924,6 +2020,14 @@ fn completion_line(strings: &Strings, numbers: &dyn Numbers, completion: &Comple
             count(key, &[&text_of(destination)])
         }
         Completed::Delete if cancelled => count("file_operations.cancelled_delete", &[]),
+        Completed::Synchronize(destination) => {
+            let key = if cancelled {
+                "sync.cancelled"
+            } else {
+                "sync.completed"
+            };
+            strings.format(key, &[&text_of(destination)])
+        }
         Completed::Delete => count("file_operations.ended_delete", &[]),
         Completed::NewFolder(_) if cancelled => return String::new(),
         Completed::NewFolder(path) => {
@@ -1950,14 +2054,6 @@ fn parent_of(path: &str) -> &str {
     }
 }
 
-/// A folder's own name, or a drive's root whole, such as `C:\`.
-fn folder_name(path: &str) -> &str {
-    match name_of(path) {
-        "" => path,
-        name => name,
-    }
-}
-
 /// `path` relative to the folder `from`, or `path` whole when it is not
 /// inside it.
 fn relative_to<'a>(path: &'a str, from: &str) -> &'a str {
@@ -1968,95 +2064,6 @@ fn relative_to<'a>(path: &'a str, from: &str) -> &'a str {
         }
         _ => path,
     }
-}
-
-/// A question with several answers, of which the person picks one or
-/// cancels: the conflict question (DESIGN.md: File operations).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Choices {
-    pub(crate) title: String,
-    pub(crate) instruction: String,
-    pub(crate) body: String,
-    /// Each answer a command link, in this order.
-    pub(crate) answers: Vec<String>,
-}
-
-/// The conflict question's answers, in the order of its links.
-const CONFLICT_CHOICES: [Choice; 3] = [Choice::Replace, Choice::Skip, Choice::KeepBoth];
-
-/// Whether the person answers a [`conflict_question`] before the prepared
-/// copy or move runs.
-pub(crate) fn asks(request: &Request, prepared: &Prepared) -> bool {
-    matches!(request, Request::Copy { .. } | Request::Move { .. })
-        && (prepared.conflicts)
-            .is_some_and(|found| found.files + found.merges + found.same_name > 0)
-}
-
-/// The choice of the conflict question's answer `index`.
-pub(crate) fn conflict_choice(index: usize) -> Option<Choice> {
-    CONFLICT_CHOICES.get(index).copied()
-}
-
-/// The conflict question of a copy or a move whose prepare found files at
-/// the destination with the names it writes, selected folders that merge
-/// into folders of their names, or selected entries that share a name;
-/// `None` when it found none, so nobody is asked. As File Explorer's
-/// question does, it names the folders by their own names, so a long path
-/// never widens the dialog. Without a total from gozlerd it counts the
-/// selected entries, as File Explorer does before it has counted. `folder`
-/// holds the request's sources; the queue works it out before it prepares.
-pub(crate) fn conflict_question(
-    strings: &Strings,
-    numbers: &dyn Numbers,
-    request: &Request,
-    prepared: &Prepared,
-    folder: &SourcesFolder,
-) -> Option<Choices> {
-    let found = prepared.conflicts?;
-    let (key, destination) = match request {
-        Request::Copy { destination, .. } => ("file_operations.conflict_copying", destination),
-        Request::Move { destination, .. } => ("file_operations.conflict_moving", destination),
-        Request::Delete { .. } | Request::NewFolder { .. } => return None,
-    };
-    let from = sources_text(
-        strings,
-        numbers,
-        folder,
-        prepared.entries,
-        "file_operations.several_folders_inline",
-    );
-    let to = text_of(&destination.path());
-    let items = prepared
-        .total
-        .map_or(prepared.entries as u64, |total| total.items);
-    let doing = strings.count(key, items, numbers, &[folder_name(&from), folder_name(&to)]);
-    let mut found = [
-        ("file_operations.conflicts", found.files),
-        ("file_operations.merges", found.merges),
-        ("file_operations.same_name", found.same_name),
-    ]
-    .into_iter()
-    .filter(|&(_, count)| count > 0)
-    .map(|(key, count)| strings.count(key, count, numbers, &[]));
-    let instruction = found.next()?;
-    let body = [doing]
-        .into_iter()
-        .chain(found)
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(Choices {
-        title: strings.text(kind_of(request).name).to_owned(),
-        instruction,
-        body,
-        answers: [
-            "file_operations.replace",
-            "file_operations.skip",
-            "file_operations.keep_both",
-        ]
-        .iter()
-        .map(|key| strings.text(key).to_owned())
-        .collect(),
-    })
 }
 
 /// The Delete question (DESIGN.md: File operations): the one entry's name, or
@@ -2095,7 +2102,9 @@ pub(crate) fn exit_question(
     for operation in operations {
         match operation.state {
             State::Running(_) | State::Cancelling => running += 1,
-            State::Preparing | State::Prepared(_) | State::Waiting { .. } => waiting += 1,
+            State::Preparing | State::Prepared(_) | State::Compared(_) | State::Waiting { .. } => {
+                waiting += 1
+            }
             State::Ended(_) | State::Interrupted => {}
         }
     }
@@ -2231,6 +2240,7 @@ fn reason_text(strings: &Strings, reason: Reason, windows_text: &dyn Fn(u32) -> 
             windows_text(code)
         }
         Reason::Skipped => strings.text("file_operations.reason_skipped").to_owned(),
+        Reason::SynchronizationChanged => strings.text("sync.changed").to_owned(),
         Reason::SourceKept => strings
             .text("file_operations.reason_source_kept")
             .to_owned(),
@@ -2267,13 +2277,16 @@ fn no_room_text(strings: &Strings, numbers: &dyn Numbers, no_room: &NoRoom) -> S
 }
 
 /// Why the engine did not start an operation.
-fn refusal_text(
+pub(crate) fn refusal_text(
     strings: &Strings,
     numbers: &dyn Numbers,
     refusal: Refusal,
     windows_text: &dyn Fn(u32) -> String,
 ) -> String {
     match refusal {
+        Refusal::SynchronizationRootsOverlap => strings.text("sync.overlap").to_owned(),
+        Refusal::SynchronizationChanged => strings.text("sync.changed").to_owned(),
+        Refusal::ComparisonFailed(code) => strings.format("sync.failed", &[&windows_text(code)]),
         Refusal::SourceUnavailable => strings
             .text("file_operations.source_unavailable")
             .to_owned(),
@@ -2302,7 +2315,7 @@ fn refusal_text(
 mod tests {
     use super::*;
     use crate::core::text::tests::{English, english};
-    use gozler_fileops::{Conflicts, Destination};
+    use gozler_fileops::Destination;
 
     /// After Hide the middle group's line is the only sign that an
     /// operation finished, so it counts what the operation did, apart from
@@ -2312,6 +2325,7 @@ mod tests {
         let ended = StatusOperation::Ended {
             id: OperationId::for_tests(1),
             request: Arc::new(Request::Copy {
+                policy: gozler_fileops::Policy::default(),
                 sources: vec![PathBuf::from(r"C:\f\a"), PathBuf::from(r"C:\f\b")],
                 destination: Destination::Folder(PathBuf::from(r"D:\Backup")),
             }),
@@ -2359,6 +2373,7 @@ mod tests {
                 ring: RingCounts::default(),
             };
             let request = Request::Copy {
+                policy: gozler_fileops::Policy::default(),
                 sources: vec![PathBuf::from(r"Y:\backup")],
                 destination: Destination::Folder(PathBuf::from(r"C:\b")),
             };
@@ -2386,6 +2401,7 @@ mod tests {
     fn a_move_to_a_new_name_in_its_own_folder_is_a_rename() {
         let move_to = |folder: &str| {
             Arc::new(Request::Move {
+                policy: gozler_fileops::Policy::default(),
                 sources: vec![PathBuf::from(r"C:\f\report.pdf")],
                 destination: Destination::Named {
                     folder: PathBuf::from(folder),
@@ -2525,6 +2541,7 @@ mod tests {
     #[test]
     fn done_counts_passed_bytes_and_never_exceeds_the_total() {
         let running = |items, bytes, passed| Running {
+            phase: gozler_fileops::RunningPhase::Executing,
             items,
             bytes,
             passed,
@@ -2543,6 +2560,58 @@ mod tests {
     }
 
     #[test]
+    fn synchronization_progress_includes_pending_mirror_deletions() {
+        let total = Some(Total {
+            items: 2,
+            bytes: 100,
+        });
+        let mut operation = Operation {
+            id: OperationId::for_tests(1),
+            request: Arc::new(Request::Synchronize {
+                source: PathBuf::from(r"C:\source"),
+                destination: PathBuf::from(r"D:\backup"),
+                mirror: true,
+            }),
+            folder: SourcesFolder::Shared(r"C:\source".into()),
+            state: State::Waiting {
+                on: OperationId::for_tests(2),
+                reason: gozler_fileops::Wait::Disk,
+                total,
+            },
+        };
+        let mut batch = batch::Batch::default();
+        batch.record(std::slice::from_ref(&operation));
+        assert_eq!(batch.bar(), Bar::Measured(Measure { done: 0, total: 2 }));
+        let running = Running {
+            phase: gozler_fileops::RunningPhase::Synchronizing,
+            items: 1,
+            bytes: 100,
+            passed: 0,
+            total,
+            renames: false,
+            paused: false,
+            yielded: false,
+            current: Some(gozler_fileops::Current {
+                source: PathBuf::from(r"C:\source\a.txt"),
+                destination: Some(PathBuf::from(r"D:\backup\a.txt")),
+                done: 100,
+                size: 100,
+            }),
+        };
+        operation.state = State::Running(running.clone());
+        batch.record(std::slice::from_ref(&operation));
+        assert_eq!(batch.bar(), Bar::Measured(Measure { done: 1, total: 2 }));
+        let card = card(&english(), &English, &operation, &running, None);
+        assert_eq!(
+            card.file_bar,
+            Some(Bar::Measured(Measure {
+                done: 100,
+                total: 100
+            }))
+        );
+    }
+
+    #[test]
     fn a_file_is_named_relative_to_the_from_folder() {
         assert_eq!(
             relative_to(r"C:\Photos\2026\a.jpg", r"C:\photos"),
@@ -2550,59 +2619,6 @@ mod tests {
         );
         assert_eq!(relative_to(r"C:\a.txt", r"C:\"), "a.txt");
         assert_eq!(relative_to(r"D:\a.txt", r"C:\Photos"), r"D:\a.txt");
-    }
-
-    /// A full path in the conflict question once widened the dialog to
-    /// 1,400 px, so the question names each folder by its own name, as
-    /// File Explorer's does.
-    #[test]
-    fn the_conflict_question_names_the_folders_only() {
-        let strings = english();
-        let request = Request::Copy {
-            sources: vec![
-                PathBuf::from(r"C:\Users\user\Photos\2026\a.jpg"),
-                PathBuf::from(r"C:\Users\user\Photos\2026\b.jpg"),
-            ],
-            destination: Destination::Folder(PathBuf::from(r"V:\Backup\Photos")),
-        };
-        let prepared = Prepared {
-            entries: 2,
-            total: Some(Total {
-                items: 4_210,
-                bytes: 1,
-            }),
-            conflicts: Some(Conflicts {
-                files: 12,
-                ..Conflicts::default()
-            }),
-        };
-        let folder = SourcesFolder::Shared(r"C:\Users\user\Photos\2026".to_owned());
-        let question = conflict_question(&strings, &English, &request, &prepared, &folder)
-            .expect("12 conflicts ask");
-        assert!(!question.body.contains('\\'), "{}", question.body);
-        assert!(question.body.contains("2026") && question.body.contains("Photos"));
-    }
-
-    /// Prepare reads no file inside a folder that merges, so a merge alone
-    /// asks: without the question, nobody chose, and the run would skip
-    /// every file of the same name inside it.
-    #[test]
-    fn a_merge_alone_asks() {
-        let strings = english();
-        let request = Request::Copy {
-            sources: vec![PathBuf::from(r"C:\Users\user\Photos")],
-            destination: Destination::Folder(PathBuf::from(r"V:\Backup")),
-        };
-        let prepared = Prepared {
-            entries: 1,
-            total: None,
-            conflicts: Some(Conflicts {
-                merges: 1,
-                ..Conflicts::default()
-            }),
-        };
-        let folder = SourcesFolder::Shared(r"C:\Users\user".to_owned());
-        assert!(conflict_question(&strings, &English, &request, &prepared, &folder).is_some());
     }
 
     #[test]

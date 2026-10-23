@@ -312,7 +312,7 @@ impl<'a> InfoTip<'a> {
 }
 
 /// `LVN_GETDISPINFOW`: the list asks for a cell.
-pub(crate) struct DispInfo<'a>(&'a mut NMLVDISPINFOW);
+pub(crate) struct DispInfo<'a>(pub(super) &'a mut NMLVDISPINFOW);
 
 impl DispInfo<'_> {
     pub(crate) fn row(&self) -> u64 {

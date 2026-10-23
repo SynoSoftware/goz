@@ -64,26 +64,25 @@ pub(crate) fn kind(attributes: u32, reparse_tag: u32) -> Kind {
 }
 
 /// The names of a destination folder, read once for its conflicts.
-pub(crate) fn read_names(folder: &Entry, page: &mut [u64]) -> Result<Names, u32> {
+pub(crate) fn read_names(
+    folder: &Entry,
+    page: &mut [u64],
+    stopped: impl Fn() -> bool,
+) -> Result<Names, u32> {
     let mut names = Names::default();
-    list(
-        folder,
-        page,
-        || false,
-        |listed| {
-            // A name a relative open cannot take is not one a copy could take.
-            if let Ok(listed) = listed {
-                let found = Found {
-                    kind: kind(listed.attributes, listed.reparse_tag.unwrap_or(0)),
-                    size: listed.size,
-                    created: listed.created,
-                    last_write: listed.last_write,
-                    reparse_point: listed.reparse_tag.is_some(),
-                };
-                names.insert(&listed.name, Holder::Found(found));
-            }
-        },
-    )?;
+    list(folder, page, stopped, |listed| {
+        // A name a relative open cannot take is not one a copy could take.
+        if let Ok(listed) = listed {
+            let found = Found {
+                kind: kind(listed.attributes, listed.reparse_tag.unwrap_or(0)),
+                size: listed.size,
+                created: listed.created,
+                last_write: listed.last_write,
+                reparse_point: listed.reparse_tag.is_some(),
+            };
+            names.insert(&listed.name, Holder::Found(found));
+        }
+    })?;
     Ok(names)
 }
 

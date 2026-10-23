@@ -29,9 +29,7 @@ use crate::win::notify::{Command, ListNotify};
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
-use gozler_fileops::{
-    Operation, OperationId, OrderRefused, Queue, Request, Side, SpeedSettings, Taken,
-};
+use gozler_fileops::{Operation, OperationId, OrderRefused, Queue, Request, SpeedSettings, Taken};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
@@ -121,7 +119,6 @@ struct Controls {
     bytes: Label,
     queue: Label,
     list: QueueList,
-    hint: Label,
     hide: Button,
     tips: Tooltip,
 }
@@ -156,7 +153,6 @@ impl Controls {
                 self.count.hwnd(),
                 self.queue.hwnd(),
                 self.list.hwnd(),
-                self.hint.hwnd(),
                 self.hide.hwnd(),
                 self.all.hwnd(),
                 self.flip.hwnd(),
@@ -198,9 +194,6 @@ struct Pane {
     flipped: Cell<bool>,
     maximized: Cell<bool>,
     drag: Cell<Option<Drag>>,
-    /// Why the queue refused the move the person tried or points at, which
-    /// the hint names and which gives the hint its line.
-    refused: Cell<Option<OrderRefused>>,
     /// The row that Move up or Move down moved, which the next view keeps
     /// in sight.
     moved: Cell<Option<OperationId>>,
@@ -263,8 +256,24 @@ impl FileOperations {
         self.queue.operations()
     }
 
-    /// Prepares `request`; the main window asks about its conflicts when the
-    /// count is ready, and then submits it. `source` is where the files
+    pub(super) fn operation(&self, id: OperationId) -> Option<Operation> {
+        self.queue.operation(id)
+    }
+
+    pub(super) fn synchronize(&self, id: OperationId) -> bool {
+        self.queue.synchronize(id).is_ok()
+    }
+
+    pub(super) fn release_comparison(&self, comparison: Arc<gozler_fileops::Comparison>) {
+        self.queue.release_comparison(comparison);
+    }
+
+    pub(super) fn set_transfer_limit(&self, limit: gozler_fileops::TransferLimit) {
+        self.queue.set_transfer_limit(limit);
+    }
+
+    /// Prepares `request` with its accepted policy; the main window submits
+    /// it when ready. `source` is where the files
     /// that the request copies or moves came from, which hears what became
     /// of them.
     pub(super) fn start(
@@ -319,7 +328,7 @@ impl FileOperations {
     /// which only a submit can refuse.
     pub(super) fn run(&self, step: QueueStep) -> bool {
         match step {
-            QueueStep::Submit { id, choice } => self.queue.submit(id, choice).is_ok(),
+            QueueStep::Submit { id } => self.queue.submit(id).is_ok(),
             QueueStep::Cancel(id) => {
                 self.queue.cancel(id);
                 true
@@ -375,7 +384,6 @@ impl FileOperations {
                         if refused.is_none() {
                             window.moved.set(Some(id));
                         }
-                        window.show_hint(refused);
                     }
                 }
             }
@@ -384,10 +392,7 @@ impl FileOperations {
     }
 
     pub(super) fn move_before(&self, id: OperationId, before: Option<OperationId>) {
-        let refused = self.queue.move_waiting(id, before).err();
-        if let Some(window) = self.made() {
-            window.show_hint(refused);
-        }
+        let _ = self.queue.move_waiting(id, before);
     }
 
     /// Updates explicitly opened content without activating the main window.
@@ -648,7 +653,6 @@ impl Pane {
             flipped: Cell::new(true),
             maximized: Cell::new(false),
             drag: Cell::new(None),
-            refused: Cell::new(None),
             moved: Cell::new(None),
         });
         let hwnd = window::create_child_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
@@ -724,7 +728,6 @@ impl Pane {
             bytes: right(ControlId::FileOperationsBytes)?,
             queue: label(ControlId::FileOperationsQueue)?,
             list: QueueList::create(hwnd, id(ControlId::FileOperationsList))?,
-            hint: label(ControlId::FileOperationsHint)?,
             hide,
             tips,
         };
@@ -962,7 +965,6 @@ impl Pane {
                 (c.hide.hwnd(), layout.hide),
                 (c.queue.hwnd(), layout.queue),
                 (c.list.hwnd(), layout.list),
-                (c.hint.hwnd(), layout.hint),
                 (c.icon.hwnd(), layout.icon),
                 (c.title.hwnd(), layout.title),
                 (c.status.hwnd(), layout.status),
@@ -992,8 +994,7 @@ impl Pane {
         c.list.hwnd().set_visible(queue);
         c.flip.hwnd().set_visible(multiple && card.is_some());
         c.all.hwnd().set_visible(multiple);
-        c.hint.hwnd().set_visible(queue && self.hint_shown());
-        c.queue.hwnd().set_visible(queue && !self.hint_shown());
+        c.queue.hwnd().set_visible(queue);
         for control in c.card_labels() {
             control.set_visible(card.is_some() && !report);
         }
@@ -1003,14 +1004,16 @@ impl Pane {
         c.icon
             .hwnd()
             .set_visible(card.is_some() && crate::win::gdi::icons_shown());
-        let current = card.is_some_and(|card| card.file_bar.is_some()) && !report;
+        let meter = card.is_some_and(|card| card.file_bar.is_some()) && !report;
         for control in [
             c.file_bar.hwnd(),
             c.file_percent.hwnd(),
             c.file_bytes.hwnd(),
-            c.doing.hwnd(),
-            c.file.hwnd(),
         ] {
+            control.set_visible(meter);
+        }
+        let current = card.is_some_and(|card| !card.file.is_empty()) && !report;
+        for control in [c.doing.hwnd(), c.file.hwnd()] {
             control.set_visible(current);
         }
         c.total_bar.hwnd().set_visible(card.is_some() && !report);
@@ -1265,8 +1268,7 @@ impl Pane {
         Some(use_row(row, rows))
     }
 
-    /// Whether the queue lets the selected row move up or down, and the
-    /// hint that names why not.
+    /// Whether the queue still lets the selected row move up or down.
     fn can_step(&self, id: OperationId, up: bool) -> Result<bool, OrderRefused> {
         let view = self.view.borrow();
         let step = view
@@ -1283,55 +1285,6 @@ impl Pane {
         self.selected_row(|row, _| (row.id, row.phase))
             .filter(|(_, phase)| *phase != RowPhase::Cancelling)
             .map(|(id, phase)| (id, phase.buttons()))
-    }
-
-    /// Shows why the queue refused a move, or clears the hint.
-    fn show_hint(&self, refused: Option<OrderRefused>) {
-        let shown = self.hint_shown();
-        self.refused.set(refused);
-        let text = self.hint_text();
-        if text.is_none() {
-            self.refused.set(None);
-        }
-        self.controls()
-            .hint
-            .hwnd()
-            .set_text(text.as_deref().unwrap_or_default());
-        if shown != self.hint_shown()
-            && let Some(hwnd) = self.hwnd.get()
-        {
-            self.layout(hwnd);
-        }
-    }
-
-    /// The hint's sentence for [`Self::refused`], whose operation's paths
-    /// give way in their middle so that the sentence fits the hint's line.
-    /// `None` when the refusal names no row: the queue changed since the
-    /// window last read it, and the next view shows the change.
-    fn hint_text(&self) -> Option<String> {
-        let OrderRefused::Overlaps { other, side } = self.refused.get()? else {
-            return None;
-        };
-        let view = self.view.borrow();
-        let strings = self.strings.borrow();
-        let other = view.as_ref()?.rows.iter().find(|row| row.id == other)?;
-        let key = match side {
-            Side::After => "file_operations.must_stay_after",
-            Side::Before => "file_operations.must_stay_before",
-        };
-        let fonts = self.fonts.borrow();
-        let Some(meter) = fonts.as_ref().map(|fonts| TextMeter::new(&fonts.ui)) else {
-            return Some(strings.format(key, &[&other.title.whole(&strings)]));
-        };
-        let width = self.controls().hint.hwnd().client_size().width;
-        let room = width - meter.plain_width(&strings.format(key, &[""]));
-        let title = other.title.fitted(
-            &strings,
-            room,
-            &|text| meter.plain_width(text),
-            &|path, width| meter.compact_path(path, width),
-        );
-        Some(strings.format(key, &[&title]))
     }
 
     fn act(&self, id: OperationId, action: QueueAction) {
@@ -1371,10 +1324,6 @@ impl Pane {
                 );
             }
         }
-    }
-
-    fn hint_shown(&self) -> bool {
-        self.refused.get().is_some()
     }
 
     fn show_menu(&self, hwnd: Hwnd, point: Option<(i32, i32)>) {
@@ -1471,7 +1420,6 @@ impl Pane {
             list.set_insert_mark(gap);
         }
         show_drag_cursor(refused.is_some());
-        self.show_hint(refused);
         self.drag.set(Some(Drag { gap, ..drag }));
     }
 

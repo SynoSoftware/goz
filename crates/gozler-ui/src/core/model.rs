@@ -16,7 +16,7 @@ use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::operations::{
-    Answer, OperationProgress, OperationSteps, Operations, QueueStep, Source, SourceStep,
+    OperationProgress, OperationSteps, Operations, QueueStep, Source, SourceStep,
 };
 use super::panel::{LookIn, PanelFollow, Panels, Side, TakenRows, View, drive_root};
 use super::query::{self, Filters, LocationItem, Matching};
@@ -559,25 +559,6 @@ impl Model {
         }
     }
 
-    /// The conflict question of the operation `id`, while it waits to be
-    /// asked; `None` once it no longer does.
-    pub(crate) fn operation_question(
-        &self,
-        id: OperationId,
-        numbers: &dyn Numbers,
-    ) -> Option<file_operations::Choices> {
-        self.operations.question(id, &self.strings, numbers)
-    }
-
-    /// The person answered the conflict question of `id`.
-    pub(crate) fn answer_operation(
-        &mut self,
-        id: OperationId,
-        answer: Answer,
-    ) -> Option<QueueStep> {
-        self.operations.answer(id, answer)
-    }
-
     /// The queue accepted the submit of `id`.
     pub(crate) fn operation_submitted(&mut self, id: OperationId) -> Option<SourceStep> {
         self.operations.submitted(id)
@@ -594,6 +575,13 @@ impl Model {
     ) -> Option<Failure> {
         self.operations
             .failure(id, &self.strings, numbers, windows_text)
+    }
+
+    pub(crate) fn operation_outcome(
+        &self,
+        id: OperationId,
+    ) -> Option<Arc<gozler_fileops::Outcome>> {
+        self.operations.outcome(id)
     }
 
     /// The window showed the failure dialog of `id`.
@@ -773,6 +761,10 @@ impl Model {
             change: Change::Settings,
             then: search_again.then(|| Then::SearchAgain(vec![List::Search])),
         }
+    }
+
+    pub(crate) fn set_copy_policy(&mut self, policy: gozler_fileops::Policy) {
+        self.settings.choices.copy_policy = policy;
     }
 
     /// Replaces the language with `strings` and records `choice`, which the
@@ -3776,6 +3768,7 @@ pub(crate) mod tests {
                     sources: vec![r"C:\f\a.txt".into()],
                 }),
                 running: gozler_fileops::Running {
+                    phase: gozler_fileops::RunningPhase::Executing,
                     items: 0,
                     bytes: 0,
                     passed: 0,

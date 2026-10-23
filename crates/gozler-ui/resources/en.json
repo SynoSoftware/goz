@@ -17,6 +17,7 @@
     "turkish": "&Turkish"
   },
   "command": {
+    "synchronize": "S&ynchronize folders…",
     "open": "&Open",
     "open_file_location": "Open file &location",
     "explore": "&Explore",
@@ -429,7 +430,16 @@
     "not_a_number": "Enter a number, such as {0}.",
     "order": "Minimum can't be larger than Maximum."
   },
+  "copy_policy": {
+    "label": "Files already at &destination:",
+    "update_changed": "Update changed files",
+    "update_newer": "Update newer files",
+    "keep_both": "Keep both",
+    "skip": "Skip existing files",
+    "hint": "Update changed files also replaces newer destination files."
+  },
   "settings": {
+    "performance": "Performance",
     "title": "Settings",
     "unsaved": "Unsaved changes",
     "saving": "Saving settings…",
@@ -536,6 +546,7 @@
     "two_panels": "Two panels keeps F3 to F9, Alt+F1, Alt+F2, Alt+F7, Ctrl+F, Ctrl+L and Ctrl+R, and Alt with a letter, a digit, a comma or a period. A shortcut on one of these keys works in Search only."
   },
   "settings_file_operations": {
+    "transfers_per_device": "&Transfers per device:",
     "speed": "S&peed settings:",
     "automatic": "Automatic",
     "automatic_description": "Gozler's recommended values.",
@@ -736,8 +747,6 @@
     "size_items_other": "{0} items",
     "selected_one": "{0} selected item",
     "selected_other": "{0} selected items",
-    "must_stay_after": "It must stay after {0}, because both use the same files.",
-    "must_stay_before": "It must stay before {0}, because both use the same files.",
     "pause": "Pause",
     "resume": "Resume",
     "cancel": "Cancel",
@@ -907,6 +916,43 @@
     "open_failed": "Couldn't start {0}. {1} Check the command in File > Settings > Context menu.",
     "shortcut_taken": "Another program uses {0}, so it no longer shows Gozler. Choose another shortcut in File > Settings > Keyboard.",
     "registry_failed": "Couldn't save \"{0}\" in the registry. {1}"
+  },
+  "sync": {
+    "title": "Synchronize folders",
+    "source": "&Source:",
+    "destination": "Des&tination:",
+    "mirror": "&Delete extra files (Mirror)",
+    "compare": "&Compare",
+    "synchronize": "Synchronize",
+    "direction": "Changes go from Source to Destination.",
+    "initial": "Compare the folders before synchronizing.",
+    "action": "Action",
+    "add": "Add",
+    "replace": "Replace",
+    "conflict": "Conflict",
+    "unchanged": "Unchanged",
+    "keep": "Keep",
+    "summary": "Add {0} · Replace {1} · Unchanged {2} · Extra {3} · Conflicts {4}",
+    "conflicts": "Resolve conflicting file and folder names, then compare again.",
+    "delete_hint": "Mirror permanently deletes the entries marked Delete.",
+    "ready": "Destination-only entries stay. Synchronize applies this comparison.",
+    "review": "Review comparison",
+    "comparing": "Comparing folders",
+    "synchronizing": "Synchronizing",
+    "row": "Synchronize {0} → {1}",
+    "waiting_for": "Waiting for Synchronize: {0}",
+    "processed_one": "{0} processed",
+    "processed_other": "{0} processed",
+    "running": "Synchronizing {0}",
+    "completed": "Synchronized {0}",
+    "cancelled": "Synchronization cancelled: {0}",
+    "changed": "The folders changed after comparison. Compare again.",
+    "overlap": "Choose separate folders. Neither folder can contain the other.",
+    "failed": "Couldn't compare the folders. {0}",
+    "failed_short": "Comparison stopped",
+    "copy_sync": "Copy & Synchronize",
+    "move_sync": "Move & Synchronize",
+    "copy_move_sync": "Copy, Move & Synchronize"
   },
   "transfer": {
     "copy_name": "Copy {0} to:",

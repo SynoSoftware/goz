@@ -196,6 +196,7 @@ fn timing_progress_folder_per_operation() {
         .map(|i| PathBuf::from(format!(r"{}\file{i}.txt", path("Projects", 9))))
         .collect();
     let request = Arc::new(Request::Copy {
+        policy: gozler_fileops::Policy::default(),
         sources,
         destination: Destination::Folder(PathBuf::from(r"D:\Backup")),
     });

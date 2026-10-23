@@ -31,9 +31,9 @@ use crate::saved::{self, Saved};
 use crate::totals::Index;
 use crate::volumes::{CopyPlan, VolumeClass};
 use crate::{
-    Choice, Conflicts, Count, Destination, End, LargeFileLimit, Listed, OperationId, Outcome,
-    Preset, Queue, Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk,
-    RingSsd, SourcesFolder, SpeedSettings, State, Taken, Total,
+    Count, Destination, End, LargeFileLimit, Listed, OperationId, Outcome, Policy, Preset, Queue,
+    Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk, RingSsd,
+    SourcesFolder, SpeedSettings, State, Taken, Total,
 };
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -41,10 +41,10 @@ const ERROR_SHARING_VIOLATION: u32 = 32;
 const ERROR_ALREADY_EXISTS: u32 = 183;
 
 /// A folder of its own under the temporary folder, removed when dropped.
-struct Scratch(PathBuf);
+pub(super) struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(test: &str) -> Scratch {
+    pub(super) fn new(test: &str) -> Scratch {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let path =
@@ -53,11 +53,11 @@ impl Scratch {
         Scratch(path)
     }
 
-    fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
+    pub(super) fn path(&self, relative: impl AsRef<Path>) -> PathBuf {
         self.0.join(relative)
     }
 
-    fn write(&self, relative: impl AsRef<Path>, contents: &[u8]) -> PathBuf {
+    pub(super) fn write(&self, relative: impl AsRef<Path>, contents: &[u8]) -> PathBuf {
         let path = self.path(relative);
         fs::create_dir_all(path.parent().expect("a file has a folder")).expect("create folders");
         fs::write(&path, contents).expect("write a file");
@@ -69,7 +69,7 @@ impl Scratch {
     }
 
     /// The saved file of this test's queues.
-    fn saved(&self) -> PathBuf {
+    pub(super) fn saved(&self) -> PathBuf {
         self.path("operations.json")
     }
 }
@@ -80,7 +80,7 @@ impl Drop for Scratch {
     }
 }
 
-fn junction(link: &Path, target: &Path) {
+pub(super) fn junction(link: &Path, target: &Path) {
     let status = Command::new("cmd")
         .raw_arg(format!(
             r#"/c mklink /J "{}" "{}" >nul"#,
@@ -104,7 +104,7 @@ fn units(path: &Path) -> Vec<u16> {
 
 /// gozlerd as the tests see it: it never answers, so no prepare has a
 /// total, and no test depends on the gozlerd of the machine.
-struct NoIndex;
+pub(super) struct NoIndex;
 
 impl Index for NoIndex {
     fn below(&self, _: &[&Identity], _: &Arc<AtomicBool>) -> Option<Vec<Total>> {
@@ -189,6 +189,29 @@ impl Watched {
         }
     }
 
+    fn compared(
+        &self,
+        source: &Path,
+        destination: &Path,
+        mirror: bool,
+    ) -> (OperationId, Arc<crate::Comparison>) {
+        let (id, _) = self.prepared(Request::Synchronize {
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            mirror,
+        });
+        self.queue.submit(id).expect("prepared comparison");
+        match self.wait(id, |state| {
+            matches!(state, State::Compared(_) | State::Ended(_))
+        }) {
+            State::Compared(comparison) => (
+                id,
+                comparison.upgrade().expect("the queue retains the preview"),
+            ),
+            state => panic!("not compared: {state:?}"),
+        }
+    }
+
     /// The taken entries once `done` says they followed the operations,
     /// which they do a moment after a change, with a wake of their own.
     fn taken_when(&self, done: impl Fn(&Taken) -> bool) -> Arc<Taken> {
@@ -204,11 +227,259 @@ impl Watched {
     }
 
     /// Prepares and submits `request` with `choice`, and waits for its end.
-    fn run(&self, request: Request, choice: Option<Choice>) -> Outcome {
-        let (id, _) = self.prepared(request);
-        self.queue.submit(id, choice).expect("prepared");
+    fn run(&self, request: Request, choice: Option<Policy>) -> Outcome {
+        let (id, _) = self.prepared(with_policy(request, choice));
+        self.queue.submit(id).expect("prepared");
         self.ended(id)
     }
+}
+
+#[test]
+fn synchronization_waits_for_commit_releases_devices_and_keeps_extras_by_default() {
+    let scratch = Scratch::new("sync-commit");
+    let source = scratch.path("source");
+    let destination = scratch.path("destination");
+    scratch.write(r"source\a.txt", b"updated");
+    scratch.write(r"destination\a.txt", b"old");
+    scratch.write(r"destination\extra.txt", b"keep");
+    fs::create_dir(source.join("empty")).expect("empty source folder");
+    let watched = Watched::new(&scratch.saved());
+    let (id, comparison) = watched.compared(&source, &destination, false);
+    assert_eq!(comparison.summary().replacements, 1);
+    assert_eq!(comparison.summary().additions, 1);
+    assert_eq!(
+        fs::read(destination.join("a.txt")).expect("not committed"),
+        b"old"
+    );
+    assert!(!destination.join("empty").exists());
+    let other = scratch.write("other.txt", b"other");
+    let ordinary = watched.run(
+        Request::Copy {
+            sources: vec![other],
+            destination: Destination::Folder(scratch.path("other-out")),
+            policy: Policy::UpdateChanged,
+        },
+        None,
+    );
+    assert!(
+        ordinary.succeeded,
+        "the preview holds no grant: {ordinary:?}"
+    );
+    drop(comparison);
+    watched.queue.synchronize(id).expect("reviewed");
+    assert!(watched.ended(id).succeeded);
+    assert_eq!(
+        fs::read(destination.join("a.txt")).expect("updated"),
+        b"updated"
+    );
+    assert!(destination.join("empty").is_dir());
+    assert_eq!(
+        fs::read(destination.join("extra.txt")).expect("kept by default"),
+        b"keep"
+    );
+    let (id, comparison) = watched.compared(&source, &destination, false);
+    assert_eq!(comparison.summary().unchanged, 2);
+    drop(comparison);
+    watched
+        .queue
+        .synchronize(id)
+        .expect("unchanged reviewed files");
+    assert!(
+        watched.ended(id).succeeded,
+        "unchanged metadata is resolved work"
+    );
+}
+
+#[test]
+fn synchronization_deletes_only_unchanged_approved_extras_and_empty_folders() {
+    let scratch = Scratch::new("sync-approved");
+    fs::create_dir(scratch.path("source")).expect("source");
+    let gone = scratch.write(r"destination\gone.txt", b"gone");
+    let changed = scratch.write(r"destination\changed.txt", b"old");
+    let returned = scratch.write(r"destination\returned.txt", b"destination");
+    let child = scratch.write(r"destination\extra\old.txt", b"old");
+    let watched = Watched::new(&scratch.saved());
+    let (id, comparison) =
+        watched.compared(&scratch.path("source"), &scratch.path("destination"), true);
+    drop(comparison);
+    fs::write(&changed, b"changed since preview").expect("change a candidate");
+    scratch.write(r"source\returned.txt", b"arrived since preview");
+    let arrived = scratch.write(r"destination\extra\new.txt", b"unapproved");
+    watched.queue.synchronize(id).expect("reviewed");
+    let outcome = watched.ended(id);
+    assert_eq!(outcome.end, End::Complete);
+    assert!(!gone.exists());
+    assert!(!child.exists());
+    assert_eq!(
+        fs::read(&changed).expect("changed candidate kept"),
+        b"changed since preview"
+    );
+    assert_eq!(
+        fs::read(returned).expect("source arrived, candidate kept"),
+        b"destination"
+    );
+    assert_eq!(
+        fs::read(arrived).expect("unapproved child kept"),
+        b"unapproved"
+    );
+    assert!(outcome.listed.contains(&Listed {
+        path: changed,
+        reason: Reason::SynchronizationChanged
+    }));
+}
+
+#[test]
+fn synchronization_keeps_extras_when_a_required_copy_fails() {
+    let scratch = Scratch::new("sync-failed-copy");
+    scratch.write(r"source\a.txt", b"source");
+    let extra = scratch.write(r"destination\extra.txt", b"keep");
+    let watched = Watched::new(&scratch.saved());
+    let (id, comparison) =
+        watched.compared(&scratch.path("source"), &scratch.path("destination"), true);
+    drop(comparison);
+    fs::create_dir(scratch.path(r"destination\a.txt")).expect("racing type mismatch");
+    watched.queue.synchronize(id).expect("reviewed");
+    let outcome = watched.ended(id);
+    assert!(!outcome.succeeded);
+    assert_eq!(fs::read(extra).expect("no deletion phase"), b"keep");
+}
+
+#[test]
+fn synchronization_keeps_extras_when_a_preview_source_changes_or_is_replaced() {
+    for replace_root in [false, true] {
+        let scratch = Scratch::new("sync-source-change");
+        let source = scratch.path("source");
+        let file = scratch.write(r"source\a.txt", b"source");
+        let extra = scratch.write(r"destination\extra.txt", b"keep");
+        let watched = Watched::new(&scratch.saved());
+        let (id, comparison) = watched.compared(&source, &scratch.path("destination"), true);
+        drop(comparison);
+        if replace_root {
+            fs::rename(&source, scratch.path("old-source")).expect("rename retained root");
+            fs::create_dir(&source).expect("replace the chosen root binding");
+        } else {
+            fs::write(&file, b"changed after preview").expect("change the source");
+        }
+        watched.queue.synchronize(id).expect("reviewed");
+        assert_eq!(
+            watched.ended(id).end,
+            End::Refused(Refusal::SynchronizationChanged)
+        );
+        assert_eq!(fs::read(extra).expect("no deletion phase"), b"keep");
+    }
+}
+
+#[test]
+fn synchronization_cancel_all_rejects_a_later_preview_commit() {
+    let scratch = Scratch::new("sync-cancel-preview");
+    fs::create_dir(scratch.path("source")).expect("source");
+    let extra = scratch.write(r"destination\extra.txt", b"keep");
+    let watched = Watched::new(&scratch.saved());
+    let (id, comparison) =
+        watched.compared(&scratch.path("source"), &scratch.path("destination"), true);
+    drop(comparison);
+    watched.queue.cancel_all();
+    assert_eq!(watched.ended(id).end, End::Cancelled);
+    assert!(watched.queue.synchronize(id).is_err());
+    assert_eq!(
+        fs::read(extra).expect("cancelled preview changes nothing"),
+        b"keep"
+    );
+}
+
+#[test]
+fn synchronization_refuses_overlapping_roots_and_unknown_link_subtrees() {
+    let scratch = Scratch::new("sync-boundary");
+    scratch.write(r"source\a.txt", b"source");
+    let destination = scratch.path("destination");
+    let extra = scratch.write(r"destination\extra.txt", b"keep");
+    let alias = scratch.path("alias");
+    junction(&alias, &scratch.path("source"));
+    let watched = Watched::new(&scratch.saved());
+    let id = watched.queue.prepare(
+        Request::Synchronize {
+            source: scratch.path("source"),
+            destination: alias,
+            mirror: true,
+        },
+        SpeedSettings::automatic(),
+    );
+    assert_eq!(
+        watched.ended(id).end,
+        End::Refused(Refusal::SynchronizationRootsOverlap)
+    );
+    let outside = scratch.path("outside");
+    fs::create_dir(&outside).expect("outside folder");
+    junction(&scratch.path(r"source\unknown"), &outside);
+    let (id, _) = watched.prepared(Request::Synchronize {
+        source: scratch.path("source"),
+        destination,
+        mirror: true,
+    });
+    watched.queue.submit(id).expect("prepared comparison");
+    assert_eq!(
+        watched.ended(id).end,
+        End::Refused(Refusal::ComparisonFailed(
+            crate::win32::ERROR_REPARSE_POINT_ENCOUNTERED
+        ))
+    );
+    assert_eq!(fs::read(extra).expect("unknown is never extra"), b"keep");
+}
+
+#[test]
+fn synchronization_continue_compares_again_without_replaying_deletions() {
+    let scratch = Scratch::new("sync-continue");
+    fs::create_dir(scratch.path("source")).expect("source");
+    scratch.write(r"destination\old.txt", b"old");
+    let request = Request::Synchronize {
+        source: scratch.path("source"),
+        destination: scratch.path("destination"),
+        mirror: true,
+    };
+    let saved =
+        Saved::new(&request, system_time(), &SpeedSettings::automatic()).expect("intent saved");
+    saved::write(&scratch.saved(), std::iter::once(&saved)).expect("persist interrupted intent");
+    let arrived = scratch.write(r"destination\arrived.txt", b"after interruption");
+    let watched = Watched::new(&scratch.saved());
+    let operation = watched
+        .queue
+        .operations()
+        .into_iter()
+        .next()
+        .expect("interrupted intent");
+    assert!(matches!(operation.state, State::Interrupted));
+    watched
+        .queue
+        .resume(operation.id)
+        .expect("explicit Continue");
+    let state = watched.wait(operation.id, |state| {
+        matches!(state, State::Compared(_) | State::Ended(_))
+    });
+    let State::Compared(comparison) = state else {
+        panic!("Continue must compare: {state:?}");
+    };
+    let comparison = comparison
+        .upgrade()
+        .expect("the queue retains the fresh preview");
+    assert_eq!(comparison.summary().deletions, 2);
+    assert_eq!(
+        fs::read(&arrived).expect("fresh preview has not committed"),
+        b"after interruption"
+    );
+    drop(comparison);
+    watched.queue.cancel(operation.id);
+    assert_eq!(watched.ended(operation.id).end, End::Cancelled);
+    assert!(arrived.exists());
+}
+
+fn with_policy(mut request: Request, chosen: Option<Policy>) -> Request {
+    if let Some(chosen) = chosen {
+        match &mut request {
+            Request::Copy { policy, .. } | Request::Move { policy, .. } => *policy = chosen,
+            Request::Delete { .. } | Request::NewFolder { .. } | Request::Synchronize { .. } => {}
+        }
+    }
+    request
 }
 
 fn run(request: Request) -> Outcome {
@@ -305,21 +576,18 @@ fn copy_listed(
     listed: bool,
 ) -> Copied {
     let cancel = AtomicBool::new(false);
-    let (received, destination) = receive(sources, Some(destination), &cancel).expect("received");
+    let (received, destination) =
+        receive(sources, Some(destination), &cancel, None).expect("received");
     let destination = destination.expect("a destination");
     let mut page = vec![0u64; LISTING_WORDS];
     let names = if listed {
         destination
-            .names(&mut page)
+            .names(&mut page, || false)
             .expect("the destination's names")
     } else {
         Names::default()
     };
-    let target = Arc::new(Target {
-        verbatim: destination.verbatim,
-        names: Mutex::new(names),
-        made: false,
-    });
+    let target = Arc::new(Target::new(destination.verbatim, names, false));
     let sources = (received.entries.into_iter())
         .map(|selected| Source {
             name: selected.identity.name().to_vec(),
@@ -331,7 +599,7 @@ fn copy_listed(
     copy(sources, target, copying)
 }
 
-fn first_run(choice: Option<Choice>) -> Rule {
+fn first_run(choice: Option<Policy>) -> Rule {
     Rule {
         choice,
         run: Run::First { started: None },
@@ -435,7 +703,7 @@ fn an_ended_delete_is_taken_only_where_kept() {
     let (id, _) = watched.prepared(Request::Delete {
         sources: vec![file.clone()],
     });
-    watched.queue.submit(id, None).expect("prepared");
+    watched.queue.submit(id).expect("prepared");
     watched.ended(id);
     let row = units(&file);
     let taken = watched.taken_when(|taken| !taken.contains(&row, |_| false));
@@ -563,19 +831,20 @@ fn paths_compare_by_what_they_name() {
     let short = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let cancel = AtomicBool::new(false);
 
-    let (received, _) = receive(&[folder.clone(), upper], None, &cancel).expect("no destination");
+    let (received, _) =
+        receive(&[folder.clone(), upper], None, &cancel, None).expect("no destination");
     assert_eq!(received.entries.len(), 1);
     if short == folder {
         eprintln!("skipped the short name: this volume makes none");
     } else {
         let (received, _) =
-            receive(&[folder.clone(), short], None, &cancel).expect("no destination");
+            receive(&[folder.clone(), short], None, &cancel, None).expect("no destination");
         assert_eq!(received.entries.len(), 1);
     }
 
     let out = scratch.path("out");
     junction(&out, &folder.join("build"));
-    let refused = receive(std::slice::from_ref(&folder), Some(&out), &cancel);
+    let refused = receive(std::slice::from_ref(&folder), Some(&out), &cancel, None);
     assert_eq!(refused.err(), Some(Refusal::DestinationInsideSource));
 }
 
@@ -639,36 +908,44 @@ fn every_method_copies_a_whole_tree() {
 /// Replace never takes a folder.
 #[test]
 fn each_choice_applies_to_its_conflicts() {
-    for choice in [Choice::Replace, Choice::Skip, Choice::KeepBoth] {
+    for choice in [
+        Policy::UpdateChanged,
+        Policy::UpdateNewer,
+        Policy::Replace,
+        Policy::Skip,
+        Policy::KeepBoth,
+    ] {
         let scratch = Scratch::new("choices");
         let same = scratch.write(r"src\same.txt", b"new");
+        set_modified(&same, SystemTime::now() + Duration::from_secs(60));
         let clash = scratch.write(r"src\clash", b"new");
         let out = scratch.path("out");
         scratch.write(r"out\same.txt", b"old");
         scratch.write(r"out\clash\inside.txt", b"old");
         let watched = Watched::new(&scratch.saved());
-        let (id, prepared) = watched.prepared(Request::Copy {
+        let (id, _) = watched.prepared(Request::Copy {
+            policy: choice,
             sources: vec![same.clone(), clash.clone()],
             destination: Destination::Folder(out.clone()),
         });
-        assert_eq!(prepared.conflicts.expect("counted").files, 1);
-        watched.queue.submit(id, Some(choice)).expect("prepared");
+
+        watched.queue.submit(id).expect("prepared");
         let outcome = watched.ended(id);
 
         let refused = failed(&clash, ERROR_ALREADY_EXISTS);
         let read = |name: &str| fs::read(out.join(name)).ok();
         assert_eq!(read(r"clash\inside.txt").as_deref(), Some(&b"old"[..]));
         match choice {
-            Choice::Replace => {
+            Policy::Replace | Policy::UpdateChanged | Policy::UpdateNewer => {
                 assert_eq!(outcome.listed, [refused]);
                 assert_eq!(read("same.txt").as_deref(), Some(&b"new"[..]));
             }
-            Choice::Skip => {
+            Policy::Skip => {
                 assert_eq!(outcome.listed.len(), 2);
                 assert!(outcome.listed.contains(&skipped(&same)));
                 assert_eq!(read("same.txt").as_deref(), Some(&b"old"[..]));
             }
-            Choice::KeepBoth => {
+            Policy::KeepBoth => {
                 assert_eq!(outcome.listed, [refused]);
                 assert_eq!(read("same.txt").as_deref(), Some(&b"old"[..]));
                 assert_eq!(read("same (2).txt").as_deref(), Some(&b"new"[..]));
@@ -677,25 +954,87 @@ fn each_choice_applies_to_its_conflicts() {
     }
 }
 
-/// A file created at the destination after prepare found no conflict is
-/// skipped and listed: nobody chose to replace it.
+/// The accepted default also governs files that appear after preparation.
 #[test]
-fn a_conflict_after_prepare_is_skipped() {
+fn a_conflict_after_prepare_uses_the_accepted_policy() {
     let scratch = Scratch::new("late");
     let source = scratch.write(r"src\a.txt", b"new");
     let out = scratch.path("out");
     fs::create_dir(&out).expect("a destination");
     let watched = Watched::new(&scratch.saved());
-    let (id, prepared) = watched.prepared(Request::Copy {
+    let (id, _) = watched.prepared(Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![source.clone()],
         destination: Destination::Folder(out.clone()),
     });
-    assert_eq!(prepared.conflicts.expect("counted").files, 0);
+
     scratch.write(r"out\a.txt", b"someone's");
-    watched.queue.submit(id, None).expect("prepared");
+    watched.queue.submit(id).expect("prepared");
     let outcome = watched.ended(id);
-    assert_eq!(outcome.listed, [skipped(&source)]);
-    assert_eq!(fs::read(out.join("a.txt")).expect("kept"), b"someone's");
+    assert!(outcome.listed.is_empty());
+    assert_eq!(fs::read(out.join("a.txt")).expect("updated"), b"new");
+}
+
+#[test]
+fn policy_skips_keep_move_sources_and_repeated_copies_do_not_duplicate() {
+    let scratch = Scratch::new("policy");
+    let source = scratch.write(r"src\a.txt", b"source");
+    let destination = scratch.path("out");
+    fs::create_dir(&destination).unwrap();
+    let watched = Watched::new(&scratch.saved());
+    let request = || Request::Copy {
+        sources: vec![source.clone()],
+        destination: Destination::Folder(destination.clone()),
+        policy: Policy::UpdateChanged,
+    };
+    assert!(watched.run(request(), None).succeeded);
+    // Same length with changed contents deliberately demonstrates metadata selection.
+    fs::write(&source, b"edited").unwrap();
+    let modified = fs::metadata(destination.join("a.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    set_modified(&source, modified);
+    let repeated = watched.run(request(), None);
+    assert_eq!(repeated.listed, [skipped(&source)]);
+    assert_eq!(fs::read(destination.join("a.txt")).unwrap(), b"source");
+    assert!(!destination.join("a (2).txt").exists());
+    let moved = watched.run(
+        Request::Move {
+            sources: vec![source.clone()],
+            destination: Destination::Folder(destination.clone()),
+            policy: Policy::UpdateChanged,
+        },
+        None,
+    );
+    assert_eq!(moved.listed, [skipped(&source)]);
+    assert_eq!(fs::read(source).unwrap(), b"edited");
+}
+
+#[test]
+fn a_replacement_that_became_a_folder_is_a_failure_even_when_its_date_would_skip() {
+    let scratch = Scratch::new("policy-kind");
+    let out = scratch.path("out");
+    fs::create_dir_all(out.join("a.txt")).unwrap();
+    let path: Vec<u16> = out.as_os_str().encode_wide().collect();
+    let target = Target::new(verbatim(&path), Names::default(), false);
+    let name: Vec<u16> = "a.txt".encode_utf16().collect();
+    let placing = crate::place::Placing {
+        base: &name,
+        name: name.clone(),
+        replace: true,
+        is_folder: false,
+        size: 1,
+        last_write: 0,
+        recovering: false,
+        shared: false,
+    };
+    let placed: crate::place::Placed<()> =
+        crate::place::place(&target, placing, Some(Policy::UpdateNewer), |_, _| {
+            panic!("a folder must not be written")
+        });
+    assert_eq!(placed, crate::place::Placed::Failed(ERROR_ALREADY_EXISTS));
+    assert!(out.join("a.txt").is_dir());
 }
 
 /// Prepare's total is a selected folder with what gozlerd holds below it,
@@ -710,6 +1049,7 @@ fn gozlerds_totals_count_and_refuse_too_little_space() {
     let out = scratch.path("out");
     fs::create_dir(&out).expect("a destination");
     let copy = |sources: Vec<PathBuf>| Request::Copy {
+        policy: crate::Policy::default(),
         sources,
         destination: Destination::Folder(out.clone()),
     };
@@ -738,34 +1078,8 @@ fn gozlerds_totals_count_and_refuse_too_little_space() {
     }
 }
 
-/// A selected folder that merges into a folder of its name counts as a
-/// merge, so the window asks the person, because prepare reads no file
-/// inside it and the run applies the answer to each file it meets there.
-#[test]
-fn a_merge_is_counted() {
-    let scratch = Scratch::new("merge");
-    let docs = scratch.path(r"src\docs");
-    scratch.write(r"src\docs\a.txt", b"new");
-    scratch.write(r"out\docs\a.txt", b"old");
-    let watched = Watched::new(&scratch.saved());
-    let (_, prepared) = watched.prepared(Request::Copy {
-        sources: vec![docs],
-        destination: Destination::Folder(scratch.path("out")),
-    });
-    let merge = Conflicts {
-        files: 0,
-        same_name: 0,
-        merges: 1,
-    };
-    assert_eq!(prepared.conflicts, Some(merge));
-}
-
-/// A hidden, read-only file that takes the final name after the folder was
-/// listed refuses the copy's create; that refusal is a conflict with
-/// someone else's file, never our own failure. So the choice applies and the
-/// file is never deleted: without a choice and with Skip the copy is
-/// skipped, Keep both numbers it, and Replace writes over the file, whose
-/// protection it clears, as each engine would otherwise refuse it.
+/// A hidden, read-only file can take the final name after listing. The accepted
+/// policy must still decide it, clearing protection only for replacement.
 #[test]
 fn a_file_that_takes_the_final_name_gets_the_choice() {
     let windows = CopyPlan::new(
@@ -777,9 +1091,9 @@ fn a_file_that_takes_the_final_name_gets_the_choice() {
     for (engine, plan) in [("windows", windows), ("ring", ring)] {
         for choice in [
             None,
-            Some(Choice::Skip),
-            Some(Choice::KeepBoth),
-            Some(Choice::Replace),
+            Some(Policy::Skip),
+            Some(Policy::KeepBoth),
+            Some(Policy::Replace),
         ] {
             let case = format!("{engine} {choice:?}");
             let scratch = Scratch::new("final");
@@ -797,16 +1111,16 @@ fn a_file_that_takes_the_final_name_gets_the_choice() {
                 copy_unlisted(std::slice::from_ref(&source), &out, plan, first_run(choice));
             let read = |name: &str| fs::read(out.join(name)).ok();
             match choice {
-                None | Some(Choice::Skip) => {
+                Some(Policy::Skip) => {
                     assert_eq!(listed, [skipped(&source)], "{case}");
                     assert_eq!(read("a.txt").as_deref(), Some(&b"theirs"[..]), "{case}");
                 }
-                Some(Choice::KeepBoth) => {
+                Some(Policy::KeepBoth) => {
                     assert_eq!(listed, [], "{case}");
                     assert_eq!(read("a.txt").as_deref(), Some(&b"theirs"[..]), "{case}");
                     assert_eq!(read("a (2).txt").as_deref(), Some(&b"ours"[..]), "{case}");
                 }
-                Some(Choice::Replace) => {
+                None | Some(Policy::Replace | Policy::UpdateChanged | Policy::UpdateNewer) => {
                     assert_eq!(listed, [], "{case}");
                     assert_eq!(read("a.txt").as_deref(), Some(&b"ours"[..]), "{case}");
                 }
@@ -818,7 +1132,7 @@ fn a_file_that_takes_the_final_name_gets_the_choice() {
 /// A file symbolic link at the destination is never written through, also
 /// when its target is outside the destination: each engine's Replace
 /// replaces the link itself, and Continue never takes a link written since
-/// the start for its unfinished copy, so without a choice it is skipped.
+/// the start for its unfinished copy. An accepted replacement removes the link.
 #[test]
 fn a_link_at_the_destination_is_never_written_through() {
     let windows = CopyPlan::new(
@@ -835,8 +1149,8 @@ fn a_link_at_the_destination_is_never_written_through() {
     };
     for (case, plan, rule) in [
         ("Continue", windows, continued),
-        ("windows Replace", windows, first_run(Some(Choice::Replace))),
-        ("ring Replace", ring, first_run(Some(Choice::Replace))),
+        ("windows Replace", windows, first_run(Some(Policy::Replace))),
+        ("ring Replace", ring, first_run(Some(Policy::Replace))),
     ] {
         let scratch = Scratch::new("through");
         let source = scratch.write(r"src\a.bin", &pattern(7, 2 * BLOCK + 10));
@@ -859,7 +1173,7 @@ fn a_link_at_the_destination_is_never_written_through() {
             b"the link's target",
             "{case}"
         );
-        if rule.choice == Some(Choice::Replace) {
+        if rule.choice != Some(Policy::Skip) {
             assert_eq!(listed, [], "{case}");
             assert!(!fs::symlink_metadata(&link).expect("a copy").is_symlink());
             assert!(fs::read(&link).expect("the copy") == fs::read(&source).expect("source"));
@@ -894,7 +1208,7 @@ fn the_rings_replace_writes_over_a_plain_file_in_place() {
             std::slice::from_ref(&source),
             &scratch.path("out"),
             ring,
-            first_run(Some(Choice::Replace)),
+            first_run(Some(Policy::Replace)),
             false,
         );
         assert_eq!(listed, [], "{stream}");
@@ -950,7 +1264,7 @@ fn continue_replaces_an_interrupted_replace_in_place() {
         }
         let before = identity(&copy);
         let rule = Rule {
-            choice: Some(Choice::Replace),
+            choice: Some(Policy::Replace),
             run: if continuing {
                 Run::Continue {
                     started: Some(started),
@@ -990,13 +1304,11 @@ fn files_of_two_merged_folders_never_replace_each_other() {
     let out = scratch.path("out");
     let watched = Watched::new(&scratch.saved());
     let (id, _) = watched.prepared(Request::Copy {
+        policy: Policy::Replace,
         sources: vec![scratch.path(r"one\a"), scratch.path(r"two\a")],
         destination: Destination::Folder(out.clone()),
     });
-    watched
-        .queue
-        .submit(id, Some(Choice::Replace))
-        .expect("prepared");
+    watched.queue.submit(id).expect("prepared");
     let outcome = watched.ended(id);
     assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
     let mut copies = ["x.bin", "x (2).bin"].map(|name| fs::read(out.join("a").join(name)).ok());
@@ -1015,10 +1327,11 @@ fn a_cancelled_copy_leaves_no_partial_file() {
     fs::create_dir(&out).expect("a destination");
     let watched = Watched::new(&scratch.saved());
     let (id, _) = watched.prepared(Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![source],
         destination: Destination::Folder(out.clone()),
     });
-    watched.queue.submit(id, None).expect("prepared");
+    watched.queue.submit(id).expect("prepared");
     // Progress wakes nothing, so this reads it until it moves.
     loop {
         match watched.state(id) {
@@ -1223,7 +1536,8 @@ fn a_paused_delete_waits_between_entries() {
             scratch.file(tree.join(format!("{i}.txt")));
         }
         let (cancel, progress) = (AtomicBool::new(false), Progress::default());
-        let (received, _) = receive(std::slice::from_ref(&tree), None, &cancel).expect("received");
+        let (received, _) =
+            receive(std::slice::from_ref(&tree), None, &cancel, None).expect("received");
         let (listed, (left, items)) = pause_at_first_report(
             &progress,
             |pause| {
@@ -1262,7 +1576,7 @@ fn set_modified(path: &Path, time: SystemTime) {
 
 /// Sets a file's creation time, so Continue takes it for a file that was
 /// there before the operation started.
-fn set_created(path: &Path, time: SystemTime) {
+pub(super) fn set_created(path: &Path, time: SystemTime) {
     let file = fs::OpenOptions::new().write(true).open(path).expect("open");
     let times = FileTimes::new().set_created(time);
     file.set_times(times).expect("set the time");
@@ -1277,8 +1591,16 @@ fn modified(path: &Path) -> SystemTime {
 
 /// Writes `request` to the saved file as a crash leaves it, with the time
 /// its first run started.
-fn save(scratch: &Scratch, request: &Request, choice: Option<Choice>, started: i64) {
-    let saved = Saved::new(request, choice, started, &SpeedSettings::automatic()).expect("saved");
+fn save(scratch: &Scratch, request: &Request, choice: Option<Policy>, started: i64) {
+    let request = with_policy(request.clone(), choice);
+    let saved = Saved::new(&request, started, &SpeedSettings::automatic()).expect("saved");
+    let saved = if choice.is_none() {
+        let mut legacy = serde_json::to_value(saved).unwrap();
+        legacy.as_object_mut().unwrap().remove("choice");
+        serde_json::from_value(legacy).unwrap()
+    } else {
+        saved
+    };
     saved::write(&scratch.saved(), std::iter::once(&saved)).expect("write the saved file");
 }
 
@@ -1314,10 +1636,11 @@ fn continue_copies_only_what_is_not_done() {
     let numbered = scratch.write(r"out\report (2).pdf", b"REPORT");
     set_modified(&numbered, modified(&kept));
     let request = Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![unfinished, done, kept],
         destination: Destination::Folder(out.clone()),
     };
-    save(&scratch, &request, Some(Choice::KeepBoth), started);
+    save(&scratch, &request, Some(Policy::KeepBoth), started);
 
     let outcome = resume(&scratch);
     assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
@@ -1414,6 +1737,7 @@ fn continue_resumes_every_unfinished_file() {
     }
     let out = scratch.path("out");
     let request = Request::Copy {
+        policy: crate::Policy::default(),
         sources,
         destination: Destination::Folder(out.clone()),
     };
@@ -1449,10 +1773,11 @@ fn continue_never_writes_over_a_copy_of_another_source_of_its_name() {
     scratch.write(r"out\x (2).bin", &second[..BLOCK]);
     let out = scratch.path("out");
     let request = Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![first_source, second_source],
         destination: Destination::Folder(out.clone()),
     };
-    save(&scratch, &request, Some(Choice::KeepBoth), started);
+    save(&scratch, &request, Some(Policy::KeepBoth), started);
 
     let outcome = resume(&scratch);
     assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
@@ -1475,6 +1800,7 @@ fn a_resumed_file_with_another_stream_is_copied_again() {
     let extra = format!("{}:extra", copy.display());
     fs::write(&extra, b"not the source's").expect("write a stream");
     let request = Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![source],
         destination: Destination::Folder(scratch.path("out")),
     };
@@ -1490,11 +1816,10 @@ fn a_resumed_file_with_another_stream_is_copied_again() {
 /// An unfinished file is resumed whatever the choice, because it is the
 /// operation's own file, while a file of its name created before the
 /// operation started gets the choice, also when the person edited it during
-/// the interruption: without a choice, and with Skip, it stays and the
-/// source is skipped.
+/// the interruption. Skip keeps that file; a missing legacy policy uses the default.
 #[test]
 fn an_unfinished_file_is_resumed_whatever_the_choice() {
-    for choice in [None, Some(Choice::Skip)] {
+    for choice in [None, Some(Policy::Skip)] {
         let scratch = Scratch::new("choice");
         let old = scratch.write(r"src\old.txt", b"old source");
         let new = scratch.write(r"src\new.txt", b"new source");
@@ -1504,16 +1829,27 @@ fn an_unfinished_file_is_resumed_whatever_the_choice() {
         set_modified(&theirs, SystemTime::now() + Duration::from_secs(1));
         scratch.write(r"out\new.txt", b"new");
         let request = Request::Copy {
+            policy: crate::Policy::default(),
             sources: vec![old.clone(), new],
             destination: Destination::Folder(scratch.path("out")),
         };
         save(&scratch, &request, choice, started);
 
         let outcome = resume(&scratch);
-        assert_eq!(outcome.listed, [skipped(&old)], "{choice:?}");
+        let expected = if choice == Some(Policy::Skip) {
+            vec![skipped(&old)]
+        } else {
+            vec![]
+        };
+        assert_eq!(outcome.listed, expected, "{choice:?}");
         let read = |name: &str| fs::read(scratch.path("out").join(name)).expect("a file");
         assert_eq!(read("new.txt"), b"new source", "{choice:?}");
-        assert_eq!(fs::read(&theirs).expect("theirs stays"), b"the person's");
+        let expected: &[u8] = if choice == Some(Policy::Skip) {
+            b"the person's"
+        } else {
+            b"old source"
+        };
+        assert_eq!(fs::read(&theirs).expect("destination"), expected);
     }
 }
 
@@ -1662,6 +1998,7 @@ fn continue_counts_what_already_moved() {
     fs::create_dir(&out).expect("a destination");
     fs::rename(&first, out.join("first.txt")).expect("the half that moved");
     let request = Request::Move {
+        policy: crate::Policy::default(),
         sources: vec![first, second.clone()],
         destination: Destination::Folder(out.clone()),
     };
@@ -1692,11 +2029,12 @@ fn continue_counts_what_already_moved() {
     scratch.file(r"out\lost.txt");
     let watched = Watched::new(&scratch.saved());
     let (id, _) = watched.prepared(Request::Move {
+        policy: crate::Policy::default(),
         sources: vec![lost.clone()],
         destination: Destination::Folder(out),
     });
     fs::remove_file(&lost).expect("another program deletes it");
-    watched.queue.submit(id, None).expect("prepared");
+    watched.queue.submit(id).expect("prepared");
     assert_eq!(
         watched.ended(id).listed,
         [failed(&lost, ERROR_FILE_NOT_FOUND)]
@@ -1705,7 +2043,7 @@ fn continue_counts_what_already_moved() {
 
 /// A move on one volume renames: the file keeps its file ID. A folder that
 /// merges into one of its name moves its other files and keeps the one that
-/// conflicts, which nobody chose to replace.
+/// conflicts under the accepted Skip policy.
 #[test]
 fn a_move_on_one_volume_renames_and_merges() {
     let scratch = Scratch::new("rename");
@@ -1725,6 +2063,7 @@ fn a_move_on_one_volume_renames_and_merges() {
     let watched = Watched::new(&scratch.saved());
     let outcome = watched.run(
         Request::Move {
+            policy: Policy::Skip,
             sources: vec![file, folder.clone()],
             destination: Destination::Folder(out.clone()),
         },
@@ -1769,13 +2108,14 @@ fn an_unfinished_operation_is_offered_again() {
     let out = scratch.path("out");
     fs::create_dir(&out).expect("a destination");
     let copy = Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![held],
         destination: Destination::Folder(out),
     };
     for cancelled in [false, true] {
         let watched = Watched::new(&scratch.saved());
         let (id, _) = watched.prepared(copy.clone());
-        watched.queue.submit(id, None).expect("prepared");
+        watched.queue.submit(id).expect("prepared");
         watched.wait(id, |state| matches!(state, State::Running { .. }));
         if cancelled {
             watched.queue.cancel(id);
@@ -1805,6 +2145,7 @@ fn cancel_all_covers_intake_and_delete_cannot_revive_it() {
     fs::create_dir(&out).expect("destination");
     let watched = Watched::new(&scratch.saved());
     let request = Request::Copy {
+        policy: crate::Policy::default(),
         sources: Vec::new(),
         destination: Destination::Folder(out.clone()),
     };
@@ -1813,14 +2154,12 @@ fn cancel_all_covers_intake_and_delete_cannot_revive_it() {
     let (deleted, _) = watched.prepared(Request::Delete {
         sources: vec![scratch.file("delete.txt")],
     });
-    watched
-        .queue
-        .submit(deleted, None)
-        .expect("prepared delete");
+    watched.queue.submit(deleted).expect("prepared delete");
     assert_eq!(watched.ended(deleted).end, End::Complete);
     assert!(!watched.queue.resolve(
         id,
         Request::Copy {
+            policy: crate::Policy::default(),
             sources: vec![source],
             destination: Destination::Folder(out.clone()),
         }
@@ -1830,6 +2169,33 @@ fn cancel_all_covers_intake_and_delete_cannot_revive_it() {
     drop(watched);
     assert!(saved::read(&scratch.saved()).is_empty());
     assert!(!out.join("a.txt").exists());
+}
+
+#[test]
+fn policy_is_captured_before_delayed_source_intake() {
+    let scratch = Scratch::new("intake-policy");
+    let source = scratch.write(r"src\a.txt", b"new source");
+    let out = scratch.path("out");
+    scratch.write(r"out\a.txt", b"keep this");
+    let watched = Watched::new(&scratch.saved());
+    let request = |sources, policy| Request::Copy {
+        sources,
+        destination: Destination::Folder(out.clone()),
+        policy,
+    };
+    let id = watched.queue.accept(
+        request(Vec::new(), Policy::Skip),
+        SpeedSettings::automatic(),
+    );
+    assert!(
+        watched
+            .queue
+            .resolve(id, request(vec![source.clone()], Policy::UpdateChanged))
+    );
+    watched.wait(id, |state| matches!(state, State::Prepared(_)));
+    watched.queue.submit(id).unwrap();
+    assert_eq!(watched.ended(id).listed, [skipped(&source)]);
+    assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"keep this");
 }
 
 /// Recovery must be saved before the first mutation; a failed write cannot
@@ -1842,10 +2208,11 @@ fn an_unwritable_recovery_file_prevents_the_first_mutation() {
     fs::create_dir(&out).expect("destination");
     let watched = Watched::new(&scratch.path(r"missing\operations.json"));
     let (id, _) = watched.prepared(Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![source],
         destination: Destination::Folder(out.clone()),
     });
-    watched.queue.submit(id, None).expect("prepared copy");
+    watched.queue.submit(id).expect("prepared copy");
     assert!(matches!(
         watched.ended(id).end,
         End::Refused(Refusal::RecoveryUnavailable(_))
@@ -1863,6 +2230,7 @@ fn a_missing_source_does_not_erase_a_successful_copys_count() {
     let watched = Watched::new(&scratch.saved());
     let outcome = watched.run(
         Request::Copy {
+            policy: crate::Policy::default(),
             sources: vec![missing.clone(), source],
             destination: Destination::Folder(out.clone()),
         },
@@ -2138,10 +2506,11 @@ fn a_cancelled_ring_copy_leaves_no_partial_file() {
 fn a_typed_destination_is_a_folder_or_a_new_name() {
     let scratch = Scratch::new("typed");
     let a = scratch.write(r"src\a.txt", b"a");
-    let b = scratch.write(r"src\b.txt", b"b");
+    let b = scratch.write(r"src\b.txt", b"bb");
     let out = scratch.path("out");
     fs::create_dir(&out).expect("a destination");
     let copy = |sources: &[&PathBuf], destination| Request::Copy {
+        policy: crate::Policy::default(),
         sources: sources.iter().map(|&source| source.clone()).collect(),
         destination,
     };
@@ -2155,15 +2524,16 @@ fn a_typed_destination_is_a_folder_or_a_new_name() {
     assert_eq!(outcome.end, End::Complete);
     assert_eq!(
         fs::read(deep.join("b.txt")).expect("in the new folder"),
-        b"b"
+        b"bb"
     );
 
     let renamed = out.join("a-old.txt");
     let outcome = watched.run(copy(&[&a], Destination::Typed(renamed.clone())), None);
     assert_eq!(outcome.end, End::Complete);
     assert_eq!(fs::read(&renamed).expect("under the new name"), b"a");
-    let (_, prepared) = watched.prepared(copy(&[&b], Destination::Typed(renamed)));
-    assert_eq!(prepared.conflicts.expect("counted").files, 1);
+    let outcome = watched.run(copy(&[&b], Destination::Typed(renamed.clone())), None);
+    assert_eq!(outcome.end, End::Complete);
+    assert_eq!(fs::read(renamed).expect("updated named destination"), b"bb");
 }
 
 /// `F6` on the folder `Photos` with `photos` typed renames it in its
@@ -2176,6 +2546,7 @@ fn a_move_that_changes_only_the_case_renames() {
     scratch.file(r"src\Photos\a.jpg");
     let watched = Watched::new(&scratch.saved());
     let (id, _) = watched.prepared(Request::Move {
+        policy: crate::Policy::default(),
         sources: vec![photos],
         destination: Destination::Typed(scratch.path(r"src\photos")),
     });
@@ -2187,7 +2558,7 @@ fn a_move_that_changes_only_the_case_renames() {
         &*queued.request,
         Request::Move { destination: Destination::Named { name, .. }, .. } if name == "photos"
     ));
-    watched.queue.submit(id, None).expect("prepared");
+    watched.queue.submit(id).expect("prepared");
     assert_eq!(watched.ended(id).end, End::Complete);
     let names: Vec<_> = (fs::read_dir(scratch.path("src")).expect("list"))
         .map(|entry| entry.expect("an entry").file_name())
@@ -2205,13 +2576,14 @@ fn two_copies_into_one_new_folder_both_run() {
     let new = scratch.path(r"out\new");
     let watched = Watched::new(&scratch.saved());
     let copy = |source: &PathBuf| Request::Copy {
+        policy: crate::Policy::default(),
         sources: vec![source.clone()],
         destination: Destination::Folder(new.clone()),
     };
     let (first, _) = watched.prepared(copy(&a));
     let (second, _) = watched.prepared(copy(&b));
-    watched.queue.submit(first, None).expect("prepared");
-    watched.queue.submit(second, None).expect("prepared");
+    watched.queue.submit(first).expect("prepared");
+    watched.queue.submit(second).expect("prepared");
     assert_eq!(watched.ended(first).end, End::Complete);
     assert_eq!(watched.ended(second).end, End::Complete);
     assert_eq!(fs::read(new.join("a.txt")).expect("copied"), b"a");
@@ -2229,6 +2601,7 @@ fn a_destination_without_a_folder_above_is_refused() {
     let watched = Watched::new(&scratch.saved());
     let id = watched.queue.prepare(
         Request::Copy {
+            policy: crate::Policy::default(),
             sources: vec![a],
             destination: Destination::Folder(gone),
         },
