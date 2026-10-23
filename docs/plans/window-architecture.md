@@ -22,14 +22,36 @@ conditional on evidence.
 
 **Not scheduled.** The owner decides when.
 
-Stage 4 changes the same repaint code as the flicker work that another
-session holds as defects 6 and 8, which landed its first part in
-`362f5b2`. Stage 4 starts after that work ends, so the plan's one
-implementer does it.
+Reviewed against `ab0e9b0` on 2026-10-23. This review revises the plan;
+it starts no implementation stage. The measurements below belong to their
+named historical builds and were not rerun. Before a stage changes a path,
+check that path in the current source rather than treating an old issue's
+description or timing as proof of its present cost.
+
+Current boundaries that every stage preserves:
+
+- `gozler-fileops::Queue` owns engine threads, device admission, accepted
+  policies, cancellation and recovery, including synchronization's
+  comparison, review and explicit commit. The UI work owner does not
+  replace that lifecycle or submit an engine operation a second time.
+- File transfers is child content in the shared inspector, accepted and
+  routed by the main window. It has no separate top-level window or loop.
+  Its text guard already skips unchanged values. Copy/Move captures its
+  policy before preparation; there is no later conflict question.
+- Recovery registers a compact accepted request at admission before a
+  worker starts. `Recovery::saved` converts its paths lazily on an engine
+  worker. `Queue::close` returns a recovery-write completion receiver;
+  the process remains alive for that acknowledgment off the window thread.
+- The indexing-progress and early large-file dispatch changes are current
+  behavior. Preserve their status-slot, polling and engine ownership.
+
+Stage 4 starts from the current painting code, including `362f5b2` and the
+integrated pane. Reconcile any concurrent editor before changing it; an
+old session's defect numbers are not a scheduling dependency.
 
 ## Why
 
-Measured on `main` at `5146bc2`:
+Historical measurements and source observations on `main` at `5146bc2`:
 
 - **The window still waits on disks and other programs.** Five waits on
   the window's thread are filed: Settings reads every drive's label, every
@@ -70,8 +92,10 @@ Measured on `main` at `5146bc2`:
   `IconList::set_icons`, `ListView::set_small_images`,
   `ListView::set_header`, `Edit::set_cue`, `DatePicker::set_day`,
   `Button::set_icon`, which also sends `BCM_SETSHIELD`, and the progress
-  bar. So the File operations window sets every text of its card on each
-  500 ms poll during a copy, and each set draws the control again.
+  bar. The old File operations window set every card text on each poll.
+  The current transfer pane's `show_text` already compares text, and
+  `ProgressBar::set_measured` already checks its position. Stage 4 audits
+  remaining setters, including `set_moving`, instead of repeating those fixes.
 
 ## What DESIGN.md says that does not hold
 
@@ -82,8 +106,8 @@ Measured on `main` at `5146bc2`:
    on a click, an icon's bitmap depends on the DPI, the system colours
    and Show icons, and a Settings page is made from its template each
    time it first shows. The control itself is the record of what it
-   shows. The code relies on that in many setters; the rule is to make
-   every setter do it, not to add a diffed view.
+   shows. The code relies on that in many setters; use cheap native reads
+   or a caller-established change instead of a second diffed view.
 2. **"`WM_SETREDRAW` is turned off only around a change that would draw a
    control several times"**, and **"the main window erases only its own
    background between controls, once after each layout."** Both may cost a
@@ -124,18 +148,18 @@ the same failure.
 | --- | --- | --- |
 | Nothing stops the window is the first rule and the first stages | Gozler exists because Everything's window stops responding; in Total Commander a `\\server\share` that does not answer freezes the window (owner ruling "the window never lags") | The one failure that makes Gozler pointless comes back through any single call |
 | The bar is decency, not smoothness (owner) | A regular office user, not a gamer | Effort spent on smoothness nobody notices, while freezes wait |
-| One owner for all background work, used by every window (owner) | About 19 places start threads, each with its own rules for slowness, cancel and exit | Each new window repeats the rules, differently, and one of them freezes |
-| `core::work` holds the rules, `win::work` starts every thread, `app::work` connects areas | The rules are tested on Ubuntu; `win`'s own threads use the owner without `win` calling `app` | Untested rules, or layering reversed |
+| One UI work-policy owner used by every window, observing the existing engine owner | UI launch sites repeat slowness, replacement and exit rules; Queue already owns engine work | Each new window repeats those rules or duplicates the engine's lifecycle |
+| `core::work` holds UI policy, `win::work` launches UI workers, `app::work` connects areas; Queue retains its internals | Pure rules run on Ubuntu and native worker launch stays below app | Untested rules, layering reversed, or two engine owners |
 | Cancel by doing something else in the same place (owner) | A new search or another folder replaces the work; the person never waits for work they left | Stale work runs on, or a click elsewhere cancels work the person wants |
 | Work that changes files is cancelled only by its Cancel (owner) | A half-done copy lost to a typed search is worse than any wait | Lost or half-done copies, moves, deletes and exports |
 | Cancel shows only when a task the person waits for is slow, where its result will appear (owner) | A fast task needs no button, and a slow one needs a way out | Flashing buttons, or no way out of a dead share |
 | No automatic time limit for work the person started; background work gives up silently (owner) | A slow share may still answer and the person decides; nobody waits for background work | Results thrown away, or messages about work nobody asked for |
 | Known waits move first, onto the owner (stage 1) | They are what a person feels; the tooling protects later work but gives nothing alone | Months of tooling while the freezes stay |
-| `OffThread` token, `!Send`, on every function that can wait | The compiler rejects a marked waiting call on the window's thread | A marked call compiles there and ships |
+| A privately constructed, `!Send` `OffThread` token at the UI worker entry point | UI code cannot construct it; marked waiting calls require it. Bounded inline CPU passes receive no I/O capability | `!Send` alone permits UI-thread construction, or an inline pass gains permission to block |
 | A test scans `app`, `win` and `core` for waiting `std` calls, a named list of waiting Win32 calls and of other crates' waiting functions; thread code only in `…_thread` modules or under `work` | The token guards only marked functions; the Location check lives in `gozler-client`, the settings save in `core` | Unmarked waits, such as #141 and #143, ship unseen |
 | No join of a thread that may still run; at exit the window hides, tasks are cancelled and released through the `OpenWaker` flag | A join waits for whatever the thread waits for, such as a permission prompt or a dead share | Exit hangs |
-| The watchdog is a heartbeat that every message loop dispatches | The filter hook fires only before a message and misses the size/move loop and drag and drop; a heartbeat stops only when the thread is blocked | Every open dialog or border drag logged as a hang, and real hangs mislabelled |
-| The watchdog logs CPU cycles beside wall time, repeats while a stop lasts, records only message and control IDs, writes from its own thread, caps the log | Tells waiting from working; a long hang reads as long; window titles hold typed searches and file names; the log must not itself wait or grow | Noise, short readings of long hangs, private text in a log, a log that is a wait |
+| The watchdog's dedicated-window heartbeat is verified in each applicable native loop before use | A main-loop hook alone misses native loops; pure tests cannot prove modal dispatch | Every open dialog or border drag logged as a hang, and real hangs mislabelled |
+| The watchdog logs CPU-cycle and wall-time deltas separately, repeats while a stop lasts, records only message/control IDs, writes from its own thread and caps the log | The measurements help investigation but their units cannot be compared directly; window text is private and logging must not block the UI | False diagnoses, short readings of long hangs, private text in a log, or a log that is a wait |
 | The owner's day of use and the field checks go to `ui-after-install.md` | AGENTS.md: what only the owner can check waits for no stage | A stage that stalls on the owner |
 | Painting starts with a recording, and its riskier changes happen only if the recording shows a flash; one recording before and one after, each run once and saved for the owner, never a loop (owner) | The list moves inside `draw_once_after` to stop a scroll bar flash; the suspected flashes are not filmed; a resize step is about 34 ms; paint counts cannot tell a visible flash from the list's own erase and paint on every step | A flash brought back to fix one nobody saw, or windows flashing in front of the owner for an hour |
 | `RDW_ERASE` stays in the main window's `draw_once_after` | A mode or language switch must erase the other mode's pixels | Garbage after a mode or language switch |
@@ -143,20 +167,20 @@ the same failure.
 | A list's changed column widths are set together, inside one `draw_once_after` on that list | Each `LVM_SETCOLUMNWIDTH` paints the whole list and header before it returns, twice when the scroll bar comes or goes (5–8 paints per panel list before `set_panel_widths`) | The paints that f96343c removed come back |
 | One `DeferWindowPos` batch for each parent | A batch takes only windows of one parent; the filter pane's controls are the pane's children | The batch fails and every control moves and draws on its own |
 | The owner has an inline size beside its slow constant; every pass over the selection, the fetched rows, a folder's entries or an operation's sources goes through `work::pass`, inline at or under the size and as a task above it | The token and the scan see calls, not loops, and the watchdog sees only stops over 200 ms; a 60 ms pass over 100,000 rows is a wait for what should be instant | Each feature decides again whether its loop is too long, and the next pass over 100,000 rows ships unseen |
-| The collections a pass walks are shared snapshots (`Arc<[…]>`) that offer whole-collection iteration only through `work::pass` or with the `OffThread` token | A task must take them without copying, and the compiler then refuses a long loop on the window's thread | A clone of 100,000 rows on the window's thread, or a loop the scan cannot see |
+| Large passes use shared snapshots and `work::pass`; inline callbacks have bounded CPU data, not the I/O capability | Preparing, applying and retiring a pass must also fit its UI budget; arbitrary loops still need review | A clone, destruction or unchecked loop over 100,000 rows holds the UI |
 | A selection whose taken-file filter is a task has its own state, which unhighlights nothing until the answer arrives; the answer is filtered again if the taken entries changed meanwhile | `Selection::Reading` already means a gozlerd request, and `deselect` maps it to the row-by-row pass; the taken entries can change while the task runs | About 300,000 messages for a whole-selection delete, or a command acting on files a running operation has taken (window rule 10) |
 | A pass that sends messages to a control stays on the window's thread in a one-message form or bounded by `SELECTION_LIMIT` | Only the thread that owns a control may send it messages | A row-by-row pass over 100,000 rows, as before 730f93a's `Deselect::All` |
-| `Saved::new` stays in `Queue::submit` on the caller's thread; a write of `operations.json` waits for its read | The run's `started` time and choice exist only in the `Start` the run thread takes, and `Queue::close` must find every running operation saved (D19); a write before the read replaces the file with only the new operations | Continue and Skip treat partial copies as files that were there before, or interrupted operations are lost |
-| The waits after the window hides are listed and bounded: `ui.json`, `operations.json`, a stopped export's removal of its partial file, and telling each drag source that its drop ended, for at most a few seconds | Each keeps a promise in DESIGN.md; an unbounded wait at exit is a hang a person sees as a program that will not end | Lost settings or operations, a partial export left behind, or a frozen 7-Zip holding Exit forever |
-| Unchanged sets are removed early, the File operations window first | Its card is set every 500 ms during a copy, the one blink on every update | The blink stays until the maintenance stages |
+| Recovery registration stays at engine admission, conversion on its worker; a write of `operations.json` waits for its initial read | Current Queue fixes the start time and immutable request before first mutation; its close acknowledgment includes explicit cancellation | UI path conversion returns, or recovery loses interrupted or cancelled operations |
+| Essential settings/recovery completion stays off the UI thread; nonessential task and source-notification waits do not hold Exit | Native storage calls have no guaranteed deadline. Preserve recovery acknowledgment and report failed persistence honestly instead of claiming both forced exit and durable writes | Lost cancellation/settings state, a blocked window, or a frozen drag source holding unrelated shutdown work |
+| Remove remaining unchanged sets early; retain the transfer pane's existing text guard | The shared pane already compares its texts; other native setters still need inspection | An obsolete surface is rebuilt or an already-fixed path obscures remaining repaint work |
 | Setters read the control; no saved copy of what was set, no `Screen` type | Controls change themselves, icons depend on DPI and colours, pages are made anew | The window shows a value the model does not hold, or never sets one after a DPI or theme change |
 | The inspector's file icon, the shield and the marquee are kept beside their control in `Controls` | They cannot be read back: a new icon copy each time, no getter for `BCM_SETSHIELD` or `PBM_SETMARQUEE`; the wrappers are `Copy` handles | Sets on every refresh, or a restarted marquee |
 | A refresh never sets the selection, focus, scroll position, typed text, column widths or order; the item count is an effect | The control or the person owns them; setting the count also redraws every row | A refresh undoes a column drag, or a new search with the same total shows old rows |
 | Check boxes, toolbar check buttons and the Match: list are set from the model | A toggle the model refuses must go back | The control shows checked while the model says unchecked |
 | Menus stay out of refreshes | Their states are set when a menu opens (window rule 9) | Work on every update for menus nobody sees |
 | Three steps: structure effects, refresh, other effects | A column must exist before its header is set; Windows drops the focus of a control it disables | Lost header texts, or a lost focus |
-| An effect that changes the model returns an `Accepted`, handled at once; a refresh repeats while the model's change count moves, a few times at most | Starting a reading or reading memory changes the model after the refresh; a message sent back by a set runs its own update | Stale panels and memory figures, or old values written over newer ones |
-| A command's own dialog or menu runs at the end of step 3, not as a `ModalStep` | Modal steps run one at a time, and Settings starts fixes whose questions are steps | While Settings is open, a fix's question and a copy's conflict question never show |
+| Reentrant updates invalidate stale presentation and state-dependent effects; accepted irreversible commands still execute exactly once | A native set may dispatch a newer update before the outer sequence resumes | Old searches, focus or structure effects undo newer state, or a committed file command is lost or repeated |
+| A command's own dialog or menu runs at the end of step 3, not as a `ModalStep` | Modal steps run one at a time, and Settings starts fixes whose questions are steps; Copy/Move has no later conflict question | A fix's question cannot be answered while Settings is open |
 | A dialog that a reply, disk event or operation starts is a `ModalStep` | Window rule 13 | A dialog's loop applies newer events before older ones |
 | Effects stop once the window is destroyed | Window rule 5 | A reply reaches a reused handle |
 | A notification that only records control-owned state is not an update | Shift+End over 100,000 rows sends a storm of `LVN_ITEMCHANGED` | One full update per notification stalls the window |
@@ -179,20 +203,27 @@ the same failure.
 
 ### Background work: one owner
 
-All work that can wait runs through one owner, which every window uses:
-Search, the file manager's panels, copying, the Viewer, Settings, and any
-later window. A window says only "start this work, of this kind, shown in
-this area".
+UI work that can wait runs through one policy owner, used by Search, the
+panels, the Viewer, Settings and later windows. A window supplies the work's
+purpose, area and policy. Existing specialized readers retain their
+apartment and lifetime requirements behind this owner. Accepted file
+operations remain in `gozler-fileops::Queue`; the UI owner observes their
+snapshots and routes explicit actions through its existing interface.
+It owns neither a second engine scheduler nor engine worker threads.
 
 - **`core::work` holds the rules,** with no Win32 type, tested on Ubuntu:
   the kind of each task, when a task counts as slow (one constant, a few
   seconds without an answer or progress), what then happens, the inline
   size of "Passes over many items" below, and the one captions function
   that words "Waiting for …".
-- **`win::work` is the only code that starts a thread** for a task. It
-  gives the task an `OffThread` token, which is `!Send`, so it cannot
-  reach the window's thread, a cancel token, and a registration that lets
-  a cancel cut loose a stuck disk call (`CancelSynchronousIo`). It
+- **`win::work` is the only UI task launcher.** Only its worker entry
+  point may construct the private `!Send` `OffThread` token; UI code
+  cannot obtain one. `!Send` alone proves no construction rule. Marked
+  waiting calls require this capability, never a token supplied to an
+  inline CPU pass. The worker also receives a cancel token and a
+  registration for best-effort `CancelSynchronousIo`. Cancellation does not
+  imply completion or make native resources safe to release; see Microsoft's
+  [I/O cancellation contract](https://learn.microsoft.com/en-us/windows/win32/fileio/canceling-pending-i-o-operations). It
   delivers the task's answers through the replies channel and an
   `OpenWaker`, which wakes the window only while it is open, so no task is
   joined. It lives in `win`, so `win`'s own threads (folder readings, the
@@ -202,19 +233,36 @@ this area".
   cancels the area's task that a new one replaces, and routes Cancel and
   Esc to the task shown where the person is.
 
-The kinds of task:
+Replacement, visibility and mutation are independent policy dimensions.
+A search is replaceable and awaited; an export is awaited and changes files.
+Do not make these overlapping rows mutually exclusive enum variants:
 
 | Kind | Examples | When it is slow |
 | --- | --- | --- |
 | Replaced by the next action in the same place | a search as you type, a folder reading, a selection read, a Viewer's reads | A new task of the same purpose in the same area cancels it, silently |
 | Waited for by the person | a search, a folder on a share, opening a file, an export, a copy | After the slow constant with no answer, its area's message place, where the result will appear, says "Waiting for \\server\share…" with Cancel. No automatic time limit |
 | Background, nobody watching | the status, folder sizes, drive labels and free space, the update check | It gives up silently after its limit and runs again at the next natural moment |
-| Changing files | a copy, move, delete or export | Never cancelled by another action; only its Cancel ends it. The engine (`gozler-fileops`) does the work; the owner shows its slowness in the card and the status bar when its progress stops |
+| Changing files | a copy, move, synchronization, delete or export | Never cancelled by an unrelated action. Queue owns engine operations; Requests owns export until its explicit migration. Observe their existing progress/Cancel instead of introducing a second cancellation owner |
+
+Bound replaceable UI work before migrating its launch sites. Each area and
+purpose has at most one executing request and one pending replacement; a
+new replacement supersedes that pending request. A cancelled native call
+still occupies its execution slot until it actually returns. Pending work
+has its own cancellation/generation and visible waiting state when awaited.
+Unrelated purposes have separate admission so a blocked share does not
+consume every search, Settings or service slot. Worker registrations and
+pending replies are bounded too. Preserve dedicated STA/message-pump work
+where required; this is policy around existing workers, not one global
+worker thread or a new execution framework. Engine admission stays in Queue.
 
 A task reports progress when it can, but the owner, not the task,
 notices that a task is slow: it times how long each task has gone
 without an answer or progress, because a task blocked inside a call
 cannot report that it is blocked.
+Engine Paused, Waiting and Compared states keep their existing meaning;
+absence of progress in those states is not a second generic stall state.
+Show a task's progress only in its owning surface: Settings shows its own
+work, while engine progress remains in the main window's shared presentation.
 
 **Passes over many items.** Time is not the only way to stop the window:
 a pass over 100,000 selected rows takes 58–80 ms with no call that waits.
@@ -232,13 +280,23 @@ once or on a later wake. A feature has one code path and never chooses.
   task must take them without copying 100,000 rows on the window's
   thread. Their type offers `len`, `get` and the range of rows on screen,
   which `LVN_GETDISPINFO` and the cell fill need, and iteration over the
-  whole collection only through `work::pass` or with the `OffThread`
-  token, so the compiler refuses a long loop on the window's thread and
-  the scan needs no loop detector. A panel's entries change in place
+  whole collection through `work::pass` or on a worker. The inline callback
+  gets only bounded CPU data, never `OffThread`; preparing that data, applying
+  its result and releasing its last large allocation follow the same size
+  rule. This does not prove that arbitrary loops through `get` are bounded;
+  review the affected callers rather than inventing a general loop checker.
+  A panel's entries change in place
   with each disk event, so while a task holds a panel's snapshot, the
-  panel's changes wait for the task's answer, in the order its moment
-  counter and `ReadChange` already keep; otherwise the next change would
-  copy the whole listing on the window's thread inside `Arc::make_mut`.
+  panel's changes wait in a bounded batch in the order its generation,
+  moment counter and `ReadChange` already keep; otherwise the next change
+  would copy the whole listing on the window's thread inside `Arc::make_mut`.
+  Success, error, cancellation and supersession all release this ownership.
+  A folder replacement discards the old generation's events. If the pending
+  batch fills, cancel/invalidate the pass and request a fresh listing through
+  the existing reader, rather than growing a backlog. Replay/application is
+  itself bounded; dropping a stale answer must not leave a panel frozen.
+  Large snapshot retirement runs on the work owner; synchronization previews
+  retain Queue's existing `release_comparison` route.
 - A pass that sends messages to a control cannot leave the thread that
   owns the control. It takes a one-message form where Windows offers one,
   as `Deselect::All` clears every highlight with one `LVM_SETITEMSTATE`
@@ -255,9 +313,9 @@ once or on a later wake. A feature has one code path and never chooses.
   selection loses every file.
 
 Scrolling, opening Settings, switching to the other panel or opening the
-Viewer cancel nothing. A call that Windows does not let go of is cut
-loose and its thread released, never waited for. There is never a modal
-"please wait".
+Viewer cancel nothing unrelated. Cancellation requests do not prove a native
+call has ended; a detached call remains accounted for until it returns, with
+no UI join or unsafe resource reclamation. There is never a modal "please wait".
 
 ### Nothing stops the window
 
@@ -271,28 +329,37 @@ The window's thread runs the message loop and nothing that can wait:
 - **No lock that another thread holds while it works.** A thread that
   shares a value with the window holds its lock only to copy the value in
   or out, never across a read, a write or a call; a channel is preferred.
-- **At exit** the window hides, every task is cancelled, and the threads
-  are released through the `OpenWaker` flag, not joined. The waits after
-  the window is hidden are bounded, each keeping a promise of DESIGN.md:
-  the final writes of `ui.json`, which keeps the window's place and
-  columns, and of `operations.json`, which lets the operations continue at
-  the next start; a stopped export's removal of its partial file, bounded
-  because the export checks its cancel token after each page; and telling
-  each drag source that its drop ended (`wait_for_sources`), which waits
-  for the source's process and so ends after a few seconds with one log
-  line, so a frozen source such as a stuck 7-Zip no longer holds Exit
-  forever.
+- **At exit** the window hides, closes delivery while its HWND is valid,
+  requests cancellation and releases nonessential workers without UI joins.
+  Preserve Queue's existing asynchronous close acknowledgment before process
+  exit, including cancellation persistence. Serialize the final `ui.json`
+  read/merge/write on its persistence worker too. Completion or a reported
+  write failure, not a forced deadline pretending to save, ends essential
+  finalization. Keep the last valid file on failure and use the existing
+  failure report without touching a destroyed HWND. Arbitrary native storage
+  calls are not guaranteed to finish within seconds; UI responsiveness and
+  process termination are different guarantees.
+  Export checks cancellation between pages, but a page write or removing its
+  partial file can still block. Keep that cleanup off the UI thread and report
+  its actual outcome; never infer a cleanup deadline from page cancellation.
+  Drag-source completion attempts have a finite wait budget and are released
+  without blocking essential writes if a frozen source cannot answer.
+  Apply the same ordering to setup/reset and session end; `WM_ENDSESSION`
+  cannot guarantee a write survives Windows forcibly terminating the process.
 - **Exit no longer waits for a permission prompt.** Today `WM_DESTROY`
   joins the Include save and the fix thread, which wait for the prompt's
-  answer. With the owner, Exit ends at once; an elevated helper the
+  answer. With the owner, the window closes without joining that prompt;
+  process completion still follows essential persistence. An elevated helper the
   person allows still runs to its end on its own, and the Include save's
   temporary file, which its thread removes after the helper ends, can be
   left behind.
 
 What enforces it, stated as what each part catches:
 
-- **The token:** every function that can wait takes an `OffThread`, so a
-  call to a marked function on the window's thread does not compile.
+- **The token:** marked UI blocking boundaries require the privately
+  constructed worker capability; compile-check that UI code cannot create
+  or transfer it. Keep engine internals behind Queue's existing asynchronous
+  interface; do not change every engine function to take a UI token.
 - **The scan:** a `core` test reads the sources of `app`, `win` and `core`
   (as the catalogue-key test reads them), skipping `#[cfg(test)]` code,
   and fails on a waiting call outside the thread modules. It matches the
@@ -308,32 +375,49 @@ What enforces it, stated as what each part catches:
   after a timeout when Explorer hangs), seeded by one pass over `win` for
   calls that reach another process; and a
   named list of other crates' waiting functions
-  (`gozler_client::folder_is_missing`, `gozler_fileops::Queue::new` and
-  `close`). It also fails on `thread::spawn` or `thread::Builder` outside
+  (`gozler_client::folder_is_missing` and `gozler_fileops::Queue::new`).
+  Queue's existing asynchronous `close` is an audited interface, not a
+  blanket ban. The scan also flags `thread::spawn` or `thread::Builder` outside
   `win::work` (rule 15). The code a task runs lives only in modules named
   `…_thread` or under `work`, which hold nothing else, so a file that
   mixes the two splits. The few exceptions are listed in the test with
   their reasons: the panic hook's join, which keeps the window's thread
   from dispatching while its state is half changed (window rule 11), the
   keyboard hook's thread, which needs its own message loop, start-up
-  before the window exists, and the bounded waits after the window
-  hides. `core` holds no file call: `core` builds and parses the
+  before the window exists, essential finalization on non-UI workers and
+  bounded nonessential completion attempts, plus engine-owned threads behind
+  Queue's asynchronous interface.
+  A recognized-form scan is a reviewed backstop, not proof about aliases,
+  indirect calls, native modal loops or unknown APIs. Trace those boundaries
+  in review; do not build a general Rust parser for this check.
+  `core` holds no file call: `core` builds and parses the
   settings text, `app` reads the file at start-up and a task writes it.
-- **The watchdog** catches the rest. A watchdog thread posts a heartbeat
-  message to the window every 100 ms while a Gozler window is on screen.
-  Every message loop on the thread dispatches it, modal ones included
-  (dialogs, menus, the size and move loop, drag and drop), and a blocked
-  thread does not. When a heartbeat goes unanswered past the limit, one
+- **The watchdog** observes stalls the reviewed boundaries miss. A worker
+  posts a heartbeat to a dedicated window on the UI thread every 100 ms
+  while a Gozler window is on screen, through a lifetime-safe wake endpoint.
+  The mechanism must demonstrate dispatch in the native loops listed below;
+  a genuinely blocked UI thread cannot acknowledge it. When an unsuppressed
+  heartbeat goes unanswered past the limit, one
   constant in `core::work`, 200 ms to start, the watchdog writes a line,
   and again each second while the stop lasts: how long, the window
-  thread's CPU cycles over the same time (`QueryThreadCycleTime`), so
-  waiting is told from working, and the message in progress, from a
-  stack that the window procedure wrappers in `win::window` and
+  thread's CPU-cycle delta over the same interval (`QueryThreadCycleTime`),
+  as separate observations with different units, and the message in progress,
+  from a stack that the window procedure wrappers in `win::window` and
   `win::dialog` push and pop around each message of a Gozler window or
   dialog, whichever loop dispatched it, so a nested loop never
   overwrites the outer record. A message to a system dialog leaves the
   record of the message that opened it on top,
-  which is the one to name.
+  which is the one to name. Do not compare raw cycles with elapsed time or
+  automatically classify a stall from them. Post to a dedicated window on
+  the UI thread, not a bare thread message or a main-loop-only hook. Before
+  relying on this mechanism, one bounded native check must observe delivery
+  during a menu, application/system dialog, size/move and drag/drop loop,
+  and absence of acknowledgment during a controlled blocked handler. If a
+  native loop does not dispatch it, correct the mechanism or suppress that
+  known loop; do not log ordinary modal interaction as a hang. This is a
+  prerequisite of stage 3, not a native behavior already proven by core tests.
+  Microsoft's [modal-loop guidance](https://devblogs.microsoft.com/oldnewthing/20130905-00/?p=3313)
+  explains why a thread-message or main-loop-only hook is insufficient.
   It records message IDs and control IDs or classes, never window text,
   which holds typed searches and file names. Only the watchdog thread
   writes `ui-slow.log`, which keeps its newest 64 KB, in the settings
@@ -348,9 +432,10 @@ today, and what happens to each:
 
 **Fixed in stage 1:**
 
-- The File operations window's first open, 536 ms, in `Window::open`
-  (#110). It was not sampled, so one sampled run finds the slow step
-  first; the fix follows from it.
+- The old File operations window's first open was 536 ms (#110). That
+  window is gone; the shared transfer pane is lazy. Trace its current first
+  open and retain a targeted measurement only if a remaining synchronous
+  step is suspected. Do not rebuild the old window or rerun its benchmark.
 - A delete or move of 100,000 selected entries (#107):
   - `selected_paths`, about 15 ms when the command runs, and a panel's
     `chosen()`, 67 ms, go through `work::pass`. `transfer` builds
@@ -364,8 +449,9 @@ today, and what happens to each:
     `work::pass` with the selection's own state of "Passes over many
     items". The answer sets `Selection::Files` directly; it does not run
     `Model::select`, which would filter on the window's thread again.
-  - `Saved::new`, about 20 ms, stays in `submit`, as the decisions table
-    says.
+  - The old `Saved::new` cost of about 20 ms has moved to the engine worker.
+    Preserve compact recovery registration at admission and save-before-first-
+    mutation; no UI-thread serialization work is scheduled here.
 - Copying 100,000 paths, 59 ms (#91): the clipboard block is built by
   `work::pass`. Reading the selected positions from the list stays, a
   message pass bounded by `SELECTION_LIMIT` (15.6 ms at 100,000).
@@ -397,8 +483,8 @@ the rest of #126 stays in that issue.
 
 ### Setters that read the control
 
-Every `win` setter of a shown value compares the new value with the
-control's current value and sets only when they differ. Reading a control
+For a refresh-owned value, use a cheap native getter to skip unchanged
+sets unless the caller already establishes the change. Reading a control
 is not a decision about the model, so `win` still decides nothing. A
 value that the control changes in its own way when it is set, such as a
 shortened path, is compared in that form.
@@ -471,7 +557,7 @@ setters run:
 
 1. **Structure effects:** the effects that change what the controls are
    or hold, such as inserting a column with its header, setting a list's
-   item count, or starting or stopping a panel's reading, because a value
+   item count or preparing a panel's controls/data, because a value
    can be set only on a control part that exists, and some values, such as
    the rows in view, need the new count.
 2. **Refresh** each touched area: compute its values in `core` from the
@@ -485,10 +571,17 @@ The rules around the steps:
 - **An effect that changes the model** returns an `Accepted`, which is
   handled at once with its own three steps.
 - **A message that a set or an effect sends back** runs its handler and
-  its own steps; there is no guard. Each update counts the model's
-  changes, and a refresh that sees the count move while it sets refreshes
-  its areas again, a few times at most (`debug_assert` after that), so it
-  never leaves a value computed before the nested update.
+  its own steps outside model borrows. Tag precomputed presentation and
+  state-dependent effects with the model revision or relevant purpose
+  generation. After reentry, abandon stale presentation and revalidate or
+  recompute remaining structure, navigation, focus and task-start effects
+  before applying them. An already accepted irreversible command keeps its
+  operation id and executes once; invalidating a refresh cannot discard it
+  or replay it. Use direct feature transitions rather than a generic event
+  framework. If refresh cannot converge in a bounded pass, post one deferred
+  refresh and stop the old pass; a debug assertion alone is not the release
+  behavior. Actual task starts/cancels stay in the ordered effects, outside
+  structural control creation.
 - **A dialog or menu that a command opens** runs at the end of step 3,
   outside every borrow, as Settings and the context menu run now, so a
   dialog that a reply or an operation starts can still run inside it.
@@ -505,11 +598,13 @@ The rules around the steps:
   update. Each message it handles runs one update, not one per
   notification; an effect's own `Accepted` and a repeated refresh run
   inside that update.
-- **Settings, the File operations window and each Viewer** keep their own
-  state and their own small loop of the same shape: Settings edits its
-  draft (window rule 1), the File operations window words what the queue
-  reports, a Viewer owns its file. They use the same owner for background
-  work and the same setters.
+- **Settings, synchronization's comparison dialog and each Viewer** keep
+  their existing local state and a small loop of the same shape. Settings
+  edits its draft; a Viewer owns its file; the comparison dialog reads an
+  immutable engine preview and explicitly commits it. File transfers stays
+  shared inspector content routed through the main window and its existing
+  `core::Operations`/`app::FileOperations` owners, not another loop or window.
+  All use the UI work policy where applicable and the native setters.
 - **The panels and the operations** keep their ordering rules: a
   listing's changes apply in the order `ReadChange` gives, and an
   operation's sources come last in `OperationSteps`, because COM delivers
@@ -539,8 +634,9 @@ it shows, and an `app` module with its controls' messages, its refresh,
 and the making of its own controls, so #98 can make an area's controls
 when it first shows. `Model` holds the areas and the facts several of
 them read: the strings, the settings, the service's status and the
-instance. `MainWindow` holds the window: its handle, the mode, the layout
-and one table that routes each control ID and timer to its area.
+instance. `Model` retains the authoritative mode in its saved window state.
+`MainWindow` holds handles and layout measurements and routes each control
+ID and timer to its area, reading the mode from `Model`.
 
 ### Painting
 
@@ -575,10 +671,10 @@ cite rules 1 to 13 by number:
     can wait on a disk, the network, the service, another process or
     another thread, takes no lock another thread holds while it works,
     and joins no thread that may still run.
-15. **All background work goes through the one owner.** Only `win::work`
-    starts a thread for a task; a function that can wait takes an
-    `OffThread` token; a window says what to run, of which kind, shown in
-    which area, and the owner decides cancelling, slowness and exit.
+15. **UI background work goes through one policy owner.** `win::work`
+    launches UI tasks and privately constructs their `OffThread` capability.
+    Policy covers admission, replacement, slowness and exit; Queue retains
+    engine workers, operation cancellation, device admission and recovery.
 16. **A handler turns a message into an update and handles its
     `Accepted`.** It sets no control outside the three steps.
 17. **Model the state by its rules.** A boolean for an independent fact;
@@ -590,21 +686,23 @@ cite rules 1 to 13 by number:
     wrong: change the representation instead of adding a branch.
 18. **A fact has one owner,** the area that changes it; another area reads
     it through the model, never through a copy.
-19. **Every `win` setter of a shown value reads the control first** and
-    sets only a value that differs; a value the control cannot return is
+19. **A refresh skips unchanged native sets** using a cheap getter or a
+    caller-established change; a value the control cannot return is
     kept beside it in its window's `Controls`. `app` keeps no copy of a
     shown value only to skip a set.
 20. **A timer is a variant of `Timer`,** never a bare number.
-21. **A test asserts what the person would see,** the values an area
+21. **A core test asserts the behavior a caller would see,** the values an area
     shows for one representative state, given fixed measures, or the
     effects of an update in their order, against literals the scenario
-    predicts. No test needs a window.
+    predicts. Pure rules need no window; uncertain native behavior gets one
+    bounded check, not a permanent display-only regression suite.
 
 ## Stages
 
 One implementer keeps its context through the stages and fixes the
 review's findings; one reviewer reads each stage and reports. Each stage
-is its own commits and lands on `main` with `build.ps1` green. A defect
+ends with its reviewed changes and `build.ps1` green; committing and installing
+remain separate owner decisions. A defect
 found on the way is filed, or fixed in its own commit when it is small.
 Stages 1 to 4 change what a person feels; stages 5 to 9 are maintenance,
 change nothing a person should notice, and come after them. Their risk is
@@ -612,10 +710,11 @@ a regression in focus, selection or speed, which their proofs watch.
 
 ### Stage 1: the owner for background work, and the known waits
 
-1. `core::work`: the kinds, the slow constant, the rules for replacing,
-   cancelling and giving up, and the wording of "Waiting for …".
-2. `win::work`: the one spawn, the `!Send` `OffThread` token, the cancel
-   token, the registration for `CancelSynchronousIo`, and delivery
+1. `core::work`: the independent task policies, finite admission and pending
+   replacement rules, the slow constant, cancellation/give-up rules and the
+   wording of "Waiting for …". Preserve the engine boundary above.
+2. `win::work`: the UI launch boundary, the privately constructed `!Send`
+   `OffThread` token, cancellation, best-effort `CancelSynchronousIo` and delivery
    through the replies channel and an `OpenWaker`. `app::work`: starting
    a task for an area and routing Cancel and Esc.
 3. The known waits move onto the owner:
@@ -631,12 +730,18 @@ a regression in focus, selection or speed, which their proofs watch.
      share that stopped answering decides the owner: the main window if
      it keeps taking input, otherwise a window made on the shell's
      thread;
-   - the `ui.json` save (#143): `core` builds and parses the settings
-     text and holds no file call; the file is written as a task, one at
-     a time, the newest text winning. At exit and at `WM_ENDSESSION` the
-     last write is waited for after the window hides, as
-     `operations.json` is, so the window's place and columns are kept,
-     and a failure still shows its message;
+   - the `ui.json` save (#143): move the complete read/merge/write off-thread,
+     preserving `Settings::save_changes`' per-window changed-key intent,
+     `SaveScope::Choices` and the latest file's unrelated keys. `core` keeps
+     parsing/merging pure. One writer serializes this window's attempts;
+     coalescing keeps every pending key change/removal and scope, not merely
+     the last text or last delta. Results identify their attempt/generation.
+     Preserve the current attempted-baseline/failure rule: a failed attempt
+     reports once and retries after another state change, not every timer.
+     Advancing that baseline for queued work must not lose an earlier pending
+     key. Read the latest disk file when writing, so another window's changes
+     are merged as today; do not invent a cross-process transaction system.
+     Finalization and `WM_ENDSESSION` follow the persistence contract above;
    - the drive labels (#140), read as a background task, the last labels
      kept for each refresh;
    - the clipboard open (#144): retried on a short timer, not a sleep;
@@ -644,17 +749,21 @@ a regression in focus, selection or speed, which their proofs watch.
      for start at sign-in; `Queue::new`'s read of `operations.json` (17.6
      MB for 100,000 sources), and if it moves, a write of the file waits
      until the read has ended, because a write before it would replace
-     the file with only the new operations; the drop's `GetData` from
+     the file with only the new operations. Hold new engine commands until
+     Queue initialization is ready rather than exposing a half-restored
+     queue; existing engine admission and recovery remain its own. The drop's
+     `GetData` from
      another process; and `EmptyClipboard`'s message to another process:
      each moved onto the owner, or shown to return at once, with the
      evidence in the stage's report;
-   - the locks the window takes that a thread also holds: the
-     operations queue's, which the File operations window's poll takes,
-     and its write lock, which `Queue::close` waits on while a queue
-     thread writes `operations.json`; and the service check's. Each is
-     shown to be held only to copy a value, or replaced by a message,
-     with the evidence in the stage's report; `Queue::close` runs only
-     after the window hides.
+   - the locks shared with the window: Queue's snapshot, reorder/admission
+     and action critical sections, and the service check's. Audit their
+     current callers and work under lock; #146's old path-reservation walk
+     is gone and must not return. Current `Queue::close` already starts its
+     recovery write on an engine worker and returns a receiver, so preserve
+     that interface instead of moving a nonexistent UI write lock. Show that
+     UI-facing locks only copy bounded state, or move the remaining large
+     work through the existing owner, with evidence in the stage report.
 4. `work::pass`, its inline size from one measurement, and the snapshot
    types of "Passes over many items" for the selection and a panel's
    entries, a panel's changes waiting while a task holds its snapshot;
@@ -667,19 +776,29 @@ a regression in focus, selection or speed, which their proofs watch.
   that changes files is never cancelled by another action; a task the
   person waits for shows Cancel only after the slow constant; background
   work gives up silently; nothing is delivered after the window closes.
+- One pure admission case holds an execution slot after cancellation and
+  replaces its pending request repeatedly: only the newest pending request
+  remains and an unrelated purpose can run. Compile-check capability creation
+  and inline CPU passes without granting UI code the blocking capability.
+- One settings-save case covers coalesced changes to different keys while
+  another window changes an unrelated key; verify scope and failure/retry
+  acknowledgment against the current behavior, using fixture text.
 - For item 4, `core` tests that `work::pass` runs inline at the inline
   size and as a task above it and delivers the same answer both ways;
   that a filter answer for a selection that is no longer current changes
   nothing; and that an answer filtered against older taken entries is
-  filtered again. One measured run of the first open and of a delete of
-  100,000 selected entries, reported beside the figures above.
+  filtered again. A panel-pass cancellation/replacement case releases its
+  snapshot, rejects old-folder events and retains current updates without
+  unbounded replay. Measure the current selected-source path once at
+  100,000 entries; remeasure first-open work only if the current pane trace
+  justifies it. Attribute comparisons to the historical figures above.
 - The After install items in `ui-after-install.md`: a Location on a
   sleeping disk; Enter, F3 and Properties on a share that stopped
   answering; a pulled USB drive; a clipboard another program holds;
   Settings > Drives and service and Settings > Include with a drive
   asleep or offline.
 
-### Stage 2: every thread onto the owner, exit without waiting, the scan
+### Stage 2: UI task migration, exit without UI joins, the scan
 
 A move before the stage that changes what a person sees (AGENTS.md:
 restructuring is its own stage). The one change of behavior is at exit,
@@ -687,17 +806,20 @@ because the owner joins no task: Exit no longer waits for an open
 permission prompt, as "Nothing stops the window" says, which reverses
 what #126's check 2 expects today.
 
-1. The threads of today move onto the owner, each with the rules it has
+1. The UI task threads move onto the owner, each with the rules it has
    now: the requests, the panels' folder threads, the Viewer's reader,
    the Include save, Paste, the entry checks with `present()`, the update
    check, the service check, the fix thread, Indexed folders, the
-   clipboard and drops.
-2. Joins go with them: at exit the window hides, cancels every task and
-   releases the threads through the `OpenWaker` flag; only the bounded
-   waits of "Nothing stops the window" follow, after the window is
-   hidden: the final writes of `ui.json` and `operations.json`, a stopped
-   export's removal of its partial file, and telling each drag source,
-   for a few seconds at most.
+   clipboard and drops. Queue and its internal workers remain engine-owned;
+   the shared transfer pane and synchronization preview use their existing
+   operation ids, explicit commits, retained reports and cancellation routes.
+2. Remove UI joins of potentially running workers and close their delivery
+   endpoints before HWND destruction. Essential persistence follows the
+   asynchronous acknowledgment contract of "Nothing stops the window";
+   do not force process exit before recovery/cancellation is saved. Export
+   cleanup stays off-thread and drag-source notification cannot hold those
+   writes. Cover ordinary Exit, setup/reset and session-end ordering without
+   claiming a hard deadline for storage I/O.
 3. The scan test, with its listed exceptions and the `…_thread` and
    `work` modules; files that mix window-thread code and thread code
    split.
@@ -722,8 +844,14 @@ and the window's place kept at the next start.
   tests do not already cover them.
 - A `core` test of the watchdog's rule, with fixed times: an unanswered
   heartbeat past the limit writes a line, a stop that lasts writes one
-  each second, cycles near the wall time read as working and far below
-  it as waiting, and popping a nested record restores the outer one.
+  each second, wall time and CPU-cycle deltas remain separate fields, and
+  popping a nested record restores the outer one. Read/copy the current
+  context under a short lock, then release it before logging or native
+  queries; the UI never waits for log I/O.
+- One bounded native check of the dedicated heartbeat window in the nested
+  loops listed above, plus one controlled blocked handler. Observe actual
+  acknowledgments, not fixed sleeps. Keep the result as API evidence, not a
+  recurring display test. The mechanism is not accepted until this passes.
 - In `ui-after-install.md`: a day of the owner's normal use with the
   build; the implementer then files one issue for each distinct message
   and cause in `ui-slow.log`, adding repeats to the existing issue. No
@@ -733,7 +861,7 @@ and the window's place kept at the next start.
 
 1. One screen recording before any change: a border drag in both modes,
    a splitter drag, typing a search, a mode switch, a status update and a
-   copy with the File operations window open. It runs once as part of the
+   copy with the shared transfer pane open. It runs once as part of the
    stage, never as a loop, and is saved for the owner to review later.
    The border drag is driven through the window's own handlers between
    `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`, because a drag by
@@ -743,8 +871,9 @@ and the window's place kept at the next start.
    button captions, `Toolbar::set_text`, the status bar's and the
    tooltips' tips, `ListView::set_header`, `Edit::set_cue`,
    `DatePicker::set_day`, and `Button::set_icon` with the shield kept in
-   `Controls`. The File operations window stops setting its card's texts
-   on each poll.
+   `Controls`. Retain the transfer pane's existing text comparison; audit
+   remaining status/progress setters, including indexing activity, against
+   the current source rather than adding another presentation cache.
 3. Only if the first recording, at normal speed, shows a flash a regular
    user would see:
    - toolbar blink: `TBSTYLE_EX_DOUBLEBUFFER`, with its look in light,
@@ -815,10 +944,13 @@ A move, with no change of behavior or of what an update returns:
 4. `core/captions.rs` splits along the areas whose texts it holds, and
    `win/controls.rs` by control.
 
-**Proof:** the existing tests pass with only their paths and names
-changed. Done when no area's field is in `Model` or `MainWindow`, no file
-of `core` or `app` is over 2,500 lines with its test module, and `win`
-is split by control.
+**Proof:** the existing tests pass with only their paths and names changed.
+Done when each named area's private facts and controls have one feature
+owner, shared facts remain in `Model`, and `MainWindow` routes rather than
+duplicates those responsibilities. Aggregate area fields may remain in their
+owning window/model. Remove temporary forwarding methods once callers move.
+Split along those responsibilities; line count is a review prompt, not a
+completion quota or a reason to fragment coherent code and tests.
 
 ### Stage 7: what an update returns (maintenance)
 
@@ -845,16 +977,21 @@ is split by control.
    them, and stops running effects once the window is destroyed.
 3. `core` emits the modal steps it decides; `app` keeps its queue for the
    steps that its own threads, drops and checks raise.
-4. The other windows' loops take the same three steps.
+4. Settings, synchronization's comparison dialog and Viewer loops retain
+   their scopes while taking the same three steps. Shared inspector transfer
+   content continues through the main window; create no independent loop.
 
 **Proof:**
-- The 28 tests in `core/model.rs` that assert `change` or `then` are
+- The existing tests in `core/model.rs` that assert `change` or `then` are
   rewritten to assert the touched areas and the effects in their order,
   against what each scenario predicts.
+- One reentrancy case supersedes an outer state-dependent effect with a
+  newer nested update while preserving an accepted file command exactly
+  once. Trace the native reentry path in review; test the pure decision.
 - One measured run on the window's thread of a status reply, a key in
   the search box, a resize step, a splitter drag, Ctrl+click and
   Shift+End over 100,000 rows, and the end of a move, reported beside
-  today's figures from `8db8f37` (Ctrl+click 15.6 ms, Shift+End 5.3 ms,
+  historical figures from `8db8f37` (Ctrl+click 15.6 ms, Shift+End 5.3 ms,
   end of a move 39 ms, a status reply under 15 ms). It sets no threshold,
   because a threshold depends on the machine.
 - In `ui-after-install.md`: the focus after Enter, Esc, Tab and a mode
@@ -862,8 +999,9 @@ is split by control.
 
 ### Stage 8: the remaining setters and the areas' refresh (maintenance)
 
-1. The setters left setting every time, such as the progress bar's, read
-   the control first, as the table says.
+1. Audit the setters still setting unchanged values. Preserve existing
+   position/style checks in `ProgressBar::set_measured`; inspect marquee
+   updates separately and cache only values the native control cannot return.
 2. Area by area, the refresh calls the setters with the values `core`
    computes, and `app`'s copies of shown values go (`status_right` and
    `status_memory` where the status bar's values can be computed again).
@@ -887,27 +1025,30 @@ read it. The sentences this plan makes false are rewritten: "Shared
 code", that `core`'s only filesystem calls load and save the settings
 file; "Requests", that Exit joins every request thread; "The selection",
 for the filter's own state and the rows unhighlighted when its answer
-arrives; and the drag sources at exit, which are told for a few seconds
-at most. The bullet in `AGENTS.md` "Writing code" that points at this plan
+arrives; essential asynchronous persistence acknowledgment versus released
+nonessential workers; and bounded drag-source notification attempts. Retain
+the shared inspector/Queue and settings-merge contracts now documented.
+The bullet in `AGENTS.md` "Writing code" that points at this plan
 points at DESIGN.md instead. This plan is deleted.
 
 ## Not in this plan
 
-- No framework, no data binding and no MVVM: Win32 has no binding, and
+- No framework, windows-reactor, data binding or MVVM: Win32 has no binding, and
   writing one means notifications that call back into the window, the
   panic window rule 1 exists to prevent.
 - No new drawn surface: owner draw still needs the owner's permission.
 - No change to the virtual lists, to how rows are fetched, or to the
   selection contract; the model stays on the window's thread, because
   `LVN_GETDISPINFO` needs each cell's text before it returns.
-- No thread for each top-level window: the File operations window is
-  owned by the main window, and the waits are kept off the thread
-  instead.
+- No thread for each top-level window, and no restored standalone transfer
+  window: file transfers remains shared inspector content and waits stay
+  off the one UI thread. Engine workers remain in Queue.
 - No crate of its own for `core`, unless a measured rebuild of an edit to
   `app` shows a large saving.
-- The start-up cost of making every control before the window shows,
-  and a Settings page's first show (#98), stay in that issue; stage 6
-  makes them easier, because an area then makes its own controls.
+- The start-up cost of making the main window's controls before it shows
+  stays in #98. Settings pages and transfer content are already lazy; do
+  not schedule those completed first-show changes again. Stage 6's area
+  ownership may make the remaining start-up work easier.
 - The 2-second status poll (#139) is a protocol change, outside this
   plan.
 - No feature and no change a person can see, other than waits moved off
