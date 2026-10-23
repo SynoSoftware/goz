@@ -11,6 +11,7 @@
 pub(crate) mod captions;
 pub(crate) mod clipboard;
 pub(crate) mod commands;
+pub(crate) mod dates;
 pub(crate) mod drop_target;
 pub(crate) mod fetch;
 pub(crate) mod file_operations;

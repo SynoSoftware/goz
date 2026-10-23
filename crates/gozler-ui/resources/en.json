@@ -453,6 +453,7 @@
     "language": "Lan&guage:",
     "windows_default": "Windows default",
     "display": "Language and display",
+    "formats": "Formats",
     "starting": "Starting and closing",
     "sign_in": "Start when I &sign in to Windows",
     "updates": "Check for &updates at startup",
@@ -460,7 +461,20 @@
     "one_window": "Allow only one &window at a time",
     "show_icons": "Show &icons in menus, buttons and lists",
     "show_memory": "Show &memory use in the status bar",
-    "sizes": "Show si&zes in:"
+    "sizes": "Show si&zes in:",
+    "dates": "Short &date format:"
+  },
+  "date": {
+    "full": "Date/Time",
+    "date_only": "Date Only",
+    "relative": "Relative Date",
+    "now": "Now",
+    "yesterday": "Yesterday",
+    "tomorrow": "Tomorrow",
+    "minutes_ago": "{0} min ago",
+    "in_minutes": "In {0} min",
+    "hours_ago": "{0} hr ago",
+    "in_hours": "In {0} hr"
   },
   "settings_context_menu": {
     "items_label": "Ite&ms:",

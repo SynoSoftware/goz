@@ -2476,6 +2476,10 @@ pub(crate) mod tests {
                 model.strings(),
                 &English,
                 text::SizeFormat::Kb,
+                &crate::core::dates::Dates::new(
+                    crate::core::dates::DateFormat::Full,
+                    jiff::Timestamp::UNIX_EPOCH.to_zoned(jiff::tz::TimeZone::UTC),
+                ),
                 Column::Name,
                 row
             ),

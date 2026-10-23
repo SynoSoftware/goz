@@ -565,7 +565,7 @@ impl MainWindow {
             let panel = model.panels().panel(Side::Left);
             let samples: Vec<Vec<String>> = (fitted.iter())
                 .map(|column| {
-                    widest
+                    let mut samples: Vec<_> = widest
                         .iter()
                         .map(|entry| {
                             let row = Row::Entry(entry);
@@ -573,12 +573,17 @@ impl MainWindow {
                                 model.strings(),
                                 &*numbers,
                                 sizes,
+                                &self.dates.borrow(),
                                 panel,
                                 row,
                                 *column,
                             )
                         })
-                        .collect()
+                        .collect();
+                    if *column == PanelColumn::Size {
+                        samples.extend(sizes.width_samples(model.strings(), &*numbers));
+                    }
+                    samples
                 })
                 .collect();
             (samples, captions::panel_headers(model.strings(), &fitted))
@@ -1804,7 +1809,15 @@ impl MainWindow {
                 (Some(row), Some(column)) => (
                     info.wants_text().then(|| {
                         let panel = panels.panel(side);
-                        captions::panel_cell(model.strings(), &*numbers, sizes, panel, row, *column)
+                        captions::panel_cell(
+                            model.strings(),
+                            &*numbers,
+                            sizes,
+                            &self.dates.borrow(),
+                            panel,
+                            row,
+                            *column,
+                        )
                     }),
                     Some(icon_of(row)),
                 ),

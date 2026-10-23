@@ -25,6 +25,7 @@ use crate::core::commands::{
     INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, MenuItem, SHOW_DETAILS, State,
     TabStop,
 };
+use crate::core::dates::{DateFormat, Dates};
 use crate::core::drop_target::{Dragged, DropEffect, DropKeys, DropMenu, SourceEffects};
 use crate::core::fetch::{ChunkAsk, DaemonFailure, Fetch, List, Purpose, WriteFailure};
 use crate::core::file_operations::{delete_question, exit_question};
@@ -141,6 +142,7 @@ mod timer {
     pub(super) const SEARCHING: usize = 18;
     /// The same for each search panel's search, by side.
     pub(super) const PANEL_SEARCHING: [usize; 2] = [19, 20];
+    pub(super) const DATES: usize = 21;
 
     /// The timer of `list`'s search.
     pub(super) fn search(list: List) -> usize {
@@ -833,6 +835,7 @@ pub(crate) struct MainWindow {
     instance: Instance,
     model: RefCell<Model>,
     numbers: RefCell<WindowsNumbers>,
+    dates: RefCell<Dates>,
     /// The control that had the focus when the window was deactivated.
     focus_on_activate: Cell<Option<Hwnd>>,
     settings_file: PathBuf,
@@ -1023,11 +1026,13 @@ impl MainWindow {
         let accelerators = accelerator_table(&model.choices().shortcuts, model.mode())
             .expect("the accelerator table builds");
         let viewers = Viewers::new(model.viewer());
+        let dates = Dates::new(model.choices().date_format, jiff::Zoned::now());
         let window = Rc::new(MainWindow {
             created: OnceCell::new(),
             instance,
             model: RefCell::new(model),
             numbers: RefCell::new(WindowsNumbers::new()),
+            dates: RefCell::new(dates),
             focus_on_activate: Cell::new(None),
             settings_file,
             settings_failure_shown: Cell::new(false),
@@ -1229,6 +1234,12 @@ impl MainWindow {
     }
 
     fn apply_text(&self, hwnd: Hwnd, captions: &WindowCaptions) {
+        {
+            let mut dates = self.dates.borrow_mut();
+            dates.format = self.model.borrow().choices().date_format;
+            dates.set_time(jiff::Zoned::now());
+        }
+        self.follow_dates(hwnd);
         let controls = &self.created().controls;
         hwnd.set_text(&captions.title);
         let _ = win::menu::replace_menu_bar(hwnd, &captions.menu_bar);
@@ -2164,10 +2175,8 @@ impl MainWindow {
     /// The fit of each of the shown columns at `indexes`, from its header
     /// and the cells of the rows the list shows and one row above and below
     /// them, which are the rows the person reads and those a small scroll
-    /// brings (DESIGN.md: Results list). While the list holds none of those
-    /// rows, every column would fit its header and Size would get as much
-    /// room as Name, so each column's first width stands for its fit until
-    /// the rows arrive.
+    /// brings (DESIGN.md: Results list). A column without rows keeps its
+    /// first width, except Size, whose samples cover later values too.
     fn fits_of(&self, indexes: Range<usize>) -> Vec<ColumnFit> {
         let created = self.created();
         let list = created.controls.list;
@@ -2189,12 +2198,6 @@ impl MainWindow {
             let items: Vec<_> = rows
                 .filter_map(|row| Some((row, results.row(row)?)))
                 .collect();
-            if items.is_empty() {
-                return columns
-                    .iter()
-                    .map(|column| ColumnFit::first(*column, dpi))
-                    .collect();
-            }
             let headers: Vec<String> = columns
                 .iter()
                 .map(|column| captions::header(strings, *column))
@@ -2202,15 +2205,30 @@ impl MainWindow {
             let cells: Vec<Vec<(String, Vec<Range<usize>>)>> = columns
                 .iter()
                 .map(|&column| {
-                    items
+                    let mut cells: Vec<_> = items
                         .iter()
                         .map(|&(row, item)| {
                             (
-                                crate::core::text::cell(strings, &*numbers, sizes, column, item),
+                                crate::core::text::cell(
+                                    strings,
+                                    &*numbers,
+                                    sizes,
+                                    &self.dates.borrow(),
+                                    column,
+                                    item,
+                                ),
                                 model.matched_in_cell(row, column),
                             )
                         })
-                        .collect()
+                        .collect();
+                    if column == Column::Size {
+                        cells.extend(
+                            sizes
+                                .width_samples(strings, &*numbers)
+                                .map(|text| (text, Vec::new())),
+                        );
+                    }
+                    cells
                 })
                 .collect();
             (columns.to_vec(), headers, cells)
@@ -2224,6 +2242,9 @@ impl MainWindow {
             .zip(columns)
             .zip(indexes)
             .map(|(((header, cells), column), index)| {
+                if cells.is_empty() {
+                    return ColumnFit::first(column, dpi);
+                }
                 let first = index == 0;
                 let label = if first { label } else { Px(0) };
                 let texts = (cells.iter())
@@ -3087,10 +3108,37 @@ impl MainWindow {
     /// stops the memory group's figures; coming on screen asks for fresh
     /// ones at once.
     fn follow_visibility(&self, hwnd: Hwnd) {
+        self.follow_dates(hwnd);
         let polled = self.polling.get();
         self.update_poll(hwnd);
         if self.polling.get() && !polled {
             self.ask_status();
+        }
+    }
+
+    fn follow_dates(&self, hwnd: Hwnd) {
+        if self.dates.borrow().format == DateFormat::Relative && hwnd.is_on_screen() {
+            self.refresh_dates();
+            hwnd.set_timer(timer::DATES, AGE_REFRESH_MS);
+        } else {
+            hwnd.kill_timer(timer::DATES);
+        }
+    }
+
+    fn refresh_dates(&self) {
+        self.dates.borrow_mut().set_time(jiff::Zoned::now());
+        let mode = self.model.borrow().mode();
+        match mode {
+            Mode::Search => {
+                let list = self.created().controls.list;
+                list.redraw_rows(list.visible_rows());
+            }
+            Mode::TwoPanels => {
+                for side in Side::BOTH {
+                    let list = self.panel(side).list;
+                    list.redraw_rows(list.visible_rows());
+                }
+            }
         }
     }
 
@@ -3570,6 +3618,7 @@ impl MainWindow {
                             model.strings(),
                             &*numbers,
                             model.choices().size_format,
+                            &self.dates.borrow(),
                             column,
                             row,
                         )
@@ -3757,7 +3806,14 @@ impl MainWindow {
     /// chooses, Two panels shows it, or Open opens the selection (DESIGN.md:
     /// Searching).
     fn enter_result(&self, hwnd: Hwnd) {
-        let choice = self.model.borrow().choices().result_enter;
+        let row = self.created().controls.list.focused_or_first_selected();
+        let choice = {
+            let model = self.model.borrow();
+            let Some(result) = row.and_then(|row| model.search_list().results().row(row)) else {
+                return;
+            };
+            model.choices().enter_result(result.is_dir)
+        };
         match choice {
             ResultEnter::ShowInPanels => {
                 let row = self.created().controls.list.focused_or_first_selected();
@@ -4921,13 +4977,24 @@ impl MainWindow {
                 }
                 self.refresh_text(hwnd);
             }
-            if edited.choices.size_format != last.choices.size_format {
-                // The columns keep their widths, as TableView's do when a
-                // property changes; Fit column fits the new Size texts.
+            if edited.choices.size_format != last.choices.size_format
+                || edited.choices.date_format != last.choices.date_format
+            {
+                self.dates.borrow_mut().format = edited.choices.date_format;
+                self.follow_dates(hwnd);
+                if edited.choices.size_format != last.choices.size_format {
+                    let width = self.fill_width();
+                    let widths = (self.column_sizing.borrow_mut())
+                        .window_shown(width, || self.column_fits());
+                    self.created()
+                        .controls
+                        .list
+                        .hwnd()
+                        .draw_once_after(|| self.set_column_widths(widths));
+                }
+                self.fill_panel_columns();
                 let list = self.created().controls.list;
                 list.redraw_rows(list.visible_rows());
-                // The panels' Size column fits its widest size in the format.
-                self.fill_panel_columns();
                 for side in Side::BOTH {
                     let list = self.panel(side).list;
                     list.redraw_rows(list.visible_rows());
@@ -5604,6 +5671,10 @@ impl WindowProc for MainWindow {
             Message::Timer(timer::AGE) => {
                 self.show_age();
                 self.fit_inspector();
+                Some(LRESULT(0))
+            }
+            Message::Timer(timer::DATES) => {
+                self.refresh_dates();
                 Some(LRESULT(0))
             }
             Message::Timer(timer::DROP_SCROLL) => {

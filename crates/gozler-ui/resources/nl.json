@@ -453,6 +453,7 @@
     "language": "Taa&l:",
     "windows_default": "Windows-standaard",
     "display": "Taal en weergave",
+    "formats": "Notaties",
     "starting": "Starten en sluiten",
     "sign_in": "Starten wanneer ik me &aanmeld bij Windows",
     "updates": "Bij het starten controleren op &updates",
@@ -460,7 +461,20 @@
     "one_window": "Slechts één &venster tegelijk toestaan",
     "show_icons": "P&ictogrammen tonen in menu’s, knoppen en lijsten",
     "show_memory": "Geheugengebruik tonen in de status&balk",
-    "sizes": "&Groottes tonen in:"
+    "sizes": "&Groottes tonen in:",
+    "dates": "Korte &datumnotatie:"
+  },
+  "date": {
+    "full": "Datum/tijd",
+    "date_only": "Alleen datum",
+    "relative": "Relatieve datum",
+    "now": "Nu",
+    "yesterday": "Gisteren",
+    "tomorrow": "Morgen",
+    "minutes_ago": "{0} min terug",
+    "in_minutes": "Over {0} min",
+    "hours_ago": "{0} u terug",
+    "in_hours": "Over {0} u"
   },
   "settings_context_menu": {
     "items_label": "Ite&ms:",

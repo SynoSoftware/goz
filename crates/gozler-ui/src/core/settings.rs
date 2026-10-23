@@ -4,6 +4,7 @@
 //! damaged falls back to its default, and every other value still loads.
 
 use super::commands::{CommandId, MenuItem, row_menu};
+use super::dates::DateFormat;
 use super::glyph::Glyph;
 use super::ids::DialogId;
 use super::layout::{Dip, Panes};
@@ -66,6 +67,8 @@ pub(crate) struct Choices {
     pub(crate) show_memory: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) size_format: SizeFormat,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) date_format: DateFormat,
     /// The open commands; empty does what File Explorer does (DESIGN.md: The
     /// Context menu page).
     #[serde(default, deserialize_with = "or_default")]
@@ -103,6 +106,21 @@ pub(crate) struct Choices {
     pub(crate) speed: Speed,
 }
 
+impl Choices {
+    pub(crate) fn enter_result(&self, is_folder: bool) -> ResultEnter {
+        let command = if is_folder {
+            &self.open_folders
+        } else {
+            &self.open_files
+        };
+        if command.trim().is_empty() {
+            self.result_enter
+        } else {
+            ResultEnter::Open
+        }
+    }
+}
+
 impl Default for Choices {
     fn default() -> Choices {
         Choices {
@@ -113,6 +131,7 @@ impl Default for Choices {
             show_icons: on(),
             show_memory: false,
             size_format: SizeFormat::Kb,
+            date_format: DateFormat::Full,
             open_folders: String::new(),
             open_files: String::new(),
             open_file_location: String::new(),
@@ -225,6 +244,7 @@ impl SettingsValues {
                 choices.show_icons = defaults.show_icons;
                 choices.show_memory = defaults.show_memory;
                 choices.size_format = defaults.size_format;
+                choices.date_format = defaults.date_format;
                 self.start_at_sign_in = false;
             }
             SettingsPage::Search => {
@@ -934,6 +954,18 @@ mod tests {
         assert_eq!(draft.edited.choices.open_folders, command);
         assert_eq!(draft.edited.choices.open_files, command);
         assert!(!draft.use_total_commander(path));
+    }
+
+    #[test]
+    fn opening_results_uses_configured_commands() {
+        let mut choices = Choices {
+            open_files: total_commander_command(r"C:\totalcmd\TOTALCMD64.EXE"),
+            ..Choices::default()
+        };
+        assert_eq!(choices.enter_result(false), ResultEnter::Open);
+        assert_eq!(choices.enter_result(true), ResultEnter::ShowInPanels);
+        choices.open_folders.clone_from(&choices.open_files);
+        assert_eq!(choices.enter_result(true), ResultEnter::Open);
     }
 
     /// A settings file that breaks a rule of Settings > Keyboard would give

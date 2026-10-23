@@ -468,6 +468,15 @@ pub(crate) enum SizeFormat {
 }
 
 impl SizeFormat {
+    /// Later rows do not refill the columns, so Size reserves room for its
+    /// full range and both forms of the unit before those rows arrive.
+    pub(crate) fn width_samples(self, strings: &Strings, numbers: &dyn Numbers) -> [String; 2] {
+        [
+            self.text(strings, numbers, 1),
+            self.text(strings, numbers, u64::MAX),
+        ]
+    }
+
     /// The choices of its list on the General page, from the smallest unit
     /// to the largest.
     pub(crate) const ALL: [SizeFormat; 3] = [SizeFormat::Bytes, SizeFormat::Kb, SizeFormat::Mb];
@@ -502,6 +511,7 @@ pub(crate) fn cell(
     strings: &Strings,
     numbers: &dyn Numbers,
     sizes: SizeFormat,
+    dates: &super::dates::Dates,
     column: Column,
     row: &ResultItem,
 ) -> String {
@@ -523,11 +533,11 @@ pub(crate) fn cell(
         },
         Column::DateModified => row
             .mtime_ft
-            .map(|ft| numbers.date_time(ft))
+            .map(|ft| dates.text(strings, numbers, ft))
             .unwrap_or_default(),
         Column::DateCreated => row
             .created_ft
-            .map(|ft| numbers.date_time(ft))
+            .map(|ft| dates.text(strings, numbers, ft))
             .unwrap_or_default(),
         Column::Extension => gozler_core::query::extension(name.as_bytes(), row.is_dir)
             .map(|ext| String::from_utf8_lossy(ext).into_owned())

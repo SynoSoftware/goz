@@ -14,6 +14,7 @@ use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, IndexCaptions, SETTINGS_GROUPS, failure_text,
 };
 use crate::core::commands::{CommandId, Key, Keystroke};
+use crate::core::dates::DateFormat;
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::SummaryRow;
@@ -436,6 +437,13 @@ impl<'a> SettingsDialog<'a> {
         )
     }
 
+    fn date_list(&self) -> Option<DropDownList> {
+        DropDownList::of_dialog(
+            self.page(SettingsPage::General)?,
+            ControlId::GeneralDates.id(),
+        )
+    }
+
     fn command_list(&self) -> Option<ReportList> {
         ReportList::of_dialog(
             self.page(SettingsPage::Keyboard)?,
@@ -483,6 +491,11 @@ impl<'a> SettingsDialog<'a> {
                     let format = values.choices.size_format;
                     let place = SizeFormat::ALL.iter().position(|each| *each == format);
                     if let (Some(list), Some(place)) = (self.size_list(), place) {
+                        list.select(place);
+                    }
+                    let format = values.choices.date_format;
+                    let place = DateFormat::ALL.iter().position(|each| *each == format);
+                    if let (Some(list), Some(place)) = (self.date_list(), place) {
                         list.select(place);
                     }
                 } else {
@@ -1072,6 +1085,13 @@ impl<'a> SettingsDialog<'a> {
                 }
                 if let Some(list) = self.size_list() {
                     let names: Vec<&str> = SizeFormat::ALL
+                        .iter()
+                        .map(|format| text(format.label()))
+                        .collect();
+                    list.set_items(&names, 0);
+                }
+                if let Some(list) = self.date_list() {
+                    let names: Vec<&str> = DateFormat::ALL
                         .iter()
                         .map(|format| text(format.label()))
                         .collect();
@@ -1741,6 +1761,14 @@ impl<'a> SettingsDialog<'a> {
                 .and_then(|place| SizeFormat::ALL.get(place).copied());
             if let Some(format) = chosen {
                 self.draft.borrow_mut().edited.choices.size_format = format;
+            }
+        } else if is(id, ControlId::GeneralDates) {
+            let chosen = self
+                .date_list()
+                .and_then(DropDownList::selected)
+                .and_then(|place| DateFormat::ALL.get(place).copied());
+            if let Some(format) = chosen {
+                self.draft.borrow_mut().edited.choices.date_format = format;
             }
         } else if is(id, ControlId::KeyboardShortcut) {
             // Undoes a paste from the box's context menu: the keys pressed

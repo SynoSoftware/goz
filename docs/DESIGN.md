@@ -313,7 +313,7 @@ While the filter pane is hidden, Show filters stands at the row's left margin an
 
 ### Searching
 
-- **`Enter` and a double-click on a result** show it in Two panels by default (**Owner ruling**: Gozler is the person's file manager, so a result leads there, not to File Explorer). Two panels shows, and its active panel shows the folder that holds the result, with the result focused; a folder result shows that folder itself. That is what `Enter` on a search panel's result does (see "Search in a panel"), and both use `panel::result_place`. Settings > Search > Results can choose Open it instead, which runs Open with the Context menu page's open commands, as `Enter` did before. File > Open always opens.
+- **`Enter` and a double-click on a result** show it in Two panels by default (**Owner ruling**: Gozler is the person's file manager, so a result leads there, not to File Explorer). Two panels shows, and its active panel shows the folder that holds the result, with the result focused; a folder result shows that folder itself. That is what `Enter` on a search panel's result does (see "Search in a panel"), and both use `panel::result_place`. Settings > Search > Results can choose Open it instead, which runs Open with the Context menu page's open commands, as `Enter` did before. A configured Open folders or Open files command takes precedence for that kind of result, so Enter and a double-click run it even when Results chooses Two panels. File > Open always opens.
 - Search as you type starts a search 150 ms after the last keystroke. `Enter` in the search box then acts on the selected row, or the first row when none is selected, as `Enter` in the list does, so a person types a name and presses `Enter` to reach it. When the search for the current text has not answered yet, because `Enter` came within the 150 ms or while the search runs, the search runs at once and its first row takes `Enter` when it answers; a search that finds nothing does nothing, and typing again before the answer cancels it (`Model::enter_in_search_box`). With search as you type off, `Enter` runs the search.
 - While a search runs, the list keeps the previous results, and the status bar keeps their counts and totals until the new ones arrive. Only a search that has run 300 ms without an answer makes the status bar say "Searching…" and drop the totals, so a search that answers at once, as most do while the person types, changes the status bar once instead of blinking on every keystroke (**Owner ruling**). The search itself starts at once. The new results replace the previous ones at once, scrolled to the first row (`T1`, `T2`).
 - When the Location folder does not exist, the window does not search, as `gozler` refuses the same search (`S8`).
@@ -326,7 +326,7 @@ While the filter pane is hidden, Show filters stands at the row's left margin an
 | Name | shown; cannot be hidden | the name, with its extension's icon |
 | Path | shown | the folder of the full path |
 | Size | shown | the size in one unit for every row, so sizes line up for comparison: KB, rounded up, as File Explorer shows it, unless Settings > General's Show sizes in chooses MB or Bytes (see "The General page"); for a folder, its folder size; "Unknown" for an unknown size |
-| Date modified | shown | the local date and time in the Windows short formats |
+| Date modified | shown | the local timestamp in Settings > General's Short date format |
 | Date created | hidden | as Date modified; empty while Dates created is off (see "Include settings") |
 | Extension | hidden | the extension; empty for a folder |
 | Attributes | hidden; not sortable | the attribute letters, as `gozler` prints them |
@@ -644,9 +644,10 @@ File > Settings… opens a dialog with a page list on the left and the page on t
 | Page | Group | Setting | Default |
 | --- | --- | --- | --- |
 | General | Language and display | Language | Windows default |
-| | | Show sizes in: Bytes, KB or MB | KB, as File Explorer |
 | | | Show icons in menus, buttons and lists | on |
 | | | Show memory use in the status bar | off, as in TinyTorrent2 |
+| | Formats | Show sizes in: Bytes, KB or MB | KB, as File Explorer |
+| | | Short date format: Date/Time, Date Only or Relative Date | Date/Time |
 | | Starting and closing | Start Gozler when I sign in to Windows | off |
 | | | Check for updates when Gozler starts | off |
 | | | Keep Gozler running in the notification area when I close its window | on, as in Everything |
@@ -678,9 +679,10 @@ File > Settings… opens a dialog with a page list on the left and the page on t
 
 ### The General page
 
-The page has two groups. Language and display holds Language, Show sizes in, Show icons and Show memory use, which change how the window shows things; Starting and closing holds the four check boxes that decide when Gozler starts and stops.
+The page reads in three groups: Language and display holds Language, Show icons and Show memory use; Formats holds Show sizes in and Short date format; Starting and closing holds the four check boxes that decide when Gozler starts and stops.
 
-- **Show sizes in** sets how the Size column shows sizes, folder sizes included: KB, rounded up, as File Explorer shows them; MB with two decimals, rounded up to the hundredth, so a file that is not empty never shows 0.00 MB; or Bytes, the exact count, as Total Commander shows it. Each uses the regional number format. The status bar, the inspector and Export keep their own formats. Applying a change redraws the sizes and leaves the column widths alone, as TableView does when a property changes; the header's Fit columns fits them to the new sizes (see "Results list").
+- **Show sizes in** sets how the Size column shows sizes, folder sizes included: KB, rounded up, as File Explorer shows them; MB with two decimals, rounded up to the hundredth, so a file that is not empty never shows 0.00 MB; or Bytes, the exact count, as Total Commander shows it. Each uses the regional number format. The status bar, the inspector and Export keep their own formats. Applying a change fits Search's columns again and sizes both panels' Size columns for the new unit. Size's minimum includes the singular unit and the largest supported size, even before any rows arrive, so larger values in later rows cannot be clipped by a fill.
+- **Short date format** applies to Search's Date modified and Date created columns and both panels' Date modified columns. Date/Time keeps the Windows short date and time; Date Only shows the Windows short date. Relative Date uses one short label: Now for less than a minute in either direction; Yesterday or Tomorrow for an adjacent local calendar day; otherwise, on the same local day, a whole number of minutes or hours, such as "5 min ago", "In 5 min", "3 hr ago" or "In 3 hr". Other days show the Windows short date. Relative labels refresh once a minute while the window is on screen, without reading disk or changing column widths. The inspector and Export keep their exact timestamps, and sorting always compares timestamps. The saved `date_format` defaults to Date/Time when missing or damaged.
 - **Keep Gozler running in the notification area** decides what Close does and whether the shortcut works after the window closes (see "Window lifetime").
 - **Start at sign-in** writes the `gozler` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, `"<this gozler-ui.exe>" --sign-in`, which starts Gozler as "Window lifetime" says. The check box shows on only when that value exists and Windows has not turned it off: Task Manager's Startup apps page and Windows Settings turn an entry off without removing it, by a `gozler` value under `...\Explorer\StartupApproved\Run` whose first byte is odd. That format is not documented; Task Manager writes 2 for on and 3 for off. Turning the check box on deletes that value, and off deletes both. The registry is the only copy, so the check box and Task Manager never disagree. Uninstalling Gozler removes both values.
 - **Allow only one Gozler window at a time** decides what a second start does (see "Window lifetime").

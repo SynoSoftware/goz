@@ -453,6 +453,7 @@
     "language": "&Idioma:",
     "windows_default": "Predeterminado de Windows",
     "display": "Idioma y visualización",
+    "formats": "Formatos",
     "starting": "Inicio y cierre",
     "sign_in": "Abrir al iniciar &sesión en Windows",
     "updates": "Buscar act&ualizaciones al iniciar",
@@ -460,7 +461,20 @@
     "one_window": "Permitir solo una &ventana a la vez",
     "show_icons": "Mostrar i&conos en menús, botones y listas",
     "show_memory": "Mostrar el uso de memoria en la &barra de estado",
-    "sizes": "Mostrar &tamaños en:"
+    "sizes": "Mostrar &tamaños en:",
+    "dates": "Formato de &fecha corta:"
+  },
+  "date": {
+    "full": "Fecha/hora",
+    "date_only": "Solo fecha",
+    "relative": "Fecha relativa",
+    "now": "Ahora",
+    "yesterday": "Ayer",
+    "tomorrow": "Mañana",
+    "minutes_ago": "Hace {0} min",
+    "in_minutes": "En {0} min",
+    "hours_ago": "Hace {0} h",
+    "in_hours": "En {0} h"
   },
   "settings_context_menu": {
     "items_label": "&Elementos:",

@@ -487,11 +487,16 @@ impl DialogItem {
 
 /// The groups of the Settings pages: each title, the static icon before it
 /// and the icon it shows.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 16] = [
+pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 17] = [
     (
         ControlId::GeneralDisplay,
         ControlId::GeneralDisplayIcon,
         Glyph::Globe,
+    ),
+    (
+        ControlId::GeneralFormats,
+        ControlId::GeneralFormatsIcon,
+        Glyph::BulletedList,
     ),
     (
         ControlId::GeneralStarting,
@@ -710,6 +715,7 @@ impl CaptionTable {
                         "settings_general.language",
                     ),
                     (Control(C::GeneralSizesLabel), "settings_general.sizes"),
+                    (Control(C::GeneralDatesLabel), "settings_general.dates"),
                     (Control(C::GeneralSignIn), "settings_general.sign_in"),
                     (Control(C::GeneralUpdates), "settings_general.updates"),
                     (
@@ -727,6 +733,7 @@ impl CaptionTable {
                 plain: &[
                     (Control(C::GeneralHeading), "settings.general"),
                     (Control(C::GeneralDisplay), "settings_general.display"),
+                    (Control(C::GeneralFormats), "settings_general.formats"),
                     (Control(C::GeneralStarting), "settings_general.starting"),
                 ],
             },
@@ -2490,13 +2497,11 @@ impl PanelCaptions {
             .focused()
             .and_then(|row| model.panels().row(side, row));
         let folder = match focused {
-            Some(Row::Result(item)) if all_drives => text::cell(
-                strings,
-                numbers,
-                model.choices().size_format,
-                Column::Path,
-                item,
-            ),
+            Some(Row::Result(item)) if all_drives => {
+                let path =
+                    text::path_part(Column::Path, &item.path).expect("Path is a part of the path");
+                item.path[path].to_owned()
+            }
             _ => String::new(),
         };
         PanelCaptions {
@@ -2625,6 +2630,7 @@ pub(crate) fn panel_cell(
     strings: &Strings,
     numbers: &dyn Numbers,
     sizes: SizeFormat,
+    dates: &super::dates::Dates,
     panel: &Panel,
     row: Row,
     column: PanelColumn,
@@ -2638,7 +2644,7 @@ pub(crate) fn panel_cell(
             if column == PanelColumn::Folder && this_folder {
                 return relative_folder(panel.folder(), &item.path).to_owned();
             }
-            return text::cell(strings, numbers, sizes, column.search_column(), item);
+            return text::cell(strings, numbers, sizes, dates, column.search_column(), item);
         }
         Row::Entry(entry) => entry,
     };
@@ -2651,7 +2657,7 @@ pub(crate) fn panel_cell(
             (true, Some(size)) | (false, Some(size)) => sizes.text(strings, numbers, size),
             (false, None) => sizes.text(strings, numbers, entry.size),
         },
-        PanelColumn::DateModified => numbers.date_time(entry.modified),
+        PanelColumn::DateModified => dates.text(strings, numbers, entry.modified),
     }
 }
 

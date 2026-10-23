@@ -453,6 +453,7 @@
     "language": "&Dil:",
     "windows_default": "Windows varsayılanı",
     "display": "Dil ve gösterim",
+    "formats": "Biçimler",
     "starting": "Başlatma ve kapatma",
     "sign_in": "Windows'ta &oturum açtığımda başlat",
     "updates": "Başlangıçta &güncelleştirmeleri denetle",
@@ -460,7 +461,20 @@
     "one_window": "Aynı anda yalnızca bir &pencereye izin ver",
     "show_icons": "Menülerde, düğmelerde ve listelerde s&imgeleri göster",
     "show_memory": "Durum çubuğunda bellek &kullanımını göster",
-    "sizes": "&Boyut birimi:"
+    "sizes": "&Boyut birimi:",
+    "dates": "Kısa &tarih biçimi:"
+  },
+  "date": {
+    "full": "Tarih/saat",
+    "date_only": "Yalnızca tarih",
+    "relative": "Göreli tarih",
+    "now": "Şimdi",
+    "yesterday": "Dün",
+    "tomorrow": "Yarın",
+    "minutes_ago": "{0} dk önce",
+    "in_minutes": "{0} dk sonra",
+    "hours_ago": "{0} sa önce",
+    "in_hours": "{0} sa sonra"
   },
   "settings_context_menu": {
     "items_label": "&Öğeler:",

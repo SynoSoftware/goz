@@ -128,20 +128,31 @@ fn timing_highlight_per_paint() {
 #[test]
 #[ignore = "timing; run in release"]
 fn timing_locale_cells_per_paint() {
+    let dates = crate::core::dates::Dates::new(
+        crate::core::dates::DateFormat::Full,
+        "2026-10-23T12:00:00Z[UTC]".parse().unwrap(),
+    );
     let strings = english();
     let numbers = WindowsNumbers::new();
     let sizes = SizeFormat::Kb;
     let row = row(path("Projects", 9));
     time("size and date cells, 80 cells", || {
         for _ in 0..VISIBLE_ROWS {
-            black_box(cell(&strings, &numbers, sizes, Column::Size, &row));
-            black_box(cell(&strings, &numbers, sizes, Column::DateModified, &row));
+            black_box(cell(&strings, &numbers, sizes, &dates, Column::Size, &row));
+            black_box(cell(
+                &strings,
+                &numbers,
+                sizes,
+                &dates,
+                Column::DateModified,
+                &row,
+            ));
         }
     });
     time("name and path cells, 80 cells", || {
         for _ in 0..VISIBLE_ROWS {
-            black_box(cell(&strings, &numbers, sizes, Column::Name, &row));
-            black_box(cell(&strings, &numbers, sizes, Column::Path, &row));
+            black_box(cell(&strings, &numbers, sizes, &dates, Column::Name, &row));
+            black_box(cell(&strings, &numbers, sizes, &dates, Column::Path, &row));
         }
     });
 }
