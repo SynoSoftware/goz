@@ -1,193 +1,196 @@
-# gozler
+# Gozler
 
-[![CI](https://github.com/mustafaahci/goz/actions/workflows/ci.yml/badge.svg)](https://github.com/mustafaahci/goz/actions/workflows/ci.yml)
+[![CI](https://github.com/SynoSoftware/goz/actions/workflows/ci.yml/badge.svg)](https://github.com/SynoSoftware/goz/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#requirements)
-[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](rust-toolchain.toml)
 
-**gozler** *(gözler, Turkish for "eyes")* finds any file on Windows as you type: every name on your NTFS and ReFS drives, in milliseconds. It is an open-source alternative to voidtools Everything, written in Rust.
+**Find files instantly. Copy, move and delete them blazingly fast.**
 
-Gozler-UI, its app, is a two-panel file manager with that instant search. It copies, moves and deletes blazingly fast, without File Explorer: it deletes small files 3 times faster than `rmdir`, and copies them 1.8 times faster than `robocopy`.
+Free and open source, for Windows 10 and 11.
 
-**[Download the installer](https://github.com/SynoSoftware/goz/releases/latest)** for Windows 10 and 11, x64.
+- *Instant file search across NTFS and ReFS drives, inspired by voidtools Everything.*
+- *Copy engine inspired by [FastCopy and AngelCOPY](docs/research/fast-copy-delete.md#copiers),
+  but faster (Gozler's SSD scheduling cut mixed-file copy time even further
+  by [17% in our test](docs/BENCHMARKS.md#ssd-early-dispatch-before-and-after)).*
+- *[Folder synchronization](docs/DESIGN.md#synchronize-folders) inspired by
+  Robocopy: preview changes before copying, with optional mirroring.*
+- *Deletion inspired by [rmbrr](docs/research/fast-copy-delete.md#rmbrr).*
+- *UI inspired by Norton Commander, with two panels for convenient copy,
+  move and delete.*
 
-![Gozler's two panels: C:\Windows on the left, a Chrome profile folder on the right, and the F3 to F8 key bar below](docs/images/two-panels.png)
+Search your Windows drives, then act on what you find. Copy, move or delete
+directly from results, or use two panels to keep the source and destination
+in view.
 
-[Synapse N.V.](http://synapse.sr) develops Gozler at [SynoSoftware/goz](https://github.com/SynoSoftware/goz). Gozler started as a fork of [goz](https://github.com/mustafaahci/goz) *(göz, "eye")* 0.2.0 by [Mustafa Ahci](https://github.com/mustafaahci), as vim started from vi.
+**[Download Gozler for Windows x64](https://github.com/SynoSoftware/goz/releases/latest)**
+· [What's new](https://github.com/SynoSoftware/goz/releases)
 
-## Highlights
+![Instant file search with filters and the selected file's details](docs/images/search.png)
 
-### Gozler-UI
+## Find files across your drives
 
-#### Two panels
+Search filenames across NTFS and ReFS drives as you type, including Dev
+Drives. Narrow results by folder, file type, size, date or attributes.
+Combine terms, exclude names, or use regular expressions.
 
-- **A file manager in the style of Norton Commander and Total Commander.** Browse two folders side by side: F5 copies, F6 moves, F7 creates a folder and F8 deletes. Copy and Move offer the other panel's folder.
-- **Search takes you to the file.** Enter on a search result shows it in its folder, and Ctrl+F searches from a panel.
-- **A Viewer opens any file at once** with F3, in Text or Hex, even when it is several gigabytes.
+- **Go straight to its folder.** Press Enter on a result to open its folder.
+  Ctrl+F searches from either panel.
+- **Search by folder as fast as by name.** Match part of a folder path to
+  find the files below it, without slowing a broad search.
+- **Browse millions of results.** Scroll through the full list, sort it,
+  or inspect a file's details.
+- **Use the results where you need them.** Copy paths, export to CSV, or
+  drag files straight into another program.
+- **See what takes up space.** Check folder sizes and item counts, or sort
+  by size to find the largest folders and files.
+- **Big exports don't hold up other searches.** Keep searching while an
+  export runs, even with millions of files in deeply nested folders.
+- **Results stay current.** New files, changes and renames appear
+  automatically, including hard-link renames. Gozler tells you when a
+  drive's results may still be incomplete.
 
-#### Search
+The [0.4.0 measurements](https://github.com/SynoSoftware/goz/releases/tag/v0.4.0)
+recorded a two-million-file index building in **10 seconds instead of 22**,
+and changes appearing within **113 ms**. Copying 100,000 paths to the
+clipboard took **59 ms**; dragging 1,000 files started in **10 ms**.
 
-![Gozler's Search: 2,320,777 results with the filters on the left and the selected file's details below](docs/images/search.png)
+## Fast copy, move and delete
 
-- **Results as you type.** Filters narrow the list by kind, folder, date, size and attributes.
-- **Search by folder as fast as by name.** With Match path on, part of a folder name lists every file below it.
-- **Act on a result where it is.** Open it, copy its path, export the list, or drag it into another program. The inspector shows the selected file's details, and a folder's size and item count.
-- **No waiting.** Copying 100,000 paths to the clipboard takes 59 ms. A drag of 1,000 files starts in 10 ms. The app stays under 16 MB of private memory.
-- **One-click repair.** When the service is stopped, missing or older than the app, a button in the app repairs it.
-- **In your language:** English, Spanish, Dutch and Turkish.
+Copy, move or delete what you find directly from search results. Totals
+come from the index, so work can start without walking the whole tree to
+count files first.
+
+- **Copy small files about 1.8 times faster than robocopy** in our
+  [published copy tests](docs/BENCHMARKS.md#stage-e-final-names-and-resume).
+- **Delete about 3 times faster than `rmdir`.** 30,000 files in 5,000 folders
+  took **6.4 seconds instead of 19.1** in our
+  [deletion test](docs/BENCHMARKS.md#copy-move-and-delete-engine).
+- **Keep browsing while files transfer.** Check progress, pause, cancel or
+  change the queue order from File operations.
+- **Continue after an interruption.** After a restart or crash, Gozler offers
+  to continue copies, moves and deletes. A half-copied file resumes where it
+  stopped.
+- **Automatic or your choice.** Automatic adapts copying to the file size
+  and drive type. Choose the Windows engine or Gozler's ring copy through
+  the speed presets, or adjust the settings yourself.
+- **Move within a drive in moments.** A move on the same volume uses a rename
+  when possible, without copying the file's contents.
+
+Deletes are permanent: Gozler does not use the Recycle Bin.
+
+## Keep source and destination side by side
+
+The two panels provide a familiar Norton Commander layout for Gozler's
+fast file operations. Copy and Move suggest the other panel's folder
+automatically. Folder changes appear live, and slow network folders load
+without freezing the window.
+
+![Source and destination folders side by side, with F3 to F8 commands below](docs/images/two-panels.png)
+
+The built-in Text and Hex Viewer opens even multi-gigabyte files at once,
+without blocking other programs from writing to, renaming or deleting them.
+
+## Coming in the next release
+
+These improvements are in development after
+[Gozler 0.5.0](https://github.com/SynoSoftware/goz/releases/tag/v0.5.0):
+
+- **17% less waiting in our mixed SSD copy test.** Starting large files
+  earlier, alongside small-file work, reduced median time from **14.32 to
+  11.84 seconds**, including the final flush, compared with Gozler's previous
+  scheduling. The test copied 6,000 small files and one 1,600 MiB file within
+  one NVMe SSD. [Conditions and raw results](docs/BENCHMARKS.md#ssd-early-dispatch-before-and-after).
+- **Compare folders before synchronizing.** Preview additions and updates,
+  then synchronize. Optional Mirror also removes extra destination files
+  after you review the comparison.
+- **Transfers stay in the main window.** An integrated pane keeps the queue,
+  current file, progress and reports together.
+- **Choose how conflicts are handled once.** Update, keep both or skip
+  existing files without another question interrupting the transfer.
+- **See indexing progress for each drive.** The status bar shows scanning
+  progress and when an index is being prepared.
+
+Gozler can start large files while small files are still being copied.
+[AngelCOPY's published scheduling](https://github.com/vangel76/AngelCOPY/blob/b5c63a721073a6574667a625bc681d54af3f37df/AngelCopyRunner/NativeCopy.cpp)
+finishes small files first. The [benchmark record](docs/BENCHMARKS.md#competitor-context)
+explains that difference and the comparisons measured so far.
+
+[Read the draft release notes](docs/WHATS-NEW.md).
+
+## Install and start searching
+
+Download the installer from the
+[latest release](https://github.com/SynoSoftware/goz/releases/latest), run
+it, and open Gozler from the Start menu. The installer sets up the search
+service and upgrades an earlier Gozler installation.
+
+- Windows 10 or 11, x64.
+- Instant search indexes fixed NTFS and ReFS drives. Folder panels can also
+  browse removable drives and network folders.
+- Available in English, Spanish, Dutch and Turkish.
+
+Choose the folders to index in Settings. If the service needs attention,
+Gozler offers a repair action in the window. A ZIP download is also
+available on the release page; keep all three programs from the same release
+together.
 
 <p>
-  <img src="docs/images/settings.png" alt="Settings, General page: language, sizes, icons and start-up options" width="49%">
-  <img src="docs/images/indexed-folders.png" alt="Indexed folders: a tree of check boxes that chooses which folders the index keeps" width="49%">
+  <img src="docs/images/settings.png" alt="Settings: language, sizes, icons and startup options" width="49%">
+  <img src="docs/images/indexed-folders.png" alt="Choose which folders Gozler indexes" width="49%">
 </p>
 
-#### Copy, move and delete
+## Search from scripts and terminals
 
-- **Delete 3 times faster than `rmdir`.** 30,000 files of 1 to 64 KB in 5,000 folders took 6.4 seconds, against 19.1 seconds for `rmdir /s /q`. Gozler deletes the way [rmbrr](https://github.com/mtopolski/rmbrr) does: POSIX delete, on one worker per processor. It also deletes faster than robocopy.
-- **Copy 1.8 times faster than robocopy,** comparable with AngelCOPY and FastCopy. The 1.8 is for small files, against `robocopy /e /mt:16` ([benchmarks](docs/BENCHMARKS.md#stage-e-final-names-and-resume)). A move is faster than robocopy too, and a move within one drive is a rename, so it takes milliseconds at any size.
-- **Work starts at once.** Gozler takes the totals from its index, so it never counts the files before it starts.
-- **Drop files on a folder** in the results to copy or move them there. Drop with the right button to choose Copy here or Move here.
-- **Every operation in view.** The File operations window shows the current file, its progress, and the speed in bytes and in files per second. Pause, cancel, or drag an operation to another place in the queue.
-- **Picks up after a crash.** When a copy, move or delete is interrupted, for example because Windows restarted, Gozler offers to continue it the next time it starts. A half-copied file continues where it stopped.
-
-### gozlerd, the service
-
-- **Faster than Everything.** 1.8x to 6.1x quicker across every query in our [benchmarks](docs/BENCHMARKS.md), on the same machine with the same result sets.
-- **NTFS and ReFS.** Dev Drives and other ReFS volumes are searched and kept live just like NTFS. ReFS has no MFT to read, so gozler walks the volume's folders once, then follows its USN journal.
-- **Ready sooner after a restart.** The index of 2 million files builds in 10 seconds, down from 22.
-- **Live.** Changes show in the results within 113 ms, including hard-link renames that Everything 1.4 misses. The USN journal is sized to the volume automatically: a 2 TB disk gets about four days of changes, not the 32 MB Windows default that Everything leaves you to raise by hand.
-- **Light.** About 12 MB resident when idle and 215 MB under heavy querying, with an index of about 4 million entries.
-- **Unfazed by deep folders.** A search over 5.5 million files 200 folders deep needed more than 12 GB. A full export of that tree now needs 183 MB beyond the index ([details](#deep-folders)).
-- **A large export never holds up other searches.** On a tree of 5.6 million entries, an export holds the index for at most about 0.04 seconds at a time, so other searches and live updates keep running.
-- **Honest about state.** Every volume reports whether it is provably in sync, rescanning, or offline. It never serves stale results silently.
-
-### Command line
-
-- **Scriptable.** A script written for Everything's `es.exe` needs only the program name changed to `gozler`. `--json` prints the results as JSON, and each outcome has its own exit code.
-- **Folder sizes.** A folder's size is the total of the files below it, in `-size`, the exports, `size:` and the size sort.
-- **Starts with an overview.** `gozler` alone shows the version, whether the service runs, and how to start it. `-h` prints help that fits on one screen.
-
-## Requirements
-
-- Windows 10 / 11 (reads the NTFS MFT, or walks the folders of a ReFS volume, and follows the USN journal; NTFS and ReFS volumes only)
-- Rust 1.94 or newer, only if you build from source
-
-## Install
-
-Run `gozler-<version>-x64-Setup.exe` from the [gozler releases](https://github.com/SynoSoftware/goz/releases). It installs the three programs to `C:\Program Files\Gozler`, adds a Gozler shortcut to the Start menu, adds that folder to the machine `PATH`, and installs and starts the service. It upgrades an earlier gozler in place, and always installs `gozler.exe` and `gozlerd.exe` together, because the service answers only programs from its own release. When it finds goz, or a gozler installed by hand in another folder, it offers to remove them once gozler runs: their service, files and `PATH` entries, and goz's logs. A silent install removes nothing. Or download `gozler.exe`, `gozlerd.exe` and `gozler-ui.exe` in the release's zip, or build from source:
+Search from a terminal, or change `es.exe` to `gozler` in an existing
+Everything script:
 
 ```
-cargo build --release
+gozler report                       # filenames containing report
+gozler "*.iso" -sort size -n 10      # the 10 largest ISO files
+gozler --json report                # JSON for scripts and agents
+gozler -export-csv files.csv ext:cs  # export matching files
 ```
 
-Either way you get three binaries (in `target\release` when built locally):
+The default is 20 results; `-n all` returns every match. Scripts and agents
+can tell whether an answer is complete from its exit code. Invalid search
+terms produce an error. Run `gozler -h` for quick examples or `gozler --help`
+for the full reference.
 
-| Binary          | Role                                                                            |
-| --------------- | ------------------------------------------------------------------------------- |
-| `gozlerd.exe`   | The indexing daemon. Runs elevated; owns the index and serves queries.          |
-| `gozler.exe`    | The command-line client. Runs unelevated; talks to the daemon.                  |
-| `gozler-ui.exe` | The Gozler window. Searches through the daemon, and copies, moves and deletes files itself. Runs unelevated. |
+## What's changed since goz v0.2.0?
 
-Run the daemon in an elevated terminal:
+Since the original command-line index, Gozler has added a Windows search app,
+fast file operations, recovery, a Viewer and two panels. See the release
+notes for each version:
 
-```
-.\target\release\gozlerd.exe run --console
-```
+| Release | Main additions |
+| --- | --- |
+| [0.5.0](https://github.com/SynoSoftware/goz/releases/tag/v0.5.0) | Two panels for file operations, Text and Hex Viewer, browsing millions of results, creation-date search, and more responsive controls. |
+| [0.4.0](https://github.com/SynoSoftware/goz/releases/tag/v0.4.0) | Windows search app, fast copy/move/delete with recovery, ReFS support, folder sizes and a faster indexing service. |
+| [0.3.0](https://github.com/SynoSoftware/goz/releases/tag/v0.3.0) | Fuller search language, useful errors and exit codes, bounded command-line output, and an installer that upgrades in place. |
 
-Or install it as an auto-start Windows service (elevated):
+## Performance records
 
-```
-.\target\release\gozlerd.exe install     # register and start
-.\target\release\gozlerd.exe status      # check state
-.\target\release\gozlerd.exe uninstall   # stop and remove
-```
-
-To build an installer instead, double-click `Release.cmd`, or run `pwsh ./installer/Build.ps1`, with Inno Setup 7.1 or later installed. It writes `target\installer\gozler-<version>-x64-Setup.exe`, the installer the release publishes. Each local run first raises the patch version in `Cargo.toml`, such as 0.2.0 to 0.2.1, so each setup upgrades the one before; the release builds the version its tag names. Uninstalling removes the binaries, the Start menu shortcut, the `PATH` entry and the service, and, for the person who uninstalls, the window's sign-in entry and the "Search with Gozler" command that earlier versions added to File Explorer.
-
-## Usage
-
-Open Gozler from the Start menu, type, and open what it finds. Help > Search syntax lists the search terms.
-
-To copy, move or delete what it finds, select the results and choose File > Copy to folder…, Move to folder… or Delete. Edit > Cut and Paste work too, and so does dropping files on a folder row. View > File operations shows each operation's progress and lets you pause, cancel or reorder it. A delete is permanent: Gozler does not use the Recycle Bin.
-
-Or search from any terminal. `gozler` alone shows whether the service runs and how to start. `gozler -h` prints a quick help that fits on one screen, and `gozler --help` the full reference: every option, search function and exit code.
-
-```
-gozler report                      # names that contain report
-gozler readme*.txt                 # .txt files that start with readme
-gozler report !draft               # names with report but not draft
-gozler C:\repo\ *.cs               # .cs files anywhere in C:\repo
-gozler *.log dm:7days              # .log files changed in the last 7 days
-gozler "size:>1gb"                 # files and folders larger than 1 GB
-gozler *.iso -sort size -n 10      # the 10 largest .iso files
-gozler -n all report               # every match, not just the first 20
-gozler -export-csv out.csv ext:cs  # save the .cs files to out.csv
-gozler --json report               # the matches as JSON
-gozler --status                    # whether the index is ready
-```
-
-gozler shows 20 results unless you pass `-n`. Put quotes around a term that contains `|`, `<`, `>` or `;`. gozler exits 0 when it is done, 2 when results may be incomplete, and 10 when the limit left some out.
-
-A script written for Everything's `es.exe` or for goz 0.2.0 needs only the program name changed to `gozler`: every option keeps its name and purpose. gozler's own options start with `--`, as `--json` does.
-
-## Performance
-
-goz vs Everything 1.4.1.1032 (`es.exe` 1.1.0.30), same machine, each warm. Single substring term, `-sort name` on both, full result set, median of 6 runs after 2 warmups, interleaved. Median milliseconds; **bold** is faster.
-
-| Query                    | Matches   | Everything (file) | goz (file) | Everything (pipe) | goz (pipe) |
-| ------------------------ | --------: | ----------------: | ---------: | ----------------: | ---------: |
-| `kernel32.dll`           | 38        | 47.5              | **27.0**   | 32.0              | **14.0**   |
-| `.pdf`                   | 424       | 51.0              | **27.0**   | 39.5              | **14.5**   |
-| `.config`                | 4,287     | 71.5              | **35.0**   | 44.0              | **18.5**   |
-| `.mui`                   | 21,789    | 148.0             | **39.0**   | 93.5              | **26.5**   |
-| `.dll`                   | 141,666   | 724.0             | **139.0**  | 416.5             | **119.0**  |
-| `e` (~73% of all files)  | 2,884,148 | 14,700            | **2,394**  | 7,511             | **2,470**  |
-
-Faster in every cell: 1.8x to 6.1x to a file, 2.3x to 3.5x piped.
-
-Memory, same box, each index warm at ~3.97M entries:
-
-| Metric                                          | Everything | goz        |
-| ----------------------------------------------- | ---------: | ---------: |
-| Binaries shipped                                | **2.3 MB** | 4.1 MB     |
-| Committed memory (private bytes)                | 527 MB     | **525 MB** |
-| Resident RAM, idle after indexing               | 369 MB     | **12 MB**  |
-| Resident RAM, steady after heavy querying       | 554 MB     | **215 MB** |
-| Resident RAM, peak (2.88M-match sorted export)  | 1.2 GB     | 1.2 GB     |
-| Committed memory, peak (same query)             | **1.2 GB** | 1.5 GB     |
-
-goz wins the resident-RAM rows that matter for a background daemon and edges out committed memory at rest. It loses two: a larger (statically linked) binary, and ~0.3 GB more peak committed memory during a full sorted export. Hardware and methodology are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-
-### Deep folders
-
-A search result used to carry its full path, so a deep folder tree multiplied the memory of every result. Now the daemon keeps each result as a 16-byte row, reads each page's names from its index, sends each folder once, and the client rebuilds the paths. A sort compares numbers: a rank for each name, and for a path sort a rank for each folder.
-
-The test tree is a copy that copied into itself: a chain of 190 folders, then folders of 9 files each, so a path is about 2.1 KB. The figures are the daemon's peak heap above its index and its time, for an export of every entry, measured on the same laptop before and after the changes:
-
-| Export of 280,330 entries | Before | Now |
-| ------------------------- | -----: | --: |
-| Sorted by name            | 1,189 MB, 4.4 s | **8 MB, 0.04 s** |
-| Sorted by path            | 2,208 MB, 10.4 s | **8 MB, 0.06 s** |
-| Bytes through the pipe    | 571 MB | **7.3 MB** |
-
-At 5.6 million entries, the old daemon would need about 25 GB, which this laptop does not have. The daemon now sorts numbers instead of names and reads each page's rows from the index as it sends them. So a full export needs 0.2 GB instead of 1.0 GB, and the daemon's part takes 1.2 s by name and 1.5 s by path instead of 6.1 s and 5.2 s. The method and every figure are in [deep folder rows](docs/research/deep-folder-rows.md).
-
-## How it works
-
-gozler is a small workspace of seven crates: a pure, OS-agnostic core (parsing, index, query engine), a thin `unsafe` Win32 layer, an indexing daemon, a named-pipe client library, a CLI client, the window, and the window's copy, move and delete engine. The design notes, including how the index stays coherent and how hard-link reconciliation works, are in [docs/DESIGN.md](docs/DESIGN.md).
+[Benchmarks](docs/BENCHMARKS.md) record the tests behind the speed claims.
+The original search and memory comparison with Everything was measured on
+**goz v0.2.0**: searches were **1.8 to 6.1 times faster than Everything** in
+those tests. Those figures describe that version. Later records cover copy
+speed and [reduced memory use for deep-folder exports](docs/research/deep-folder-rows.md).
 
 ## Security
 
-The daemon runs elevated and indexes filenames from a raw MFT read, or a ReFS folder walk with backup semantics, which both bypass per-file ACLs. Any authenticated local user can query the resulting index (filenames, sizes, and timestamps; not file contents), the same trust model as Everything. The window copies, moves and deletes files in its own process, with your own permissions, never through the elevated daemon. See [docs/SECURITY.md](docs/SECURITY.md) for the full model and how to report a vulnerability.
+The search service indexes file names, sizes and dates with administrator
+access. Those names are visible to other local users, as with Everything.
+File operations run with your own permissions. Read the
+[security model](docs/SECURITY.md) for shared-PC use and reporting vulnerabilities.
 
-## Contributing
+## Build and contribute
 
-Issues and pull requests welcome.
+[Build from source](docs/BUILDING.md) · [Design](docs/DESIGN.md) ·
+[Report an issue](https://github.com/SynoSoftware/goz/issues)
 
-## Credits
-
-[Synapse N.V.](http://synapse.sr) develops gozler. [Mustafa Ahci](https://github.com/mustafaahci) created goz ([mustafaahci/goz](https://github.com/mustafaahci/goz)) and wrote it up to version 0.2.0, the start of gozler: its first MFT index and daemon, and the benchmarks above.
-
-## License
+[Synapse N.V.](http://synapse.sr) develops Gozler at
+[SynoSoftware/goz](https://github.com/SynoSoftware/goz).
+It began as a fork of [goz v0.2.0](https://github.com/mustafaahci/goz)
+by Mustafa Ahci, who created the original index, daemon and historical
+benchmarks. Gozler means “eyes” in Turkish.
 
 Licensed under the [MIT License](LICENSE).

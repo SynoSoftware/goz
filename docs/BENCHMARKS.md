@@ -1,6 +1,6 @@
 # Benchmarks
 
-goz vs Everything 1.4.1.1032 (`es.exe` 1.1.0.30), same machine, each warm. Single substring term, `-sort name` on both, full result set, median of 6 runs after 2 warmups, interleaved. Median milliseconds; **bold** is faster.
+Historical measurements of **goz v0.2.0** vs Everything 1.4.1.1032 (`es.exe` 1.1.0.30), same machine, each warm. Single substring term, `-sort name` on both, full result set, median of 6 runs after 2 warmups, interleaved. Median milliseconds; **bold** is faster. These original search and memory figures are retained as a record, not maintained as measurements of the current Gozler release.
 
 | Query                    | Matches   | Everything (file) | goz (file) | Everything (pipe) | goz (pipe) |
 | ------------------------ | --------: | ----------------: | ---------: | ----------------: | ---------: |
@@ -23,7 +23,7 @@ Ryzen 7 7800X3D (8C/16T), 31 GB RAM, Windows 11 Pro 26200, NVMe SSD. 4 live NTFS
 
 ## Memory footprint
 
-Same box, each index warm at ~3.97M entries.
+The original goz v0.2.0, on the same box, each index warm at ~3.97M entries.
 
 | Metric                                          | Everything | goz        |
 | ----------------------------------------------- | ---------: | ---------: |
@@ -282,7 +282,16 @@ and share plans retain their ordering. No index query or admission change
 is involved. The children-supplied case is a control: its large file was
 already selected up front, and its six-file subfolders contain no large file.
 
-| Case | Large first observed (s) | Copy complete (s) | Including flush (s) | Flush-inclusive range (s) | Prepare + copy + flush (s) |
+The first timing column records when the destination **filename first
+exists**, as observed by `Path::try_exists`; 0.176 s does not mean the
+1,600 MiB file finished copying then. A destination can exist before its
+data is written. This helps diagnose startup delay; it does not measure
+first-byte transfer or individual file completion.
+"Copy complete" is when Queue reports the entire 6,001-file operation
+complete. "Including flush" also includes opening and calling `sync_all`
+on every output file; it is the elapsed-time comparison used in the README.
+
+| Case | Destination filename first observed (s) | Copy complete (s) | Including flush (s) | Flush-inclusive range (s) | Prepare + copy + flush (s) |
 | --- | ---: | ---: | ---: | --- | ---: |
 | Normal walk, before | 2.363 | 7.40 | 14.32 | 11.51–14.70 | 14.32 |
 | Normal walk, after | 0.176 | 5.12 | 11.84 | 11.17–13.15 | 11.85 |
@@ -299,11 +308,39 @@ early dispatch for this startup delay; it does not establish a general
 (walk 21.69 to 18.44 G; control 21.82 to 18.13 G), so attributing their
 reduction to this change would be unwarranted.
 
+These are not cold-cache measurements. The harness deliberately reads the
+small sources before each case, and does not purge filesystem metadata or
+control the SSD's caches. The large file uses unbuffered copying, and the
+final destination flush does not make source reads cold. Matching those
+conditions and repeating the control strengthens the comparison but does
+not eliminate every cache effect or establish sustained media throughput.
+
 Large-file existence was first observed at 0.162–0.180 s after submission
 in every changed normal-walk sample, versus 2.261–2.637 s before. This
 establishes earlier destination creation, not the time of its first byte
 or its individual completion. Separate small/large completion times remain
-unavailable for a mixed operation. The change is retained in the working
-tree; it neither finds a large file deeper in an unvisited subtree nor
+unavailable for a mixed operation. The ordering change was committed as
+`0df3df7`; it neither finds a large file deeper in an unvisited subtree nor
 keeps the lane continuously occupied. Indexed hints still need their own
 integrated benchmark, as do other SSDs, sustained writes and antivirus modes.
+
+#### Competitor context
+
+The 17.3% elapsed-time reduction compares Gozler before and after early
+dispatch. Neither AngelCOPY nor FastCopy ran this mixed-file fixture, so
+it is not a measured percentage lead over either tool. The older copy
+measurements above also do not contain a direct FastCopy comparison.
+
+There is a source-confirmed scheduling difference with AngelCOPY. In
+`RunNativeJobs`, the published engine joins the small-file worker pool
+before iterating its collected large files; `ExecutePlan` likewise finishes
+`RunSmallPool` before processing `plan.big`. Gozler's separate SSD lane can
+overlap these classes. This recheck also corrects the engine spec's former
+claim that AngelCOPY already ran its large lane beside the small workers.
+[AngelCOPY source, commit b5c63a72](https://github.com/vangel76/AngelCOPY/blob/b5c63a721073a6574667a625bc681d54af3f37df/AngelCopyRunner/NativeCopy.cpp).
+
+FastCopy's official help describes overlapped read/write I/O and SSD
+parallelism. It does not establish whether Gozler's dispatch change gives a
+speed advantage over FastCopy. A direct comparison needs both competitors
+on the same fixture, with equivalent copy options and completion/flush
+timing. [FastCopy v5.12.0 help](https://fastcopy.jp/help/fastcopy_eng.htm).

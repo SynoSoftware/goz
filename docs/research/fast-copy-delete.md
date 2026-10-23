@@ -71,6 +71,7 @@ removed. Cite `CHANGELOG.md` and the source.
 | Files of 32 MiB and more: an unbuffered, overlapped ring on a completion port, 8 MiB blocks, 8 in flight (`kBigFileBytes`, `kRingChunk`, `kRingDepth`) | Confirmed | `NativeCopy.cpp` `RingCopyFile` |
 | Preallocation sets the end of file to the sector-aligned size (`FileEndOfFileInfo`), then truncates to the true size at the end | Confirmed; it does not use `FileAllocationInfo` | `NativeCopy.cpp` `RingCopyFile` |
 | Smaller files: `CopyFileExW` on 16 workers (`PoolThreads`, overridable), items of up to 256 files of one folder (`kChunkFiles`) | Confirmed | `NativeCopy.cpp` |
+| Mixed small and large files | Confirmed on 2026-10-23: `RunNativeJobs` joins the small-file workers before copying collected large files. `ExecutePlan` also finishes `RunSmallPool` before `plan.big`. This corrects the engine spec's earlier claim that AngelCOPY's large-file lane runs beside its small-file workers. It establishes an ordering difference, not a measured speed gap. | [`NativeCopy.cpp`, commit b5c63a72](https://github.com/vangel76/AngelCOPY/blob/b5c63a721073a6574667a625bc681d54af3f37df/AngelCopyRunner/NativeCopy.cpp) |
 | A network end (UNC or `DRIVE_REMOTE`) always uses `CopyFileExW` | Confirmed | `NativeCopy.cpp` `IsRemotePath`, `CopyOneBig` |
 | Deletion: `DeleteFileW` and `RemoveDirectoryW` on 8 workers (`kDelThreads`) | Confirmed | `AngelCopyRunner/Delete.cpp` |
 | One 8 GiB cold file on NVMe: 3,200 MB/s against robocopy's 2,430 MB/s (+32 %), by `bench/bench.cpp` | Confirmed | `CHANGELOG.md` [1.0.0] |
