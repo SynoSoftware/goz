@@ -9,6 +9,10 @@ pub(crate) enum Preview {
     #[default]
     Empty,
     Comparing(OperationId),
+    Committing {
+        id: OperationId,
+        comparison: Arc<Comparison>,
+    },
     Ready {
         id: OperationId,
         comparison: Arc<Comparison>,
@@ -20,20 +24,24 @@ impl Preview {
     pub(crate) fn id(&self) -> Option<OperationId> {
         match self {
             Self::Empty => None,
-            Self::Comparing(id) | Self::Failed(id) | Self::Ready { id, .. } => Some(*id),
+            Self::Comparing(id)
+            | Self::Failed(id)
+            | Self::Ready { id, .. }
+            | Self::Committing { id, .. } => Some(*id),
         }
     }
 
     pub(crate) fn comparison(&self) -> Option<&Comparison> {
         match self {
-            Self::Ready { comparison, .. } => Some(comparison),
+            Self::Ready { comparison, .. } | Self::Committing { comparison, .. } => {
+                Some(comparison)
+            }
             _ => None,
         }
     }
 
     pub(crate) fn can_commit(&self) -> bool {
-        self.comparison()
-            .is_some_and(|comparison| comparison.summary().conflicts == 0)
+        matches!(self, Self::Ready { comparison, .. } if comparison.summary().conflicts == 0)
     }
 }
 

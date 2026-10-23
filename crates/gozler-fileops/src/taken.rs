@@ -103,6 +103,12 @@ impl Taken {
         self.paths.is_empty()
     }
 
+    /// Distinct paths after Windows case folding, regardless of how many
+    /// operations take each path.
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
     /// The taken paths directly in the folder `folder`, as UTF-16,
     /// whichever operation takes them; `None` when it holds none.
     pub fn in_folder(&self, folder: &[u16]) -> Option<TakenFolder<'_>> {

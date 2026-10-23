@@ -31,6 +31,7 @@ use crate::core::shortcuts::{
 };
 use crate::core::speed::{self, ENGINES, Speed, SpeedNumber, SpeedPreset, ring_blocks};
 use crate::core::text::{LANGUAGES, LanguageChoice, SizeFormat, Strings, without_access_key};
+use crate::core::work::Id;
 use crate::win::controls::{
     Balloon, Button, CheckBox, DropDownList, Edit, GlyphLabel, HotkeyControl, HotkeyValue,
     IconList, ListBox, ReportList, Tooltip, show_heading_icon,
@@ -51,7 +52,7 @@ const INDEX_REFRESH_MS: u32 = 2_000;
 const PREVIEW_TIMER: usize = 2;
 const PREVIEW_DELAY_MS: u32 = 300;
 
-/// What the dialog does once the Include settings are saved.
+/// What the dialog does once its accepted changes are saved.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AfterSave {
     /// Apply was pressed: the dialog stays open.
@@ -61,9 +62,13 @@ enum AfterSave {
     Close,
 }
 
-/// What the copy of the window that runs as administrator does for the
-/// dialog.
 enum Awaited {
+    SignIn {
+        id: Id,
+        on: bool,
+        include: Option<IndexSettings>,
+        after: AfterSave,
+    },
     /// Saves these Include settings, after Apply or OK.
     Include(IndexSettings, AfterSave),
     /// Asks the service to rebuild the index, after Rebuild.
@@ -685,13 +690,20 @@ impl<'a> SettingsDialog<'a> {
         if let Some(edit) = self.control(SettingsPage::Include, ControlId::IncludeNames) {
             edit.set_text(&include.excluded_names);
         }
+        self.include_rows.borrow_mut().clear();
+        self.refresh_include_rows(include);
+    }
+
+    fn refresh_include_rows(&self, include: &IndexSettings) {
+        let Some(list) = self.include_folders() else {
+            return;
+        };
         let drives = self.main.include_drives(include);
         let rows = self.main.include_summary(&self.strings, &drives, include);
         let cells: Vec<[String; 3]> = rows.iter().map(|row| row.cells.clone()).collect();
-        self.include_rows.replace(rows);
-        if let Some(list) = self.include_folders() {
-            list.set_rows(&cells, None);
-        }
+        let shown = self.include_rows.replace(rows);
+        let shown: Vec<[String; 3]> = shown.into_iter().map(|row| row.cells).collect();
+        list.update_rows(&shown, &cells);
     }
 
     /// The Include page's list of the indexed folders.
@@ -781,20 +793,9 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Starts saving the edited Include settings as administrator, when
-    /// they changed, and answers whether it started; the answer arrives as
-    /// a reply.
-    fn save_include(
-        &self,
-        edited: &SettingsValues,
-        last: &SettingsValues,
-        after: AfterSave,
-    ) -> bool {
-        let Some(include) = edited
-            .include
-            .clone()
-            .filter(|_| edited.include != last.include)
-        else {
+    /// Saves the captured Include edit; later edits remain in the draft.
+    fn save_include(&self, include: Option<IndexSettings>, after: AfterSave) -> bool {
+        let Some(include) = include else {
             return false;
         };
         self.saving
@@ -821,6 +822,10 @@ impl<'a> SettingsDialog<'a> {
     /// closes; refused ones stay edited, and a failure says why. The
     /// service shows a rebuild in its drives' state.
     fn save_answered(&self, dialog: Hwnd) {
+        if matches!(self.saving.borrow().as_ref(), Some(Awaited::SignIn { .. })) {
+            self.sign_in_answered(dialog);
+            return;
+        }
         let Some(answer) = self.main.take_include_saved() else {
             return;
         };
@@ -836,14 +841,69 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
             (Awaited::Rebuild, Ok(())) | (_, Err(NotSaved::Declined)) => {}
+            (Awaited::SignIn { .. }, Ok(())) => {
+                unreachable!("registry replies are handled separately")
+            }
             (awaited, Err(NotSaved::Failed(reason))) => {
                 let key = match awaited {
                     Awaited::Include(..) => "settings_include.not_saved",
                     Awaited::Rebuild => "settings_index.not_rebuilt",
+                    Awaited::SignIn { .. } => {
+                        unreachable!("registry replies are handled separately")
+                    }
                 };
                 let text = self.strings.format(key, &[&reason]);
                 win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
             }
+        }
+        self.show_preview();
+        self.update_apply(dialog);
+    }
+
+    fn sign_in_answered(&self, dialog: Hwnd) {
+        let (id, on, answer) = {
+            let saving = self.saving.borrow();
+            let Some(Awaited::SignIn { id, on, .. }) = saving.as_ref() else {
+                return;
+            };
+            (*id, *on, self.main.take_sign_in_saved(*id))
+        };
+        let Some(answer) = answer else { return };
+        let changed = {
+            let mut draft = self.draft.borrow_mut();
+            let in_effect = if answer.is_ok() {
+                on
+            } else {
+                draft.last_applied().start_at_sign_in
+            };
+            draft.sign_in_saved(on, in_effect)
+        };
+        if changed
+            && let Some(check) = self.check_box(SettingsPage::General, ControlId::GeneralSignIn)
+        {
+            let on = self.draft.borrow().edited.start_at_sign_in;
+            self.filling(|| check.set_checked(on));
+        }
+        if let Err(error) = answer {
+            let text = self.strings.format(
+                "message.registry_failed",
+                &[
+                    &without_access_key(self.strings.text("settings_general.sign_in")),
+                    &win::error_text(&error),
+                ],
+            );
+            win::dialog::error_box(Some(dialog), &text, self.strings.text("window.title"));
+        }
+        if !self.main.sign_in_is_current(id) || win::window::quit_pending() {
+            return;
+        }
+        let Some(Awaited::SignIn { include, after, .. }) = self.saving.take() else {
+            return;
+        };
+        let saving = self.save_include(include, after);
+        if !saving && after == AfterSave::Close && self.apply(dialog, AfterSave::Close) {
+            dialog::end(dialog, DialogEnd::Ok);
+            return;
         }
         self.show_preview();
         self.update_apply(dialog);
@@ -1044,7 +1104,7 @@ impl<'a> SettingsDialog<'a> {
             match saving.as_ref() {
                 Some(awaited) => {
                     let key = match awaited {
-                        Awaited::Include(..) => "settings.saving",
+                        Awaited::SignIn { .. } | Awaited::Include(..) => "settings.saving",
                         Awaited::Rebuild => "settings.rebuilding",
                     };
                     JobCaption {
@@ -1619,9 +1679,11 @@ impl<'a> SettingsDialog<'a> {
         if edited == last {
             return true;
         }
-        match self.main.apply_settings(self.window, &edited, &last) {
+        match self
+            .main
+            .apply_choices(self.window, &edited.choices, &last.choices)
+        {
             Err(message) => {
-                self.draft.borrow_mut().window_applied(None);
                 self.refuse(
                     dialog,
                     SettingsPage::Keyboard,
@@ -1630,20 +1692,29 @@ impl<'a> SettingsDialog<'a> {
                 );
                 false
             }
-            Ok(applied) => {
-                let saving = self.save_include(&edited, &last, after);
-                let refill = (self.draft.borrow_mut()).window_applied(Some(applied.values));
-                if refill {
-                    for page in SettingsPage::ALL {
-                        self.fill(page);
-                    }
-                } else if edited.choices.show_shortcut != last.choices.show_shortcut {
+            Ok(()) => {
+                self.draft
+                    .borrow_mut()
+                    .choices_applied(edited.choices.clone());
+                let include = edited
+                    .include
+                    .clone()
+                    .filter(|_| edited.include != last.include);
+                let saving = if edited.start_at_sign_in != last.start_at_sign_in {
+                    let id = self.main.set_sign_in(edited.start_at_sign_in);
+                    self.saving.replace(Some(Awaited::SignIn {
+                        id,
+                        on: edited.start_at_sign_in,
+                        include,
+                        after,
+                    }));
+                    true
+                } else {
+                    self.save_include(include, after)
+                };
+                if edited.choices.show_shortcut != last.choices.show_shortcut {
                     // Show window's row shows what Windows registered.
                     self.fill_commands(self.selected_command());
-                }
-                let title = self.strings.text("window.title");
-                for failure in &applied.failures {
-                    win::dialog::error_box(Some(dialog), failure, title);
                 }
                 let icons_changed = edited.choices.show_icons != last.choices.show_icons;
                 if icons_changed {
@@ -2059,7 +2130,7 @@ impl DialogProc for SettingsDialog<'_> {
             ]
             .contains(&id)
         {
-            // Esc and the close button too wait for the Include save.
+            // Esc and the close button also preserve an accepted write.
             return true;
         }
         let handled = match message {
@@ -2140,6 +2211,7 @@ impl DialogProc for SettingsDialog<'_> {
                 on_row
             }
             DialogMessage::Timer { id: INDEX_TIMER } => {
+                self.main.refresh_volume_labels();
                 self.refresh_index(dialog);
                 self.show_status(dialog);
                 return true;
@@ -2150,6 +2222,10 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Reply => {
                 self.total_commander_found(dialog);
+                let include = self.draft.borrow().edited.include.clone();
+                if let Some(include) = include {
+                    self.refresh_include_rows(&include);
+                }
                 // The Include count, which the model holds.
                 self.show_preview();
                 self.save_answered(dialog);

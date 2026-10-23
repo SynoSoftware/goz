@@ -223,7 +223,7 @@ impl QueueList {
         found.then_some(rect)
     }
 
-    fn count(self) -> usize {
+    pub(crate) fn count(self) -> usize {
         usize::try_from(send(self.0, LVM_GETITEMCOUNT, 0, 0)).unwrap_or(0)
     }
 
@@ -241,54 +241,83 @@ impl QueueList {
         }
     }
 
-    /// Changes tiles in place, preserving scroll and selection unless the
-    /// core chose a different row or the rows changed identity or order.
-    pub(crate) fn set_tiles(self, tiles: &[Tile], selected: Option<usize>, apply_selection: bool) {
-        let count = usize::try_from(send(self.0, LVM_GETITEMCOUNT, 0, 0)).unwrap_or(0);
-        for index in (tiles.len()..count).rev() {
+    pub(crate) fn remove_last(self) {
+        if let Some(index) = self.count().checked_sub(1) {
             send(self.0, LVM_DELETEITEM, index, 0);
         }
-        let detail_column = [1u32];
-        for (index, tile) in tiles.iter().enumerate() {
-            let mut title = wide(tile.title);
-            let mut item = LVITEMW {
-                mask: LVIF_TEXT | LVIF_IMAGE | LVIF_COLUMNS,
-                iItem: index as i32,
-                pszText: PWSTR(title.as_mut_ptr()),
-                iImage: tile.icon as i32,
-                cColumns: 1,
-                puColumns: detail_column.as_ptr().cast_mut(),
-                ..Default::default()
-            };
-            let existing = index < count;
-            if !existing || !self.same_tile(index, 0, tile.title, Some(tile.icon)) {
-                let message = if existing {
-                    LVM_SETITEMW
-                } else {
-                    LVM_INSERTITEMW
-                };
-                // SAFETY: `item`, its text and its column list outlive the
-                // call, which copies them.
-                unsafe { send_pointer(self.0, message, 0, &raw const item) };
-            }
-            if existing && self.same_tile(index, 1, tile.detail, None) {
-                continue;
-            }
-            let mut detail = wide(tile.detail);
-            item = LVITEMW {
-                mask: LVIF_TEXT,
-                iItem: index as i32,
-                iSubItem: 1,
-                pszText: PWSTR(detail.as_mut_ptr()),
-                ..Default::default()
-            };
-            // SAFETY: as above.
-            unsafe { send_pointer(self.0, LVM_SETITEMW, 0, &raw const item) };
+    }
+
+    /// Native notifications can replace the pending presentation during any send.
+    pub(crate) fn set_tile(
+        self,
+        index: usize,
+        tile: &Tile<'_>,
+        current: &dyn Fn() -> bool,
+    ) -> bool {
+        let existing = index < self.count();
+        if !current() {
+            return false;
         }
-        if apply_selection {
-            for index in 0..tiles.len() {
-                self.set_selected(index, Some(index) == selected);
+        let detail_column = [1u32];
+        let mut title = wide(tile.title);
+        let mut item = LVITEMW {
+            mask: LVIF_TEXT | LVIF_IMAGE | LVIF_COLUMNS,
+            iItem: index as i32,
+            pszText: PWSTR(title.as_mut_ptr()),
+            iImage: tile.icon as i32,
+            cColumns: 1,
+            puColumns: detail_column.as_ptr().cast_mut(),
+            ..Default::default()
+        };
+        let same = existing && self.same_tile(index, 0, tile.title, Some(tile.icon));
+        if !current() {
+            return false;
+        }
+        if !same {
+            let message = if existing {
+                LVM_SETITEMW
+            } else {
+                LVM_INSERTITEMW
+            };
+            // SAFETY: `item`, its text and its column list outlive the
+            // call, which copies them.
+            unsafe { send_pointer(self.0, message, 0, &raw const item) };
+            if !current() {
+                return false;
             }
+        }
+        let same = existing && self.same_tile(index, 1, tile.detail, None);
+        if !current() {
+            return false;
+        }
+        if same {
+            return true;
+        }
+        let mut detail = wide(tile.detail);
+        item = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: index as i32,
+            iSubItem: 1,
+            pszText: PWSTR(detail.as_mut_ptr()),
+            ..Default::default()
+        };
+        // SAFETY: as above.
+        unsafe { send_pointer(self.0, LVM_SETITEMW, 0, &raw const item) };
+        current()
+    }
+
+    pub(crate) fn select(self, selected: Option<usize>, current: &dyn Fn() -> bool) {
+        let old = self.selected();
+        if !current() || old == selected {
+            return;
+        }
+        if let Some(old) = old {
+            self.set_selected(old, false);
+        }
+        if current()
+            && let Some(selected) = selected
+        {
+            self.set_selected(selected, true);
         }
     }
 
@@ -388,14 +417,20 @@ impl QueueList {
     pub(crate) fn gap_at(self, point: (i32, i32)) -> Option<usize> {
         let y = self.client_point(point).y;
         let count = self.count();
-        (count > 0).then(|| {
-            (0..count)
-                .find(|&row| {
-                    self.item_rect(row, LVIR_BOUNDS)
-                        .is_some_and(|rect| y < (rect.top + rect.bottom) / 2)
-                })
-                .unwrap_or(count)
-        })
+        if count == 0 {
+            return None;
+        }
+        let (mut first, mut end) = (0, count);
+        while first < end {
+            let row = first + (end - first) / 2;
+            let rect = self.item_rect(row, LVIR_BOUNDS)?;
+            if y < (rect.top + rect.bottom) / 2 {
+                end = row;
+            } else {
+                first = row + 1;
+            }
+        }
+        Some(first)
     }
 
     /// Shows the list's insertion mark at the gap `gap`, as

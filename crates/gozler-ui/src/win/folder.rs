@@ -18,9 +18,9 @@
 use super::Hwnd;
 use super::wake::OpenWaker;
 use crate::core::panel::{
-    Entry, FolderChange, FolderSort, ReadAsk, ReadEvent, ReadFailure, Side, SortedFolders,
-    give_sizes, join, sort_listing,
+    Entry, FolderChange, ReadAsk, ReadEvent, ReadFailure, Side, give_sizes, join, sort_listing,
 };
+use crate::core::work::{INLINE_ITEMS, Retirement};
 use gozler_core::layout::{NotifyAction, walk_full_listing_buffer, walk_notify_buffer};
 use gozler_core::winpath::{is_root, parent_of};
 use gozler_winfs::{
@@ -29,18 +29,20 @@ use gozler_winfs::{
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use windows::Win32::Foundation::{
     ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
 };
-use windows::Win32::Storage::FileSystem::{GetLogicalDrives, GetVolumeInformationW};
+use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEVICE_NOTIFY_WINDOW_HANDLE, HDEVNOTIFY,
     RegisterDeviceNotificationW, UnregisterDeviceNotification,
 };
-use windows::core::HSTRING;
+
+mod mailbox;
+
+use mailbox::Mailbox;
 
 /// One listing page, and one watch's buffer: 64 KiB, the most a network
 /// share's watch takes.
@@ -101,11 +103,6 @@ pub(crate) enum PanelEvent {
     Label {
         letter: char,
         label: String,
-    },
-    /// The panel's folders, sorted by gozlerd's sizes.
-    FolderOrder {
-        side: Side,
-        sorted: SortedFolders,
     },
 }
 
@@ -171,9 +168,15 @@ struct Reading {
     generation: u64,
     stop: Arc<Stop>,
     shared: Arc<Mutex<Watched>>,
+    mailbox: Mailbox,
     /// The drive's removal was asked, so the handle is closed and only the
     /// registration waits for the answer.
     suspended: bool,
+}
+
+struct Reply {
+    stop: Arc<Stop>,
+    mailbox: Mailbox,
 }
 
 impl Reading {
@@ -210,30 +213,52 @@ pub(crate) enum Removal {
 pub(crate) struct PanelThreads {
     window: Hwnd,
     waker: OpenWaker,
-    sender: Sender<PanelEvent>,
-    events: Receiver<PanelEvent>,
     readings: [RefCell<Option<Reading>>; 2],
-    frees: [RefCell<Option<Arc<Stop>>>; 2],
-    labels: RefCell<Vec<Arc<Stop>>>,
+    frees: [RefCell<Option<Reply>>; 2],
+    labels: RefCell<Vec<Reply>>,
+    retired: RefCell<Retirement>,
 }
 
 impl PanelThreads {
     pub(crate) fn new(window: Hwnd, waker: OpenWaker) -> PanelThreads {
-        let (sender, events) = channel();
         PanelThreads {
             window,
             waker,
-            sender,
-            events,
             readings: Default::default(),
             frees: Default::default(),
             labels: RefCell::default(),
+            retired: RefCell::default(),
         }
     }
 
-    /// Everything the threads found, without waiting.
+    /// A bounded batch from each current producer, without waiting.
     pub(crate) fn drain(&self) -> Vec<PanelEvent> {
-        self.events.try_iter().collect()
+        let mut events = Vec::new();
+        for side in Side::BOTH {
+            if let Some(reading) = self.readings[side.index()].borrow().as_ref()
+                && !reading.suspended
+            {
+                let (found, lost) = reading.mailbox.drain(&self.waker);
+                events.extend(found);
+                if lost {
+                    events.push(PanelEvent::Lost {
+                        side,
+                        reading: reading.generation,
+                    });
+                }
+            }
+            if let Some(reply) = self.frees[side.index()].borrow().as_ref() {
+                events.extend(reply.mailbox.drain(&self.waker).0);
+            }
+        }
+        for reply in self.labels.borrow().iter() {
+            events.extend(reply.mailbox.drain(&self.waker).0);
+        }
+        events
+    }
+
+    pub(crate) fn take_retired(&self) -> Retirement {
+        std::mem::take(&mut *self.retired.borrow_mut())
     }
 
     /// Reads the folder of `ask` for `side`, then watches it, and ends the
@@ -243,21 +268,20 @@ impl PanelThreads {
         let stop = Arc::new(Stop::new());
         let shared = Arc::new(Mutex::new(Watched::default()));
         let generation = ask.generation;
+        let (mailbox, delivery) = Mailbox::new(Arc::clone(&stop), self.waker.clone());
         self.readings[side.index()].replace(Some(Reading {
             generation,
             stop: Arc::clone(&stop),
             shared: Arc::clone(&shared),
+            mailbox,
             suspended: false,
         }));
-        let (sender, waker) = (self.sender.clone(), self.waker.clone());
         let window = self.window.0.0 as isize;
         std::thread::spawn(move || {
             if stop.enter() {
                 return;
             }
-            let deliver = |event: PanelEvent| {
-                waker.deliver(|| !stop.stopped() && sender.send(event).is_ok());
-            };
+            let deliver = |event: PanelEvent| delivery.send(event);
             let read = |event: ReadEvent| deliver(PanelEvent::Read { side, event });
             // Registered before the listing, so a removal of the drive
             // while the folder is listed finds the panel.
@@ -289,6 +313,8 @@ impl PanelThreads {
             else {
                 return;
             };
+            // The watch no longer needs the previous listing's shared size snapshot.
+            drop(ask);
             let Some(signal) = &stop.signal else {
                 return;
             };
@@ -318,6 +344,7 @@ impl PanelThreads {
     pub(crate) fn cancel_read(&self, side: Side) {
         if let Some(old) = self.readings[side.index()].take() {
             old.end();
+            self.retired.borrow_mut().push(old, INLINE_ITEMS + 1);
         }
     }
 
@@ -376,19 +403,21 @@ impl PanelThreads {
     /// reading it replaces.
     pub(crate) fn read_free(&self, side: Side, folder: &str) {
         let stop = Arc::new(Stop::new());
-        if let Some(old) = self.frees[side.index()].replace(Some(Arc::clone(&stop))) {
-            old.stop();
+        let (mailbox, delivery) = Mailbox::new(Arc::clone(&stop), self.waker.clone());
+        if let Some(old) = self.frees[side.index()].replace(Some(Reply {
+            stop: Arc::clone(&stop),
+            mailbox,
+        })) {
+            old.stop.stop();
+            self.retired.borrow_mut().push(old, INLINE_ITEMS + 1);
         }
-        let (sender, waker) = (self.sender.clone(), self.waker.clone());
         let folder = folder.to_owned();
         std::thread::spawn(move || {
             if stop.enter() {
                 return;
             }
             let free = gozler_winfs::free_space(&folder.encode_utf16().collect::<Vec<u16>>()).ok();
-            waker.deliver(|| {
-                !stop.stopped() && sender.send(PanelEvent::Free { side, folder, free }).is_ok()
-            });
+            delivery.send(PanelEvent::Free { side, folder, free });
         });
     }
 
@@ -398,38 +427,27 @@ impl PanelThreads {
     pub(crate) fn read_labels(&self) {
         let mut labels = self.labels.borrow_mut();
         for old in labels.drain(..) {
-            old.stop();
+            old.stop.stop();
+            self.retired.borrow_mut().push(old, INLINE_ITEMS + 1);
         }
         for letter in drives() {
             let stop = Arc::new(Stop::new());
-            labels.push(Arc::clone(&stop));
-            let (sender, waker) = (self.sender.clone(), self.waker.clone());
-            std::thread::spawn(move || {
+            let (mailbox, delivery) = Mailbox::new(Arc::clone(&stop), self.waker.clone());
+            labels.push(Reply {
+                stop: Arc::clone(&stop),
+                mailbox,
+            });
+            super::work::spawn(move |worker| {
                 if stop.enter() {
                     return;
                 }
-                let Some(label) = label(letter) else {
+                let Some(label) = super::shell::volume_label(&format!(r"{letter}:\"), worker)
+                else {
                     return;
                 };
-                waker.deliver(|| {
-                    !stop.stopped() && sender.send(PanelEvent::Label { letter, label }).is_ok()
-                });
+                delivery.send(PanelEvent::Label { letter, label });
             });
         }
-    }
-
-    /// Sorts `side`'s folders by their new sizes on a thread of its own,
-    /// which touches no disk, so the window never waits for the sort.
-    pub(crate) fn sort_folders(&self, side: Side, job: FolderSort) {
-        let (sender, waker) = (self.sender.clone(), self.waker.clone());
-        std::thread::spawn(move || {
-            let sorted = job.sort();
-            waker.deliver(|| {
-                sender
-                    .send(PanelEvent::FolderOrder { side, sorted })
-                    .is_ok()
-            });
-        });
     }
 
     /// Stops every thread's wait, when Search shows and at Exit; none is
@@ -438,11 +456,13 @@ impl PanelThreads {
         for side in Side::BOTH {
             self.cancel_read(side);
             if let Some(free) = self.frees[side.index()].take() {
-                free.stop();
+                free.stop.stop();
+                self.retired.borrow_mut().push(free, INLINE_ITEMS + 1);
             }
         }
         for label in self.labels.borrow_mut().drain(..) {
-            label.stop();
+            label.stop.stop();
+            self.retired.borrow_mut().push(label, INLINE_ITEMS + 1);
         }
     }
 }
@@ -456,28 +476,6 @@ pub(crate) fn drives() -> Vec<char> {
         .filter(|bit| mask & (1 << bit) != 0)
         .map(|bit| char::from(b'A' + bit))
         .collect()
-}
-
-fn label(letter: char) -> Option<String> {
-    let mut name = [0u16; 261];
-    // SAFETY: the root is a NUL-terminated string the call reads; the name
-    // buffer outlives the call, which writes at most its length.
-    unsafe {
-        GetVolumeInformationW(
-            &HSTRING::from(format!(r"{letter}:\")),
-            Some(&mut name),
-            None,
-            None,
-            None,
-            None,
-        )
-    }
-    .ok()?;
-    let length = name
-        .iter()
-        .position(|&unit| unit == 0)
-        .unwrap_or(name.len());
-    Some(String::from_utf16_lossy(&name[..length]))
 }
 
 /// `path` with the prefix that lets Windows take it longer than `MAX_PATH`.
@@ -522,7 +520,7 @@ pub(super) fn reason(error: &WinError) -> String {
 fn read_folder(
     ask: &ReadAsk,
     stop: &Stop,
-    deliver: &dyn Fn(ReadEvent),
+    deliver: &dyn Fn(ReadEvent) -> bool,
     armed: &dyn Fn(&FolderWatch) -> bool,
 ) -> Option<(String, Option<FileIdentity>, FolderWatch)> {
     let generation = ask.generation;
@@ -579,10 +577,12 @@ fn read_folder(
     if watch.as_ref().is_some_and(|watch| !armed(watch)) {
         return None;
     }
-    deliver(ReadEvent::Opened {
+    if !deliver(ReadEvent::Opened {
         generation,
         folder: path.clone(),
-    });
+    }) {
+        return None;
+    }
     let mut page = vec![0u64; PAGE_WORDS];
     let mut entries = Vec::new();
     loop {
@@ -619,15 +619,17 @@ fn read_folder(
     let identity = folder.identity().ok();
     drop(folder);
     if path == ask.path {
-        give_sizes(&mut entries, &ask.sizes);
+        give_sizes(&mut entries, &ask.sizes.values());
     }
     sort_listing(&mut entries, ask.sort);
-    deliver(ReadEvent::Listed {
+    if !deliver(ReadEvent::Listed {
         generation,
         folder: path.clone(),
         entries,
         focus,
-    });
+    }) {
+        return None;
+    }
     Some((path, identity, watch?))
 }
 
@@ -699,7 +701,7 @@ fn follow(
     watch: &mut FolderWatch,
     signal: &Signal,
     stop: &Stop,
-    deliver: &dyn Fn(Followed),
+    deliver: &dyn Fn(Followed) -> bool,
 ) {
     let mut watched = false;
     loop {
@@ -710,15 +712,26 @@ fn follow(
         match read {
             Ok(WatchEvent::Stopped) => return,
             Err(error) if !watched && UNWATCHABLE.contains(&error.code) => return,
-            Err(_) | Ok(WatchEvent::Changes([])) => return deliver(Followed::Lost),
+            Err(_) | Ok(WatchEvent::Changes([])) => {
+                deliver(Followed::Lost);
+                return;
+            }
             Ok(WatchEvent::Changes(bytes)) => match changes(folder, bytes) {
-                Some(changes) => deliver(Followed::Changes(changes)),
-                None => return deliver(Followed::Lost),
+                Some(changes) => {
+                    if !deliver(Followed::Changes(changes)) {
+                        return;
+                    }
+                }
+                None => {
+                    deliver(Followed::Lost);
+                    return;
+                }
             },
             Ok(WatchEvent::Quiet) => {}
         }
         if moved(folder, identity) {
-            return deliver(Followed::Lost);
+            deliver(Followed::Lost);
+            return;
         }
         watched = true;
     }

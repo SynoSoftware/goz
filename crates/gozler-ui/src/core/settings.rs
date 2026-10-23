@@ -21,8 +21,7 @@ use gozler_fileops::{DeleteWorkers, Policy, TransferLimit};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
-use std::io;
-use std::path::Path;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Settings {
@@ -503,33 +502,21 @@ impl SettingsDraft {
         self.edited.include != self.applied.include
     }
 
-    /// Records `values`, what Apply or OK applied, which can differ from
-    /// the edited values when a registry write failed.
-    pub(crate) fn applied(&mut self, values: SettingsValues) {
-        self.edited = values.clone();
-        self.applied = values;
+    pub(crate) fn choices_applied(&mut self, choices: Choices) {
+        self.applied.choices = choices;
     }
 
-    /// Records what the main window did with the edited values, and
-    /// answers whether the pages must show other values than the edited
-    /// ones. `None`: Windows refused the shortcut, so the window applied
-    /// nothing and every value stays edited. Otherwise the values now in
-    /// effect, which a registry setting whose write failed keeps at its
-    /// earlier value, become the applied and the edited ones; the Include
-    /// settings stay edited until they are saved
-    /// ([`SettingsDraft::include_saved`]).
-    pub(crate) fn window_applied(&mut self, applied: Option<SettingsValues>) -> bool {
-        let Some(values) = applied else {
-            return false;
-        };
-        let include = self.edited.include.clone();
-        let refill = SettingsValues {
-            include: include.clone(),
-            ..values.clone()
-        } != self.edited;
-        self.applied(values);
-        self.edited.include = include;
-        refill
+    /// A delayed acknowledgment may replace its submitted edit, but never a
+    /// newer one. The answer says whether the check box needs to change.
+    pub(crate) fn sign_in_saved(&mut self, submitted: bool, in_effect: bool) -> bool {
+        self.applied.start_at_sign_in = in_effect;
+        if self.edited.start_at_sign_in == submitted {
+            let changed = self.edited.start_at_sign_in != in_effect;
+            self.edited.start_at_sign_in = in_effect;
+            changed
+        } else {
+            false
+        }
     }
 
     pub(crate) fn last_applied(&self) -> &SettingsValues {
@@ -743,79 +730,76 @@ impl Default for ViewerState {
 }
 
 impl Settings {
-    /// The settings in `path`; the defaults when the file is missing or is
-    /// not a JSON object.
-    pub(crate) fn load(path: &Path) -> Settings {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+    pub(crate) fn parse(text: &str) -> Settings {
+        serde_json::from_str(text).unwrap_or_default()
     }
 
-    /// Writes each setting that differs from `saved`, the copy this window
-    /// saved last, over the one in `path`, and keeps every other setting
-    /// the file holds, so a setting that another window saved meanwhile
-    /// stays (DESIGN.md: Window lifetime). A setting is a key of
-    /// `settings` or `window`. A file that is missing or not a JSON object
-    /// gets every setting. The file is written through a temporary file
-    /// renamed over it, so a failed write never leaves half a file.
-    pub(crate) fn save_changes(&self, saved: &Settings, path: &Path) -> io::Result<()> {
+    pub(crate) fn changes(&self, saved: &Settings) -> Changes {
         let now = serde_json::to_value(self).expect("Settings serializes");
         let before = serde_json::to_value(saved).expect("Settings serializes");
-        let on_disk = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .filter(Value::is_object);
-        let file = match on_disk {
-            Some(mut file) => {
-                merge_changes(&mut file, &now, &before);
-                file
+        let mut keys = BTreeMap::new();
+        for (group, values) in now.as_object().expect("Settings is an object") {
+            let before = before.get(group).and_then(Value::as_object);
+            let values = values.as_object().expect("settings groups are objects");
+            let changed: BTreeMap<_, _> = values
+                .keys()
+                .chain(before.into_iter().flat_map(Map::keys))
+                .filter(|key| values.get(*key) != before.and_then(|values| values.get(*key)))
+                .map(|key| (key.clone(), values.get(key).cloned()))
+                .collect();
+            if !changed.is_empty() {
+                keys.insert(group.clone(), changed);
             }
-            None => now,
-        };
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
         }
-        let temporary = path.with_extension("json.tmp");
-        let text = serde_json::to_string_pretty(&file).expect("a JSON value serializes");
-        std::fs::write(&temporary, text)?;
-        std::fs::rename(&temporary, path)
+        Changes { full: now, keys }
     }
 }
 
-/// Writes into `file` each key of each group of `now` whose value differs
-/// from `before`'s, and removes a key that `now` no longer has.
-fn merge_changes(file: &mut Value, now: &Value, before: &Value) {
-    let (Some(file), Some(now)) = (file.as_object_mut(), now.as_object()) else {
-        return;
-    };
-    for (group, now) in now {
-        let before = before.get(group);
-        let target = file
-            .entry(group.clone())
-            .or_insert_with(|| Value::Object(Map::new()));
-        if !target.is_object() {
-            *target = Value::Object(Map::new());
+/// Pending changed-key intent, including removals. Coalescing retains keys even
+/// if their newest value equals the value before the first pending change.
+pub(crate) struct Changes {
+    full: Value,
+    keys: BTreeMap<String, BTreeMap<String, Option<Value>>>,
+}
+
+impl Changes {
+    pub(crate) fn combine(mut self, newer: Changes) -> Changes {
+        self.full = newer.full;
+        for (group, keys) in newer.keys {
+            self.keys.entry(group).or_default().extend(keys);
         }
-        let (Some(target), Some(now)) = (target.as_object_mut(), now.as_object()) else {
-            continue;
-        };
-        let keys = now.keys().chain(
-            before
-                .and_then(Value::as_object)
-                .into_iter()
-                .flat_map(Map::keys),
-        );
-        for key in keys {
-            let value = now.get(key);
-            if value == before.and_then(|before| before.get(key)) {
-                continue;
+        self
+    }
+
+    /// Applies only this window's changed keys to the latest file. An absent or
+    /// invalid file gets the complete state, as at the first save of an install.
+    pub(crate) fn apply(self, text: Option<&str>) -> String {
+        let file = text
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .filter(Value::is_object);
+        let mut file = match file {
+            Some(file) => file,
+            None => {
+                return serde_json::to_string_pretty(&self.full).expect("a JSON value serializes");
             }
-            match value {
-                Some(value) => target.insert(key.clone(), value.clone()),
-                None => target.remove(key),
-            };
+        };
+        let groups = file.as_object_mut().expect("the parsed file is an object");
+        for (group, keys) in self.keys {
+            let target = groups
+                .entry(group)
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !target.is_object() {
+                *target = Value::Object(Map::new());
+            }
+            let target = target.as_object_mut().expect("the target is an object");
+            for (key, value) in keys {
+                match value {
+                    Some(value) => target.insert(key, value),
+                    None => target.remove(&key),
+                };
+            }
         }
+        serde_json::to_string_pretty(&file).expect("a JSON value serializes")
     }
 }
 
@@ -915,17 +899,6 @@ mod tests {
         }
     }
 
-    /// A shortcut that Windows refuses applies nothing, so Apply stays
-    /// enabled for the edited values.
-    #[test]
-    fn a_refused_shortcut_applies_nothing() {
-        let mut draft = SettingsDraft::new(values());
-        draft.edited.choices.show_memory = true;
-        assert!(!draft.window_applied(None));
-        assert_eq!(*draft.last_applied(), values());
-        assert!(draft.edited.choices.show_memory && draft.can_apply());
-    }
-
     /// A sign-in setting whose registry write failed keeps its earlier
     /// value, which the page shows again, while the Include settings,
     /// whose save as administrator the person declined, stay edited with
@@ -939,16 +912,34 @@ mod tests {
             ..IndexSettings::default()
         };
         draft.edited.include = Some(include.clone());
-        // The window applies the Include settings only once they are saved.
-        let in_effect = SettingsValues {
-            start_at_sign_in: false,
-            include: values().include,
-            ..draft.edited.clone()
-        };
-        assert!(draft.window_applied(Some(in_effect)));
+        draft.choices_applied(draft.edited.choices.clone());
+        assert!(draft.sign_in_saved(true, false));
         assert!(!draft.edited.start_at_sign_in);
         assert_eq!(draft.edited.include, Some(include));
         assert!(draft.shielded() && draft.can_apply());
+    }
+
+    #[test]
+    fn a_delayed_sign_in_acknowledgment_preserves_newer_edits() {
+        let mut draft = SettingsDraft::new(values());
+        draft.edited.start_at_sign_in = true;
+        draft.choices_applied(draft.edited.choices.clone());
+        draft.edited.start_at_sign_in = false;
+        draft.edited.choices.show_memory = true;
+        draft.edited.choices.speed.change(|settings| {
+            settings.delete_workers = DeleteWorkers::Fixed(Count::new(4).expect("in range"));
+        });
+        draft.type_number(SpeedNumber::DeleteWorkers, "0");
+        assert!(!draft.sign_in_saved(true, true));
+        assert!(draft.last_applied().start_at_sign_in);
+        assert!(!draft.edited.start_at_sign_in);
+        assert!(draft.edited.choices.show_memory);
+        assert!(!draft.last_applied().choices.show_memory);
+        assert_eq!(
+            draft.refused().map(|(number, _)| number),
+            Some(SpeedNumber::DeleteWorkers)
+        );
+        assert!(draft.can_apply());
     }
 
     /// A number box's text out of its range enables Apply, which refuses
@@ -960,7 +951,7 @@ mod tests {
         draft.edited.choices.speed.change(|settings| {
             settings.delete_workers = DeleteWorkers::Fixed(Count::new(4).expect("in range"));
         });
-        draft.applied(draft.edited.clone());
+        draft.choices_applied(draft.edited.choices.clone());
         draft.type_number(SpeedNumber::DeleteWorkers, "0");
         assert_eq!(
             draft.refused().map(|(number, _)| number),
@@ -1029,10 +1020,7 @@ mod tests {
                 Keystroke::ctrl(Key::Letter(b'E'))
             ]
         );
-        assert_eq!(
-            Settings::load(Path::new("no such folder/ui.json")),
-            Settings::default()
-        );
+        assert_eq!(Settings::parse(""), Settings::default());
     }
 
     /// A new install starts with Match path on, while a person who turned it
@@ -1071,8 +1059,7 @@ mod tests {
         );
         assert!(draft.edited.start_at_sign_in);
         assert!(draft.can_apply());
-        let applied = draft.edited.clone();
-        draft.applied(applied);
+        draft.choices_applied(draft.edited.choices.clone());
         assert!(!draft.can_apply());
         draft.edited.choices.search_as_you_type = false;
         draft.edited.choices.search_as_you_type = true;
@@ -1146,13 +1133,9 @@ mod tests {
         );
     }
 
-    /// The keys written must be the keys read, and the second save must
-    /// replace the first file.
+    /// The keys written must be the keys read.
     #[test]
     fn saved_settings_load_again() {
-        let folder =
-            std::env::temp_dir().join(format!("gozler-ui-settings-{}", std::process::id()));
-        let path = folder.join("ui.json");
         let mut shortcuts = CommandShortcuts::default();
         let ctrl_k = Keystroke::ctrl(Key::Letter(b'K'));
         shortcuts
@@ -1231,14 +1214,8 @@ mod tests {
                 },
             },
         };
-        Settings::default()
-            .save_changes(&Settings::default(), &path)
-            .expect("the temporary folder is writable");
-        settings
-            .save_changes(&Settings::default(), &path)
-            .expect("the temporary folder is writable");
-        assert_eq!(Settings::load(&path), settings);
-        std::fs::remove_dir_all(&folder).expect("the test's folder is removable");
+        let text = settings.changes(&Settings::default()).apply(Some("{}"));
+        assert_eq!(Settings::parse(&text), settings);
     }
 
     /// Each window saves its whole state, so a window that wrote every
@@ -1247,27 +1224,43 @@ mod tests {
     /// its default leaves the file.
     #[test]
     fn a_save_keeps_what_another_window_saved() {
-        let folder = std::env::temp_dir().join(format!("gozler-ui-merge-{}", std::process::id()));
-        let path = folder.join("ui.json");
         let mut loaded = Settings::default();
         loaded.window.destination_folder = Some(r"E:\Backup".into());
-        loaded
-            .save_changes(&Settings::default(), &path)
-            .expect("the temporary folder is writable");
+        let text = loaded.changes(&Settings::default()).apply(None);
         let mut other = loaded.clone();
         other.choices.language = LanguageChoice::Tag("de".into());
-        other
-            .save_changes(&loaded, &path)
-            .expect("the temporary folder is writable");
+        let text = other.changes(&loaded).apply(Some(&text));
         let mut this = loaded.clone();
         this.window.mode = Mode::TwoPanels;
         this.window.destination_folder = None;
-        this.save_changes(&loaded, &path)
-            .expect("the temporary folder is writable");
-        let saved = Settings::load(&path);
+        let text = this.changes(&loaded).apply(Some(&text));
+        let saved = Settings::parse(&text);
         assert_eq!(saved.choices.language, LanguageChoice::Tag("de".into()));
         assert_eq!(saved.window.mode, Mode::TwoPanels);
         assert_eq!(saved.window.destination_folder, None);
-        std::fs::remove_dir_all(&folder).expect("the test's folder is removable");
+    }
+
+    #[test]
+    fn coalesced_saves_keep_changed_keys_removals_and_other_windows_choices() {
+        let mut before = Settings::default();
+        before.choices.show_memory = true;
+        before.window.destination_folder = Some(r"E:\Backup".into());
+        let mut first = before.clone();
+        first.choices.show_memory = false;
+        first.window.destination_folder = None;
+        let mut last = first.clone();
+        last.choices.show_memory = true;
+        last.window.mode = Mode::TwoPanels;
+        let changes = first.changes(&before).combine(last.changes(&first));
+        let latest_file = r#"{
+            "settings": {"language": "de", "show_memory": false},
+            "window": {"destination_folder": "E:\\Backup"}
+        }"#;
+        let saved: Value =
+            serde_json::from_str(&changes.apply(Some(latest_file))).expect("changes produce JSON");
+        assert_eq!(saved["settings"]["language"], "de");
+        assert_eq!(saved["settings"]["show_memory"], true);
+        assert_eq!(saved["window"]["mode"], "two_panels");
+        assert!(saved["window"].get("destination_folder").is_none());
     }
 }

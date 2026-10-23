@@ -120,7 +120,8 @@ impl Synchronize<'_> {
     fn detach(&self) -> Option<OperationId> {
         let preview = self.preview.take();
         let id = preview.id();
-        if let Preview::Ready { comparison, .. } = preview {
+        if let Preview::Ready { comparison, .. } | Preview::Committing { comparison, .. } = preview
+        {
             self.operations.release_comparison(comparison);
         }
         id
@@ -144,10 +145,22 @@ impl Synchronize<'_> {
     }
 
     fn enable(&self, dialog: Hwnd) {
+        let committing = matches!(*self.preview.borrow(), Preview::Committing { .. });
+        for id in [
+            C::SyncSource,
+            C::SyncDestination,
+            C::SyncSourceBrowse,
+            C::SyncDestinationBrowse,
+            C::SyncMirror,
+        ] {
+            if let Some(control) = dialog::item(dialog, id.id()) {
+                control.set_enabled(!committing);
+            }
+        }
         let filled = !Self::text(dialog, C::SyncSource).trim().is_empty()
             && !Self::text(dialog, C::SyncDestination).trim().is_empty();
         if let Some(compare) = dialog::item(dialog, C::SyncCompare.id()) {
-            compare.set_enabled(filled);
+            compare.set_enabled(filled && !committing);
         }
         let ready = self.preview.borrow().can_commit();
         if let Some(commit) = dialog::item(dialog, DialogItem::Ok.id()) {
@@ -179,10 +192,26 @@ impl Synchronize<'_> {
     }
 
     fn poll(&self, dialog: Hwnd) {
+        let committing = match *self.preview.borrow() {
+            Preview::Committing { id, .. } => Some(id),
+            _ => None,
+        };
+        if let Some(id) = committing {
+            match self.operations.take_synchronized(id) {
+                Some(true) => {
+                    self.detach();
+                    dialog::end(dialog, DialogEnd::Ok);
+                }
+                Some(false) => self.invalidate(dialog),
+                None => {}
+            }
+            return;
+        }
         let id = match *self.preview.borrow() {
             Preview::Comparing(id) => id,
             _ => return,
         };
+        self.operations.request_refresh();
         let state = self
             .operations
             .operation(id)
@@ -195,7 +224,9 @@ impl Synchronize<'_> {
                     .map(State::Ended)
             });
         let Some(state) = state else {
-            self.invalidate(dialog);
+            if !self.operations.is_pending(id) {
+                self.invalidate(dialog);
+            }
             return;
         };
         match state {
@@ -331,13 +362,11 @@ impl DialogProc for Synchronize<'_> {
             }
             DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
                 let ready = self.preview.borrow().can_commit();
-                if ready && let Some(id) = self.detach() {
-                    if self.operations.synchronize(id) {
-                        dialog::end(dialog, DialogEnd::Ok);
-                    } else {
-                        self.operations.act(id, QueueAction::Cancel);
-                        self.invalidate(dialog);
-                    }
+                if ready && let Preview::Ready { id, comparison } = self.preview.take() {
+                    self.preview.replace(Preview::Committing { id, comparison });
+                    self.operations.synchronize(id);
+                    self.enable(dialog);
+                    dialog.set_timer(POLL, 200);
                 }
                 true
             }

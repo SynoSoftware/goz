@@ -134,6 +134,9 @@ responsibly resolve yourself.
 
 Every test adds compile time to each `build.ps1` run and is code the next
 change must keep passing, so a test earns its place by the failure it watches.
+Test lasting behavior and invariants once the implementation settles. Prune
+redundant tests; skip tests of temporary code scheduled for replacement or
+deletion in the current work.
 
 - **Name the failure first:** what breaks, what a script or user would see,
   and why the compiler and the existing tests miss it. With no answer, write
@@ -244,6 +247,13 @@ instructions differ.
 Builds share the machine with interactive work and other agents, and a first
 build compiles every dependency. A change only to Markdown or `ci.yml` needs
 no build. A change to `build.ps1` is verified by running it.
+
+**Owner preference: use judgment, not ceremony.** Code larger coherent batches;
+for a staged plan, normally finish the stage, review the implementation that
+will remain, then build. Replace or delete temporary paths before reviewing
+them. Reuse valid review evidence. A focused check earns an earlier run when
+its answer changes the next edit; a small internal slice is not automatically
+a reason for another review and full build.
 
 Build when the change is reviewed: you have read the final diff as its next
 maintainer, traced each changed behavior from its callers, and named the

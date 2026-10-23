@@ -55,6 +55,10 @@ pub(crate) struct Dragged {
 }
 
 impl Dragged {
+    pub(crate) fn items(&self) -> usize {
+        self.folded.len()
+    }
+
     pub(crate) fn new(paths: Vec<PathBuf>) -> Dragged {
         let folded = paths
             .iter()

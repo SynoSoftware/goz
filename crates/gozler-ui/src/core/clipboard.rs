@@ -6,6 +6,33 @@
 
 use gozler_core::proto::ResultItem;
 use std::ops::Range;
+use std::time::Duration;
+
+pub(crate) const RETRY_AFTER: Duration = Duration::from_millis(20);
+
+pub(crate) struct Publication {
+    sequence: u32,
+    attempts: u8,
+}
+
+impl Publication {
+    pub(crate) fn new(sequence: u32) -> Self {
+        Self {
+            sequence,
+            attempts: 0,
+        }
+    }
+
+    /// Our preceding publication may have completed after this Copy was accepted.
+    pub(crate) fn is_current(&self, sequence: u32, preceding: u32) -> bool {
+        sequence == self.sequence || (preceding != 0 && sequence == preceding)
+    }
+
+    pub(crate) fn retry(&mut self) -> bool {
+        self.attempts += 1;
+        self.attempts < 5
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClipboardFormat {
@@ -59,6 +86,10 @@ impl<'a> ClipboardData<'a> {
 
     pub(crate) fn format(&self) -> ClipboardFormat {
         self.format
+    }
+
+    pub(crate) fn items(&self) -> usize {
+        self.files.len()
     }
 
     /// The bytes [`write_into`](Self::write_into) writes.
@@ -164,6 +195,25 @@ pub(crate) fn folder_of<T: Copy + Into<u32>>(path: &[T]) -> &[T] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_copy_stops_retrying_and_never_replaces_an_unrelated_copy() {
+        let mut publication = Publication::new(10);
+        for _ in 0..4 {
+            assert!(publication.retry());
+        }
+        assert!(!publication.retry());
+        assert!(publication.is_current(10, 0));
+        assert!(
+            publication.is_current(11, 11),
+            "our preceding copy finished"
+        );
+        assert!(!publication.is_current(12, 11), "another copy replaced it");
+        assert!(
+            !publication.is_current(0, 0),
+            "an unknown preceding copy is no permission"
+        );
+    }
 
     fn file(path: &str) -> ResultItem {
         ResultItem {

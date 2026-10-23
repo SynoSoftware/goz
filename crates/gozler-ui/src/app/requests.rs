@@ -194,7 +194,7 @@ fn rows(
                     {
                         first(Outcome::Rows(Chunk {
                             start: ask.start,
-                            rows: page.items.clone(),
+                            rows: page.items.clone().into(),
                             total: page.total,
                             volumes_incomplete: page.volumes_incomplete,
                             metadata_pending: page.metadata_pending,
@@ -213,7 +213,7 @@ fn rows(
     let all = all.ok_or_else(|| ClientError::Communication("the reply had no page".into()))?;
     Ok(Chunk {
         start: ask.start,
-        rows: all.items,
+        rows: all.items.into(),
         total: all.total,
         volumes_incomplete: all.volumes_incomplete,
         metadata_pending: all.metadata_pending,
@@ -251,11 +251,7 @@ fn selection(client: &mut Client, ask: SelectionAsk) -> Result<SelectionRows, Cl
             Ok::<(), ClientError>(())
         },
     )?;
-    Ok(SelectionRows {
-        rows,
-        cached: ask.cached,
-        made,
-    })
+    Ok(SelectionRows::new(&ask.positions, rows, ask.cached, made))
 }
 
 /// Why an export stopped before its end.

@@ -3,6 +3,7 @@
 //! surface reads a command's label, shortcut, enabled state and check mark from
 //! here, so the menus, the keys and the controls cannot disagree.
 
+use super::fetch::List;
 use super::glyph::Glyph;
 use super::ids::ControlId;
 use super::model::{Column, Model};
@@ -255,7 +256,7 @@ impl CommandId {
                     &[],
                     |s| {
                         let panels = s.model.panels();
-                        (panels.focused(panels.active())).is_some_and(|entry| !entry.is_folder)
+                        matches!(s.list, List::Panel(side) if panels.focused(side).is_some_and(|entry| !entry.is_folder))
                     },
                     None,
                 ),
@@ -265,10 +266,7 @@ impl CommandId {
                     &[],
                     |s| {
                         s.model.offers_file_operations()
-                            && matches!(
-                                s.model.panels().panel(s.model.panels().active()).view(),
-                                View::Folder
-                            )
+                            && matches!(s.list, List::Panel(side) if matches!(s.model.panels().panel(side).view(), View::Folder))
                     },
                     None,
                 ),
@@ -383,11 +381,12 @@ pub(crate) struct Command {
     pub(crate) checked: Checked,
 }
 
-/// What a command's state depends on: the model, and which control has the
-/// focus, which only Windows knows.
+/// A command's source list and focus remain fixed while native capture or a
+/// context menu yields, even if the person activates another panel.
 pub(crate) struct State<'a> {
     pub(crate) model: &'a Model,
     pub(crate) focus: Focus,
+    pub(crate) list: List,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -439,9 +438,9 @@ fn files(state: &State) -> bool {
 /// read, or the active panel's selected entries, else its focused entry
 /// (DESIGN.md: Commands in Two panels).
 fn chosen(state: &State) -> usize {
-    match state.model.mode() {
-        Mode::Search => (state.model.search_list().selection().files()).map_or(0, <[_]>::len),
-        Mode::TwoPanels => state.model.panels().chosen_count(),
+    match state.list {
+        List::Search => (state.model.search_list().selection().files()).map_or(0, <[_]>::len),
+        List::Panel(side) => state.model.panels().chosen_count(side),
     }
 }
 
@@ -1093,6 +1092,46 @@ pub(crate) enum Mark {
 }
 
 impl MenuItem {
+    pub(crate) fn writes_selection(self, focus: Focus) -> bool {
+        match self {
+            Self::Run(CommandId::ClearSelection) => true,
+            Self::Run(CommandId::SelectAll) => !matches!(
+                focus,
+                Focus::SearchBox { .. } | Focus::Value { .. } | Focus::PathBox | Focus::PanelSearch
+            ),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn reads_selection(self, focus: Focus) -> bool {
+        use CommandId as C;
+        match self {
+            Self::Run(C::Copy | C::Cut)
+                if matches!(focus, Focus::SearchBox { .. } | Focus::Value { .. }) =>
+            {
+                false
+            }
+            Self::Run(
+                C::Open
+                | C::OpenFileLocation
+                | C::Explore
+                | C::Properties
+                | C::Copy
+                | C::Cut
+                | C::CopyAsPath
+                | C::CopyName
+                | C::CopyFolder
+                | C::CopyToFolder
+                | C::MoveToFolder
+                | C::Delete
+                | C::Paste
+                | C::SearchInThisFolder
+                | C::View,
+            ) => true,
+            _ => false,
+        }
+    }
+
     /// The item's `WM_COMMAND` ID. Each kind has its own range, so no two
     /// items share an ID.
     pub(crate) fn id(self) -> u16 {
@@ -1915,6 +1954,7 @@ mod tests {
         MenuItem::Run(command).enabled(&State {
             model,
             focus: Focus::List,
+            list: model.active_list(),
         })
     }
 
@@ -1927,13 +1967,13 @@ mod tests {
         for (selected, opens, shows_properties) in
             [(1, true, true), (15, true, false), (16, false, false)]
         {
-            model.set_selection(List::Search, vec![0..selected]);
+            model.set_selection(List::Search, vec![0..selected].into());
             assert_eq!(enabled(&model, CommandId::Open), opens, "{selected} rows");
             assert_eq!(enabled(&model, CommandId::OpenFileLocation), opens);
             assert_eq!(enabled(&model, CommandId::Properties), shows_properties);
             assert!(enabled(&model, CommandId::CopyAsPath));
         }
-        model.set_selection(List::Search, vec![0..1, 40_000..40_001]);
+        model.set_selection(List::Search, vec![0..1, 40_000..40_001].into());
         for command in [CommandId::Open, CommandId::Copy, CommandId::Properties] {
             assert!(
                 !enabled(&model, command),
@@ -1971,8 +2011,19 @@ mod tests {
         model.panels_mut().set_focused(Side::Left, Some(1));
         assert_eq!(offered(&model), [true; 3]);
         model.panels_mut().set_focused(Side::Left, Some(0));
-        model.panels_mut().set_selected(Side::Left, vec![2..3]);
+        model
+            .panels_mut()
+            .set_selected(Side::Left, vec![2..3].into());
         assert_eq!(offered(&model), [true; 3]);
+        model.panels_mut().activate(Side::Right);
+        assert!(!enabled(&model, CommandId::Delete));
+        let source = State {
+            model: &model,
+            focus: Focus::Panel,
+            list: List::Panel(Side::Left),
+        };
+        assert!(MenuItem::Run(CommandId::Delete).enabled(&source));
+        model.panels_mut().activate(Side::Left);
         assert!(enabled(&model, CommandId::NewFolder));
         model.panels_mut().drive_removed(Side::Left);
         assert!(!enabled(&model, CommandId::NewFolder));
@@ -2001,7 +2052,7 @@ mod tests {
     #[test]
     fn t11_a_command_chosen_after_new_rows_cleared_the_selection_does_nothing() {
         let mut model = showing(10);
-        model.set_selection(List::Search, vec![2..3]);
+        model.set_selection(List::Search, vec![2..3].into());
         assert!(
             enabled(&model, CommandId::Open),
             "the menu opens with it on"

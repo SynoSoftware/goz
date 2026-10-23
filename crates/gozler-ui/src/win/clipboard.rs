@@ -3,14 +3,15 @@
 //! (DESIGN.md: Copy), and the files that Paste reads from it.
 
 use super::Hwnd;
-use crate::core::clipboard::{ClipboardData, ClipboardFormat};
+use crate::core::clipboard::{ClipboardData, ClipboardFormat, Publication};
+use gozler_client::CancelToken;
 use std::ffi::OsString;
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::time::Duration;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{E_OUTOFMEMORY, GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
@@ -25,7 +26,9 @@ use windows::Win32::System::Ole::{
     OleGetClipboard, OleInitialize, OleUninitialize, ReleaseStgMedium,
 };
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
-use windows::Win32::UI::WindowsAndMessaging::WM_CLIPBOARDUPDATE;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
+};
 use windows::core::w;
 
 /// The message a window that [`listen`]s gets after the clipboard changed.
@@ -78,20 +81,55 @@ fn effect_block(value: u32) -> Option<HGLOBAL> {
     }
 }
 
-/// How often a copy asks for the clipboard that another program holds, and
-/// how long it waits between, so it gives up after 100 ms (DESIGN.md: Copy).
-const OPEN_TRIES: u32 = 5;
-const OPEN_WAIT: Duration = Duration::from_millis(20);
-
 /// One format's bytes in a block of their own size. Dropping a block that
 /// the clipboard did not take frees it.
 pub(crate) struct ClipboardBlock {
-    memory: HGLOBAL,
+    memory: Memory,
     format: ClipboardFormat,
+    items: usize,
 }
 
-/// Another program holds the clipboard.
-pub(crate) struct ClipboardBusy;
+struct Memory(HGLOBAL);
+
+// SAFETY: this owns unlocked GMEM_MOVEABLE storage exclusively. No pointer into
+// it survives construction, and transfer to Windows consumes the owning value.
+unsafe impl Send for Memory {}
+
+impl Drop for Memory {
+    fn drop(&mut self) {
+        // SAFETY: only memory that was not transferred to Windows reaches Drop.
+        let _ = unsafe { GlobalFree(Some(self.0)) };
+    }
+}
+
+pub(crate) enum CopyAttempt {
+    Published,
+    Busy(ClipboardBlock),
+    Superseded,
+    Failed(windows::core::Error),
+}
+
+struct Owner(Hwnd);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.0.destroy();
+    }
+}
+
+struct Open;
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        // SAFETY: only a successful OpenClipboard constructs this thread-local guard.
+        let _ = unsafe { CloseClipboard() };
+    }
+}
+
+pub(crate) fn sequence() -> u32 {
+    // SAFETY: this reads the version without asking its owner to render anything.
+    unsafe { GetClipboardSequenceNumber() }
+}
 
 impl ClipboardBlock {
     /// A block holding `data`, or `None` when Windows has no memory for it.
@@ -103,8 +141,9 @@ impl ClipboardBlock {
         // clipboard takes it.
         let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, len) }.ok()?;
         let block = ClipboardBlock {
-            memory,
+            memory: Memory(memory),
             format: data.format(),
+            items: data.items(),
         };
         // SAFETY: a locked moveable block of at least `len` bytes stays put
         // until it is unlocked, and nothing else holds it.
@@ -119,18 +158,21 @@ impl ClipboardBlock {
         Some(block)
     }
 
-    /// Puts the block on the clipboard, as `owner`'s, in place of what the
-    /// clipboard held. It sends `WM_DESTROYCLIPBOARD` to the clipboard's
-    /// last owner, which can be this window, so no model borrow is held.
-    pub(crate) fn set(self, owner: Hwnd) -> Result<(), ClipboardBusy> {
-        let mut tries = 0;
-        // SAFETY: plain values.
-        while unsafe { OpenClipboard(Some(owner.0)) }.is_err() {
-            tries += 1;
-            if tries == OPEN_TRIES {
-                return Err(ClipboardBusy);
-            }
-            std::thread::sleep(OPEN_WAIT);
+    pub(crate) fn items(&self) -> usize {
+        self.items
+    }
+
+    /// One attempt on its worker's native owner. Cancellation is checked before
+    /// EmptyClipboard; afterward every format and CloseClipboard must finish.
+    pub(crate) fn set(
+        self,
+        publication: &Publication,
+        preceding: &AtomicU32,
+        cancel: &CancelToken,
+        _worker: &super::work::OffThread,
+    ) -> CopyAttempt {
+        if cancel.is_cancelled() {
+            return CopyAttempt::Superseded;
         }
         let (format, effect) = match self.format {
             ClipboardFormat::Files => (CF_HDROP, Some(DROPEFFECT_COPY)),
@@ -139,31 +181,70 @@ impl ClipboardBlock {
                 (CF_UNICODETEXT, None)
             }
         };
-        // SAFETY: the clipboard is open on this thread. Once SetClipboardData
-        // succeeds the clipboard owns the block, so it is not freed here.
-        unsafe {
-            let _ = EmptyClipboard();
-            if SetClipboardData(format, Some(HANDLE(self.memory.0))).is_ok() {
+        let effect = match effect {
+            Some(value) => match effect_block(value) {
+                Some(memory) => Some(Memory(memory)),
+                None => {
+                    return CopyAttempt::Failed(windows::core::Error::from_hresult(E_OUTOFMEMORY));
+                }
+            },
+            None => None,
+        };
+        // SAFETY: a built-in, invisible message-only window owned by this worker.
+        // Eager formats need no rendering messages after this owner is destroyed.
+        let owner = match unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!(""),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+        } {
+            Ok(owner) => Owner(Hwnd(owner)),
+            Err(error) => return CopyAttempt::Failed(error),
+        };
+        // SAFETY: the owner was created on this thread and outlives the open guard.
+        if unsafe { OpenClipboard(Some(owner.0.0)) }.is_err() {
+            return CopyAttempt::Busy(self);
+        }
+        let _open = Open;
+        if cancel.is_cancelled()
+            || !publication.is_current(sequence(), preceding.load(Ordering::Acquire))
+        {
+            return CopyAttempt::Superseded;
+        }
+        // SAFETY: this thread holds the clipboard open. The guards close it and
+        // destroy its owner in that order on every return path.
+        if let Err(error) = unsafe { EmptyClipboard() } {
+            return CopyAttempt::Failed(error);
+        }
+        let result = (|| {
+            // SAFETY: both blocks are unlocked and owned here. Only a successful
+            // SetClipboardData consumes their ownership; errors leave Drop to free them.
+            unsafe {
+                SetClipboardData(format, Some(HANDLE(self.memory.0.0)))?;
                 std::mem::forget(self);
-                // Without the effect, a program pasting the files copies
-                // them, so a Cut would act as a Copy.
-                if let Some(block) = effect.and_then(effect_block)
-                    && SetClipboardData(preferred_drop_effect(), Some(HANDLE(block.0))).is_err()
-                {
-                    let _ = GlobalFree(Some(block));
+                if let Some(effect) = effect {
+                    SetClipboardData(preferred_drop_effect(), Some(HANDLE(effect.0.0)))?;
+                    std::mem::forget(effect);
                 }
             }
-            let _ = CloseClipboard();
+            Ok(())
+        })();
+        // Record partial mutations too, before Close permits another publisher.
+        preceding.store(sequence(), Ordering::Release);
+        match result {
+            Ok(()) => CopyAttempt::Published,
+            Err(error) => CopyAttempt::Failed(error),
         }
-        Ok(())
-    }
-}
-
-impl Drop for ClipboardBlock {
-    fn drop(&mut self) {
-        // SAFETY: the block is this value's, because the clipboard did not
-        // take it.
-        let _ = unsafe { GlobalFree(Some(self.memory)) };
     }
 }
 

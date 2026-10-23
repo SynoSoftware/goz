@@ -2,8 +2,8 @@
 //! `git show 2c66b40:docs/plans/window-responsiveness.md` ranked and
 //! numbered, on synthetic rows, without a window, a daemon or a disk. Each test
 //! is ignored, because only an optimized build gives meaningful times:
-//! `cargo test --release --workspace timing -- --ignored --nocapture
-//! --test-threads=1`. A time is the median of 15 runs after one warm-up.
+//! `pwsh ./build.ps1 -Timing timing`. A time is the median of 15 runs after
+//! one warm-up.
 
 use crate::core::clipboard::{ClipboardData, ClipboardFormat};
 use crate::core::file_operations;
@@ -157,8 +157,7 @@ fn timing_locale_cells_per_paint() {
     });
 }
 
-/// Rank 1: each reply and wake sums the selection for the inspector, and
-/// `set_taken` checks every selected file.
+/// Measures selection calculations independently of their work-owner dispatch.
 #[test]
 #[ignore = "timing; run in release"]
 fn timing_large_selection_per_reply() {
@@ -176,11 +175,19 @@ fn timing_large_selection_per_reply() {
         &PathBuf::from(r"D:\other.txt"),
         false,
     );
-    let kept = std::collections::HashSet::new();
+    let kept = Arc::default();
     // The other path takes none of them, so each run checks them all.
-    let mut files = rows.clone();
-    time("set_taken over the selection, one other taken path", || {
-        crate::core::search_list::retain_untaken(&taken, &kept, &mut files);
+    let files: Arc<[ResultItem]> = rows.into();
+    let taken = Arc::new(taken);
+    time("selection filtering and size, one other taken path", || {
+        crate::core::selection::Filter {
+            generation: crate::core::fetch::Generation(0),
+            source: crate::core::selection::SelectionSource::Files(Arc::clone(&files)),
+            taken: Arc::clone(&taken),
+            kept: Arc::clone(&kept),
+            count_bytes: true,
+        }
+        .run()
     });
 }
 
@@ -461,10 +468,16 @@ fn timing_other_waits() {
     let file = folder.join("ui.json");
     let settings = crate::core::settings::Settings::default();
     // The second save reads the first file, as each save but a first does.
-    settings.save_changes(&settings, &file).expect("saves");
-    time("save ui.json to the temporary folder", || {
-        settings.save_changes(&settings, &file).expect("saves")
-    });
+    crate::win::work::spawn(move |worker| {
+        crate::app::work::write_settings(&file, settings.changes(&settings), worker)
+            .expect("saves");
+        time("save ui.json to the temporary folder", || {
+            crate::app::work::write_settings(&file, settings.changes(&settings), worker)
+                .expect("saves")
+        });
+    })
+    .join()
+    .expect("the timing worker finishes");
     let _ = std::fs::remove_dir_all(&folder);
 
     // Rank 12: Copy while another program holds the clipboard, with the
@@ -680,16 +693,18 @@ fn timing_large_panel_selection() {
     use crate::core::panel::{Panels, Side};
     let folder = path("Projects", 9);
     let folder = folder.trim_end_matches(r"\report 2026.txt");
-    let entries = (0..100_000)
-        .map(|i| file(&format!("report {i}.txt"), 1_000, 0))
-        .collect();
-    let mut panels = Panels::new(&Default::default());
-    list(&mut panels, folder, entries);
-    panels.set_selected(Side::Left, vec![1..100_001]);
-    time("panel status counts, 100,000 selected", || {
-        panels.panel(Side::Left).counts()
-    });
-    time("panel chosen entries, 100,000 selected", || {
-        panels.chosen(Side::Left)
-    });
+    for count in [1_000, 100_000] {
+        let entries = (0..count)
+            .map(|i| file(&format!("report {i}.txt"), 1_000, 0))
+            .collect();
+        let mut panels = Panels::new(&Default::default());
+        list(&mut panels, folder, entries);
+        panels.set_selected(Side::Left, vec![1..count + 1].into());
+        time(&format!("panel status counts, {count} selected"), || {
+            panels.panel(Side::Left).counts()
+        });
+        time(&format!("panel chosen entries, {count} selected"), || {
+            panels.chosen_source(Side::Left).unwrap().resolve()
+        });
+    }
 }

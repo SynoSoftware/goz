@@ -23,8 +23,9 @@
 use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
-use super::search_list::{Deselect, SearchList, is_taken};
-use super::selection::{Selection, wide_path};
+use super::search_list::{Deselect, SearchList};
+use super::selection::{RowSelection, Selection, wide_path};
+use super::work::{self, Pass, Retirement};
 use gozler_core::fold::{fold, fold_into};
 use gozler_core::proto::ResultItem;
 use gozler_core::query::QueryStart;
@@ -40,6 +41,17 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
+mod calculation;
+mod counting;
+mod quick;
+pub(crate) use calculation::{Calculated, Calculation, PanelUpdate, UpdatedKind};
+use calculation::{Change as RowChange, End, Input, Interaction};
+pub(crate) use counting::{Counted, Counting};
+use quick::Quick;
+pub(crate) use quick::{Finding, Found, QuickAction};
+
+const PENDING_ROWS: usize = 32;
+
 /// How many folders a panel's drive menu offers (DESIGN.md: The drive menu).
 pub(crate) const HISTORY: usize = 10;
 
@@ -47,7 +59,7 @@ pub(crate) const HISTORY: usize = 10;
 const SIZE_ROWS: u64 = 100_000;
 
 /// The most entries a batch of changes inserts one by one
-/// ([`Panel::insert_sorted`]); each insert moves the entries after it.
+/// ([`FolderRows::insert_sorted`]); each insert moves the entries after it.
 const INSERT_IN_PLACE: usize = 8;
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
@@ -101,9 +113,6 @@ pub(crate) struct Entry {
     /// Whether `size` holds a folder's size from gozlerd: a flag, because an
     /// `Option` would add 8 bytes to each entry.
     sized: bool,
-    /// Whether the list selected it, while a change moves the rows
-    /// ([`Panel::remember`]).
-    selected: bool,
 }
 
 impl Entry {
@@ -115,7 +124,6 @@ impl Entry {
             size,
             modified,
             sized: false,
-            selected: false,
         }
     }
 
@@ -280,7 +288,7 @@ pub(crate) enum FolderChange {
 pub(crate) struct Place {
     pub(crate) focused: Option<u64>,
     /// Sorted ranges that do not touch, as the list gives them.
-    pub(crate) selected: Vec<Range<u64>>,
+    pub(crate) selected: Arc<Vec<Range<u64>>>,
 }
 
 /// What a panel's list area shows (DESIGN.md: A panel).
@@ -324,26 +332,75 @@ impl LookIn {
     pub(crate) const ALL: [LookIn; 2] = [LookIn::ThisFolder, LookIn::AllDrives];
 }
 
-/// An entry that a file command acts on, in a folder panel or a search
-/// panel.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ChosenEntry {
-    /// The full path as Windows names it.
-    pub(crate) path: Vec<u16>,
-    pub(crate) is_folder: bool,
+pub(crate) use super::open::Selected as ChosenEntry;
+
+#[derive(Clone, Copy)]
+pub(crate) struct CommandPlace {
+    pub(crate) side: Side,
+    epoch: u64,
+    interaction: u64,
 }
 
-impl ChosenEntry {
-    fn of_result(item: &ResultItem) -> ChosenEntry {
-        ChosenEntry {
-            path: wide_path(item),
-            is_folder: item.is_dir,
+pub(crate) struct PanelEntries {
+    rows: Arc<FolderRows>,
+    selected: Arc<Vec<Range<u64>>>,
+    focused: Option<u64>,
+    folder: String,
+    up: u64,
+}
+
+impl PanelEntries {
+    pub(crate) fn items(&self) -> usize {
+        self.rows.items().saturating_add(self.selected.len())
+    }
+
+    pub(crate) fn resolve(self) -> Vec<ChosenEntry> {
+        let mut base: Vec<u16> = self.folder.encode_utf16().collect();
+        if base.last() != Some(&u16::from(b'\\')) {
+            base.push(u16::from(b'\\'));
         }
+        let entry = |row| {
+            let entry = self.rows.entry(row, self.up)?;
+            let mut path = Vec::with_capacity(base.len() + entry.name.len());
+            path.extend_from_slice(&base);
+            path.extend_from_slice(&entry.name);
+            Some(ChosenEntry {
+                path,
+                is_folder: entry.is_folder(),
+            })
+        };
+        if self.selected.is_empty() {
+            self.focused.and_then(entry).into_iter().collect()
+        } else {
+            self.selected
+                .iter()
+                .flat_map(Clone::clone)
+                .filter_map(entry)
+                .collect()
+        }
+    }
+
+    pub(crate) fn one(&self) -> Option<ChosenEntry> {
+        let row = match self.selected.as_slice() {
+            [] => self.focused?,
+            [range] if range.end == range.start + 1 => range.start,
+            _ => return None,
+        };
+        let entry = self.rows.entry(row, self.up)?;
+        let mut path: Vec<u16> = self.folder.encode_utf16().collect();
+        if path.last() != Some(&u16::from(b'\\')) {
+            path.push(u16::from(b'\\'));
+        }
+        path.extend_from_slice(&entry.name);
+        Some(ChosenEntry {
+            path,
+            is_folder: entry.is_folder(),
+        })
     }
 }
 
 /// What a folder panel does after operations ended
-/// ([`Panels::operations_ended`]).
+/// ([`Panels::accept_operations`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PanelFollow {
     pub(crate) side: Side,
@@ -356,11 +413,14 @@ pub(crate) struct PanelFollow {
 /// What new taken entries change in a panel's list ([`Panels::set_taken`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TakenRows {
+    Pending,
     /// A folder panel's rows moved; the list shows this place.
     Folder(Place),
     /// A search panel's taken rows show blank in place, and its list
     /// unhighlights the rows `deselect` says.
-    Search { deselect: Deselect },
+    Search {
+        deselect: Deselect,
+    },
 }
 
 /// A column of a panel's list (DESIGN.md: A panel, Search in a panel).
@@ -435,7 +495,33 @@ pub(crate) struct ReadAsk {
     /// The folder sizes the panel knows, when it reads its shown folder
     /// again: the reading thread gives them to the listing before it sorts,
     /// so a panel sorted by size keeps its order and its sizes.
-    pub(crate) sizes: Vec<(Box<[u16]>, u64)>,
+    pub(crate) sizes: ReadSizes,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReadSizes(Option<Arc<FolderRows>>);
+
+impl PartialEq for ReadSizes {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ReadSizes {}
+
+impl ReadSizes {
+    pub(crate) fn values(&self) -> Vec<(Box<[u16]>, u64)> {
+        self.0
+            .as_ref()
+            .into_iter()
+            .flat_map(|rows| &rows.entries)
+            .filter_map(|entry| Some((entry.name.clone(), entry.folder_size()?)))
+            .collect()
+    }
 }
 
 /// Sorts a listing for a panel sorted by `sort`, as its rows show:
@@ -494,42 +580,6 @@ pub(crate) fn give_sizes(entries: &mut [Entry], sizes: &[(Box<[u16]>, u64)]) {
     }
 }
 
-/// gozlerd's folder sizes for a panel sorted by size, which a thread sorts
-/// the folders by before the panel shows them, because sorting a folder of
-/// many subfolders would hold the window ([`Panels::take_folder_sort`]).
-#[derive(Debug)]
-pub(crate) struct FolderSort {
-    /// The panel's folder, whose subfolders they are.
-    folder: String,
-    /// The sort the panel's entries are in.
-    sort: SortSpec,
-    /// Copies of the panel's folders, in their order, with the new sizes.
-    folders: Vec<Entry>,
-}
-
-impl FolderSort {
-    /// Sorts the folders, on the thread that runs it.
-    pub(crate) fn sort(self) -> SortedFolders {
-        let order = sorted_order(&self.folders, self.sort);
-        SortedFolders {
-            folder: self.folder,
-            sort: self.sort,
-            folders: self.folders,
-            order,
-        }
-    }
-}
-
-/// A [`FolderSort`]'s answer, which [`Panels::accept_folder_order`]
-/// applies.
-#[derive(Debug)]
-pub(crate) struct SortedFolders {
-    folder: String,
-    sort: SortSpec,
-    folders: Vec<Entry>,
-    order: Vec<usize>,
-}
-
 /// Why the reading thread could not list a folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadFailure {
@@ -565,6 +615,7 @@ pub(crate) enum ReadEvent {
 /// What a reading's answer means for the window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReadChange {
+    Pending,
     /// An older reading, which changes nothing.
     Stale,
     /// The rows went: a new folder opened, and the list says "Reading…",
@@ -700,24 +751,13 @@ pub(crate) struct Panel {
     /// The shown folder; empty before the first listing.
     folder: String,
     view: View,
-    /// Sorted by [`compare`] with `order`.
-    entries: Vec<Entry>,
-    /// The sort `entries` are in: the sort of the listing that gave them,
-    /// which differs from `sort` while a listing in the new sort is read.
-    order: SortSpec,
-    totals: Totals,
-    /// The indexes of the entries that the list shows, in order, while a
-    /// delete or a move takes some of them; `None` when all show.
-    shown: Option<Vec<u32>>,
+    rows: Arc<FolderRows>,
     /// The sort the person chose, which the header shows.
     sort: SortSpec,
     history: Vec<String>,
     /// The folder the panel last showed on each drive in this session, by
     /// the drive's folded root.
     drive_folders: HashMap<Vec<u8>, String>,
-    /// The ended operations that still take rows from this panel, with the
-    /// moment their end was seen.
-    kept: HashMap<OperationId, u64>,
     read: Option<Read>,
     sizes_asked: Option<Generation>,
     /// gozlerd answered a sizes request since the list was emptied, so a
@@ -725,16 +765,14 @@ pub(crate) struct Panel {
     sized: bool,
     free: Option<u64>,
     /// The quick search box's text while it is open.
-    quick: Option<String>,
+    quick: Quick,
     /// The list's selected rows as it last told them, which the status
-    /// line counts and Clear selection follows. Each selected entry also
-    /// carries the mark, which stays with it when a change moves the rows.
-    selected: Vec<Range<u64>>,
+    /// line counts and Clear selection follows.
+    selected: Arc<Vec<Range<u64>>>,
+    counted: CountState,
+    selected_count: u64,
     /// The saved folder, which the first reading shows.
     saved: Option<String>,
-    /// gozlerd's sizes for a panel sorted by size, which wait for a thread
-    /// to sort them.
-    folder_sort: Option<FolderSort>,
     /// The focused name that a change took away, while the focus shows on
     /// a neighbouring row ([`Panels::apply_changes`]).
     gone_focus: Option<GoneFocus>,
@@ -744,9 +782,51 @@ pub(crate) struct Panel {
     /// The name that Gozler's own New folder or rename gives an entry in
     /// the shown folder, which the focus goes to when a row shows it.
     awaited: Option<Awaited>,
-    /// The name hashes of the taken entries in the shown folder, which
-    /// [`Panel::filter`] keeps from one change batch to the next.
-    taken_hashes: Option<TakenHashes>,
+    awaited_place: Option<(Place, RowSelection)>,
+    interaction_revision: u64,
+    epoch: u64,
+    calculation: CalculationState,
+    pending: std::collections::VecDeque<RowChange>,
+    ends: Vec<End>,
+    end_revision: u64,
+    observing: bool,
+    native_pending: bool,
+    reread: bool,
+    omitted_end: Option<u64>,
+    ready_update: Option<PanelUpdate>,
+    retired: Retirement,
+}
+
+#[derive(Debug)]
+enum CalculationState {
+    Idle,
+    Pending(Box<Calculation>),
+    Running,
+    AwaitingSelection(Box<Calculated>),
+}
+
+#[derive(Debug)]
+enum CountState {
+    Needed,
+    Running,
+    Ready(Counts),
+}
+
+#[derive(Clone, Debug)]
+struct FolderRows {
+    /// Sorted by [`compare`] with `order`.
+    entries: Vec<Entry>,
+    /// The listing's sort, which differs from the chosen sort while its new
+    /// listing is read.
+    order: SortSpec,
+    totals: Totals,
+    /// Indexes in display order while entries are taken; `None` when all show.
+    shown: Option<Vec<u32>>,
+    /// [`FolderRows::filter`] reuses these hashes between change batches.
+    taken_hashes: Option<Arc<TakenHashes>>,
+    /// The ended operations that still take rows from this panel, with the
+    /// moment their end was seen.
+    kept: HashMap<OperationId, u64>,
 }
 
 /// The name hashes of the taken paths in one folder, for one snapshot of
@@ -760,7 +840,7 @@ struct TakenHashes {
 
 /// A name that an operation of this window creates in the shown folder
 /// ([`Panels::await_name`]).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Awaited {
     name: Name,
     /// The renamed entry was selected, so its new name is too.
@@ -772,12 +852,20 @@ struct Awaited {
     /// The moment the operation's end was seen: a listing started after it
     /// that lacks the name means the operation did not create it.
     ended: Option<u64>,
+    /// Whether the name existed is decided from the command's original rows.
+    origin: Option<(Arc<FolderRows>, u64)>,
+}
+
+impl Awaited {
+    fn items(&self) -> usize {
+        self.origin.as_ref().map_or(0, |(rows, _)| rows.items())
+    }
 }
 
 /// A focused name that a change took away, to which the focus returns when
 /// a later change brings it back, as an editor's save through a temporary
 /// name does: the focus and the selection stay on the same names.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct GoneFocus {
     name: Name,
     /// The row the focus was put on; a list focused on another row means
@@ -786,31 +874,70 @@ struct GoneFocus {
 }
 
 impl Panel {
+    fn set_awaited(&mut self, awaited: Option<Awaited>) {
+        if let Some(old) = std::mem::replace(&mut self.awaited, awaited) {
+            let items = old.items();
+            self.retired.push(old, items);
+        }
+    }
+
     fn new(saved: &SavedPanel) -> Panel {
         Panel {
             folder: String::new(),
             view: View::Reading,
-            entries: Vec::new(),
-            order: saved.sort,
-            totals: Totals::default(),
-            shown: None,
+            rows: Arc::new(FolderRows {
+                entries: Vec::new(),
+                order: saved.sort,
+                totals: Totals::default(),
+                shown: None,
+                taken_hashes: None,
+                kept: HashMap::new(),
+            }),
             sort: saved.sort,
             history: saved.history.clone(),
             drive_folders: HashMap::new(),
-            kept: HashMap::new(),
             read: None,
             sizes_asked: None,
             sized: false,
             free: None,
-            quick: None,
-            selected: Vec::new(),
+            quick: Quick::default(),
+            selected: Arc::default(),
+            counted: CountState::Ready(Counts {
+                items: 0,
+                selected: None,
+                size: None,
+            }),
+            selected_count: 0,
             saved: saved.folder.clone(),
-            folder_sort: None,
             gone_focus: None,
             focused: None,
             awaited: None,
-            taken_hashes: None,
+            awaited_place: None,
+            interaction_revision: 0,
+            epoch: 0,
+            calculation: CalculationState::Idle,
+            pending: Default::default(),
+            ends: Vec::new(),
+            end_revision: 0,
+            observing: false,
+            native_pending: false,
+            reread: false,
+            omitted_end: None,
+            ready_update: None,
+            retired: Retirement::default(),
         }
+    }
+
+    fn set_view(&mut self, view: View) {
+        let mut old = std::mem::replace(&mut self.view, view);
+        let items = match &mut old {
+            View::Search(search) => {
+                self.retired.append(search.list.take_retired());
+                search.list.items()
+            }
+            _ => 0,
+        };
+        self.retired.push(old, items);
     }
 
     pub(crate) fn folder(&self) -> &str {
@@ -864,7 +991,7 @@ impl Panel {
     }
 
     pub(crate) fn quick_text(&self) -> Option<&str> {
-        self.quick.as_deref()
+        self.quick.text.as_deref()
     }
 
     /// The folders the drive menu offers: the last ones the panel showed,
@@ -904,17 +1031,8 @@ impl Panel {
         u64::from(self.has_up())
     }
 
-    /// The entries the list shows.
     fn shown_len(&self) -> usize {
-        self.shown.as_ref().map_or(self.entries.len(), Vec::len)
-    }
-
-    /// The index in `entries` of the `at`th shown entry.
-    fn shown_at(&self, at: usize) -> Option<usize> {
-        match &self.shown {
-            None => (at < self.entries.len()).then_some(at),
-            Some(shown) => shown.get(at).map(|&i| i as usize),
-        }
+        self.rows.shown_len()
     }
 
     /// The number of rows the list shows.
@@ -926,16 +1044,11 @@ impl Panel {
         }
     }
 
-    /// The folder row at `index`; [`Panels::row`] gives a search panel's.
     fn row(&self, index: u64) -> Option<Row<'_>> {
         if !matches!(self.view, View::Folder) {
             return None;
         }
-        if self.has_up() && index == 0 {
-            return Some(Row::Up);
-        }
-        let at = usize::try_from(index - self.up_rows()).ok()?;
-        Some(Row::Entry(&self.entries[self.shown_at(at)?]))
+        self.rows.row(index, self.up_rows())
     }
 
     fn entry(&self, index: u64) -> Option<&Entry> {
@@ -967,43 +1080,11 @@ impl Panel {
         path
     }
 
-    /// The row that holds `name`: the one with exactly that name, else one
-    /// whose name differs only in case, because a case-sensitive folder can
-    /// hold both. `near` limits the search to a row and how far from it the
-    /// name's row may have moved, so a change costs no pass over a large
-    /// folder; `None` searches every row.
     fn row_of(&self, name: &Name, near: Option<(u64, u64)>) -> Option<u64> {
-        let all = self.up_rows()..self.count();
-        let rows = match near {
-            Some((row, reach)) => {
-                row.saturating_sub(reach).max(all.start)..(row + reach + 1).min(all.end)
-            }
-            None => all,
-        };
-        let exact = |row: &u64| {
-            self.entry(*row)
-                .is_some_and(|e| e.hash == name.hash && e.name == name.raw)
-        };
-        rows.clone().find(exact).or_else(|| {
-            rows.into_iter()
-                .find(|row| self.entry(*row).is_some_and(|e| e.is(name)))
-        })
-    }
-
-    /// The row with exactly `name`, as an operation of this window
-    /// creates it.
-    /// The row that shows `awaited`'s name, once no row shows the entry it
-    /// renames.
-    fn awaited_row(&self, awaited: &Awaited) -> Option<u64> {
-        let renamed = (awaited.from.as_ref()).is_some_and(|from| self.row_named(from).is_some());
-        self.row_named(&awaited.name).filter(|_| !renamed)
-    }
-
-    fn row_named(&self, name: &Name) -> Option<u64> {
-        (self.up_rows()..self.count()).find(|row| {
-            self.entry(*row)
-                .is_some_and(|e| e.hash == name.hash && e.name == name.raw)
-        })
+        if !matches!(self.view, View::Folder) {
+            return None;
+        }
+        self.rows.row_of(name, near, self.up_rows())
     }
 
     /// Whether an entry is selected.
@@ -1013,10 +1094,7 @@ impl Panel {
 
     /// How many rows the list selects, as it last told them.
     pub(crate) fn selected_rows(&self) -> u64 {
-        self.selected
-            .iter()
-            .map(|range| range.end - range.start)
-            .sum()
+        self.selected_count
     }
 
     /// The folder entry at `row` as an entry a command acts on.
@@ -1056,61 +1134,378 @@ impl Panel {
     /// that lacks some has none, because it would call each folder unknown
     /// for the moment the reply takes.
     pub(crate) fn counts(&self) -> Counts {
-        let items = self.shown_len() as u64;
-        let mut picked = 0;
-        let chosen = Totals::of(
-            (self.selected.iter().flat_map(|range| range.clone()))
-                .filter_map(|row| self.entry(row))
-                .inspect(|_| picked += 1),
-        );
-        let (selected, size) = if picked == 0 {
-            let size = match &self.shown {
-                None => self.totals,
-                Some(shown) => Totals::of(shown.iter().map(|&i| &self.entries[i as usize])),
-            };
-            // An empty folder's line says "0 items" alone.
-            (None, (items > 0).then_some(size))
-        } else {
-            (Some(picked), Some(chosen))
+        let mut counts = match self.counted {
+            CountState::Ready(counts) => counts,
+            _ => Counts {
+                items: self.shown_len() as u64,
+                selected: self.has_selection().then(|| self.selected_rows()),
+                size: None,
+            },
         };
         let waits = self.sizes_asked.is_some() && !self.sized;
-        Counts {
-            items,
-            selected,
-            size: size.filter(|size| size.unknown == 0 || !waits),
+        counts.size = counts.size.filter(|size| size.unknown == 0 || !waits);
+        counts
+    }
+
+    fn select(&mut self, selected: Vec<Range<u64>>) {
+        self.select_shared(selected.into());
+    }
+
+    fn select_shared(&mut self, selection: RowSelection) {
+        self.selected_count = selection.count;
+        let old = std::mem::replace(&mut self.selected, selection.positions);
+        let items = old.len();
+        self.retired.push(old, items);
+        self.interaction_revision += 1;
+        let input = Counting::new(self);
+        self.counted = match work::pass(input.cost(), input, Counting::run) {
+            Pass::Ready(answer) => CountState::Ready(answer.counts),
+            Pass::Deferred(_) => CountState::Needed,
+        };
+        if let Some(old) = self.awaited_place.take() {
+            let items = old.0.selected.len();
+            self.retired.push(old, items);
+        }
+        if let Some(update) = self.ready_update.take() {
+            let items = update.place.selected.len();
+            self.retired.push(update, items);
         }
     }
 
-    /// The list's selected rows changed to `selected`: the marks move from
-    /// the old rows' entries to the new ones', which costs the selection,
-    /// not the folder.
-    fn select(&mut self, selected: Vec<Range<u64>>) {
-        // A search panel has no entries; its list holds its selection.
-        if self.search().is_none() {
-            let up = self.up_rows();
-            for (ranges, mark) in [(&self.selected, false), (&selected, true)] {
-                for row in ranges.iter().flat_map(Clone::clone) {
-                    let at = row.checked_sub(up).and_then(|at| usize::try_from(at).ok());
-                    if let Some(i) = at.and_then(|at| self.shown_at(at)) {
-                        self.entries[i].selected = mark;
-                    }
-                }
+    /// Empties the list, while it reads, its drive is not ready or it
+    /// starts a search.
+    fn clear(&mut self) {
+        self.native_pending = false;
+        self.invalidate();
+        let old = std::mem::replace(
+            &mut self.rows,
+            Arc::new(FolderRows {
+                entries: Vec::new(),
+                order: self.sort,
+                totals: Totals::default(),
+                shown: None,
+                taken_hashes: None,
+                kept: HashMap::new(),
+            }),
+        );
+        let items = old.items();
+        self.retired.push(old, items);
+        self.select(Vec::new());
+        self.quick.close(&mut self.retired);
+        self.gone_focus = None;
+        let ends = std::mem::take(&mut self.ends);
+        self.retired.push(ends, work::INLINE_ITEMS + 1);
+        self.omitted_end = None;
+        self.reread = false;
+        self.sized = false;
+    }
+
+    /// The folder `ui.json` saves: the shown one, or the saved one while
+    /// the first reading has not opened.
+    fn saved_folder(&self) -> Option<&str> {
+        match self.folder.is_empty() {
+            true => self.saved.as_deref(),
+            false => Some(&self.folder),
+        }
+    }
+
+    /// Records the shown folder in the drive menu's history and as its
+    /// drive's last folder.
+    fn note_folder(&mut self) {
+        let key = folder_key(&self.folder);
+        self.history.retain(|folder| folder_key(folder) != key);
+        self.history.insert(0, self.folder.clone());
+        self.history.truncate(HISTORY + 1);
+        self.drive_folders
+            .insert(folder_key(&drive_root(&self.folder)), self.folder.clone());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keeps(&self, id: OperationId) -> bool {
+        self.observing || self.rows.kept.contains_key(&id)
+    }
+
+    pub(crate) fn is_calculating(&self) -> bool {
+        !matches!(self.calculation, CalculationState::Idle)
+            || self.observing
+            || self.native_pending
+            || !self.pending.is_empty()
+            || !self.ends.is_empty()
+            || self.omitted_end.is_some()
+    }
+
+    fn interaction(&self) -> Interaction {
+        Interaction {
+            revision: self.interaction_revision,
+            selected: Arc::clone(&self.selected),
+            focused: self.focused,
+            gone: self.gone_focus.clone(),
+            awaited: self.awaited.clone(),
+        }
+    }
+
+    fn invalidate(&mut self) {
+        if self.observing
+            || !matches!(self.calculation, CalculationState::Idle)
+            || !self.pending.is_empty()
+        {
+            self.omitted_end = Some(self.omitted_end.unwrap_or(0).max(self.end_revision));
+        }
+        self.epoch += 1;
+        match std::mem::replace(&mut self.calculation, CalculationState::Idle) {
+            CalculationState::Pending(input) => {
+                let items = input.items();
+                self.retired.push(input, items);
+            }
+            CalculationState::AwaitingSelection(answer) => {
+                let items = answer.items();
+                self.retired.push(answer, items);
+            }
+            CalculationState::Idle | CalculationState::Running => {}
+        }
+        let pending = std::mem::take(&mut self.pending);
+        self.retired.push(pending, work::INLINE_ITEMS + 1);
+        if let Some(old) = self.awaited_place.take() {
+            let items = old.0.selected.len();
+            self.retired.push(old, items);
+        }
+    }
+
+    fn input(&mut self, change: RowChange, taken: &Arc<Taken>) -> Calculation {
+        let folder = match &change {
+            RowChange::Listed { folder, .. } => folder.clone(),
+            _ => self.folder.clone(),
+        };
+        Calculation {
+            epoch: self.epoch,
+            folder,
+            before: Arc::clone(&self.rows),
+            before_up: self.up_rows(),
+            interaction: self.interaction(),
+            taken: Arc::clone(taken),
+            ends: std::mem::take(&mut self.ends),
+            end_revision: self.end_revision,
+            input: Input::Change(change),
+        }
+    }
+
+    fn submit(&mut self, change: RowChange, taken: &Arc<Taken>) -> Option<PanelUpdate> {
+        if self.omitted_end.is_some() && !matches!(change, RowChange::Listed { .. }) {
+            let items = change.items();
+            self.retired.push(change, items);
+            return None;
+        }
+        if self.native_pending
+            || self.observing
+            || !matches!(self.calculation, CalculationState::Idle)
+            || !self.pending.is_empty()
+        {
+            if self.pending.len() == PENDING_ROWS {
+                self.invalidate();
+                self.omitted_end = Some(self.end_revision);
+                self.reread = true;
+                let items = change.items();
+                self.retired.push(change, items);
+                return None;
+            }
+            self.pending.push_back(change);
+            return None;
+        }
+        let input = self.input(change, taken);
+        match work::pass(input.items(), input, Calculation::run) {
+            Pass::Ready(answer) => self.accept_calculated(answer, taken),
+            Pass::Deferred(input) => {
+                self.calculation = CalculationState::Pending(Box::new(input));
+                None
             }
         }
-        self.selected = selected;
     }
 
-    /// The focused row by name, so it can be found again after the rows
-    /// change; the selected entries carry their own marks
-    /// ([`Panel::select`]).
-    fn remember(&self, focused: Option<u64>) -> Remembered {
-        let focused = focused.and_then(|row| match self.row(row)? {
+    fn accept_calculated(
+        &mut self,
+        mut answer: Calculated,
+        taken: &Arc<Taken>,
+    ) -> Option<PanelUpdate> {
+        if answer.epoch != self.epoch || !Arc::ptr_eq(&answer.before, &self.rows) {
+            let items = answer.items();
+            self.retired.push(answer, items);
+            return None;
+        }
+        if self.native_pending {
+            self.calculation = CalculationState::AwaitingSelection(Box::new(answer));
+            return None;
+        }
+        if self
+            .omitted_end
+            .is_some_and(|moment| answer.started().is_none_or(|started| started <= moment))
+        {
+            self.invalidate();
+            let items = answer.items();
+            self.retired.push(answer, items);
+            self.reread = true;
+            return None;
+        }
+        self.calculation = CalculationState::Idle;
+        if self.observing
+            || answer.interaction.revision != self.interaction_revision
+            || answer.end_revision != self.end_revision
+            || !Arc::ptr_eq(&answer.taken, taken)
+        {
+            let input = Calculation {
+                epoch: self.epoch,
+                folder: answer.folder.clone(),
+                before: Arc::clone(&self.rows),
+                before_up: self.up_rows(),
+                interaction: self.interaction(),
+                taken: Arc::clone(taken),
+                ends: std::mem::take(&mut self.ends),
+                end_revision: self.end_revision,
+                input: Input::Remap(Box::new(answer)),
+            };
+            if self.observing {
+                self.calculation = CalculationState::Pending(Box::new(input));
+                return None;
+            }
+            match work::pass(input.items(), input, Calculation::run) {
+                Pass::Ready(answer) => return self.accept_calculated(answer, taken),
+                Pass::Deferred(input) => {
+                    self.calculation = CalculationState::Pending(Box::new(input))
+                }
+            }
+            return None;
+        }
+        let rows = answer
+            .rows
+            .take()
+            .expect("a current answer owns its candidate");
+        let before = Place {
+            focused: self.focused,
+            selected: Arc::clone(&self.selected),
+        };
+        let old = std::mem::replace(&mut self.rows, Arc::new(rows));
+        let items = old.items();
+        self.retired.push(old, items);
+        let update = answer.update(before);
+        if matches!(update.kind, UpdatedKind::Listed { .. }) {
+            self.folder.clone_from(&answer.folder);
+            self.set_view(View::Folder);
+            self.read = None;
+            self.saved = None;
+            self.omitted_end = None;
+            self.note_folder();
+        }
+        self.select_shared(answer.selected.clone());
+        self.focused = update.place.focused;
+        self.gone_focus = answer.interaction.gone.take();
+        self.set_awaited(answer.interaction.awaited.take());
+        self.awaited_place = answer.awaited_place.take();
+        let items = answer.items();
+        self.retired.push(answer, items);
+        Some(update)
+    }
+}
+
+impl FolderRows {
+    fn items(&self) -> usize {
+        self.entries
+            .len()
+            .saturating_add(self.kept.len())
+            .saturating_add(
+                self.taken_hashes
+                    .as_ref()
+                    .map_or(0, |known| known.taken.len() + known.hashes.len()),
+            )
+    }
+
+    fn row_named(&self, name: &Name, up: u64) -> Option<u64> {
+        (up..self.count(up)).find(|row| {
+            self.entry(*row, up)
+                .is_some_and(|entry| entry.hash == name.hash && entry.name == name.raw)
+        })
+    }
+
+    fn awaited_row(&self, awaited: &Awaited, up: u64) -> Option<u64> {
+        let renamed = awaited
+            .from
+            .as_ref()
+            .is_some_and(|from| self.row_named(from, up).is_some());
+        self.row_named(&awaited.name, up).filter(|_| !renamed)
+    }
+    fn count(&self, up: u64) -> u64 {
+        up + self.shown_len() as u64
+    }
+
+    /// The entries the list shows.
+    fn shown_len(&self) -> usize {
+        self.shown.as_ref().map_or(self.entries.len(), Vec::len)
+    }
+
+    /// The index in `entries` of the `at`th shown entry.
+    fn shown_at(&self, at: usize) -> Option<usize> {
+        match &self.shown {
+            None => (at < self.entries.len()).then_some(at),
+            Some(shown) => shown.get(at).map(|&i| i as usize),
+        }
+    }
+
+    /// The folder row at `index`; [`Panels::row`] gives a search panel's.
+    fn row(&self, index: u64, up: u64) -> Option<Row<'_>> {
+        if up != 0 && index == 0 {
+            return Some(Row::Up);
+        }
+        let at = usize::try_from(index - up).ok()?;
+        Some(Row::Entry(&self.entries[self.shown_at(at)?]))
+    }
+
+    fn entry(&self, index: u64, up: u64) -> Option<&Entry> {
+        match self.row(index, up)? {
+            Row::Entry(entry) => Some(entry),
+            Row::Up | Row::Result(_) => None,
+        }
+    }
+
+    /// The row that holds `name`: the one with exactly that name, else one
+    /// whose name differs only in case, because a case-sensitive folder can
+    /// hold both. `near` limits the search to a row and how far from it the
+    /// name's row may have moved, so a change costs no pass over a large
+    /// folder; `None` searches every row.
+    fn row_of(&self, name: &Name, near: Option<(u64, u64)>, up: u64) -> Option<u64> {
+        let all = up..self.count(up);
+        let rows = match near {
+            Some((row, reach)) => {
+                row.saturating_sub(reach).max(all.start)..(row + reach + 1).min(all.end)
+            }
+            None => all,
+        };
+        let exact = |row: &u64| {
+            self.entry(*row, up)
+                .is_some_and(|e| e.hash == name.hash && e.name == name.raw)
+        };
+        rows.clone().find(exact).or_else(|| {
+            rows.into_iter()
+                .find(|row| self.entry(*row, up).is_some_and(|e| e.is(name)))
+        })
+    }
+
+    /// Keeps the stored names: a refresh or a replacement of that name
+    /// preserves selection, but an external rename does not follow it.
+    fn remember(&self, focused: Option<u64>, selected: &[Range<u64>], up: u64) -> Remembered {
+        let mut names: HashMap<u64, Vec<Box<[u16]>>> = HashMap::new();
+        for row in selected.iter().flat_map(Clone::clone) {
+            if let Some(entry) = self.entry(row, up) {
+                names
+                    .entry(entry.hash)
+                    .or_default()
+                    .push(entry.name.clone());
+            }
+        }
+        let focused = focused.and_then(|row| match self.row(row, up)? {
             Row::Up => Some(Focus::Up),
             Row::Result(_) => None,
             Row::Entry(entry) => {
                 // The rows after it, nearest first, for when it goes.
-                let after = (row + 1..self.count())
-                    .filter_map(|r| self.entry(r).map(Entry::name))
+                let after = (row + 1..self.count(up))
+                    .filter_map(|r| self.entry(r, up).map(Entry::name))
                     .take(64)
                     .collect();
                 Some(Focus::Entry {
@@ -1120,14 +1515,16 @@ impl Panel {
                 })
             }
         });
-        Remembered { focused }
+        Remembered {
+            focused,
+            selected: names,
+        }
     }
 
     /// The rows of what `remembered` holds, now, which the list then shows.
-    /// `reach` is how far a row may have moved, when the change says. The
-    /// marks are looked for only when an entry was selected.
-    fn place_of(&mut self, remembered: Remembered, reach: Option<u64>) -> Place {
-        let count = self.count();
+    /// `reach` is how far a row may have moved, when the change says.
+    fn place_of(&self, remembered: Remembered, reach: Option<u64>, up: u64) -> Place {
+        let count = self.count(up);
         let focused = match remembered.focused {
             None => None,
             Some(Focus::Up) => (count > 0).then_some(0),
@@ -1136,39 +1533,31 @@ impl Panel {
                 // it that is not near is gone. The focused name may be a
                 // rename's new name, which can land anywhere.
                 let near = reach.map(|reach| (row, reach));
-                self.row_of(&name, near)
-                    .or_else(|| near.and_then(|_| self.row_of(&name, None)))
-                    .or_else(|| after.iter().find_map(|name| self.row_of(name, near)))
+                self.row_of(&name, near, up)
+                    .or_else(|| near.and_then(|_| self.row_of(&name, None, up)))
+                    .or_else(|| after.iter().find_map(|name| self.row_of(name, near, up)))
                     .or_else(|| count.checked_sub(1).map(|last| row.min(last)))
             }
         };
-        if !self.selected.is_empty() {
-            let up = self.up_rows();
+        let selected = if !remembered.selected.is_empty() {
             let selected: Vec<u64> = (0..self.shown_len())
-                .filter(|&at| self.shown_at(at).is_some_and(|i| self.entries[i].selected))
+                .filter(|&at| {
+                    let entry = &self.entries[self.shown_at(at).expect("at is a shown entry")];
+                    remembered
+                        .selected
+                        .get(&entry.hash)
+                        .is_some_and(|names| names.contains(&entry.name))
+                })
                 .map(|at| at as u64 + up)
                 .collect();
-            self.selected = ranges(&selected);
-        }
+            ranges(&selected)
+        } else {
+            Vec::new()
+        };
         Place {
             focused,
-            selected: self.selected.clone(),
+            selected: Arc::new(selected),
         }
-    }
-
-    /// Empties the list, while it reads, its drive is not ready or it
-    /// starts a search.
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.totals = Totals::default();
-        self.shown = None;
-        self.selected.clear();
-        self.quick = None;
-        self.gone_focus = None;
-        // A search panel never filters, so it would keep a taken snapshot,
-        // which holds every source of a large delete, until it leaves.
-        self.taken_hashes = None;
-        self.sized = false;
     }
 
     /// Recomputes which entries show, after the entries or the taken
@@ -1178,10 +1567,7 @@ impl Panel {
     /// entry whose name has a taken name's hash is looked up, by its name
     /// as the operation gave it, so a change batch folds no name; its path
     /// is compared only when the operation gave its name in another case.
-    /// An entry it hides loses its selection mark, because the list's
-    /// selection loses its row, and a mark kept would select it again,
-    /// unasked, when it shows again.
-    fn filter(&mut self, taken: &Arc<Taken>) {
+    fn filter(&mut self, folder: &str, taken: &Arc<Taken>) {
         let kept = &self.kept;
         let keeps = |id| kept.contains_key(&id);
         if taken.is_empty() {
@@ -1189,39 +1575,35 @@ impl Panel {
             self.taken_hashes = None;
             return;
         }
-        let folder: Vec<u16> = self.folder.encode_utf16().collect();
-        let here = taken.in_folder(&folder);
+        let wide: Vec<u16> = folder.encode_utf16().collect();
+        let here = taken.in_folder(&wide);
         if here.is_none() {
             self.taken_hashes = None;
         }
-        self.shown = if taken.contains(&folder, keeps) {
-            for entry in &mut self.entries {
-                entry.selected = false;
-            }
+        self.shown = if taken.contains(&wide, keeps) {
             Some(Vec::new())
         } else if let Some(here) = here {
-            let known = (self.taken_hashes.as_ref()).is_some_and(|known| {
-                Arc::ptr_eq(&known.taken, taken) && known.folder == self.folder
-            });
+            let known = (self.taken_hashes.as_ref())
+                .is_some_and(|known| Arc::ptr_eq(&known.taken, taken) && known.folder == folder);
             if !known {
                 let mut folding = Folding::default();
-                self.taken_hashes = Some(TakenHashes {
+                self.taken_hashes = Some(Arc::new(TakenHashes {
                     taken: Arc::clone(taken),
-                    folder: self.folder.clone(),
+                    folder: folder.to_owned(),
                     hashes: here
                         .names()
                         .map(|name| name_hash(folding.of(name)))
                         .collect(),
-                });
+                }));
             }
             let hashes = &self.taken_hashes.as_ref().expect("filled above").hashes;
-            let mut path = folder.clone();
+            let mut path = wide;
             if path.last() != Some(&u16::from(b'\\')) {
                 path.push(u16::from(b'\\'));
             }
             let base = path.len();
             let mut shown = Vec::new();
-            for (i, entry) in self.entries.iter_mut().enumerate() {
+            for (i, entry) in self.entries.iter().enumerate() {
                 if hashes.contains(&entry.hash) {
                     let hidden = here.takes(&entry.name, keeps).unwrap_or_else(|| {
                         path.truncate(base);
@@ -1229,7 +1611,6 @@ impl Panel {
                         taken.contains(&path, keeps)
                     });
                     if hidden {
-                        entry.selected = false;
                         continue;
                     }
                 }
@@ -1290,8 +1671,7 @@ impl Panel {
                 }
             }
         }
-        // What each changed name's entry was: its folder size and its mark.
-        let mut replaced: HashMap<Box<[u16]>, (Option<u64>, bool)> = HashMap::new();
+        let mut replaced: HashMap<Box<[u16]>, Option<u64>> = HashMap::new();
         let mut totals = self.totals;
         // The changed names' hashes, sorted: a binary search for each entry
         // costs less than hashing its name.
@@ -1302,7 +1682,7 @@ impl Panel {
                 return true;
             }
             totals.remove(entry);
-            replaced.insert(entry.name.clone(), (entry.folder_size(), entry.selected));
+            replaced.insert(entry.name.clone(), entry.folder_size());
             false
         });
         // The names that went or changed and that no entry has exactly,
@@ -1315,7 +1695,7 @@ impl Panel {
             let hash = name_hash(&name_key(name));
             unmatched.entry(hash).or_default().push(name);
         }
-        let mut folded: HashMap<Box<[u16]>, (Option<u64>, bool)> = HashMap::new();
+        let mut folded: HashMap<Box<[u16]>, Option<u64>> = HashMap::new();
         // The stored name of the entry each of them took.
         let mut stored = HashMap::new();
         if !unmatched.is_empty() {
@@ -1329,7 +1709,7 @@ impl Panel {
                     return true;
                 };
                 totals.remove(entry);
-                folded.insert((*name).into(), (entry.folder_size(), entry.selected));
+                folded.insert((*name).into(), entry.folder_size());
                 stored.insert(Box::<[u16]>::from(*name), entry.name.clone());
                 false
             });
@@ -1350,9 +1730,8 @@ impl Panel {
                         entry
                     }
                 };
-                if let Some(&(size, selected)) = replaced.get(&name) {
+                if let Some(&size) = replaced.get(&name) {
                     entry.set_folder_size(size);
-                    entry.selected = selected;
                 }
                 totals.add(&entry);
                 Some((name_key(&entry.name), entry))
@@ -1402,26 +1781,6 @@ impl Panel {
         self.entries = merged;
     }
 
-    /// The folder `ui.json` saves: the shown one, or the saved one while
-    /// the first reading has not opened.
-    fn saved_folder(&self) -> Option<&str> {
-        match self.folder.is_empty() {
-            true => self.saved.as_deref(),
-            false => Some(&self.folder),
-        }
-    }
-
-    /// Records the shown folder in the drive menu's history and as its
-    /// drive's last folder.
-    fn note_folder(&mut self) {
-        let key = folder_key(&self.folder);
-        self.history.retain(|folder| folder_key(folder) != key);
-        self.history.insert(0, self.folder.clone());
-        self.history.truncate(HISTORY + 1);
-        self.drive_folders
-            .insert(folder_key(&drive_root(&self.folder)), self.folder.clone());
-    }
-
     /// Releases the ended operations that ended before `started`, the
     /// moment the completed listing started. Returns whether it keeps one
     /// that ended after, whose rows only a newer listing can show.
@@ -1429,14 +1788,10 @@ impl Panel {
         self.kept.retain(|_, ended| *ended >= started);
         !self.kept.is_empty()
     }
-
-    pub(crate) fn keeps(&self, id: OperationId) -> bool {
-        self.kept.contains_key(&id)
-    }
 }
 
 /// A changed name's last state in a batch, which decides how
-/// [`Panel::merge`] matches it to an entry.
+/// [`FolderRows::merge`] matches it to an entry.
 enum Now {
     Gone,
     Modified(Entry),
@@ -1456,37 +1811,11 @@ enum Focus {
     },
 }
 
-/// The list's place while the rows change; the selected entries carry
-/// their own mark.
+/// The list's place by stored names while its row indexes change.
 #[derive(Debug)]
 struct Remembered {
     focused: Option<Focus>,
-}
-
-/// The rows of `a` that are not in `b`, both sorted ranges that do not
-/// touch, as such ranges.
-pub(crate) fn difference(a: &[Range<u64>], b: &[Range<u64>]) -> Vec<Range<u64>> {
-    let mut out = Vec::new();
-    let mut b = b.iter().peekable();
-    for range in a {
-        let mut start = range.start;
-        while start < range.end {
-            while b.next_if(|cut| cut.end <= start).is_some() {}
-            match b.peek() {
-                Some(cut) if cut.start < range.end => {
-                    if start < cut.start {
-                        out.push(start..cut.start);
-                    }
-                    start = cut.end.max(start);
-                }
-                _ => {
-                    out.push(start..range.end);
-                    start = range.end;
-                }
-            }
-        }
-    }
-    out
+    selected: HashMap<u64, Vec<Box<[u16]>>>,
 }
 
 /// Whether `name` is a short (8.3) name, as a watch can report one: a `~`
@@ -1774,6 +2103,29 @@ pub(crate) struct Panels {
     labels: HashMap<char, String>,
 }
 
+pub(crate) struct EndReceipt {
+    moment: u64,
+    awaited: [Option<OperationId>; 2],
+}
+
+pub(crate) struct PanelKeeps([Arc<FolderRows>; 2]);
+
+impl PanelKeeps {
+    pub(crate) fn contains(&self, id: OperationId) -> bool {
+        self.0.iter().any(|rows| rows.kept.contains_key(&id))
+    }
+
+    pub(crate) fn items(&self) -> usize {
+        self.0.iter().map(|rows| rows.items()).sum()
+    }
+
+    pub(crate) fn matches(&self, panels: &Panels) -> bool {
+        Side::BOTH
+            .into_iter()
+            .all(|side| Arc::ptr_eq(&self.0[side.index()], &panels.panel(side).rows))
+    }
+}
+
 impl Panels {
     pub(crate) fn new(saved: &SavedPanels) -> Panels {
         Panels {
@@ -1787,6 +2139,82 @@ impl Panels {
 
     pub(crate) fn panel(&self, side: Side) -> &Panel {
         &self.panels[side.index()]
+    }
+
+    pub(crate) fn take_retired(&mut self) -> Retirement {
+        let mut retired = Retirement::default();
+        for panel in &mut self.panels {
+            retired.append(std::mem::take(&mut panel.retired));
+            if let Some(search) = panel.search_mut() {
+                retired.append(search.list.take_retired());
+            }
+        }
+        retired
+    }
+
+    pub(crate) fn take_calculation(&mut self, side: Side) -> Option<Calculation> {
+        let taken = Arc::clone(&self.taken);
+        let panel = self.panel_mut(side);
+        if panel.observing || panel.native_pending {
+            return None;
+        }
+        if matches!(panel.calculation, CalculationState::Idle)
+            && let Some(change) = panel.pending.pop_front()
+        {
+            panel.calculation = CalculationState::Pending(Box::new(panel.input(change, &taken)));
+        }
+        match std::mem::replace(&mut panel.calculation, CalculationState::Running) {
+            CalculationState::Pending(input) => Some(*input),
+            CalculationState::AwaitingSelection(answer) => Some(Calculation {
+                epoch: panel.epoch,
+                folder: answer.folder.clone(),
+                before: Arc::clone(&panel.rows),
+                before_up: panel.up_rows(),
+                interaction: panel.interaction(),
+                taken,
+                ends: std::mem::take(&mut panel.ends),
+                end_revision: panel.end_revision,
+                input: Input::Remap(answer),
+            }),
+            other => {
+                panel.calculation = other;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn accept_calculation(
+        &mut self,
+        side: Side,
+        answer: Calculated,
+    ) -> Option<PanelUpdate> {
+        let taken = Arc::clone(&self.taken);
+        self.panel_mut(side).accept_calculated(answer, &taken)
+    }
+
+    pub(crate) fn take_count(&mut self, side: Side) -> Option<Counting> {
+        let panel = self.panel_mut(side);
+        if matches!(panel.view, View::Folder)
+            && !panel.is_calculating()
+            && matches!(panel.counted, CountState::Needed)
+        {
+            panel.counted = CountState::Running;
+            Some(Counting::new(panel))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn accept_count(&mut self, side: Side, answer: Counted) -> bool {
+        answer.accept(self.panel_mut(side))
+    }
+
+    pub(crate) fn take_reread(&mut self, side: Side) -> bool {
+        std::mem::take(&mut self.panel_mut(side).reread)
+    }
+
+    pub(crate) fn take_update(&mut self, side: Side) -> Option<PanelUpdate> {
+        self.panel_mut(side).ready_update.take()
     }
 
     fn panel_mut(&mut self, side: Side) -> &mut Panel {
@@ -1836,16 +2264,16 @@ impl Panels {
         // awaited name; the shown one read again keeps them, so a change
         // does not end the person's typing.
         if matches!(kind, ReadKind::Go { .. }) {
-            panel.quick = None;
-            panel.awaited = None;
+            panel.quick.close(&mut panel.retired);
+            panel.set_awaited(None);
         }
         let sort = panel.sort;
         let sizes = if folder_key(&path) == folder_key(&panel.folder) {
-            let folders = panel.entries.iter().filter(|e| e.is_folder());
-            (folders.filter_map(|e| Some((e.name.clone(), e.folder_size()?)))).collect()
+            ReadSizes(Some(Arc::clone(&panel.rows)))
         } else {
-            Vec::new()
+            ReadSizes(None)
         };
+        panel.invalidate();
         panel.read = Some(Read {
             generation,
             kind,
@@ -2073,18 +2501,15 @@ impl Panels {
             }
         }
         panel.clear();
-        panel.order = panel.sort;
-        panel.kept.clear();
         panel.read = None;
         panel.sizes_asked = None;
-        panel.folder_sort = None;
-        panel.awaited = None;
+        panel.set_awaited(None);
         panel.focused = None;
-        panel.view = View::Search(Box::new(PanelSearch {
+        panel.set_view(View::Search(Box::new(PanelSearch {
             list: SearchList::new(),
             look_in: LookIn::ThisFolder,
             back,
-        }));
+        })));
         true
     }
 
@@ -2106,8 +2531,8 @@ impl Panels {
     /// `Esc` in `side`'s list, after the quick search box was closed: it
     /// clears a selection first, and only with nothing selected leaves the
     /// search (DESIGN.md: Search in a panel).
-    pub(crate) fn leave_on_escape(&mut self, side: Side) -> Option<ReadAsk> {
-        if self.panel(side).has_selection() {
+    pub(crate) fn leave_on_escape(&mut self, side: Side, selected: bool) -> Option<ReadAsk> {
+        if selected {
             return None;
         }
         self.leave_search(side)
@@ -2156,13 +2581,18 @@ impl Panels {
         let taken = Arc::clone(&self.taken);
         let panel = self.panel_mut(side);
         let Some(read) = panel.read.clone().filter(|r| r.generation == generation) else {
+            let items = match &event {
+                ReadEvent::Listed { entries, .. } => entries.len(),
+                _ => 0,
+            };
+            panel.retired.push(event, items);
             return ReadChange::Stale;
         };
         match event {
             ReadEvent::Opened { folder, .. } => match read.kind {
                 ReadKind::Go { .. } => {
                     panel.folder = folder;
-                    panel.view = View::Reading;
+                    panel.set_view(View::Reading);
                     panel.clear();
                     panel.free = None;
                     ReadChange::Cleared
@@ -2175,74 +2605,36 @@ impl Panels {
                 focus,
                 ..
             } => {
-                panel.read = None;
-                panel.gone_focus = None;
-                let remembered = match (&read.kind, &panel.view) {
-                    (ReadKind::Again, View::Folder)
-                        if folder_key(&folder) == folder_key(&panel.folder) =>
-                    {
-                        Some(panel.remember(focused))
-                    }
-                    _ => None,
-                };
-                let focus = match read.kind {
-                    ReadKind::Go { focus: wanted, .. } => focus.or(wanted),
+                if panel
+                    .omitted_end
+                    .is_some_and(|moment| read.generation <= moment)
+                {
+                    let items = entries.len();
+                    panel.retired.push(entries, items);
+                    panel.reread = true;
+                    return ReadChange::Pending;
+                }
+                let same = matches!((&read.kind, &panel.view), (ReadKind::Again, View::Folder))
+                    && folder_key(&folder) == folder_key(&panel.folder);
+                let focus = match &read.kind {
+                    ReadKind::Go { focus: wanted, .. } => focus.or_else(|| wanted.clone()),
                     ReadKind::Again => focus,
                 };
-                panel.folder = folder;
-                panel.view = View::Folder;
-                panel.saved = None;
-                // The same folder keeps its selection, by exact name, because
-                // both listings hold the names as stored on the disk; the
-                // reading thread gave it the folder sizes the panel knew
-                // (`ReadAsk::sizes`).
-                let same = remembered.is_some();
-                // By hash, each with the entries of that hash, whose names
-                // are compared only when it matches.
-                let mut old: HashMap<u64, Vec<Entry>> = HashMap::new();
-                if same {
-                    for entry in panel.entries.drain(..).filter(|e| e.selected) {
-                        old.entry(entry.hash).or_default().push(entry);
-                    }
-                }
-                panel.entries = entries;
-                if !old.is_empty() {
-                    for entry in &mut panel.entries {
-                        entry.selected = (old.get(&entry.hash))
-                            .is_some_and(|olds| olds.iter().any(|old| old.name == entry.name));
-                    }
-                }
-                panel.totals = Totals::of(&panel.entries);
-                // The rows stay where the person sees them only in the
-                // order they had.
-                let again = same && read.sort == panel.order;
-                panel.order = read.sort;
-                let stale = panel.release(read.generation);
-                panel.filter(&taken);
-                panel.note_folder();
-                if let Some(awaited) = &panel.awaited
-                    && awaited.ended.is_some_and(|ended| ended < read.generation)
-                    && panel.awaited_row(awaited).is_none()
-                {
-                    panel.awaited = None;
-                }
-                let place = match remembered {
-                    Some(remembered) => panel.place_of(remembered, None),
-                    None => {
-                        panel.selected.clear();
-                        let focused = focus
-                            .and_then(|name| panel.row_of(&Name::of(name), None))
-                            .or_else(|| (panel.count() > 0).then_some(0));
-                        Place {
-                            focused,
-                            selected: Vec::new(),
-                        }
-                    }
+                panel.focused = focused;
+                let change = RowChange::Listed {
+                    folder,
+                    entries,
+                    read,
+                    same,
+                    focus,
                 };
-                ReadChange::Listed {
-                    place,
-                    again,
-                    stale,
+                match panel.submit(change, &taken) {
+                    Some(update) => ReadChange::Listed {
+                        place: update.place,
+                        again: matches!(update.kind, UpdatedKind::Listed { again: true }),
+                        stale: update.read_again,
+                    },
+                    None => ReadChange::Pending,
                 }
             }
             ReadEvent::Failed {
@@ -2267,9 +2659,9 @@ impl Panels {
                         typed,
                     },
                     _ => {
-                        panel.view = View::NotReady {
+                        panel.set_view(View::NotReady {
                             drive: drive_root(&read.path),
-                        };
+                        });
                         if panel.folder.is_empty() {
                             panel.folder = read.path;
                         }
@@ -2297,21 +2689,39 @@ impl Panels {
         {
             panel.folder = path;
         }
-        panel.view = View::NotReady {
+        panel.set_view(View::NotReady {
             drive: drive_root(&panel.folder),
-        };
+        });
         panel.clear();
         searched
     }
 
     /// The list's selected rows, as it tells them; whether they changed.
-    pub(crate) fn set_selected(&mut self, side: Side, selected: Vec<Range<u64>>) -> bool {
+    pub(crate) fn set_selected(&mut self, side: Side, selected: RowSelection) -> bool {
         let panel = self.panel_mut(side);
-        let changed = panel.selected != selected;
+        let changed = panel.selected_count != selected.count
+            || selected.positions.len() > work::INLINE_ITEMS
+            || panel.selected.as_ref() != selected.positions.as_ref();
         if changed {
-            panel.select(selected);
+            panel.select_shared(selected);
         }
         changed
+    }
+
+    pub(crate) fn native_selection_pending(&mut self, side: Side, pending: bool) {
+        self.panel_mut(side).native_pending = pending;
+    }
+
+    pub(crate) fn selected_count(&self, side: Side) -> u64 {
+        self.panel(side).selected_count
+    }
+
+    pub(crate) fn place(&self, side: Side) -> Place {
+        let panel = self.panel(side);
+        Place {
+            focused: panel.focused,
+            selected: Arc::clone(&panel.selected),
+        }
     }
 
     /// Whether the active panel has a selected entry.
@@ -2321,19 +2731,29 @@ impl Panels {
 
     /// The list's focused row, as it tells it.
     pub(crate) fn set_focused(&mut self, side: Side, focused: Option<u64>) {
-        self.panel_mut(side).focused = focused;
+        let panel = self.panel_mut(side);
+        if panel.focused != focused {
+            panel.focused = focused;
+            panel.interaction_revision += 1;
+            if let Some(old) = panel.awaited_place.take() {
+                let items = old.0.selected.len();
+                panel.retired.push(old, items);
+            }
+        }
     }
 
-    /// How many entries the active panel's file commands act on
-    /// ([`Panels::chosen`]), without a pass over them: none while a search
+    /// How many entries `side`'s file commands act on
+    /// ([`Panels::chosen_source`]), without a pass over them: none while a search
     /// panel's selection is read.
-    pub(crate) fn chosen_count(&self) -> usize {
-        let side = self.active;
+    pub(crate) fn chosen_count(&self, side: Side) -> usize {
         let panel = self.panel(side);
+        if panel.is_calculating() {
+            return 0;
+        }
         let focused = || usize::from(self.focused(side).is_some());
         match (panel.search(), panel.selected.as_slice()) {
             (None, []) => focused(),
-            (None, selected) => selected.iter().map(|r| (r.end - r.start) as usize).sum(),
+            (None, _) => panel.selected_count as usize,
             (Some(search), selected) => match search.list.selection() {
                 Selection::None if selected.is_empty() => focused(),
                 selection => selection.files().map_or(0, <[_]>::len),
@@ -2345,29 +2765,49 @@ impl Panels {
     /// else the focused one; never `..` (DESIGN.md: Selecting entries). A
     /// search panel's selected results once they are read, and none while they
     /// are.
-    pub(crate) fn chosen(&self, side: Side) -> Vec<ChosenEntry> {
+    pub(crate) fn chosen_source(&self, side: Side) -> Option<super::open::Entries> {
         let panel = self.panel(side);
+        if panel.is_calculating() {
+            return None;
+        }
         match panel.search() {
-            None if panel.selected.is_empty() => self.focused(side).into_iter().collect(),
-            None => (panel.selected.iter())
-                .flat_map(Clone::clone)
-                .filter_map(|row| panel.chosen_entry(row))
-                .collect(),
+            None => Some(super::open::Entries::Panel(PanelEntries {
+                rows: Arc::clone(&panel.rows),
+                selected: Arc::clone(&panel.selected),
+                focused: panel.focused,
+                folder: panel.folder.clone(),
+                up: panel.up_rows(),
+            })),
             Some(search) => match search.list.selection() {
-                Selection::None if panel.selected.is_empty() => {
-                    self.focused(side).into_iter().collect()
-                }
-                selection => (selection.files().unwrap_or_default().iter())
-                    .map(ChosenEntry::of_result)
-                    .collect(),
+                Selection::None if panel.selected.is_empty() => Some(super::open::Entries::Ready(
+                    self.focused(side).into_iter().collect(),
+                )),
+                selection => selection.shared_files().map(super::open::Entries::Results),
             },
         }
+    }
+
+    pub(crate) fn command_place(&self, side: Side) -> CommandPlace {
+        let panel = self.panel(side);
+        CommandPlace {
+            side,
+            epoch: panel.epoch,
+            interaction: panel.interaction_revision,
+        }
+    }
+
+    pub(crate) fn place_is_current(&self, place: CommandPlace) -> bool {
+        let panel = self.panel(place.side);
+        place.epoch == panel.epoch && place.interaction == panel.interaction_revision
     }
 
     /// The focused entry of `side`, which View opens; never `..` or a blank
     /// row.
     pub(crate) fn focused(&self, side: Side) -> Option<ChosenEntry> {
         let panel = self.panel(side);
+        if panel.is_calculating() {
+            return None;
+        }
         let row = panel.focused?;
         match self.row(side, row)? {
             Row::Up => None,
@@ -2412,15 +2852,18 @@ impl Panels {
         }
         let name = Name::of(name.encode_utf16().collect());
         let from = from.map(|from| Name::of(from.encode_utf16().collect()));
+        let taken = Arc::clone(&self.taken);
         let panel = self.panel_mut(side);
-        let replaces = (from.as_ref()).is_some_and(|from| panel.row_named(from).is_some());
-        panel.awaited = (replaces || panel.row_named(&name).is_none()).then_some(Awaited {
+        panel.set_awaited(Some(Awaited {
             name,
             select,
             from,
             operation,
             ended: None,
-        });
+            origin: Some((Arc::clone(&panel.rows), panel.up_rows())),
+        }));
+        panel.interaction_revision += 1;
+        panel.submit(RowChange::Await, &taken);
     }
 
     /// The place that shows `side`'s awaited name, once a row shows it,
@@ -2428,22 +2871,15 @@ impl Panels {
     /// `None` while no row shows it.
     pub(crate) fn show_awaited(&mut self, side: Side) -> Option<Place> {
         let panel = self.panel_mut(side);
-        let awaited = panel.awaited.as_ref()?;
-        let row = panel.awaited_row(awaited)?;
-        let select = awaited.select;
-        panel.awaited = None;
-        panel.gone_focus = None;
-        if select {
-            let mut rows: Vec<u64> = panel.selected.iter().flat_map(Clone::clone).collect();
-            rows.push(row);
-            rows.sort_unstable();
-            rows.dedup();
-            panel.select(ranges(&rows));
+        if panel.is_calculating() {
+            return None;
         }
-        Some(Place {
-            focused: Some(row),
-            selected: panel.selected.clone(),
-        })
+        let (place, selected) = panel.awaited_place.take()?;
+        panel.set_awaited(None);
+        panel.gone_focus = None;
+        panel.select_shared(selected);
+        panel.focused = place.focused;
+        Some(place)
     }
 
     /// Applies the watching thread's `changes` to `side`, whose list has
@@ -2464,133 +2900,105 @@ impl Panels {
         let taken = Arc::clone(&self.taken);
         let panel = self.panel_mut(side);
         if !matches!(panel.view, View::Folder) {
+            let items = changes.len();
+            panel.retired.push(changes, items);
             return None;
         }
-        // Each change moves a row by one at most.
-        let reach = changes.len() as u64 + 1;
-        let mut remembered = panel.remember(focused);
-        let gone = (panel.gone_focus.take()).filter(|gone| gone.row == focused);
-        let back = gone.as_ref().is_some_and(|gone| {
-            changes.iter().any(|change| match change {
-                FolderChange::Added(entry)
-                | FolderChange::Modified(entry)
-                | FolderChange::Renamed { to: entry, .. } => entry.name == gone.name.raw,
-                FolderChange::Gone(_) => false,
-            })
-        });
-        // When the name was the folder's only entry, the focus shows on
-        // `..`, or on no row at a drive's root.
-        if back && let Some(gone) = &gone {
-            let name = gone.name.clone();
-            remembered.focused = Some(match remembered.focused.take() {
-                Some(Focus::Entry { after, row, .. }) => Focus::Entry { name, after, row },
-                _ => Focus::Entry {
-                    name,
-                    after: Vec::new(),
-                    row: focused.unwrap_or(0),
-                },
-            });
-        }
-        let wanted = match &remembered.focused {
-            Some(Focus::Entry { name, .. }) => Some(name.clone()),
-            _ => None,
-        };
-        let again = panel.merge(changes);
-        panel.filter(&taken);
-        let place = panel.place_of(remembered, Some(reach));
-        let shows = |name: &Name| {
-            (place.focused.and_then(|row| panel.entry(row))).is_some_and(|e| e.name == name.raw)
-        };
-        let gone_name = match wanted {
-            Some(name) if !shows(&name) => Some(gone.map_or(name, |gone| gone.name)),
-            _ if back => None,
-            _ => gone.map(|gone| gone.name),
-        };
-        panel.gone_focus = gone_name.map(|name| GoneFocus {
-            name,
-            row: place.focused,
-        });
-        Some((place, again))
-    }
-
-    /// The folder sizes of `side` that wait to be sorted, which
-    /// [`Panels::accept_sizes`] left for a panel sorted by size.
-    pub(crate) fn take_folder_sort(&mut self, side: Side) -> Option<FolderSort> {
-        self.panel_mut(side).folder_sort.take()
-    }
-
-    /// The folders of `side`, sorted by their new sizes: the sizes apply in
-    /// that order, keeping the focus on `focused`'s name. Returns the new
-    /// place; `None` when the shown folder, its folders or the sort changed
-    /// since the sizes came, and then the change that did it asks gozlerd
-    /// for the sizes again, so the panel's entries stay in their order.
-    pub(crate) fn accept_folder_order(
-        &mut self,
-        side: Side,
-        sorted: SortedFolders,
-        focused: Option<u64>,
-    ) -> Option<Place> {
-        let taken = Arc::clone(&self.taken);
-        let panel = self.panel_mut(side);
-        let count = panel.entries.partition_point(Entry::is_folder);
-        let folders = &panel.entries[..count];
-        if folder_key(&panel.folder) != folder_key(&sorted.folder)
-            || panel.order != sorted.sort
-            || folders.len() != sorted.folders.len()
-            || !folders
-                .iter()
-                .zip(&sorted.folders)
-                .all(|(a, b)| a.name == b.name)
-        {
-            return None;
-        }
-        let remembered = panel.remember(focused);
-        let folders = &mut panel.entries[..count];
-        for (entry, sized) in folders.iter_mut().zip(&sorted.folders) {
-            panel.totals.remove(entry);
-            entry.set_folder_size(sized.folder_size());
-            panel.totals.add(entry);
-        }
-        apply_order(folders, sorted.order);
-        panel.filter(&taken);
-        Some(panel.place_of(remembered, None))
+        panel.focused = focused;
+        panel
+            .submit(RowChange::Watch(changes), &taken)
+            .map(|update| (update.place, update.read_again))
     }
 
     /// The ended operations `ended`, each with its request, which each
     /// folder panel keeps when its end makes it read its folder again; a
-    /// search panel's list decides for itself ([`SearchList::ended`]).
+    /// search panel's list decides for itself ([`SearchList::accept_end`]).
     /// Returns what each panel that they changed does.
+    #[cfg(test)]
     pub(crate) fn operations_ended(
         &mut self,
-        ended: &[(OperationId, Arc<Request>)],
+        ended: Arc<super::search_list::Ended>,
+        has_ended: impl Fn(OperationId) -> bool,
     ) -> Vec<PanelFollow> {
+        let receipt = self.observe_operations();
+        self.accept_operations(receipt, Some(ended), has_ended)
+    }
+
+    pub(crate) fn kept_rows(&self) -> PanelKeeps {
+        PanelKeeps(std::array::from_fn(|at| Arc::clone(&self.panels[at].rows)))
+    }
+
+    pub(crate) fn observe_operations(&mut self) -> EndReceipt {
         self.moment += 1;
         let moment = self.moment;
+        let awaited = std::array::from_fn(|at| {
+            self.panels[at]
+                .awaited
+                .as_ref()
+                .map(|awaited| awaited.operation)
+        });
+        for panel in &mut self.panels {
+            panel.observing = true;
+            panel.end_revision = moment;
+        }
+        EndReceipt { moment, awaited }
+    }
+
+    pub(crate) fn accept_operations(
+        &mut self,
+        receipt: EndReceipt,
+        ended: Option<Arc<super::search_list::Ended>>,
+        has_ended: impl Fn(OperationId) -> bool,
+    ) -> Vec<PanelFollow> {
+        let moment = receipt.moment;
+        let taken = Arc::clone(&self.taken);
         let mut out = Vec::new();
         for side in Side::BOTH {
             let panel = self.panel_mut(side);
-            let mut again = false;
-            let mut sizes = false;
-            for (id, request) in ended {
-                if let Some(awaited) = &mut panel.awaited
-                    && awaited.operation == *id
-                {
-                    awaited.ended = Some(moment);
-                }
-                if panel.folder.is_empty() || panel.search().is_some() {
-                    continue;
-                }
-                if ends_in(request, &panel.folder) {
-                    panel.kept.insert(*id, moment);
-                    again = true;
-                }
-                sizes |= changes_sizes(request, &panel.folder);
+            panel.observing = false;
+            let Some(ended) = &ended else {
+                continue;
+            };
+            // Command intent must keep its acknowledgment when a row candidate is discarded.
+            if let Some(awaited) = &mut panel.awaited
+                && awaited.ended.is_none()
+                && receipt.awaited[side.index()] == Some(awaited.operation)
+                && has_ended(awaited.operation)
+            {
+                awaited.ended = Some(moment);
+                panel.interaction_revision += 1;
             }
-            if again || sizes {
+            if panel.folder.is_empty() || panel.search().is_some() {
+                continue;
+            }
+            panel.end_revision = moment;
+            if panel.omitted_end.is_some() {
+                panel.omitted_end = Some(moment);
+                panel.reread = true;
+                continue;
+            }
+            if panel.ends.len() == PENDING_ROWS {
+                panel.invalidate();
+                let ends = std::mem::take(&mut panel.ends);
+                panel.retired.push(ends, work::INLINE_ITEMS + 1);
+                panel.omitted_end = Some(moment);
+                panel.reread = true;
+                continue;
+            }
+            panel.ends.push(End {
+                moment,
+                evidence: Arc::clone(ended),
+            });
+            if !matches!(panel.calculation, CalculationState::Idle) || !panel.pending.is_empty() {
+                continue;
+            }
+            if let Some(update) = panel.submit(RowChange::Ended, &taken)
+                && (update.read_again || update.sizes)
+            {
                 out.push(PanelFollow {
                     side,
-                    read_again: again,
-                    sizes,
+                    read_again: update.read_again,
+                    sizes: update.sizes,
                 });
             }
         }
@@ -2603,6 +3011,7 @@ impl Panels {
     }
 
     /// Whether either panel keeps the ended operation `id`.
+    #[cfg(test)]
     pub(crate) fn keep(&self, id: OperationId) -> bool {
         self.panels.iter().any(|panel| panel.keeps(id))
     }
@@ -2620,17 +3029,21 @@ impl Panels {
         Side::BOTH.map(|side| {
             let panel = self.panel_mut(side);
             if let Some(search) = panel.search_mut() {
-                let lost = search.list.drop_taken(&taken);
-                if lost {
-                    search.list.count_chosen_bytes();
-                }
                 return TakenRows::Search {
-                    deselect: search.list.deselect(lost),
+                    deselect: search.list.deselect(),
                 };
             }
-            let remembered = panel.remember(focused[side.index()]);
-            panel.filter(&taken);
-            TakenRows::Folder(panel.place_of(remembered, None))
+            if !matches!(panel.view, View::Folder) {
+                return TakenRows::Folder(Place::default());
+            }
+            panel.focused = focused[side.index()];
+            if !matches!(panel.calculation, CalculationState::Idle) || !panel.pending.is_empty() {
+                return TakenRows::Pending;
+            }
+            match panel.submit(RowChange::Filter, &taken) {
+                Some(update) => TakenRows::Folder(update.place),
+                None => TakenRows::Pending,
+            }
         })
     }
 
@@ -2638,7 +3051,9 @@ impl Panels {
     /// its folder, from gozlerd (DESIGN.md: Folder sizes).
     pub(crate) fn ask_sizes(&mut self, side: Side, generation: Generation) -> Option<Ask> {
         let panel = self.panel_mut(side);
-        if !matches!(panel.view, View::Folder) || !panel.entries.iter().any(Entry::is_folder) {
+        if !matches!(panel.view, View::Folder)
+            || !panel.rows.entries.first().is_some_and(Entry::is_folder)
+        {
             panel.sizes_asked = None;
             return None;
         }
@@ -2672,10 +3087,8 @@ impl Panels {
 
     /// gozlerd's answer to `side`'s folder sizes: each subfolder's size,
     /// matched to the rows by name, exactly first, then without regard to
-    /// case, as NTFS compares names. A folder gozlerd does not know keeps
-    /// no size. A panel sorted by size keeps its sizes until its folders
-    /// are sorted by them ([`Panels::take_folder_sort`]), because a merge
-    /// inserts by the order the entries are in.
+    /// case, as NTFS compares names. Sizes and their resulting order publish
+    /// together, so a later change inserts by the new order.
     /// Whether it was the answer the panel waits for.
     pub(crate) fn accept_sizes(
         &mut self,
@@ -2683,51 +3096,18 @@ impl Panels {
         generation: Generation,
         outcome: Outcome,
     ) -> bool {
+        let taken = Arc::clone(&self.taken);
         let panel = self.panel_mut(side);
-        if panel.sizes_asked != Some(generation) {
+        if panel.sizes_asked != Some(generation) || !matches!(panel.view, View::Folder) {
+            let items = outcome.items();
+            panel.retired.push(outcome, items);
             return false;
         }
         panel.sizes_asked = None;
         panel.sized = true;
-        let rows = match &outcome {
-            Outcome::Rows(chunk) => chunk.rows.as_slice(),
-            _ => &[],
-        };
-        // By the hash of the folded name, each with the names of that hash
-        // as gozlerd wrote them.
-        let mut sizes: HashMap<u64, Vec<(Vec<u16>, u64)>> = HashMap::new();
-        for row in rows.iter().filter(|row| row.is_dir) {
-            if let Some(size) = row.size {
-                let name = last_name(&row.path);
-                let hash = name_hash(&fold(name.as_bytes()));
-                let entry = (name.encode_utf16().collect(), size);
-                sizes.entry(hash).or_default().push(entry);
-            }
+        if let Some(update) = panel.submit(RowChange::Sizes(Box::new(outcome)), &taken) {
+            panel.ready_update = Some(update);
         }
-        let size_of = |entry: &Entry| {
-            (sizes.get(&entry.hash))
-                .and_then(|named| best_match(named, &entry.name, |(name, _)| name))
-                .map(|(_, size)| *size)
-        };
-        if panel.order.key == SortKey::Size {
-            let folders = panel.entries.iter().take_while(|e| e.is_folder());
-            let folders = folders.map(|entry| {
-                let mut sized = entry.clone();
-                sized.set_folder_size(size_of(entry));
-                sized
-            });
-            panel.folder_sort = Some(FolderSort {
-                folder: panel.folder.clone(),
-                sort: panel.order,
-                folders: folders.collect(),
-            });
-            return true;
-        }
-        for entry in panel.entries.iter_mut().filter(|e| e.is_folder()) {
-            let size = size_of(entry);
-            entry.set_folder_size(size);
-        }
-        panel.totals = Totals::of(&panel.entries);
         true
     }
 
@@ -2753,87 +3133,10 @@ impl Panels {
         }
     }
 
-    /// A character typed in `side`'s list, which opens the quick search
-    /// box or extends its text (DESIGN.md: Quick search). The focus goes to the
-    /// first row whose name starts with the text; a character after which no
-    /// name would match is not added. Returns the row to focus.
-    pub(crate) fn quick_char(&mut self, side: Side, c: char) -> Option<u64> {
-        let taken = Arc::clone(&self.taken);
-        let panel = self.panel_mut(side);
-        if !matches!(panel.view, View::Folder | View::Search(_)) {
-            return None;
-        }
-        // A first character that matches nothing does not open the box.
-        let mut wanted = panel.quick.clone().unwrap_or_default();
-        wanted.push(c);
-        let found = first_match(panel, &taken, &wanted, 0, true);
-        if found.is_some() {
-            panel.quick = Some(wanted);
-        }
-        found
-    }
-
-    /// `Backspace` in the quick search box: the text loses its last
-    /// character and the focus goes to the first row that matches it.
-    pub(crate) fn quick_back(&mut self, side: Side) -> Option<u64> {
-        let taken = Arc::clone(&self.taken);
-        let panel = self.panel_mut(side);
-        let text = panel.quick.as_mut()?;
-        text.pop();
-        let text = text.clone();
-        first_match(panel, &taken, &text, 0, true)
-    }
-
-    /// `Up` or `Down` in the quick search box: the previous or the next
-    /// row that matches.
-    pub(crate) fn quick_step(
-        &mut self,
-        side: Side,
-        focused: Option<u64>,
-        down: bool,
-    ) -> Option<u64> {
-        let panel = self.panel(side);
-        let text = panel.quick.as_deref()?;
-        let from = focused?;
-        if down {
-            first_match(panel, &self.taken, text, from + 1, true)
-        } else {
-            first_match(panel, &self.taken, text, from, false)
-        }
-    }
-
     /// Closes the quick search box; whether it was open.
     pub(crate) fn close_quick(&mut self, side: Side) -> bool {
-        self.panel_mut(side).quick.take().is_some()
-    }
-}
-
-/// The first row from `from` down, or the last before `from` up, whose
-/// name starts with `text`, without regard to case. `..` never matches. A
-/// search panel looks only at its fetched rows that no delete or move has
-/// taken, so the walk never passes the rows the list cannot show
-/// (DESIGN.md: Quick search).
-fn first_match(panel: &Panel, taken: &Taken, text: &str, from: u64, down: bool) -> Option<u64> {
-    let wanted = fold(text.as_bytes());
-    let mut folding = Folding::default();
-    if let Some(search) = panel.search() {
-        let list = &search.list;
-        return (list.results().fetched_from(from, down))
-            .find(|(_, item)| {
-                folding.of_str(last_name(&item.path)).starts_with(&wanted)
-                    && !is_taken(taken, &list.kept, item)
-            })
-            .map(|(row, _)| row);
-    }
-    let matches = |row: &u64| {
-        panel
-            .entry(*row)
-            .is_some_and(|entry| folding.of(&entry.name).starts_with(&wanted))
-    };
-    if down {
-        (from..panel.count()).find(matches)
-    } else {
-        (0..from).rev().find(matches)
+        let panel = self.panel_mut(side);
+        panel.quick.close(&mut panel.retired)
     }
 }
 
@@ -2903,7 +3206,7 @@ pub(crate) mod tests {
         mut entries: Vec<Entry>,
     ) -> Place {
         if folder == ask.path {
-            super::give_sizes(&mut entries, &ask.sizes);
+            super::give_sizes(&mut entries, &ask.sizes.values());
         }
         sort_listing(&mut entries, ask.sort);
         let event = ReadEvent::Listed {
@@ -2914,6 +3217,14 @@ pub(crate) mod tests {
         };
         match panels.accept_read(Side::Left, event, None).change {
             ReadChange::Listed { place, .. } => place,
+            ReadChange::Pending => loop {
+                let input = panels
+                    .take_calculation(Side::Left)
+                    .expect("a fixture has pending work");
+                if let Some(update) = panels.accept_calculation(Side::Left, input.run()) {
+                    break update.place;
+                }
+            },
             other => panic!("not listed: {other:?}"),
         }
     }
@@ -2922,6 +3233,151 @@ pub(crate) mod tests {
         Arc::new(Request::Delete {
             sources: sources.iter().map(PathBuf::from).collect(),
         })
+    }
+
+    #[test]
+    fn a_large_row_answer_remaps_current_selection_and_taken_without_replaying_the_change() {
+        let entries = (0..1_100)
+            .map(|i| file(&format!("item {i:04}"), 1, 0))
+            .collect();
+        let mut panels = showing(r"C:\f", entries);
+        panels.set_selected(Side::Left, vec![1..2].into());
+        panels.set_focused(Side::Left, Some(1));
+        assert!(
+            panels
+                .apply_changes(
+                    Side::Left,
+                    vec![FolderChange::Added(file("000-new", 7, 0))],
+                    Some(1)
+                )
+                .is_none()
+        );
+        assert_eq!(panels.panel(Side::Left).count(), 1_101);
+        assert_eq!(panels.chosen_count(Side::Left), 0);
+        let input = panels
+            .take_calculation(Side::Left)
+            .expect("large changes defer");
+        let answer = input.run();
+        let candidate = answer
+            .rows
+            .as_ref()
+            .expect("an answer owns rows")
+            .entries
+            .as_ptr();
+
+        panels.native_selection_pending(Side::Left, true);
+        assert!(panels.accept_calculation(Side::Left, answer).is_none());
+        assert!(panels.take_calculation(Side::Left).is_none());
+        assert_eq!(panels.panel(Side::Left).selected.as_ref(), &[1..2]);
+        assert_eq!(panels.panel(Side::Left).count(), 1_101);
+
+        panels.set_selected(Side::Left, vec![2..4].into());
+        panels.set_focused(Side::Left, Some(2));
+        let mut taken = Taken::default();
+        taken.insert(
+            OperationId::for_tests(51),
+            Path::new(r"C:\f\item 0001"),
+            false,
+        );
+        assert!(matches!(
+            panels.set_taken(Arc::new(taken), [Some(2), None])[0],
+            TakenRows::Pending
+        ));
+        panels.native_selection_pending(Side::Left, false);
+        assert_eq!(panels.panel(Side::Left).selected.as_ref(), &[2..4]);
+        assert_eq!(panels.panel(Side::Left).count(), 1_101);
+
+        let remap = panels
+            .take_calculation(Side::Left)
+            .expect("new interaction requires a remap");
+        let answer = remap.run();
+        let selected = Arc::clone(&answer.selected.positions);
+        let update = panels
+            .accept_calculation(Side::Left, answer)
+            .expect("the remap is current");
+        assert_eq!(update.place.selected.as_slice(), [3..4]);
+        assert!(Arc::ptr_eq(&panels.panel(Side::Left).selected, &selected));
+        assert_eq!(panels.panel(Side::Left).rows.entries.as_ptr(), candidate);
+        assert_eq!(
+            panels.panel(Side::Left).shown_name("000-new").as_deref(),
+            Some("000-new")
+        );
+        assert_eq!(panels.panel(Side::Left).shown_name("item 0001"), None);
+    }
+
+    #[test]
+    fn an_overflow_keeps_the_end_barrier_and_awaited_acknowledgment_until_a_new_listing() {
+        let entries = || {
+            (0..1_100)
+                .map(|i| file(&format!("item {i:04}"), 1, 0))
+                .collect()
+        };
+        let mut panels = showing(r"C:\f", entries());
+        let older = panels.read_again(Side::Left).expect("a folder shows");
+        let id = OperationId::for_tests(52);
+        panels.await_name(Side::Left, "created", None, false, id);
+        let input = panels
+            .take_calculation(Side::Left)
+            .expect("a large awaited lookup defers");
+        let request = Arc::new(Request::NewFolder {
+            path: PathBuf::from(r"C:\f\created"),
+        });
+        end(&mut panels, &[(id, request)]);
+        let moment = panels
+            .panel(Side::Left)
+            .awaited
+            .as_ref()
+            .expect("the command awaits its name")
+            .ended;
+        assert!(moment.is_some());
+        for _ in 0..=PENDING_ROWS {
+            panels.apply_changes(
+                Side::Left,
+                vec![FolderChange::Modified(file("item 0000", 2, 0))],
+                None,
+            );
+        }
+        assert!(panels.panel(Side::Left).is_calculating());
+        let event = ReadEvent::Listed {
+            generation: older.generation,
+            folder: r"C:\f".to_owned(),
+            entries: entries(),
+            focus: None,
+        };
+        assert_eq!(
+            panels.accept_read(Side::Left, event, None).change,
+            ReadChange::Pending
+        );
+        assert!(panels.take_reread(Side::Left));
+        assert!(panels.accept_calculation(Side::Left, input.run()).is_none());
+        assert_eq!(
+            panels
+                .panel(Side::Left)
+                .awaited
+                .as_ref()
+                .expect("invalidation keeps command intent")
+                .ended,
+            moment
+        );
+
+        let newer = panels
+            .read_again(Side::Left)
+            .expect("overflow requests a fresh listing");
+        complete(&mut panels, &newer, r"C:\f", entries());
+        assert!(!panels.panel(Side::Left).is_calculating());
+        assert!(panels.panel(Side::Left).awaited.is_none());
+        panels.apply_changes(
+            Side::Left,
+            vec![FolderChange::Added(folder("created"))],
+            None,
+        );
+        let input = panels
+            .take_calculation(Side::Left)
+            .expect("the folder change defers");
+        panels
+            .accept_calculation(Side::Left, input.run())
+            .expect("the change is current");
+        assert_eq!(panels.show_awaited(Side::Left), None);
     }
 
     /// `Ctrl+Right` shows the focused folder in the right panel, and for
@@ -2972,7 +3428,10 @@ pub(crate) mod tests {
             if change_first {
                 panels.apply_changes(Side::Left, gone(), None);
             }
-            let again = panels.operations_ended(&[(id, delete(&[r"C:\f\a.txt", r"C:\f\b.txt"]))]);
+            let again = end(
+                &mut panels,
+                &[(id, delete(&[r"C:\f\a.txt", r"C:\f\b.txt"]))],
+            );
             assert_eq!(
                 again,
                 [PanelFollow {
@@ -3107,7 +3566,7 @@ pub(crate) mod tests {
         let mut panels = showing(r"C:\f", vec![file("a.txt", 1, 0)]);
         let ask = panels.go(Side::Left, r"C:\f".to_owned(), None);
         let id = OperationId::for_tests(1);
-        panels.operations_ended(&[(id, delete(&[r"C:\f\a.txt"]))]);
+        end(&mut panels, &[(id, delete(&[r"C:\f\a.txt"]))]);
         let event = ReadEvent::Listed {
             generation: ask.generation,
             folder: r"C:\f".to_owned(),
@@ -3130,11 +3589,13 @@ pub(crate) mod tests {
         let changes = vec![FolderChange::Added(file("makefile", 2, 0))];
         panels.apply_changes(Side::Left, changes, None);
         assert_eq!(names(&panels, Side::Left), ["..", "Makefile", "makefile"]);
-        panels.set_selected(Side::Left, vec![1..2]);
+        panels.set_selected(Side::Left, vec![1..2].into());
         let ask = panels.read_again(Side::Left).expect("a folder shows");
         let listed = vec![file("Makefile", 1, 0), file("makefile", 2, 0)];
         assert_eq!(
-            complete(&mut panels, &ask, r"C:\src", listed).selected,
+            complete(&mut panels, &ask, r"C:\src", listed)
+                .selected
+                .as_slice(),
             [1..2]
         );
         let changes = vec![FolderChange::Gone(wide("makefile"))];
@@ -3154,26 +3615,57 @@ pub(crate) mod tests {
         for taken_path in [r"C:\f\a.txt", r"C:\f"] {
             let mut panels = showing(r"C:\f", vec![file("a.txt", 1, 0), file("b.txt", 1, 0)]);
             // `..`, a.txt, b.txt: a.txt selected.
-            panels.set_selected(Side::Left, vec![1..2]);
+            panels.set_selected(Side::Left, vec![1..2].into());
             let mut taken = Taken::default();
             taken.insert(OperationId::for_tests(1), Path::new(taken_path), false);
             panels.set_taken(Arc::new(taken), [None; 2]);
             panels.set_taken(Arc::default(), [None; 2]);
             assert_eq!(names(&panels, Side::Left), ["..", "a.txt", "b.txt"]);
-            panels.set_selected(Side::Left, vec![2..3]);
+            panels.set_selected(Side::Left, vec![2..3].into());
             let changes = vec![FolderChange::Modified(file("b.txt", 2, 0))];
             let (place, _) = panels
                 .apply_changes(Side::Left, changes, None)
                 .expect("a folder shows");
-            assert_eq!(place.selected, [2..3], "taken: {taken_path}");
+            assert_eq!(place.selected.as_slice(), [2..3], "taken: {taken_path}");
         }
     }
 
-    /// Quick search goes to the first name that starts with the text,
-    /// refuses a character after which nothing matches, and `Up` and
-    /// `Down` step between the matches.
+    #[test]
+    fn late_quick_search_does_not_reopen_after_escape_or_steal_newer_focus() {
+        for escape in [false, true] {
+            let mut panels = showing(
+                r"C:\docs",
+                vec![file("report.pdf", 1, 0), file("tax.pdf", 1, 0)],
+            );
+            panels.find_quick(Side::Left, QuickAction::Character('r'));
+            let pending = panels.take_quick(Side::Left).unwrap();
+            if escape {
+                assert!(panels.close_quick(Side::Left));
+                panels.find_quick(Side::Left, QuickAction::Character('t'));
+            } else {
+                panels.set_focused(Side::Left, Some(2));
+            }
+            assert_eq!(panels.accept_quick(Side::Left, pending.run()), None);
+            assert_eq!(panels.panel(Side::Left).quick_text(), None);
+            if escape {
+                let current = panels.take_quick(Side::Left).unwrap();
+                assert_eq!(panels.accept_quick(Side::Left, current.run()), Some(2));
+                assert_eq!(panels.panel(Side::Left).quick_text(), Some("t"));
+            }
+        }
+    }
+
     #[test]
     fn quick_search_goes_to_the_first_match() {
+        fn quick(panels: &mut Panels, action: QuickAction) -> Option<u64> {
+            panels.find_quick(Side::Left, action);
+            let input = panels.take_quick(Side::Left).unwrap();
+            let row = panels.accept_quick(Side::Left, input.run());
+            if row.is_some() {
+                panels.set_focused(Side::Left, row);
+            }
+            row
+        }
         let mut panels = showing(
             r"C:\docs",
             vec![
@@ -3184,18 +3676,24 @@ pub(crate) mod tests {
             ],
         );
         // A first character that matches nothing opens no box.
-        assert_eq!(panels.quick_char(Side::Left, 'z'), None);
+        assert_eq!(quick(&mut panels, QuickAction::Character('z')), None);
         assert_eq!(panels.panel(Side::Left).quick_text(), None);
         // `..`, notes, Report-draft, report, tax.
-        assert_eq!(panels.quick_char(Side::Left, 'r'), Some(2));
-        assert_eq!(panels.quick_char(Side::Left, 'E'), Some(2));
-        assert_eq!(panels.quick_char(Side::Left, 'x'), None);
+        assert_eq!(quick(&mut panels, QuickAction::Character('r')), Some(2));
+        assert_eq!(quick(&mut panels, QuickAction::Character('E')), Some(2));
+        assert_eq!(quick(&mut panels, QuickAction::Character('x')), None);
         assert_eq!(panels.panel(Side::Left).quick_text(), Some("rE"));
-        assert_eq!(panels.quick_step(Side::Left, Some(2), true), Some(3));
-        assert_eq!(panels.quick_step(Side::Left, Some(3), true), None);
-        assert_eq!(panels.quick_step(Side::Left, Some(3), false), Some(2));
-        assert_eq!(panels.quick_back(Side::Left), Some(2));
-        assert_eq!(panels.quick_char(Side::Left, '.'), None);
+        assert_eq!(
+            quick(&mut panels, QuickAction::Step { down: true }),
+            Some(3)
+        );
+        assert_eq!(quick(&mut panels, QuickAction::Step { down: true }), None);
+        assert_eq!(
+            quick(&mut panels, QuickAction::Step { down: false }),
+            Some(2)
+        );
+        assert_eq!(quick(&mut panels, QuickAction::Back), Some(2));
+        assert_eq!(quick(&mut panels, QuickAction::Character('.')), None);
         assert!(panels.close_quick(Side::Left));
     }
 
@@ -3209,7 +3707,7 @@ pub(crate) mod tests {
             vec![file("a", 1, 0), file("c", 1, 0), file("d", 1, 0)],
         );
         // `..`, a, c, d: c focused, a and d selected.
-        panels.set_selected(Side::Left, vec![1..2, 3..4]);
+        panels.set_selected(Side::Left, vec![1..2, 3..4].into());
         let (place, again) = panels
             .apply_changes(
                 Side::Left,
@@ -3226,7 +3724,7 @@ pub(crate) mod tests {
             place,
             Place {
                 focused: Some(3),
-                selected: vec![1..2, 3..4],
+                selected: Arc::new(vec![1..2, 3..4]),
             }
         );
     }
@@ -3295,7 +3793,7 @@ pub(crate) mod tests {
         let mut panels = showing(r"C:\d", vec![folder("Photos"), file("a", 5, 0)]);
         give_sizes(&mut panels, &[(r"C:\d\Photos", 40)]);
         // `..`, Photos, a: both selected.
-        panels.set_selected(Side::Left, vec![1..3]);
+        panels.set_selected(Side::Left, vec![1..3].into());
         let (place, _) = panels
             .apply_changes(
                 Side::Left,
@@ -3323,10 +3821,10 @@ pub(crate) mod tests {
             place,
             Place {
                 focused: Some(1),
-                selected: vec![1..2],
+                selected: Arc::new(vec![1..2]),
             }
         );
-        panels.set_selected(Side::Left, Vec::new());
+        panels.set_selected(Side::Left, Vec::new().into());
         let size = panels.panel(Side::Left).counts().size;
         assert_eq!(size.map(|size| size.bytes), Some(46));
     }
@@ -3339,7 +3837,7 @@ pub(crate) mod tests {
     fn a_save_with_a_backup_keeps_one_selected() {
         let mut panels = showing(r"C:\f", vec![file("doc.txt", 1, 0)]);
         // `..`, doc.txt: doc.txt selected.
-        panels.set_selected(Side::Left, vec![1..2]);
+        panels.set_selected(Side::Left, vec![1..2].into());
         let changes = vec![
             FolderChange::Added(file("doc.tmp", 2, 0)),
             FolderChange::Renamed {
@@ -3355,7 +3853,7 @@ pub(crate) mod tests {
             .apply_changes(Side::Left, changes, None)
             .expect("a folder shows");
         assert_eq!(names(&panels, Side::Left), ["..", "doc.bak", "doc.txt"]);
-        assert_eq!(place.selected, [2..3]);
+        assert_eq!(place.selected.as_slice(), [2..3]);
     }
 
     /// A program can write a file under another spelling of its name, and
@@ -3379,7 +3877,7 @@ pub(crate) mod tests {
     fn gozler_s_own_rename_keeps_the_focus_and_the_selection() {
         let mut panels = showing(r"C:\f", vec![file("a.txt", 1, 0), file("b.txt", 1, 0)]);
         // `..`, a.txt, b.txt: a.txt selected and focused.
-        panels.set_selected(Side::Left, vec![1..2]);
+        panels.set_selected(Side::Left, vec![1..2].into());
         panels.await_name(
             Side::Left,
             "c.txt",
@@ -3397,12 +3895,15 @@ pub(crate) mod tests {
         assert!(place.selected.is_empty());
         let place = panels.show_awaited(Side::Left).expect("c.txt shows");
         assert_eq!(names(&panels, Side::Left), ["..", "b.txt", "c.txt"]);
-        assert_eq!((place.focused, place.selected), (Some(2), vec![2..3]));
+        assert_eq!(
+            (place.focused, place.selected),
+            (Some(2), Arc::new(vec![2..3]))
+        );
         assert_eq!(panels.show_awaited(Side::Left), None, "it is shown once");
 
         let id = OperationId::for_tests(2);
         panels.await_name(Side::Left, "d.txt", None, false, id);
-        panels.operations_ended(&[(id, delete(&[r"C:\other\x"]))]);
+        end(&mut panels, &[(id, delete(&[r"C:\other\x"]))]);
         let ask = panels.read_again(Side::Left).expect("a folder shows");
         complete(&mut panels, &ask, r"C:\f", vec![file("b.txt", 1, 0)]);
         let ask = panels.read_again(Side::Left).expect("a folder shows");
@@ -3436,7 +3937,7 @@ pub(crate) mod tests {
     fn a_rename_that_replaces_takes_the_focus_once_done() {
         let entries = vec![file("a.txt", 1, 0), file("b.txt", 1, 0)];
         let mut panels = showing(r"C:\f", entries.clone());
-        panels.set_selected(Side::Left, vec![1..2]);
+        panels.set_selected(Side::Left, vec![1..2].into());
         panels.await_name(
             Side::Left,
             "b.txt",
@@ -3451,12 +3952,15 @@ pub(crate) mod tests {
         };
         panels.apply_changes(Side::Left, vec![renamed], Some(1));
         let place = panels.show_awaited(Side::Left).expect("b.txt replaced");
-        assert_eq!((place.focused, place.selected), (Some(1), vec![1..2]));
+        assert_eq!(
+            (place.focused, place.selected),
+            (Some(1), Arc::new(vec![1..2]))
+        );
 
         let mut panels = showing(r"C:\f", entries.clone());
         let id = OperationId::for_tests(2);
         panels.await_name(Side::Left, "b.txt", Some("a.txt"), false, id);
-        panels.operations_ended(&[(id, delete(&[r"C:\other\x"]))]);
+        end(&mut panels, &[(id, delete(&[r"C:\other\x"]))]);
         let ask = panels.read_again(Side::Left).expect("a folder shows");
         complete(&mut panels, &ask, r"C:\f", entries);
         panels.apply_changes(Side::Left, vec![FolderChange::Gone(wide("a.txt"))], None);
@@ -3498,7 +4002,7 @@ pub(crate) mod tests {
         panels.set_taken(Arc::new(taken), [None; 2]);
         assert_eq!(names(&panels, Side::Left), ["..", "c.txt"]);
         let folded = |panels: &Panels| {
-            let hashes = panels.panel(Side::Left).taken_hashes.as_ref();
+            let hashes = panels.panel(Side::Left).rows.taken_hashes.as_ref();
             hashes
                 .expect("the folder holds taken entries")
                 .folder
@@ -3592,15 +4096,6 @@ pub(crate) mod tests {
         assert!(size_of::<Entry>() <= 48, "{} bytes", size_of::<Entry>());
     }
 
-    /// The list writes only the rows whose selection changed, so the
-    /// difference must keep every row of `a` that `b` lacks.
-    #[test]
-    fn a_difference_keeps_the_rows_the_other_lacks() {
-        assert_eq!(difference(&[0..10], &[2..3, 5..7]), [0..2, 3..5, 7..10]);
-        assert_eq!(difference(&[0..3, 5..8], &[2..6]), [0..2, 6..8]);
-        assert!(difference(&[1..2], &[0..4]).is_empty());
-    }
-
     /// A change notification during a move to another folder reads
     /// nothing, because reading the old folder again would cancel the move.
     #[test]
@@ -3671,12 +4166,68 @@ pub(crate) mod tests {
             ReadChange::Listed {
                 place: Place {
                     focused: Some(2),
-                    selected: Vec::new(),
+                    selected: Arc::default(),
                 },
                 again: false,
                 stale: false,
             }
         );
+    }
+
+    fn end(panels: &mut Panels, operations: &[(OperationId, Arc<Request>)]) -> Vec<PanelFollow> {
+        panels.operations_ended(
+            Arc::new(super::super::search_list::Ended {
+                operations: operations.to_vec(),
+                in_queue: HashSet::new(),
+                taken: Arc::clone(panels.taken()),
+            }),
+            |id| operations.iter().any(|(ended, _)| *ended == id),
+        )
+    }
+
+    #[test]
+    fn a_listing_after_a_received_end_cannot_revive_an_awaited_name() {
+        let mut panels = showing(r"C:\f", vec![file("a.txt", 1, 0)]);
+        let id = OperationId::for_tests(53);
+        panels.await_name(Side::Left, "created", None, false, id);
+        let receipt = panels.observe_operations();
+        let ask = panels.read_again(Side::Left).expect("a folder shows");
+        let event = ReadEvent::Listed {
+            generation: ask.generation,
+            folder: r"C:\f".to_owned(),
+            entries: vec![file("a.txt", 1, 0)],
+            focus: None,
+        };
+        assert_eq!(
+            panels.accept_read(Side::Left, event, None).change,
+            ReadChange::Pending
+        );
+        assert!(panels.take_calculation(Side::Left).is_none());
+        let ended = Arc::new(super::super::search_list::Ended {
+            operations: vec![(
+                id,
+                Arc::new(Request::NewFolder {
+                    path: PathBuf::from(r"C:\f\created"),
+                }),
+            )],
+            in_queue: HashSet::new(),
+            taken: Arc::clone(panels.taken()),
+        });
+        panels.accept_operations(receipt, Some(ended), |ended| ended == id);
+        let input = panels
+            .take_calculation(Side::Left)
+            .expect("the listing waits for the end evidence");
+        panels
+            .accept_calculation(Side::Left, input.run())
+            .expect("the post-end listing is current");
+        assert!(!panels.panel(Side::Left).is_calculating());
+        assert!(panels.panel(Side::Left).awaited.is_none());
+        panels.apply_changes(
+            Side::Left,
+            vec![FolderChange::Added(folder("created"))],
+            None,
+        );
+        assert_eq!(panels.show_awaited(Side::Left), None);
     }
 
     /// gozlerd's sizes match the rows by name without regard to case; a
@@ -3704,11 +4255,6 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// A panel sorted by size gets gozlerd's sizes only with the order a
-    /// thread sorted them in, because a change that comes first inserts by
-    /// the order the entries are in; an order its folders no longer match,
-    /// or one sorted for another folder, is refused, and the entries keep
-    /// theirs.
     #[test]
     fn sizes_by_size_come_with_their_order() {
         let entries = || vec![folder("a"), folder("b"), file("f", 1, 0)];
@@ -3719,35 +4265,17 @@ pub(crate) mod tests {
         };
         let ask = panels.sort(Side::Left, sort).expect("a folder shows");
         complete(&mut panels, &ask, r"C:\d", entries());
+        panels.set_focused(Side::Left, Some(1));
         give_sizes(&mut panels, &[(r"C:\d\a", 10), (r"C:\d\b", 90)]);
-        assert_eq!(folder_sizes(&panels), [None, None, None]);
-        let job = panels.take_folder_sort(Side::Left).expect("sizes wait");
-        let place = panels.accept_folder_order(Side::Left, job.sort(), Some(1));
-        assert_eq!(place.expect("the folders match").focused, Some(2));
+        let update = panels
+            .take_update(Side::Left)
+            .expect("sizes and order publish together");
+        assert_eq!(update.place.focused, Some(2));
         assert_eq!(names(&panels, Side::Left), ["..", "b", "a", "f"]);
         assert_eq!(folder_sizes(&panels), [Some(90), Some(10), None]);
 
-        give_sizes(&mut panels, &[(r"C:\d\a", 95), (r"C:\d\b", 90)]);
-        let sorted = panels
-            .take_folder_sort(Side::Left)
-            .expect("sizes wait")
-            .sort();
-        let changes = vec![FolderChange::Added(folder("c"))];
-        panels.apply_changes(Side::Left, changes, None);
-        assert_eq!(panels.accept_folder_order(Side::Left, sorted, None), None);
+        panels.apply_changes(Side::Left, vec![FolderChange::Added(folder("c"))], None);
         assert_eq!(names(&panels, Side::Left), ["..", "b", "a", "c", "f"]);
-
-        // Another folder with the same names refuses them too.
-        let mut panels = showing(r"C:\d", entries());
-        let ask = panels.sort(Side::Left, sort).expect("a folder shows");
-        complete(&mut panels, &ask, r"C:\d", entries());
-        give_sizes(&mut panels, &[(r"C:\d\a", 10), (r"C:\d\b", 90)]);
-        let sorted = panels
-            .take_folder_sort(Side::Left)
-            .expect("sizes wait")
-            .sort();
-        list(&mut panels, r"C:\e", entries());
-        assert_eq!(panels.accept_folder_order(Side::Left, sorted, None), None);
     }
 
     /// Reading the shown folder again keeps the folder sizes the panel
@@ -3763,7 +4291,7 @@ pub(crate) mod tests {
         // Old, Photos.
         assert_eq!(folder_sizes(&panels), [None, Some(40)]);
         let ask = panels.go(Side::Left, r"C:\e".to_owned(), None);
-        assert!(ask.sizes.is_empty());
+        assert!(ask.sizes.values().is_empty());
     }
 
     /// Asks for the left panel's folder sizes, and answers with gozlerd's
@@ -3846,7 +4374,7 @@ pub(crate) mod tests {
                 }),
             }
         );
-        panels.set_selected(Side::Left, vec![2..4]);
+        panels.set_selected(Side::Left, vec![2..4].into());
         assert_eq!(
             panels.panel(Side::Left).counts(),
             Counts {
@@ -3889,10 +4417,8 @@ pub(crate) mod tests {
         let mut panels = Panels::new(&SavedPanels::default());
         list(&mut panels, r"C:\a", Vec::new());
         panels.enter_search(Side::Left);
-        panels.set_selected(Side::Left, vec![0..2]);
-        assert_eq!(panels.leave_on_escape(Side::Left), None);
-        panels.set_selected(Side::Left, Vec::new());
-        assert!(panels.leave_on_escape(Side::Left).is_some());
+        assert_eq!(panels.leave_on_escape(Side::Left, true), None);
+        assert!(panels.leave_on_escape(Side::Left, false).is_some());
     }
 
     /// T7: a drive's root ends in a separator, which shifts the count of

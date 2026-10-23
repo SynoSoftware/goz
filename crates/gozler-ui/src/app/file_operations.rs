@@ -1,22 +1,22 @@
-//! Owns the engine Queue and the shared inspector's native transfer controls.
+//! Owns the UI's Queue client and the shared inspector's native transfer controls.
 //! Engine wakes reach the main window; only that window accepts snapshots and
 //! runs lifecycle decisions. The child content has no independent placement,
 //! activation or message loop. Reports read immutable outcomes on demand.
 
+use super::work::{CheckPurpose, QueueAccepted, QueueClient};
 use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
     self, Bar, CARD_ICON, Detail, Failure, Layout, Metrics, QueueAction, ROW_GLYPHS, ROW_ICON, Row,
-    RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
+    RowButtons, RowLine, RowPhase, Rows, Taskbar, View, icon_index,
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::layout::{Px, Rect, button_content, button_room};
 use crate::core::operations::{QueueStep, Source, SourceStep};
 use crate::core::text::Strings;
+use crate::core::work::Retirement;
 use crate::win::clipboard::ClipboardFiles;
-use crate::win::controls::{
-    Button, GlyphLabel, Label, ListColumn, ListView, ProgressBar, ReportList, Tooltip,
-};
+use crate::win::controls::{Button, GlyphLabel, Label, ListColumn, ListView, ProgressBar, Tooltip};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
 use crate::win::drop_target::DropSource;
 use crate::win::file_operations::{
@@ -26,14 +26,12 @@ use crate::win::file_operations::{
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::menu::Menu;
 use crate::win::notify::{Command, ListNotify};
-use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
-use gozler_fileops::{Operation, OperationId, OrderRefused, Queue, Request, SpeedSettings, Taken};
+use gozler_fileops::{Operation, OperationId, OrderRefused, Request, SpeedSettings, Taken};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
-use std::mem::ManuallyDrop;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use windows::Win32::Foundation::LRESULT;
@@ -53,13 +51,7 @@ const ESCAPE: u16 = 2;
 /// The queue and the transfer controls in the shared inspector.
 pub(super) struct FileOperations {
     owner: Hwnd,
-    /// Never dropped, because dropping it waits for every Windows copy, and
-    /// a copy that Windows stops deletes its file, while the process ending
-    /// leaves that file for Continue.
-    queue: Rc<ManuallyDrop<Queue>>,
-    /// Wakes the owner from the engine's threads, which outlive it, until
-    /// [`FileOperations::close`].
-    waker: OpenWaker,
+    queue: QueueClient,
     strings: RefCell<Strings>,
     /// The transfer content, made the first time it shows; `None`
     /// inside when it could not open, and the operations then show only in
@@ -179,10 +171,19 @@ struct Drag {
     gap: Option<usize>,
 }
 
+struct TileApply {
+    view: Arc<View>,
+    next: usize,
+    revision: u64,
+    fit: u64,
+    apply_selection: bool,
+    again: bool,
+}
+
 struct Pane {
     actions: Rc<RefCell<Vec<PaneAction>>>,
     hwnd: Cell<Option<Hwnd>>,
-    queue: Rc<ManuallyDrop<Queue>>,
+    queue: QueueClient,
     owner: Hwnd,
     strings: RefCell<Strings>,
     controls: OnceCell<Controls>,
@@ -190,13 +191,21 @@ struct Pane {
     layout: Cell<Layout>,
     metrics: Cell<Option<Metrics>>,
     /// What the window shows now.
-    view: RefCell<Option<View>>,
+    view: RefCell<Option<Arc<View>>>,
+    retired: RefCell<Retirement>,
+    tiles: RefCell<Option<TileApply>>,
+    tile_revision: Cell<u64>,
+    tile_fit: Cell<u64>,
+    tile_posted: Cell<bool>,
+    applying_tiles: Cell<bool>,
+    tiles_blocked: Cell<bool>,
     flipped: Cell<bool>,
     maximized: Cell<bool>,
     drag: Cell<Option<Drag>>,
     /// The row that Move up or Move down moved, which the next view keeps
     /// in sight.
     moved: Cell<Option<OperationId>>,
+    order_menu: Cell<Option<(OperationId, Menu)>>,
 }
 
 /// Where the files that an operation copies or moves came from.
@@ -218,23 +227,17 @@ impl FilesSource {
 }
 
 impl FileOperations {
-    /// Opens the queue, whose saved operations are in `saved`, and has
-    /// `owner` read them at once, so interrupted ones show. The window opens
-    /// the first time it shows; `error_log` gets the reason when it cannot.
+    /// Adopts a fully restored queue. Transfer controls stay lazy; `error_log`
+    /// gets the reason when they cannot open.
     pub(super) fn new(
         owner: Hwnd,
-        saved: &Path,
+        queue: QueueClient,
         strings: Strings,
         error_log: PathBuf,
     ) -> FileOperations {
-        let waker = OpenWaker::posting(owner, QUEUE_CHANGED);
-        let wakes = waker.clone();
-        let queue = Queue::new(saved, move || wakes.deliver(|| true));
-        owner.post(QUEUE_CHANGED);
         FileOperations {
             owner,
-            queue: Rc::new(ManuallyDrop::new(queue)),
-            waker,
+            queue,
             strings: RefCell::new(strings),
             window: OnceCell::new(),
             error_log,
@@ -252,16 +255,61 @@ impl FileOperations {
     }
 
     /// Every operation in the queue now.
-    pub(super) fn snapshot(&self) -> Vec<Operation> {
-        self.queue.operations()
+    pub(super) fn snapshot(&self) -> Arc<[Operation]> {
+        self.queue.snapshot()
+    }
+
+    pub(super) fn exit_counts(&self) -> file_operations::ExitCounts {
+        self.queue.exit_counts()
     }
 
     pub(super) fn operation(&self, id: OperationId) -> Option<Operation> {
         self.queue.operation(id)
     }
 
-    pub(super) fn synchronize(&self, id: OperationId) -> bool {
-        self.queue.synchronize(id).is_ok()
+    pub(super) fn synchronize(&self, id: OperationId) {
+        self.queue.synchronize(id);
+    }
+
+    pub(super) fn take_synchronized(&self, id: OperationId) -> Option<bool> {
+        self.queue.take_synchronized(id)
+    }
+
+    pub(super) fn is_pending(&self, id: OperationId) -> bool {
+        self.queue.is_pending(id)
+    }
+
+    pub(super) fn request_refresh(&self) {
+        self.queue.refresh();
+    }
+
+    pub(super) fn take_retired(&self) -> Retirement {
+        let mut retired = self.queue.take_retired();
+        if let Some(window) = self.made() {
+            retired.append(std::mem::take(&mut *window.retired.borrow_mut()));
+        }
+        retired
+    }
+
+    pub(super) fn update(&self) -> Vec<QueueAccepted> {
+        let accepted = self.queue.update();
+        for reply in &accepted {
+            if let QueueAccepted::Moved(id, true) = reply
+                && let Some(window) = self.made()
+            {
+                window.moved.set(Some(*id));
+            }
+        }
+        if let Some(window) = self.made()
+            && window.drag.get().is_some()
+            && let Some(point) = window.hwnd.get().and_then(Hwnd::cursor_point)
+        {
+            window.drag_to(point);
+        }
+        if let Some(window) = self.made() {
+            window.refresh_order_menu();
+        }
+        accepted
     }
 
     pub(super) fn release_comparison(&self, comparison: Arc<gozler_fileops::Comparison>) {
@@ -293,23 +341,21 @@ impl FileOperations {
         self.queue.accept(request, settings)
     }
 
-    pub(super) fn resolve(
-        &self,
-        id: OperationId,
-        request: Request,
-        source: Option<FilesSource>,
-    ) -> bool {
+    pub(super) fn resolve(&self, id: OperationId, request: Request, source: Option<FilesSource>) {
         if let Some(source) = source {
             self.sources.borrow_mut().insert(id, source);
         }
-        let accepted = self.queue.resolve(id, request);
+        self.queue.resolve(id, request);
+    }
+
+    pub(super) fn resolved(&self, id: OperationId, accepted: bool) -> Option<Source> {
         if !accepted {
             let source = self.sources.borrow_mut().remove(&id);
             if let Some(FilesSource::Drop(source)) = source {
                 source.end(false);
             }
         }
-        accepted
+        self.sources.borrow().get(&id).map(FilesSource::kind)
     }
 
     pub(super) fn cancel_all(&self) {
@@ -324,19 +370,10 @@ impl FileOperations {
         self.queue.fail_intake(id);
     }
 
-    /// Runs `step` on the queue. Returns whether the queue accepted it,
-    /// which only a submit can refuse.
-    pub(super) fn run(&self, step: QueueStep) -> bool {
+    pub(super) fn run(&self, step: QueueStep) {
         match step {
-            QueueStep::Submit { id } => self.queue.submit(id).is_ok(),
-            QueueStep::Cancel(id) => {
-                self.queue.cancel(id);
-                true
-            }
-            QueueStep::Remove(id) => {
-                self.queue.remove(id);
-                true
-            }
+            QueueStep::Submit { id } => self.queue.submit(id),
+            QueueStep::Remove(id) => self.queue.remove(id),
         }
     }
 
@@ -369,10 +406,10 @@ impl FileOperations {
             QueueAction::Resume => self.queue.set_paused(id, false),
             QueueAction::Cancel => self.queue.cancel(id),
             QueueAction::Continue => {
-                let _ = self.queue.resume(id);
+                self.queue.resume(id);
             }
             QueueAction::Dismiss => {
-                let _ = self.queue.dismiss(id);
+                self.queue.dismiss(id);
             }
             QueueAction::MoveUp | QueueAction::MoveDown => {
                 if let Some(window) = self.made() {
@@ -380,10 +417,7 @@ impl FileOperations {
                         file_operations::move_step(&view.rows, id, action == QueueAction::MoveUp)
                     });
                     if let Some(before) = before {
-                        let refused = self.queue.move_waiting(id, before).err();
-                        if refused.is_none() {
-                            window.moved.set(Some(id));
-                        }
+                        self.queue.move_waiting(id, before);
                     }
                 }
             }
@@ -392,11 +426,11 @@ impl FileOperations {
     }
 
     pub(super) fn move_before(&self, id: OperationId, before: Option<OperationId>) {
-        let _ = self.queue.move_waiting(id, before);
+        self.queue.move_waiting(id, before);
     }
 
     /// Updates explicitly opened content without activating the main window.
-    pub(super) fn show(&self, view: View) {
+    pub(super) fn show(&self, view: Arc<View>) {
         let Some(window) = self.window() else {
             return;
         };
@@ -444,7 +478,10 @@ impl FileOperations {
         if target != window.controls().list.hwnd() {
             return false;
         }
-        let Some(id) = window.selected() else {
+        if window.tiles_blocked.get() {
+            return true;
+        }
+        let Some((id, buttons)) = window.selected_buttons() else {
             return false;
         };
         if key.alt && !key.ctrl && !key.shift && matches!(key.key, Key::Up | Key::Down) {
@@ -462,9 +499,7 @@ impl FileOperations {
             && !key.ctrl
             && !key.alt
             && !key.shift
-            && window
-                .selected_buttons()
-                .is_some_and(|(_, b)| b.run == Some(QueueAction::Report))
+            && buttons.run == Some(QueueAction::Report)
         {
             window.act(id, QueueAction::Report);
             return true;
@@ -490,7 +525,7 @@ impl FileOperations {
     }
 
     /// Shows `snapshot` in the window, if it was made.
-    pub(super) fn refresh(&self, view: View) {
+    pub(super) fn refresh(&self, view: Arc<View>) {
         if let Some(window) = self.made()
             && let Some(hwnd) = window.hwnd.get()
         {
@@ -529,7 +564,7 @@ impl FileOperations {
         // The labels and Hide are as wide as their new words.
         if let Some(hwnd) = window.hwnd.get() {
             window.layout(hwnd);
-            window.show_tiles(false);
+            window.show_tiles(false, true);
             let report = window.controls().report;
             report.redraw_rows(0..report.count());
         }
@@ -549,14 +584,25 @@ impl FileOperations {
     /// operation stops so that Continue finishes it at the next start, and
     /// the window goes. The process then ends without dropping the queue.
     pub(super) fn close(&self) -> std::sync::mpsc::Receiver<std::io::Result<()>> {
-        self.waker.close();
         let saved = self.queue.close();
         // The closed queue ends no more operations, so each source hears
         // that its operation failed.
         let sources = std::mem::take(&mut *self.sources.borrow_mut());
         drop(sources);
-        if let Some(hwnd) = self.made().and_then(|window| window.hwnd.take()) {
-            hwnd.destroy();
+        if let Some(window) = self.made() {
+            let old = window.view.take();
+            window
+                .retired
+                .borrow_mut()
+                .push(old, crate::core::work::INLINE_ITEMS + 1);
+            window
+                .retired
+                .borrow_mut()
+                .push(window.tiles.take(), crate::core::work::INLINE_ITEMS + 1);
+            window.tile_revision.set(window.tile_revision.get() + 1);
+            if let Some(hwnd) = window.hwnd.take() {
+                hwnd.destroy();
+            }
         }
         saved
     }
@@ -567,7 +613,7 @@ impl FileOperations {
             let strings = self.strings.borrow().clone();
             match Pane::open(
                 self.owner,
-                Rc::clone(&self.queue),
+                self.queue.clone(),
                 strings,
                 Rc::clone(&self.actions),
             ) {
@@ -592,24 +638,26 @@ impl FileOperations {
 
 /// Shows what failed in an ended operation: the failure dialog, or a
 /// message box when nothing is listed. It runs its own message loop.
-pub(super) fn show_failure(owner: Hwnd, strings: &Strings, failure: Failure) {
+pub(super) fn show_failure(owner: Hwnd, strings: &Strings, failure: Failure) -> Failure {
     if failure.rows.is_empty() {
         // A refusal, or a full disk before any entry failed, lists
         // nothing, so the message stands alone.
         let text = format!("{}\n\n{}", failure.instruction, failure.body);
         dialog::error_box(Some(owner), &text, &failure.title);
-        return;
+        return failure;
     }
     let mut captions = DialogCaptions::new(DialogId::FileOperationsFailed, strings);
     captions.title.clone_from(&failure.title);
     let dialog = FailureDialog {
         failure,
+        list: OnceCell::new(),
         columns: [
             strings.text("file_operations.column_item").to_owned(),
             strings.text("file_operations.column_reason").to_owned(),
         ],
     };
     let _ = dialog::run_modal(owner, DialogId::FileOperationsFailed, &captions, &dialog);
+    dialog.failure
 }
 
 /// `dip` at the DPI of `hwnd`.
@@ -630,7 +678,7 @@ impl Pane {
     /// Creates hidden transfer content within the owner's inspector.
     fn open(
         owner: Hwnd,
-        queue: Rc<ManuallyDrop<Queue>>,
+        queue: QueueClient,
         strings: Strings,
         actions: Rc<RefCell<Vec<PaneAction>>>,
     ) -> windows::core::Result<Rc<Pane>> {
@@ -650,10 +698,18 @@ impl Pane {
             layout: Cell::new(Layout::default()),
             metrics: Cell::new(None),
             view: RefCell::new(None),
+            retired: RefCell::default(),
+            tiles: RefCell::new(None),
+            tile_revision: Cell::new(0),
+            tile_fit: Cell::new(0),
+            tile_posted: Cell::new(false),
+            applying_tiles: Cell::new(false),
+            tiles_blocked: Cell::new(false),
             flipped: Cell::new(true),
             maximized: Cell::new(false),
             drag: Cell::new(None),
             moved: Cell::new(None),
+            order_menu: Cell::new(None),
         });
         let hwnd = window::create_child_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
         window.hwnd.set(Some(hwnd));
@@ -777,7 +833,7 @@ impl Pane {
         self.apply_glyphs();
         // The controls hold the old fonts until they get the new ones.
         self.fonts.replace(Some(Fonts { ui, title }));
-        self.show_tiles(false);
+        self.show_tiles(false, true);
     }
 
     fn apply_glyphs(&self) {
@@ -1055,7 +1111,7 @@ impl Pane {
         }
         drop(view);
         if old_layout.list != layout.list {
-            self.show_tiles(false);
+            self.show_tiles(false, true);
         }
     }
 
@@ -1078,10 +1134,13 @@ impl Pane {
         }
     }
 
-    fn show_view(&self, hwnd: Hwnd, view: View) {
+    fn show_view(&self, hwnd: Hwnd, view: Arc<View>) {
         let c = self.controls();
-        let strings = self.strings.borrow();
-        let previous = self.view.borrow();
+        let strings = self.strings.borrow().clone();
+        let previous = self.view.borrow().clone();
+        if previous.as_ref().is_some_and(|old| Arc::ptr_eq(old, &view)) {
+            return;
+        }
         let old_card = previous.as_ref().and_then(|v| v.card.as_ref());
         let old_report = previous.as_ref().and_then(|v| v.report.as_ref());
         show_text(c.count.hwnd(), &view.queue);
@@ -1184,19 +1243,29 @@ impl Pane {
             || old_report.is_some() != view.report.is_some();
         let apply_selection = previous.as_ref().is_none_or(|old| {
             old.card.as_ref().map(|c| c.id) != view.card.as_ref().map(|c| c.id)
-                || !old
-                    .rows
-                    .iter()
-                    .map(|row| row.id)
-                    .eq(view.rows.iter().map(|row| row.id))
+                || !old.rows.same_order(&view.rows)
         });
+        let identity_changed = previous
+            .as_ref()
+            .is_none_or(|old| !old.rows.same_order(&view.rows));
         drop(previous);
         drop(strings);
-        let moved = self
-            .moved
-            .take()
-            .and_then(|id| view.rows.iter().position(|r| r.id == id));
-        self.view.replace(Some(view));
+        if identity_changed {
+            self.tiles_blocked.set(true);
+            if self.drag.get().is_some() {
+                window::release_mouse();
+            }
+            self.end_drag();
+            c.list.hwnd().set_enabled(false);
+        }
+        let old = self.view.replace(Some(view));
+        self.retired
+            .borrow_mut()
+            .push(old, crate::core::work::INLINE_ITEMS + 1);
+        if let Some(id) = self.selected() {
+            let _ = self.can_step(id, true);
+            let _ = self.can_step(id, false);
+        }
         if c.report.count() != report_count {
             c.report.set_count(report_count);
         } else if report_changed {
@@ -1206,65 +1275,170 @@ impl Pane {
             self.show_state_glyphs();
         }
         self.layout(hwnd);
-        self.show_tiles(apply_selection);
-        if let Some(index) = moved {
-            c.list.ensure_visible(index);
-        }
+        self.show_tiles(apply_selection, false);
     }
 
     /// Shows the view's rows in the list, with the selected row selected.
     /// Each title fits its tile's first line, its paths shortened in the
     /// middle, so the second line keeps the row's state; the row's tooltip
     /// gives the whole title.
-    fn show_tiles(&self, apply_selection: bool) {
-        let c = self.controls();
-        let view = self.view.borrow();
-        let rows: &[Row] = view.as_ref().map_or(&[], |view| &view.rows);
-        let selected = self
-            .selected()
-            .and_then(|id| rows.iter().position(|row| row.id == id));
-        let strings = self.strings.borrow();
-        let fonts = self.fonts.borrow();
-        let meter = fonts.as_ref().map(|fonts| TextMeter::new(&fonts.ui));
-        let show = |width: Option<Px>, apply_selection| {
-            let fitted = |line: &RowLine| match (&meter, width) {
-                (Some(meter), Some(width)) => line.fitted(
-                    &strings,
-                    width,
-                    &|text| meter.plain_width(text),
-                    &|path, width| meter.compact_path(path, width),
-                ),
-                _ => line.whole(&strings),
-            };
-            let lines: Vec<(String, String)> = rows
-                .iter()
-                .map(|row| (fitted(&row.title), fitted(&row.detail)))
-                .collect();
-            let tiles: Vec<Tile> = rows
-                .iter()
-                .zip(&lines)
-                .map(|(row, (title, detail))| Tile {
-                    icon: icon_index(row.glyph),
-                    title,
-                    detail,
-                })
-                .collect();
-            c.list.set_tiles(&tiles, selected, apply_selection);
+    fn show_tiles(&self, apply_selection: bool, refit: bool) {
+        let Some(hwnd) = self.hwnd.get() else {
+            return;
         };
-        // The list measures a tile once it holds one.
-        let width = c.list.text_width().or_else(|| {
-            show(None, false);
-            c.list.text_width()
-        });
-        show(width, apply_selection);
+        let Some(view) = self.view.borrow().clone() else {
+            return;
+        };
+        if refit {
+            self.tile_fit.set(self.tile_fit.get() + 1);
+        }
+        let pending = self.tiles.take();
+        let next = match pending {
+            Some(mut pending)
+                if pending.fit == self.tile_fit.get()
+                    && pending.view.rows.same_order(&view.rows) =>
+            {
+                pending.again |= !Arc::ptr_eq(&pending.view, &view);
+                pending.apply_selection |= apply_selection;
+                pending
+            }
+            pending => {
+                self.retired
+                    .borrow_mut()
+                    .push(pending, crate::core::work::INLINE_ITEMS + 1);
+                let revision = self.tile_revision.get() + 1;
+                self.tile_revision.set(revision);
+                TileApply {
+                    view,
+                    next: 0,
+                    revision,
+                    fit: self.tile_fit.get(),
+                    apply_selection,
+                    again: false,
+                }
+            }
+        };
+        self.tiles.replace(Some(next));
+        if !self.tile_posted.replace(true) {
+            hwnd.post(window::DEFERRED);
+        }
+    }
+
+    fn apply_tiles(&self, hwnd: Hwnd) {
+        self.tile_posted.set(false);
+        if self.applying_tiles.replace(true) {
+            return;
+        }
+        let pending = self.tiles.take();
+        if let Some(mut pending) = pending {
+            let (revision, fit) = (pending.revision, pending.fit);
+            let current = || {
+                self.hwnd.get() == Some(hwnd)
+                    && self.tile_revision.get() == revision
+                    && self.tile_fit.get() == fit
+            };
+            let list = self.controls().list;
+            let strings = self.strings.borrow().clone();
+            let mut remaining = crate::core::work::INLINE_ITEMS;
+            while remaining > 0 && current() && list.count() > pending.view.rows.len() {
+                list.remove_last();
+                remaining -= 1;
+            }
+            while remaining > 0 && current() && pending.next < pending.view.rows.len() {
+                let row = &pending.view.rows[pending.next];
+                let width = list.text_width();
+                let (title, detail) = {
+                    let fonts = self.fonts.borrow();
+                    let meter = fonts.as_ref().map(|fonts| TextMeter::new(&fonts.ui));
+                    let fitted = |line: &RowLine| match (&meter, width) {
+                        (Some(meter), Some(width)) => line.fitted(
+                            &strings,
+                            width,
+                            &|text| meter.plain_width(text),
+                            &|path, width| meter.compact_path(path, width),
+                        ),
+                        _ => line.whole(&strings),
+                    };
+                    (fitted(&row.title), fitted(&row.detail))
+                };
+                if !list.set_tile(
+                    pending.next,
+                    &Tile {
+                        icon: icon_index(row.glyph),
+                        title: &title,
+                        detail: &detail,
+                    },
+                    &current,
+                ) {
+                    break;
+                }
+                // The first item supplies the native text width; fit it before advancing.
+                if width.is_some() || list.text_width().is_none() {
+                    pending.next += 1;
+                }
+                remaining -= 1;
+            }
+            if current()
+                && list.count() == pending.view.rows.len()
+                && pending.next == pending.view.rows.len()
+            {
+                let latest = self.view.borrow().clone();
+                if let Some(latest) = latest.filter(|view| view.rows.same_order(&pending.view.rows))
+                {
+                    if pending.apply_selection {
+                        let selected = latest
+                            .card
+                            .as_ref()
+                            .and_then(|card| latest.rows.position(card.id));
+                        list.select(selected, &current);
+                    }
+                    if current() {
+                        self.tiles_blocked.set(false);
+                        list.hwnd().set_enabled(true);
+                    }
+                    if current()
+                        && let Some(index) =
+                            self.moved.take().and_then(|id| latest.rows.position(id))
+                    {
+                        list.ensure_visible(index);
+                    }
+                }
+                let again = pending.again;
+                self.retired
+                    .borrow_mut()
+                    .push(pending, crate::core::work::INLINE_ITEMS + 1);
+                if again && self.hwnd.get().is_some() {
+                    self.show_tiles(false, false);
+                }
+            } else if current() {
+                self.tiles.replace(Some(pending));
+                if !self.tile_posted.replace(true) {
+                    hwnd.post(window::DEFERRED);
+                }
+            } else {
+                self.retired
+                    .borrow_mut()
+                    .push(pending, crate::core::work::INLINE_ITEMS + 1);
+            }
+        }
+        self.applying_tiles.set(false);
+        if self.hwnd.get() == Some(hwnd) {
+            if self.tiles.borrow().is_some() && !self.tile_posted.replace(true) {
+                hwnd.post(window::DEFERRED);
+            }
+            self.owner.post(QUEUE_CHANGED);
+        }
     }
 
     /// The selected row, as the window shows it.
-    fn selected_row<T>(&self, use_row: impl FnOnce(&Row, &[Row]) -> T) -> Option<T> {
+    fn selected_row<T>(&self, use_row: impl FnOnce(&Row, &Rows) -> T) -> Option<T> {
+        if self.tiles_blocked.get() || self.applying_tiles.get() {
+            return None;
+        }
+        let index = self.controls().list.selected()?;
         let view = self.view.borrow();
         let rows = &view.as_ref()?.rows;
-        let id = self.selected()?;
-        let row = rows.iter().find(|row| row.id == id)?;
+        let row = rows.get(index)?;
         Some(use_row(row, rows))
     }
 
@@ -1275,16 +1449,34 @@ impl Pane {
             .as_ref()
             .and_then(|view| file_operations::move_step(&view.rows, id, up));
         match step {
-            Some(before) => self.queue.check_move(id, before).map(|()| true),
+            Some(before) => self
+                .queue
+                .check_move(
+                    if up {
+                        CheckPurpose::Up
+                    } else {
+                        CheckPurpose::Down
+                    },
+                    id,
+                    before,
+                )
+                .map_or(Ok(false), |answer| answer.map(|()| true)),
             None => Ok(false),
         }
     }
 
-    /// The selected row, and what the queue's header buttons do to it.
+    /// Commands from the list act on its current highlight, even while the
+    /// follower is still preparing that row's card.
     fn selected_buttons(&self) -> Option<(OperationId, RowButtons)> {
         self.selected_row(|row, _| (row.id, row.phase))
             .filter(|(_, phase)| *phase != RowPhase::Cancelling)
             .map(|(id, phase)| (id, phase.buttons()))
+    }
+
+    fn card_buttons(&self) -> Option<(OperationId, RowButtons)> {
+        let view = self.view.borrow();
+        let card = view.as_ref()?.card.as_ref()?;
+        (card.phase != RowPhase::Cancelling).then(|| (card.id, card.phase.buttons()))
     }
 
     fn act(&self, id: OperationId, action: QueueAction) {
@@ -1301,7 +1493,7 @@ impl Pane {
             self.post(PaneAction::Maximize);
         } else if c.flip.clicked(event) {
             self.post(PaneAction::Flip);
-        } else if let Some((id, buttons)) = self.selected_buttons() {
+        } else if let Some((id, buttons)) = self.card_buttons() {
             let report = self
                 .view
                 .borrow()
@@ -1327,6 +1519,9 @@ impl Pane {
     }
 
     fn show_menu(&self, hwnd: Hwnd, point: Option<(i32, i32)>) {
+        if self.tiles_blocked.get() {
+            return;
+        }
         let list = self.controls().list;
         let index = match point {
             Some(point) => list.tile_at(point),
@@ -1362,13 +1557,30 @@ impl Pane {
             ),
         ];
         // The menu runs its own message loop, so nothing is borrowed here.
-        let chosen = Menu::track_popup(hwnd, &items, point, &states, None);
+        let chosen = Menu::track_popup_live(hwnd, &items, point, &states, None, |menu| {
+            self.order_menu.set(menu.map(|menu| (id, menu)));
+        });
         if let Some(action) = chosen.and_then(QueueAction::from_id) {
             self.act(id, action);
         }
     }
 
+    fn refresh_order_menu(&self) {
+        if let Some((id, menu)) = self.order_menu.get() {
+            for (action, up) in [(QueueAction::MoveUp, true), (QueueAction::MoveDown, false)] {
+                menu.set_state(
+                    action.id(),
+                    matches!(self.can_step(id, up), Ok(true)),
+                    false,
+                );
+            }
+        }
+    }
+
     fn begin_drag(&self, hwnd: Hwnd) {
+        if self.tiles_blocked.get() {
+            return;
+        }
         let Some((id, phase)) = self.selected_row(|row, _| (row.id, row.phase)) else {
             return;
         };
@@ -1411,10 +1623,13 @@ impl Pane {
         });
         let (gap, refused) = match checked {
             Some((_, _, true)) | None => (None, None),
-            Some((gap, before, false)) => match self.queue.check_move(drag.id, before) {
-                Ok(()) => (Some(gap), None),
-                Err(refused) => (None, Some(refused)),
-            },
+            Some((gap, before, false)) => {
+                match self.queue.check_move(CheckPurpose::Drag, drag.id, before) {
+                    Some(Ok(())) => (Some(gap), None),
+                    Some(Err(refused)) => (None, Some(refused)),
+                    None => (None, None),
+                }
+            }
         };
         if gap != drag.gap {
             list.set_insert_mark(gap);
@@ -1453,6 +1668,7 @@ impl Pane {
 struct FailureDialog {
     failure: Failure,
     columns: [String; 2],
+    list: OnceCell<ListView>,
 }
 
 impl DialogProc for FailureDialog {
@@ -1468,12 +1684,23 @@ impl DialogProc for FailureDialog {
         if let Some(body) = dialog::item(dialog, ControlId::FailedBody.id()) {
             body.set_text(&self.failure.body);
         }
-        if let Some(list) = ReportList::of_dialog(dialog, ControlId::FailedList.id()) {
-            let [item, reason] = &self.columns;
-            list.set_columns(&[(item, 60, false), (reason, 40, false)]);
-            list.set_rows(&self.failure.rows, None);
-            list.fit_columns(&[item, reason], &self.failure.rows);
-            list.show_paths(0, &self.failure.rows);
+        if let Some(list) = ListView::of_dialog(dialog, ControlId::FailedList.id()) {
+            let width = list.hwnd().client_size().width;
+            let path = Px(width.0 * 3 / 5);
+            for (index, (header, width)) in
+                self.columns.iter().zip([path, width - path]).enumerate()
+            {
+                list.insert_column(
+                    index,
+                    &ListColumn {
+                        header,
+                        width,
+                        right_aligned: false,
+                    },
+                );
+            }
+            let _ = self.list.set(list);
+            list.set_count(self.failure.rows.len() as u64);
             list.show_info_tips();
         }
         Opened {
@@ -1484,6 +1711,31 @@ impl DialogProc for FailureDialog {
 
     fn message(&self, _dialog: Hwnd, _message: DialogMessage) -> bool {
         false
+    }
+
+    fn list_cell(&self, id: u16, row: u64, column: usize) -> Option<String> {
+        if id != ControlId::FailedList.id() {
+            return None;
+        }
+        let text = self
+            .failure
+            .rows
+            .get(usize::try_from(row).ok()?)?
+            .get(column)?;
+        if column == 0
+            && let Some(list) = self.list.get()
+            && let Ok(font) = Font::of(list.hwnd())
+        {
+            let room = list.column_width(0)
+                - crate::core::layout::column_sizing::cell_width(
+                    Px(0),
+                    Px(0),
+                    true,
+                    list.hwnd().dpi(),
+                );
+            return Some(TextMeter::new(&font).compact_path(text, room));
+        }
+        Some(text.clone())
     }
 
     /// The entry's whole path and reason, which the row can show cut off.
@@ -1503,6 +1755,10 @@ impl DialogProc for FailureDialog {
 impl WindowProc for Pane {
     fn message(&self, hwnd: Hwnd, message: Message<'_>) -> Option<LRESULT> {
         match message {
+            Message::Deferred => {
+                self.apply_tiles(hwnd);
+                Some(LRESULT(0))
+            }
             Message::Size => {
                 if self.controls.get().is_some() {
                     self.layout(hwnd);
@@ -1563,7 +1819,11 @@ impl WindowProc for Pane {
                     }
                     return None;
                 }
-                match c.list.notification(notification)? {
+                let notification = c.list.notification(notification)?;
+                if self.tiles_blocked.get() || self.applying_tiles.get() {
+                    return Some(LRESULT(0));
+                }
+                match notification {
                     QueueNotify::SelectionChanged => {
                         let index = c.list.selected();
                         let id = index.and_then(|index| {

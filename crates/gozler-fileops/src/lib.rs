@@ -4,9 +4,9 @@
 //! which reads the selected entries from the disk on a queue thread, asks
 //! gozlerd for their totals instead of walking to count them, and ends
 //! prepared; the window submits that operation with its accepted policy.
-//! It runs on its own thread with its workers. The window never
-//! waits for the disk: every call returns at once, and the queue calls the
-//! window's wake function after each change of an operation's state.
+//! It runs on its own thread with its workers. The window serializes its
+//! Queue commands on a worker, because state decisions can acquire engine
+//! locks. The queue calls its wake function after each change of state.
 //! Synchronization compares complete trees under device admission, releases
 //! its grants for preview, and reacquires them only after explicit commit.
 //! Mirror verifies required output before deleting unchanged approved extras;
@@ -88,7 +88,7 @@ pub use operation::{
     Total, Wait,
 };
 #[cfg(windows)]
-pub use queue::{NotCompared, NotInterrupted, NotPrepared, Queue};
+pub use queue::{NotCompared, NotInterrupted, NotPrepared, Queue, ReservedId};
 pub use settings::{
     CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, Preset, RingBlock, RingBuffer,
     RingHardDisk, RingSsd, SettingError, SpeedSettings, TransferLimit,

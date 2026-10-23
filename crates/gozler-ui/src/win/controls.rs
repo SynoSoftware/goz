@@ -11,10 +11,8 @@ use super::{Hwnd, wide};
 use crate::core::captions::ButtonIcon;
 use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
-use crate::core::layout::column_sizing::{self, ColumnFit};
+use crate::core::layout::column_sizing;
 use crate::core::layout::{self, Dpi, Px, Size, glyph_gap, icon_glyph_height};
-use crate::core::panel::difference;
-use crate::core::selection::ToldRows;
 use gozler_core::include::FolderCheck;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -1525,8 +1523,7 @@ impl ListView {
         send(self.0, LVM_GETITEMCOUNT, 0, 0).max(0) as u64
     }
 
-    /// How many rows are selected, in one message, where [`Self::selected`]
-    /// sends one for each selected row.
+    /// How many rows are selected, in one message.
     pub(crate) fn selected_count(self) -> u64 {
         send(self.0, LVM_GETSELECTEDCOUNT, 0, 0).max(0) as u64
     }
@@ -1627,119 +1624,14 @@ impl ListView {
         self.set_state(row as usize, LVIS_SELECTED, state);
     }
 
-    /// Selects exactly the rows of `ranges`, sorted ranges that do not
-    /// touch, and keeps the focus.
-    pub(crate) fn set_selected(self, ranges: &[Range<u64>]) {
-        let none = LIST_VIEW_ITEM_STATE_FLAGS(0);
-        self.set_state(usize::MAX, LVIS_SELECTED, none);
-        let count = self.count();
-        if let [all] = ranges
-            && *all == (0..count)
-        {
-            return self.select_all();
-        }
-        for row in ranges.iter().flat_map(Clone::clone) {
-            self.select(row, true);
-        }
-    }
-
-    /// Changes the selection from `shown`, the rows the list selects, to
-    /// `wanted`, both sorted ranges that do not touch, with the fewest
-    /// writes, because each write is a message that notifies the parent: one
-    /// for each row that differs, or, when that is more, one that clears
-    /// every row and one for each wanted row, as when a move took most of
-    /// the selected entries.
-    pub(crate) fn change_selected(self, shown: &[Range<u64>], wanted: &[Range<u64>]) {
-        let count = self.count();
-        if let [all] = wanted
-            && all.end == count
-            && all.start < 2
-            && shown != wanted
-        {
-            self.select_all();
-            for row in 0..all.start {
-                self.select(row, false);
-            }
-            return;
-        }
-        let deselected = difference(shown, wanted);
-        let selected = difference(wanted, shown);
-        let rows = |ranges: &[Range<u64>]| ranges.iter().map(|r| r.end - r.start).sum::<u64>();
-        if rows(&deselected) + rows(&selected) > 1 + rows(wanted) {
-            return self.set_selected(wanted);
-        }
-        for row in deselected.into_iter().flatten() {
-            self.select(row, false);
-        }
-        for row in selected.into_iter().flatten() {
-            self.select(row, true);
-        }
-    }
-
-    /// The selected rows, as sorted ranges that do not touch. A virtual
-    /// list knows them only row by row, so a selection of every row from
-    /// the first selected one on, which Select all makes, also without a
-    /// panel's `..`, is read without asking for each.
-    #[allow(
-        clippy::single_range_in_vec_init,
-        reason = "a selection is a list of row ranges"
-    )]
-    pub(crate) fn selected(self) -> Vec<Range<u64>> {
-        let selected = send(self.0, LVM_GETSELECTEDCOUNT, 0, 0).max(0) as u64;
-        if selected == 0 {
-            return Vec::new();
-        }
-        let count = self.count();
-        let first = send(self.0, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
-        if let Ok(first) = u64::try_from(first)
-            && selected == count - first
-        {
-            return vec![first..count];
-        }
-        let mut ranges: Vec<Range<u64>> = Vec::new();
-        let mut after = -1isize;
-        loop {
-            let next = send(
-                self.0,
-                LVM_GETNEXTITEM,
-                after as usize,
-                LVNI_SELECTED as isize,
-            );
-            let Ok(row) = u64::try_from(next) else { break };
-            match ranges.last_mut() {
-                Some(last) if last.end == row => last.end = row + 1,
-                _ => ranges.push(row..row + 1),
-            }
-            after = next;
-        }
-        ranges
-    }
-
-    /// The selected rows, as [`Self::selected`] gives them, from `told`,
-    /// the rows the list's notifications told: the list confirms them with
-    /// its count, how many rows it selects, the first, and that it selects
-    /// the last, where reading them takes a message for each selected row.
-    /// When it does not, they are read, and `told` holds them from then on.
-    /// Told rows past the list's count are left out, because a shorter list
-    /// drops them without a notification.
-    pub(crate) fn selected_told(self, told: &mut ToldRows) -> Vec<Range<u64>> {
-        let rows = told.rows(self.count());
-        let selected: u64 = rows.iter().map(|range| range.end - range.start).sum();
-        let first = send(self.0, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
-        let confirmed = selected == self.selected_count()
-            && match (rows.first(), rows.last()) {
-                (Some(first_run), Some(last_run)) => {
-                    u64::try_from(first) == Ok(first_run.start)
-                        && self.row_state(last_run.end - 1).1
-                }
-                _ => true,
-            };
-        if confirmed {
-            return rows;
-        }
-        let read = self.selected();
-        *told = ToldRows::read(&read);
-        read
+    pub(crate) fn next_selected(self, after: Option<u64>) -> Option<u64> {
+        u64::try_from(send(
+            self.0,
+            LVM_GETNEXTITEM,
+            after.map_or(usize::MAX, |row| row as usize),
+            LVNI_SELECTED as isize,
+        ))
+        .ok()
     }
 
     /// The row at `point`, in screen coordinates, if one is there.
@@ -2399,58 +2291,6 @@ impl ReportList {
             LVNI_SELECTED as isize,
         ))
         .ok()
-    }
-
-    /// Fits each column to `headers` and to the cells of `rows`, and fills
-    /// the list's width with them, as the results list does
-    /// ([`column_sizing::fill_widths`]). The list's label tips show a cell that is
-    /// still cut off.
-    pub(crate) fn fit_columns<R: AsRef<[String]>>(self, headers: &[&str], rows: &[R]) {
-        let Ok(font) = Font::of(self.0) else {
-            return;
-        };
-        let meter = TextMeter::new(&font);
-        let dpi = self.0.dpi();
-        let fits: Vec<ColumnFit> = headers
-            .iter()
-            .enumerate()
-            .map(|(column, header)| {
-                let texts = (rows.iter())
-                    .filter_map(|row| row.as_ref().get(column))
-                    .filter(|text| !text.is_empty())
-                    .map(|text| meter.plain_width(text));
-                ColumnFit::of(meter.plain_width(header), texts, Px(0), column == 0, dpi)
-            })
-            .collect();
-        // The vertical scroll bar takes its width when the rows fill the
-        // list.
-        let width = self.0.client_size().width - scroll_bar_width(dpi);
-        for (column, width) in column_sizing::fill_widths(&fits, width)
-            .into_iter()
-            .enumerate()
-        {
-            send(self.0, LVM_SETCOLUMNWIDTH, column, width.0 as isize);
-        }
-    }
-
-    /// Shows each path of `rows` in `column` that is wider than the column
-    /// without its middle, as Windows shortens a path, so its drive and its
-    /// name stay. Call it once the column has its width.
-    pub(crate) fn show_paths<R: AsRef<[String]>>(self, column: usize, rows: &[R]) {
-        let Ok(font) = Font::of(self.0) else {
-            return;
-        };
-        let meter = TextMeter::new(&font);
-        let width = Px(send(self.0, LVM_GETCOLUMNWIDTH, column, 0) as i32);
-        let room = width - column_sizing::cell_width(Px(0), Px(0), column == 0, self.0.dpi());
-        for (index, row) in rows.iter().enumerate() {
-            if let Some(path) = row.as_ref().get(column) {
-                let shown = meter.compact_path(path, room);
-                if shown != *path {
-                    self.put_cell(LVM_SETITEMTEXTW, index, column, &shown);
-                }
-            }
-        }
     }
 }
 

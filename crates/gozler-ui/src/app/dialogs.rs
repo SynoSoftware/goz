@@ -3,6 +3,8 @@
 //! window rule 1). `MainWindow::open_dialog` runs each, and the dialog module
 //! sets its fixed captions from `core::captions::CaptionTable`.
 
+use super::main_window::MainWindow;
+use super::work::REPOSITORY;
 use crate::core::captions::DialogItem;
 use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
@@ -16,18 +18,22 @@ use gozler_fileops::{Destination, Policy};
 use std::cell::{Cell, OnceCell, RefCell};
 
 /// The About Gozler dialog (DESIGN.md: C23).
-pub(super) struct About {
+pub(super) struct About<'a> {
+    main: &'a MainWindow,
     version: String,
     service: String,
 }
 
-const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-
-impl About {
+impl<'a> About<'a> {
     /// `service_version` is the version of the service the window is
     /// connected to, if any.
-    pub(super) fn new(strings: &Strings, service_version: Option<&str>) -> About {
+    pub(super) fn new(
+        main: &'a MainWindow,
+        strings: &Strings,
+        service_version: Option<&str>,
+    ) -> About<'a> {
         About {
+            main,
             version: strings.format("about.version", &[gozler_core::escompat::version()]),
             service: match service_version {
                 Some(version) => strings.format("about.service", &[version]),
@@ -37,7 +43,7 @@ impl About {
     }
 }
 
-impl DialogProc for About {
+impl DialogProc for About<'_> {
     fn init(&self, dialog: Hwnd) -> Opened {
         let mut fonts = Vec::new();
         if let Some(version) = dialog::item(dialog, ControlId::AboutVersion.id()) {
@@ -66,7 +72,7 @@ impl DialogProc for About {
     fn message(&self, _dialog: Hwnd, message: DialogMessage) -> bool {
         match message {
             DialogMessage::LinkActivated { id } if id == ControlId::AboutLink.id() => {
-                win::shell::open(REPOSITORY);
+                self.main.open_repository();
                 true
             }
             DialogMessage::LinkActivated { .. }

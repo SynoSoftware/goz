@@ -17,6 +17,7 @@ use gozler_core::types::SortSpec;
 use std::io;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// A list that shows gozlerd's results: Search's results list, or a
 /// search panel's list (DESIGN.md: Search in a panel).
@@ -193,7 +194,7 @@ impl ChunkAsk {
 pub(crate) struct SelectionAsk {
     pub(crate) span: ChunkAsk,
     /// Sorted and apart, as the list gives them.
-    pub(crate) positions: Vec<Range<u64>>,
+    pub(crate) positions: Arc<Vec<Range<u64>>>,
     /// The cached chunks inside `span`, sorted.
     pub(crate) cached: Vec<Range<u64>>,
 }
@@ -295,15 +296,75 @@ pub(crate) enum Outcome {
     Failed(DaemonFailure),
 }
 
+impl Outcome {
+    pub(crate) fn items(&self) -> usize {
+        match self {
+            Self::Rows(chunk) => chunk.rows.len(),
+            Self::Selection(rows) => rows
+                .files
+                .len()
+                .saturating_add(rows.cached.iter().map(|chunk| chunk.rows.len()).sum()),
+            _ => 0,
+        }
+    }
+}
+
 /// The rows a [`SelectionAsk`] keeps, read at one moment.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SelectionRows {
-    /// By position, in position order.
-    pub(crate) rows: Vec<(u64, ResultItem)>,
-    /// The ask's [`SelectionAsk::cached`], whose chunks these rows replace.
-    pub(crate) cached: Vec<Range<u64>>,
+    pub(crate) files: Arc<[ResultItem]>,
+    pub(crate) cached: Vec<CachedRows>,
     /// The result snapshot the request made, whose rows these are.
     pub(crate) made: Option<ResultSnapshotId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CachedRows {
+    /// The original cached span, also when its replacement is shorter.
+    pub(crate) range: Range<u64>,
+    pub(crate) rows: Arc<[ResultItem]>,
+}
+
+impl SelectionRows {
+    /// Partitions on the producer thread; only rows held by both the selection
+    /// and cache are copied, preserving the one-moment selection rule.
+    pub(crate) fn new(
+        positions: &[Range<u64>],
+        rows: Vec<(u64, ResultItem)>,
+        cached: Vec<Range<u64>>,
+        made: Option<ResultSnapshotId>,
+    ) -> Self {
+        let selected: u64 = positions.iter().map(|range| range.end - range.start).sum();
+        let cache_size: u64 = cached.iter().map(|range| range.end - range.start).sum();
+        let mut files = Vec::with_capacity(usize::try_from(selected).unwrap_or(0));
+        let mut cache = Vec::with_capacity(usize::try_from(cache_size).unwrap_or(0));
+        for (position, row) in rows {
+            match (inside(positions, position), inside(&cached, position)) {
+                (true, true) => {
+                    files.push(row.clone());
+                    cache.push((position, row));
+                }
+                (true, false) => files.push(row),
+                (false, _) => cache.push((position, row)),
+            }
+        }
+        let mut cache = cache.into_iter().peekable();
+        let cached = cached
+            .into_iter()
+            .map(|range| {
+                let rows = std::iter::from_fn(|| cache.next_if(|(at, _)| *at < range.end))
+                    .filter(|(at, _)| *at >= range.start)
+                    .map(|(_, row)| row)
+                    .collect();
+                CachedRows { range, rows }
+            })
+            .collect();
+        Self {
+            files: files.into(),
+            cached,
+            made,
+        }
+    }
 }
 
 /// Why a file could not be written, as Windows said it.
@@ -328,7 +389,7 @@ impl From<&io::Error> for WriteFailure {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Chunk {
     pub(crate) start: u64,
-    pub(crate) rows: Vec<ResultItem>,
+    pub(crate) rows: Arc<[ResultItem]>,
     /// Every match of the search, not only the rows of the chunk.
     pub(crate) total: u64,
     /// A volume in scope is not complete, as a page says.

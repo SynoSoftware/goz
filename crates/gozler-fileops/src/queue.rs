@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
@@ -44,6 +44,7 @@ pub struct Queue {
 }
 
 struct Shared {
+    next_id: AtomicU64,
     operations: Mutex<Operations>,
     /// Called after each change of an operation's state, never under the
     /// queue's lock, so it may read the states at once.
@@ -102,7 +103,6 @@ impl Recovery {
 #[derive(Default)]
 struct Operations {
     limit: TransferLimit,
-    next_id: u64,
     next_order: u64,
     next_start: u64,
     by_id: BTreeMap<OperationId, Tracked>,
@@ -218,6 +218,15 @@ pub struct NotCompared;
 #[error("the operation is not interrupted")]
 pub struct NotInterrupted;
 
+/// An allocated operation id, consumed once when its command reaches the queue.
+pub struct ReservedId(OperationId);
+
+impl ReservedId {
+    pub fn id(&self) -> OperationId {
+        self.0
+    }
+}
+
 impl Queue {
     /// `saved` is the file where operations are saved; each operation saved
     /// there becomes an interrupted one. `wake` is called on an engine
@@ -238,16 +247,17 @@ impl Queue {
         let mut saved_operations = BTreeMap::new();
         let mut requests = Vec::new();
         for (saved, restored) in saved::read(&saved_path) {
-            let id = OperationId(operations.next_id);
-            operations.next_id += 1;
+            let id = OperationId(operations.by_id.len() as u64);
             let request = Arc::new(restored.request.clone());
             requests.push((id, Arc::clone(&request)));
             let operation = Tracked::new(request, restored.settings, Phase::Interrupted(restored));
             operations.by_id.insert(id, operation);
             saved_operations.insert(id, Arc::new(Recovery::Saved(saved)));
         }
+        let next_id = AtomicU64::new(operations.by_id.len() as u64);
         let queue = Queue {
             shared: Arc::new(Shared {
+                next_id,
                 operations: Mutex::new(operations),
                 wake: Box::new(wake),
                 index,
@@ -275,24 +285,59 @@ impl Queue {
     /// Starts preparing `request` on a queue thread and returns its id at
     /// once.
     pub fn prepare(&self, request: Request, settings: SpeedSettings) -> OperationId {
-        let id = self.accept(request, settings);
-        Shared::prepare(&self.shared, id);
+        let reserved = self.reserve_id();
+        let id = reserved.id();
+        self.prepare_reserved(reserved, request, settings);
         id
     }
 
     /// Accepts a command before asynchronous source intake. [`Queue::resolve`]
     /// completes that same operation; cancellation also covers this interval.
     pub fn accept(&self, request: Request, settings: SpeedSettings) -> OperationId {
-        let id = {
-            let mut operations = self.shared.lock();
-            let id = OperationId(operations.next_id);
-            operations.next_id += 1;
-            let operation = Tracked::new(Arc::new(request), settings, Phase::Receiving);
-            operations.by_id.insert(id, operation);
-            id
-        };
-        (self.shared.wake)();
+        let reserved = self.reserve_id();
+        let id = reserved.id();
+        self.accept_reserved(reserved, request, settings);
         id
+    }
+
+    /// Allocates an id without taking the queue lock. The returned token must
+    /// reach this queue through [`Queue::accept_reserved`] or
+    /// [`Queue::prepare_reserved`], in the command's original order.
+    pub fn reserve_id(&self) -> ReservedId {
+        #[allow(deprecated, reason = "try_update requires Rust 1.95; MSRV is 1.94")]
+        let id = self
+            .shared
+            .next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .expect("operation ids cannot wrap");
+        ReservedId(OperationId(id))
+    }
+
+    pub fn prepare_reserved(
+        &self,
+        reserved: ReservedId,
+        request: Request,
+        settings: SpeedSettings,
+    ) {
+        let id = reserved.id();
+        self.accept_reserved(reserved, request, settings);
+        Shared::prepare(&self.shared, id);
+    }
+
+    pub fn accept_reserved(&self, reserved: ReservedId, request: Request, settings: SpeedSettings) {
+        let id = reserved.id();
+        {
+            let mut operations = self.shared.lock();
+            let operation = Tracked::new(Arc::new(request), settings, Phase::Receiving);
+            let old = operations.by_id.insert(id, operation);
+            assert!(
+                old.is_none(),
+                "a reserved id is inserted once into its queue"
+            );
+        }
+        (self.shared.wake)();
     }
 
     /// Completes intake only while the accepted command still wants its reply.
@@ -1914,6 +1959,7 @@ mod tests {
 
     fn shared() -> Shared {
         Shared {
+            next_id: AtomicU64::new(0),
             operations: Mutex::default(),
             wake: Box::new(|| {}),
             index: Box::new(Gozlerd),
@@ -1926,6 +1972,46 @@ mod tests {
             closing: AtomicBool::new(false),
             threads: Mutex::default(),
         }
+    }
+
+    #[test]
+    fn operation_ids_can_be_reserved_while_engine_state_is_locked() {
+        let queue = Arc::new(Queue {
+            shared: Arc::new(shared()),
+        });
+        let locked = queue.shared.lock();
+        let other = Arc::clone(&queue);
+        let (sender, reserved) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _ = sender.send((other.reserve_id(), other.reserve_id()));
+        });
+        let answer = reserved.recv_timeout(std::time::Duration::from_secs(5));
+        drop(locked);
+        thread.join().unwrap();
+        let (first, second) = answer.expect("reservation never waits for engine state");
+        assert_eq!(first.id(), OperationId(0));
+        assert_eq!(second.id(), OperationId(1));
+        for (reserved, path) in [(first, "first"), (second, "second")] {
+            queue.accept_reserved(
+                reserved,
+                Request::NewFolder {
+                    path: PathBuf::from(path),
+                },
+                SpeedSettings::automatic(),
+            );
+        }
+        assert_eq!(
+            queue.operation(OperationId(0)).unwrap().request.as_ref(),
+            &Request::NewFolder {
+                path: PathBuf::from("first")
+            }
+        );
+        assert_eq!(
+            queue.operation(OperationId(1)).unwrap().request.as_ref(),
+            &Request::NewFolder {
+                path: PathBuf::from("second")
+            }
+        );
     }
 
     fn key(operation: u64, index: usize) -> TransferId {

@@ -8,7 +8,10 @@ use crate::core::selection::wide_path;
 use gozler_core::proto::ResultItem;
 use std::cell::Cell;
 use std::io;
+use std::marker::PhantomData;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use windows::Win32::Foundation::{
     CloseHandle, E_POINTER, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FILETIME, HANDLE,
     HWND, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
@@ -18,7 +21,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-    CoInitializeEx, CoTaskMemFree, CreateBindCtx, IBindCtx, IDataObject,
+    CoInitializeEx, CoTaskMemFree, CoUninitialize, CreateBindCtx, IBindCtx, IDataObject,
 };
 use windows::Win32::System::Ole::{
     DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource, OleInitialize,
@@ -35,16 +38,16 @@ use windows::Win32::UI::Shell::{
     FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IFileSystemBindData,
     IFileSystemBindData_Impl, ILClone, ILCreateFromPathW, ILFindLastID, ILFree, ILIsParent,
     ILRemoveLastID, IShellItem, KF_FLAG_DEFAULT, KF_FLAG_DONT_VERIFY, KNOWN_FOLDER_FLAG,
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject, SHCreateItemFromParsingName,
-    SHDoDragDrop, SHELLEXECUTEINFOW, SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties,
-    SHOpenFolderAndSelectItems, SHParseDisplayName, SIGDN_FILESYSPATH, STR_FILE_SYS_BIND_DATA,
-    ShellExecuteExW, ShellExecuteW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject,
+    SHCreateItemFromParsingName, SHDoDragDrop, SHELLEXECUTEINFOW, SHGetKnownFolderPath,
+    SHOP_FILEPATH, SHObjectProperties, SHOpenFolderAndSelectItems, SHParseDisplayName,
+    SIGDN_FILESYSPATH, STR_FILE_SYS_BIND_DATA, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL};
 use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
 
 /// Starts COM on this thread in the apartment model, which the shell's
-/// dialogs and `ShellExecuteW` need.
+/// dialogs need.
 pub(crate) fn initialize_com() {
     // SAFETY: called once on each thread that makes COM or shell calls,
     // before the first.
@@ -143,6 +146,7 @@ pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
     };
     let mut missing = None;
     let mut lists = Vec::with_capacity(files.len());
+    let mut paths = Vec::with_capacity(files.len());
     for file in files {
         let path = wide_path(file);
         let mut list = std::ptr::null_mut();
@@ -155,6 +159,7 @@ pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
         };
         if named.is_ok() && !list.is_null() {
             lists.push(list);
+            paths.push(PathBuf::from(std::ffi::OsString::from_wide(&path)));
         } else {
             missing.get_or_insert(path);
         }
@@ -187,7 +192,7 @@ pub(crate) fn drag(files: &[ResultItem]) -> Option<Vec<u16>> {
             SHCreateDataObject(None, Some(absolute.as_slice()), None::<&IDataObject>)
         };
         if let Ok(data) = data {
-            let _own = super::drop_target::own_drag(&data);
+            let _own = super::drop_target::own_drag(&data, paths.into());
             // A move needs nothing here: the index follows the journal.
             let _ = SHDoDragDrop(
                 None,
@@ -237,67 +242,143 @@ fn known_folder(
     }
 }
 
-/// Opens `target` as a double-click would: an address in the default
-/// browser, or a console such as `services.msc`.
-pub(crate) fn open(target: &str) {
-    // SAFETY: both strings outlive the call.
-    unsafe {
-        ShellExecuteW(
-            None,
+/// The shell slot keeps this apartment and its pump alive between invocations;
+/// NOASYNC alone does not protect URI handlers after ShellExecuteEx returns.
+pub(crate) struct Session {
+    initialized: windows::core::Result<()>,
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl Session {
+    pub(super) fn new(_worker: &super::work::OffThread) -> Self {
+        // SAFETY: a fresh worker thread initializes its own STA once.
+        let initialized =
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok() };
+        Self {
+            initialized,
+            _thread: PhantomData,
+        }
+    }
+
+    pub(crate) fn open(&self, target: &str) -> io::Result<()> {
+        self.ready()?;
+        execute(
+            HWND::default(),
             w!("open"),
             &HSTRING::from(target),
-            PCWSTR::null(),
-            PCWSTR::null(),
+            &HSTRING::new(),
+            SEE_MASK_NOASYNC,
             SW_SHOWNORMAL,
-        );
+        )
+        .map(|_| ())
     }
-}
 
-/// Opens the file or folder `path`, UTF-16 without a NUL, with its default
-/// command, as File Explorer's double-click does.
-pub(crate) fn open_entry(owner: Hwnd, path: &[u16]) {
-    // SAFETY: the path outlives the call; a null verb is the default one.
-    unsafe {
-        ShellExecuteW(
-            Some(owner.0),
+    pub(crate) fn start_program(&self, program: &Path) -> io::Result<()> {
+        self.ready()?;
+        let program: Vec<_> = program.as_os_str().encode_wide().collect();
+        execute(
+            HWND::default(),
+            w!("open"),
+            &HSTRING::from_wide(&program),
+            &HSTRING::new(),
+            SEE_MASK_NOASYNC,
+            SW_SHOWNORMAL,
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn open_entry(&self, path: &[u16]) -> io::Result<()> {
+        self.ready()?;
+        execute(
+            HWND::default(),
             PCWSTR::null(),
             &HSTRING::from_wide(path),
-            PCWSTR::null(),
-            PCWSTR::null(),
+            &HSTRING::new(),
+            SEE_MASK_NOASYNC,
             SW_SHOWNORMAL,
-        );
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn explore(&self, folder: &[u16]) -> io::Result<()> {
+        self.ready()?;
+        let quote = u16::from(b'"');
+        let mut parameters = vec![quote];
+        parameters.extend_from_slice(folder);
+        // A root's backslash must not escape the closing quote.
+        if folder.last() == Some(&u16::from(b'\\')) {
+            parameters.push(u16::from(b'\\'));
+        }
+        parameters.push(quote);
+        execute(
+            HWND::default(),
+            PCWSTR::null(),
+            &HSTRING::from("explorer.exe"),
+            &HSTRING::from_wide(&parameters),
+            SEE_MASK_NOASYNC,
+            SW_SHOWNORMAL,
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn show_in_folder(&self, folder: &[u16], entries: &[Vec<u16>]) -> io::Result<()> {
+        self.ready()?;
+        show_in_folder(folder, entries)
+    }
+
+    pub(crate) fn properties(&self, path: &[u16]) -> io::Result<()> {
+        self.ready()?;
+        // SAFETY: SHObjectProperties allows no owner. Path outlives invocation,
+        // and the worker's apartment keeps pumping afterward.
+        let opened = unsafe {
+            SHObjectProperties(
+                None,
+                SHOP_FILEPATH,
+                &HSTRING::from_wide(path),
+                PCWSTR::null(),
+            )
+        };
+        if opened.as_bool() {
+            Ok(())
+        } else {
+            Err(io_error(windows::Win32::Foundation::E_FAIL.into()))
+        }
+    }
+
+    pub(crate) fn run_command(&self, program: &str, parameters: &str) -> io::Result<()> {
+        self.ready()?;
+        execute(
+            HWND::default(),
+            PCWSTR::null(),
+            &HSTRING::from(program),
+            &HSTRING::from(parameters),
+            SEE_MASK_NOASYNC,
+            SW_SHOWNORMAL,
+        )
+        .map(|_| ())
+    }
+
+    fn ready(&self) -> io::Result<()> {
+        self.initialized
+            .as_ref()
+            .map_err(|error| io_error(error.clone()))
+            .copied()
     }
 }
 
-/// Opens the folder `folder`, UTF-16 without a NUL, in File Explorer,
-/// whatever program opens folders on this computer.
-pub(crate) fn explore(owner: Hwnd, folder: &[u16]) {
-    // A root's last backslash is doubled, so it cannot escape the closing
-    // quote.
-    let quote = u16::from(b'"');
-    let mut parameters = vec![quote];
-    parameters.extend_from_slice(folder);
-    if folder.last() == Some(&u16::from(b'\\')) {
-        parameters.push(u16::from(b'\\'));
-    }
-    parameters.push(quote);
-    // SAFETY: the parameters outlive the call; a null verb is the default
-    // one.
-    unsafe {
-        ShellExecuteW(
-            Some(owner.0),
-            PCWSTR::null(),
-            w!("explorer.exe"),
-            &HSTRING::from_wide(&parameters),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.initialized.is_ok() {
+            // SAFETY: match this thread's successful CoInitializeEx, after the
+            // slot closes; no apartment interface crosses to another thread.
+            unsafe { CoUninitialize() };
+        }
     }
 }
 
 /// Opens the folder `folder` in File Explorer with `entries`, which are in
 /// it, selected. Each path is UTF-16 without a NUL.
-pub(crate) fn show_in_folder(folder: &[u16], entries: &[Vec<u16>]) {
+fn show_in_folder(folder: &[u16], entries: &[Vec<u16>]) -> io::Result<()> {
     let item_list = |path: &[u16]| {
         // SAFETY: the path outlives the call; null is a path the shell
         // cannot name.
@@ -305,36 +386,24 @@ pub(crate) fn show_in_folder(folder: &[u16], entries: &[Vec<u16>]) {
         (!list.is_null()).then_some(list)
     };
     let Some(folder) = item_list(folder) else {
-        return;
+        return Err(io::ErrorKind::NotFound.into());
     };
     let entries: Vec<*mut ITEMIDLIST> = entries.iter().filter_map(|e| item_list(e)).collect();
     // SAFETY: each list is this function's own until it is freed below, and
     // the last item of an entry's list names it inside its folder.
-    unsafe {
+    let result = unsafe {
         let children: Vec<*const ITEMIDLIST> = entries
             .iter()
             .map(|list| ILFindLastID(*list).cast_const())
             .collect();
-        let _ = SHOpenFolderAndSelectItems(folder, Some(children.as_slice()), 0);
+        let result = SHOpenFolderAndSelectItems(folder, Some(children.as_slice()), 0);
         for list in entries {
             ILFree(Some(list));
         }
         ILFree(Some(folder));
-    }
-}
-
-/// Shows the shell's Properties dialog of `path`, UTF-16 without a NUL.
-/// The dialog runs in its own window, so the call returns at once.
-pub(crate) fn properties(owner: Hwnd, path: &[u16]) {
-    // SAFETY: the path outlives the call; no page is named.
-    unsafe {
-        let _ = SHObjectProperties(
-            Some(owner.0),
-            SHOP_FILEPATH,
-            &HSTRING::from_wide(path),
-            PCWSTR::null(),
-        );
-    }
+        result
+    };
+    result.map_err(io_error)
 }
 
 /// One file type of the save dialog: its name and its extension.
@@ -468,29 +537,9 @@ pub(crate) fn pick_program(owner: Hwnd, title: &str, programs: &str) -> Option<S
     }
 }
 
-/// Runs `program` with `parameters`, an open command of Settings > Context
-/// menu (DESIGN.md: The Context menu page). Windows shows no message of its own; a
-/// program that cannot start gives Windows' reason.
-pub(crate) fn run_command(owner: Hwnd, program: &str, parameters: &str) -> io::Result<()> {
-    let program = HSTRING::from(program);
-    let parameters = HSTRING::from(parameters);
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_FLAG_NO_UI,
-        hwnd: owner.0,
-        lpFile: PCWSTR(program.as_ptr()),
-        lpParameters: PCWSTR(parameters.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-    // SAFETY: `info` is complete, with its size set, and its strings outlive
-    // the call.
-    unsafe { ShellExecuteExW(&mut info) }.map_err(io_error)
-}
-
 /// The label of the volume whose root is `root`, such as "Windows" for
 /// `C:\`, or `None` when Windows cannot read it, as for an offline drive.
-pub(crate) fn volume_label(root: &str) -> Option<String> {
+pub(crate) fn volume_label(root: &str, _worker: &super::work::OffThread) -> Option<String> {
     let mut label = [0u16; 261];
     // SAFETY: the root outlives the call, which writes at most the
     // buffer's length.
@@ -615,7 +664,7 @@ fn delete_value(key: &str, name: &str) -> io::Result<()> {
 /// Whether Windows starts Gozler at sign-in: the `Run` value exists, and
 /// Task Manager did not turn it off. An odd first byte of the
 /// `StartupApproved` value is off (DESIGN.md: The General page).
-pub(crate) fn starts_at_sign_in() -> bool {
+pub(crate) fn starts_at_sign_in(_worker: &super::work::OffThread) -> bool {
     if get_value(RUN_KEY, Some(GOZLER), RRF_RT_REG_SZ, None).is_none() {
         return false;
     }
@@ -634,7 +683,11 @@ pub(crate) fn starts_at_sign_in() -> bool {
 /// Starts `program` at sign-in with `--sign-in`, or no longer does. Turning
 /// it on also removes Task Manager's off mark, so the check box and Task
 /// Manager agree.
-pub(crate) fn set_start_at_sign_in(on: bool, program: &Path) -> io::Result<()> {
+pub(crate) fn set_start_at_sign_in(
+    on: bool,
+    program: &Path,
+    _worker: &super::work::OffThread,
+) -> io::Result<()> {
     if on {
         let command = format!("\"{}\" --sign-in", program.display());
         set_string(RUN_KEY, Some(GOZLER), &command)?;
@@ -716,20 +769,14 @@ pub(crate) fn start_as_administrator(
     let process = execute(
         HWND(owner.0 as *mut _),
         w!("runas"),
-        program,
-        parameters,
+        &HSTRING::from(program),
+        &HSTRING::from(parameters),
         SEE_MASK_NOCLOSEPROCESS,
         SW_HIDE,
     )?;
     // An executable always starts a process, so SEE_MASK_NOCLOSEPROCESS
     // gives its handle.
     Ok(ElevatedProcess(process))
-}
-
-/// Starts `program`, as a double-click on it does.
-pub(crate) fn start_program(owner: Hwnd, program: &Path) -> io::Result<()> {
-    let program = program.display().to_string();
-    execute(owner.0, w!("open"), &program, "", 0, SW_SHOWNORMAL).map(|_| ())
 }
 
 /// Whether `error` says that the person said no to Windows' permission
@@ -744,20 +791,22 @@ pub(crate) fn refused(error: &io::Error) -> bool {
 fn execute(
     owner: HWND,
     verb: PCWSTR,
-    program: &str,
-    parameters: &str,
+    program: &HSTRING,
+    parameters: &HSTRING,
     mask: u32,
     show: SHOW_WINDOW_CMD,
 ) -> io::Result<HANDLE> {
-    let program = HSTRING::from(program);
-    let parameters = HSTRING::from(parameters);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: mask | SEE_MASK_FLAG_NO_UI,
         hwnd: owner,
         lpVerb: verb,
         lpFile: PCWSTR(program.as_ptr()),
-        lpParameters: PCWSTR(parameters.as_ptr()),
+        lpParameters: if parameters.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(parameters.as_ptr())
+        },
         nShow: show.0,
         ..Default::default()
     };

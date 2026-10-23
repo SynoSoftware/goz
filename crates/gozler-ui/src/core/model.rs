@@ -1,32 +1,34 @@
 //! The window's facts: the loaded language, the saved settings, what the
 //! controls ask for, what the list shows, the selection, the export, the
-//! service fix and what the service said last. Captions are built from
-//! these facts when they are shown, never stored (DESIGN.md: window rule
-//! 12). The fields are private to the core: every reply passes through
-//! [`Model::accept`], and every change the person makes through a method of
-//! its own, and each says what changed and which request that makes
-//! necessary.
+//! service fix and what the service said last. Captions derive from these
+//! facts; an operation pass publishes an immutable presentation for UI readers
+//! while the next pass runs. The fields are private to the core: service replies
+//! pass through [`Model::accept`], operation answers through
+//! [`Model::accept_followed`], and user changes through their own methods.
+//! Each transition says what changed and which request is necessary.
 
 use super::fetch::{
     Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, FromSnapshot, Generation, List, Local,
-    Outcome, Programs, Purpose, WriteFailure, inside,
+    Outcome, Programs, Purpose, WriteFailure,
 };
-use super::file_operations::{self, Failure, StatusOperation};
+use super::file_operations::{self, StatusOperation};
 use super::fixer::{FixEvent, FixWork, Fixer};
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
-use super::operations::{
-    OperationProgress, OperationSteps, Operations, QueueStep, Source, SourceStep,
-};
+use super::operations::{OperationSteps, QueueStep, Source};
 use super::panel::{LookIn, PanelFollow, Panels, Side, TakenRows, View, drive_root};
 use super::query::{self, Filters, LocationItem, Matching};
 use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
 use super::search_list::Deselect;
-use super::search_list::{SearchList, retain_untaken};
-use super::selection::{FolderContents, SELECTION_LIMIT, Selection};
-use super::settings::{Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
-use super::text::{self, LanguageChoice, Numbers, Strings};
+use super::search_list::{Ended, Keep, Kept, SearchList};
+use super::selection::{
+    Filter, Filtered, FolderContents, RowSelection, SELECTION_LIMIT, Selection, SelectionSource,
+    Sums,
+};
+use super::settings::{Changes, Choices, Mode, Placement, SavedColumn, Settings, ViewerState};
+use super::text::{self, LanguageChoice, Strings};
 use super::update;
+use super::work::Retirement;
 use gozler_core::escompat::EsPlan;
 use gozler_core::include::IndexSettings;
 use gozler_core::output::Format;
@@ -36,14 +38,14 @@ use gozler_core::scope::{Coverage, leaves_matches_out};
 use gozler_core::search::Search;
 use gozler_core::types::{EsColumn, SortDir, SortKey, SortSpec, VolumePhase};
 use gozler_core::winpath::parent_of;
-use gozler_fileops::{Operation, OperationId, Request, State, Taken};
+use gozler_fileops::{Operation, OperationId, Taken};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+mod following;
 
 pub(crate) struct Model {
     pub(super) strings: Strings,
@@ -83,12 +85,13 @@ pub(crate) struct Model {
     app_working_set: Option<u64>,
     pub(super) export: Export,
     fix: Fixer,
-    operations: Operations,
+    following: following::OperationFollow,
     inspector_content: super::layout::InspectorContent,
     /// The file operation the middle group shows.
     operation: Option<StatusOperation>,
     /// The jobs in the order they last started, the newest last.
-    started_jobs: Vec<Job>,
+    started_jobs: Vec<(Job, u64)>,
+    job_moment: u64,
     /// How the latest request for the results or the status failed; `None`
     /// once the service answers.
     failure: Option<DaemonFailure>,
@@ -118,6 +121,7 @@ pub(crate) struct Model {
     /// Whether the clipboard holds files, which Paste copies or moves.
     clipboard_files: bool,
     panels: Panels,
+    retired: Retirement,
 }
 
 /// What the window knows of GitHub's latest release once the service is
@@ -248,6 +252,10 @@ pub(crate) enum Change {
         list: List,
         rows: Range<u64>,
     },
+    SelectionFiltered {
+        list: List,
+        deselect: Deselect,
+    },
     /// The folder selected in Search's list was counted, which only the
     /// inspector shows.
     FolderCounted,
@@ -368,8 +376,7 @@ impl Accepted {
     }
 }
 
-/// Whether the Location folder exists, which `app` asks before a search,
-/// because the core makes no filesystem call.
+/// The latest background observation of Location; the core never reads a disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScopeCheck {
     Exists,
@@ -410,10 +417,11 @@ impl Model {
             app_working_set: None,
             export: Export::Idle,
             fix: Fixer::Idle,
-            operations: Operations::default(),
+            following: following::OperationFollow::new(),
             inspector_content: super::layout::InspectorContent::Selection,
             operation: None,
             started_jobs: Vec::new(),
+            job_moment: 0,
             failure: None,
             status_asked: None,
             program_asked: None,
@@ -427,6 +435,7 @@ impl Model {
             file_operations: false,
             clipboard_files: false,
             panels,
+            retired: Retirement::default(),
         };
         // The saved columns stay current in display order from now on,
         // also when the file had none.
@@ -439,9 +448,16 @@ impl Model {
         model
     }
 
-    /// Makes this window the one that offers the file operations.
+    /// Enables file-operation commands once this window's queue is ready.
     pub(crate) fn offer_file_operations(&mut self) {
         self.file_operations = true;
+    }
+
+    pub(crate) fn take_retired(&mut self) -> Retirement {
+        let mut retired = std::mem::take(&mut self.retired);
+        retired.append(self.search_list.take_retired());
+        retired.append(self.panels.take_retired());
+        retired
     }
 
     pub(crate) fn offers_file_operations(&self) -> bool {
@@ -489,138 +505,22 @@ impl Model {
     }
 
     /// The rows of `selected` in `list` whose entries a delete or a move
-    /// has taken; none while no operation takes entries.
+    /// has taken, for native deselection. Pending filtering/keeping preserves
+    /// highlights even though painting may conservatively hide taken entries.
     pub(crate) fn taken_rows(&self, list: List, selected: &[Range<u64>]) -> Vec<u64> {
         let taken = self.panels.taken();
         match self.list(list) {
-            Some(shown) if !taken.is_empty() => (selected.iter().cloned().flatten())
-                .filter(|&row| shown.row_taken(row, taken))
-                .collect(),
+            Some(shown)
+                if !taken.is_empty()
+                    && !shown.is_keeping()
+                    && !matches!(shown.selection(), Selection::Filtering { .. }) =>
+            {
+                (selected.iter().cloned().flatten())
+                    .filter(|&row| shown.row_taken(row, taken))
+                    .collect()
+            }
             _ => Vec::new(),
         }
-    }
-
-    /// The queue prepares the operation `id`, whose files came from
-    /// `source`, if anywhere but the selection.
-    pub(crate) fn file_operation_started(&mut self, id: OperationId, source: Option<Source>) {
-        if let Some(source) = source {
-            self.operations.started(id, source);
-        }
-    }
-
-    /// Follows `snapshot`, the queue's operations at `now`, which the window
-    /// read after `taken`, so every operation that `taken` has as ended is
-    /// in it. The lists hear of each operation that ended in the same call,
-    /// so none leaves the queue before every list decided whether it keeps
-    /// it.
-    pub(crate) fn accept_operations(
-        &mut self,
-        snapshot: &[Operation],
-        taken: &Taken,
-        now: Instant,
-    ) -> OperationSteps {
-        let seen = self.operations.accept(snapshot, now);
-        let panels = if seen.ended.is_empty() {
-            Vec::new()
-        } else {
-            let in_queue = snapshot.iter().map(|operation| operation.id).collect();
-            self.operations_ended(&seen.ended, &in_queue, taken)
-        };
-        let mut queue = seen.queue;
-        queue.extend(self.release_operations());
-        OperationSteps {
-            queue,
-            panels,
-            dialogs: seen.dialogs,
-            progress: self.poll_operations(snapshot),
-            sources: seen.sources,
-        }
-    }
-
-    /// What the status bar and the taskbar button show of `snapshot`, which
-    /// the window reads twice a second while an operation runs. Asks,
-    /// reports and removals wait for the queue's wakes.
-    pub(crate) fn poll_operations(&mut self, snapshot: &[Operation]) -> OperationProgress {
-        let prior_speed = self
-            .operation
-            .as_ref()
-            .and_then(|operation| self.operations.speed(operation.id()));
-        let counts_changed = self.operations.record(snapshot, Instant::now());
-        let status = self.operations.status(snapshot);
-        let speed = status
-            .as_ref()
-            .and_then(|operation| self.operations.speed(operation.id()));
-        let status_changed = status != self.operation || counts_changed || speed != prior_speed;
-        self.set_operation(status);
-        OperationProgress {
-            status_changed,
-            taskbar: file_operations::taskbar(snapshot),
-            polls: (snapshot.iter()).any(|operation| matches!(operation.state, State::Running(_))),
-        }
-    }
-
-    /// The queue accepted the submit of `id`.
-    pub(crate) fn operation_submitted(&mut self, id: OperationId) -> Option<SourceStep> {
-        self.operations.submitted(id)
-    }
-
-    /// The failure dialog of the ended operation `id`, while it waits to
-    /// show; `None` once it no longer does. `windows_text` words a Windows
-    /// error code.
-    pub(crate) fn operation_failure(
-        &self,
-        id: OperationId,
-        numbers: &dyn Numbers,
-        windows_text: &dyn Fn(u32) -> String,
-    ) -> Option<Failure> {
-        self.operations
-            .failure(id, &self.strings, numbers, windows_text)
-    }
-
-    pub(crate) fn operation_outcome(
-        &self,
-        id: OperationId,
-    ) -> Option<Arc<gozler_fileops::Outcome>> {
-        self.operations.outcome(id)
-    }
-
-    /// The window showed the failure dialog of `id`.
-    pub(crate) fn operation_reported(&mut self, id: OperationId) -> Vec<QueueStep> {
-        let mut steps = Vec::from_iter(self.operations.reported(id));
-        steps.extend(self.release_operations());
-        steps
-    }
-
-    pub(crate) fn operation_view(
-        &self,
-        numbers: &dyn Numbers,
-        snapshot: &[Operation],
-    ) -> file_operations::View {
-        self.operations.view(&self.strings, numbers, snapshot)
-    }
-
-    pub(crate) fn transfer_caption(
-        &self,
-        numbers: &dyn Numbers,
-    ) -> Option<super::status_transfer::Caption> {
-        let mut caption = self.operations.transfer_caption(&self.strings, numbers)?;
-        let key = if self.inspector_content == super::layout::InspectorContent::Transfers
-            && self.settings.window.inspector
-        {
-            "file_operations.hide_tip"
-        } else {
-            "file_operations.show_tip"
-        };
-        caption.summary_tip = self.strings.text(key).to_owned();
-        Some(caption)
-    }
-
-    pub(crate) fn open_transfer_selection(
-        &mut self,
-        select: Option<OperationId>,
-        snapshot: &[Operation],
-    ) {
-        self.operations.open_selection(select, snapshot);
     }
 
     pub(crate) fn collapse_inspector(&mut self) -> Accepted {
@@ -628,59 +528,28 @@ impl Model {
         Accepted::only(Change::Panes)
     }
 
-    pub(crate) fn operation_is_transfer(&self, id: OperationId, snapshot: &[Operation]) -> bool {
-        self.operations.is_transfer(id, snapshot)
+    pub(crate) fn take_keep(&mut self, list: List) -> Option<Keep> {
+        self.list_mut(list)?.take_keep()
     }
 
-    pub(crate) fn select_operation(&mut self, detail: file_operations::Detail) {
-        self.operations.select(detail);
-    }
-
-    pub(crate) fn close_operation_report(&mut self) {
-        self.operations.close_report();
-    }
-
-    pub(crate) fn operation_backlog(
-        &self,
-        numbers: &dyn Numbers,
-        operation: &StatusOperation,
-    ) -> String {
-        self.operations.backlog(&self.strings, numbers, operation)
-    }
-
-    /// Removes from the queue the reported deletes and moves that no list
-    /// keeps any more.
-    pub(crate) fn release_operations(&mut self) -> Vec<QueueStep> {
-        let released: Vec<OperationId> = (self.operations.kept())
-            .filter(|id| !self.keeps(*id))
-            .collect();
-        self.operations.release(&released)
-    }
-
-    /// The operations `ended`, which ended since the window last told the
-    /// lists, the operations `in_queue`, and the taken entries `taken` that
-    /// the lists show next: each search list keeps an ended delete or move
-    /// that takes one of its fetched rows, until its next search
-    /// (fast-copy-delete-spec.md: Taken entries), and the folder panels
-    /// decide for themselves. Returns what the folder panels do, as
-    /// [`Panels::operations_ended`] does.
-    fn operations_ended(
-        &mut self,
-        ended: &[(OperationId, Arc<Request>)],
-        in_queue: &HashSet<OperationId>,
-        taken: &Taken,
-    ) -> Vec<PanelFollow> {
-        self.search_list.ended(ended, in_queue, taken);
-        for side in Side::BOTH {
-            if let Some(search) = self.panels.search_mut(side) {
-                search.list.ended(ended, in_queue, taken);
+    pub(crate) fn accept_kept(&mut self, list: List, answer: Kept) -> Accepted {
+        if let Some(shown) = self.list_mut(list) {
+            if shown.accept_kept(answer) {
+                return Accepted::only(Change::SelectionFiltered {
+                    list,
+                    deselect: Deselect::Nothing,
+                });
             }
+        } else {
+            let items = answer.kept.len();
+            self.retired.push(answer, items);
         }
-        self.panels.operations_ended(ended)
+        Accepted::only(Change::Nothing)
     }
 
     /// Whether a list still shows the rows of the ended operation `id`
     /// blank, so it stays in the queue.
+    #[cfg(test)]
     pub(crate) fn keeps(&self, id: OperationId) -> bool {
         List::ALL
             .into_iter()
@@ -699,12 +568,37 @@ impl Model {
     /// and Search's selection loses them, its list showing their rows blank
     /// once it draws them again.
     pub(crate) fn set_taken(&mut self, taken: Arc<Taken>, focused: [Option<u64>; 2]) -> TakenShown {
-        let panels = self.panels.set_taken(taken, focused);
-        let lost = self.search_list.drop_taken(self.panels.taken());
+        let mut panels = self.panels.set_taken(taken, focused);
+        let mut search_changed = false;
+        let mut search_deselect = self.search_list.deselect();
+        for list in List::ALL {
+            let changed = self
+                .list(list)
+                .is_some_and(|shown| shown.selection.files().is_some());
+            let filtered = self.refilter_selection(list);
+            let deselect = match filtered {
+                Some(Accepted {
+                    change: Change::SelectionFiltered { deselect, .. },
+                    ..
+                }) => deselect,
+                _ => self
+                    .list(list)
+                    .map_or(Deselect::Nothing, SearchList::deselect),
+            };
+            if list == List::Search {
+                search_changed = changed;
+                search_deselect = deselect;
+            }
+            if let List::Panel(side) = list
+                && self.panels.search(side).is_some()
+            {
+                panels[side.index()] = TakenRows::Search { deselect };
+            }
+        }
         TakenShown {
             panels,
-            search_lost: lost,
-            search_deselect: self.search_list.deselect(lost),
+            search_lost: search_changed,
+            search_deselect,
         }
     }
 
@@ -773,6 +667,7 @@ impl Model {
     pub(crate) fn set_language(&mut self, choice: LanguageChoice, strings: Strings) -> Accepted {
         self.settings.choices.language = choice;
         self.strings = strings;
+        self.operation_text_changed();
         Accepted::only(Change::Choice)
     }
 
@@ -1017,6 +912,13 @@ impl Model {
     /// Search's results list.
     pub(crate) fn search_list(&self) -> &SearchList {
         &self.search_list
+    }
+
+    pub(crate) fn active_list(&self) -> List {
+        match self.mode() {
+            Mode::Search => List::Search,
+            Mode::TwoPanels => List::Panel(self.panels.active()),
+        }
     }
 
     /// The state of `list`: always Search's, and a panel's while it is a
@@ -1445,7 +1347,8 @@ impl Model {
             return Accepted::only(Change::Nothing);
         };
         shown.results.show_message(message);
-        shown.selection = Selection::None;
+        shown.abandon_keeping();
+        shown.set_selection(Selection::None);
         shown.chosen_bytes = None;
         Accepted::only(Change::Message(list))
     }
@@ -1482,11 +1385,8 @@ impl Model {
     /// those rows, the files the person sees; otherwise it is read
     /// (DESIGN.md: The selection). More than [`SELECTION_LIMIT`] rows are
     /// not read, and no command acts on them.
-    pub(crate) fn set_selection(&mut self, list: List, positions: Vec<Range<u64>>) -> Accepted {
-        let count: u64 = positions
-            .iter()
-            .map(|r| r.end.saturating_sub(r.start))
-            .sum();
+    pub(crate) fn set_selection(&mut self, list: List, selection: RowSelection) -> Accepted {
+        let RowSelection { positions, count } = selection;
         if count > SELECTION_LIMIT {
             return self.select_too_many(list, count);
         }
@@ -1494,23 +1394,17 @@ impl Model {
             return Accepted::only(Change::Nothing);
         };
         let older = shown.selection.asked();
-        let positions: Vec<Range<u64>> = positions.into_iter().filter(|r| !r.is_empty()).collect();
         let then = if positions.is_empty() || shown.results.shown_ask().is_none() {
-            shown.selection = Selection::None;
+            shown.set_selection(Selection::None);
             shown.chosen_bytes = None;
             None
         } else {
-            match shown.results.cached_rows(&positions) {
-                Some(files) => self.select(list, files),
-                None => {
-                    shown.selection = Selection::Reading {
-                        positions,
-                        asked: None,
-                    };
-                    shown.chosen_bytes = None;
-                    Some(Then::ReadSelectionSoon(list))
-                }
-            }
+            let source = SelectionSource::Cached {
+                chunks: shown.results.cached(),
+                positions,
+                count: count as usize,
+            };
+            self.filter_selection(list, source)
         };
         // The request for the older selection reads other files (DESIGN.md: T6,
         // T7); a new request of the purpose ends it too.
@@ -1529,7 +1423,7 @@ impl Model {
             return Accepted::only(Change::Nothing);
         };
         let older = shown.selection.asked();
-        shown.selection = Selection::TooMany(count);
+        shown.set_selection(Selection::TooMany(count));
         shown.chosen_bytes = None;
         Accepted {
             change: Change::Selection(list),
@@ -1541,28 +1435,181 @@ impl Model {
     /// folder alone also asks for its contents, which the inspector shows
     /// (DESIGN.md: Inspector pane); a search panel adds up the selection's
     /// size for its status line instead.
-    fn select(&mut self, list: List, mut files: Vec<ResultItem>) -> Option<Then> {
+    fn select(&mut self, list: List, files: Arc<[ResultItem]>) -> Option<Then> {
+        self.filter_selection(list, SelectionSource::Files(files))
+    }
+
+    fn filter_selection(&mut self, list: List, source: SelectionSource) -> Option<Then> {
+        let generation = self.generation();
+        let shown = self.list_mut(list)?;
+        shown.set_selection(Selection::Filtering {
+            generation,
+            source,
+            running: false,
+        });
+        shown.chosen_bytes = None;
+        self.inline_filter(list).and_then(|accepted| accepted.then)
+    }
+
+    fn inline_filter(&mut self, list: List) -> Option<Accepted> {
+        let shown = self.list(list)?;
+        let Selection::Filtering { source, .. } = &shown.selection else {
+            return None;
+        };
+        if shown.is_keeping() {
+            return None;
+        }
+        match super::work::pass(source.items(), list, |list| {
+            let input = self.take_selection_filter(list)?;
+            Some(self.accept_filtered(list, input.run()))
+        }) {
+            super::work::Pass::Ready(accepted) => accepted,
+            super::work::Pass::Deferred(_) => None,
+        }
+    }
+
+    pub(crate) fn take_selection_filter(&mut self, list: List) -> Option<Filter> {
         let taken = Arc::clone(self.panels.taken());
         let shown = self.list_mut(list)?;
-        // A result snapshot's row whose file is gone holds no file.
-        files.retain(|file| !file.is_gone());
-        retain_untaken(&taken, &shown.kept, &mut files);
+        if shown.is_keeping() {
+            return None;
+        }
+        let Selection::Filtering {
+            generation,
+            source,
+            running: false,
+        } = &shown.selection
+        else {
+            return None;
+        };
+        let input = Filter {
+            generation: *generation,
+            source: source.clone(),
+            taken,
+            kept: Arc::clone(&shown.kept),
+            count_bytes: matches!(list, List::Panel(_)),
+        };
+        if let Selection::Filtering { running, .. } = &mut shown.selection {
+            *running = true;
+        }
+        Some(input)
+    }
+
+    pub(crate) fn accept_filtered(&mut self, list: List, answer: Filtered) -> Accepted {
+        let current = self.list(list).is_some_and(|shown| {
+            matches!(
+                shown.selection,
+                Selection::Filtering { generation, .. } if generation == answer.input.generation
+            )
+        });
+        let valid = current
+            && self.list(list).is_some_and(|shown| {
+                !shown.is_keeping()
+                    && Arc::ptr_eq(&shown.kept, &answer.input.kept)
+                    && Arc::ptr_eq(self.panels.taken(), &answer.input.taken)
+            });
+        if !valid {
+            let items = answer.input.retained_items();
+            self.retired.push(answer, items);
+            if current {
+                if let Some(shown) = self.list_mut(list)
+                    && let Selection::Filtering { running, .. } = &mut shown.selection
+                {
+                    *running = false;
+                }
+                return Accepted::only(Change::Selection(list));
+            }
+            return Accepted::only(Change::Nothing);
+        }
+        let Filtered {
+            input,
+            files,
+            chosen_bytes,
+            sums,
+        } = answer;
+        let count = input.source.items();
+        let positions = match &input.source {
+            SelectionSource::Cached { positions, .. } => Some(Arc::clone(positions)),
+            SelectionSource::Files(_) => None,
+        };
+        let items = input.retained_items();
+        self.retired.push(input, items);
+        let Some(files) = files else {
+            let shown = self.list_mut(list).expect("the filter is current");
+            shown.set_selection(Selection::Reading {
+                positions: positions.expect("only cached input can lack rows"),
+                asked: None,
+            });
+            return Accepted {
+                change: Change::Selection(list),
+                then: Some(Then::ReadSelectionSoon(list)),
+            };
+        };
+        let deselect = if files.len() == count {
+            Deselect::Nothing
+        } else if files.is_empty() {
+            Deselect::All
+        } else {
+            Deselect::Taken
+        };
+        let then = self.adopt_selection(list, files, chosen_bytes, sums);
+        Accepted {
+            change: Change::SelectionFiltered { list, deselect },
+            then,
+        }
+    }
+
+    fn refilter_selection(&mut self, list: List) -> Option<Accepted> {
+        let shown = self.list(list)?;
+        let source = match &shown.selection {
+            Selection::Files(_) if !shown.is_keeping() && self.panels.taken().is_empty() => {
+                return None;
+            }
+            Selection::Files(files) => SelectionSource::Files(Arc::clone(files)),
+            Selection::Folder { folder, .. }
+                if !shown.is_keeping() && !shown.takes(self.panels.taken(), folder) =>
+            {
+                return None;
+            }
+            Selection::Folder { folder, .. } => SelectionSource::Files(Arc::from([folder.clone()])),
+            Selection::Filtering { source, .. } => source.clone(),
+            _ => return None,
+        };
+        let generation = self.generation();
+        let shown = self.list_mut(list)?;
+        shown.set_selection(Selection::Filtering {
+            generation,
+            source,
+            running: false,
+        });
+        shown.chosen_bytes = None;
+        self.inline_filter(list)
+    }
+
+    fn adopt_selection(
+        &mut self,
+        list: List,
+        files: Arc<[ResultItem]>,
+        chosen_bytes: Option<u64>,
+        sums: Sums,
+    ) -> Option<Then> {
+        let shown = self.list_mut(list)?;
         if files.is_empty() {
-            shown.selection = Selection::None;
+            shown.set_selection(Selection::None);
             shown.chosen_bytes = None;
             return None;
         }
-        let folder = match (list, files.as_slice()) {
-            (List::Search, [entry]) if entry.is_dir => {
-                files.pop().expect("the selection is one folder")
-            }
+        let folder = match (list, files.as_ref()) {
+            (List::Search, [entry]) if entry.is_dir => entry.clone(),
             (List::Search, _) => {
-                shown.selection = Selection::Files(files);
+                shown.set_selection(Selection::Files(files));
+                shown.selection_sums = sums;
                 return None;
             }
             (List::Panel(_), _) => {
-                shown.selection = Selection::Files(files);
-                shown.count_chosen_bytes();
+                shown.set_selection(Selection::Files(files));
+                shown.selection_sums = sums;
+                shown.chosen_bytes = chosen_bytes;
                 return None;
             }
         };
@@ -1574,10 +1621,11 @@ impl Model {
             },
             scope: Some(folder.path.clone()),
         };
-        self.search_list.selection = Selection::Folder {
+        self.search_list.set_selection(Selection::Folder {
             folder,
             contents: FolderContents::Calculating(generation),
-        };
+        });
+        self.search_list.selection_sums = sums;
         Some(Then::Fetch(Fetch {
             generation,
             ask: Ask::FolderSize(search),
@@ -1721,15 +1769,28 @@ impl Model {
                 .is_some_and(StatusOperation::can_cancel),
         };
         let mut started = self.started_jobs.iter().rev();
-        (started.clone().find(|job| runs(job)))
+        (started.clone().find(|(job, _)| runs(job)))
             .or_else(|| started.next())
             .copied()
+            .map(|(job, _)| job)
             .unwrap_or(Job::Export)
     }
 
     fn job_started(&mut self, job: Job) {
-        self.started_jobs.retain(|started| *started != job);
-        self.started_jobs.push(job);
+        let moment = self.next_job_moment();
+        self.job_started_at(job, moment);
+    }
+
+    fn next_job_moment(&mut self) -> u64 {
+        self.job_moment += 1;
+        self.job_moment
+    }
+
+    fn job_started_at(&mut self, job: Job, moment: u64) {
+        self.started_jobs.retain(|(started, _)| *started != job);
+        self.started_jobs.push((job, moment));
+        self.started_jobs
+            .sort_unstable_by_key(|(_, moment)| *moment);
     }
 
     /// The file operation the middle group shows ([`StatusOperation`]).
@@ -1737,13 +1798,17 @@ impl Model {
         self.operation.as_ref()
     }
 
-    /// The middle group shows `operation`: another operation than the one
-    /// shown is the newest job, also one that ended before the window saw
-    /// it run.
+    #[cfg(test)]
     fn set_operation(&mut self, operation: Option<StatusOperation>) {
+        let moment = self.next_job_moment();
+        self.set_operation_at(operation, moment);
+    }
+
+    // Order by receipt, so a delayed calculation cannot outrank a newer job.
+    fn set_operation_at(&mut self, operation: Option<StatusOperation>, moment: u64) {
         let id = |operation: &Option<StatusOperation>| operation.as_ref().map(StatusOperation::id);
         if id(&operation).is_some() && id(&operation) != id(&self.operation) {
-            self.job_started(Job::Operation);
+            self.job_started_at(Job::Operation, moment);
         }
         self.operation = operation;
     }
@@ -1939,7 +2004,10 @@ impl Model {
                 self.program_asked = None;
                 Accepted::only(Change::TotalCommander(match fetched.outcome {
                     Outcome::Rows(chunk) => {
-                        Ok(newest_total_commander(&chunk.rows).map(str::to_owned))
+                        let found = newest_total_commander(&chunk.rows).map(str::to_owned);
+                        let items = chunk.rows.len();
+                        self.retired.push(chunk, items);
+                        Ok(found)
                     }
                     Outcome::Failed(failure) => Err(failure),
                     other => {
@@ -1979,7 +2047,11 @@ impl Model {
             | Purpose::Export
             | Purpose::Program
             | Purpose::IncludeCount
-            | Purpose::SettingsSaved => Accepted::only(Change::Nothing),
+            | Purpose::SettingsSaved => {
+                let items = fetched.outcome.items();
+                self.retired.push(fetched.outcome, items);
+                Accepted::only(Change::Nothing)
+            }
         }
     }
 
@@ -1996,9 +2068,9 @@ impl Model {
                     RowsChange::NewSearch { count } => {
                         // A new search's rows are other files (DESIGN.md: T2),
                         // and the disk as it is now.
-                        shown.selection = Selection::None;
+                        shown.set_selection(Selection::None);
                         shown.chosen_bytes = None;
-                        shown.kept.clear();
+                        shown.reset_kept();
                         // A panel draws no matched parts bold.
                         if list == List::Search {
                             shown.results.mark_matches();
@@ -2153,67 +2225,53 @@ impl Model {
         let shown = self
             .list_mut(list)
             .expect("accept checked that the list waits");
-        match (
-            std::mem::replace(&mut shown.selection, Selection::None),
-            outcome,
-        ) {
-            (Selection::Reading { positions, .. }, Outcome::Selection(reply)) => {
-                // Each row moves to the files or to the cache, and only a row
-                // that is both is copied, so a selection of 100,000 rows is
-                // held once (DESIGN.md: Memory budget).
-                let selected = positions.iter().map(|r| r.end - r.start).sum::<u64>();
-                let mut files = Vec::with_capacity(usize::try_from(selected).unwrap_or(0));
-                let mut cached = Vec::new();
-                for (position, row) in reply.rows {
-                    match (
-                        inside(&positions, position),
-                        inside(&reply.cached, position),
-                    ) {
-                        (true, true) => {
-                            files.push(row.clone());
-                            cached.push((position, row));
-                        }
-                        (true, false) => files.push(row),
-                        (false, _) => cached.push((position, row)),
-                    }
-                }
+        match outcome {
+            Outcome::Selection(reply) if matches!(shown.selection, Selection::Reading { .. }) => {
+                shown.set_selection(Selection::None);
                 let adopted = reply
                     .made
                     .is_some_and(|id| shown.results.adopt_snapshot(id));
-                let rows = shown.results.replace_cached(&reply.cached, cached);
+                let rows = shown.results.replace_cached(reply.cached);
                 // The rows cached before are gone, so every row draws again.
                 let rows = if adopted {
                     0..shown.results.count()
                 } else {
                     rows
                 };
-                let then = if files.is_empty() {
+                let then = if reply.files.is_empty() {
                     None
                 } else {
-                    self.select(list, files)
+                    self.select(list, reply.files)
                 };
                 Accepted {
                     change: Change::SelectionRead { list, rows },
                     then,
                 }
             }
-            (Selection::Folder { folder, .. }, Outcome::Totals(totals)) => {
-                shown.selection = Selection::Folder {
-                    folder,
-                    contents: FolderContents::Counted(totals),
-                };
+            Outcome::Totals(totals) if matches!(shown.selection, Selection::Folder { .. }) => {
+                if let Selection::Folder { contents, .. } = &mut shown.selection {
+                    *contents = FolderContents::Counted(totals);
+                }
                 Accepted::only(Change::FolderCounted)
             }
-            (_, Outcome::ResultSnapshotGone) => self.snapshot_gone(list),
-            (_, Outcome::Failed(failure)) if !shown.results.searching() => {
+            Outcome::ResultSnapshotGone => {
+                shown.set_selection(Selection::None);
+                self.snapshot_gone(list)
+            }
+            Outcome::Failed(failure) if !shown.results.searching() => {
+                shown.set_selection(Selection::None);
                 self.show_failure(list, failure)
             }
             // A search in flight shows its own reply, which clears the
             // list's selection.
-            (_, Outcome::Failed(_)) => Accepted::only(Change::Selection(list)),
-            (selection, other) => unreachable!(
+            Outcome::Failed(_) => {
+                shown.set_selection(Selection::None);
+                Accepted::only(Change::Selection(list))
+            }
+            other => unreachable!(
                 "a selection request's reply is its rows, its folder's totals or a failure: \
-                 {selection:?}, {other:?}"
+                 {:?}, {other:?}",
+                shown.selection
             ),
         }
     }
@@ -2317,11 +2375,9 @@ impl Model {
         true
     }
 
-    /// Saves to `path` what `scope` covers of what changed since the last
-    /// save; nothing when nothing changed. A failed save is not tried again
-    /// until the state changes, so a failing disk is not written at every
-    /// change of anything else.
-    pub(crate) fn save_settings(&mut self, path: &Path, scope: SaveScope) -> io::Result<()> {
+    /// Advances the attempted baseline when changes are queued, including on a
+    /// failed save, so unrelated refreshes never retry a failing disk.
+    pub(crate) fn settings_changes(&mut self, scope: SaveScope) -> Option<Changes> {
         self.saved_state_changed();
         let settings = match scope {
             SaveScope::Everything => self.settings.clone(),
@@ -2331,11 +2387,11 @@ impl Model {
             },
         };
         if settings == self.saved {
-            return Ok(());
+            return None;
         }
-        let saved = settings.save_changes(&self.saved, path);
+        let changes = settings.changes(&self.saved);
         self.saved = settings;
-        saved
+        Some(changes)
     }
 }
 
@@ -2513,7 +2569,10 @@ pub(crate) mod tests {
     use gozler_client::NotRunning;
     use gozler_client::Repair;
     use gozler_core::escompat::{Command, parse_argv};
-    use gozler_core::proto::VolumeStatus;
+    use gozler_core::proto::{ResultSnapshotId, VolumeStatus};
+    use gozler_fileops::{Request, State};
+    use std::collections::HashSet;
+    use std::io;
 
     /// The search list keeps an ended delete only when, at its end, the
     /// delete takes one of the list's fetched rows, and then until its next
@@ -2536,20 +2595,20 @@ pub(crate) mod tests {
                 sources: vec![path.into()],
             })
         };
-        model.operations_ended(
-            &[(ours, delete(r"C:\row1")), (other, delete(r"D:\elsewhere"))],
-            &HashSet::from([ours, other]),
-            &taken,
-        );
+        model.operations_ended(Arc::new(Ended {
+            operations: vec![(ours, delete(r"C:\row1")), (other, delete(r"D:\elsewhere"))],
+            in_queue: HashSet::from([ours, other]),
+            taken: Arc::new(taken),
+        }));
         assert!(model.keeps(ours));
         // Taken entries older than the queue, which do not have it as
         // ended yet, while another operation ends.
         let later = OperationId::for_tests(3);
-        model.operations_ended(
-            &[(later, delete(r"E:\later"))],
-            &HashSet::from([ours, other, later]),
-            &Taken::default(),
-        );
+        model.operations_ended(Arc::new(Ended {
+            operations: vec![(later, delete(r"E:\later"))],
+            in_queue: HashSet::from([ours, other, later]),
+            taken: Arc::default(),
+        }));
         assert!(model.keeps(ours));
         assert!(!model.keeps(other));
         let fetch = search(&mut model, "rows");
@@ -2624,8 +2683,6 @@ pub(crate) mod tests {
     /// (DESIGN.md: Window lifetime).
     #[test]
     fn another_window_saves_only_its_choices() {
-        let folder = std::env::temp_dir().join(format!("gozler-ui-another-{}", std::process::id()));
-        let path = folder.join("ui.json");
         let mut model = model();
         model.set_placement(Placement {
             left: 0,
@@ -2639,13 +2696,13 @@ pub(crate) mod tests {
             ..model.choices().clone()
         };
         model.set_choices(choices);
-        model
-            .save_settings(&path, SaveScope::Choices)
-            .expect("the temporary folder is writable");
-        let saved = Settings::load(&path);
+        let changes = model
+            .settings_changes(SaveScope::Choices)
+            .expect("choices changed");
+        let saved = Settings::parse(&changes.apply(None));
         assert!(saved.choices.show_memory);
         assert_eq!(saved.window.placement, None);
-        std::fs::remove_dir_all(&folder).expect("the test's folder is removable");
+        assert!(model.settings_changes(SaveScope::Choices).is_none());
     }
 
     /// The list's message and its buttons' captions.
@@ -2811,7 +2868,11 @@ pub(crate) mod tests {
         let delete = Arc::new(Request::Delete {
             sources: vec![r"C:\row1".into()],
         });
-        model.operations_ended(&[(id, delete)], &HashSet::from([id]), &taken);
+        model.operations_ended(Arc::new(Ended {
+            operations: vec![(id, delete)],
+            in_queue: HashSet::from([id]),
+            taken: Arc::new(taken),
+        }));
         let fetch = search(&mut model, "rows");
         model.accept(rows(&fetch, 3));
         assert!(
@@ -3276,10 +3337,105 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_of_cached_rows_is_built_from_the_cache() {
         let mut model = showing(50_000);
-        let accepted = model.set_selection(List::Search, vec![3..5, 9..10]);
+        let accepted = model.set_selection(List::Search, vec![3..5, 9..10].into());
         assert_eq!(accepted, Accepted::only(Change::Selection(List::Search)));
         assert_eq!(paths(&model), [r"C:\row3", r"C:\row4", r"C:\row9"]);
         assert_eq!(model.read_selection(List::Search), None);
+    }
+
+    #[test]
+    fn a_delayed_large_filter_cannot_restore_an_old_selection_or_taken_file() {
+        let mut model = showing(5_000);
+        model.set_selection(List::Search, vec![0..2_001].into());
+        let old = model.take_selection_filter(List::Search).unwrap().run();
+        assert!(model.search_list.selection.files().is_none());
+        model.set_selection(List::Search, vec![3..4].into());
+        assert_eq!(
+            model.accept_filtered(List::Search, old).change,
+            Change::Nothing
+        );
+        assert_eq!(paths(&model), [r"C:\row3"]);
+
+        model.set_selection(List::Search, vec![0..2_001].into());
+        let old = model.take_selection_filter(List::Search).unwrap().run();
+        let mut taken = Taken::default();
+        taken.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
+        model.set_taken(Arc::new(taken), [None, None]);
+        assert!(model.taken_rows(List::Search, &[0..2_001]).is_empty());
+        model.accept_filtered(List::Search, old);
+        assert!(model.search_list.selection.files().is_none());
+        let current = model.take_selection_filter(List::Search).unwrap().run();
+        model.accept_filtered(List::Search, current);
+        let selected = paths(&model);
+        assert_eq!(selected.len(), 2_000);
+        assert!(!selected.contains(&r"C:\row1"));
+    }
+
+    #[test]
+    fn pending_ends_keep_their_original_cache_evidence_across_eviction() {
+        let mut model = showing(50_000);
+        let (first, second) = (OperationId::for_tests(1), OperationId::for_tests(2));
+        let delete = |path: &str| {
+            Arc::new(Request::Delete {
+                sources: vec![path.into()],
+            })
+        };
+        let ended = |id, path| Operation {
+            id,
+            request: delete(path),
+            folder: gozler_fileops::SourcesFolder::Pending,
+            state: State::Ended(Arc::new(gozler_fileops::Outcome::new(
+                gozler_fileops::End::Complete,
+                1,
+                0,
+                Vec::new(),
+                gozler_fileops::RingCounts::default(),
+            ))),
+        };
+        let mut snapshot = vec![ended(first, r"C:\row1")];
+        let mut taken = Taken::default();
+        taken.insert(first, Path::new(r"C:\row1"), true);
+        let taken = Arc::new(taken);
+        model.set_taken(Arc::clone(&taken), [None, None]);
+        model.observe_operations(
+            Arc::from(snapshot.clone()),
+            Arc::clone(&taken),
+            Instant::now(),
+        );
+        let pending = model.take_following().unwrap();
+        assert!(
+            model
+                .search_list
+                .results
+                .adopt_snapshot(ResultSnapshotId(1))
+        );
+        let steps = model.accept_followed(pending.run(&English));
+        assert!(!steps.queue.contains(&QueueStep::Remove(first)));
+        assert!(model.taken_rows(List::Search, &[1..2]).is_empty());
+        let first_pass = model.take_keep(List::Search).unwrap();
+        snapshot.push(ended(second, r"D:\elsewhere"));
+        model.observe_operations(snapshot.into(), Arc::default(), Instant::now());
+        let pending = model.take_following().unwrap();
+        let steps = model.accept_followed(pending.run(&English));
+        assert!(
+            steps.queue.is_empty(),
+            "no operation leaves before every list settles"
+        );
+        assert!(
+            model.take_keep(List::Search).is_none(),
+            "accept the predecessor before dispatch"
+        );
+        model.accept_kept(List::Search, first_pass.run());
+        let second_pass = model.take_keep(List::Search).unwrap();
+        model.accept_kept(List::Search, second_pass.run());
+        assert!(model.keeps(first));
+        assert!(!model.keeps(second));
+        assert!(model.release_operations().is_empty());
+        let release = model.take_following().unwrap();
+        assert_eq!(
+            model.accept_followed(release.run(&English)).queue,
+            [QueueStep::Remove(second)]
+        );
     }
 
     /// The reply to the selection's one request: the rows it keeps, under
@@ -3292,7 +3448,7 @@ pub(crate) mod tests {
         let rows = span
             .filter(|p| ask.keeps(*p))
             .map(|p| {
-                let mut row = chunk(p, 1, 50_000).rows.remove(0);
+                let mut row = chunk(p, 1, 50_000).rows[0].clone();
                 row.path = format!(r"{folder}\row{p}");
                 (p, row)
             })
@@ -3300,11 +3456,12 @@ pub(crate) mod tests {
         Fetched {
             purpose: Purpose::Selection(List::Search),
             generation: fetch.generation,
-            outcome: Outcome::Selection(SelectionRows {
+            outcome: Outcome::Selection(SelectionRows::new(
+                &ask.positions,
                 rows,
-                cached: ask.cached.clone(),
-                made: None,
-            }),
+                ask.cached.clone(),
+                None,
+            )),
         }
     }
 
@@ -3314,7 +3471,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selected_row_outside_the_cache_is_read_with_the_cached_rows_beside_it() {
         let mut model = showing(50_000);
-        let accepted = model.set_selection(List::Search, vec![0..1, 40_000..40_001]);
+        let accepted = model.set_selection(List::Search, vec![0..1, 40_000..40_001].into());
         assert_eq!(accepted.then, Some(Then::ReadSelectionSoon(List::Search)));
         assert_eq!(
             captions::selection_status(&model, &English),
@@ -3348,7 +3505,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_past_the_limit_is_not_read() {
         let mut model = showing(200_000);
-        let accepted = model.set_selection(List::Search, vec![0..150_000]);
+        let accepted = model.set_selection(List::Search, vec![0..150_000].into());
         assert_eq!(accepted, Accepted::only(Change::Selection(List::Search)));
         assert_eq!(model.read_selection(List::Search), None);
         assert_eq!(model.search_list().selection().files(), None);
@@ -3366,7 +3523,7 @@ pub(crate) mod tests {
     fn a_selection_read_makes_the_result_snapshot_that_rows_are_read_from() {
         use gozler_core::proto::{ResultItem, ResultSnapshotId};
         let mut model = showing(200_000);
-        model.set_selection(List::Search, vec![150_000..150_002]);
+        model.set_selection(List::Search, vec![150_000..150_002].into());
         let fetch = model
             .read_selection(List::Search)
             .expect("the selection is read");
@@ -3378,8 +3535,7 @@ pub(crate) mod tests {
         let mut reply = selection_reply(&fetch, "D:");
         if let Outcome::Selection(rows) = &mut reply.outcome {
             rows.made = Some(id);
-            rows.rows.retain(|(p, _)| *p >= 150_000);
-            rows.rows[1].1 = ResultItem::gone();
+            Arc::make_mut(&mut rows.files)[1] = ResultItem::gone();
         }
         assert_eq!(
             model.accept(reply).change,
@@ -3411,13 +3567,15 @@ pub(crate) mod tests {
     #[test]
     fn t6_a_selection_changed_while_it_is_read_drops_the_older_reply() {
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![40_000..40_001]);
+        model.set_selection(List::Search, vec![40_000..40_001].into());
         let older = model
             .read_selection(List::Search)
             .expect("the selection is read");
         // The window ends the older read when it schedules the new one.
         assert_eq!(
-            model.set_selection(List::Search, vec![40_000..40_002]).then,
+            model
+                .set_selection(List::Search, vec![40_000..40_002].into())
+                .then,
             Some(Then::ReadSelectionSoon(List::Search))
         );
         assert_eq!(
@@ -3466,8 +3624,8 @@ pub(crate) mod tests {
         let fetch = search(&mut model, "report");
         let mut reply = rows(&fetch, 10);
         if let Outcome::Rows(chunk) = &mut reply.outcome {
-            chunk.rows[0].is_dir = true;
-            chunk.rows[1].is_dir = true;
+            Arc::make_mut(&mut chunk.rows)[0].is_dir = true;
+            Arc::make_mut(&mut chunk.rows)[1].is_dir = true;
         }
         model.accept(reply);
         let size = |model: &Model| {
@@ -3476,9 +3634,9 @@ pub(crate) mod tests {
                 .clone()
         };
 
-        let first = folder_size(model.set_selection(List::Search, vec![0..1]));
+        let first = folder_size(model.set_selection(List::Search, vec![0..1].into()));
         assert_eq!(size(&model), "Calculating…");
-        let second = folder_size(model.set_selection(List::Search, vec![1..2]));
+        let second = folder_size(model.set_selection(List::Search, vec![1..2].into()));
         let Ask::FolderSize(search) = &second.ask else {
             unreachable!("folder_size returns a folder size request")
         };
@@ -3491,9 +3649,9 @@ pub(crate) mod tests {
         );
         assert_eq!(size(&model), "2.00 KB (2,048 bytes) in 7 items");
 
-        let _third = folder_size(model.set_selection(List::Search, vec![0..1]));
+        let _third = folder_size(model.set_selection(List::Search, vec![0..1].into()));
         assert_eq!(
-            model.set_selection(List::Search, vec![2..3]).then,
+            model.set_selection(List::Search, vec![2..3].into()).then,
             Some(Then::Cancel(Purpose::Selection(List::Search)))
         );
         assert_eq!(
@@ -3509,7 +3667,7 @@ pub(crate) mod tests {
     #[test]
     fn a_selection_read_that_fails_shows_the_failure_and_polls() {
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![40_000..40_001]);
+        model.set_selection(List::Search, vec![40_000..40_001].into());
         let fetch = model
             .read_selection(List::Search)
             .expect("the selection is read");
@@ -3526,7 +3684,7 @@ pub(crate) mod tests {
         assert!(model.polls_status(false));
 
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![40_000..40_001]);
+        model.set_selection(List::Search, vec![40_000..40_001].into());
         let read = model
             .read_selection(List::Search)
             .expect("the selection is read");
@@ -3549,7 +3707,7 @@ pub(crate) mod tests {
     #[test]
     fn t12_a_language_switch_keeps_the_results_the_selection_and_the_text() {
         let mut model = showing(50_000);
-        model.set_selection(List::Search, vec![3..5]);
+        model.set_selection(List::Search, vec![3..5].into());
         model.set_typed_search(List::Search, r"F:\ ext:cs".into());
         model.set_language(LanguageChoice::Tag("en".into()), english());
         assert_eq!(model.search_list().results().count(), 50_000);
@@ -3565,7 +3723,7 @@ pub(crate) mod tests {
     #[test]
     fn only_a_selection_that_lost_every_file_deselects_every_row() {
         let mut model = showing(10);
-        model.set_selection(List::Search, vec![1..3]);
+        model.set_selection(List::Search, vec![1..3].into());
         let mut part = Taken::default();
         part.insert(OperationId::for_tests(1), Path::new(r"C:\row1"), false);
         let shown = model.set_taken(Arc::new(part), [None, None]);
@@ -3582,7 +3740,7 @@ pub(crate) mod tests {
     #[test]
     fn a_new_search_clears_the_selection() {
         let mut model = showing(10);
-        model.set_selection(List::Search, vec![1..2]);
+        model.set_selection(List::Search, vec![1..2].into());
         let fetch = search(&mut model, "repo");
         assert_eq!(paths(&model), [r"C:\row1"], "the selection stays until");
         model.accept(rows(&fetch, 3));
@@ -3760,7 +3918,7 @@ pub(crate) mod tests {
         let mut reply = rows(&fetch_rows(&fetch), 1);
         reply.purpose = Purpose::Program;
         if let Outcome::Rows(chunk) = &mut reply.outcome {
-            chunk.rows[0].path = r"C:\TC\TOTALCMD64.EXE".into();
+            Arc::make_mut(&mut chunk.rows)[0].path = r"C:\TC\TOTALCMD64.EXE".into();
         }
         assert_eq!(
             model.accept(reply.clone()).change,
@@ -3850,9 +4008,12 @@ pub(crate) mod tests {
         };
         model.set_operation(running(1));
         assert_eq!(model.job(), Job::Operation);
+        let receipt = model.next_job_moment();
         export(&mut model);
         assert_eq!(model.job(), Job::Export);
-        model.set_operation(running(2));
+        model.set_operation_at(running(2), receipt);
+        assert_eq!(model.job(), Job::Export);
+        model.set_operation(running(3));
         assert_eq!(model.job(), Job::Operation);
         assert_eq!(
             crate::core::captions::settings_job(&model, model.strings(), &English, true),

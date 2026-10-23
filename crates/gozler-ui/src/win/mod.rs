@@ -29,6 +29,7 @@ pub(crate) mod update;
 pub(crate) mod viewer;
 pub(crate) mod wake;
 pub(crate) mod window;
+pub(crate) mod work;
 
 use crate::core::layout::{Px, Rect, Size};
 use crate::core::settings::Placement;

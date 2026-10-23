@@ -6,6 +6,85 @@
 
 use super::text::name_of;
 use gozler_core::proto::ResultItem;
+use std::sync::Arc;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryAction {
+    Open,
+    OpenFileLocation,
+    Explore,
+    Properties,
+}
+
+impl EntryAction {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Open,
+        Self::OpenFileLocation,
+        Self::Explore,
+        Self::Properties,
+    ];
+}
+
+/// A selected path in UTF-16 without a trailing NUL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Selected {
+    pub(crate) path: Vec<u16>,
+    pub(crate) is_folder: bool,
+}
+
+impl Selected {
+    pub(crate) fn of_result(item: &ResultItem) -> Self {
+        Self {
+            path: super::selection::wide_path(item),
+            is_folder: item.is_dir,
+        }
+    }
+}
+
+/// Captures the command's entries without materializing a large selection on UI.
+pub(crate) enum Entries {
+    Ready(Vec<Selected>),
+    Results(Arc<[ResultItem]>),
+    Panel(super::panel::PanelEntries),
+}
+
+impl Entries {
+    pub(crate) fn items(&self) -> usize {
+        match self {
+            Self::Ready(entries) => entries.len(),
+            Self::Results(files) => files.len(),
+            Self::Panel(entries) => entries.items(),
+        }
+    }
+
+    pub(crate) fn resolve(self) -> Vec<Selected> {
+        match self {
+            Self::Ready(entries) => entries,
+            Self::Results(files) => files.iter().map(Selected::of_result).collect(),
+            Self::Panel(entries) => entries.resolve(),
+        }
+    }
+
+    pub(crate) fn one(&self) -> Option<Selected> {
+        match self {
+            Self::Ready(entries) => match entries.as_slice() {
+                [one] => Some(one.clone()),
+                _ => None,
+            },
+            Self::Results(files) => match files.as_ref() {
+                [one] => Some(Selected::of_result(one)),
+                _ => None,
+            },
+            Self::Panel(entries) => entries.one(),
+        }
+    }
+}
+
+pub(crate) struct Commands {
+    pub(crate) folders: String,
+    pub(crate) files: String,
+    pub(crate) location: String,
+}
 
 /// The command that Browse… writes for the chosen program: the program in
 /// quotes, so a path with spaces stays one, and the entry's path in quotes.
@@ -104,7 +183,7 @@ mod tests {
             (r"C:\Old\TOTALCMD.EXE", 500),
             (r"C:\Tools\totalcmd64.exe.lnk", 900),
         ];
-        for (row, (path, mtime)) in rows.iter_mut().zip(found) {
+        for (row, (path, mtime)) in std::sync::Arc::make_mut(&mut rows).iter_mut().zip(found) {
             row.path = path.into();
             row.mtime_ft = Some(mtime);
             row.is_dir = false;

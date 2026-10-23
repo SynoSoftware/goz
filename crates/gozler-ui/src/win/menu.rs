@@ -198,6 +198,19 @@ impl Menu {
         states: &[(u16, bool, bool)],
         default: Option<u16>,
     ) -> Option<u16> {
+        Self::track_popup_live(owner, items, point, states, default, |_| {})
+    }
+
+    /// Exposes the live menu for asynchronous state updates, and clears it
+    /// before destruction. The callback must not retain it after `None`.
+    pub(crate) fn track_popup_live(
+        owner: Hwnd,
+        items: &[MenuNode],
+        point: (i32, i32),
+        states: &[(u16, bool, bool)],
+        default: Option<u16>,
+        mut live: impl FnMut(Option<Menu>),
+    ) -> Option<u16> {
         let menu = Menu::popup(icon_glyph_height(owner.dpi())).ok()?;
         let chosen = menu.append(items).ok().map(|()| {
             for &(id, enabled, checked) in states {
@@ -207,6 +220,7 @@ impl Menu {
                 // SAFETY: plain values; an ID the menu lacks fails.
                 let _ = unsafe { SetMenuDefaultItem(menu.handle, u32::from(id), 0) };
             }
+            live(Some(menu));
             // SAFETY: the menu is this function's own; with TPM_RETURNCMD
             // the call returns the chosen ID instead of sending WM_COMMAND.
             unsafe {
@@ -221,6 +235,7 @@ impl Menu {
             }
             .0
         });
+        live(None);
         menu.destroy();
         chosen
             .and_then(|id| u16::try_from(id).ok())

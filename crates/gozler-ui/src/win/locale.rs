@@ -43,6 +43,7 @@ fn code_page_text(code_page: u32, bytes: &[u8]) -> String {
 
 /// The user's regional number format, read when created; a change to the
 /// regional format needs a new one.
+#[derive(Clone)]
 pub(crate) struct WindowsNumbers {
     leading_zero: u32,
     grouping: u32,

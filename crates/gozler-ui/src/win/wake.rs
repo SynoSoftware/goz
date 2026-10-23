@@ -65,6 +65,13 @@ pub(crate) struct OpenWaker {
 }
 
 impl OpenWaker {
+    #[cfg(test)]
+    pub(crate) fn closed() -> Self {
+        let waker = Self::new(Hwnd(HWND::default()));
+        waker.close();
+        waker
+    }
+
     pub(crate) fn new(window: Hwnd) -> OpenWaker {
         OpenWaker::posting(window, WAKE)
     }
@@ -74,6 +81,17 @@ impl OpenWaker {
         OpenWaker {
             waker: Waker::posting(window, message),
             open: Arc::new(Mutex::new(true)),
+        }
+    }
+
+    /// A different message on the same delivery lifetime; closing either closes both.
+    pub(crate) fn for_message(&self, message: u32) -> Self {
+        Self {
+            waker: Waker {
+                message,
+                ..self.waker.clone()
+            },
+            open: Arc::clone(&self.open),
         }
     }
 

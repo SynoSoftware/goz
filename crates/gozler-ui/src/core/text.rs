@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// A shipped language: its tag, its names and its embedded catalogue.
 pub(crate) struct Language {
@@ -199,7 +200,7 @@ impl Message {
 /// applied. It does not change; a language switch loads a new one.
 #[derive(Clone)]
 pub(crate) struct Strings {
-    messages: HashMap<String, Message>,
+    messages: Arc<HashMap<String, Message>>,
 }
 
 impl Strings {
@@ -236,7 +237,9 @@ impl Strings {
                 }
             }
         }
-        Strings { messages: merged }
+        Strings {
+            messages: Arc::new(merged),
+        }
     }
 
     /// The message, or the dotted key when the language lacks it, so a

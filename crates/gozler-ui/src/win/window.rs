@@ -14,6 +14,9 @@ use crate::core::layout::{Dpi, Px, Rect, ScrollRequest, Size};
 use crate::core::settings::Placement;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, COLOR_WINDOW, GetMonitorInfoW, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
@@ -34,20 +37,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowThreadProcessId, HHOOK, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON,
     IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
-    MSGF_DIALOGBOX, MSGF_MESSAGEBOX, PM_REMOVE, PeekMessageW, PostQuitMessage, PostThreadMessageW,
-    RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
-    SB_THUMBTRACK, SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON,
-    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer,
-    SetWindowLongPtrW, SetWindowPlacement, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
-    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA,
-    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED,
-    WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
-    WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL,
-    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CHILD, WS_CLIPCHILDREN,
-    WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
+    MSGF_DIALOGBOX, MSGF_MESSAGEBOX, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
+    PeekMessageW, PostQuitMessage, PostThreadMessageW, QS_ALLINPUT, RegisterClassExW, SB_BOTTOM,
+    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP,
+    SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED,
+    SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WA_INACTIVE,
+    WH_MSGFILTER, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE,
+    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_QUIT,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
+    WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -721,23 +724,83 @@ pub(crate) fn open_menu_bar(window: Hwnd) {
     };
 }
 
-pub(crate) fn quit() {
-    // SAFETY: posts WM_QUIT to this thread's queue.
-    unsafe { PostQuitMessage(0) };
-}
-
 /// Keeps the message loop alive until background shutdown finishes, without
 /// waiting on the window thread or using a window handle after destruction.
-pub(crate) fn quit_after(finish: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
-    // SAFETY: the current thread owns the message loop which remains alive
-    // until this worker posts WM_QUIT to its existing queue.
+pub(crate) fn quit_after(
+    finish: impl FnOnce(&super::work::OffThread) + Send + 'static,
+) -> Shutdown {
+    // SAFETY: the calling thread owns the queue that finalization will wake.
     let thread = unsafe { GetCurrentThreadId() };
-    std::thread::spawn(move || {
-        finish();
-        // SAFETY: WM_QUIT has no pointer parameters, and the loop has not
-        // been told to exit before the shutdown worker finishes.
+    let finished = Arc::new(AtomicBool::new(false));
+    let completed = Arc::clone(&finished);
+    super::work::spawn(move |worker| {
+        finish(worker);
+        completed.store(true, Ordering::Release);
+        // SAFETY: WM_QUIT has no pointer parameters or HWND.
         let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
-    })
+    });
+    Shutdown { finished }
+}
+
+/// Actual persistence completion, independent of WM_QUIT, which setup may
+/// already have posted before finalization starts. No window owns this lifetime.
+#[derive(Clone)]
+pub(crate) struct Shutdown {
+    finished: Arc<AtomicBool>,
+}
+
+impl Shutdown {
+    /// Called after every window is gone. The process may remain for its writer;
+    /// the window thread dispatches messages instead of joining that worker.
+    pub(crate) fn finish(&self) {
+        self.dispatch_until_finished(None);
+    }
+
+    /// Windows may terminate the writer after WM_ENDSESSION returns. Give it
+    /// only the owner's short budget; the last valid file survives an unfinished
+    /// atomic replacement, but the newest state is not guaranteed at sign-out.
+    pub(crate) fn finish_session(&self) {
+        self.dispatch_until_finished(Some(crate::core::work::SESSION_FINALIZATION));
+    }
+
+    fn dispatch_until_finished(&self, budget: Option<Duration>) -> bool {
+        let deadline = budget.map(|budget| Instant::now() + budget);
+        let mut quit = None;
+        let mut message = MSG::default();
+        while !self.finished.load(Ordering::Acquire) {
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if left.is_some_and(|left| left.is_zero()) {
+                break;
+            }
+            // SAFETY: message is a local. The caller destroyed the window and
+            // holds no model borrow while sent/posted messages are dispatched.
+            if unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                if message.message == WM_QUIT {
+                    quit.get_or_insert(message.wParam.0 as i32);
+                } else {
+                    // SAFETY: PeekMessageW initialized the message.
+                    unsafe {
+                        let _ = TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+                continue;
+            }
+            let timeout = left.map_or(u32::MAX, |left| {
+                u32::try_from(left.as_millis().max(1)).unwrap_or(u32::MAX - 1)
+            });
+            // SAFETY: there are no handles to borrow; only queue input or the
+            // remaining budget wakes this wait. The finalizer posts WM_QUIT.
+            unsafe {
+                MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            }
+        }
+        if let Some(code) = quit {
+            // SAFETY: restore any quit consumed here for the outer/native loop.
+            unsafe { PostQuitMessage(code) };
+        }
+        self.finished.load(Ordering::Acquire)
+    }
 }
 
 /// Ends the message loop from inside any modal loop that runs on this
@@ -1164,5 +1227,26 @@ pub(crate) fn show_resize_cursor() {
         if let Ok(cursor) = LoadCursorW(None, IDC_SIZENS) {
             SetCursor(Some(cursor));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn early_quit_is_preserved_without_acknowledging_an_unfinished_writer() {
+        let shutdown = Shutdown {
+            finished: Arc::new(AtomicBool::new(false)),
+        };
+        // SAFETY: this test thread owns its message queue; no window is opened.
+        unsafe { PostQuitMessage(73) };
+        let finished = shutdown.dispatch_until_finished(Some(Duration::from_millis(1)));
+        let mut message = MSG::default();
+        // SAFETY: message is a local; remove the test's restored quit.
+        let has_quit = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool();
+        assert!(!finished);
+        assert!(has_quit);
+        assert_eq!((message.message, message.wParam.0), (WM_QUIT, 73));
     }
 }

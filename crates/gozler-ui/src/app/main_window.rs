@@ -14,12 +14,16 @@ use super::requests::Requests;
 use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use super::viewer::Viewers;
+use super::work::{
+    CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
+    QueueReady, RegistryAnswer, ShellPurpose, ShellTarget,
+};
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, FilterCaptions, IndexCaptions, Inspected,
     InspectorCaptions, JobCaption, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest,
     ValuePart, WindowCaptions,
 };
-use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
+use crate::core::clipboard::ClipboardFormat;
 use crate::core::commands::{
     self, CommandButton, CommandId, Focus, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
     INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, MenuItem, SHOW_DETAILS, State,
@@ -27,7 +31,9 @@ use crate::core::commands::{
 };
 use crate::core::dates::{DateFormat, Dates};
 use crate::core::drop_target::{Dragged, DropEffect, DropKeys, DropMenu, SourceEffects};
-use crate::core::fetch::{ChunkAsk, DaemonFailure, Fetch, List, Purpose, WriteFailure};
+use crate::core::fetch::{
+    ChunkAsk, DaemonFailure, Fetch, List, LocalService, Purpose, WriteFailure,
+};
 use crate::core::file_operations::{QueueAction, delete_question, exit_question};
 use crate::core::fixer::{FixEvent, SetupEvent, SetupResult};
 use crate::core::glyph::Glyph;
@@ -45,21 +51,25 @@ use crate::core::model::{
     Accepted, Change, Column, ExportError, ExportFormat, Job, Model, SaveScope, ScopeCheck,
     SearchBoxEnter, Then,
 };
-use crate::core::open::{self, CommandLine};
-use crate::core::operations::{OperationDialog, OperationProgress, QueueStep};
-use crate::core::panel::{ChosenEntry, Side};
+use crate::core::open::{Commands, Entries, EntryAction, Selected};
+use crate::core::operations::{
+    OperationDialog, OperationProgress, OperationSteps, PreparedFailure, QueueStep, Reporting,
+    SourceStep,
+};
+use crate::core::panel::Side;
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
     date_items, size_items,
 };
 use crate::core::results::{Fix, ListButton};
 use crate::core::search_list::Deselect;
-use crate::core::selection::{DRAG_LIMIT, SELECTION_LIMIT, ToldRows, wide_path};
-use crate::core::settings::{Mode, ResultEnter, SettingsValues};
+use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selection, wide_path};
+use crate::core::settings::{Choices, Mode, ResultEnter, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
 use crate::core::text::{LanguageChoice, Numbers, Strings, without_access_key};
 use crate::core::update;
-use crate::win::clipboard::{self as clipboard, ClipboardBlock, ClipboardFiles};
+use crate::core::work::{Id, Retirement};
+use crate::win::clipboard::{self as clipboard, ClipboardFiles};
 use crate::win::controls::{
     Button, CheckBox, Divider, DropDownList, Edit, FileIconLabel, IconList, Label, ListClosing,
     ListColumn, ListView, ScrollEdge, Tooltip,
@@ -87,7 +97,7 @@ use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortSpec};
 use gozler_fileops::{Destination, OperationId, Request, Taken};
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::ops::Range;
@@ -99,9 +109,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime};
 use windows::Win32::Foundation::LRESULT;
 
+mod drops;
 mod panels;
+mod selection;
 mod synchronize;
 
+use drops::DragIn;
 use panels::{KEY_BAR, KEY_TIPS, PanelControls};
 
 mod timer {
@@ -141,6 +154,8 @@ mod timer {
     /// The same for each search panel's search, by side.
     pub(super) const PANEL_SEARCHING: [usize; 2] = [19, 20];
     pub(super) const DATES: usize = 21;
+    pub(super) const CLIPBOARD: usize = 22;
+    pub(super) const WORK: usize = 23;
 
     /// The timer of `list`'s search.
     pub(super) fn search(list: List) -> usize {
@@ -181,15 +196,6 @@ const SAVE_DELAY_MS: u32 = 1_000;
 /// Twice a second, as the engine's counters expect to be read.
 const OPERATIONS_POLL_MS: u32 = 500;
 
-/// What Settings' OK or Apply applied (DESIGN.md: Settings dialog).
-pub(super) struct Applied {
-    /// The values now in effect: the edited ones, except a registry
-    /// setting whose write failed, which keeps its earlier value.
-    pub(super) values: SettingsValues,
-    /// The message of each registry write that failed.
-    pub(super) failures: Vec<String>,
-}
-
 /// What the threads that ask GitHub for its latest release found: the
 /// update check, and the question whether the release is older than the
 /// window. [`MainWindow::ask_github`] runs them.
@@ -197,6 +203,11 @@ pub(super) struct Applied {
 struct UpdateCheck {
     newer: Option<String>,
     older: Option<bool>,
+}
+
+enum UpdateAnswer {
+    Newer(Option<String>),
+    Older(bool),
 }
 
 /// The controls, created in `WM_CREATE` in Tab order; Windows destroys them
@@ -790,6 +801,7 @@ struct Created {
     /// `None` while the window moves to a monitor with another DPI.
     layout: RefCell<Option<Layout>>,
     requests: Requests,
+    work: RefCell<super::work::Work>,
     fixer: FixThread,
     /// Wakes the window from the threads it does not join: GitHub's and a
     /// fix's.
@@ -838,6 +850,7 @@ pub(crate) struct MainWindow {
     focus_on_activate: Cell<Option<Hwnd>>,
     settings_file: PathBuf,
     settings_failure_shown: Cell<bool>,
+    ending_session: Cell<bool>,
     show_message: u32,
     icons: Icons,
     /// Whether the status timer runs.
@@ -847,7 +860,7 @@ pub(crate) struct MainWindow {
     selection_pending: Cell<bool>,
     /// The rows each list's notifications told it selects, in the order of
     /// [`List::ALL`] ([`MainWindow::selected_rows`]).
-    told: [RefCell<ToldRows>; 3],
+    told: [RefCell<selection::NativeSelection>; 3],
     /// Whether a [`Message::Deferred`] is posted to read the header's order
     /// after the person dragged a column.
     column_dragged: Cell<bool>,
@@ -909,11 +922,9 @@ pub(crate) struct MainWindow {
     include_saving: RefCell<Option<Saving>>,
     /// Its answer, once it arrived, for the Settings dialog.
     include_saved: RefCell<Option<Result<(), NotSaved>>>,
+    sign_in_saved: RefCell<Option<(Id, io::Result<()>)>>,
     /// A Paste whose thread reads the clipboard.
     pasting: RefCell<Vec<Pasting>>,
-    /// The actions on Search's selected entries whose check has not
-    /// arrived, in the order they were chosen.
-    checking: RefCell<Vec<Checking>>,
     /// Whether a click gave the search box the focus, so its text is
     /// selected once the click is handled (Settings > Search).
     select_search: Cell<bool>,
@@ -935,13 +946,58 @@ pub(crate) struct MainWindow {
     /// While files are dragged over the window.
     drag_in: RefCell<Option<DragIn>>,
     /// The drops whose paths a thread still reads from their source.
-    dropping: RefCell<Vec<Dropping>>,
+    dropping: RefCell<HashMap<OperationId, drops::Dropping>>,
     /// The modal steps that wait for [`Message::Deferred`], in the order
     /// they came.
     modal_steps: RefCell<VecDeque<ModalStep>>,
     /// Whether a modal step runs, whose loop the later steps wait for.
     modal_running: Cell<bool>,
-    shutdown: RefCell<Option<std::thread::JoinHandle<()>>>,
+    operation_delivery: RefCell<Option<OperationDelivery>>,
+    delivering_operations: Cell<bool>,
+    shutdown: RefCell<Option<win::window::Shutdown>>,
+}
+
+struct OperationDelivery {
+    queue: std::vec::IntoIter<QueueStep>,
+    panels: std::vec::IntoIter<crate::core::panel::PanelFollow>,
+    dialogs: std::vec::IntoIter<OperationDialog>,
+    progress: Option<OperationProgress>,
+    sources: std::vec::IntoIter<SourceStep>,
+}
+
+enum OperationEffect {
+    Queue(QueueStep),
+    Panel(crate::core::panel::PanelFollow),
+    Dialog(OperationDialog),
+    Progress(OperationProgress),
+    Source(SourceStep),
+}
+
+impl OperationDelivery {
+    fn new(steps: OperationSteps) -> Self {
+        Self {
+            queue: steps.queue.into_iter(),
+            panels: steps.panels.into_iter(),
+            dialogs: steps.dialogs.into_iter(),
+            progress: Some(steps.progress),
+            sources: steps.sources.into_iter(),
+        }
+    }
+
+    fn next(&mut self) -> Option<OperationEffect> {
+        self.queue
+            .next()
+            .map(OperationEffect::Queue)
+            .or_else(|| self.panels.next().map(OperationEffect::Panel))
+            .or_else(|| self.dialogs.next().map(OperationEffect::Dialog))
+            .or_else(|| self.progress.take().map(OperationEffect::Progress))
+            .or_else(|| self.sources.next().map(OperationEffect::Source))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.len() + self.panels.len() + self.dialogs.len() + self.sources.len() == 0
+            && self.progress.is_none()
+    }
 }
 
 /// A dialog, or another call with its own message loop, that a reply, a
@@ -958,6 +1014,12 @@ enum ModalStep {
         path: PathBuf,
         error: ExportError,
     },
+    SettingsNotSaved(std::io::Error),
+    OpenSettings(Id, bool),
+    CopyFailed(Id, CopyFailure),
+    Opened(ShellPurpose, crate::core::work::Id, Opened),
+    PreparedPaths(PathPurpose, Id, PreparedPaths),
+    Paired(crate::core::work::Id, LocalService, bool),
     /// A panel's folder could not be opened.
     PanelRefused(panels::Refused),
     /// Gives `Enter` to the first row of `ask`'s search, which `Enter` in
@@ -965,38 +1027,8 @@ enum ModalStep {
     EnterFirst(ChunkAsk),
     /// A file operation's retained failure dialog.
     Operation(OperationDialog),
+    PreparedFailure(PreparedFailure),
     Synchronize(OperationId),
-    /// An action on Search's selected entries, which a thread found
-    /// `present`, and the first that is `missing`.
-    Checked {
-        action: EntryAction,
-        present: Vec<Selected>,
-        missing: Option<Vec<u16>>,
-    },
-}
-
-/// A drop whose paths a thread reads from its source.
-struct Dropping {
-    id: OperationId,
-    /// The folder the files were dropped on.
-    destination: PathBuf,
-    moves: bool,
-    files: Receiver<Vec<PathBuf>>,
-    source: Option<DropSource>,
-}
-
-/// Files dragged over the window.
-struct DragIn {
-    dragged: Dragged,
-    /// The folder row the files would be dropped into, which the list
-    /// shows highlighted.
-    target: Option<DropFolder>,
-    /// The pointer, the keys and the source's effects of the last
-    /// `DragOver`, which the scroll timer asks again with after each row it
-    /// scrolls.
-    over: Option<((i32, i32), DropKeys, SourceEffects)>,
-    /// The edge the pointer rests at, while the scroll timer runs.
-    scrolling: Option<ScrollEdge>,
 }
 
 /// The folder row that dragged files would be dropped into. The drop goes
@@ -1015,16 +1047,13 @@ impl MainWindow {
     /// message loop reads its accelerators.
     pub(crate) fn open(
         class: &str,
-        mut model: Model,
+        model: Model,
         settings_file: PathBuf,
         show_message: u32,
         instance: Instance,
         sign_in: bool,
     ) -> (Hwnd, Rc<MainWindow>) {
         let placement = model.placement();
-        if instance == Instance::First {
-            model.offer_file_operations();
-        }
         let accelerators = accelerator_table(&model.choices().shortcuts, model.mode())
             .expect("the accelerator table builds");
         let viewers = Viewers::new(model.viewer());
@@ -1038,6 +1067,7 @@ impl MainWindow {
             focus_on_activate: Cell::new(None),
             settings_file,
             settings_failure_shown: Cell::new(false),
+            ending_session: Cell::new(false),
             show_message,
             icons: Icons::default(),
             polling: Cell::new(false),
@@ -1068,9 +1098,9 @@ impl MainWindow {
             total_commander: RefCell::new(None),
             include_saving: RefCell::new(None),
             include_saved: RefCell::new(None),
+            sign_in_saved: RefCell::new(None),
             pasting: RefCell::new(Vec::new()),
             shutdown: RefCell::new(None),
-            checking: RefCell::new(Vec::new()),
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
             file_operations: OnceCell::new(),
@@ -1079,9 +1109,11 @@ impl MainWindow {
             panel_typed: RefCell::new([None, None]),
             drop_target: RefCell::new(None),
             drag_in: RefCell::new(None),
-            dropping: RefCell::new(Vec::new()),
+            dropping: RefCell::new(HashMap::new()),
             modal_steps: RefCell::new(VecDeque::new()),
             modal_running: Cell::new(false),
+            operation_delivery: RefCell::new(None),
+            delivering_operations: Cell::new(false),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -1170,6 +1202,7 @@ impl MainWindow {
             status_fit: Cell::new(None),
             layout: RefCell::new(None),
             requests: Requests::new(Waker::new(hwnd)),
+            work: RefCell::new(super::work::Work::new(waker.clone())),
             fixer: FixThread::new(waker.clone()),
             panel_threads: PanelThreads::new(hwnd, waker.clone()),
             waker,
@@ -1393,6 +1426,7 @@ impl MainWindow {
             let state = State {
                 model: &model,
                 focus: Focus::Other,
+                list: model.active_list(),
             };
             (
                 (CommandId::Match.row().enabled)(&state),
@@ -1719,6 +1753,7 @@ impl MainWindow {
     }
 
     pub(super) fn cancel_settings_fix(&self, hwnd: Hwnd) {
+        self.created().work.borrow_mut().cancel_pairing();
         let accepted = self.model.borrow_mut().cancel_fix();
         self.apply(hwnd, accepted);
     }
@@ -1753,35 +1788,34 @@ impl MainWindow {
     /// and the Index page's call it, with the main window as `hwnd`, which
     /// owns Windows' permission prompt and outlives the fix's thread.
     pub(super) fn run_fix(&self, hwnd: Hwnd, fix: Fix) {
+        self.created().work.borrow_mut().cancel_pairing();
         match &fix {
-            Fix::OpenServices => return win::shell::open("services.msc"),
+            Fix::OpenServices => {
+                self.created().work.borrow_mut().open(ShellTarget::Services);
+                return;
+            }
             Fix::UseLocal(local) => {
                 let question = captions::use_local_question(self.model.borrow().strings(), local);
                 if !win::dialog::ask(self.fix_owner(hwnd), &question) {
                     return;
                 }
-                if !super::local_service::is_paired(&local.program) {
-                    // Read before the message box, whose loop may change
-                    // the model.
-                    let (text, title) = {
-                        let model = self.model.borrow();
-                        let text = |key: &str| model.strings().text(key).to_owned();
-                        (
-                            text("fixing.use_local_not_paired"),
-                            text("fixing.use_local_caption"),
-                        )
-                    };
-                    win::dialog::error_box(Some(self.fix_owner(hwnd)), &text, &title);
-                    return;
-                }
+                self.created()
+                    .work
+                    .borrow_mut()
+                    .check_pairing(local.clone());
+                return;
             }
             Fix::Repair(_) | Fix::Update => {}
         }
+        self.start_fix(hwnd, &fix);
+    }
+
+    fn start_fix(&self, hwnd: Hwnd, fix: &Fix) {
         if let Some(mut open) = self.settings.get() {
             open.follow_fix = true;
             self.settings.set(Some(open));
         }
-        let accepted = self.model.borrow_mut().start_fix(&fix);
+        let accepted = self.model.borrow_mut().start_fix(fix);
         self.apply(hwnd, accepted);
     }
 
@@ -1826,25 +1860,8 @@ impl MainWindow {
         }
     }
 
-    /// Starts the checked setup and closes the window, because the setup
-    /// does not run while a Gozler window is open (DESIGN.md: Service
-    /// fixes). The window ends the message loop instead of closing at once,
-    /// because Settings, a message box or another modal loop may be
-    /// running, and closes in [`MainWindow::close_for_setup`] once none
-    /// runs.
-    fn run_setup(&self, hwnd: Hwnd, setup: &Path) {
-        match shell::start_program(hwnd, setup) {
-            Ok(()) => {
-                self.closing_for_setup.set(true);
-                win::window::quit_modal_loops();
-            }
-            Err(error) => {
-                let failed = SetupResult::Failed(win::error_text(&error));
-                let failed = FixEvent::Setup(SetupEvent::End(failed));
-                let accepted = self.model.borrow_mut().accept_fix(failed);
-                self.apply(hwnd, accepted);
-            }
-        }
+    fn run_setup(&self, setup: PathBuf) {
+        self.created().work.borrow_mut().start_setup(setup);
     }
 
     /// Closes the window after its message loop has ended, when the setup
@@ -1856,10 +1873,10 @@ impl MainWindow {
     }
 
     /// Setup can end the message loop before destroying the window, so its
-    /// caller also holds the process open for the recovery writer.
+    /// caller also holds the process open for its essential writers.
     pub(super) fn finish_shutdown(&self) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.join();
+            shutdown.finish();
         }
     }
 
@@ -2478,15 +2495,33 @@ impl MainWindow {
     /// Each item's ID, whether it is enabled and whether it is checked, from
     /// the command table.
     fn item_states(&self, items: &[MenuItem]) -> Vec<(u16, bool, bool)> {
-        let focus = self.focus();
+        self.item_states_for(items, self.command_context())
+    }
+
+    fn item_states_for(
+        &self,
+        items: &[MenuItem],
+        context: selection::CommandContext,
+    ) -> Vec<(u16, bool, bool)> {
+        let focus = context.focus;
         let model = self.model.borrow();
+        let pending = self.selection_command_pending(context.list);
         let state = State {
             model: &model,
             focus,
+            list: context.list,
         };
         items
             .iter()
-            .map(|item| (item.id(), item.enabled(&state), item.checked(&state)))
+            .map(|item| {
+                (
+                    item.id(),
+                    item.enabled(&state)
+                        && !(pending
+                            && (item.reads_selection(focus) || item.writes_selection(focus))),
+                    item.checked(&state),
+                )
+            })
             .collect()
     }
 
@@ -2511,20 +2546,39 @@ impl MainWindow {
     /// enabled, because the state can change while a menu is open (DESIGN.md:
     /// T11).
     fn run(&self, hwnd: Hwnd, item: MenuItem) {
-        // The command acts on the rows just selected, such as F5 right after
-        // Insert. The read calls `apply`, which can move the focus
-        // (DESIGN.md: window rule 1), so it comes before `focus`.
-        let mode = self.model.borrow().mode();
-        match mode {
-            Mode::Search => self.read_list_selection(hwnd),
-            Mode::TwoPanels => self.read_panel_selection(),
+        let context = self.command_context();
+        self.run_in_context(hwnd, item, context);
+    }
+
+    fn run_in_context(&self, hwnd: Hwnd, item: MenuItem, context: selection::CommandContext) {
+        if !self.selection_context_current(context) {
+            return;
         }
-        let focus = self.focus();
+        let writing = item.writes_selection(context.focus)
+            && (self.native_update_active(context.list)
+                || self.native_deselection_pending(context.list)
+                || self.selection_command_pending(context.list));
+        if (item.reads_selection(context.focus) || writing)
+            && !self.prepare_selection_command(hwnd, item, context)
+        {
+            return;
+        }
+        self.run_command(hwnd, item, context);
+    }
+
+    fn run_command(&self, hwnd: Hwnd, item: MenuItem, context: selection::CommandContext) {
+        if !self.selection_context_current(context) {
+            return;
+        }
+        let selection::CommandContext {
+            mode, list, focus, ..
+        } = context;
         let enabled = {
             let model = self.model.borrow();
             item.enabled(&State {
                 model: &model,
                 focus,
+                list,
             })
         };
         if !enabled {
@@ -2535,7 +2589,10 @@ impl MainWindow {
             // quick search copies the focused row.
             self.close_quick_search();
         }
-        let active = self.model.borrow().panels().active();
+        let active = match list {
+            List::Panel(side) => side,
+            List::Search => self.model.borrow().panels().active(),
+        };
         let controls = &self.created().controls;
         let accepted = match item {
             MenuItem::Run(command) => match command {
@@ -2546,25 +2603,34 @@ impl MainWindow {
                 CommandId::About => {
                     let about = {
                         let model = self.model.borrow();
-                        About::new(model.strings(), model.service_version())
+                        About::new(self, model.strings(), model.service_version())
                     };
                     self.open_dialog(hwnd, DialogId::About, &about);
                     return;
                 }
-                CommandId::Open if mode == Mode::TwoPanels => return self.open_panel_entries(hwnd),
-                CommandId::Open => return self.act_on_selected(hwnd, EntryAction::Open),
-                CommandId::OpenFileLocation => {
-                    return self.act_on_selected(hwnd, EntryAction::OpenFileLocation);
+                CommandId::Open if mode == Mode::TwoPanels => {
+                    return self.open_panel_entries(active);
                 }
-                CommandId::Explore => return self.act_on_selected(hwnd, EntryAction::Explore),
+                CommandId::Open => return self.act_on_selected(list, EntryAction::Open),
+                CommandId::OpenFileLocation => {
+                    return self.act_on_selected(list, EntryAction::OpenFileLocation);
+                }
+                CommandId::Explore => return self.act_on_selected(list, EntryAction::Explore),
                 CommandId::Properties => {
-                    return self.act_on_selected(hwnd, EntryAction::Properties);
+                    return self.act_on_selected(list, EntryAction::Properties);
                 }
                 CommandId::ExportResults => return self.export(hwnd),
-                CommandId::Cancel => self.model.borrow_mut().cancel_job(),
+                CommandId::Cancel => {
+                    self.created().work.borrow_mut().cancel_pairing();
+                    self.model.borrow_mut().cancel_job()
+                }
                 CommandId::Copy => match focus {
-                    Focus::SearchBox { .. } => return controls.search.copy(),
+                    Focus::SearchBox { .. } => {
+                        self.cancel_copy(hwnd);
+                        return controls.search.copy();
+                    }
                     Focus::Value { .. } => {
+                        self.cancel_copy(hwnd);
                         if let Some(value) = self.focused_value() {
                             value.copy();
                         }
@@ -2605,18 +2671,21 @@ impl MainWindow {
                         };
                     }
                 },
-                CommandId::ClearSelection => return self.panel(active).list.set_selected(&[]),
+                CommandId::ClearSelection => return self.panel(active).list.deselect_all(),
                 CommandId::Find => {
                     if mode == Mode::TwoPanels {
-                        return self.find_in_panel(hwnd);
+                        return self.find_in_panel(hwnd, active);
                     }
                     controls.search.hwnd().focus();
                     return controls.search.select_all();
                 }
                 CommandId::Refresh => {
                     return match mode {
-                        Mode::Search => self.search(hwnd, List::Search),
-                        Mode::TwoPanels => self.refresh_panel(hwnd),
+                        Mode::Search => {
+                            self.created().work.borrow_mut().refresh_location();
+                            self.search(hwnd, List::Search);
+                        }
+                        Mode::TwoPanels => self.refresh_panel(hwnd, active),
                     };
                 }
                 CommandId::SearchSyntax => {
@@ -2630,14 +2699,14 @@ impl MainWindow {
                 CommandId::Settings => return self.open_settings(hwnd),
                 CommandId::ShowWindow => return self.show_window(hwnd),
                 CommandId::CopyToFolder | CommandId::MoveToFolder if mode == Mode::TwoPanels => {
-                    return self.transfer(hwnd, command == CommandId::MoveToFolder);
+                    return self.transfer(hwnd, command == CommandId::MoveToFolder, active);
                 }
-                CommandId::CopyToFolder => return self.copy_to_folder(hwnd, false),
-                CommandId::MoveToFolder => return self.copy_to_folder(hwnd, true),
+                CommandId::CopyToFolder => return self.copy_to_folder(hwnd, false, list),
+                CommandId::MoveToFolder => return self.copy_to_folder(hwnd, true, list),
                 CommandId::Synchronize => return self.synchronize_folders(hwnd, None),
-                CommandId::Delete => return self.delete_selected(hwnd),
-                CommandId::NewFolder => return self.new_folder(hwnd),
-                CommandId::View => return self.view_focused(hwnd),
+                CommandId::Delete => return self.delete_selected(hwnd, list),
+                CommandId::NewFolder => return self.new_folder(hwnd, active),
+                CommandId::View => return self.view_focused(hwnd, active),
                 // Not available in this version (DESIGN.md: Commands in Two
                 // panels).
                 CommandId::Edit => return,
@@ -2679,10 +2748,10 @@ impl MainWindow {
                 return;
             }
             MenuItem::SortKey(key) if mode == Mode::TwoPanels => {
-                return self.sort_active_panel(hwnd, Some(key), None);
+                return self.change_panel_sort(hwnd, active, Some(key), None);
             }
             MenuItem::SortDirection(dir) if mode == Mode::TwoPanels => {
-                return self.sort_active_panel(hwnd, None, Some(dir));
+                return self.change_panel_sort(hwnd, active, None, Some(dir));
             }
             MenuItem::SortKey(key) => {
                 let mut model = self.model.borrow_mut();
@@ -2697,7 +2766,7 @@ impl MainWindow {
             MenuItem::Panel(action) => return self.run_panel_action(hwnd, action),
             MenuItem::Language(place) => {
                 hwnd.draw_once_after(|| self.set_language(hwnd, LanguageChoice::at(place)));
-                self.save_settings(hwnd, true);
+                self.save_settings(true);
                 return;
             }
         };
@@ -2705,9 +2774,8 @@ impl MainWindow {
     }
 
     /// Runs the search that `list`'s text and controls ask for now. Only
-    /// Search's Location is looked for on the disk: a search panel's folder
-    /// is the one the panel just showed, and a folder deleted since gives no
-    /// results.
+    /// Search's Location uses its last background observation; a search panel's
+    /// folder is the one the panel just showed.
     fn search(&self, hwnd: Hwnd, list: List) {
         hwnd.kill_timer(timer::search(list));
         let start = QueryStart {
@@ -2718,9 +2786,9 @@ impl MainWindow {
             List::Search => self.model.borrow().location().map(str::to_owned),
             List::Panel(_) => None,
         };
-        let scope = match location {
-            Some(folder) if gozler_client::folder_is_missing(&folder) => ScopeCheck::Missing,
-            Some(_) | None => ScopeCheck::Exists,
+        let scope = match list {
+            List::Search => self.created().work.borrow_mut().scope(location.as_deref()),
+            List::Panel(_) => ScopeCheck::Exists,
         };
         let accepted = self.model.borrow_mut().start_search(list, &start, scope);
         if accepted.change == Change::Searching(list) {
@@ -2886,6 +2954,8 @@ impl MainWindow {
     /// Updates the controls for what a reply or an input changed, and starts
     /// the request it makes necessary.
     fn apply(&self, hwnd: Hwnd, accepted: Accepted) {
+        self.retire_model();
+        self.start_list_passes();
         let created = self.created();
         let controls = &created.controls;
         match accepted.then {
@@ -2906,12 +2976,8 @@ impl MainWindow {
             Some(Then::ConfirmSetup) => self.defer(hwnd, ModalStep::ConfirmSetup),
             Some(Then::ExplainNoSetup) => self.defer(hwnd, ModalStep::ExplainNoSetup),
             Some(Then::StopFix) => created.fixer.stop(),
-            Some(Then::CancelOperation(id)) => {
-                if let Some(operations) = self.file_operations.get() {
-                    operations.run(QueueStep::Cancel(id));
-                }
-            }
-            Some(Then::RunSetup(setup)) => self.run_setup(hwnd, &setup),
+            Some(Then::CancelOperation(id)) => self.act_operation(id, QueueAction::Cancel),
+            Some(Then::RunSetup(setup)) => self.run_setup(setup),
             None => {}
         }
         match accepted.change {
@@ -3031,6 +3097,7 @@ impl MainWindow {
                 // selected (DESIGN.md: T2).
                 controls.list.select_only(None);
                 controls.list.set_count(count);
+                self.seed_native_selection(List::Search, Vec::new().into());
                 if count > 0 {
                     controls.list.ensure_visible(0);
                 }
@@ -3065,6 +3132,7 @@ impl MainWindow {
                 let control = self.panel(side).list;
                 control.select_only(None);
                 control.set_count(count);
+                self.seed_native_selection(list, Vec::new().into());
                 if count > 0 {
                     control.set_focused(Some(0));
                 }
@@ -3095,6 +3163,7 @@ impl MainWindow {
                 let control = self.list_control(list);
                 control.select_only(None);
                 control.set_count(0);
+                self.seed_native_selection(list, Vec::new().into());
                 created.requests.cancel(Purpose::Selection(list));
                 match list {
                     List::Search => self.update_message(),
@@ -3110,6 +3179,13 @@ impl MainWindow {
                 self.update_status();
                 // A result snapshot the read made emptied the cache.
                 self.fetch_visible(list);
+            }
+            Change::SelectionFiltered { list, deselect } => {
+                self.show_list_taken(list, deselect);
+                if let List::Panel(side) = list {
+                    self.show_panel(side);
+                }
+                self.update_status();
             }
             Change::ExportFailed { path, error } => {
                 self.update_status();
@@ -3130,6 +3206,12 @@ impl MainWindow {
         self.update_inspector(hwnd);
         self.update_poll(hwnd);
         self.note_saved_state(hwnd);
+    }
+
+    fn retire_model(&self) {
+        let mut retired = self.model.borrow_mut().take_retired();
+        retired.append(self.created().panel_threads.take_retired());
+        self.created().work.borrow_mut().retire(retired);
     }
 
     /// Starts the save timer when the state that `ui.json` saves changed
@@ -3160,6 +3242,12 @@ impl MainWindow {
     /// dispatches wakes, whose steps wait here for it to end, so no dialog
     /// opens over another.
     fn run_modal_steps(&self, hwnd: Hwnd) {
+        if self.delivering_operations.get() || self.operation_delivery.borrow().is_some() {
+            return;
+        }
+        if self.created().work.borrow().preparing_report() {
+            return;
+        }
         if self.modal_running.replace(true) {
             return;
         }
@@ -3172,6 +3260,123 @@ impl MainWindow {
                 ModalStep::ExportFailed { path, error } => {
                     self.show_export_failure(hwnd, &path, &error);
                 }
+                ModalStep::SettingsNotSaved(error) if !self.ending_session.get() => {
+                    let text = self.model.borrow().strings().format(
+                        "message.settings_not_saved",
+                        &[
+                            &self.settings_file.display().to_string(),
+                            &win::error_text(&error),
+                        ],
+                    );
+                    self.error_box(hwnd, &text);
+                }
+                ModalStep::SettingsNotSaved(_) => {}
+                ModalStep::CopyFailed(id, failure) => {
+                    if !self.created().work.borrow().copy_is_current(id) {
+                        continue;
+                    }
+                    let text = match failure {
+                        CopyFailure::Busy => self
+                            .model
+                            .borrow()
+                            .strings()
+                            .text("message.clipboard_busy")
+                            .to_owned(),
+                        CopyFailure::Native(error) => error.message(),
+                    };
+                    self.error_box(hwnd, &text);
+                }
+                ModalStep::PreparedPaths(purpose, id, prepared) => {
+                    if !self.created().work.borrow().paths_are_current(purpose, id) {
+                        self.retire_paths(prepared.paths);
+                        continue;
+                    }
+                    match prepared.action {
+                        PathAction::Transfer { moves } => {
+                            self.copy_paths_to_folder(hwnd, moves, prepared.paths);
+                        }
+                        PathAction::PanelTransfer {
+                            moves,
+                            place,
+                            selected,
+                            start,
+                        } => {
+                            self.transfer_paths(
+                                hwnd,
+                                moves,
+                                place,
+                                selected,
+                                *start,
+                                prepared.paths,
+                            );
+                        }
+                        PathAction::Delete { place } => {
+                            self.delete_paths(hwnd, place, prepared.paths)
+                        }
+                    }
+                }
+                ModalStep::OpenSettings(id, sign_in) => {
+                    if self.created().work.borrow().registry_is_current(id)
+                        && self.settings.get().is_none()
+                    {
+                        self.show_settings(hwnd, sign_in);
+                    }
+                }
+                ModalStep::Opened(purpose, id, opened) => {
+                    if !self.created().work.borrow().opening_is_current(purpose, id) {
+                        continue;
+                    }
+                    if purpose == ShellPurpose::Setup {
+                        match opened.failure {
+                            Some(failure) => {
+                                let failed = SetupResult::Failed(win::error_text(&failure.error));
+                                let event = FixEvent::Setup(SetupEvent::End(failed));
+                                let accepted = self.model.borrow_mut().accept_fix(event);
+                                self.apply(hwnd, accepted);
+                            }
+                            None => {
+                                // Setup waits for Gozler to close. Native modal
+                                // loops must unwind before its HWND is destroyed.
+                                self.closing_for_setup.set(true);
+                                win::window::quit_modal_loops();
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(failure) = opened.failure {
+                        let reason = win::error_text(&failure.error);
+                        let text = {
+                            let model = self.model.borrow();
+                            match failure.target {
+                                OpenTarget::Command(program) => model
+                                    .strings()
+                                    .format("message.open_failed", &[&program, &reason]),
+                                OpenTarget::Path(path) => model.strings().format(
+                                    "panel.cannot_open",
+                                    &[&String::from_utf16_lossy(&path), &reason],
+                                ),
+                            }
+                        };
+                        self.error_box(self.fix_owner(hwnd), &text);
+                    }
+                    if self.created().work.borrow().opening_is_current(purpose, id) {
+                        self.report_missing(hwnd, opened.missing);
+                    }
+                }
+                ModalStep::Paired(id, _, _)
+                    if !self.created().work.borrow().pairing_is_current(id) => {}
+                ModalStep::Paired(_, local, true) => self.start_fix(hwnd, &Fix::UseLocal(local)),
+                ModalStep::Paired(_, _, false) => {
+                    let (text, title) = {
+                        let model = self.model.borrow();
+                        let text = |key: &str| model.strings().text(key).to_owned();
+                        (
+                            text("fixing.use_local_not_paired"),
+                            text("fixing.use_local_caption"),
+                        )
+                    };
+                    win::dialog::error_box(Some(self.fix_owner(hwnd)), &text, &title);
+                }
                 ModalStep::PanelRefused(refused) => self.refuse(hwnd, refused),
                 ModalStep::EnterFirst(ask) => {
                     let shown =
@@ -3180,13 +3385,13 @@ impl MainWindow {
                         self.enter_first_or_selected(hwnd);
                     }
                 }
-                ModalStep::Operation(dialog) => self.operation_dialog(hwnd, dialog),
+                ModalStep::Operation(dialog) => {
+                    if self.operation_dialog(hwnd, dialog) {
+                        break;
+                    }
+                }
+                ModalStep::PreparedFailure(prepared) => self.show_prepared_failure(hwnd, prepared),
                 ModalStep::Synchronize(id) => self.synchronize_folders(hwnd, Some(id)),
-                ModalStep::Checked {
-                    action,
-                    present,
-                    missing,
-                } => self.act(hwnd, action, present, missing),
             }
         }
         self.modal_running.set(false);
@@ -3267,6 +3472,132 @@ impl MainWindow {
     /// Accepts every reply that has arrived, and the newer release that the
     /// update check found.
     fn on_wake(&self, hwnd: Hwnd) {
+        self.accept_told_selections(hwnd);
+        self.apply_taken_deselections(hwnd);
+        self.read_list_selection(hwnd);
+        self.read_panel_selection();
+        let report = self.created().work.borrow_mut().take_report();
+        if let Some(report) = report {
+            self.modal_steps
+                .borrow_mut()
+                .push_front(ModalStep::PreparedFailure(report));
+            hwnd.post(DEFERRED);
+        }
+        let followed = self.created().work.borrow_mut().take_followed();
+        if let Some(answer) = followed {
+            let steps = self.model.borrow_mut().accept_followed(answer);
+            self.apply_operation_steps(hwnd, steps);
+        }
+        let panels = self.created().work.borrow_mut().take_panels();
+        for (side, answer) in panels {
+            let update = self
+                .model
+                .borrow_mut()
+                .panels_mut()
+                .accept_calculation(side, answer);
+            if let Some(update) = update {
+                self.apply_panel_update(hwnd, side, update);
+            }
+            self.retire_model();
+        }
+        let counted = self.created().work.borrow_mut().take_panel_counts();
+        for (side, answer) in counted {
+            let current = self
+                .model
+                .borrow_mut()
+                .panels_mut()
+                .accept_count(side, answer);
+            if current && self.model.borrow().mode() == Mode::TwoPanels {
+                self.show_panel(side);
+            }
+            self.retire_model();
+        }
+        let found = self.created().work.borrow_mut().take_quick();
+        for (side, answer) in found {
+            let row = self
+                .model
+                .borrow_mut()
+                .panels_mut()
+                .accept_quick(side, answer);
+            if let Some(row) = row {
+                self.quick_go(side, row);
+            }
+            self.show_panel(side);
+            self.retire_model();
+        }
+        self.start_list_passes();
+        let kept = self.created().work.borrow_mut().take_kept();
+        if !kept.is_empty() {
+            for (list, answer) in kept {
+                let accepted = self.model.borrow_mut().accept_kept(list, answer);
+                self.apply(hwnd, accepted);
+            }
+            self.release_operations();
+        }
+        let filtered = self.created().work.borrow_mut().take_filtered();
+        for (list, answer) in filtered {
+            let accepted = self.model.borrow_mut().accept_filtered(list, answer);
+            self.apply(hwnd, accepted);
+        }
+        let restored = self.created().work.borrow_mut().take_queue();
+        if let Some(restored) = restored {
+            self.adopt_queue(hwnd, restored);
+        }
+        let location_changed = self.created().work.borrow_mut().take_location();
+        if location_changed {
+            self.search(hwnd, List::Search);
+        }
+        let labels_changed = self.created().work.borrow_mut().take_labels();
+        if labels_changed {
+            self.post_settings_reply();
+        }
+        let copied = self.created().work.borrow_mut().take_copied();
+        match copied {
+            Some(CopyNotice::Retry) => hwnd.set_timer(
+                timer::CLIPBOARD,
+                crate::core::clipboard::RETRY_AFTER.as_millis() as u32,
+            ),
+            Some(CopyNotice::Failed(id, error)) => {
+                self.defer(hwnd, ModalStep::CopyFailed(id, error))
+            }
+            Some(CopyNotice::Finished) | None => {}
+        }
+        loop {
+            let answer = self.created().work.borrow_mut().take_registry();
+            let Some((id, answer)) = answer else { break };
+            match answer {
+                RegistryAnswer::Read(sign_in) => {
+                    self.defer(hwnd, ModalStep::OpenSettings(id, sign_in))
+                }
+                RegistryAnswer::SignIn(result) => {
+                    self.sign_in_saved.replace(Some((id, result)));
+                    self.post_settings_reply();
+                }
+            }
+        }
+        let opened = self.created().work.borrow_mut().take_opened();
+        for (purpose, id, opened) in opened {
+            self.defer(hwnd, ModalStep::Opened(purpose, id, opened));
+        }
+        let prepared = self.created().work.borrow_mut().take_paths();
+        for (purpose, id, prepared) in prepared {
+            self.defer(hwnd, ModalStep::PreparedPaths(purpose, id, prepared));
+        }
+        let paired = self.created().work.borrow_mut().take_pairing();
+        if let Some((id, local, paired)) = paired {
+            self.defer(hwnd, ModalStep::Paired(id, local, paired));
+        }
+        loop {
+            let saved = self.created().work.borrow_mut().take_saved();
+            let Some(saved) = saved else { break };
+            if let Err(error) = saved.result
+                && saved.report_failure
+                && !self.ending_session.get()
+                && !self.settings_failure_shown.replace(true)
+            {
+                self.defer(hwnd, ModalStep::SettingsNotSaved(error));
+            }
+        }
         for fetched in self.created().requests.drain() {
             let accepted = self.model.borrow_mut().accept(fetched);
             self.apply(hwnd, accepted);
@@ -3278,7 +3609,6 @@ impl MainWindow {
         self.finish_include_save();
         self.finish_paste();
         self.finish_drops();
-        self.finish_checks(hwnd);
         self.on_panel_events(hwnd);
         let newer = self
             .update
@@ -3300,6 +3630,19 @@ impl MainWindow {
             let accepted = self.model.borrow_mut().set_latest_release_older(older);
             self.apply(hwnd, accepted);
         }
+        self.resume_selection_actions(hwnd);
+        self.poll_work(hwnd);
+    }
+
+    fn poll_work(&self, hwnd: Hwnd) {
+        if self.shutdown.borrow().is_some() {
+            return;
+        }
+        if self.created().work.borrow_mut().tick(Instant::now()) {
+            hwnd.set_timer(timer::WORK, 250);
+        } else {
+            hwnd.kill_timer(timer::WORK);
+        }
     }
 
     /// A control's notification in `WM_COMMAND`.
@@ -3310,10 +3653,8 @@ impl MainWindow {
                 crate::core::status_transfer::Input::Toggle => {
                     controls.status.restore_transfer_focus();
                     self.remember_inspector_focus();
-                    if let Some(operations) = self.file_operations.get() {
-                        self.model
-                            .borrow_mut()
-                            .open_transfer_selection(None, &operations.snapshot());
+                    if self.file_operations.get().is_some() {
+                        self.model.borrow_mut().open_transfer_selection(None);
                     }
                     let accepted = self.model.borrow_mut().toggle_transfers();
                     self.apply(hwnd, accepted);
@@ -3327,9 +3668,7 @@ impl MainWindow {
                     self.refresh_operations();
                 }
                 crate::core::status_transfer::Input::Action(id, action) => {
-                    if let Some(operations) = self.file_operations.get() {
-                        operations.act(id, action);
-                    }
+                    self.act_operation(id, action);
                 }
             }
             return;
@@ -3614,14 +3953,15 @@ impl MainWindow {
         groups: &[Vec<MenuItem>],
         point: (i32, i32),
         default: Option<MenuItem>,
+        context: selection::CommandContext,
     ) {
         let items: Vec<MenuItem> = groups.iter().flatten().copied().collect();
-        let states = self.item_states(&items);
+        let states = self.item_states_for(&items, context);
         let nodes = commands::render_popup(groups, self.model.borrow().strings());
         let default = default.map(MenuItem::id);
         let chosen = win::menu::Menu::track_popup(hwnd, &nodes, point, &states, default);
         if let Some(item) = chosen.and_then(MenuItem::from_id) {
-            self.run(hwnd, item);
+            self.run_in_context(hwnd, item, context);
         }
     }
 
@@ -3629,6 +3969,17 @@ impl MainWindow {
     /// Menu key and Shift+F10. A right-click below the last row shows none
     /// (DESIGN.md: Results list).
     fn row_menu(&self, hwnd: Hwnd, point: Option<(i32, i32)>) {
+        if let Some(context) = self.await_search_menu(hwnd, point) {
+            self.row_menu_ready(hwnd, point, context);
+        }
+    }
+
+    fn row_menu_ready(
+        &self,
+        hwnd: Hwnd,
+        point: Option<(i32, i32)>,
+        context: selection::CommandContext,
+    ) {
         let list = self.created().controls.list;
         let point = match point {
             Some(point) => list.row_at(point).map(|_| point),
@@ -3636,15 +3987,13 @@ impl MainWindow {
         };
         let Some(point) = point else { return };
         // The right-click selected its row a moment ago.
-        self.read_list_selection(hwnd);
         // The first selected row's kind decides which Open shows, and Shift
         // the items shown only with it (DESIGN.md: The Context menu page).
+        let first = list.next_selected(None);
         let groups = {
             let model = self.model.borrow();
-            let folder = list
-                .selected()
-                .first()
-                .and_then(|rows| model.search_list().results().row(rows.start))
+            let folder = first
+                .and_then(|row| model.search_list().results().row(row))
                 .is_some_and(|row| row.is_dir);
             commands::shown_row_menu(
                 model.choices().context_menu,
@@ -3661,26 +4010,33 @@ impl MainWindow {
             .flatten()
             .any(|item| *item == open)
             .then_some(open);
-        self.context_menu(hwnd, &groups, point, default);
+        self.context_menu(hwnd, &groups, point, default, context);
     }
 
     /// Reads the list's selection, if it changed since it was last read
     /// (DESIGN.md: The selection).
-    fn read_list_selection(&self, hwnd: Hwnd) {
+    fn read_list_selection(&self, hwnd: Hwnd) -> bool {
+        if self.native_deselection_pending(List::Search) {
+            return false;
+        }
         if !self.selection_pending.replace(false) {
-            return;
+            return true;
         }
         let list = self.created().controls.list;
         let count = list.selected_count();
         let accepted = if count > SELECTION_LIMIT {
             self.model.borrow_mut().select_too_many(List::Search, count)
         } else {
-            let positions = self.selected_rows(List::Search);
+            let Some(selected) = self.selected_rows(List::Search) else {
+                self.selection_pending.set(true);
+                return false;
+            };
             self.model
                 .borrow_mut()
-                .set_selection(List::Search, positions)
+                .set_selection(List::Search, selected)
         };
         self.apply(hwnd, accepted);
+        true
     }
 
     fn on_list_notify(&self, hwnd: Hwnd, notify: ListNotify) -> Option<LRESULT> {
@@ -3721,7 +4077,9 @@ impl MainWindow {
                 DrawStage::Other => DrawAnswer::Default,
             })),
             ListNotify::SelectionChanged(change) => {
-                self.told_rows(List::Search).borrow_mut().change(change);
+                if !self.selection_changed(List::Search, change) {
+                    return None;
+                }
                 if !self.selection_pending.replace(true) {
                     hwnd.post(DEFERRED);
                 }
@@ -4011,109 +4369,51 @@ impl MainWindow {
         list.hwnd().is_visible() && list.header().screen_rect().contains(point)
     }
 
-    /// The entries a file command acts on, each as `chosen` makes the
-    /// active panel's chosen ones in Two panels, or as `file` makes Search's
-    /// selected entries.
-    fn selected_as<T>(
-        &self,
-        chosen: impl FnMut(ChosenEntry) -> T,
-        file: impl FnMut(&ResultItem) -> T,
-    ) -> Vec<T> {
+    fn selected_source(&self, list: List) -> Option<Entries> {
         let model = self.model.borrow();
-        if model.mode() == Mode::TwoPanels {
-            let panels = model.panels();
-            return (panels.chosen(panels.active()).into_iter())
-                .map(chosen)
-                .collect();
-        }
-        let files = model.search_list().selection().files().unwrap_or_default();
-        files.iter().map(file).collect()
-    }
-
-    fn selected_entries(&self) -> Vec<Selected> {
-        self.selected_as(
-            |entry| Selected {
-                path: entry.path,
-                is_folder: entry.is_folder,
-            },
-            |file| Selected {
-                path: wide_path(file),
-                is_folder: file.is_dir,
-            },
-        )
-    }
-
-    /// Does `action` on the selected entries. Search's rows come from the
-    /// index and can be stale, so a thread first checks which entries still
-    /// exist, because a share that stopped answering would hang the window,
-    /// and the window acts once it has the answer ([`present`]). A panel's
-    /// rows come from a listing, and Windows reports a missing entry itself,
-    /// so Two panels checks none.
-    fn act_on_selected(&self, hwnd: Hwnd, action: EntryAction) {
-        let entries = self.selected_entries();
-        if self.model.borrow().mode() == Mode::TwoPanels {
-            return self.act(hwnd, action, entries, None);
-        }
-        let (sender, checked) = channel();
-        let waker = self.created().waker.clone();
-        std::thread::spawn(move || {
-            let checked = present(entries);
-            waker.deliver(|| sender.send(checked).is_ok());
-        });
-        (self.checking.borrow_mut()).push(Checking { action, checked });
-    }
-
-    /// The actions whose entries their threads have checked, in the order
-    /// they were chosen, each as a modal step, because an action can say
-    /// that an entry is missing (DESIGN.md: window rule 13). A check that
-    /// waits for a share that stopped answering holds back no later one.
-    fn finish_checks(&self, hwnd: Hwnd) {
-        let mut checked = Vec::new();
-        self.checking
-            .borrow_mut()
-            .retain(|checking| match checking.checked.try_recv() {
-                Ok((present, missing)) => {
-                    checked.push(ModalStep::Checked {
-                        action: checking.action,
-                        present,
-                        missing,
-                    });
-                    false
-                }
-                Err(TryRecvError::Empty) => true,
-                Err(TryRecvError::Disconnected) => false,
-            });
-        for step in checked {
-            self.defer(hwnd, step);
+        match list {
+            List::Panel(side) => model.panels().chosen_source(side),
+            List::Search => model
+                .search_list()
+                .selection()
+                .shared_files()
+                .map(Entries::Results),
         }
     }
 
-    /// Does `action` on `present`, then says that `missing` no longer
-    /// exists.
-    fn act(
-        &self,
-        hwnd: Hwnd,
-        action: EntryAction,
-        present: Vec<Selected>,
-        missing: Option<Vec<u16>>,
-    ) {
-        match action {
-            EntryAction::Open => self.open_entries(hwnd, &present),
-            EntryAction::OpenFileLocation => self.show_entries(hwnd, present),
-            EntryAction::Explore => explore_entries(hwnd, present),
-            EntryAction::Properties => {
-                for entry in &present {
-                    shell::properties(hwnd, &entry.path);
-                }
+    fn act_on_selected(&self, list: List, action: EntryAction) {
+        let Some(entries) = self.selected_source(list) else {
+            return;
+        };
+        self.open_entries(list, action, entries);
+    }
+
+    fn act_on_entries(&self, list: List, action: EntryAction, entries: Vec<Selected>) {
+        self.open_entries(list, action, Entries::Ready(entries));
+    }
+
+    fn open_entries(&self, list: List, action: EntryAction, entries: Entries) {
+        let commands = {
+            let model = self.model.borrow();
+            let choices = model.choices();
+            Commands {
+                folders: choices.open_folders.clone(),
+                files: choices.open_files.clone(),
+                location: choices.open_file_location.clone(),
             }
-        }
-        self.report_missing(hwnd, missing);
+        };
+        self.created()
+            .work
+            .borrow_mut()
+            .open_entries(list, action, entries, commands);
     }
 
     /// Drags the selected entries out of the window, as File Explorer drags
     /// its own, once they are read (DESIGN.md: Dragging).
     fn drag_selected(&self, hwnd: Hwnd) {
-        self.read_list_selection(hwnd);
+        if !self.read_list_selection(hwnd) {
+            return;
+        }
         let selected =
             (self.model.borrow().search_list().selection().files()).map_or(0, <[_]>::len);
         if selected > DRAG_LIMIT {
@@ -4183,60 +4483,6 @@ impl MainWindow {
         self.drag_over(point, keys, allowed);
     }
 
-    /// Opens each entry with the Open folders or Open files command, or as
-    /// File Explorer does when it is empty (DESIGN.md: C1).
-    fn open_entries(&self, hwnd: Hwnd, present: &[Selected]) {
-        let (folders, files) = {
-            let model = self.model.borrow();
-            let choices = model.choices();
-            (choices.open_folders.clone(), choices.open_files.clone())
-        };
-        for entry in present {
-            let command = if entry.is_folder { &folders } else { &files };
-            match open::expand(command, &String::from_utf16_lossy(&entry.path)) {
-                Some(line) => {
-                    if !self.run_open_command(hwnd, &line) {
-                        return;
-                    }
-                }
-                None => shell::open_entry(hwnd, &entry.path),
-            }
-        }
-    }
-
-    /// Opens the folder of each entry with the entries selected, one File
-    /// Explorer window for each folder, or runs the Open file location
-    /// command for each entry (DESIGN.md: C2).
-    fn show_entries(&self, hwnd: Hwnd, present: Vec<Selected>) {
-        let command = self.model.borrow().choices().open_file_location.clone();
-        if command.trim().is_empty() {
-            show_in_folders(present);
-        } else {
-            for entry in &present {
-                if let Some(line) = open::expand(&command, &String::from_utf16_lossy(&entry.path))
-                    && !self.run_open_command(hwnd, &line)
-                {
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Runs an open command of Settings > Context menu, and answers whether it
-    /// started; one that cannot start says why, and the rest of the
-    /// selection is not tried, because it would fail the same way.
-    fn run_open_command(&self, hwnd: Hwnd, line: &CommandLine) -> bool {
-        let Err(error) = shell::run_command(hwnd, &line.program, &line.parameters) else {
-            return true;
-        };
-        let text = self.model.borrow().strings().format(
-            "message.open_failed",
-            &[&line.program, &win::error_text(&error)],
-        );
-        self.error_box(hwnd, &text);
-        false
-    }
-
     /// Says that `missing`, which the person chose, no longer exists
     /// (DESIGN.md: Feedback).
     fn report_missing(&self, hwnd: Hwnd, missing: Option<Vec<u16>>) {
@@ -4251,38 +4497,29 @@ impl MainWindow {
     }
 
     /// Puts the selected files on the clipboard in `format` (DESIGN.md: C8, C9,
-    /// C10). The block is filled while the model is borrowed, which no call
-    /// that sends a message interrupts, and given to the clipboard after.
+    /// C10). The block holds this command's selection through background retries.
     fn copy(&self, hwnd: Hwnd, format: ClipboardFormat) {
-        let block = {
+        let files = {
             let model = self.model.borrow();
-            let Some(files) = model.search_list().selection().files() else {
-                return;
-            };
-            ClipboardBlock::new(&ClipboardData::new(format, files))
+            model.search_list().selection().shared_files()
         };
-        let Some(block) = block else { return };
-        if block.set(hwnd).is_err() {
-            let text = self
-                .model
-                .borrow()
-                .strings()
-                .text("message.clipboard_busy")
-                .to_owned();
-            self.error_box(hwnd, &text);
-        }
+        let Some(files) = files else { return };
+        hwnd.kill_timer(timer::CLIPBOARD);
+        self.created().work.borrow_mut().copy(files, format);
+    }
+
+    fn cancel_copy(&self, hwnd: Hwnd) {
+        hwnd.kill_timer(timer::CLIPBOARD);
+        self.created().work.borrow_mut().cancel_copy();
     }
 
     /// `F3`: opens a Viewer of the active panel's focused file
     /// (DESIGN.md: The Viewer).
-    fn view_focused(&self, hwnd: Hwnd) {
+    fn view_focused(&self, hwnd: Hwnd, side: Side) {
         let (path, strings) = {
             let model = self.model.borrow();
             let panels = model.panels();
-            let Some(entry) = panels
-                .focused(panels.active())
-                .filter(|entry| !entry.is_folder)
-            else {
+            let Some(entry) = panels.focused(side).filter(|entry| !entry.is_folder) else {
                 return;
             };
             (entry.path, model.strings().clone())
@@ -4295,19 +4532,27 @@ impl MainWindow {
         }
     }
 
-    /// Opens the file operations' queue and starts following the clipboard
-    /// for Paste; the transfer pane is made only when explicitly opened.
+    /// Admission stays disabled until the complete recovery read is adopted.
     fn open_file_operations(&self, hwnd: Hwnd) {
-        let strings = self.model.borrow().strings().clone();
         let saved = self.settings_file.with_file_name("operations.json");
-        let error_log = self.settings_file.with_file_name("ui-error.log");
-        let operations = FileOperations::new(hwnd, &saved, strings, error_log);
-        operations.set_transfer_limit(self.model.borrow().choices().transfers_per_device);
-        let _ = self.file_operations.set(operations);
+        self.created().work.borrow_mut().restore_queue(saved);
         clipboard::listen(hwnd);
         self.model
             .borrow_mut()
             .set_clipboard_holds_files(clipboard::holds_files());
+    }
+
+    fn adopt_queue(&self, hwnd: Hwnd, restored: QueueReady) {
+        let strings = self.model.borrow().strings().clone();
+        let error_log = self.settings_file.with_file_name("ui-error.log");
+        let queue = self.created().work.borrow_mut().open_queue(restored);
+        let operations = FileOperations::new(hwnd, queue, strings, error_log);
+        operations.set_transfer_limit(self.model.borrow().choices().transfers_per_device);
+        let _ = self.file_operations.set(operations);
+        self.model.borrow_mut().offer_file_operations();
+        self.update_key_bar();
+        // Enrichment may have woken before adoption; explicitly read the restored state.
+        hwnd.post(QUEUE_CHANGED);
     }
 
     /// Prepares `request` in the queue, with the speed settings; `None` in
@@ -4331,9 +4576,43 @@ impl MainWindow {
     /// sources' last, because a drop's source can deliver messages while
     /// it is told.
     fn on_operations(&self, hwnd: Hwnd) {
+        self.continue_operation_steps(hwnd);
+        if self.delivering_operations.get() || self.operation_delivery.borrow().is_some() {
+            return;
+        }
         let Some(operations) = self.file_operations.get() else {
             return;
         };
+        if self.model.borrow().can_receive_operations() {
+            for reply in operations.update() {
+                match reply {
+                    super::work::QueueAccepted::Resolved(id, accepted) => {
+                        let source = operations.resolved(id, accepted);
+                        if accepted {
+                            self.model.borrow_mut().file_operation_started(id, source);
+                        }
+                    }
+                    super::work::QueueAccepted::Submitted(id, true) => {
+                        self.model.borrow_mut().operation_submitted(id);
+                    }
+                    super::work::QueueAccepted::Submitted(_, false)
+                    | super::work::QueueAccepted::Moved(_, _) => {}
+                }
+            }
+            let taken = operations.taken();
+            self.model.borrow_mut().observe_operations(
+                operations.snapshot(),
+                Arc::clone(&taken),
+                Instant::now(),
+            );
+            if !self.model.borrow().shows_taken(&taken) {
+                self.show_taken(hwnd, taken);
+            }
+        }
+        self.created()
+            .work
+            .borrow_mut()
+            .retire(operations.take_retired());
         use super::file_operations::PaneAction;
         for action in operations.take_actions() {
             match action {
@@ -4343,8 +4622,7 @@ impl MainWindow {
                     .borrow_mut()
                     .select_operation(crate::core::file_operations::Detail::Report(id)),
                 PaneAction::Command(id, QueueAction::Clear) => {
-                    let steps = self.model.borrow_mut().operation_reported(id);
-                    self.run_queue_steps(steps);
+                    self.model.borrow_mut().operation_reported(id);
                 }
                 PaneAction::Command(id, QueueAction::Continue)
                     if operations.operation(id).is_some_and(|operation| {
@@ -4353,9 +4631,12 @@ impl MainWindow {
                 {
                     self.defer(hwnd, ModalStep::Synchronize(id));
                 }
-                PaneAction::Command(id, action) => operations.act(id, action),
+                PaneAction::Command(id, action) => self.act_operation(id, action),
                 PaneAction::Move(id, before) => operations.move_before(id, before),
-                PaneAction::CancelAll => operations.cancel_all(),
+                PaneAction::CancelAll => {
+                    self.dropping.borrow_mut().clear();
+                    operations.cancel_all();
+                }
                 PaneAction::CloseReport => self.model.borrow_mut().close_operation_report(),
                 PaneAction::Collapse | PaneAction::Maximize | PaneAction::Flip => {
                     let accepted = {
@@ -4371,21 +4652,96 @@ impl MainWindow {
                 }
             }
         }
-        let taken = operations.taken();
-        let snapshot = operations.snapshot();
-        let steps = (self.model.borrow_mut()).accept_operations(&snapshot, &taken, Instant::now());
-        self.run_queue_steps(steps.queue);
-        if !self.model.borrow().shows_taken(&taken) {
-            self.show_taken(hwnd, taken);
+        let released = self.model.borrow_mut().next_operation_release();
+        self.run_queue_steps(released);
+        self.retire_model();
+        self.start_list_passes();
+        if self.model.borrow().has_operation_release() {
+            hwnd.post(QUEUE_CHANGED);
         }
-        self.follow_operations(hwnd, &steps.panels);
-        for dialog in steps.dialogs {
-            self.defer(hwnd, ModalStep::Operation(dialog));
+    }
+
+    fn apply_operation_steps(&self, hwnd: Hwnd, steps: OperationSteps) {
+        assert!(
+            self.operation_delivery.borrow().is_none(),
+            "the previous receipt finishes delivery before the next pass"
+        );
+        self.operation_delivery
+            .replace(Some(OperationDelivery::new(steps)));
+        self.retire_model();
+        for list in List::ALL {
+            let pending = self
+                .model
+                .borrow()
+                .list(list)
+                .is_some_and(|shown| matches!(shown.selection(), Selection::Filtering { .. }));
+            if pending {
+                self.apply(
+                    hwnd,
+                    Accepted {
+                        change: Change::Selection(list),
+                        then: None,
+                    },
+                );
+            }
         }
-        self.refresh_operations();
-        self.show_progress(hwnd, steps.progress);
-        for step in steps.sources {
-            operations.tell_source(step);
+        self.continue_operation_steps(hwnd);
+    }
+
+    fn continue_operation_steps(&self, hwnd: Hwnd) {
+        if self.delivering_operations.replace(true) {
+            return;
+        }
+        for _ in 0..crate::core::work::INLINE_ITEMS {
+            let next = self
+                .operation_delivery
+                .borrow_mut()
+                .as_mut()
+                .and_then(OperationDelivery::next);
+            let Some(next) = next else {
+                break;
+            };
+            match next {
+                OperationEffect::Queue(step) => {
+                    if let Some(operations) = self.file_operations.get() {
+                        operations.run(step);
+                    }
+                }
+                OperationEffect::Panel(step) => self.follow_operations(hwnd, &[step]),
+                OperationEffect::Dialog(dialog) => self.defer(hwnd, ModalStep::Operation(dialog)),
+                OperationEffect::Progress(progress) => {
+                    self.refresh_operations();
+                    self.show_progress(hwnd, progress);
+                }
+                OperationEffect::Source(step) => {
+                    if let Some(operations) = self.file_operations.get() {
+                        operations.tell_source(step);
+                    }
+                }
+            }
+            if self.shutdown.borrow().is_some() {
+                break;
+            }
+        }
+        self.delivering_operations.set(false);
+        if self.shutdown.borrow().is_some() {
+            return;
+        }
+        let finished = self
+            .operation_delivery
+            .borrow()
+            .as_ref()
+            .is_some_and(OperationDelivery::is_empty);
+        if finished {
+            let delivery = self.operation_delivery.take();
+            let mut retired = Retirement::default();
+            retired.push(delivery, crate::core::work::INLINE_ITEMS + 1);
+            self.created().work.borrow_mut().retire(retired);
+            self.start_list_passes();
+            hwnd.post(DEFERRED);
+        }
+        if finished || self.operation_delivery.borrow().is_some() {
+            hwnd.post(QUEUE_CHANGED);
         }
     }
 
@@ -4396,16 +4752,16 @@ impl MainWindow {
             return;
         };
         for step in steps {
-            let accepted = operations.run(step);
-            match step {
-                QueueStep::Submit { id, .. } if accepted => {
-                    let told = self.model.borrow_mut().operation_submitted(id);
-                    if let Some(told) = told {
-                        operations.tell_source(told);
-                    }
-                }
-                QueueStep::Submit { .. } | QueueStep::Remove(_) | QueueStep::Cancel(_) => {}
-            }
+            operations.run(step);
+        }
+    }
+
+    fn act_operation(&self, id: OperationId, action: QueueAction) {
+        if action == QueueAction::Cancel {
+            self.abandon_drop(id);
+        }
+        if let Some(operations) = self.file_operations.get() {
+            operations.act(id, action);
         }
     }
 
@@ -4414,6 +4770,50 @@ impl MainWindow {
     fn release_operations(&self) {
         let steps = self.model.borrow_mut().release_operations();
         self.run_queue_steps(steps);
+        self.start_list_passes();
+    }
+
+    fn start_list_passes(&self) {
+        self.gate_changed_selections();
+        let input =
+            if self.delivering_operations.get() || self.operation_delivery.borrow().is_some() {
+                None
+            } else {
+                self.model.borrow_mut().take_following()
+            };
+        if let Some(input) = input {
+            self.created()
+                .work
+                .borrow_mut()
+                .follow(input, self.numbers.borrow().clone());
+        }
+        for side in Side::BOTH {
+            let input = self.model.borrow_mut().panels_mut().take_calculation(side);
+            if let Some(input) = input {
+                self.created()
+                    .work
+                    .borrow_mut()
+                    .calculate_panel(side, input);
+            }
+            let input = self.model.borrow_mut().panels_mut().take_count(side);
+            if let Some(input) = input {
+                self.created().work.borrow_mut().count_panel(side, input);
+            }
+            let input = self.model.borrow_mut().panels_mut().take_quick(side);
+            if let Some(input) = input {
+                self.created().work.borrow_mut().find_quick(side, input);
+            }
+        }
+        for list in List::ALL {
+            let keep = self.model.borrow_mut().take_keep(list);
+            if let Some(input) = keep {
+                self.created().work.borrow_mut().keep(list, input);
+            }
+            let filter = self.model.borrow_mut().take_selection_filter(list);
+            if let Some(input) = filter {
+                self.created().work.borrow_mut().filter(list, input);
+            }
+        }
     }
 
     /// Opens File operations explicitly, with `select` selected.
@@ -4421,29 +4821,36 @@ impl MainWindow {
         self.remember_inspector_focus();
         let accepted = {
             let mut model = self.model.borrow_mut();
-            if let Some(operations) = self.file_operations.get() {
-                model.open_transfer_selection(select, &operations.snapshot());
+            if self.file_operations.get().is_some() {
+                model.open_transfer_selection(select);
             }
             model.show_transfers()
         };
         self.apply(self.created().controls.search.hwnd().parent(), accepted);
         if let Some(operations) = self.file_operations.get() {
-            let view = self
-                .model
-                .borrow()
-                .operation_view(&*self.numbers.borrow(), &operations.snapshot());
-            operations.show(view);
+            let view = self.model.borrow().operation_view();
+            if let Some(view) = view {
+                operations.show(view);
+            }
+            self.created()
+                .work
+                .borrow_mut()
+                .retire(operations.take_retired());
         }
     }
 
     /// Refreshes the transfer pane without opening it.
     fn refresh_operations(&self) {
+        self.start_list_passes();
         if let Some(operations) = self.file_operations.get() {
-            let view = self
-                .model
-                .borrow()
-                .operation_view(&*self.numbers.borrow(), &operations.snapshot());
-            operations.refresh(view);
+            let view = self.model.borrow().operation_view();
+            if let Some(view) = view {
+                operations.refresh(view);
+            }
+            self.created()
+                .work
+                .borrow_mut()
+                .retire(operations.take_retired());
         }
     }
 
@@ -4477,55 +4884,66 @@ impl MainWindow {
     }
 
     /// Reads a running operation's counts, which change without a wake.
-    fn poll_operations(&self, hwnd: Hwnd) {
+    fn poll_operations(&self, _hwnd: Hwnd) {
         let Some(operations) = self.file_operations.get() else {
             return;
         };
-        let snapshot = operations.snapshot();
-        let progress = self.model.borrow_mut().poll_operations(&snapshot);
-        self.show_progress(hwnd, progress);
-        let shown = self
-            .model
-            .borrow()
-            .operation_view(&*self.numbers.borrow(), &snapshot);
-        operations.refresh(shown);
+        operations.request_refresh();
+        self.refresh_operations();
     }
 
     /// Shows the retained failure without holding model borrows across its message loop.
-    fn operation_dialog(&self, hwnd: Hwnd, dialog: OperationDialog) {
+    fn operation_dialog(&self, _hwnd: Hwnd, dialog: OperationDialog) -> bool {
         match dialog {
             OperationDialog::Report(id) => {
-                let transfer = self.file_operations.get().is_some_and(|ops| {
-                    self.model
-                        .borrow()
-                        .operation_is_transfer(id, &ops.snapshot())
-                });
+                let transfer = self.model.borrow().operation_is_transfer(id);
                 if transfer {
                     self.show_operations(Some(id));
                     self.model
                         .borrow_mut()
                         .select_operation(crate::core::file_operations::Detail::Report(id));
                     self.refresh_operations();
-                    return;
+                    return false;
                 }
-                let windows_text =
-                    |code: u32| win::error_text(&io::Error::from_raw_os_error(code as i32));
-                let (failure, strings) = {
+                let (operation, strings) = {
                     let model = self.model.borrow();
-                    let failure =
-                        model.operation_failure(id, &*self.numbers.borrow(), &windows_text);
-                    (failure, model.strings().clone())
+                    (model.operation_report(id), model.strings().clone())
                 };
-                let Some(failure) = failure else {
-                    return;
+                let Some(operation) = operation else {
+                    return false;
                 };
-                super::file_operations::show_failure(hwnd, &strings, failure);
-                let steps = self.model.borrow_mut().operation_reported(id);
-                self.run_queue_steps(steps);
+                self.created().work.borrow_mut().prepare_report(
+                    Reporting { operation, strings },
+                    self.numbers.borrow().clone(),
+                );
             }
         }
-        // The report may have released the last retained operation.
-        hwnd.post(QUEUE_CHANGED);
+        true
+    }
+
+    fn show_prepared_failure(&self, hwnd: Hwnd, mut prepared: PreparedFailure) {
+        let current = self
+            .model
+            .borrow()
+            .operation_outcome(prepared.id)
+            .is_some_and(|outcome| Arc::ptr_eq(&outcome, &prepared.outcome));
+        if current {
+            if let Some(failure) = prepared.failure.take() {
+                prepared.failure = Some(super::file_operations::show_failure(
+                    hwnd,
+                    &prepared.strings,
+                    failure,
+                ));
+            }
+            if self.shutdown.borrow().is_none() {
+                self.model.borrow_mut().operation_reported(prepared.id);
+                self.start_list_passes();
+                hwnd.post(QUEUE_CHANGED);
+            }
+        }
+        let mut retired = Retirement::default();
+        retired.push(prepared, crate::core::work::INLINE_ITEMS + 1);
+        self.created().work.borrow_mut().retire(retired);
     }
 
     fn transfer_request(
@@ -4579,15 +4997,12 @@ impl MainWindow {
             operations.fail_intake(id);
             return;
         }
-        let kind = from.as_ref().map(FilesSource::kind);
         let policy = self.model.borrow().choices().copy_policy;
-        if operations.resolve(
+        operations.resolve(
             id,
             Self::transfer_request(sources, destination, moves, policy),
             from,
-        ) {
-            self.model.borrow_mut().file_operation_started(id, kind);
-        }
+        );
     }
 
     fn remember_copy_policy(&self, hwnd: Hwnd, policy: gozler_fileops::Policy) {
@@ -4595,13 +5010,21 @@ impl MainWindow {
         self.note_saved_state(hwnd);
     }
 
-    /// The full paths of the entries a file command acts on, as Windows
-    /// names them.
-    fn selected_paths(&self) -> Vec<PathBuf> {
-        self.selected_as(
-            |entry| PathBuf::from(OsString::from_wide(&entry.path)),
-            os_path,
-        )
+    fn prepare_selected(&self, list: List, action: PathAction) {
+        let Some(entries) = self.selected_source(list) else {
+            return;
+        };
+        self.created()
+            .work
+            .borrow_mut()
+            .prepare_paths(action, entries);
+    }
+
+    fn retire_paths(&self, paths: Vec<PathBuf>) {
+        let items = paths.len();
+        let mut retired = Retirement::default();
+        retired.push(paths, items);
+        self.created().work.borrow_mut().retire(retired);
     }
 
     fn ask_transfer(
@@ -4631,8 +5054,11 @@ impl MainWindow {
             .and_then(|_| dialog.chosen())
     }
 
-    fn copy_to_folder(&self, hwnd: Hwnd, moves: bool) {
-        let sources = self.selected_paths();
+    fn copy_to_folder(&self, _hwnd: Hwnd, moves: bool, list: List) {
+        self.prepare_selected(list, PathAction::Transfer { moves });
+    }
+
+    fn copy_paths_to_folder(&self, hwnd: Hwnd, moves: bool, sources: Vec<PathBuf>) {
         let Some(first) = sources.first() else {
             return;
         };
@@ -4686,6 +5112,7 @@ impl MainWindow {
             }
         };
         let Some((destination, policy)) = self.ask_transfer(hwnd, start, moves) else {
+            self.retire_paths(sources);
             return;
         };
         if let Destination::Folder(folder) = &destination {
@@ -4714,8 +5141,23 @@ impl MainWindow {
 
     /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete
     /// question, then the permanent delete (DESIGN.md: File operations).
-    fn delete_selected(&self, hwnd: Hwnd) {
-        let sources = self.selected_paths();
+    fn delete_selected(&self, _hwnd: Hwnd, list: List) {
+        let place = {
+            let model = self.model.borrow();
+            match list {
+                List::Panel(side) => Some(model.panels().command_place(side)),
+                List::Search => None,
+            }
+        };
+        self.prepare_selected(list, PathAction::Delete { place });
+    }
+
+    fn delete_paths(
+        &self,
+        hwnd: Hwnd,
+        place: Option<crate::core::panel::CommandPlace>,
+        sources: Vec<PathBuf>,
+    ) {
         if sources.is_empty() {
             return;
         }
@@ -4727,9 +5169,17 @@ impl MainWindow {
         // here.
         if win::dialog::ask(hwnd, &question) {
             self.start_operation(Request::Delete { sources }, None);
-            if self.model.borrow().mode() == Mode::TwoPanels {
+            let follows = place.is_some_and(|place| {
+                let model = self.model.borrow();
+                model.mode() == Mode::TwoPanels
+                    && model.panels().active() == place.side
+                    && model.panels().place_is_current(place)
+            });
+            if follows {
                 self.focus_after_chosen();
             }
+        } else {
+            self.retire_paths(sources);
         }
     }
 
@@ -4737,10 +5187,13 @@ impl MainWindow {
     /// it, or moves them when they were cut (DESIGN.md: Copy), once a
     /// thread has read them.
     fn paste(&self) {
-        let folder = self.selected_paths();
-        let [destination] = folder.as_slice() else {
+        let Some(entry) = self
+            .selected_source(List::Search)
+            .and_then(|entries| entries.one())
+        else {
             return;
         };
+        let destination = PathBuf::from(OsString::from_wide(&entry.path));
         let Some(id) = self.accept_transfer(destination.clone(), false) else {
             return;
         };
@@ -4752,34 +5205,6 @@ impl MainWindow {
             destination: destination.clone(),
             files,
         });
-    }
-
-    /// Copies or moves the dropped files whose paths their threads have
-    /// read. A drop that holds no paths drops nothing, which tells its
-    /// source that the operation failed.
-    fn finish_drops(&self) {
-        let read = {
-            let mut dropping = self.dropping.borrow_mut();
-            let mut read = Vec::new();
-            let mut index = 0;
-            while index < dropping.len() {
-                match dropping[index].files.try_recv() {
-                    Err(TryRecvError::Empty) => index += 1,
-                    paths => read.push((dropping.remove(index), paths.unwrap_or_default())),
-                }
-            }
-            read
-        };
-        for (dropped, paths) in read {
-            let source = dropped.source.map(FilesSource::Drop);
-            self.resolve_transfer(
-                dropped.id,
-                paths,
-                dropped.destination,
-                dropped.moves,
-                source,
-            );
-        }
     }
 
     /// Paste's files, once their thread has read them from the clipboard.
@@ -4816,9 +5241,7 @@ impl MainWindow {
     fn show_taken(&self, hwnd: Hwnd, taken: Arc<Taken>) {
         let replaced = Arc::clone(self.model.borrow().panels().taken());
         let shown = self.show_panels_taken(taken);
-        // Freed on a thread of its own, because freeing the entries of a
-        // large operation's sources is a wait the window would show.
-        std::thread::spawn(move || drop(replaced));
+        self.created().work.borrow_mut().retire_taken(replaced);
         if shown.search_lost {
             let lost = Accepted {
                 change: Change::Selection(List::Search),
@@ -4827,6 +5250,7 @@ impl MainWindow {
             self.apply(hwnd, lost);
         }
         self.show_list_taken(List::Search, shown.search_deselect);
+        self.start_list_passes();
     }
 
     /// Shows `list`'s taken rows blank, and unhighlights the rows that
@@ -4837,43 +5261,9 @@ impl MainWindow {
         match deselect {
             Deselect::Nothing => {}
             Deselect::All => control.deselect_all(),
-            Deselect::Taken => {
-                self.deselect_taken(list, &self.selected_rows(list));
-            }
+            Deselect::Taken => self.request_taken_deselection(list),
         }
         control.redraw_rows(control.visible_rows());
-    }
-
-    /// The rows `list`'s control selects, from the rows its notifications
-    /// told, which the control confirms in a few messages, where reading
-    /// them takes one for each selected row (DESIGN.md: The selection).
-    fn selected_rows(&self, list: List) -> Vec<Range<u64>> {
-        let told = self.told_rows(list);
-        // Taken out, because a message to the list could notify the window.
-        let mut rows = told.take();
-        let selected = self.list_control(list).selected_told(&mut rows);
-        told.replace(rows);
-        selected
-    }
-
-    fn told_rows(&self, list: List) -> &RefCell<ToldRows> {
-        let index = (List::ALL.iter())
-            .position(|each| *each == list)
-            .expect("ALL holds every list");
-        &self.told[index]
-    }
-
-    /// Deselects the rows of `selected`, `list`'s selected rows, whose
-    /// entries are taken, which the selection leaves out. Returns whether
-    /// any was; none while no operation takes entries.
-    fn deselect_taken(&self, list: List, selected: &[Range<u64>]) -> bool {
-        let control = self.list_control(list);
-        let rows = self.model.borrow().taken_rows(list, selected);
-        // Each deselect notifies the window, so nothing is borrowed here.
-        for &row in &rows {
-            control.deselect(row);
-        }
-        !rows.is_empty()
     }
 
     /// Asks where to export the shown search, and starts the export (DESIGN.md:
@@ -4998,7 +5388,7 @@ impl MainWindow {
         // Gozler keeps running hidden, so this is when the window's
         // placement is saved, with the first hide's notice.
         let first_hide = self.model.borrow_mut().first_hide();
-        self.save_settings(hwnd, true);
+        self.save_settings(true);
         if !first_hide {
             return;
         }
@@ -5024,10 +5414,13 @@ impl MainWindow {
     /// the notification area or another start's request. Returns whether Gozler
     /// ends; `false` when the person kept the operations.
     fn exit(&self, hwnd: Hwnd) -> bool {
-        let snapshot = (self.file_operations.get()).map_or_else(Vec::new, FileOperations::snapshot);
+        let counts = self
+            .file_operations
+            .get()
+            .map_or_else(Default::default, FileOperations::exit_counts);
         let question = {
             let model = self.model.borrow();
-            exit_question(model.strings(), &*self.numbers.borrow(), &snapshot)
+            exit_question(model.strings(), &*self.numbers.borrow(), counts)
         };
         if let Some(question) = question {
             self.show_window(hwnd);
@@ -5040,7 +5433,7 @@ impl MainWindow {
         // Each Viewer leaves its size, place and Wrap long lines as it
         // closes, so the save holds them.
         self.viewers.close_all();
-        self.save_settings(hwnd, true);
+        self.save_settings(true);
         hwnd.destroy();
         true
     }
@@ -5159,10 +5552,12 @@ impl MainWindow {
         if !self.model.borrow_mut().update_check_due(now) {
             return;
         }
-        self.ask_github(|reply, found| {
-            found.newer = reply
-                .and_then(|reply| update::newer_release(&reply, gozler_core::escompat::version()));
-            found.newer.is_some()
+        self.ask_github(|reply| {
+            UpdateAnswer::Newer(
+                reply.and_then(|reply| {
+                    update::newer_release(&reply, gozler_core::escompat::version())
+                }),
+            )
         });
     }
 
@@ -5171,32 +5566,37 @@ impl MainWindow {
     /// (DESIGN.md: Daemon failures). A reply that is not a release counts
     /// as not older.
     fn ask_latest_release(&self) {
-        self.ask_github(|reply, found| {
+        self.ask_github(|reply| {
             let older = reply.and_then(|reply| {
                 update::latest_is_older(&reply, gozler_core::escompat::version())
             });
-            found.older = Some(older.unwrap_or(false));
-            true
+            UpdateAnswer::Older(older.unwrap_or(false))
         });
     }
 
     /// Asks GitHub for its latest release on a thread of its own, which
     /// gives the reply, or `None` for a failure, to `found`, while the
-    /// window is open. `found` returns whether it left the window a result
-    /// in [`UpdateCheck`], which the window reads once it wakes.
-    fn ask_github(
-        &self,
-        found: impl FnOnce(Option<String>, &mut UpdateCheck) -> bool + Send + 'static,
-    ) {
+    /// window is open. Parsing finishes before the answer is published under
+    /// the lock that the window also reads.
+    fn ask_github(&self, found: impl FnOnce(Option<String>) -> UpdateAnswer + Send + 'static) {
         let check = Arc::clone(&self.update);
         let waker = self.created().waker.clone();
         std::thread::spawn(move || {
             let reply = win::update::latest_release();
+            let answer = found(reply);
             waker.deliver(|| {
-                found(
-                    reply,
-                    &mut check.lock().unwrap_or_else(PoisonError::into_inner),
-                )
+                let mut check = check.lock().unwrap_or_else(PoisonError::into_inner);
+                match answer {
+                    UpdateAnswer::Newer(version) => {
+                        let changed = version.is_some();
+                        check.newer = version;
+                        changed
+                    }
+                    UpdateAnswer::Older(older) => {
+                        check.older = Some(older);
+                        true
+                    }
+                }
             });
         });
     }
@@ -5211,9 +5611,17 @@ impl MainWindow {
     }
 
     /// File > Settings…: the dialog edits a copy of the settings, which OK
-    /// and Apply give back through [`MainWindow::apply_settings`] (DESIGN.md:
+    /// and Apply give back through [`MainWindow::apply_choices`] (DESIGN.md:
     /// Settings dialog).
-    fn open_settings(&self, hwnd: Hwnd) {
+    fn open_settings(&self, _hwnd: Hwnd) {
+        if self.settings.get().is_some() {
+            return;
+        }
+        self.created().work.borrow_mut().read_registry();
+    }
+
+    fn show_settings(&self, hwnd: Hwnd, start_at_sign_in: bool) {
+        self.refresh_volume_labels();
         let (choices, strings) = {
             let model = self.model.borrow();
             (model.choices().clone(), model.strings().clone())
@@ -5228,7 +5636,7 @@ impl MainWindow {
         });
         let values = SettingsValues {
             choices,
-            start_at_sign_in: shell::starts_at_sign_in(),
+            start_at_sign_in,
             include,
         };
         let dialog = SettingsDialog::new(self, hwnd, strings, values);
@@ -5243,6 +5651,13 @@ impl MainWindow {
         if dialog.resets() {
             self.reset_all(hwnd);
         }
+    }
+
+    pub(super) fn open_repository(&self) {
+        self.created()
+            .work
+            .borrow_mut()
+            .open(ShellTarget::Repository);
     }
 
     /// Settings' Reset all, which the person confirmed: Gozler exits as
@@ -5264,19 +5679,17 @@ impl MainWindow {
     /// Applies what Settings edited, `edited`, which was `last` before; OK
     /// and Apply call it (DESIGN.md: Settings dialog). A shortcut that Windows
     /// refuses applies nothing and returns its message, so the dialog stays
-    /// open. The registry is written only for a value that changed, so a page
-    /// that was not touched never changes what Task Manager or File Explorer
-    /// show.
-    pub(super) fn apply_settings(
+    /// open. Registry and Include changes are acknowledged separately.
+    pub(super) fn apply_choices(
         &self,
         hwnd: Hwnd,
-        edited: &SettingsValues,
-        last: &SettingsValues,
-    ) -> Result<Applied, String> {
-        let shortcut = edited.choices.show_shortcut;
+        edited: &Choices,
+        last: &Choices,
+    ) -> Result<(), String> {
+        let shortcut = edited.show_shortcut;
         // Another window saves the shortcut for the first window's next
         // start, because the first window holds it.
-        if self.instance == Instance::First && shortcut != last.choices.show_shortcut {
+        if self.instance == Instance::First && shortcut != last.show_shortcut {
             // The new shortcut is registered before the old one goes, so a
             // refusal leaves the old one working.
             let registration = match shortcut {
@@ -5289,48 +5702,34 @@ impl MainWindow {
             self.shortcut.replace(registration);
             self.shortcut_failure.replace(None);
         }
-        let mut failures = Vec::new();
-        let values = SettingsValues {
-            choices: edited.choices.clone(),
-            start_at_sign_in: self.write_registry(
-                (edited.start_at_sign_in, last.start_at_sign_in),
-                "settings_general.sign_in",
-                &mut failures,
-                |program| shell::set_start_at_sign_in(edited.start_at_sign_in, program),
-            ),
-            // The Settings dialog saves them apart, as administrator.
-            include: last.include.clone(),
-        };
         // The window draws once after every refresh below.
         hwnd.draw_once_after(|| {
-            let accepted = self.model.borrow_mut().set_choices(values.choices.clone());
+            let accepted = self.model.borrow_mut().set_choices(edited.clone());
             self.apply(hwnd, accepted);
-            if edited.choices.language != last.choices.language {
-                self.set_language(hwnd, edited.choices.language.clone());
+            if edited.language != last.language {
+                self.set_language(hwnd, edited.language.clone());
             }
-            if edited.choices.show_icons != last.choices.show_icons {
-                win::gdi::show_icons(edited.choices.show_icons);
+            if edited.show_icons != last.show_icons {
+                win::gdi::show_icons(edited.show_icons);
                 self.apply_glyphs(hwnd.dpi());
                 self.viewers.apply_glyphs();
                 // The menus, the button widths and the Kind list follow.
                 self.refresh_text(hwnd);
             }
-            if edited.choices.show_memory != last.choices.show_memory {
+            if edited.show_memory != last.show_memory {
                 // The group first shows the app's figure, read now, and the
                 // service's from the latest status; the reply to this request
                 // brings both current ones.
-                if edited.choices.show_memory {
+                if edited.show_memory {
                     self.read_app_memory();
                     self.ask_status();
                 }
                 self.refresh_text(hwnd);
             }
-            if edited.choices.size_format != last.choices.size_format
-                || edited.choices.date_format != last.choices.date_format
-            {
-                self.dates.borrow_mut().format = edited.choices.date_format;
+            if edited.size_format != last.size_format || edited.date_format != last.date_format {
+                self.dates.borrow_mut().format = edited.date_format;
                 self.follow_dates(hwnd);
-                if edited.choices.size_format != last.choices.size_format {
+                if edited.size_format != last.size_format {
                     let width = self.fill_width();
                     let widths = (self.column_sizing.borrow_mut())
                         .window_shown(width, || self.column_fits());
@@ -5349,42 +5748,33 @@ impl MainWindow {
                 }
             }
         });
-        self.save_settings(hwnd, true);
-        if edited.choices.transfers_per_device != last.choices.transfers_per_device
+        self.save_settings(true);
+        if edited.transfers_per_device != last.transfers_per_device
             && let Some(operations) = self.file_operations.get()
         {
-            operations.set_transfer_limit(edited.choices.transfers_per_device);
+            operations.set_transfer_limit(edited.transfers_per_device);
         }
-        Ok(Applied { values, failures })
+        Ok(())
     }
 
-    /// Writes a setting whose one copy is in the registry with `write`, if
-    /// it changed from `was` to `on`, and returns the value now in effect.
-    /// A failed write keeps `was` and adds its message, which names the
-    /// setting by the check box `label`, to `failures`.
-    fn write_registry(
-        &self,
-        (on, was): (bool, bool),
-        label: &str,
-        failures: &mut Vec<String>,
-        write: impl FnOnce(&Path) -> io::Result<()>,
-    ) -> bool {
-        if on == was {
-            return on;
+    pub(super) fn set_sign_in(&self, on: bool) -> Id {
+        self.created()
+            .work
+            .borrow_mut()
+            .set_sign_in(on, self.settings_file.with_file_name("ui-error.log"))
+    }
+
+    pub(super) fn take_sign_in_saved(&self, id: Id) -> Option<io::Result<()>> {
+        let mut answer = self.sign_in_saved.borrow_mut();
+        if answer.as_ref().is_some_and(|(attempt, _)| *attempt == id) {
+            answer.take().map(|(_, result)| result)
+        } else {
+            None
         }
-        let Err(error) = std::env::current_exe().and_then(|program| write(&program)) else {
-            return on;
-        };
-        let model = self.model.borrow();
-        let strings = model.strings();
-        failures.push(strings.format(
-            "message.registry_failed",
-            &[
-                &without_access_key(strings.text(label)),
-                &win::error_text(&error),
-            ],
-        ));
-        was
+    }
+
+    pub(super) fn sign_in_is_current(&self, id: Id) -> bool {
+        self.created().work.borrow().registry_is_current(id)
     }
 
     /// Settings shows or hides its Index page, which follows the service's
@@ -5404,8 +5794,8 @@ impl MainWindow {
         IndexCaptions::new(&self.model.borrow(), &*self.numbers.borrow(), &label)
     }
 
-    /// The volume label of each drive in the service's status, indexed or
-    /// left out, by its mount prefix.
+    /// The last observed labels, including mounted folders, without reading a
+    /// volume while Settings opens or refreshes.
     fn volume_labels(&self) -> Vec<(String, Option<String>)> {
         let prefixes: Vec<String> = {
             let model = self.model.borrow();
@@ -5421,15 +5811,12 @@ impl MainWindow {
                 })
                 .unwrap_or_default()
         };
-        // Windows reads the labels with no borrow held (DESIGN.md:
-        // window rule 1).
-        prefixes
-            .into_iter()
-            .map(|prefix| {
-                let label = shell::volume_label(&prefix);
-                (prefix, label)
-            })
-            .collect()
+        self.created().work.borrow_mut().labels(prefixes)
+    }
+
+    pub(super) fn refresh_volume_labels(&self) {
+        self.volume_labels();
+        self.created().work.borrow_mut().refresh_labels();
     }
 
     /// The drives Settings > Include shows: the service's, and those
@@ -5559,28 +5946,22 @@ impl MainWindow {
     /// Saves what changed since the last save: from another window, only
     /// what its Settings and its Language menu apply. A failure is shown
     /// once per session, and not while Windows ends the session.
-    fn save_settings(&self, hwnd: Hwnd, report_failure: bool) {
+    fn save_settings(&self, report_failure: bool) {
         let scope = match self.instance {
             Instance::First => SaveScope::Everything,
             Instance::Another => SaveScope::Choices,
         };
-        let saved = {
+        let changes = {
             let mut model = self.model.borrow_mut();
             model.set_viewer(self.viewers.state());
-            model.save_settings(&self.settings_file, scope)
+            model.settings_changes(scope)
         };
-        let Err(error) = saved else { return };
-        if !report_failure || self.settings_failure_shown.replace(true) {
-            return;
+        if let Some(changes) = changes {
+            self.created()
+                .work
+                .borrow_mut()
+                .save(&self.settings_file, changes, report_failure);
         }
-        let text = self.model.borrow().strings().format(
-            "message.settings_not_saved",
-            &[
-                &self.settings_file.display().to_string(),
-                &win::error_text(&error),
-            ],
-        );
-        self.error_box(hwnd, &text);
     }
 
     fn min_window_size(&self, hwnd: Hwnd) -> Option<Size> {
@@ -5608,69 +5989,6 @@ fn matched_width(plain: &TextMeter, bold: &TextMeter, text: &str, parts: &[Range
     width + plain.plain_width(&text[at..])
 }
 
-/// What a command does with the selected entries, once Search's are
-/// checked ([`MainWindow::act_on_selected`]).
-#[derive(Clone, Copy)]
-enum EntryAction {
-    Open,
-    OpenFileLocation,
-    Explore,
-    Properties,
-}
-
-/// An action on Search's selected entries, until its thread has checked
-/// which of them still exist.
-struct Checking {
-    action: EntryAction,
-    checked: Receiver<(Vec<Selected>, Option<Vec<u16>>)>,
-}
-
-/// The full path of `file` as Windows names it, as [`wide_path`] gives it,
-/// converted once instead of through UTF-16, which takes several times as
-/// long for each selected file.
-fn os_path(file: &ResultItem) -> PathBuf {
-    match &file.path_u16 {
-        Some(units) => PathBuf::from(OsString::from_wide(units)),
-        None => PathBuf::from(&file.path),
-    }
-}
-
-/// A selected entry, by its path as Windows names it.
-struct Selected {
-    path: Vec<u16>,
-    is_folder: bool,
-}
-
-/// The `entries` that still exist, and the first path that does not. An
-/// action on the selection acts on every entry it can (DESIGN.md: The
-/// selection).
-fn present(entries: Vec<Selected>) -> (Vec<Selected>, Option<Vec<u16>>) {
-    let mut missing = None;
-    let present = entries
-        .into_iter()
-        .filter(|entry| {
-            let exists = std::fs::symlink_metadata(OsString::from_wide(&entry.path)).is_ok();
-            if !exists {
-                missing.get_or_insert_with(|| entry.path.clone());
-            }
-            exists
-        })
-        .collect();
-    (present, missing)
-}
-
-/// Shows each of `entries` in File Explorer, whatever the open commands
-/// say: a folder opens, and a file's folder opens with the file selected
-/// (DESIGN.md: C26).
-fn explore_entries(hwnd: Hwnd, entries: Vec<Selected>) {
-    let (folders, files): (Vec<Selected>, Vec<Selected>) =
-        entries.into_iter().partition(|entry| entry.is_folder);
-    for folder in &folders {
-        shell::explore(hwnd, &folder.path);
-    }
-    show_in_folders(files);
-}
-
 /// The accelerator table of `mode`, from the command shortcuts `shortcuts`.
 fn accelerator_table(
     shortcuts: &CommandShortcuts,
@@ -5683,22 +6001,6 @@ fn accelerator_table(
     Accelerators::new(&table)
 }
 
-/// Opens the folder of each of `entries` with them selected, one File
-/// Explorer window for each folder.
-fn show_in_folders(entries: Vec<Selected>) {
-    let mut folders: Vec<(Vec<u16>, Vec<Vec<u16>>)> = Vec::new();
-    for Selected { path, .. } in entries {
-        let folder = folder_of(&path).to_vec();
-        match folders.iter_mut().find(|(f, _)| *f == folder) {
-            Some((_, entries)) => entries.push(path),
-            None => folders.push((folder, vec![path])),
-        }
-    }
-    for (folder, entries) in &folders {
-        shell::show_in_folder(folder, entries);
-    }
-}
-
 /// Windows' own words for why a file could not be written.
 fn windows_reason(failure: WriteFailure) -> String {
     let error = match failure.os_code {
@@ -5706,151 +6008,6 @@ fn windows_reason(failure: WriteFailure) -> String {
         None => std::io::Error::from(failure.kind),
     };
     win::error_text(&error)
-}
-
-/// Files dragged from File Explorer, another program or the list itself
-/// onto a folder row, which the engine copies or moves into it, as Paste
-/// does (DESIGN.md: Dragging).
-impl DropHandler for MainWindow {
-    fn drag_enter(&self, files: Vec<PathBuf>) {
-        self.drag_in.replace(Some(DragIn {
-            dragged: Dragged::new(files),
-            target: None,
-            over: None,
-            scrolling: None,
-        }));
-    }
-
-    fn drag_over(
-        &self,
-        point: (i32, i32),
-        keys: DropKeys,
-        allowed: SourceEffects,
-    ) -> Option<DropEffect> {
-        let list = self.created().controls.list;
-        // Two panels accepts no drop (DESIGN.md: Not planned), and the hidden
-        // Search list keeps its place and its rows.
-        let search = self.model.borrow().mode() == Mode::Search;
-        // A modal step blocks drops, as a modal dialog does
-        // (`win::drop_target`): a step can wait on a call into another
-        // program, such as Open's, which a drop held under it would never
-        // let return.
-        let accepts = search && !self.modal_running.get();
-        let row = (accepts && list.hwnd().screen_rect().contains(point) && !self.on_header(point))
-            .then(|| list.row_at(point))
-            .flatten();
-        let edge = list.drag_scroll_edge(point).filter(|_| accepts);
-        let (effect, changed, scrolling) = {
-            let model = self.model.borrow();
-            let mut drag_in = self.drag_in.borrow_mut();
-            let drag = drag_in.as_mut()?;
-            let shown =
-                row.and_then(|row| (model.shown_row(List::Search, row)).map(|item| (row, item)));
-            let effect = drag
-                .dragged
-                .effect(shown.map(|(_, item)| item), keys, allowed);
-            let target = shown
-                .filter(|_| effect.is_some())
-                .map(|(row, item)| DropFolder {
-                    row,
-                    folder: item.clone(),
-                });
-            let before = drag.target.as_ref().map(|target| target.row);
-            let after = target.as_ref().map(|target| target.row);
-            drag.target = target;
-            drag.over = Some((point, keys, allowed));
-            let scrolling = std::mem::replace(&mut drag.scrolling, edge);
-            (
-                effect,
-                (before != after).then_some([before, after]),
-                scrolling,
-            )
-        };
-        if let Some(rows) = changed {
-            self.redraw_drop_rows(rows.into_iter().flatten());
-        }
-        let window = list.hwnd().parent();
-        match (scrolling, edge) {
-            (None, Some(_)) => window.set_timer(timer::DROP_SCROLL, DROP_SCROLL_MS),
-            (Some(_), None) => window.kill_timer(timer::DROP_SCROLL),
-            _ => {}
-        }
-        effect
-    }
-
-    /// A `DROP_SCROLL` tick would scroll and replace the target.
-    fn hold_still(&self) {
-        let scrolled = self
-            .drag_in
-            .borrow_mut()
-            .as_mut()
-            .is_some_and(|drag| drag.scrolling.take().is_some());
-        if scrolled {
-            let window = self.created().controls.list.hwnd().parent();
-            window.kill_timer(timer::DROP_SCROLL);
-        }
-    }
-
-    fn choose_effect(
-        &self,
-        window: Hwnd,
-        point: (i32, i32),
-        default: DropEffect,
-        allowed: SourceEffects,
-    ) -> Option<DropEffect> {
-        let (nodes, menu) = {
-            let model = self.model.borrow();
-            let drag_in = self.drag_in.borrow();
-            let drag = drag_in.as_ref()?;
-            let target = drag.target.as_ref()?;
-            (
-                DropMenu::nodes(model.strings()),
-                drag.dragged.menu(&target.folder, default, allowed),
-            )
-        };
-        // The menu runs its own message loop, so nothing is borrowed here.
-        let chosen = win::menu::Menu::track_popup_in_front(
-            window,
-            &nodes,
-            point,
-            &menu.states(),
-            Some(menu.default_id()),
-        );
-        DropMenu::effect_of(chosen)
-    }
-
-    fn drag_leave(&self) {
-        let drag = self.drag_in.take();
-        self.end_drag_in(drag.as_ref());
-    }
-
-    fn dropped(&self, effect: DropEffect, data: DropData, source: Option<DropSource>) {
-        let Some(drag) = self.drag_in.take() else {
-            return;
-        };
-        self.end_drag_in(Some(&drag));
-        let Some(target) = drag.target else {
-            return;
-        };
-        let destination = PathBuf::from(OsString::from_wide(&wide_path(&target.folder)));
-        let Some(id) = self.accept_transfer(destination.clone(), effect == DropEffect::Move) else {
-            return;
-        };
-        let (sender, files) = channel();
-        let waker = self.created().waker.clone();
-        data.read_files(move |paths| waker.deliver(|| sender.send(paths).is_ok()));
-        self.dropping.borrow_mut().push(Dropping {
-            id,
-            destination,
-            moves: effect == DropEffect::Move,
-            files,
-            source,
-        });
-    }
-
-    fn run_until(&self, window: Hwnd, done: &dyn Fn() -> bool) {
-        win::window::run_messages_until(window, &|| self.accelerators(), done);
-    }
 }
 
 impl WindowProc for MainWindow {
@@ -6034,13 +6191,25 @@ impl WindowProc for MainWindow {
                 self.refresh_dates();
                 Some(LRESULT(0))
             }
+            Message::Timer(timer::CLIPBOARD) => {
+                hwnd.kill_timer(timer::CLIPBOARD);
+                let left = self.created().work.borrow_mut().retry_copy();
+                if let Some(left) = left {
+                    hwnd.set_timer(timer::CLIPBOARD, left.as_millis().max(1) as u32);
+                }
+                Some(LRESULT(0))
+            }
             Message::Timer(timer::DROP_SCROLL) => {
                 self.drop_scroll(hwnd);
                 Some(LRESULT(0))
             }
             Message::Timer(timer::SAVE) => {
                 hwnd.kill_timer(timer::SAVE);
-                self.save_settings(hwnd, true);
+                self.save_settings(true);
+                Some(LRESULT(0))
+            }
+            Message::Timer(timer::WORK) => {
+                self.poll_work(hwnd);
                 Some(LRESULT(0))
             }
             Message::Timer(timer::SELECTION) => {
@@ -6057,8 +6226,13 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::Deferred => {
+                for side in Side::BOTH {
+                    self.apply_native_place(side);
+                }
+                self.apply_taken_deselections(hwnd);
                 self.read_list_selection(hwnd);
                 self.read_panel_selection();
+                self.resume_selection_actions(hwnd);
                 if self.column_dragged.replace(false) {
                     let list = self.created().controls.list;
                     let count = self.model.borrow().columns().len();
@@ -6109,7 +6283,13 @@ impl WindowProc for MainWindow {
                 let column = self.created().controls.list.column_at(point);
                 let column =
                     column.and_then(|index| self.model.borrow().columns().get(index).copied());
-                self.context_menu(hwnd, &commands::header_menu(column), point, None);
+                self.context_menu(
+                    hwnd,
+                    &commands::header_menu(column),
+                    point,
+                    None,
+                    self.command_context(),
+                );
                 Some(LRESULT(0))
             }
             Message::ContextMenu { from, point } if from == self.created().controls.list.hwnd() => {
@@ -6213,6 +6393,8 @@ impl WindowProc for MainWindow {
                 regional_format: true,
             } => {
                 self.numbers.replace(WindowsNumbers::new());
+                self.model.borrow_mut().operation_text_changed();
+                self.start_list_passes();
                 hwnd.draw_once_after(|| self.refresh_text(hwnd));
                 None
             }
@@ -6222,10 +6404,23 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::EndSession { ending: true } => {
-                self.save_settings(hwnd, false);
+                if self.ending_session.replace(true) {
+                    return Some(LRESULT(0));
+                }
+                self.viewers.close_all();
+                hwnd.hide();
+                self.save_settings(false);
+                hwnd.destroy();
+                let shutdown = self.shutdown.borrow().clone();
+                if let Some(shutdown) = shutdown {
+                    shutdown.finish_session();
+                }
                 Some(LRESULT(0))
             }
-            Message::EndSession { .. } => None,
+            Message::EndSession { .. } => {
+                self.ending_session.set(false);
+                None
+            }
             Message::Close => {
                 self.close(hwnd);
                 Some(LRESULT(0))
@@ -6241,9 +6436,31 @@ impl WindowProc for MainWindow {
                 self.closing_for_setup.set(false);
                 // Exit can come inside a modal step's loop, and the steps
                 // that wait for it would run against the destroyed window.
-                self.modal_steps.borrow_mut().clear();
+                let steps = std::mem::take(&mut *self.modal_steps.borrow_mut());
+                let mut retired = Retirement::default();
+                retired.push(steps, crate::core::work::INLINE_ITEMS + 1);
+                retired.push(
+                    self.operation_delivery.take(),
+                    crate::core::work::INLINE_ITEMS + 1,
+                );
+                self.created().work.borrow_mut().retire(retired);
+                self.retire_native_selections();
+                self.drag_leave();
                 self.created().waker.close();
+                self.drop_target.replace(None);
+                self.dropping.borrow_mut().clear();
                 self.created().panel_threads.stop_all();
+                self.model.borrow_mut().retire_following();
+                self.retire_model();
+                let recovery_finished = self.file_operations.get().map(|operations| {
+                    let finished = operations.close();
+                    self.created()
+                        .work
+                        .borrow_mut()
+                        .retire(operations.take_retired());
+                    finished
+                });
+                let settings_finished = self.created().work.borrow_mut().close();
                 self.shortcut.replace(None);
                 self.tray.replace(None);
                 self.created().requests.shut_down();
@@ -6252,26 +6469,24 @@ impl WindowProc for MainWindow {
                 if let Some(saving) = self.include_saving.take() {
                     saving.join();
                 }
-                self.drop_target.replace(None);
-                self.dropping.borrow_mut().clear();
                 // No Viewer outlives the message loop.
                 self.viewers.close_all();
-                if let Some(operations) = self.file_operations.get() {
-                    let finished = operations.close();
-                    let error_log = self.settings_file.with_file_name("ui-error.log");
-                    let shutdown = win::window::quit_after(move || match finished.recv() {
-                        Ok(Ok(())) => {}
-                        result => super::write_log(
-                            &error_log,
-                            &format!(
-                                "File operation recovery state was not saved at Exit: {result:?}",
+                let error_log = self.settings_file.with_file_name("ui-error.log");
+                let shutdown = win::window::quit_after(move |worker| {
+                    settings_finished(worker);
+                    if let Some(finished) = recovery_finished {
+                        match finished.recv() {
+                            Ok(Ok(())) => {}
+                            result => super::write_log(
+                                &error_log,
+                                &format!(
+                                    "File operation recovery state was not saved at Exit: {result:?}",
+                                ),
                             ),
-                        ),
-                    });
-                    self.shutdown.replace(Some(shutdown));
-                } else {
-                    win::window::quit();
-                }
+                        }
+                    }
+                });
+                self.shutdown.replace(Some(shutdown));
                 Some(LRESULT(0))
             }
             Message::Hotkey => {

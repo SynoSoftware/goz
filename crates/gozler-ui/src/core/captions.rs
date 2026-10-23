@@ -1531,7 +1531,7 @@ impl StatusCaptions {
                 };
                 JobCaption {
                     text,
-                    transfer: model.transfer_caption(numbers),
+                    transfer: model.transfer_caption(),
                     transfer_only: model.job() == Job::Operation
                         && model
                             .operation()
@@ -1686,7 +1686,7 @@ impl InspectorCaptions {
                 fields: Vec::new(),
                 inspected: Inspected::Several,
             },
-            Selection::Reading { .. } => {
+            Selection::Reading { .. } | Selection::Filtering { .. } => {
                 let reading = label("status.reading");
                 InspectorCaptions {
                     heading: reading.clone(),
@@ -1694,9 +1694,9 @@ impl InspectorCaptions {
                     inspected: Inspected::Reading,
                 }
             }
-            Selection::Files(files) => match files.as_slice() {
+            Selection::Files(files) => match files.as_ref() {
                 [file] => entry(model, numbers, file, None),
-                files => several(strings, numbers, Sums::of(files)),
+                _ => several(strings, numbers, model.search_list().selection_sums()),
             },
             Selection::Folder { folder, contents } => entry(model, numbers, folder, Some(contents)),
         }
@@ -2202,10 +2202,12 @@ pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     match model.search_list().selection() {
         Selection::None => String::new(),
-        Selection::Reading { .. } => strings.text("status.reading").to_owned(),
+        Selection::Reading { .. } | Selection::Filtering { .. } => {
+            strings.text("status.reading").to_owned()
+        }
         Selection::TooMany(count) => too_many(strings, numbers, *count),
         Selection::Files(_) | Selection::Folder { .. } => {
-            let sums = Sums::of(model.search_list().selection().files().unwrap_or_default());
+            let sums = model.search_list().selection_sums();
             let count = numbers.integer(sums.entries());
             // The size counts files only, so folders alone have none.
             if sums.files == 0 {
@@ -2251,7 +2253,7 @@ fn operation_status(model: &Model, numbers: &dyn Numbers) -> (String, JobProgres
         return (String::new(), JobProgress::None);
     }
     let (mut text, bar) = file_operations::status_line(model.strings(), numbers, operation);
-    let backlog = model.operation_backlog(numbers, operation);
+    let backlog = model.operation_backlog();
     if !backlog.is_empty() {
         if matches!(
             operation,
@@ -2260,10 +2262,10 @@ fn operation_status(model: &Model, numbers: &dyn Numbers) -> (String, JobProgres
                 ..
             }
         ) {
-            text = backlog;
+            text = backlog.to_owned();
         } else {
             text.push_str(model.strings().text("file_operations.separator"));
-            text.push_str(&backlog);
+            text.push_str(backlog);
         }
     }
     let progress = match bar {
@@ -2704,7 +2706,9 @@ fn search_counts(
             }
             LookIn::AllDrives => strings.count("panel.results_everywhere", total, numbers, &[]),
         },
-        Selection::None | Selection::Reading { .. } => selected(panel.selected_rows()),
+        Selection::None | Selection::Reading { .. } | Selection::Filtering { .. } => {
+            selected(panel.selected_rows())
+        }
         Selection::TooMany(count) => too_many(strings, numbers, *count),
         Selection::Files(_) | Selection::Folder { .. } => {
             let files = search.list.selection().files().unwrap_or_default();

@@ -3,10 +3,15 @@
 //! builds the files from them once per user action (DESIGN.md: The
 //! selection).
 
-use super::fetch::Generation;
+use super::fetch::{CachedRows, Generation};
 use gozler_core::proto::{QueryTotals, ResultItem};
-use std::collections::BTreeMap;
+use gozler_fileops::{OperationId, Taken};
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
+
+mod capture;
+pub(crate) use capture::{CaptureKey, Capturing, Telling, Told};
 
 /// Open and Open file location stop here, because File Explorer asks before
 /// it opens more items, and many windows opened by accident are worse
@@ -23,18 +28,48 @@ pub(crate) const DRAG_LIMIT: usize = 1_000;
 /// The selection).
 pub(crate) const SELECTION_LIMIT: u64 = 100_000;
 
+/// The positions and count observed in one list selection. Windows supplies the
+/// count without walking a scattered selection; worker-made ranges count once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RowSelection {
+    pub(crate) positions: Arc<Vec<Range<u64>>>,
+    pub(crate) count: u64,
+}
+
+impl RowSelection {
+    pub(crate) fn new(positions: Vec<Range<u64>>, count: u64) -> Self {
+        Self {
+            positions: Arc::new(positions),
+            count,
+        }
+    }
+}
+
+impl From<Vec<Range<u64>>> for RowSelection {
+    fn from(mut positions: Vec<Range<u64>>) -> Self {
+        positions.retain(|range| !range.is_empty());
+        let count = positions.iter().map(|range| range.end - range.start).sum();
+        Self::new(positions, count)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum Selection {
     None,
     /// Some selected rows are not cached; their one request is due, or in
     /// flight as `asked`.
     Reading {
-        positions: Vec<Range<u64>>,
+        positions: Arc<Vec<Range<u64>>>,
         asked: Option<Generation>,
+    },
+    Filtering {
+        generation: Generation,
+        source: SelectionSource,
+        running: bool,
     },
     /// In position order, each at most once. In Search's list never one
     /// folder alone, which is [`Selection::Folder`].
-    Files(Vec<ResultItem>),
+    Files(Arc<[ResultItem]>),
     /// One folder alone, whose contents the inspector shows (DESIGN.md:
     /// Inspector pane).
     Folder {
@@ -61,7 +96,18 @@ impl Selection {
         match self {
             Selection::Files(files) => Some(files),
             Selection::Folder { folder, .. } => Some(std::slice::from_ref(folder)),
-            Selection::None | Selection::Reading { .. } | Selection::TooMany(_) => None,
+            Selection::None
+            | Selection::Reading { .. }
+            | Selection::Filtering { .. }
+            | Selection::TooMany(_) => None,
+        }
+    }
+
+    pub(crate) fn shared_files(&self) -> Option<Arc<[ResultItem]>> {
+        match self {
+            Self::Files(files) => Some(Arc::clone(files)),
+            Self::Folder { folder, .. } => Some(Arc::from([folder.clone()])),
+            _ => None,
         }
     }
 
@@ -76,11 +122,129 @@ impl Selection {
             } => Some(*generation),
             Selection::None
             | Selection::Files(_)
+            | Selection::Filtering { .. }
             | Selection::TooMany(_)
             | Selection::Folder {
                 contents: FolderContents::Counted(_),
                 ..
             } => None,
+        }
+    }
+
+    pub(crate) fn items(&self) -> usize {
+        match self {
+            Self::Files(files) => files.len(),
+            Self::Filtering { source, .. } => source.retained_items(),
+            Self::Reading { positions, .. } => positions.len(),
+            Self::Folder { .. } => 1,
+            Self::None | Self::TooMany(_) => 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SelectionSource {
+    Files(Arc<[ResultItem]>),
+    Cached {
+        chunks: Vec<CachedRows>,
+        positions: Arc<Vec<Range<u64>>>,
+        count: usize,
+    },
+}
+
+impl SelectionSource {
+    pub(crate) fn items(&self) -> usize {
+        match self {
+            Self::Files(files) => files.len(),
+            Self::Cached { count, .. } => *count,
+        }
+    }
+
+    pub(crate) fn retained_items(&self) -> usize {
+        match self {
+            Self::Files(files) => files.len(),
+            Self::Cached {
+                chunks, positions, ..
+            } => positions.len() + chunks.iter().map(|chunk| chunk.rows.len()).sum::<usize>(),
+        }
+    }
+}
+
+pub(crate) struct Filter {
+    pub(crate) generation: Generation,
+    pub(crate) source: SelectionSource,
+    pub(crate) taken: Arc<Taken>,
+    pub(crate) kept: Arc<HashSet<OperationId>>,
+    pub(crate) count_bytes: bool,
+}
+
+pub(crate) struct Filtered {
+    pub(crate) input: Filter,
+    pub(crate) files: Option<Arc<[ResultItem]>>,
+    pub(crate) chosen_bytes: Option<u64>,
+    pub(crate) sums: Sums,
+}
+
+impl Filter {
+    pub(crate) fn retained_items(&self) -> usize {
+        self.source.retained_items() + self.taken.len() + self.kept.len()
+    }
+
+    pub(crate) fn run(self) -> Filtered {
+        let (mut path, mut folded) = (Vec::new(), Vec::new());
+        let mut valid = |file: &ResultItem| {
+            if file.is_gone() {
+                return false;
+            }
+            if self.taken.is_empty() {
+                return true;
+            }
+            wide_path_into(file, &mut path);
+            !self
+                .taken
+                .contains_folding(&path, &mut folded, |id| self.kept.contains(&id))
+        };
+        let files: Option<Arc<[ResultItem]>> = match &self.source {
+            SelectionSource::Files(files) if files.iter().all(&mut valid) => {
+                Some(Arc::clone(files))
+            }
+            SelectionSource::Files(files) => {
+                Some(files.iter().filter(|file| valid(file)).cloned().collect())
+            }
+            SelectionSource::Cached {
+                chunks, positions, ..
+            } => {
+                let row = |at: u64| {
+                    chunks.iter().find_map(|chunk| {
+                        at.checked_sub(chunk.range.start)
+                            .and_then(|index| chunk.rows.get(index as usize))
+                    })
+                };
+                let positions = positions.iter().flat_map(Range::clone);
+                if positions.clone().all(|at| row(at).is_some()) {
+                    Some(
+                        positions
+                            .filter_map(row)
+                            .filter(|file| valid(file))
+                            .cloned()
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            }
+        };
+        let chosen_bytes = if self.count_bytes {
+            files.as_deref().and_then(super::search_list::chosen_bytes)
+        } else {
+            None
+        };
+        let sums = Sums::of(files.as_deref().unwrap_or_default());
+        Filtered {
+            input: self,
+            files,
+            chosen_bytes,
+            sums,
         }
     }
 }

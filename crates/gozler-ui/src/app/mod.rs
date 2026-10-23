@@ -15,10 +15,11 @@ mod requests;
 mod settings;
 mod status_bar;
 mod viewer;
+pub(crate) mod work;
 
 use crate::core::ids::IconId;
 use crate::core::model::Model;
-use crate::core::settings::{Mode, Settings};
+use crate::core::settings::Mode;
 use crate::core::text::{LANGUAGES, Language, Strings};
 use crate::win;
 use main_window::{Instance, MainWindow};
@@ -72,7 +73,7 @@ pub(crate) fn run() {
     let window_class = format!("{WINDOW_CLASS}{suffix}");
     let show_message = win::instance::register_message(SHOW_MESSAGE);
     let settings_file = data_dir.join("ui.json");
-    let settings = Settings::load(&settings_file);
+    let settings = work::load_settings(&settings_file);
     let exit_message = win::instance::register_message(EXIT_MESSAGE);
     let mutex = format!("{INSTANCE_MUTEX}{suffix}");
     let mut waiting_since = Instant::now();
@@ -162,18 +163,26 @@ pub(crate) fn run() {
     win::window::run_message_loop(hwnd, &|| window.accelerators());
     window.close_for_setup(hwnd);
     window.finish_shutdown();
-    win::drop_target::wait_for_sources();
     if window.resets_settings() {
         // The new window must find no first one.
         drop(first);
-        reset_and_start_again(&data_dir, arguments.data_dir.as_deref());
+        let given_data_dir = arguments.data_dir;
+        // All HWNDs are gone; finish reset before the process can exit.
+        let _ = win::work::spawn(move |worker| {
+            reset_and_start_again(&data_dir, given_data_dir.as_deref(), worker);
+        })
+        .join();
     }
 }
 
 /// Settings' Reset all, after the window exited: deletes `ui.json` and the
 /// sign-in entry, which a new installation does not have, and starts the
 /// window again with the same data folder (DESIGN.md: Settings dialog).
-fn reset_and_start_again(data_dir: &Path, given_data_dir: Option<&Path>) {
+fn reset_and_start_again(
+    data_dir: &Path,
+    given_data_dir: Option<&Path>,
+    worker: &win::work::OffThread,
+) {
     let log = data_dir.join("ui-error.log");
     let settings_file = data_dir.join("ui.json");
     if let Err(error) = std::fs::remove_file(&settings_file)
@@ -192,7 +201,7 @@ fn reset_and_start_again(data_dir: &Path, given_data_dir: Option<&Path>) {
         }
     };
     // Settings > General shows the registry, so a failure shows there.
-    let _ = win::shell::set_start_at_sign_in(false, &program);
+    let _ = win::shell::set_start_at_sign_in(false, &program, worker);
     let mut command = std::process::Command::new(&program);
     if let Some(folder) = given_data_dir {
         command.arg("--data-dir").arg(folder);

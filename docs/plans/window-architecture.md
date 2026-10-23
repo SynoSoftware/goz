@@ -25,8 +25,9 @@ owns shared contracts, coupled changes and the only shared-checkout build.
 Delegate substantial independent batches with exclusive file ownership and
 retain agents across related work. Use codebase-design, domain-modeling and
 rust-win32-ui; the owner has dropped implementing-plans. Keep coupled work with
-one implementer. Each completed stage gets one independent adversarial review
-of requirements, execution paths, integration, ownership and material complexity.
+one implementer. Each completed feature batch or integration milestone gets one
+independent adversarial review of requirements, execution paths, integration,
+ownership and material complexity; stages need not wait on unrelated preparation.
 Reserve code-review deep and its six specialists for final integration.
 Batch compatible fixes for the same reviewer; follow-ups cover fixes and
 affected contracts, expanding only on evidence. Reuse existing valid evidence. Commit each
@@ -43,591 +44,126 @@ runtime verification.
 
 ### Execution status
 
-- Current parallel work: the lead finishes native selection and command routing
-  in `main_window.rs`, `main_window/{panels,selection}.rs`, `core/{panel,commands}.rs`
-  and the root Work integration. A drop-intake implementer owns only
-  `win/drop_target.rs`, its new worker child, `core/drop_target.rs`, and new
-  `app/work/drops.rs` and `app/main_window/drops.rs`; shared interface changes
-  are agreed with the lead before editing callers. The existing Queue/follower/
-  transfer draft is a separate read-only review batch. No helper builds. These
-  batches remain Stage 1 work; no later stage is declared complete by overlap.
-- Stage 1 is in progress: trace current waits, implement the bounded UI work
-  owner, then migrate the listed waits and large passes. No later stage is done.
-- Implemented and checked through Build 32: the shared work lifecycle, Location,
-  serialized settings persistence, pairing, Settings labels, shell actions and
-  setup activation, sign-in registry access, native clipboard publication,
-  Queue initialization, the CPU-pass boundary and large shell/clipboard/taken
-  payload retirement, shared cached result rows and producer-side partitioning
-  of selection replies. Replaced and stale result caches retire through the same
-  owner, including nested caches when a panel stops showing search results.
-  Selection Files and positions now share immutable backing. Cache materialization,
-  taken-file filtering, panel selection bytes and kept-operation calculations
-  use the common CPU boundary; pending calculations preserve native highlights
-  and disable commands until their current answer is accepted.
-  `core::work` owns admission/replacement rules, `win::work` owns worker launch,
-  cancellation and live-window delivery, and `app::work` routes results.
-  Queue retains its own engine lifecycle. Panel structural calculations now use
-  shared accepted snapshots and owned worker candidates; selection/visibility
-  refinements reuse a candidate, and obsolete results retire off UI. Current
-  work is the collection-pass migration; remaining Stage 1 gaps include the
-  producer mailbox, other source preparation and counts, name scans, drop GetData,
-  UI-facing Queue critical sections and common timing/cancel policy.
-- Source tracing and prerequisite reports below record both the original
-  integration points and their subsequent corrections. They are evidence for
-  those slices, not a claim that the whole stage is complete.
-- Shared-result review is clean at
-  `V:/temp/gozler-window-stage1-result-snapshots-review2.md`. Build 19 found one
-  old Total Commander test fixture mutating the shared rows as a Vec. The
-  fixture now explicitly obtains exclusive test access; its focused recheck
-  `-Test use_total_commander_takes_the_newest_64_bit_one` passed, followed by
-  green Build 20 (`V:/temp/gozler-window-stage1-build20.log`, 250 active UI tests,
-  14 ignored). Twenty full runs, three focused attempts, no benchmarks. The new
-  regression watches large replaced/stale caches retaining their rows until
-  the work owner releases them; the existing native retirement regression
-  checks the disposal thread. At Build 20, Selection Files, large filtering and
-  kept-operation bookkeeping were still outstanding; their migration follows.
-- Selection/kept integration is independently clean at
-  `V:/temp/gozler-window-stage1-selection-filter-review4.md`. Each list owns its
-  canonical immutable kept set and captures fetched-row evidence at each newly
-  ended batch. It accepts one calculation before dispatching its successor;
-  pending evidence coalesces without copying rows. Queue release waits until
-  all lists settle. Filter answers validate selection identity and the exact
-  Taken/kept snapshots, never restoring an old selection. Predicate changes
-  require another filter; no highlight is cleared while it is unresolved.
-  Removed superseded inline cache-copy/filter paths. The new regressions watch
-  stale selection/Taken answers and exact historical evidence plus Queue release
-  across cache eviction. Build 21 found only an ignored timing probe referencing
-  the removed filter; it now calls the canonical selection pass. Focused
-  `-Test core::model::tests::` passed all 45 model tests, followed by green
-  Build 22 (`V:/temp/gozler-window-stage1-build22.log`, 252 active UI tests,
-  14 ignored). Twenty-two full runs, four focused attempts, one earlier timing
-  run, no criterion benchmarks. No native/display probe was added. Panel
-  prerequisite and its subsequent scratch-mark refinement:
-  `V:/temp/gozler-window-stage1-panel-snapshot-contract.md`.
-- Recurring inspector/status summaries now read the counts computed with the
-  accepted selection pass, instead of walking the files again on each refresh.
-  Every selection replacement clears the cached counts; Files/Folder adoption
-  sets them from the same accepted answer. Search skips the panel-only folder
-  size deduplication. Clean review:
-  `V:/temp/gozler-window-stage1-selection-sums-review1.md`. Build 23 is green
-  (`V:/temp/gozler-window-stage1-build23.log`, 252 active UI tests, 14 ignored).
-  Twenty-three full runs; focused/timing counts remain as above. No new display
-  or getter test. Clipboard input preparation is the current slice; its
-  existing native worker now captures shared selected rows before encoding,
-  allocation and publication, retaining a prepared block for retries. Review is
-  clean at `V:/temp/gozler-window-stage1-clipboard-input-review1.md`; Build 24
-  is green (`V:/temp/gozler-window-stage1-build24.log`, 252 active UI tests,
-  14 ignored). Twenty-four full runs, four focused attempts, one timing run,
-  no criterion benchmarks. Native clipboard ownership/exact-byte and generic
-  retirement regressions are reused; no actual clipboard mutation was probed.
-  This does not claim that panel snapshots or command path capture have been
-  migrated. Panel selection reconciliation uses exact stored names across one
-  structural transaction, including a late interaction remap; Entry needs no
-  mutable selection flag. Preserve transaction boundaries so hiding then
-  showing a name never restores a lost selection. Capture folder context
-  separately, so it does not become a second owner beside Panel.folder.
-  Interaction changes remap the already transformed rows instead of replaying
-  disk changes. Bound the producer mailbox as well as deferred events, with
-  existing reread behavior on overflow.
-- Final selection integration corrections are independently clean:
-  `V:/temp/gozler-window-stage1-wake-release-review1.md`,
-  `V:/temp/gozler-window-stage1-pending-deselect-review1.md`, and
-  `V:/temp/gozler-window-stage1-ended-retirement-review1.md` (latest merged
-  record). Unrelated common wakes no longer scan the kept operations. Native
-  deselection, including a search panel's proactive path, waits until both
-  filtering and kept bookkeeping resolve; conservative painting does not
-  decide unhighlighting. The existing two regressions cover those unresolved
-  states. A large uncaptured ended batch also retires through the owner, even
-  when no selection changed. Build 25 and Build 26 are green, latest log:
-  `V:/temp/gozler-window-stage1-build26.log` (252 active UI tests, 14 ignored).
-  The second focused `-Test core::model::tests::` run passed all 45 tests before
-  Build 26. Twenty-six full runs, five focused attempts in total, one earlier
-  timing run, no criterion benchmarks. Ubuntu/platform compilation and MSRV
-  checks remain for CI; this continuation added no dependency package or wire
-  change. Stage 1 is still incomplete; proceed with panel row snapshots and
-  bounded producer/update deferral using the prerequisite report above.
-- Panel row storage is now grouped privately, preserving the existing algorithms.
-  Independent review is clean at
-  `V:/temp/gozler-window-stage1-panel-rows-review1.md`; Build 27 is green
-  (`V:/temp/gozler-window-stage1-build27.log`, 252 active UI tests, 14 ignored).
-  The existing row algorithms and sole kept map now sit behind that interface;
-  Panel still owns navigation and canonical list interaction. This second
-  restructuring passed independent review at
-  `V:/temp/gozler-window-stage1-row-algorithms-review1.md` and green Build 28
-  (`V:/temp/gozler-window-stage1-build28.log`, 252 active UI tests, 14 ignored).
-  Twenty-eight full runs; focused/timing counts are unchanged. Existing panel
-  regressions protect selection, rename, focus and listing cutoff; no new
-  restructuring/getter test was added. Shared snapshots and deferred execution
-  are next; panel calculations do not yet run off the window thread.
-  Their accepted rows will be immutable shared snapshots. Keep a transformed
-  candidate owned until acceptance, so a later interaction or visibility
-  refinement can move it through the same task without cloning rows or replaying
-  the disk merge. Publish rows and their current Place together, after ended
-  evidence settles. Retire stale candidates and their old snapshots through
-  the work owner. The prerequisite report records the source justification and
-  overflow barrier; this is the next implementation contract, not delivered
-  asynchronous behavior.
-- Panel selection now uses one exact-name reconciliation path for listings,
-  watcher changes, filtering and folder order. Removed Entry's mutable selection
-  flag and the duplicated listing mark transfer. Selection updates change only
-  canonical ranges; structural transactions preserve exact stored names without
-  following external renames or resurrecting a previously hidden selection.
-  Independent review, including documentation and the final lookup correction,
-  is clean at `V:/temp/gozler-window-stage1-row-selection-review2.md`.
-  Build 29 passed tests/docs but found `manual_contains`; the lookup now uses
-  `contains`. Build 30 is green
-  (`V:/temp/gozler-window-stage1-build30.log`, 252 active UI tests, 14 ignored).
-  Thirty full runs; no new focused/timing run or test for this restructuring.
-  The existing panel regressions protect its exact-name, replacement, rename,
-  hidden-selection and focus rules. Ubuntu/platform compilation and MSRV remain
-  for CI. Preparing selected names still runs with the current structural
-  calculation; moving that whole calculation off UI is the next coupled step.
-- The coupled panel structural slice is implemented and under verification.
-  Accepted FolderRows and canonical selection ranges are shared; private owned
-  candidates run/remap through one Task per side. Stale epoch/base, interaction,
-  Taken and end evidence gate publication. Structural/end frames are bounded;
-  overflow requires a complete listing with an original start later than the
-  omitted-end barrier. Queue release observes the pending panel gate. Awaited
-  end acknowledgment is recorded from the existing Operations phase owner at
-  receipt, so discarded candidates cannot lose it. Reader size preparation
-  captures a shared snapshot and releases it before the watch. The separate
-  FolderSort/FolderOrder thread path is removed; sizes and order publish together.
-  Independent review is clean through
-  `V:/temp/gozler-window-stage1-panel-calculation-review3.md`. Build 31 reported
-  large-enum lint errors and a real cache-retention regression. Large payloads
-  are now boxed, and candidates share the immutable folded-name cache instead
-  of copying it. The existing cache regression is preserved for a focused
-  recheck. A subsequent shutdown trace found that a queued worker reply could
-  still release its large payload on the window thread. Nonessential task
-  delivery now transfers to background retirement before the task is dropped;
-  this correction passed independent review at
-  `V:/temp/gozler-window-stage1-panel-calculation-review4.md`. The focused
-  `-Test a_change_batch_keeps_the_taken_names_folded_once` recheck passed
-  (`V:/temp/gozler-window-stage1-cache-focused6.log`). Build 32 is green
-  (`V:/temp/gozler-window-stage1-build32.log`, 255 active UI tests, 14 ignored).
-  Thirty-two full runs and six focused attempts; timing/benchmark counts are
-  unchanged. Ubuntu/platform compilation and MSRV remain for CI.
-  The two new regressions watch current selection/Taken remap with candidate and
-  prepared-range reuse, and overflow/end/await acknowledgment across an older
-  listing and stale candidate. The old size-order test now pins atomic adoption,
-  focus and later insertion instead of the removed two-step mechanism. Producer
-  mailbox, summaries, command input preparation/name scans and the other listed
-  Stage 1 gaps remain unfinished.
-- The producer-mailbox contract is source-traced at
-  `V:/temp/gozler-window-stage1-panel-mailbox-contract.md`. Use a bounded FIFO
-  per reading with nonblocking delivery: preserve Opened then Listed/Failed,
-  and turn watch overflow into terminal Lost after the accepted FIFO prefix.
-  Detach and retire old receive endpoints off UI, since they may own a large
-  listing. Free-space and drive-label replies need bounded purpose-specific
-  delivery too. Never block a send under OpenWaker's lifetime lock. The native
-  implementation is now drafted: per-reading FIFO, terminal loss, per-purpose
-  free/label slots, bounded draining and receiver retirement on replacement,
-  removal and shutdown. It has not been reviewed or built; finish the remaining
-  Stage 1 implementation before the stage review/checks, following AGENTS.md.
-  Bounding legacy native threads still belongs to common-owner admission in
-  Stage 2. The test audit removed a redundant independent-Slot assertion;
-  retained cases protect lasting behavioral contracts, including mailbox
-  ordering through the later launcher migration.
-- The larger Stage 1 batch after Build 32 also implements snapshot-based panel
-  counts and command-source preparation. RowSelection pairs shared ranges with
-  the native count; panel/search handoff no longer clones or recounts a large
-  scattered selection on UI. Large counts use a separate bounded read-only
-  purpose and reject stale row/selection snapshots without blocking commands.
-  Shell, transfer and delete path preparation captures the command's source;
-  the latter two deliver through ModalStep after preparation. Newer panel
-  interaction prevents deferred commands from clearing or focusing that newer
-  selection. Cancelled/stale prepared paths and shutdown's pending modal batch
-  retire through the common owner. Single-entry commands inspect just one row.
-  Awaited-name admission now captures its original rows and validates them in
-  the panel calculation; all retained interaction snapshots contribute to
-  retirement sizing. Existing regression fixtures use the shared range/count
-  contract. These changes are drafted and formatted, not independently reviewed
-  or built; no new full/focused build or timing run has occurred. Continue with
-  drop data, remaining collection passes and common timing policy before the
-  stage review and checks. Quick search and Queue integration follow below.
-- Queue's ordered asynchronous command seam was source-traced against the
-  existing lock report. Use one retained common-owner worker; engine Queue
-  still owns scheduling and every state transition. Move id allocation to a
-  Shared AtomicU64 seeded after restoration, with one reserved-id insertion
-  implementation used by existing accept/prepare and the command worker.
-  Preserve all accepted mutations in FIFO order; coalesce only refresh and
-  superseded drag-validation queries. Publish immutable operations/Taken
-  snapshots, retaining Taken's documented lag. Resolve, Submit, Synchronize
-  and Move need explicit acknowledgments for current source cleanup and UI
-  effects; a replaceable snapshot cannot stand in for them. Tag asynchronous
-  check_move by the current drag/target; move_waiting revalidates on execution.
-  Close is terminal FIFO work that drains earlier accepted commands, calls the
-  existing Queue::close and forwards its actual recovery acknowledgment off UI.
-  Keep intentional non-dropping Queue ownership and retire displaced snapshots
-  off UI. Atomic id reservation and consuming ReservedId entry points are now
-  drafted in the engine, with accept/prepare delegating to one insertion path.
-  The retained Session now runs through Work and FileOperations uses its UI
-  client for intake, submission, synchronization, ordering and close. Each
-  bounded reply frame carries its snapshot and ordered acknowledgments
-  together; acknowledgments reach Model before it processes that snapshot's
-  ends. Refresh requests coalesce, while accepted mutations remain FIFO.
-  A pending id remains valid before its first published snapshot. Asynchronous
-  reorder checks update the drag marker and an already open native menu;
-  the move command still revalidates in Queue. Close transfers normal delivery
-  and large caches to retirement before Work finalization waits for Session,
-  allowing a full reply slot to disconnect without a UI wait. The actual
-  Queue recovery acknowledgment still controls essential finalization.
-  Two unrun regressions watch lock-free unique id reservation and terminal
-  close draining accepted commands despite a full delivery slot. The entire
-  post-Build-32 batch remains unreviewed and unbuilt.
-- Quick search now uses one serialized snapshot pass per panel, retaining
-  keystroke order and the existing invalid-character/Up/Down rules. It captures
-  shared folder rows or fetched chunks, Taken and kept evidence. Navigation,
-  Escape and newer native interaction reject late focus changes; changed rows
-  or visibility retry against current snapshots. Removed the superseded inline
-  scan and Results iterator. The existing matching regression now exercises
-  this canonical path, and one unrun regression watches stale focus after
-  Escape or a newer selection. This is drafted, not verified.
-- The remaining collection-pass contract is source-traced at
-  `V:/temp/gozler-window-stage1-remaining-pass-contract.md`, with the receipt
-  amendment at `V:/temp/gozler-window-stage1-follower-evidence-contract.md`.
-  The canonical Operations follower now moves through one serialized pass;
-  ordered semantic inputs wait for it, and UI readers use its last immutable
-  presentation. Lifecycle, report formatting, status and release-candidate
-  scans run in that pass. Search cache evidence and panel end moments are
-  captured at snapshot receipt, before later eviction or listing completion.
-  Pending receipt gates prevent premature row publication and Queue release.
-  Release validates current kept/row identities and commits bounded chunks.
-  Receipt ordering also prevents a delayed operation result from displacing
-  a newer export or service job. The existing cache-eviction and newest-job
-  regressions now exercise these deferred boundaries; one new unrun case
-  watches a post-receipt listing forgetting an awaited name before a later
-  unrelated creation could steal focus.
-- Operation effects now yield between bounded batches, preserving Queue,
-  panel, dialog, presentation and source ordering. The next follower result
-  and deferred dialogs wait for the current delivery. Transfer rows carry
-  worker-built identity and move indexes; native tile formatting, insertion,
-  update and tail removal continue through posted bounded UI batches. New
-  snapshots with unchanged row identity do not restart an unfinished pass;
-  resize/font/language changes invalidate fitting. Mixed row identities gate
-  queue-list input, and stale/reentrant native sends stop the older batch.
-  Native single-selection restoration no longer loops over every tile. Drag
-  gap lookup uses a binary search over the one-column native tile positions.
-  Nontransfer failures use a native virtual report list, formatting only
-  requested cells; removed its superseded whole-list population/measurement.
-  Exit reads counts prepared with Queue's snapshot, including accepted ids
-  not published yet. These changes remain drafted, not independently reviewed
-  or built through their final integration. The operation-batch review found
-  that native queue-list commands could target the previous displayed card
-  while the follower prepared a new selection. The fix uses the current native
-  highlight through the ready row identity for list actions, while card buttons
-  keep their displayed-card target. No new test of native readback was added.
-  Review: `V:/temp/gozler-window-stage1-operation-batch-review1.md`; the fix
-  remains for the Stage 1 review. Full/focused/timing counts are unchanged.
-- Native selection capture and application are now drafted as one coupled batch.
-  Notification bookkeeping moves through the common CPU owner; scattered native
-  reads, selection writes and taken-row deselection yield in bounded UI turns.
-  Canonical panel publication waits for native capture before remapping its
-  owned candidate. Accepted command continuations retain their original list,
-  focus and mode; passive remaps preserve them, and navigation cancels obsolete
-  intent. Result replacement resets capture even at the same row count. Quick
-  search retains its box across deferred capture. Superseded synchronous native
-  selection readers/writers and their difference helper have been removed.
-  The caller contract is traced at
-  `V:/temp/gozler-window-stage1-selection-capture-contract.md`: capture old
-  native interaction before core publishes new FolderRows, not merely before
-  applying their native update. Reuse the existing owned candidate/remap path
-  while capture is pending, and preserve accepted command intent bound to its
-  original list. Passive refresh may restart; no pending capture may masquerade
-  as an empty or current selection. This prerequisite was read-only, not an
-  independent code review. The existing panel remap regression now also watches
-  candidate retention while native capture is pending; one new regression
-  watches stale capture across newer notifications and same-count replacement.
-  The difference-helper test was removed with its unused implementation. This
-  review found a deferred menu losing its original target and Select all being
-  overwritten during native application. Both corrections are drafted: popup
-  enabledness/dispatch carry the same CommandContext, and explicit selection
-  mutations wait behind native application through the existing continuation.
-  Review record: `V:/temp/gozler-window-stage1-selection-capture-review1.md`.
-  A delta review also found empty-area New folder/Refresh recapturing the active
-  panel; their callers now pass the original side, as do Find and Sort. The
-  final retained code and these affected contracts await the Stage 1 review.
-  The existing
-  command-availability regression also now watches a retained source while
-  another panel is active. No build has run; verification counts are unchanged.
-  Moving Queue locks, sharing ranges and moving the operation follower alone
-  do not complete Stage 1. Drop intake and common slow/background policy also
-  remain outstanding; shutdown launcher migration belongs to Stage 2.
-- Drop intake's remaining seam is source-traced with Microsoft's COM/Shell
-  contracts at `V:/temp/gozler-window-stage1-drop-intake-contract.md`. Own drags
-  should use captured shared paths; external preview and effect/menu scans need
-  bounded work. Accepted intake must acknowledge source setup/StartOperation
-  before final GetData, preserving synchronous-source holds until engine end
-  and asynchronous EndOperation exactly once. Remove the UI GetData fallback;
-  agile-reference failure does not establish that a provider belongs to this
-  process. Unknown nonmarshalable providers have no documented universal
-  off-UI route; keep that limitation explicit rather than claiming a worker
-  proxy moves an STA provider's implementation. Native drag images remain
-  UI-affine. This is a contract for subsequent implementation, not a completed
-  migration or runtime proof. Include/fix/request joins at Destroy and bounded
-  source-completion shutdown are also still outstanding.
-- The lead moved Use local's fresh
-  binary-pairing recheck to the same bounded owner. A deferred result carries its
-  task id and rechecks current intent before starting the fix or reporting an
-  error, so Cancel or a later fix cannot apply the old result. Its independent
-  review is clean at `V:/temp/gozler-window-stage1-slice-pairing-review.md`;
-  its regression coverage passed in Build 3. No pairing UI probe was needed.
-- Location/settings have completed their first independent review and one delta.
-  Review records:
-  `V:/temp/gozler-window-stage1-slice-review1.md` and
-  `V:/temp/gozler-window-stage1-slice-review2.md`.
-  P1 correction passed delta review: actual finalizer completion is an
-  atomic signal, separate from WM_QUIT, which setup can post earlier. Session
-  end hides/saves/destroys, then dispatches for at most two seconds and preserves
-  an earlier quit code for the outer loop. Settings/recovery finalization starts
-  after the window is destroyed and adds no UI wait;
-  essential writers may keep the invisible process alive. The owner's latest
-  decisions explicitly permit that background lifetime and require no UI join
-  or unnecessary UI wait. At sign-out the newest state is not guaranteed if
-  Windows ends the process after the two-second acknowledgment budget.
-  Finalization review: `V:/temp/gozler-window-stage1-slice-review3.md`.
-  Worker-side failure reporting also passed its delta at
-  `V:/temp/gozler-window-stage1-slice-errors-review.md`: a deferred error cleared
-  by Destroy cannot erase the worker's log of the failed write.
-  Regression cases watch finite cancelled-native admission, serialized-write
-  completion/coalescing and retained pending key/removal intent. Existing
-  settings merge/scope tests now use fixture text instead of temporary disks.
-- Build 1: formatting and clippy passed; tests/docs reported missing dependency
-  exports (`VolumeStatus::progress`, `IndexProgress`, `mft_records`) that are
-  present in unchanged sources. Refreshing only core/winfs root input timestamps
-  removed those errors. The focused recheck then exposed stale generated UI ids
-  (`StatusActivity` is present in ids.h); refreshing the UI build-script timestamp
-  regenerated them. Content hashes stayed unchanged; no outside source fix.
-- Focused check `-Test early_quit_is_preserved_without_acknowledging_an_unfinished_writer`:
-  first attempt stopped at stale generated ids; second passed the real native
-  regression without opening a window.
-- Build 2 passed formatting, clippy, docs and the UI's 245 active tests, but
-  restricted execution denied native pipe/working-set privileges in other crates.
-  Build 3 outside that restriction is green; log:
-  `V:/temp/gozler-window-stage1-build3.log`. No test was relaxed. Three full runs,
-  two focused attempts, no benchmarks. This verifies only the first slice;
-  the remaining Stage 1 migrations and stages 2–9 are not complete.
-- Shell prerequisite: source/official-doc trace is at
-  `V:/temp/gozler-window-stage1-shell-lifetime.md`. The read-only challenger
-  confirmed that NOASYNC completes file activation/DDE but does not establish
-  Properties' UI lifetime. The bounded native probe observed the built-in text
-  provider returning before its separately threaded sheet closed; the sheet
-  survived the invoking thread. This proves no universal provider contract.
-  Observation: `V:/temp/gozler-window-stage1-shell-probe.md`; disposable fixture
-  removed. Native contract investigation:
-  `V:/temp/gozler-window-stage1-shell-native-contract.md`. A session-retained
-  shell STA avoids inventing Properties/URI completion from a returned call or
-  a thread-reference count; selected-entry integration is recorded below.
-- Settings' labels read through the bounded owner, including reads
-  before first show and timer refreshes, with cached mount-prefix results. Include
-  summaries update their cells when results arrive without replacing edited
-  controls or the selection. The existing panel-label worker shares the marked
-  native read; its complete lifecycle migration remains in Stage 2. Independent
-  review is clean at `V:/temp/gozler-window-stage1-labels-review1.md`. Build 4
-  passed clippy/tests/docs but reported formatting; after those corrections,
-  Build 5 is green (`V:/temp/gozler-window-stage1-build5.log`). No new tests:
-  these display updates use the already tested admission rules. Five full runs
-  total; focused attempts and regression cases remain as listed above.
-- Lead owns all edits. The existing challenger is a read-only source-mapping
-  helper for the other Stage 1 waits; it builds nothing. The existing reviewer
-  reviews completed implementation slices; the lead fixes findings before the
-  required integrated build. Native probes run only to resolve named uncertainty.
-- Current shell slice: About's repository link and Open Services use separate
-  bounded slots. A slot retains one worker STA and pumps it between invocations,
-  because NOASYNC has no URI lifetime guarantee. Invocation results, cancellation
-  and pending replacement use the same Task/Slot authority as other UI work;
-  the worker closes without a UI join. No main-window HWND crosses to it. Native
-  Properties and the selected-entry/setup migrations are recorded below.
-  One regression watches repeated invocations retaining a single apartment and
-  its native thread ending when the slot is dropped; it opens no product window
-  or shell UI. Independent review is clean at
-  `V:/temp/gozler-window-stage1-shell-targets-review1.md`. Build 6 passed
-  clippy/tests/docs and the native regression, but reported formatting. After
-  those corrections, Build 7 is green; log:
-  `V:/temp/gozler-window-stage1-build7.log` (246 active UI tests, 14 ignored).
-  Seven full runs total, two earlier focused attempts, no benchmarks. Remaining
-  selected-entry/setup shell calls, registry, clipboard, Queue initialization,
-  large passes and common slow/background policy still prevent Stage 1 completion.
-- Latest plan review: `V:/temp/gozler-window-architecture-review.md`, with final
-  snapshot `V:/temp/gozler-window-plan-challenge-round2.plan.md`. Two independent
-  review rounds returned Sound. This is plan evidence, not implementation proof.
-- Selected-entry shell migration uses one slot per originating
-  list and action, immutable accepted open commands, Search's presence check and
-  native activation in the same bounded invocation. Panel Enter routes through
-  it too; the old unbounded Checking threads and UI shell helpers are removed.
-  ShellExecuteEx and SHObjectProperties use their documented nullable owner,
-  so no UI HWND crosses and no extra hidden top-level window can hold session
-  shutdown while its worker is blocked. Native failures retain the first error
-  while other entries/folders are
-  attempted; a configured command failure still stops that selection. Deferred
-  failures/missing-file reports revalidate identity, including after an error
-  dialog's nested loop. Input preparation, pending-input retirement, common
-  waiting/Cancel/background policy and setup launch remain outstanding items;
-  this slice does not claim those are fixed. No display test is added. Review
-  is clean at
-  `V:/temp/gozler-window-stage1-shell-entries-review1.md`; the nullable-owner
-  simplification passed its delta at
-  `V:/temp/gozler-window-stage1-shell-entries-review2.md`, and native empty
-  argument handling at `V:/temp/gozler-window-stage1-shell-entries-review3.md`.
-  Build 8 passed tests/docs and reported formatting plus one obsolete import;
-  those corrections are applied. Build 9 is green:
-  `V:/temp/gozler-window-stage1-build9.log`. Nine full runs total, two focused
-  attempts from the initial slice, no benchmarks. Current active UI test count
-  remains 246; no tests were added for file-action display. Native contracts:
-  https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shobjectproperties
-  and https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow.
-- Setup activation now uses its own protected shell slot. The existing
-  Fixer::StartingSetup state admits no new fix and offers no cancellation;
-  Windows activation completes off UI, then its deferred success unwinds native
-  modal loops and preserves the existing close_for_setup path. Failure returns
-  the existing SetupResult::Failed. It does not wait for the installer process.
-  No main HWND crosses to the worker. Independent review is clean at
-  `V:/temp/gozler-window-stage1-shell-setup-review1.md`. Build 10 passed
-  clippy/tests/docs and reported formatting; after those corrections, Build 11
-  is green (`V:/temp/gozler-window-stage1-build11.log`). Eleven full runs total,
-  two earlier focused attempts, no benchmarks. Stage 1 remains incomplete.
-- Registry integration prerequisite is traced at
-  `V:/temp/gozler-window-stage1-registry-contract.md`. Delayed whole-window
-  SettingsDraft::window_applied would erase edits made while Apply is pending.
-  Acknowledge pure choices synchronously after shortcut preflight, then merge
-  only the submitted sign-in field on registry completion. Preserve Include/OK
-  continuation and order new-dialog reads behind accepted writes. Lead owns
-  this migration. Registry reads and accepted writes now share a serial slot;
-  initial reads open Settings only with a current identity. The dialog holds its
-  accepted sign-in attempt, Include snapshot and OK/Apply continuation in Awaited,
-  and consumes only its matching reply. Choices acknowledge synchronously after
-  shortcut preflight; sign-in acknowledgment preserves newer edits and refused
-  numeric text. Reset uses the same native write boundary after all HWNDs close.
-  On shutdown an accepted registry write finishes invisibly, without admitting a
-  pending read. Independent review found and resolved nested Include completion
-  during a registry error dialog: the pending stage now guards the error, and
-  lifetime is rechecked before Include starts. Clean delta:
-  `V:/temp/gozler-window-stage1-registry-review2.md`. Build 12 is green:
-  `V:/temp/gozler-window-stage1-build12.log`. Twelve full runs total, two earlier
-  focused attempts, no benchmarks. One delayed
-  acknowledgment regression replaces the former no-op shortcut-refusal test;
-  the failure/shield regression now uses the narrow acknowledgment interface.
-- Clipboard prerequisites: `V:/temp/gozler-window-stage1-clipboard-contract.md`.
-  Both retry and the full Open/Empty/Set/Close transaction must leave UI. Current
-  formats are eager, so a worker-owned native message-only STATIC can publish
-  without retaining a rendering window. Native mutation checks supersession and
-  clipboard sequence while held; once Empty starts, it completes all formats
-  and closes. The existing prepared allocation can cross threads with exclusive,
-  unlocked ownership; its expensive construction still belongs to the upcoming
-  shared-snapshot/pass migration. Independent review is clean at
-  `V:/temp/gozler-window-stage1-clipboard-review1.md`; Build 13 is green
-  (`V:/temp/gozler-window-stage1-build13.log`, 247 active UI tests, 14 ignored).
-  Thirteen full runs total, two earlier focused attempts, no benchmarks. One new
-  regression watches finite busy retries and refusal to replace an unrelated
-  copy; existing exact-byte tests retain serialization. A due-time guard prevents
-  an already queued timer from retrying a newer Copy early. Native text-box Copy
-  still has a suspected indirect clipboard wait, recorded as #147; it was not
-  measured or declared fixed by this file-copy publication slice.
-- Queue initialization and current lock scope are traced in
-  `V:/temp/gozler-window-stage1-queue-contract.md`. Initialization now returns only
-  a fully restored engine Queue through the work owner; its existing ManuallyDrop
-  process-exit policy protects stale replies from joining on UI. The model offers
-  engine commands only after adoption and drop feedback checks readiness. Engine
-  wakes share the main delivery lifetime; adoption explicitly requests the first
-  snapshot in case enrichment woke early. No command can write an empty queue
-  before restoration. Closing during that read admits no commands and adds no
-  persistence wait. Independent review is clean at
-  `V:/temp/gozler-window-stage1-queue-init-review1.md`; Build 14 reported a private
-  method called by adoption. The correction grants the parent module access to
-  update_key_bar; its delta is clean at
-  `V:/temp/gozler-window-stage1-queue-init-review2.md`. Build 15 is green
-  (`V:/temp/gozler-window-stage1-build15.log`). Fifteen full runs total, two earlier
-  focused attempts, no benchmarks. No new test mirrors this constructor ordering:
-  the complete Queue is the required adoption input; source review traced the
-  command/drop gates and existing admission/recovery tests retain engine rules.
-  The same report
-  identifies unbounded snapshot/schedule/reorder/cancel/close loops and Continue's
-  large Restored retirement under lock; those costs are suspected, not measured,
-  and remain Stage 1 work. They are not proven to be bounded copies.
-- Large-pass prerequisite: the existing synthetic panel selection timing ran at
-  1,000 and 100,000 entries through
-  `pwsh ./build.ps1 -Timing timing_large_panel_selection`. Optimized compilation
-  keeps the script's BelowNormal policy; measured tests restore the caller's
-  priority and run serially. Chosen-entry medians were 0.969 ms and 70.565 ms;
-  count medians were 0.017 ms and 1.861 ms. These are wall-time observations,
-  not a before/after speed claim. `INLINE_ITEMS` is initially 1,000.
-  Log: `V:/temp/gozler-window-stage1-pass-baseline.log`; measurement support
-  review: `V:/temp/gozler-window-stage1-pass-timing-review1.md`. One focused
-  timing run, no new display test or benchmark dependency.
-- Large pending/rejected shell and clipboard values now transfer to one
-  retirement worker instead of freeing their allocations on UI. Coalescing
-  transfers batches in constant time; native execution retains its original
-  finite admission rules. Review caught the accepted fifth-Busy clipboard
-  result bypassing cleanup; terminal failure and retry clearing now share the
-  same payload retirement path. Clean delta:
-  `V:/temp/gozler-window-stage1-retirement-review2.md`. Build 16 is green
-  (`V:/temp/gozler-window-stage1-build16.log`, 248 active UI tests, 14 ignored).
-  Sixteen full runs total, two earlier focused attempts, one timing run, no
-  criterion benchmarks. The new synthetic regression watches actual Drop
-  affinity for superseded pending input, cancelled input and rejected output;
-  it opens no windows or files and does not touch the clipboard. Shared
-  snapshots, input preparation and the remaining collection passes are still
-  incomplete. The owner's latest clarification adds no normal-Exit writer
-  wait: persistence finalization retains only the invisible process after the
-  UI is destroyed; the two-second budget applies only to session-end handling.
-- F5/F6 now reuse the captured source count; only a sole entry is reconstructed
-  for name/folder/rename metadata. The redundant plural chosen/path pass is gone.
-  No native call intervenes before those captures. Independent review is clean:
-  `V:/temp/gozler-window-stage1-transfer-input-review1.md`. Build 17 is green
-  (`V:/temp/gozler-window-stage1-build17.log`). Seventeen full runs total; focused
-  and timing counts remain as above. No helper/display test was added.
-- Current pass slice: `core::work::pass` owns the measured inline boundary;
-  `win::work::Task::pass` receives a CPU callback without OffThread and uses the
-  same admission, result identity and wake path in either execution mode.
-  Retirement is the first migrated CPU pass. The replaced Taken snapshot now
-  uses it too, removing its ad hoc thread. Taken's size is its constant-time
-  distinct folded-path count. Shared selection/panel snapshots and their
-  consumers remain subsequent work, not proof supplied by this seam.
-  Independent review is clean at
-  `V:/temp/gozler-window-stage1-cpu-pass-review2.md`. Build 18 is green
-  (`V:/temp/gozler-window-stage1-build18.log`, 249 active UI tests, 14 ignored).
-  Eighteen full runs total, two earlier focused attempts, one timing run, no
-  criterion benchmarks. The new native synthetic regression watches actual
-  inline/deferred thread identity at the boundary with the same literal answer;
-  the existing retirement regression now uses the real pass execution path.
-- The service-check lock audit finds no current direct UI caller: local_service
-  is called only by Requests' worker/status and failure mapping. LATEST guards
-  Cache::ask/finish for two program records; metadata, hashing and process work
-  run outside that guard. The Requests shutdown join remains Stage 2 work, so
-  this is not a claim that its worker cannot still delay old destruction.
-- Drop prerequisites are traced at
-  `V:/temp/gozler-window-stage1-drop-contract.md`. Moving GetData alone is
-  insufficient: DragEnter also needs current paths for its effect; async source
-  negotiation must finish before Drop returns; AgileReference failure does not
-  prove an object is local. Preserve native source lifetime and remove the UI
-  fallback only with an explicit supported-data policy. No provider responsiveness
-  measurement or implementation claim is made by this source/doc investigation.
+**Stage 1 is complete; stages 2–9 are incomplete.**
+Lead owns shared contracts, integration and the only build. The request
+implementer has finished only the unwired
+`app/work/requests.rs` for Stage 2; exclude it from the Stage 1 commit.
 
-Reviewed against `ab0e9b0` on 2026-10-23. The measurements below belong to their
-named historical builds and were not rerun. Before a stage changes a path,
-check that path in the current source rather than treating an old issue's
-description or timing as proof of its present cost.
+Current milestone:
+- Integrated adversarial review:
+  `V:/temp/gozler-window-stage1-integrated-review1.md`. Corrected distinct COM
+  data/capability references and frozen right-drop destination/menu. Lead also
+  routed status-bar Cancel through pending drop abandonment, sharing the pane's
+  action route and removing QueueStep's unused cancellation variant. Delta is
+  clean: `V:/temp/gozler-window-stage1-integrated-review2.md`.
+- Build 33 completed with integration compile/lint/doc errors, corrected together:
+  imports, borrowed/owned text, test visibility, a removed tooltip method still
+  used by Settings/Indexed folders, a closure annotation, private HWND test
+  construction and obsolete doc links. `fetch_update` retains a narrow allowance
+  because the workspace MSRV is 1.94 and its replacement requires 1.95.
+- Build 34: all 260 UI tests passed (14 ignored), formatting and docs passed.
+  First reachable clippy findings were three nested-if simplifications, a missing
+  local unsafe justification and one orphaned test-only helper. Corrected together.
+  Native pipe/ACL/working-set tests in unchanged paths failed
+  under restricted execution, as in Build 2; rerun the same script outside that
+  sandbox rather than changing those tests. Build 35 outside that restriction is
+  green: formatting, clippy, every workspace test and documentation passed.
+  Log: `V:/temp/gozler-window-stage1-build35.log`. Stage 1 is ready to commit;
+  integrate the request draft only after that checkpoint.
 
-Current boundaries that every stage preserves:
+Implemented contracts:
+- `core::work` owns admission, timing and the measured inline CPU threshold;
+  `win::work` owns worker/capability construction, native cancellation and
+  live-window delivery; `app::work` maps purposes/results to existing owners.
+  Cancellation keeps a blocked execution slot; latest replaceable pending work
+  coalesces. Large displaced inputs, replies and endpoints retire off UI.
+- Location, pairing, Settings labels, sign-in registry, shell actions/setup and
+  file clipboard publication use bounded purposes. Saves serialize changed-key,
+  removal and scope intent while merging unrelated disk keys; acknowledgments
+  preserve retry rules and newer Settings edits. Clipboard retries are finite
+  and respect sequence changes; Empty/Set/Close finishes consistently.
+- Shell purposes retain/pump their STA; no main HWND crosses to it. NOASYNC is
+  not treated as a universal Properties/URI lifetime guarantee. Large command
+  paths prepare off UI and retain original list/selection intent.
+- Queue adoption exposes only a fully restored engine. Its session serializes
+  accepted commands FIFO, publishes immutable snapshots and explicit ordered
+  acknowledgments, reserves ids atomically, and forwards actual recovery
+  acknowledgment at terminal close independently of normal reply pressure.
+  Queue remains the sole operation/scheduling/recovery owner.
+- Shared rows/ranges feed selection, Taken filtering, panel reconciliation,
+  counts, command preparation and quick search. Panel candidates are owned
+  through remap and publication; epochs, Taken, receipt-time end evidence and
+  listing cutoffs reject stale answers. The producer FIFO is bounded and reports
+  terminal Lost after its accepted prefix on watch overflow.
+- Native selection capture/application/deselection yields in bounded turns.
+  Capture precedes row publication, never impersonates empty/current selection,
+  and invalidates same-count replacement. Deferred menus/commands retain their
+  original side/list/focus; explicit selection mutations wait for native apply.
+- The canonical Operations follower runs serialized off UI with receipt-time
+  cache/end/job evidence. Release revalidates current keepers/rows in bounded
+  commits. Effects preserve Queue/panel/dialog/progress/source order. Transfer
+  tiles apply incrementally; list actions use the native highlight and card
+  buttons retain their displayed target. Failure reports use native owner data.
+- Own drag paths match successful shell items. External preview/effect work is
+  replaceable; accepted setup and final GetData are FIFO, with setup acknowledgment
+  first. Pending intake cancels by id without late restart. Synchronous holds
+  survive through use; async completion has one obligation and a separate lane.
+  Source notification cannot block essential persistence.
+- Awaited work becomes slow at three seconds without automatic expiration;
+  background work expires silently at ten seconds while retaining its execution
+  slot. Settings labels use it. Visible waiting/Cancel and streaming progress
+  join their actual Stage 2–3 consumers, avoiding unused caption scaffolding.
+- GitHub parsing precedes both publication locks. The service-check cache moves
+  bounded facts for two programs under lock; disk/hash/process work stays outside
+  it. Its launcher remains Stage 2.
 
-- `gozler-fileops::Queue` owns engine threads, device admission, accepted
-  policies, cancellation and recovery, including synchronization's
-  comparison, review and explicit commit. The UI work owner does not
-  replace that lifecycle or submit an engine operation a second time.
-- File transfers is child content in the shared inspector, accepted and
-  routed by the main window. It has no separate top-level window or loop.
-  Its text guard already skips unchanged values. Copy/Move captures its
-  policy before preparation; there is no later conflict question.
-- Recovery registers a compact accepted request at admission before a
-  worker starts. `Recovery::saved` converts its paths lazily on an engine
-  worker. `Queue::close` returns a recovery-write completion receiver;
-  the process remains alive for that acknowledgment off the window thread.
-- The indexing-progress and early large-file dispatch changes are current
-  behavior. Preserve their status-slot, polling and engine ownership.
+Evidence and settled constraints:
+- Last green full run: Build 35,
+  `V:/temp/gozler-window-stage1-build35.log` (260 UI tests passed, 14 ignored).
+  Accounting: 35 full attempts, six focused attempts,
+  one optimized timing run, no Criterion runs. Last focused check:
+  `-Test a_change_batch_keeps_the_taken_names_folded_once`, green at
+  `V:/temp/gozler-window-stage1-cache-focused6.log`. Detailed prior evidence
+  remains in doc checkpoint `35919d6` and `V:/temp/gozler-window-stage1-*`.
+- `-Timing timing_large_panel_selection` observed 1,000/100,000 entries:
+  chosen-source medians 0.969/70.565 ms, counts 0.017/1.861 ms. This supports
+  `INLINE_ITEMS = 1,000`, not a before/after speed claim. Baseline:
+  `V:/temp/gozler-window-stage1-pass-baseline.log`; support review:
+  `V:/temp/gozler-window-stage1-pass-timing-review1.md`.
+- Durable regressions cover finite/stale admission, disposal affinity,
+  inline/deferred equivalence, settings merge/coalescing, early WM_QUIT versus
+  finalizer completion, clipboard retries, panel snapshot/remap/overflow/end
+  evidence, capture replacement, quick stale focus, receipt-time awaited names,
+  id reservation and terminal Queue delivery. These cases passed Build 35.
+  No display/getter tests added.
+- Normal Exit destroys UI without waiting for writers; essential writes may keep
+  an invisible process alive. Session end dispatches at most two seconds, checks
+  explicit finalizer completion and preserves earlier WM_QUIT for the outer loop.
+  Windows sign-out may terminate unfinished persistence.
+- Failed drop marshaling is unsupported with no UI GetData fallback. An unknown
+  in-process STA provider can still dispatch its implementation back onto UI;
+  native drag imagery remains UI-affine. No universal provider responsiveness
+  claim. Contracts: `V:/temp/gozler-window-stage1-drop-intake-contract.md`;
+  integration: `V:/temp/gozler-window-stage1-drop-integration.md`.
+- Shell native-lifetime evidence is in the corresponding `shell-lifetime`,
+  `shell-native-contract` and `shell-probe` reports under the same prefix.
+  Disposable fixture removed. Native edit-box clipboard wait remains suspected,
+  tracked as #147. Required environment/visual checks stay in `ui-after-install.md`,
+  not claimed passed; installation remains separate.
+- Ubuntu/platform compilation, core purity, MSRV and affected cargo-deny checks
+  remain for CI. No new dependency package or wire layout in the latest batch.
+- Stage 2 request draft uses one Task per Purpose and a capacity-one interim
+  channel separate from terminal delivery. Export cleanup stays off UI and logs
+  partial-file removal failures independently of essential writes. Integration
+  must retain process lifetime without delaying UI destruction, delete old
+  `app/requests.rs`, and migrate the service-check launcher separately.
+  The draft is source-read, unwired and unbuilt.
 
-Stage 4 starts from the current painting code, including `362f5b2` and the
-integrated pane. Reconcile any concurrent editor before changing it; an
-old session's defect numbers are not a scheduling dependency.
+Historical analysis below was reviewed against `ab0e9b0` on 2026-10-23.
+Recheck present callers before relying on old measurements. Preserve the engine,
+shared transfer pane, explicit synchronization commit and current indexing/
+early-large-file dispatch behavior. Stage 4 starts from current painting,
+including `362f5b2`; reconcile concurrent editing first.
 
 ## Why
 

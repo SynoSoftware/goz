@@ -135,7 +135,7 @@ pub(crate) trait DialogProc {
         None
     }
     /// The tooltip of row `row` of the list view `id`, for a list that
-    /// shows info tips (`ReportList::show_info_tips`); `None` for none.
+    /// shows info tips (`ListView::show_info_tips`); `None` for none.
     fn info_tip(&self, _id: u16, _row: usize) -> Option<String> {
         None
     }

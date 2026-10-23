@@ -3,10 +3,16 @@
 //! typed text, rows, selection and kept operations, so a search in one list
 //! never changes another.
 
+mod keeping;
+
+pub(crate) use keeping::{EndEvidence, Ended, Keep, Kept};
+
+use super::fetch::Generation;
 use super::results::Results;
-use super::selection::{Selection, wide_path_into};
+use super::selection::{Selection, Sums};
+use super::work::{self, Retirement};
 use gozler_core::proto::ResultItem;
-use gozler_fileops::{OperationId, Request, Taken};
+use gozler_fileops::{OperationId, Taken};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -32,14 +38,19 @@ pub(crate) struct SearchList {
     pub(super) text: String,
     pub(super) results: Results,
     pub(super) selection: Selection,
+    pub(super) selection_sums: Sums,
     /// The ended deletes and moves whose rows this list still shows blank
     /// until its next search, because the rows it shows are of the moment
     /// its search ran: each one that took a fetched row when it ended.
-    pub(super) kept: HashSet<OperationId>,
+    pub(super) kept: Arc<HashSet<OperationId>>,
+    keeping: Option<Generation>,
+    pending: keeping::Pending,
+    observing: Option<Generation>,
     /// A search panel's selected size, which its status line shows; `None`
     /// while nothing is read, for Search's list, or when a counted folder's
     /// size is unknown.
     pub(super) chosen_bytes: Option<u64>,
+    retired: Retirement,
 }
 
 /// The size of `files`, a search panel's selection, as its status line
@@ -47,7 +58,7 @@ pub(crate) struct SearchList {
 /// and `None` when a counted size is unknown, as a folder panel's sum
 /// (DESIGN.md: Search in a panel). Only the depths at which a selected folder
 /// exists are looked up.
-fn chosen_bytes(files: &[ResultItem]) -> Option<u64> {
+pub(super) fn chosen_bytes(files: &[ResultItem]) -> Option<u64> {
     let folders: HashSet<&str> = (files.iter())
         .filter(|file| file.is_dir)
         .map(|folder| folder.path.trim_end_matches('\\'))
@@ -79,9 +90,31 @@ impl SearchList {
             text: String::new(),
             results: Results::new(),
             selection: Selection::None,
-            kept: HashSet::new(),
+            selection_sums: Sums::default(),
+            kept: Arc::default(),
+            keeping: None,
+            pending: keeping::Pending::default(),
+            observing: None,
             chosen_bytes: None,
+            retired: Retirement::default(),
         }
+    }
+
+    pub(crate) fn items(&self) -> usize {
+        self.results.items() + self.selection.items() + self.kept.len() + self.pending.items()
+    }
+
+    pub(crate) fn take_retired(&mut self) -> Retirement {
+        let mut retired = std::mem::take(&mut self.retired);
+        retired.append(self.results.take_retired());
+        retired
+    }
+
+    pub(super) fn set_selection(&mut self, selection: Selection) {
+        self.selection_sums = Sums::default();
+        let items = self.selection.items();
+        let previous = std::mem::replace(&mut self.selection, selection);
+        self.retired.push(previous, items);
     }
 
     pub(crate) fn text(&self) -> &str {
@@ -96,6 +129,10 @@ impl SearchList {
         &self.selection
     }
 
+    pub(crate) fn selection_sums(&self) -> Sums {
+        self.selection_sums
+    }
+
     pub(crate) fn chosen_bytes(&self) -> Option<u64> {
         self.chosen_bytes
     }
@@ -104,16 +141,10 @@ impl SearchList {
     /// typed text, while a search panel does not show, because it costs
     /// memory only while it shows (DESIGN.md: Search in a panel).
     pub(crate) fn drop_rows(&mut self) {
-        self.results = Results::new();
-        self.selection = Selection::None;
-        self.kept.clear();
+        self.results.clear();
+        self.set_selection(Selection::None);
+        self.reset_kept();
         self.chosen_bytes = None;
-    }
-
-    /// Adds up the selection's size again, for a search panel's status
-    /// line, after its files changed.
-    pub(super) fn count_chosen_bytes(&mut self) {
-        self.chosen_bytes = self.selection.files().and_then(chosen_bytes);
     }
 
     /// The row at `index` as the list shows it: `None` while its chunk has
@@ -121,125 +152,113 @@ impl SearchList {
     pub(crate) fn shown_row(&self, index: u64, taken: &Taken) -> Option<&ResultItem> {
         self.results
             .row(index)
-            .filter(|row| !is_taken(taken, &self.kept, row))
+            .filter(|row| !self.takes(taken, row))
     }
 
     /// Whether a delete or a move has taken the entry of the row at `index`.
     pub(crate) fn row_taken(&self, index: u64, taken: &Taken) -> bool {
         self.results
             .row(index)
-            .is_some_and(|row| is_taken(taken, &self.kept, row))
+            .is_some_and(|row| self.takes(taken, row))
     }
 
-    /// The operations `ended`, the operations `in_queue`, and the taken
-    /// entries `taken` that the list shows next: the list keeps an ended
-    /// delete or move that takes one of its fetched rows, until its next
-    /// search or until it leaves the queue. The fetched rows are walked
-    /// once, each encoded and folded into one buffer and looked up once for
-    /// every ended delete or move, and only while one is not yet kept.
-    pub(crate) fn ended(
-        &mut self,
-        ended: &[(OperationId, Arc<Request>)],
-        in_queue: &HashSet<OperationId>,
-        taken: &Taken,
-    ) {
-        let mut wanted: Vec<OperationId> = (ended.iter())
-            .filter(|(id, request)| {
-                matches!(**request, Request::Delete { .. } | Request::Move { .. })
-                    && !self.kept.contains(id)
+    pub(super) fn takes(&self, taken: &Taken, row: &ResultItem) -> bool {
+        !taken.is_empty()
+            && taken.contains(&super::selection::wide_path(row), |id| {
+                self.is_keeping() || self.kept.contains(&id)
             })
-            .map(|(id, _)| *id)
-            .collect();
-        let (mut path, mut folded) = (Vec::new(), Vec::new());
-        for row in self.results.fetched() {
-            if wanted.is_empty() {
-                break;
-            }
-            wide_path_into(row, &mut path);
-            taken.takers(&path, &mut folded, |takers| {
-                wanted.retain(|id| {
-                    let takes = takers.contains(id);
-                    if takes {
-                        self.kept.insert(*id);
-                    }
-                    !takes
-                });
+    }
+
+    pub(crate) fn observe_end(&mut self) -> Option<EndEvidence> {
+        let generation = self.results.generation()?;
+        self.observing = Some(generation);
+        Some(EndEvidence {
+            generation,
+            rows: self.results.cached(),
+        })
+    }
+
+    pub(crate) fn accept_end(&mut self, evidence: EndEvidence, ended: Option<Arc<Ended>>) {
+        if self.observing == Some(evidence.generation) {
+            self.observing = None;
+        }
+        if self.results.generation() != Some(evidence.generation) || ended.is_none() {
+            let items = evidence.items();
+            self.retired.push(evidence, items);
+            return;
+        }
+        self.pending
+            .record(ended.expect("a current end has evidence"), evidence.rows);
+        if self.keeping.is_none() {
+            let items = self.pending.items().saturating_add(self.kept.len());
+            let _ = work::pass(items, self, |shown| {
+                let pass = shown.take_keep().expect("the new evidence is pending");
+                shown.accept_kept(pass.run());
             });
         }
-        // From the queue, not from `taken`, which can be older and miss an
-        // operation that ended earlier.
-        self.kept.retain(|id| in_queue.contains(id));
+    }
+
+    pub(crate) fn is_keeping(&self) -> bool {
+        self.observing.is_some() || self.keeping.is_some() || !self.pending.is_empty()
+    }
+
+    pub(crate) fn take_keep(&mut self) -> Option<Keep> {
+        if self.keeping.is_some() || self.pending.is_empty() {
+            return None;
+        }
+        let generation = self.results.generation()?;
+        self.keeping = Some(generation);
+        Some(Keep {
+            generation,
+            kept: Arc::clone(&self.kept),
+            pending: std::mem::take(&mut self.pending),
+        })
+    }
+
+    pub(crate) fn accept_kept(&mut self, answer: Kept) -> bool {
+        if self.keeping != Some(answer.generation)
+            || self.results.generation() != Some(answer.generation)
+        {
+            let items = answer.kept.len();
+            self.retired.push(answer, items);
+            return false;
+        }
+        self.keeping = None;
+        let old = std::mem::replace(&mut self.kept, answer.kept);
+        let items = old.len();
+        self.retired.push(old, items);
+        true
+    }
+
+    pub(super) fn abandon_keeping(&mut self) {
+        self.observing = None;
+        self.keeping = None;
+        let pending = std::mem::take(&mut self.pending);
+        let items = pending.items();
+        self.retired.push(pending, items);
+    }
+
+    pub(super) fn reset_kept(&mut self) {
+        self.abandon_keeping();
+        let old = std::mem::take(&mut self.kept);
+        let items = old.len();
+        self.retired.push(old, items);
     }
 
     /// Whether the list still shows the rows of the ended operation `id`
     /// blank, so it stays in the queue.
+    #[cfg(test)]
     pub(crate) fn keeps(&self, id: OperationId) -> bool {
-        self.kept.contains(&id)
+        self.is_keeping() || self.kept.contains(&id)
     }
 
-    /// Which rows the list's control unhighlights, after
-    /// [`SearchList::drop_taken`] said whether the selection `lost` files.
-    pub(crate) fn deselect(&self, lost: bool) -> Deselect {
+    /// Which rows the list's control unhighlights after its accepted filter.
+    pub(crate) fn deselect(&self) -> Deselect {
         match &self.selection {
             Selection::Reading { .. } => Deselect::Taken,
-            Selection::None if lost => Deselect::All,
-            _ if lost => Deselect::Taken,
             _ => Deselect::Nothing,
         }
     }
-
-    /// Takes the entries of `taken` out of the selection; the list shows
-    /// their rows blank once it draws them again. Returns whether the
-    /// selection lost files.
-    pub(crate) fn drop_taken(&mut self, taken: &Taken) -> bool {
-        if taken.is_empty() || self.selection.files().is_none() {
-            return false;
-        }
-        let selected = self.selection.files().map_or(0, <[_]>::len);
-        let mut files = match std::mem::replace(&mut self.selection, Selection::None) {
-            Selection::Files(files) => files,
-            Selection::Folder { folder, contents } => {
-                if !is_taken(taken, &self.kept, &folder) {
-                    self.selection = Selection::Folder { folder, contents };
-                }
-                Vec::new()
-            }
-            other => {
-                self.selection = other;
-                Vec::new()
-            }
-        };
-        retain_untaken(taken, &self.kept, &mut files);
-        if !files.is_empty() {
-            self.selection = Selection::Files(files);
-        }
-        self.selection.files().map_or(0, <[_]>::len) != selected
-    }
-}
-
-/// Whether a delete or a move has taken `row`'s entry, by its exact name
-/// when its UTF-8 path lost an unpaired surrogate. The window asks for every
-/// cell it paints, so an empty set answers before the path is encoded.
-pub(super) fn is_taken(taken: &Taken, kept: &HashSet<OperationId>, row: &ResultItem) -> bool {
-    !taken.is_empty() && taken.contains(&super::selection::wide_path(row), |id| kept.contains(&id))
-}
-
-/// Keeps the `files` that no delete or move has taken, as [`is_taken`]
-/// says, encoding and folding every path into the same two buffers, because
-/// a selection can hold [`super::selection::SELECTION_LIMIT`] files.
-pub(crate) fn retain_untaken(
-    taken: &Taken,
-    kept: &HashSet<OperationId>,
-    files: &mut Vec<ResultItem>,
-) {
-    if taken.is_empty() {
-        return;
-    }
-    let (mut path, mut folded) = (Vec::new(), Vec::new());
-    files.retain(|file| {
-        wide_path_into(file, &mut path);
-        !taken.contains_folding(&path, &mut folded, |id| kept.contains(&id))
-    });
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 //! The life of each file operation as the window follows it: which reports
 //! remain available, which operation the status bar shows, and when an ended
 //! one leaves the queue. The engine owns the operations and their states;
-//! `app` reads a snapshot after each wake and runs the steps that
-//! [`Operations::accept`] returns.
+//! the work owner moves the follower through each received snapshot;
+//! `app` applies its ordered steps and immutable presentation.
 
 use super::file_operations::{
     self, Completion, Detail, Failure, LastEnded, Meter, Speed, StatusOperation, Taskbar, View,
@@ -13,6 +13,11 @@ use gozler_fileops::{Operation, OperationId, Outcome, Policy, Request, State};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
+
+mod following;
+pub(crate) use following::{
+    FollowChange, Followed, Following, Keepers, PreparedFailure, Presentation, Release, Reporting,
+};
 
 /// Where the files that a copy or a move acts on came from, which hears
 /// what became of them.
@@ -29,10 +34,7 @@ pub(crate) enum Source {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueueStep {
     /// The window records acceptance through `Model::operation_submitted`.
-    Submit {
-        id: OperationId,
-    },
-    Cancel(OperationId),
+    Submit { id: OperationId },
     /// Removes an ended operation, which changes the queue's taken entries.
     Remove(OperationId),
 }
@@ -50,12 +52,12 @@ pub(crate) enum SourceStep {
 /// it runs its own message loop (DESIGN.md: window rule 13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OperationDialog {
-    /// The failure dialog ([`super::model::Model::operation_failure`]).
+    /// The failure dialog of an ended operation.
     Report(OperationId),
 }
 
 /// What the window does after a snapshot of the queue
-/// ([`super::model::Model::accept_operations`]), in the order of the
+/// ([`super::model::Model::accept_followed`]), in the order of the
 /// fields. The sources come last, because a drop's source is another
 /// program, and COM can deliver messages while the window waits for it.
 #[derive(Debug, PartialEq)]
@@ -235,6 +237,7 @@ impl Operations {
         self.meters.get(&id).and_then(Meter::speed)
     }
 
+    #[cfg(test)]
     pub(super) fn view(
         &self,
         strings: &Strings,
@@ -376,28 +379,6 @@ impl Operations {
         None
     }
 
-    /// The failure dialog of `id`, while it waits to show.
-    pub(super) fn failure(
-        &self,
-        id: OperationId,
-        strings: &Strings,
-        numbers: &dyn Numbers,
-        windows_text: &dyn Fn(u32) -> String,
-    ) -> Option<Failure> {
-        let operation = self.reports.get(&id)?;
-        let State::Ended(outcome) = &operation.state else {
-            return None;
-        };
-        file_operations::failure(strings, numbers, &operation.request, outcome, windows_text)
-    }
-
-    pub(super) fn outcome(&self, id: OperationId) -> Option<Arc<Outcome>> {
-        let State::Ended(outcome) = &self.reports.get(&id)?.state else {
-            return None;
-        };
-        Some(Arc::clone(outcome))
-    }
-
     pub(super) fn reported(&mut self, id: OperationId) -> Option<QueueStep> {
         self.reports_changed |= self.reports.remove(&id).is_some();
         if self
@@ -465,15 +446,6 @@ impl Operations {
             }
         }
         steps
-    }
-
-    /// The operation the status bar shows ([`StatusOperation::of`]).
-    pub(super) fn is_transfer(&self, id: OperationId, snapshot: &[Operation]) -> bool {
-        snapshot
-            .iter()
-            .find(|op| op.id == id)
-            .or_else(|| self.reports.get(&id))
-            .is_some_and(|op| file_operations::is_transfer(&op.request))
     }
 
     pub(super) fn status(&self, snapshot: &[Operation]) -> Option<StatusOperation> {

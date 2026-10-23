@@ -62,6 +62,12 @@ owner has run it, and file an issue for each item that fails.
   about 22 MB at most, the window stays responsive, and afterwards shows
   whether the clipboard's memory still counts in the window's private bytes.
 - Drag a marquee over rows in the list: it selects them.
+- Drop files from File Explorer and an archiver onto a folder result, including
+  a right-button drop. Leave and re-enter while preview is pending; old feedback
+  must not return. Own-list drops use precisely the entries dragged.
+- Cancel a receiving drop while its source is slow, then close during another
+  intake. The UI remains responsive, cancellation cannot restart the transfer,
+  and synchronous sources keep their temporary files until file use ends.
 - In a large scattered selection, request a command or context menu in the
   left panel, then activate the right panel while capture finishes. The command
   still acts on the left. Select all and Clear selection during row remapping
@@ -127,6 +133,9 @@ owner has run it, and file an issue for each item that fails.
   operation identity; only the queue list waits during a structural replacement,
   and card Cancel remains usable. A large nontransfer failure report opens
   without populating every native row; its visible paths and tooltips agree.
+- Select a different queue row and immediately use Delete, Enter or the reorder
+  keys while its card is still updating. List commands target the selected row;
+  Cancel on the displayed card continues to target that card's operation.
 
 These need a second disk, a share, a USB drive, OneDrive or an elevated run.
 `crates/gozler-fileops/examples/measure.rs` runs the measurements, elevated,

@@ -120,10 +120,64 @@ pub(crate) struct View {
     pub(crate) card: Option<Card>,
     /// What the card says when its selection is unavailable.
     pub(crate) idle: String,
-    pub(crate) rows: Vec<Row>,
+    pub(crate) rows: Rows,
     /// The header over the list, such as "Queue · 3 waiting".
     pub(crate) queue: String,
     pub(crate) report: Option<Report>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct Rows {
+    entries: Vec<Row>,
+    positions: HashMap<OperationId, usize>,
+    movable: Vec<usize>,
+    order: Arc<[OperationId]>,
+}
+
+impl From<Vec<Row>> for Rows {
+    fn from(entries: Vec<Row>) -> Self {
+        Self {
+            positions: entries
+                .iter()
+                .enumerate()
+                .map(|(at, row)| (row.id, at))
+                .collect(),
+            movable: entries
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    matches!(row.phase, RowPhase::Waiting | RowPhase::Running { .. })
+                })
+                .map(|(at, _)| at)
+                .collect(),
+            order: entries.iter().map(|row| row.id).collect(),
+            entries,
+        }
+    }
+}
+
+impl std::ops::Deref for Rows {
+    type Target = [Row];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl Rows {
+    pub(crate) fn position(&self, id: OperationId) -> Option<usize> {
+        self.positions.get(&id).copied()
+    }
+
+    pub(crate) fn same_order(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.order, &other.order)
+    }
+
+    pub(crate) fn reuse_order(&mut self, prior: &Self) {
+        if self.order == prior.order {
+            self.order = Arc::clone(&prior.order);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -463,44 +517,44 @@ pub(crate) struct RowButtons {
     pub(crate) end: QueueAction,
 }
 
-fn movable_ids(rows: &[Row]) -> impl Iterator<Item = OperationId> + '_ {
-    (rows.iter())
-        .filter(|row| matches!(row.phase, RowPhase::Waiting | RowPhase::Running { .. }))
-        .map(|row| row.id)
-}
-
 /// Where a row dropped at `gap`, a place between the rows, lands: the gap
 /// before the next running or waiting operation, or the end of their order.
-pub(crate) fn landing(rows: &[Row], gap: usize) -> (usize, Option<OperationId>) {
-    let waiting = |row: &Row| matches!(row.phase, RowPhase::Waiting | RowPhase::Running { .. });
-    match (rows.iter().enumerate().skip(gap)).find(|(_, row)| waiting(row)) {
-        Some((index, row)) => (index, Some(row.id)),
+pub(crate) fn landing(rows: &Rows, gap: usize) -> (usize, Option<OperationId>) {
+    match rows
+        .movable
+        .get(rows.movable.partition_point(|&at| at < gap))
+    {
+        Some(&index) => (index, Some(rows[index].id)),
         None => {
-            let after = (rows.iter().rposition(waiting)).map_or(gap, |last| last + 1);
+            let after = rows.movable.last().map_or(gap, |last| last + 1);
             (after, None)
         }
     }
 }
 
 /// Whether putting `id` before `before` leaves its order unchanged.
-pub(crate) fn stays_in_place(rows: &[Row], id: OperationId, before: Option<OperationId>) -> bool {
-    let next = movable_ids(rows)
-        .skip_while(|waiting| *waiting != id)
-        .nth(1);
+pub(crate) fn stays_in_place(rows: &Rows, id: OperationId, before: Option<OperationId>) -> bool {
+    let next = rows
+        .position(id)
+        .filter(|at| rows.movable.binary_search(at).is_ok())
+        .and_then(|at| {
+            rows.movable
+                .get(rows.movable.partition_point(|&next| next <= at))
+        })
+        .map(|&at| rows[at].id);
     before == Some(id) || before == next
 }
 
 /// The place before which Move up or Move down puts `id`,
 /// or `None` when it is first or last already. The
 /// inner `None` is the end of the queue.
-pub(crate) fn move_step(rows: &[Row], id: OperationId, up: bool) -> Option<Option<OperationId>> {
-    let waiting: Vec<OperationId> = movable_ids(rows).collect();
-    let index = waiting.iter().position(|w| *w == id)?;
+pub(crate) fn move_step(rows: &Rows, id: OperationId, up: bool) -> Option<Option<OperationId>> {
+    let index = rows.movable.binary_search(&rows.position(id)?).ok()?;
     if up {
-        Some(Some(*waiting.get(index.checked_sub(1)?)?))
+        Some(Some(rows[*rows.movable.get(index.checked_sub(1)?)?].id))
     } else {
-        waiting.get(index + 1)?;
-        Some(waiting.get(index + 2).copied())
+        rows.movable.get(index + 1)?;
+        Some(rows.movable.get(index + 2).map(|&at| rows[at].id))
     }
 }
 
@@ -842,7 +896,7 @@ pub(crate) fn view(
         card,
         idle: idle.to_owned(),
         queue,
-        rows,
+        rows: rows.into(),
         report,
     }
 }
@@ -2090,25 +2144,44 @@ pub(crate) fn delete_question(
     }
 }
 
-/// The Exit question while `operations` run or wait (DESIGN.md: File
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ExitCounts {
+    running: u64,
+    waiting: u64,
+}
+
+impl ExitCounts {
+    pub(crate) fn with_pending(mut self, pending: usize) -> Self {
+        self.waiting = self.waiting.saturating_add(pending as u64);
+        self
+    }
+
+    pub(crate) fn of(operations: &[Operation]) -> Self {
+        let mut counts = Self::default();
+        for operation in operations {
+            match operation.state {
+                State::Running(_) | State::Cancelling => counts.running += 1,
+                State::Preparing
+                | State::Prepared(_)
+                | State::Compared(_)
+                | State::Waiting { .. } => counts.waiting += 1,
+                State::Ended(_) | State::Interrupted => {}
+            }
+        }
+        counts
+    }
+}
+
+/// The Exit question while operations run or wait (DESIGN.md: File
 /// operations), or `None` while none does: the running ones stop and are
 /// offered again as Interrupted, and the waiting ones, which are not saved,
 /// never run. A prepared operation waits for its answer.
 pub(crate) fn exit_question(
     strings: &Strings,
     numbers: &dyn Numbers,
-    operations: &[Operation],
+    counts: ExitCounts,
 ) -> Option<Question> {
-    let (mut running, mut waiting) = (0, 0);
-    for operation in operations {
-        match operation.state {
-            State::Running(_) | State::Cancelling => running += 1,
-            State::Preparing | State::Prepared(_) | State::Compared(_) | State::Waiting { .. } => {
-                waiting += 1
-            }
-            State::Ended(_) | State::Interrupted => {}
-        }
-    }
+    let ExitCounts { running, waiting } = counts;
     if running + waiting == 0 {
         return None;
     }
@@ -2632,13 +2705,13 @@ mod tests {
             detail: RowLine::Plain(String::new()),
             phase,
         };
-        let rows = [
+        let rows = Rows::from(vec![
             row(1, RowPhase::Running { paused: false }),
             row(2, RowPhase::Waiting),
             row(3, RowPhase::Waiting),
             row(4, RowPhase::Waiting),
             row(5, RowPhase::Interrupted),
-        ];
+        ]);
         assert_eq!(landing(&rows, 0), (0, Some(id(1))));
         assert_eq!(landing(&rows, 3), (3, Some(id(4))));
         assert_eq!(landing(&rows, 5), (4, None));

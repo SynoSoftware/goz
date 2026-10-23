@@ -15,6 +15,8 @@ param(
     # query_2M. --bench '*' selects the bench targets alone; plain cargo bench
     # would also build every library as a bench target.
     [string] $Bench,
+    # Runs an ignored synthetic timing test in an optimized build.
+    [string] $Timing,
     # Builds the release executables, which the probe measures, because the
     # memory budget is measured on what ships.
     [switch] $Release,
@@ -52,7 +54,12 @@ $rustdocFlags = $env:RUSTDOCFLAGS
 Push-Location $PSScriptRoot
 try {
     $process.PriorityClass = 'BelowNormal'
-    if ($Test) {
+    if ($Timing) {
+        Invoke-Cargo test --release --workspace --no-run $Timing
+        $process.PriorityClass = $priority
+        Invoke-Cargo test --release --workspace --no-fail-fast $Timing '--' --ignored --nocapture --test-threads=1
+    }
+    elseif ($Test) {
         Invoke-Cargo test --workspace --no-fail-fast $Test
     }
     elseif ($Release) {
