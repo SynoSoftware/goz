@@ -22,6 +22,7 @@ pub(crate) mod pairing;
 pub(crate) mod pane;
 pub(crate) mod shell;
 pub(crate) mod shortcut;
+pub(crate) mod status_transfer;
 pub(crate) mod toolbar;
 pub(crate) mod tray;
 pub(crate) mod update;

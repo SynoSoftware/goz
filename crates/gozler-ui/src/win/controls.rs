@@ -366,16 +366,15 @@ impl Label {
         .map(Label)
     }
 
-    /// A path against its right edge that loses its middle when it is too
-    /// long, so the drive and the last folder stay, such as a search
-    /// panel's focused folder.
+    /// A path centred in its height against its right edge that loses its
+    /// middle when it is too long, so the drive and the last folder stay.
     pub(crate) fn create_right_path(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
         const SS_RIGHT: u32 = 0x2;
         const SS_PATHELLIPSIS: u32 = 0x8000;
         child(
             parent,
             w!("STATIC"),
-            SS_RIGHT | SS_NOPREFIX | SS_PATHELLIPSIS,
+            SS_RIGHT | SS_NOPREFIX | SS_CENTERIMAGE | SS_PATHELLIPSIS,
             WINDOW_EX_STYLE(0),
             id,
         )
@@ -403,6 +402,19 @@ impl Label {
             parent,
             w!("STATIC"),
             SS_NOPREFIX | SS_CENTERIMAGE | SS_ENDELLIPSIS,
+            WINDOW_EX_STYLE(0),
+            id,
+        )
+        .map(Label)
+    }
+
+    /// A line as [`Label::create_heading`] makes, against its right edge.
+    pub(crate) fn create_right_heading(parent: Hwnd, id: u16) -> windows::core::Result<Label> {
+        const SS_RIGHT: u32 = 0x2;
+        child(
+            parent,
+            w!("STATIC"),
+            SS_RIGHT | SS_NOPREFIX | SS_CENTERIMAGE | SS_ENDELLIPSIS,
             WINDOW_EX_STYLE(0),
             id,
         )
@@ -1346,6 +1358,15 @@ pub(crate) struct ListColumn<'a> {
 }
 
 impl ListView {
+    pub(crate) fn show_info_tips(self) {
+        send(
+            self.0,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            LVS_EX_INFOTIP as usize,
+            LVS_EX_INFOTIP as isize,
+        );
+    }
+
     /// The controls created before the list lie above it, such as the
     /// message in its empty area. It shares the system image list, which it
     /// must not destroy.
@@ -2018,7 +2039,7 @@ impl StatusBar {
         unsafe { send_pointer(self.0, SB_SETTEXTW, part, text.as_ptr()) };
     }
 
-    fn text(self, part: usize) -> String {
+    pub(crate) fn text(self, part: usize) -> String {
         // The low word is the length; the high word says how it is drawn.
         let length = (send(self.0, SB_GETTEXTLENGTHW, part, 0) & 0xFFFF) as usize;
         let mut text = vec![0u16; length + 1];
@@ -2136,9 +2157,16 @@ impl ProgressBar {
     pub(crate) fn set_measured(self, done: u64, total: u64) {
         /// The bar's positions, so a size of any number of bytes fits.
         const STEPS: u64 = 1000;
+        let position = done.min(total).saturating_mul(STEPS) / total.max(1);
+        // SAFETY: the handle is a progress bar on this thread.
+        let marquee = unsafe { GetWindowLongPtrW(self.0.0, GWL_STYLE) } & PBS_MARQUEE as isize != 0;
+        if !marquee
+            && send(self.0, windows::Win32::UI::Controls::PBM_GETPOS, 0, 0) == position as isize
+        {
+            return;
+        }
         send(self.0, PBM_SETMARQUEE, 0, 0);
         self.set_marquee(false);
-        let position = done.min(total).saturating_mul(STEPS) / total.max(1);
         // A themed bar animates each increase, so at one update in 500 ms
         // the fill trails the percent beside it; a decrease draws at once,
         // so the bar goes one step past the position and back.

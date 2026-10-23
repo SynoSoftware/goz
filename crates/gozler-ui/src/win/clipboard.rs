@@ -181,7 +181,7 @@ pub(crate) struct ClipboardFiles {
     pub(crate) paths: Vec<PathBuf>,
     /// The files were cut, so Paste moves them.
     pub(crate) cut: bool,
-    /// Tells the reading thread that a move of the files was submitted.
+    /// Tells the reading thread that all cut files moved successfully.
     moved: Sender<()>,
 }
 
@@ -190,6 +190,9 @@ pub(crate) struct ClipboardFiles {
 /// does, and gives `answer` the files and whether they were cut, or `None`
 /// when it holds none or cannot be read.
 pub(crate) fn read_files(answer: impl FnOnce(Option<ClipboardFiles>) + Send + 'static) {
+    // SAFETY: this captures the command's clipboard version without calling
+    // its owner, whose data object is acquired on the reader thread.
+    let sequence = unsafe { GetClipboardSequenceNumber() };
     std::thread::spawn(move || {
         // SAFETY: OLE starts for this thread alone, and ends after the
         // data object is released.
@@ -200,8 +203,13 @@ pub(crate) fn read_files(answer: impl FnOnce(Option<ClipboardFiles>) + Send + 's
         // SAFETY: OLE is initialized on this thread; the data object is
         // released before OLE ends, and each medium after it is read.
         unsafe {
-            let sequence = GetClipboardSequenceNumber();
-            let data = OleGetClipboard().ok();
+            let data = if sequence != 0 && GetClipboardSequenceNumber() == sequence {
+                OleGetClipboard()
+                    .ok()
+                    .filter(|_| GetClipboardSequenceNumber() == sequence)
+            } else {
+                None
+            };
             let paths = data.as_ref().map(files_of).unwrap_or_default();
             let cut = match data
                 .as_ref()
@@ -231,7 +239,7 @@ pub(crate) fn read_files(answer: impl FnOnce(Option<ClipboardFiles>) + Send + 's
 }
 
 impl ClipboardFiles {
-    /// After a move of these files was submitted: their reading thread
+    /// After every cut file moved successfully: their reading thread
     /// tells their source that they moved, as [`tell_moved`] says.
     pub(crate) fn moved(self) {
         let _ = self.moved.send(());
@@ -253,7 +261,9 @@ fn tell_moved(data: &IDataObject, sequence: u32) {
     // is. Without a window, emptying it leaves it without an owner.
     unsafe {
         if OpenClipboard(None).is_ok() {
-            let _ = EmptyClipboard();
+            if GetClipboardSequenceNumber() == sequence {
+                let _ = EmptyClipboard();
+            }
             let _ = CloseClipboard();
         }
     }

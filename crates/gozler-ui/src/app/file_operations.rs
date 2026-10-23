@@ -1,43 +1,36 @@
-//! The first window's file operations (DESIGN.md: File operations): the
-//! engine's queue, and the File operations window, a
-//! window of its own that the main window owns, with a card for the running
-//! operation and the queue list under it. The window never blocks Gozler:
-//! closing it only hides it, and the operations go on.
-//!
-//! The queue calls its wake function on an engine thread after each change
-//! of an operation's state; the wake only posts [`QUEUE_CHANGED`] to the
-//! main window, which then reads the states and runs what
-//! `core::operations` decides, also when this window shows. A running
-//! operation's counts change without a wake, so the main window polls them
-//! twice a second while one runs.
+//! Owns the engine Queue and the shared inspector's native transfer controls.
+//! Engine wakes reach the main window; only that window accepts snapshots and
+//! runs lifecycle decisions. The child content has no independent placement,
+//! activation or message loop. Reports read immutable outcomes on demand.
 
 use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
-    self, Bar, CARD_ICON, Failure, Layout, Meter, Metrics, OPEN_WIDTH, QueueAction, ROW_GLYPHS,
-    ROW_ICON, Row, RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
+    self, Bar, CARD_ICON, Detail, Failure, Layout, Metrics, QueueAction, ROW_GLYPHS, ROW_ICON, Row,
+    RowButtons, RowLine, RowPhase, Taskbar, View, icon_index,
 };
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
-use crate::core::layout::{Px, Rect, Size, button_content, button_room};
+use crate::core::layout::{Px, Rect, button_content, button_room};
 use crate::core::operations::{QueueStep, Source, SourceStep};
 use crate::core::text::Strings;
 use crate::win::clipboard::ClipboardFiles;
-use crate::win::controls::{Button, GlyphLabel, Label, ProgressBar, ReportList, Tooltip};
+use crate::win::controls::{
+    Button, GlyphLabel, Label, ListColumn, ListView, ProgressBar, ReportList, Tooltip,
+};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
 use crate::win::drop_target::DropSource;
 use crate::win::file_operations::{
-    PathLabel, QUEUE_CHANGED, QueueList, QueueNotify, TaskbarProgress, Tile, set_client_size,
-    show_drag_cursor, show_paused, tell_hidden, window_size,
+    PathLabel, QUEUE_CHANGED, QueueList, QueueNotify, TaskbarProgress, Tile, show_drag_cursor,
+    show_paused,
 };
 use crate::win::gdi::{Font, TextMeter};
-use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Menu;
-use crate::win::notify::Command;
+use crate::win::notify::{Command, ListNotify};
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use gozler_fileops::{
-    Operation, OperationId, OrderRefused, Queue, Request, Side, SpeedSettings, State, Taken,
+    Operation, OperationId, OrderRefused, Queue, Request, Side, SpeedSettings, Taken,
 };
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
@@ -45,7 +38,6 @@ use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.file_operations";
@@ -60,7 +52,7 @@ const DRAG_SCROLL_MS: u32 = 100;
 /// `IDCANCEL`, which `Esc` sends through `IsDialogMessageW`.
 const ESCAPE: u16 = 2;
 
-/// The queue and the File operations window, as the main window holds them.
+/// The queue and the transfer controls in the shared inspector.
 pub(super) struct FileOperations {
     owner: Hwnd,
     /// Never dropped, because dropping it waits for every Windows copy, and
@@ -71,11 +63,11 @@ pub(super) struct FileOperations {
     /// [`FileOperations::close`].
     waker: OpenWaker,
     strings: RefCell<Strings>,
-    /// The File operations window, made the first time it shows; `None`
+    /// The transfer content, made the first time it shows; `None`
     /// inside when it could not open, and the operations then show only in
     /// the status bar and on the taskbar button.
-    window: OnceCell<Option<Rc<Window>>>,
-    /// Where the window's failure to open is written.
+    window: OnceCell<Option<Rc<Pane>>>,
+    /// Where a failure to create the transfer controls is written.
     error_log: PathBuf,
     /// Where the files of each copy or move came from, until the source
     /// hears what became of them.
@@ -83,9 +75,34 @@ pub(super) struct FileOperations {
     /// Made at the first operation, because the taskbar's interface costs
     /// start-up time.
     taskbar: OnceCell<TaskbarProgress>,
+    actions: Rc<RefCell<Vec<PaneAction>>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PaneAction {
+    Select(Detail),
+    Command(OperationId, QueueAction),
+    Move(OperationId, Option<OperationId>),
+    CancelAll,
+    CloseReport,
+    Collapse,
+    Maximize,
+    Flip,
 }
 
 struct Controls {
+    heading: Label,
+    count: Label,
+    all: Button,
+    flip: Button,
+    maximize: Button,
+    rate: Label,
+    files_rate: Label,
+    file_percent: Label,
+    file_bytes: Label,
+    overall: Label,
+    report: ListView,
+    summary: Label,
     icon: GlyphLabel,
     title: Label,
     status: Label,
@@ -102,13 +119,7 @@ struct Controls {
     percent: Label,
     items: Label,
     bytes: Label,
-    toggle: Button,
     queue: Label,
-    /// Pause, Resume or Continue for the selected row.
-    run: Button,
-    up: Button,
-    down: Button,
-    queue_cancel: Button,
     list: QueueList,
     hint: Label,
     hide: Button,
@@ -116,34 +127,46 @@ struct Controls {
 }
 
 impl Controls {
-    /// The labels of the running operation; the `muted` ones step back in
-    /// gray.
-    fn card_labels(&self) -> [(Hwnd, bool); 12] {
+    fn card_labels(&self) -> [Hwnd; 17] {
         [
-            (self.icon.hwnd(), false),
-            (self.title.hwnd(), false),
-            (self.status.hwnd(), true),
-            (self.doing.hwnd(), true),
-            (self.file.hwnd(), false),
-            (self.from_label.hwnd(), true),
-            (self.from.hwnd(), false),
-            (self.to_label.hwnd(), true),
-            (self.to.hwnd(), false),
-            (self.percent.hwnd(), true),
-            (self.items.hwnd(), true),
-            (self.bytes.hwnd(), true),
+            self.icon.hwnd(),
+            self.title.hwnd(),
+            self.status.hwnd(),
+            self.doing.hwnd(),
+            self.file.hwnd(),
+            self.from_label.hwnd(),
+            self.from.hwnd(),
+            self.to_label.hwnd(),
+            self.to.hwnd(),
+            self.overall.hwnd(),
+            self.percent.hwnd(),
+            self.items.hwnd(),
+            self.bytes.hwnd(),
+            self.file_percent.hwnd(),
+            self.file_bytes.hwnd(),
+            self.rate.hwnd(),
+            self.files_rate.hwnd(),
         ]
     }
-
     fn text_controls(&self) -> Vec<Hwnd> {
-        let mut controls: Vec<Hwnd> = self.card_labels().iter().map(|(hwnd, _)| *hwnd).collect();
-        controls.extend([
-            self.queue.hwnd(),
-            self.list.hwnd(),
-            self.hint.hwnd(),
-            self.hide.hwnd(),
-        ]);
-        controls
+        self.card_labels()
+            .into_iter()
+            .chain([
+                self.heading.hwnd(),
+                self.count.hwnd(),
+                self.queue.hwnd(),
+                self.list.hwnd(),
+                self.hint.hwnd(),
+                self.hide.hwnd(),
+                self.all.hwnd(),
+                self.flip.hwnd(),
+                self.maximize.hwnd(),
+                self.pause.hwnd(),
+                self.cancel.hwnd(),
+                self.report.hwnd(),
+                self.summary.hwnd(),
+            ])
+            .collect()
     }
 }
 
@@ -160,20 +183,20 @@ struct Drag {
     gap: Option<usize>,
 }
 
-struct Window {
+struct Pane {
+    actions: Rc<RefCell<Vec<PaneAction>>>,
     hwnd: Cell<Option<Hwnd>>,
     queue: Rc<ManuallyDrop<Queue>>,
     owner: Hwnd,
     strings: RefCell<Strings>,
-    numbers: RefCell<WindowsNumbers>,
     controls: OnceCell<Controls>,
     fonts: RefCell<Option<Fonts>>,
     layout: Cell<Layout>,
-    meters: RefCell<HashMap<OperationId, Meter>>,
+    metrics: Cell<Option<Metrics>>,
     /// What the window shows now.
     view: RefCell<Option<View>>,
-    selected: Cell<Option<OperationId>>,
-    queue_open: Cell<bool>,
+    flipped: Cell<bool>,
+    maximized: Cell<bool>,
     drag: Cell<Option<Drag>>,
     /// Why the queue refused the move the person tried or points at, which
     /// the hint names and which gives the hint its line.
@@ -224,6 +247,7 @@ impl FileOperations {
             error_log,
             sources: RefCell::new(HashMap::new()),
             taskbar: OnceCell::new(),
+            actions: Rc::default(),
         }
     }
 
@@ -256,6 +280,41 @@ impl FileOperations {
         id
     }
 
+    pub(super) fn accept(&self, request: Request, settings: SpeedSettings) -> OperationId {
+        self.queue.accept(request, settings)
+    }
+
+    pub(super) fn resolve(
+        &self,
+        id: OperationId,
+        request: Request,
+        source: Option<FilesSource>,
+    ) -> bool {
+        if let Some(source) = source {
+            self.sources.borrow_mut().insert(id, source);
+        }
+        let accepted = self.queue.resolve(id, request);
+        if !accepted {
+            let source = self.sources.borrow_mut().remove(&id);
+            if let Some(FilesSource::Drop(source)) = source {
+                source.end(false);
+            }
+        }
+        accepted
+    }
+
+    pub(super) fn cancel_all(&self) {
+        self.queue.cancel_all();
+    }
+
+    pub(super) fn take_actions(&self) -> Vec<PaneAction> {
+        std::mem::take(&mut *self.actions.borrow_mut())
+    }
+
+    pub(super) fn fail_intake(&self, id: OperationId) {
+        self.queue.fail_intake(id);
+    }
+
     /// Runs `step` on the queue. Returns whether the queue accepted it,
     /// which only a submit can refuse.
     pub(super) fn run(&self, step: QueueStep) -> bool {
@@ -286,50 +345,151 @@ impl FileOperations {
             }
             SourceStep::Ended { id, succeeded } => {
                 let source = self.sources.borrow_mut().remove(&id);
-                if let Some(FilesSource::Drop(dropped)) = source {
-                    dropped.end(succeeded);
+                match source {
+                    Some(FilesSource::Drop(dropped)) => dropped.end(succeeded),
+                    Some(FilesSource::Paste(files)) if succeeded && files.cut => files.moved(),
+                    _ => {}
                 }
             }
         }
     }
 
-    /// Shows the window with `snapshot`, and with `select` selected;
-    /// `front` brings it to the front, as View > File operations does.
-    pub(super) fn show(&self, snapshot: &[Operation], select: Option<OperationId>, front: bool) {
+    pub(super) fn act(&self, id: OperationId, action: QueueAction) {
+        match action {
+            QueueAction::Pause => self.queue.set_paused(id, true),
+            QueueAction::Resume => self.queue.set_paused(id, false),
+            QueueAction::Cancel => self.queue.cancel(id),
+            QueueAction::Continue => {
+                let _ = self.queue.resume(id);
+            }
+            QueueAction::Dismiss => {
+                let _ = self.queue.dismiss(id);
+            }
+            QueueAction::MoveUp | QueueAction::MoveDown => {
+                if let Some(window) = self.made() {
+                    let before = window.view.borrow().as_ref().and_then(|view| {
+                        file_operations::move_step(&view.rows, id, action == QueueAction::MoveUp)
+                    });
+                    if let Some(before) = before {
+                        let refused = self.queue.move_waiting(id, before).err();
+                        if refused.is_none() {
+                            window.moved.set(Some(id));
+                        }
+                        window.show_hint(refused);
+                    }
+                }
+            }
+            QueueAction::Report | QueueAction::Clear => {}
+        }
+    }
+
+    pub(super) fn move_before(&self, id: OperationId, before: Option<OperationId>) {
+        let refused = self.queue.move_waiting(id, before).err();
+        if let Some(window) = self.made() {
+            window.show_hint(refused);
+        }
+    }
+
+    /// Updates explicitly opened content without activating the main window.
+    pub(super) fn show(&self, view: View) {
         let Some(window) = self.window() else {
             return;
         };
         let Some(hwnd) = window.hwnd.get() else {
             return;
         };
-        if select.is_some() {
-            window.selected.set(select);
-        }
-        window.show_snapshot(hwnd, snapshot);
-        if front {
-            hwnd.bring_to_front();
+        window.show_view(hwnd, view);
+        hwnd.set_visible(true);
+    }
+
+    pub(super) fn place(&self, area: Option<Rect>, flipped: bool, maximized: bool) {
+        let Some(window) = (if area.is_some() {
+            self.window()
         } else {
-            hwnd.set_visible(true);
+            self.made()
+        }) else {
+            return;
+        };
+        let Some(hwnd) = window.hwnd.get() else {
+            return;
+        };
+        window.flipped.set(flipped);
+        if window.maximized.replace(maximized) != maximized {
+            window.apply_strings();
+        }
+        if let Some(area) = area {
+            win::move_children(&[(hwnd, area)]);
+            window.layout(hwnd);
+        }
+        hwnd.set_visible(area.is_some());
+    }
+
+    pub(super) fn key(&self, target: Hwnd, key: crate::core::commands::Keystroke) -> bool {
+        use crate::core::commands::Key;
+        if !self.contains(target) {
+            return false;
+        }
+        let Some(window) = self.made() else {
+            return false;
+        };
+        if key.key == Key::Escape && !key.alt && !key.ctrl {
+            window.post(PaneAction::Collapse);
+            return true;
+        }
+        if target != window.controls().list.hwnd() {
+            return false;
+        }
+        let Some(id) = window.selected() else {
+            return false;
+        };
+        if key.alt && !key.ctrl && !key.shift && matches!(key.key, Key::Up | Key::Down) {
+            window.act(
+                id,
+                if key.key == Key::Up {
+                    QueueAction::MoveUp
+                } else {
+                    QueueAction::MoveDown
+                },
+            );
+            return true;
+        }
+        if key.key == Key::Enter
+            && !key.ctrl
+            && !key.alt
+            && !key.shift
+            && window
+                .selected_buttons()
+                .is_some_and(|(_, b)| b.run == Some(QueueAction::Report))
+        {
+            window.act(id, QueueAction::Report);
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn contains(&self, control: Hwnd) -> bool {
+        self.made()
+            .and_then(|w| w.hwnd.get())
+            .is_some_and(|hwnd| hwnd.is_parent_of(control))
+    }
+
+    pub(super) fn focus(&self) {
+        if let Some(window) = self.made() {
+            let c = window.controls();
+            if c.list.hwnd().is_visible() {
+                c.list.hwnd().focus();
+            } else {
+                c.hide.hwnd().focus();
+            }
         }
     }
 
     /// Shows `snapshot` in the window, if it was made.
-    pub(super) fn refresh(&self, snapshot: &[Operation]) {
+    pub(super) fn refresh(&self, view: View) {
         if let Some(window) = self.made()
             && let Some(hwnd) = window.hwnd.get()
         {
-            window.show_snapshot(hwnd, snapshot);
-        }
-    }
-
-    /// Whether the window is on the screen.
-    pub(super) fn is_shown(&self) -> bool {
-        (self.made().and_then(|window| window.hwnd.get())).is_some_and(Hwnd::is_visible)
-    }
-
-    pub(super) fn hide(&self) {
-        if let Some(hwnd) = self.made().and_then(|window| window.hwnd.get()) {
-            hwnd.hide();
+            window.show_view(hwnd, view);
         }
     }
 
@@ -351,7 +511,7 @@ impl FileOperations {
         }
     }
 
-    /// Words the window in the language of `strings`; the operations' own
+    /// Words the pane in the language of `strings`; the operations' own
     /// texts follow at the next [`Self::refresh`].
     pub(super) fn set_strings(&self, strings: Strings) {
         self.strings.replace(strings.clone());
@@ -359,26 +519,33 @@ impl FileOperations {
             return;
         };
         window.strings.replace(strings);
+        window.metrics.set(None);
         window.apply_strings();
         // The labels and Hide are as wide as their new words.
         if let Some(hwnd) = window.hwnd.get() {
             window.layout(hwnd);
+            window.show_tiles(false);
+            let report = window.controls().report;
+            report.redraw_rows(0..report.count());
         }
     }
 
     /// Shows or hides Hide's icon, after icons were shown or hidden.
     pub(super) fn apply_glyphs(&self) {
-        if let Some(window) = self.made() {
-            window.apply_glyphs();
+        if let Some(window) = self.made()
+            && let Some(hwnd) = window.hwnd.get()
+        {
+            window.apply_fonts(hwnd);
+            window.layout(hwnd);
         }
     }
 
     /// The owner's `WM_DESTROY`: no wake reaches the owner any more, every
     /// operation stops so that Continue finishes it at the next start, and
     /// the window goes. The process then ends without dropping the queue.
-    pub(super) fn close(&self) {
+    pub(super) fn close(&self) -> std::sync::mpsc::Receiver<std::io::Result<()>> {
         self.waker.close();
-        self.queue.close();
+        let saved = self.queue.close();
         // The closed queue ends no more operations, so each source hears
         // that its operation failed.
         let sources = std::mem::take(&mut *self.sources.borrow_mut());
@@ -386,18 +553,24 @@ impl FileOperations {
         if let Some(hwnd) = self.made().and_then(|window| window.hwnd.take()) {
             hwnd.destroy();
         }
+        saved
     }
 
-    /// The window, made now if it was not.
-    fn window(&self) -> Option<&Rc<Window>> {
+    /// The native child pane, made only when explicitly opened.
+    fn window(&self) -> Option<&Rc<Pane>> {
         let made = self.window.get_or_init(|| {
             let strings = self.strings.borrow().clone();
-            match Window::open(self.owner, Rc::clone(&self.queue), strings) {
+            match Pane::open(
+                self.owner,
+                Rc::clone(&self.queue),
+                strings,
+                Rc::clone(&self.actions),
+            ) {
                 Ok(window) => Some(window),
                 Err(error) => {
                     super::write_log(
                         &self.error_log,
-                        &format!("The File operations window did not open: {error}"),
+                        &format!("The transfer pane did not open: {error}"),
                     );
                     None
                 }
@@ -406,8 +579,8 @@ impl FileOperations {
         made.as_ref()
     }
 
-    /// The window, if it was made.
-    fn made(&self) -> Option<&Rc<Window>> {
+    /// The native child pane, if it was made.
+    fn made(&self) -> Option<&Rc<Pane>> {
         self.window.get().and_then(Option::as_ref)
     }
 }
@@ -442,49 +615,47 @@ fn px(dip: i32, hwnd: Hwnd) -> Px {
     )
 }
 
-impl Window {
-    /// Creates the window, hidden, owned by `owner`.
+fn show_text(control: Hwnd, text: &str) {
+    if control.text() != text {
+        control.set_text(text);
+    }
+}
+
+impl Pane {
+    /// Creates hidden transfer content within the owner's inspector.
     fn open(
         owner: Hwnd,
         queue: Rc<ManuallyDrop<Queue>>,
         strings: Strings,
-    ) -> windows::core::Result<Rc<Window>> {
-        window::register_class::<Window>(
+        actions: Rc<RefCell<Vec<PaneAction>>>,
+    ) -> windows::core::Result<Rc<Pane>> {
+        window::register_class::<Pane>(
             WINDOW_CLASS,
             crate::core::ids::IconId::Gozler.id(),
             window::Background::Dialog,
         )?;
-        let window = Rc::new(Window {
+        let window = Rc::new(Pane {
+            actions,
             hwnd: Cell::new(None),
             queue,
             owner,
             strings: RefCell::new(strings),
-            numbers: RefCell::new(WindowsNumbers::new()),
             controls: OnceCell::new(),
             fonts: RefCell::new(None),
             layout: Cell::new(Layout::default()),
-            meters: RefCell::new(HashMap::new()),
+            metrics: Cell::new(None),
             view: RefCell::new(None),
-            selected: Cell::new(None),
-            queue_open: Cell::new(true),
+            flipped: Cell::new(true),
+            maximized: Cell::new(false),
             drag: Cell::new(None),
             refused: Cell::new(None),
             moved: Cell::new(None),
         });
-        let hwnd = window::create_owned_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
+        let hwnd = window::create_child_window(WINDOW_CLASS, Rc::clone(&window), owner)?;
         window.hwnd.set(Some(hwnd));
-        window::set_modeless(Some(hwnd));
         window.create_controls(hwnd)?;
         window.apply_fonts(hwnd);
         window.apply_strings();
-        let metrics = window.metrics(hwnd);
-        set_client_size(
-            hwnd,
-            Size {
-                width: px(OPEN_WIDTH, hwnd),
-                height: Layout::height(metrics, true, false),
-            },
-        );
         Ok(window)
     }
 
@@ -495,37 +666,46 @@ impl Window {
     fn create_controls(&self, hwnd: Hwnd) -> windows::core::Result<()> {
         let id = |control: ControlId| control.id();
         let label = |control| Label::create_line(hwnd, id(control));
+        let right = |control| Label::create_right_line(hwnd, id(control));
         let path = |control| PathLabel::create(hwnd, id(control));
         let button = |control| Button::create(hwnd, id(control));
         let bar = |control| ProgressBar::create(hwnd, id(control));
         let pause = button(ControlId::FileOperationsPause)?;
         let cancel = button(ControlId::FileOperationsCancel)?;
+        let hide = button(ControlId::FileOperationsHide)?;
+        let all = button(ControlId::FileOperationsAll)?;
+        let flip = button(ControlId::FileOperationsFlip)?;
+        let maximize = button(ControlId::FileOperationsMaximize)?;
         let file = path(ControlId::FileOperationsFile)?;
         let from = path(ControlId::FileOperationsFrom)?;
         let to = path(ControlId::FileOperationsTo)?;
-        let toggle = button(ControlId::FileOperationsToggle)?;
-        let run = button(ControlId::FileOperationsResume)?;
-        let up = button(ControlId::FileOperationsMoveUp)?;
-        let down = button(ControlId::FileOperationsMoveDown)?;
-        let queue_cancel = button(ControlId::FileOperationsQueueCancel)?;
-        let hide = button(ControlId::FileOperationsHide)?;
         let tips = Tooltip::create(
             hwnd,
             &[
                 pause.hwnd(),
                 cancel.hwnd(),
+                hide.hwnd(),
+                all.hwnd(),
+                flip.hwnd(),
+                maximize.hwnd(),
                 file.hwnd(),
                 from.hwnd(),
                 to.hwnd(),
-                toggle.hwnd(),
-                run.hwnd(),
-                up.hwnd(),
-                down.hwnd(),
-                queue_cancel.hwnd(),
-                hide.hwnd(),
             ],
         )?;
-        let controls = Controls {
+        let c = Controls {
+            heading: label(ControlId::FileOperationsHeading)?,
+            count: label(ControlId::FileOperationsCount)?,
+            all,
+            flip,
+            maximize,
+            rate: right(ControlId::FileOperationsRate)?,
+            files_rate: right(ControlId::FileOperationsFilesRate)?,
+            file_percent: right(ControlId::FileOperationsFilePercent)?,
+            file_bytes: right(ControlId::FileOperationsFileBytes)?,
+            overall: label(ControlId::FileOperationsOverall)?,
+            report: ListView::create(hwnd, id(ControlId::FileOperationsReport))?,
+            summary: label(ControlId::FileOperationsSummary)?,
             icon: GlyphLabel::create(hwnd, id(ControlId::FileOperationsIcon))?,
             title: label(ControlId::FileOperationsTitle)?,
             status: label(ControlId::FileOperationsStatus)?,
@@ -539,141 +719,162 @@ impl Window {
             to_label: label(ControlId::FileOperationsToLabel)?,
             to,
             total_bar: bar(ControlId::FileOperationsTotalBar)?,
-            percent: Label::create_right_line(hwnd, id(ControlId::FileOperationsPercent))?,
+            percent: right(ControlId::FileOperationsPercent)?,
             items: label(ControlId::FileOperationsItems)?,
-            bytes: Label::create_right_line(hwnd, id(ControlId::FileOperationsBytes))?,
-            toggle,
+            bytes: right(ControlId::FileOperationsBytes)?,
             queue: label(ControlId::FileOperationsQueue)?,
-            run,
-            up,
-            down,
-            queue_cancel,
             list: QueueList::create(hwnd, id(ControlId::FileOperationsList))?,
             hint: label(ControlId::FileOperationsHint)?,
             hide,
             tips,
         };
-        let _ = self.controls.set(controls);
+        let _ = self.controls.set(c);
+        self.controls().report.show_info_tips();
+        for i in 0..2 {
+            self.controls().report.insert_column(
+                i,
+                &ListColumn {
+                    header: "",
+                    width: px(160, hwnd),
+                    right_aligned: false,
+                },
+            );
+        }
         Ok(())
     }
 
     /// Creates the fonts for the window's DPI and gives them to the
     /// controls, then the list its icons at that DPI.
     fn apply_fonts(&self, hwnd: Hwnd) {
+        self.metrics.set(None);
         let Ok(ui) = Font::message(hwnd.dpi()) else {
             return;
         };
-        let title = ui.heading().unwrap_or_else(|_| {
+        let title = ui.semibold().unwrap_or_else(|_| {
             Font::message(hwnd.dpi()).expect("the message font was just created")
         });
         let controls = self.controls();
         for control in controls.text_controls() {
             control.set_font(&ui);
         }
-        controls.title.hwnd().set_font(&title);
-        controls.list.set_icons(&ROW_GLYPHS, px(ROW_ICON, hwnd));
+        for control in [
+            controls.title.hwnd(),
+            controls.heading.hwnd(),
+            controls.queue.hwnd(),
+            controls.doing.hwnd(),
+            controls.from_label.hwnd(),
+            controls.to_label.hwnd(),
+            controls.overall.hwnd(),
+            controls.percent.hwnd(),
+            controls.file_percent.hwnd(),
+            controls.rate.hwnd(),
+        ] {
+            control.set_font(&title);
+        }
         self.apply_glyphs();
         // The controls hold the old fonts until they get the new ones.
         self.fonts.replace(Some(Fonts { ui, title }));
+        self.show_tiles(false);
     }
 
-    /// Gives each button and the card its icon at the window's DPI and in
-    /// the system colours of now, so a change of either calls this again.
-    /// Hide shows its icon only while icons show; the other buttons show
-    /// only their icon.
     fn apply_glyphs(&self) {
-        self.controls()
-            .hide
-            .set_icon(ButtonIcon::of("file_operations.hide", false));
+        let c = self.controls();
+        c.list.set_icons(&ROW_GLYPHS, px(ROW_ICON, c.list.hwnd()));
+        for (button, glyph) in [
+            (c.hide, Glyph::ChevronDown),
+            (c.all, Glyph::Cancel),
+            (c.flip, Glyph::Switch),
+            (
+                c.maximize,
+                if self.maximized.get() {
+                    Glyph::ChromeRestore
+                } else {
+                    Glyph::ChromeMaximize
+                },
+            ),
+        ] {
+            if button.hwnd() == c.all.hwnd() {
+                button.set_icon(Some(ButtonIcon::Glyph(glyph)));
+            } else {
+                button.set_lone_icon(crate::win::gdi::icons_shown().then_some(glyph));
+            }
+        }
         self.show_state_glyphs();
     }
 
-    /// Gives the card and the buttons whose icon follows the operations,
-    /// such as Pause or Resume, the icon of what the window shows now.
     fn show_state_glyphs(&self) {
         let c = self.controls();
-        let card = self
-            .view
-            .borrow()
-            .as_ref()
-            .and_then(|view| view.card.as_ref().map(|card| (card.glyph, card.paused)));
-        if let Some((glyph, _)) = card {
-            c.icon.show_glyph(glyph, px(CARD_ICON, c.icon.hwnd()));
-        }
-        let paused = card.is_some_and(|(_, paused)| paused);
-        let run = self
-            .selected_buttons()
-            .and_then(|(_, buttons)| buttons.run)
-            .map_or(Glyph::Play, QueueAction::glyph);
-        let toggle = if self.queue_open.get() {
-            Glyph::ChevronDown
-        } else {
-            Glyph::ChevronRight
-        };
-        for (button, glyph) in [
-            (c.pause, if paused { Glyph::Play } else { Glyph::Pause }),
-            (c.cancel, Glyph::Cancel),
-            (c.toggle, toggle),
-            (c.run, run),
-            (c.up, Glyph::ChevronUp),
-            (c.down, Glyph::ChevronDown),
-            (c.queue_cancel, Glyph::Cancel),
-        ] {
-            button.set_lone_icon(Some(glyph));
+        let view = self.view.borrow();
+        if let Some(card) = view.as_ref().and_then(|v| v.card.as_ref()) {
+            c.icon.show_glyph(card.glyph, px(CARD_ICON, c.icon.hwnd()));
+            let buttons = card.phase.buttons();
+            if let Some(run) = buttons.run {
+                c.pause.set_icon(Some(ButtonIcon::Glyph(run.glyph())));
+            }
+            c.cancel
+                .set_icon(Some(ButtonIcon::Glyph(buttons.end.glyph())));
+            if view.as_ref().is_some_and(|v| v.report.is_some()) {
+                c.pause.set_icon(Some(ButtonIcon::Glyph(Glyph::Cancel)));
+                c.cancel.set_icon(Some(ButtonIcon::Glyph(Glyph::EraseTool)));
+            }
         }
     }
 
-    /// The texts that do not change with the operations.
     fn apply_strings(&self) {
         let strings = self.strings.borrow();
-        let controls = self.controls();
-        let text = |key| strings.text(key);
-        for (button, key) in [
-            (controls.cancel, "file_operations.cancel"),
-            (controls.up, "file_operations.move_up"),
-            (controls.down, "file_operations.move_down"),
-            (controls.queue_cancel, "file_operations.cancel"),
+        let c = self.controls();
+        for (control, key) in [
+            (c.heading.hwnd(), "file_operations.transfers"),
+            (c.from_label.hwnd(), "file_operations.from"),
+            (c.to_label.hwnd(), "file_operations.to"),
+            (c.overall.hwnd(), "file_operations.overall"),
+            (c.queue.hwnd(), "file_operations.queue_none"),
+            (c.all.hwnd(), "file_operations.cancel_all"),
+            (c.hide.hwnd(), "file_operations.hide"),
+            (c.flip.hwnd(), "file_operations.flip"),
+            (
+                c.maximize.hwnd(),
+                if self.maximized.get() {
+                    "file_operations.restore"
+                } else {
+                    "file_operations.maximize"
+                },
+            ),
         ] {
-            button.hwnd().set_text(text(key));
-            controls.tips.set(button.hwnd(), text(key));
+            show_text(control, strings.text(key));
         }
-        controls.hide.hwnd().set_text(text("file_operations.hide"));
-        controls
-            .tips
-            .set(controls.hide.hwnd(), text("file_operations.hide_tip"));
-        controls
-            .from_label
-            .hwnd()
-            .set_text(text("file_operations.from"));
-        controls
-            .to_label
-            .hwnd()
-            .set_text(text("file_operations.to"));
-        self.apply_toggle();
-    }
-
-    /// The toggle's name and tip, which say what a click does.
-    fn apply_toggle(&self) {
-        let strings = self.strings.borrow();
-        let controls = self.controls();
-        let key = if self.queue_open.get() {
-            "file_operations.hide_queue"
-        } else {
-            "file_operations.show_queue"
-        };
-        controls.toggle.hwnd().set_text(strings.text(key));
-        controls.tips.set(controls.toggle.hwnd(), strings.text(key));
+        for button in [c.all, c.hide, c.flip, c.maximize] {
+            c.tips.set(button.hwnd(), &button.hwnd().text());
+        }
+        for (index, key) in [
+            "file_operations.column_item",
+            "file_operations.column_reason",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            c.report.set_header(index, strings.text(key));
+        }
+        c.tips
+            .set(c.hide.hwnd(), strings.text("file_operations.hide_tip"));
+        drop(strings);
+        self.apply_glyphs();
     }
 
     fn metrics(&self, hwnd: Hwnd) -> Metrics {
+        if let Some(metrics) = self.metrics.get() {
+            return metrics;
+        }
         let fonts = self.fonts.borrow();
         let strings = self.strings.borrow();
         let dpi = hwnd.dpi();
         let Some(fonts) = fonts.as_ref() else {
             return Metrics {
                 dpi,
+                icons: crate::win::gdi::icons_shown(),
                 line: px(16, hwnd),
                 title_line: px(20, hwnd),
+                heading_width: px(100, hwnd),
                 label_width: px(60, hwnd),
                 percent_width: px(36, hwnd),
                 hide_width: px(75, hwnd),
@@ -682,162 +883,232 @@ impl Window {
         let ui = TextMeter::new(&fonts.ui);
         let title = TextMeter::new(&fonts.title);
         let label_width = [
-            "file_operations.copying",
-            "file_operations.moving",
-            "file_operations.deleting",
-            "file_operations.renaming",
-            "file_operations.creating",
+            "file_operations.file",
+            "file_operations.overall",
             "file_operations.from",
             "file_operations.to",
         ]
         .iter()
-        .map(|key| ui.width(strings.text(key)))
+        .map(|key| title.width(strings.text(key)))
         .max()
         .unwrap_or_default();
-        let percent_width = ui.width(&strings.format("file_operations.percent", &["100"]));
+        let percent_width = title
+            .width(&strings.format("file_operations.percent", &["100"]))
+            .max(title.width(strings.text("file_operations.total_unknown")));
         // Room for the icon also while icons are hidden, so Hide keeps its
         // width when they show.
-        let hide_caption = ui.width(strings.text("file_operations.hide"));
+        let hide_caption = QueueAction::ALL
+            .iter()
+            .map(|action| ui.width(strings.text(action.caption())))
+            .chain(
+                [
+                    "file_operations.hide",
+                    "file_operations.maximize",
+                    "file_operations.restore",
+                    "file_operations.flip",
+                    "file_operations.cancel_all",
+                ]
+                .map(|key| ui.width(strings.text(key))),
+            )
+            .max()
+            .unwrap_or_default();
         let hide_width =
             button_room(button_content(hide_caption, true, dpi), dpi).max(px(75, hwnd));
-        Metrics {
+        let metrics = Metrics {
             dpi,
+            icons: crate::win::gdi::icons_shown(),
             line: ui.height(),
             title_line: title.height(),
+            heading_width: title.width(strings.text("file_operations.transfers")),
             label_width,
             percent_width,
             hide_width,
-        }
+        };
+        self.metrics.set(Some(metrics));
+        metrics
     }
 
     fn layout(&self, hwnd: Hwnd) {
-        let metrics = self.metrics(hwnd);
-        let layout = Layout::compute(
-            hwnd.client_size().width,
-            metrics,
-            self.queue_open.get(),
-            self.hint_shown(),
+        let view = self.view.borrow();
+        let multiple = view.as_ref().is_some_and(|v| v.rows.len() > 1);
+        let report = view.as_ref().is_some_and(|v| v.report.is_some());
+        let card = view.as_ref().and_then(|v| v.card.as_ref());
+        let queue =
+            multiple || (card.is_none() && view.as_ref().is_some_and(|v| !v.rows.is_empty()));
+        let mut layout = Layout::compute(
+            hwnd.client_size(),
+            self.metrics(hwnd),
+            multiple,
+            self.flipped.get(),
+            card.is_some(),
         );
-        self.layout.set(layout);
-        let c = self.controls();
-        let open = self.queue_open.get();
-        let moves = [
-            (c.icon.hwnd(), layout.icon),
-            (c.title.hwnd(), layout.title),
-            (c.status.hwnd(), layout.status),
-            (c.pause.hwnd(), layout.pause),
-            (c.cancel.hwnd(), layout.cancel),
-            (c.doing.hwnd(), layout.doing),
-            (c.file.hwnd(), layout.file),
-            (c.file_bar.hwnd(), layout.file_bar),
-            (c.from_label.hwnd(), layout.from_label),
-            (c.from.hwnd(), layout.from),
-            (c.to_label.hwnd(), layout.to_label),
-            (c.to.hwnd(), layout.to),
-            (c.total_bar.hwnd(), layout.total_bar),
-            (c.percent.hwnd(), layout.percent),
-            (c.items.hwnd(), layout.items),
-            (c.bytes.hwnd(), layout.bytes),
-            (c.toggle.hwnd(), layout.toggle),
-            (c.queue.hwnd(), layout.queue),
-            (c.run.hwnd(), layout.resume),
-            (c.up.hwnd(), layout.up),
-            (c.down.hwnd(), layout.down),
-            (c.queue_cancel.hwnd(), layout.queue_cancel),
-            (c.list.hwnd(), layout.list),
-            (c.hint.hwnd(), layout.hint),
-            (c.hide.hwnd(), layout.hide),
-        ];
-        win::move_children(&moves);
-        for control in [
-            c.list.hwnd(),
-            c.hint.hwnd(),
-            c.up.hwnd(),
-            c.down.hwnd(),
-            c.queue_cancel.hwnd(),
-        ] {
-            control.set_visible(open);
+        if report {
+            let gap = px(8, hwnd);
+            let line = self.metrics(hwnd).line + px(3, hwnd);
+            let button_y = layout.summary.y - gap - layout.cancel.height;
+            layout.cancel.y = button_y;
+            layout.pause.y = button_y;
+            layout.report.height = (button_y - gap - layout.report.y).max(line);
         }
-        // Less the scroll bar, so a long queue scrolls without a
-        // horizontal bar.
-        c.list.set_tile_width(layout.list.width - px(4 + 17, hwnd));
-        self.show_tiles();
-        hwnd.invalidate();
-    }
-
-    /// Shows `snapshot`, with the speeds of the running ones from the
-    /// counts the window saw before.
-    fn show_snapshot(&self, hwnd: Hwnd, snapshot: &[Operation]) {
-        let now = Instant::now();
+        let old_layout = self.layout.replace(layout);
+        let c = self.controls();
+        if old_layout != layout {
+            let moves = [
+                (c.heading.hwnd(), layout.heading),
+                (c.count.hwnd(), layout.count),
+                (c.all.hwnd(), layout.all),
+                (c.flip.hwnd(), layout.flip),
+                (c.maximize.hwnd(), layout.maximize),
+                (c.hide.hwnd(), layout.hide),
+                (c.queue.hwnd(), layout.queue),
+                (c.list.hwnd(), layout.list),
+                (c.hint.hwnd(), layout.hint),
+                (c.icon.hwnd(), layout.icon),
+                (c.title.hwnd(), layout.title),
+                (c.status.hwnd(), layout.status),
+                (c.rate.hwnd(), layout.rate),
+                (c.files_rate.hwnd(), layout.files_rate),
+                (c.doing.hwnd(), layout.doing),
+                (c.file.hwnd(), layout.file),
+                (c.file_bar.hwnd(), layout.file_bar),
+                (c.file_percent.hwnd(), layout.file_percent),
+                (c.file_bytes.hwnd(), layout.file_bytes),
+                (c.from_label.hwnd(), layout.from_label),
+                (c.from.hwnd(), layout.from),
+                (c.to_label.hwnd(), layout.to_label),
+                (c.to.hwnd(), layout.to),
+                (c.overall.hwnd(), layout.overall),
+                (c.total_bar.hwnd(), layout.total_bar),
+                (c.percent.hwnd(), layout.percent),
+                (c.items.hwnd(), layout.items),
+                (c.bytes.hwnd(), layout.bytes),
+                (c.pause.hwnd(), layout.pause),
+                (c.cancel.hwnd(), layout.cancel),
+                (c.report.hwnd(), layout.report),
+                (c.summary.hwnd(), layout.summary),
+            ];
+            win::move_children(&moves);
+        }
+        c.list.hwnd().set_visible(queue);
+        c.flip.hwnd().set_visible(multiple && card.is_some());
+        c.all.hwnd().set_visible(multiple);
+        c.hint.hwnd().set_visible(queue && self.hint_shown());
+        c.queue.hwnd().set_visible(queue && !self.hint_shown());
+        for control in c.card_labels() {
+            control.set_visible(card.is_some() && !report);
+        }
+        for control in [c.title.hwnd(), c.status.hwnd()] {
+            control.set_visible(card.is_some());
+        }
+        c.icon
+            .hwnd()
+            .set_visible(card.is_some() && crate::win::gdi::icons_shown());
+        let current = card.is_some_and(|card| card.file_bar.is_some()) && !report;
+        for control in [
+            c.file_bar.hwnd(),
+            c.file_percent.hwnd(),
+            c.file_bytes.hwnd(),
+            c.doing.hwnd(),
+            c.file.hwnd(),
+        ] {
+            control.set_visible(current);
+        }
+        c.total_bar.hwnd().set_visible(card.is_some() && !report);
+        c.report.hwnd().set_visible(report);
+        c.summary.hwnd().set_visible(report);
+        let buttons = card.map(|card| card.phase.buttons());
+        c.pause
+            .hwnd()
+            .set_visible(report || buttons.is_some_and(|b| b.run.is_some()));
+        c.cancel.hwnd().set_visible(report || card.is_some());
+        c.cancel
+            .hwnd()
+            .set_enabled(report || card.is_some_and(|c| c.phase != RowPhase::Cancelling));
+        c.files_rate.hwnd().set_visible(
+            card.is_some()
+                && !report
+                && layout.files_rate.width > Px(0)
+                && layout.title.width > px(70, hwnd),
+        );
+        if old_layout.list != layout.list {
+            c.list.set_tile_width(layout.list.width - px(21, hwnd));
+        }
+        let widths = [
+            Px(layout.report.width.0 * 60 / 100),
+            Px(layout.report.width.0 * 40 / 100) - px(20, hwnd),
+        ];
+        if widths
+            .iter()
+            .enumerate()
+            .any(|(i, &width)| c.report.column_width(i) != width)
         {
-            let mut meters = self.meters.borrow_mut();
-            meters.retain(|id, _| {
-                (snapshot.iter())
-                    .any(|entry| entry.id == *id && matches!(entry.state, State::Running(_)))
-            });
-            for entry in snapshot {
-                if let State::Running(running) = &entry.state {
-                    let meter = meters.entry(entry.id).or_default();
-                    if running.paused {
-                        meter.clear();
-                    } else {
-                        meter.record(now, running.items, running.bytes);
+            c.report.hwnd().draw_once_after(|| {
+                for (i, &width) in widths.iter().enumerate() {
+                    if c.report.column_width(i) != width {
+                        c.report.set_column_width(i, width);
                     }
                 }
-            }
+            });
         }
-        let view = file_operations::view(
-            &self.strings.borrow(),
-            &*self.numbers.borrow(),
-            snapshot,
-            &self.meters.borrow(),
-        );
-        self.show_view(hwnd, view);
+        drop(view);
+        if old_layout.list != layout.list {
+            self.show_tiles(false);
+        }
     }
 
-    /// Hides the window, and tells the owner, whose operations that have
-    /// not ended then do not show it again.
-    fn hide(&self, hwnd: Hwnd) {
-        hwnd.hide();
-        tell_hidden(self.owner);
+    fn post(&self, action: PaneAction) {
+        self.actions.borrow_mut().push(action);
+        self.owner.post(QUEUE_CHANGED);
+    }
+
+    fn hide(&self, _hwnd: Hwnd) {
+        self.post(PaneAction::Collapse);
+    }
+
+    fn selected(&self) -> Option<OperationId> {
+        self.view.borrow().as_ref()?.card.as_ref().map(|c| c.id)
+    }
+
+    fn select(&self, id: OperationId) {
+        if self.selected() != Some(id) {
+            self.post(PaneAction::Select(Detail::Progress(id)));
+        }
     }
 
     fn show_view(&self, hwnd: Hwnd, view: View) {
         let c = self.controls();
-        hwnd.set_text(&view.title);
         let strings = self.strings.borrow();
-        match &view.card {
-            Some(card) => {
-                c.title.hwnd().set_text(&card.title);
-                c.status.hwnd().set_text(&card.status);
-                c.doing.hwnd().set_text(&card.doing);
-                c.file.hwnd().set_text(&card.file);
+        let previous = self.view.borrow();
+        let old_card = previous.as_ref().and_then(|v| v.card.as_ref());
+        let old_report = previous.as_ref().and_then(|v| v.report.as_ref());
+        show_text(c.count.hwnd(), &view.queue);
+        if let Some(card) = &view.card {
+            if view.report.is_none() {
+                show_text(c.title.hwnd(), &card.title);
+            }
+            show_text(c.status.hwnd(), &card.status);
+            show_text(c.rate.hwnd(), &card.rate);
+            show_text(c.files_rate.hwnd(), &card.files_rate);
+            show_text(c.doing.hwnd(), &card.doing);
+            show_text(c.file.hwnd(), &card.file);
+            if old_card.is_none_or(|old| old.file_tip != card.file_tip) {
                 c.tips.set(c.file.hwnd(), &card.file_tip);
-                c.from.hwnd().set_text(&card.from);
+            }
+            show_text(c.from.hwnd(), &card.from);
+            if old_card.is_none_or(|old| old.from != card.from) {
                 c.tips.set(c.from.hwnd(), &card.from);
-                let to = card.to.as_deref().unwrap_or_default();
-                c.to.hwnd().set_text(to);
-                c.tips.set(c.to.hwnd(), to);
-                for control in [
-                    c.icon.hwnd(),
-                    c.from_label.hwnd(),
-                    c.total_bar.hwnd(),
-                    c.pause.hwnd(),
-                    c.cancel.hwnd(),
-                ] {
-                    control.set_visible(true);
-                }
-                c.to_label.hwnd().set_visible(card.to.is_some());
-                c.file_bar.hwnd().set_visible(card.file_bar.is_some());
-                if let Some(bar) = card.file_bar {
-                    c.file_bar.set_measured(bar.done, bar.total);
-                    show_paused(c.file_bar, card.paused);
-                }
-                match card.total_bar {
+            }
+            show_text(c.to.hwnd(), card.to.as_deref().unwrap_or_default());
+            if old_card.is_none_or(|old| old.to != card.to) {
+                c.tips
+                    .set(c.to.hwnd(), card.to.as_deref().unwrap_or_default());
+            }
+            if let Some(bar) = card.file_bar {
+                match bar {
                     Bar::Measured(measure) => {
-                        c.total_bar.set_measured(measure.done, measure.total);
-                        show_paused(c.total_bar, card.paused);
-                        c.percent.hwnd().set_text(
+                        c.file_bar.set_measured(measure.done, measure.total);
+                        show_text(
+                            c.file_percent.hwnd(),
                             &strings.format(
                                 "file_operations.percent",
                                 &[&measure.percent().to_string()],
@@ -845,70 +1116,95 @@ impl Window {
                         );
                     }
                     Bar::Moving => {
-                        c.total_bar.set_moving(!card.paused);
-                        c.percent.hwnd().set_text("");
+                        if old_card.is_none_or(|old| {
+                            old.file_bar != Some(Bar::Moving) || old.paused != card.paused
+                        }) {
+                            c.file_bar.set_moving(!card.paused);
+                        }
+                        show_text(c.file_percent.hwnd(), "");
                     }
                 }
-                c.items.hwnd().set_text(&card.items);
-                c.bytes.hwnd().set_text(&card.bytes);
-                let pause = if card.paused {
-                    "file_operations.resume"
-                } else {
-                    "file_operations.pause"
-                };
-                c.pause.hwnd().set_text(strings.text(pause));
-                c.tips.set(c.pause.hwnd(), strings.text(pause));
+                show_text(c.file_bytes.hwnd(), &card.file_bytes);
+                show_paused(c.file_bar, card.paused);
             }
-            None => {
-                c.title.hwnd().set_text(&view.idle);
-                for label in [
-                    c.status.hwnd(),
-                    c.doing.hwnd(),
-                    c.file.hwnd(),
-                    c.from.hwnd(),
-                    c.to.hwnd(),
-                    c.percent.hwnd(),
-                    c.items.hwnd(),
-                    c.bytes.hwnd(),
-                ] {
-                    label.set_text("");
+            match card.total_bar {
+                Bar::Measured(measure) => {
+                    c.total_bar.set_measured(measure.done, measure.total);
+                    show_text(
+                        c.percent.hwnd(),
+                        &strings
+                            .format("file_operations.percent", &[&measure.percent().to_string()]),
+                    );
                 }
-                for path in [c.file, c.from, c.to] {
-                    c.tips.set(path.hwnd(), "");
-                }
-                // Only the title stays, so the card shows nothing that
-                // waits for a value.
-                for control in [
-                    c.icon.hwnd(),
-                    c.from_label.hwnd(),
-                    c.to_label.hwnd(),
-                    c.file_bar.hwnd(),
-                    c.total_bar.hwnd(),
-                    c.pause.hwnd(),
-                    c.cancel.hwnd(),
-                ] {
-                    control.set_visible(false);
+                Bar::Moving => {
+                    if old_card
+                        .is_none_or(|old| old.total_bar != Bar::Moving || old.paused != card.paused)
+                    {
+                        c.total_bar.set_moving(!card.paused);
+                    }
+                    show_text(
+                        c.percent.hwnd(),
+                        strings.text("file_operations.total_unknown"),
+                    );
                 }
             }
+            show_paused(c.total_bar, card.paused);
+            show_text(c.items.hwnd(), &card.items);
+            show_text(c.bytes.hwnd(), &card.bytes);
+            if view.report.is_none() {
+                let buttons = card.phase.buttons();
+                if let Some(run) = buttons.run {
+                    show_text(c.pause.hwnd(), strings.text(run.caption()));
+                }
+                show_text(c.cancel.hwnd(), strings.text(buttons.end.caption()));
+            }
+        } else {
+            show_text(c.title.hwnd(), &view.idle);
         }
-        c.queue.hwnd().set_text(&view.queue);
-        if !self
-            .selected
-            .get()
-            .is_some_and(|id| view.rows.iter().any(|row| row.id == id))
-        {
-            self.selected.set(None);
+        let report_count = view
+            .report
+            .as_ref()
+            .map_or(0, |r| r.outcome.listed.len() as u64);
+        let report_changed = view.report.as_ref().is_some_and(|report| {
+            old_report.is_none_or(|old| !Arc::ptr_eq(&old.outcome, &report.outcome))
+        });
+        if let Some(report) = &view.report {
+            show_text(c.title.hwnd(), &report.title);
+            show_text(c.pause.hwnd(), strings.text("file_operations.close"));
+            show_text(c.cancel.hwnd(), strings.text("file_operations.clear"));
+            let text =
+                |code| crate::win::error_text(&std::io::Error::from_raw_os_error(code as i32));
+            show_text(c.summary.hwnd(), &report.summary(&strings, &text));
         }
-        let moved =
-            (self.moved.take()).and_then(|id| view.rows.iter().position(|row| row.id == id));
+        let glyphs_changed = old_card.map(|c| (c.glyph, c.phase.buttons()))
+            != view.card.as_ref().map(|c| (c.glyph, c.phase.buttons()))
+            || old_report.is_some() != view.report.is_some();
+        let apply_selection = previous.as_ref().is_none_or(|old| {
+            old.card.as_ref().map(|c| c.id) != view.card.as_ref().map(|c| c.id)
+                || !old
+                    .rows
+                    .iter()
+                    .map(|row| row.id)
+                    .eq(view.rows.iter().map(|row| row.id))
+        });
+        drop(previous);
         drop(strings);
-        // Stored first: the list reports the selection it is given at once,
-        // and the window reads the row it selects from the view.
+        let moved = self
+            .moved
+            .take()
+            .and_then(|id| view.rows.iter().position(|r| r.id == id));
         self.view.replace(Some(view));
-        self.show_tiles();
-        self.update_queue_buttons();
+        if c.report.count() != report_count {
+            c.report.set_count(report_count);
+        } else if report_changed {
+            c.report.redraw_rows(0..report_count);
+        }
+        if glyphs_changed {
+            self.show_state_glyphs();
+        }
+        self.layout(hwnd);
+        self.show_tiles(apply_selection);
         if let Some(index) = moved {
-            // The moved row stays in view where the list scrolls.
             c.list.ensure_visible(index);
         }
     }
@@ -917,18 +1213,17 @@ impl Window {
     /// Each title fits its tile's first line, its paths shortened in the
     /// middle, so the second line keeps the row's state; the row's tooltip
     /// gives the whole title.
-    fn show_tiles(&self) {
+    fn show_tiles(&self, apply_selection: bool) {
         let c = self.controls();
         let view = self.view.borrow();
         let rows: &[Row] = view.as_ref().map_or(&[], |view| &view.rows);
         let selected = self
-            .selected
-            .get()
+            .selected()
             .and_then(|id| rows.iter().position(|row| row.id == id));
         let strings = self.strings.borrow();
         let fonts = self.fonts.borrow();
         let meter = fonts.as_ref().map(|fonts| TextMeter::new(&fonts.ui));
-        let show = |width: Option<Px>| {
+        let show = |width: Option<Px>, apply_selection| {
             let fitted = |line: &RowLine| match (&meter, width) {
                 (Some(meter), Some(width)) => line.fitted(
                     &strings,
@@ -951,72 +1246,43 @@ impl Window {
                     detail,
                 })
                 .collect();
-            c.list.set_tiles(&tiles, selected);
+            c.list.set_tiles(&tiles, selected, apply_selection);
         };
         // The list measures a tile once it holds one.
         let width = c.list.text_width().or_else(|| {
-            show(None);
+            show(None, false);
             c.list.text_width()
         });
-        show(width);
+        show(width, apply_selection);
     }
 
     /// The selected row, as the window shows it.
     fn selected_row<T>(&self, use_row: impl FnOnce(&Row, &[Row]) -> T) -> Option<T> {
         let view = self.view.borrow();
         let rows = &view.as_ref()?.rows;
-        let id = self.selected.get()?;
+        let id = self.selected()?;
         let row = rows.iter().find(|row| row.id == id)?;
         Some(use_row(row, rows))
     }
 
     /// Whether the queue lets the selected row move up or down, and the
     /// hint that names why not.
-    fn can_step(&self, up: bool) -> Result<bool, OrderRefused> {
-        let step = self.selected_row(|row, rows| {
-            file_operations::move_step(rows, row.id, up).map(|before| (row.id, before))
-        });
-        match step.flatten() {
-            Some((id, before)) => self.queue.check_move(id, before).map(|()| true),
+    fn can_step(&self, id: OperationId, up: bool) -> Result<bool, OrderRefused> {
+        let view = self.view.borrow();
+        let step = view
+            .as_ref()
+            .and_then(|view| file_operations::move_step(&view.rows, id, up));
+        match step {
+            Some(before) => self.queue.check_move(id, before).map(|()| true),
             None => Ok(false),
         }
     }
 
     /// The selected row, and what the queue's header buttons do to it.
     fn selected_buttons(&self) -> Option<(OperationId, RowButtons)> {
-        self.selected_row(|row, _| (row.id, row.phase.buttons()))
-    }
-
-    /// Enables the queue's buttons for the selected row, shows the hint
-    /// when the queue refuses one of its moves, and gives the buttons and
-    /// the card the icons of what the window shows now.
-    fn update_queue_buttons(&self) {
-        let c = self.controls();
-        let buttons = self.selected_buttons().map(|(_, buttons)| buttons);
-        let up = self.can_step(true);
-        let down = self.can_step(false);
-        c.up.hwnd().set_enabled(matches!(up, Ok(true)));
-        c.down.hwnd().set_enabled(matches!(down, Ok(true)));
-        c.queue_cancel.hwnd().set_enabled(buttons.is_some());
-        let strings = self.strings.borrow();
-        let end = buttons.map_or(QueueAction::Cancel, |buttons| buttons.end);
-        c.queue_cancel.hwnd().set_text(strings.text(end.caption()));
-        c.tips
-            .set(c.queue_cancel.hwnd(), strings.text(end.caption()));
-        let run = buttons.and_then(|buttons| buttons.run);
-        if let Some(run) = run {
-            c.run.hwnd().set_text(strings.text(run.caption()));
-            c.tips.set(c.run.hwnd(), strings.text(run.caption()));
-        }
-        c.run
-            .hwnd()
-            .set_visible(self.queue_open.get() && run.is_some());
-        let refused = up.err().or(down.err());
-        drop(strings);
-        if self.drag.get().is_none() {
-            self.show_hint(refused);
-        }
-        self.show_state_glyphs();
+        self.selected_row(|row, _| (row.id, row.phase))
+            .filter(|(_, phase)| *phase != RowPhase::Cancelling)
+            .map(|(id, phase)| (id, phase.buttons()))
     }
 
     /// Shows why the queue refused a move, or clears the hint.
@@ -1034,7 +1300,7 @@ impl Window {
         if shown != self.hint_shown()
             && let Some(hwnd) = self.hwnd.get()
         {
-            self.fit_height(hwnd);
+            self.layout(hwnd);
         }
     }
 
@@ -1068,118 +1334,47 @@ impl Window {
         Some(strings.format(key, &[&title]))
     }
 
-    /// Does `action` to the operation `id`. The queue then wakes the owner,
-    /// which shows what changed.
     fn act(&self, id: OperationId, action: QueueAction) {
-        let queue = &self.queue;
-        match action {
-            QueueAction::Pause => queue.set_paused(id, true),
-            QueueAction::Resume => queue.set_paused(id, false),
-            QueueAction::Cancel => queue.cancel(id),
-            QueueAction::Continue => {
-                let _ = queue.resume(id);
-            }
-            QueueAction::Dismiss => {
-                let _ = queue.dismiss(id);
-            }
-            QueueAction::MoveUp | QueueAction::MoveDown => {
-                let up = action == QueueAction::MoveUp;
-                let step = self.selected_row(|_, rows| file_operations::move_step(rows, id, up));
-                if let Some(before) = step.flatten() {
-                    let refused = queue.move_waiting(id, before).err();
-                    if refused.is_none() {
-                        self.moved.set(Some(id));
-                    }
-                    self.show_hint(refused);
-                }
-            }
-        }
+        self.post(PaneAction::Command(id, action));
     }
 
     fn on_control(&self, hwnd: Hwnd, event: crate::win::notify::ControlEvent) {
         let c = self.controls();
-        let card = self
-            .view
-            .borrow()
-            .as_ref()
-            .and_then(|view| view.card.as_ref().map(|card| (card.id, card.paused)));
-        if c.pause.clicked(event) {
-            if let Some((id, paused)) = card {
-                let action = if paused {
-                    QueueAction::Resume
-                } else {
-                    QueueAction::Pause
-                };
-                self.act(id, action);
-            }
-        } else if c.cancel.clicked(event) {
-            if let Some((id, _)) = card {
-                self.act(id, QueueAction::Cancel);
-            }
-        } else if c.toggle.clicked(event) {
-            self.toggle_queue(hwnd);
-        } else if c.hide.clicked(event) {
+        if c.hide.clicked(event) {
             self.hide(hwnd);
+        } else if c.all.clicked(event) {
+            self.post(PaneAction::CancelAll);
+        } else if c.maximize.clicked(event) {
+            self.post(PaneAction::Maximize);
+        } else if c.flip.clicked(event) {
+            self.post(PaneAction::Flip);
         } else if let Some((id, buttons)) = self.selected_buttons() {
-            if c.queue_cancel.clicked(event) {
-                self.act(id, buttons.end);
-            } else if c.run.clicked(event) {
-                if let Some(run) = buttons.run {
-                    self.act(id, run);
+            let report = self
+                .view
+                .borrow()
+                .as_ref()
+                .is_some_and(|v| v.report.is_some());
+            if c.pause.clicked(event) {
+                if report {
+                    self.post(PaneAction::CloseReport);
+                } else if let Some(action) = buttons.run {
+                    self.act(id, action);
                 }
-            } else if c.up.clicked(event) {
-                self.act(id, QueueAction::MoveUp);
-            } else if c.down.clicked(event) {
-                self.act(id, QueueAction::MoveDown);
+            } else if c.cancel.clicked(event) {
+                self.act(
+                    id,
+                    if report {
+                        QueueAction::Clear
+                    } else {
+                        buttons.end
+                    },
+                );
             }
         }
     }
 
-    /// Collapses or expands the queue; the window loses or gets back the
-    /// list's height, so the card keeps its place and size.
-    fn toggle_queue(&self, hwnd: Hwnd) {
-        self.queue_open.set(!self.queue_open.get());
-        self.apply_toggle();
-        self.fit_height(hwnd);
-        self.update_queue_buttons();
-    }
-
-    /// The client height of [`Layout::height`], which the window keeps, so
-    /// the person sets only its width.
-    fn fitted_height(&self, hwnd: Hwnd) -> Px {
-        Layout::height(self.metrics(hwnd), self.queue_open.get(), self.hint_shown())
-    }
-
-    /// Whether the hint shows a refusal, which gives it a line.
     fn hint_shown(&self) -> bool {
         self.refused.get().is_some()
-    }
-
-    /// Gives the window its [`Self::fitted_height`] and places the
-    /// controls. A window that grows past the bottom of the work area moves
-    /// up, so Hide stays on the screen.
-    fn fit_height(&self, hwnd: Hwnd) {
-        let client = hwnd.client_size();
-        let height = self.fitted_height(hwnd);
-        if client.height != height {
-            set_client_size(
-                hwnd,
-                Size {
-                    width: client.width,
-                    height,
-                },
-            );
-            let outer = hwnd.screen_rect();
-            let area = hwnd.work_area();
-            let below = outer.bottom() - area.bottom();
-            if area.height > Px(0) && below > Px(0) {
-                hwnd.set_rect(Rect {
-                    y: (outer.y - below).max(area.y),
-                    ..outer
-                });
-            }
-        }
-        self.layout(hwnd);
     }
 
     fn show_menu(&self, hwnd: Hwnd, point: Option<(i32, i32)>) {
@@ -1200,8 +1395,7 @@ impl Window {
         else {
             return;
         };
-        self.selected.set(Some(id));
-        self.update_queue_buttons();
+        self.select(id);
         let Some(point) = point.or_else(|| list.menu_point(index)) else {
             return;
         };
@@ -1209,12 +1403,12 @@ impl Window {
         let states = [
             (
                 QueueAction::MoveUp.id(),
-                matches!(self.can_step(true), Ok(true)),
+                matches!(self.can_step(id, true), Ok(true)),
                 false,
             ),
             (
                 QueueAction::MoveDown.id(),
-                matches!(self.can_step(false), Ok(true)),
+                matches!(self.can_step(id, false), Ok(true)),
                 false,
             ),
         ];
@@ -1292,8 +1486,7 @@ impl Window {
             let before = self
                 .selected_row(|_, rows| file_operations::landing(rows, gap).1)
                 .flatten();
-            let refused = self.queue.move_waiting(drag.id, before).err();
-            self.show_hint(refused);
+            self.post(PaneAction::Move(drag.id, before));
         }
     }
 
@@ -1359,7 +1552,7 @@ impl DialogProc for FailureDialog {
     }
 }
 
-impl WindowProc for Window {
+impl WindowProc for Pane {
     fn message(&self, hwnd: Hwnd, message: Message<'_>) -> Option<LRESULT> {
         match message {
             Message::Size => {
@@ -1368,32 +1561,10 @@ impl WindowProc for Window {
                 }
                 Some(LRESULT(0))
             }
-            Message::GetMinMaxInfo(mut info) => {
-                if self.controls.get().is_some() {
-                    let least = window_size(
-                        hwnd,
-                        Size {
-                            width: Layout::min_width(self.metrics(hwnd)),
-                            height: self.fitted_height(hwnd),
-                        },
-                    );
-                    info.set_min_track_size(least);
-                    info.set_max_track_height(least.height);
-                }
-                Some(LRESULT(0))
-            }
-            Message::DpiChanged { suggested, .. } => {
-                hwnd.set_rect(suggested);
+            Message::DpiChanged { .. } => {
                 self.apply_fonts(hwnd);
-                self.fit_height(hwnd);
+                self.layout(hwnd);
                 Some(LRESULT(0))
-            }
-            Message::CtlColorStatic { colors, control } => {
-                let c = self.controls.get()?;
-                c.card_labels()
-                    .into_iter()
-                    .any(|(label, muted)| muted && label == control)
-                    .then(|| colors.muted_on_dialog())
             }
             Message::Command(Command::Menu(ESCAPE)) => {
                 if self.drag.get().is_some() {
@@ -1407,8 +1578,43 @@ impl WindowProc for Window {
                 self.on_control(hwnd, event);
                 Some(LRESULT(0))
             }
-            Message::Notify(notification) => {
+            Message::Notify(mut notification) => {
                 let c = self.controls.get()?;
+                if let Some(tip) = c.report.info_tip(&mut notification) {
+                    let row = tip.row()?;
+                    let view = self.view.borrow();
+                    let report = view.as_ref()?.report.as_ref()?;
+                    let strings = self.strings.borrow();
+                    let text = |code| {
+                        crate::win::error_text(&std::io::Error::from_raw_os_error(code as i32))
+                    };
+                    return Some(tip.set(&format!(
+                        "{}\n{}",
+                        report.cell(&strings, row, 0, &text),
+                        report.cell(&strings, row, 1, &text)
+                    )));
+                }
+                if notification.sender() == c.report.hwnd() {
+                    let notify = c.report.notification(notification)?;
+                    if let ListNotify::GetDispInfo(mut info) = notify {
+                        let view = self.view.borrow();
+                        if let Some(report) = view.as_ref().and_then(|v| v.report.as_ref()) {
+                            let text = report.cell(
+                                &self.strings.borrow(),
+                                info.row() as usize,
+                                info.column(),
+                                &|code| {
+                                    crate::win::error_text(&std::io::Error::from_raw_os_error(
+                                        code as i32,
+                                    ))
+                                },
+                            );
+                            info.set_text(&text);
+                        }
+                        return Some(LRESULT(0));
+                    }
+                    return None;
+                }
                 match c.list.notification(notification)? {
                     QueueNotify::SelectionChanged => {
                         let index = c.list.selected();
@@ -1418,8 +1624,17 @@ impl WindowProc for Window {
                                 .as_ref()
                                 .and_then(|view| view.rows.get(index).map(|row| row.id))
                         });
-                        self.selected.set(id);
-                        self.update_queue_buttons();
+                        if let Some(id) = id {
+                            self.select(id);
+                        }
+                        None
+                    }
+                    QueueNotify::Activated => {
+                        if let Some((id, buttons)) = self.selected_buttons()
+                            && buttons.run == Some(QueueAction::Report)
+                        {
+                            self.act(id, QueueAction::Report);
+                        }
                         None
                     }
                     QueueNotify::BeginDrag => {
@@ -1487,10 +1702,6 @@ impl WindowProc for Window {
             Message::Close => {
                 self.hide(hwnd);
                 Some(LRESULT(0))
-            }
-            Message::Destroy => {
-                window::set_modeless(None);
-                None
             }
             _ => None,
         }

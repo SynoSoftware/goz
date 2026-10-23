@@ -1,0 +1,444 @@
+<!doctype html>
+<!-- Throwaway: an inspector-hosted transfer card and queue, with a Flip control.
+     Layout sketches for native Win32 controls; sample state only, no file access.
+     Run: python -m http.server 8766 --bind 127.0.0.1 --directory crates/gozler-ui/prototypes -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gozler · bottom drawer prototype</title>
+<style>*{box-sizing:border-box}:root{font:13px "Segoe UI",sans-serif;color-scheme:light;--face:#f4f4f4;--paper:#fff;--line:#c5c5c5;--text:#171717;--muted:#555;--select:#dceeff;--accent:#0078d4}body{margin:0;background:#e6e8eb;color:var(--text);padding:18px 20px 90px}button,input,select{font:inherit;color:inherit}button{min-height:25px;padding:2px 12px;border:1px solid #aaa;border-radius:2px;background:var(--face);white-space:nowrap;cursor:pointer}button:disabled{opacity:.5;cursor:default}button:hover:not(:disabled){border-color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:1px}input,select{background:var(--paper);border:1px solid var(--line);padding:4px;min-width:0}input[type=checkbox]{accent-color:var(--accent)}h1{font-size:18px;font-weight:600;margin:0 0 6px}p{margin:5px 0}small,.muted{color:var(--muted)}.lab{max-width:1560px;margin:0 auto 14px}.tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0}.tools label{display:flex;align-items:center;gap:5px}.hint{font-size:12px}.workspace{width:min(100%,1440px);margin:auto;container-type:inline-size;background:var(--paper);border:1px solid #929292;box-shadow:0 4px 20px #0001;overflow:hidden}.title{height:30px;display:flex;align-items:center;padding:0 10px;background:var(--face);gap:9px}.title span:last-child{margin-left:auto}.menu{height:26px;display:flex;align-items:center;gap:20px;padding:0 9px;border-bottom:1px solid var(--line)}.menu button{border:0;background:transparent;padding:0;min-height:20px}.browse{height:420px;min-height:200px;display:flex;flex-direction:column}.searchline{display:flex;gap:8px;padding:7px;border-bottom:1px solid var(--line)}.searchline input{flex:1}.panels{display:grid;grid-template-columns:1fr 1fr;flex:1;min-height:0}.panel{display:flex;flex-direction:column;min-width:0;overflow:hidden}.panel+.panel{border-left:3px solid var(--face)}.path{display:flex;padding:5px;gap:5px}.path input{width:100%}.files{overflow:auto;flex:1;border-top:1px solid var(--line)}table{width:100%;border-collapse:collapse;font-size:12px}th{text-align:left;font-weight:400;background:var(--face);position:sticky;top:0;border-bottom:1px solid var(--line)}td,th{padding:4px 7px;white-space:nowrap;max-width:250px;overflow:hidden;text-overflow:ellipsis}td:nth-child(2){text-align:right}.files tr.selected{background:var(--select)}.panel-summary{padding:4px 7px;border-top:1px solid var(--line);font-size:12px;display:flex;justify-content:space-between}.keybar{display:flex;gap:5px;padding:5px;background:var(--face);border-top:1px solid var(--line)}.keybar button{flex:1;min-width:0;padding:2px 4px;font-size:12px}.drawer{height:266px;min-height:170px;max-height:500px;background:var(--paper);display:flex;flex-direction:column}.drawer[hidden]{display:none}.grip{height:6px;flex-shrink:0;cursor:ns-resize;background:var(--face);border-top:1px solid var(--line);border-bottom:1px solid var(--line);touch-action:none}.drawer-heading{display:flex;align-items:center;gap:10px;padding:5px 9px;flex-shrink:0;background:var(--face)}.drawer-heading strong{font-weight:600}.drawer-heading .spacer{flex:1}.drawer-heading button{min-height:23px}.drawer-body{display:grid;grid-template-columns:minmax(290px,40%) 1fr;min-height:0;flex:1}.detail{padding:10px 12px;overflow:auto;border-right:1px solid var(--line);min-width:0}.detail h2{font-size:14px;font-weight:600;margin:0 0 6px}.detail .pathvalue{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}.paths{display:grid;grid-template-columns:34px 1fr;gap:2px 6px;font-size:12px;margin-bottom:7px}.progressline{display:grid;grid-template-columns:34px minmax(40px,1fr) 38px;align-items:center;gap:6px;margin:6px 0;font-size:12px}progress{width:100%;height:14px;accent-color:var(--accent)}.statistics{font-size:12px;display:flex;gap:7px 18px;flex-wrap:wrap;margin:7px 0}.selected-actions{display:flex;gap:7px;margin-top:8px}.queue{min-width:0;min-height:0;display:flex;flex-direction:column}.queue-heading{display:flex;gap:8px;align-items:center;padding:5px 8px;border-bottom:1px solid var(--line);font-size:12px}.queue-heading b{font-weight:600;margin-right:auto}.queue-heading button{font-size:12px;min-height:23px;padding:1px 8px}.queue-scroll{overflow:auto;flex:1}.queue-table tr{cursor:pointer}.queue-table tr.selected{background:var(--select)}.queue-table td:first-child{width:42%}.queue-table td:nth-child(2){text-align:left}.queue-table td:last-child{color:var(--muted)}.queue-table tr:hover{outline:1px solid var(--line);outline-offset:-1px}.queue-footer{font-size:11px;color:var(--muted);padding:4px 8px;border-top:1px solid var(--line)}.activity{min-width:70px;flex:1;overflow:hidden;text-overflow:ellipsis}.mini{display:flex;gap:4px;align-items:center;flex-shrink:0}.mini progress{width:66px;height:12px}.service{border-left:1px solid var(--line);padding-left:8px}.backlog{color:var(--muted)}.state{max-width:1440px;margin:10px auto;font:12px Consolas,monospace;line-height:1.5;color:#333;white-space:pre-wrap}.switcher{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:16px;background:#20242b;color:#fff;border-radius:7px;padding:9px 11px;box-shadow:0 3px 12px #0005;z-index:10}.switcher button{background:#353c48;color:white;border-color:#697383;font-size:17px;min-width:40px}.switcher span{min-width:250px;text-align:center}.report{margin:8px 0;padding:8px;border:1px solid var(--line);background:var(--face);font-size:12px}.badge{font-size:11px;border:1px solid var(--line);padding:1px 5px}body[data-theme=dark]{color-scheme:dark;--face:#292929;--paper:#202020;--line:#666;--text:#f4f4f4;--muted:#ccc;--select:#174c74;background:#151515}.state:empty{display:none}body[data-theme=dark] .state{color:#ddd}body[data-theme=contrast]{--face:#000;--paper:#000;--line:#fff;--text:#fff;--muted:#fff;--select:#243df5;--accent:#ffed00;background:#000;color-scheme:dark}body[data-theme=contrast] button{border-color:#fff}.modal{width:min(620px,92vw);border:1px solid var(--line);background:var(--paper);color:var(--text);padding:0}.modal::backdrop{background:#0003}.dialog-title{display:flex;justify-content:space-between;align-items:center;background:var(--face);padding:8px 12px;font-weight:600}.dialog-body{padding:15px}.formrow{display:grid;grid-template-columns:90px 1fr;gap:8px;align-items:center;margin-bottom:12px}.formrow input,.formrow select{width:100%}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}.preview{max-height:200px;overflow:auto;border:1px solid var(--line);margin-top:10px}.sync-choice{margin:10px 0}.dialog-body .notice{margin:10px 0;font-size:12px}.state-label{font-family:"Segoe UI",sans-serif;font-weight:600}.caption-note{max-width:1440px;margin:8px auto;font-size:12px;color:var(--muted)}.workspace{height:740px;display:flex;flex-direction:column}.browse{height:auto;flex:1}.title,.menu,.keybar{flex-shrink:0}
+@container (max-width:1100px){.drawer-body{grid-template-columns:minmax(250px,38%) 1fr}.statistics .secondary{display:none}}
+@container (max-width:850px){.drawer .drawer-body{display:flex;flex-direction:column}.drawer .detail .identity{flex:1;min-width:0}.drawer .detail h2{font-size:12px;margin:0}.drawer .detail .paths,.drawer .detail .secondary,.drawer .detail .statistics{display:none}.drawer .detail .meters{width:115px}.drawer .detail .selected-actions{margin:0}.drawer .detail .progressline{margin:0;grid-template-columns:1fr 30px}.drawer .detail .progressline>span:first-child{display:none}.drawer .queue{order:1;flex:1;border:0}.queue-table td:last-child,.queue-table th:last-child{display:none}.keybar button{font-size:11px}.caption-note{margin:8px}.drawer-heading .muted{display:none}}
+@media(max-width:700px){body{padding:10px 8px 80px}.switcher{gap:7px;width:max-content;max-width:98vw}.switcher span{min-width:0;font-size:12px}.tools{font-size:12px}}
+@media print{.switcher,.tools{display:none}}[hidden]{display:none!important}.sync-panel{flex:1;min-height:0;overflow:auto}.sync-panel .dialog-body{padding:8px 12px}.sync-panel .formrow{margin-bottom:6px}.sync-panel .preview{max-height:90px}.sync-panel .dialog-actions{margin-top:8px}.selected-actions{flex-wrap:wrap}.workarea{display:flex;flex:1;min-height:0}.primary-area{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}.drawer-heading{background:var(--paper);padding:7px 10px}.drawer-heading>strong{font-size:14px}.drawer-heading #hide{font-size:17px;border:0;background:transparent;min-width:26px;padding:0 4px}.grip{background:var(--face);height:6px}.detail[data-kind=Delete] .secondary,.detail[data-state=Complete] .secondary,.detail[data-state=Cancelled] .secondary,.detail[data-state=Waiting] .secondary,.detail[data-state=Interrupted] .secondary{display:none}.glyph{font-family:"Segoe Fluent Icons","Segoe MDL2 Assets";font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-weight:400}button{display:inline-flex;align-items:center;justify-content:center;gap:6px}body[data-icons=off] .glyph.optional{display:none}.toolbar-button{border-color:transparent;background:transparent;min-width:28px;width:28px;height:28px;min-height:28px;padding:0;border-radius:0}.toolbar-button:hover:not(:disabled){border-color:transparent;background:var(--select)}.clear-button{width:auto;min-width:28px;height:28px;padding:0 7px}body[data-icons=off] .clear-button{min-width:50px}body:not([data-icons=off]) .clear-button .button-text{display:none}body[data-icons=off] .clear-button .glyph{display:none}.drawer-heading{height:32px;min-height:32px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding:2px 10px;background:var(--paper)}.drawer-heading #hide{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;min-height:28px;padding:0;border:0;font-size:inherit}.drawer-heading>strong{font-size:14px;line-height:20px}.header-tools{display:flex;align-items:center;gap:2px}.tool-separator{width:1px;height:18px;background:var(--line);margin:0 5px}.drawer-body{grid-template-columns:minmax(350px,44%) minmax(0,1fr)}.drawer[data-flipped=true] .drawer-body{grid-template-columns:minmax(0,1fr) minmax(350px,44%)}.drawer[data-flipped=true] .queue{order:0;border-right:1px solid var(--line)}.drawer[data-flipped=true] .detail{order:1;border-right:0}.detail{padding:8px 11px;border-right:1px solid var(--line)}.card-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;min-height:36px}.card-icon{font-size:20px}.card-heading{min-width:0;flex:1}.card-heading h2{font-size:14px;font-weight:600;line-height:18px;margin:0}.card-speed{font-size:12px;color:var(--muted);line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card-actions{display:flex;gap:4px;flex-shrink:0}.card-actions button{min-height:28px;padding:1px 7px}.transfer-lines{display:grid;grid-template-columns:48px minmax(0,1fr);gap:3px 10px;font-size:12px}.transfer-lines .line-label{color:var(--muted)}.transfer-lines .pathvalue{line-height:16px}.transfer-lines .file-meter{grid-column:2;height:8px;margin:0 0 2px}.total-progress{display:flex;align-items:center;gap:6px;margin-top:10px}.total-progress progress{height:15px}.total-percent{width:36px;text-align:right;flex-shrink:0;font-size:12px;color:var(--muted)}.transfer-counts{display:flex;justify-content:space-between;gap:12px;margin-top:4px;font-size:12px;color:var(--muted)}.queue-heading{display:none}.queue-scroll{border:1px solid var(--line);margin:0 9px 0 0}.queue-table{table-layout:fixed}.queue-table thead{display:none}.queue-table td{white-space:normal;padding:4px 7px}.queue-table td:first-child{width:auto}.queue-table td:not(:first-child){display:none}.tile-body{display:flex;align-items:center;gap:9px;min-height:36px}.tile-icon{font-size:22px}.tile-text{min-width:0;flex:1}.tile-title,.tile-detail{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:17px}.tile-detail{color:var(--muted)}.queue-table tr[draggable=true]{cursor:grab}.queue-table tr.drop-before{box-shadow:inset 0 2px var(--text)}.queue-table tr.drop-after{box-shadow:inset 0 -2px var(--text)}.queue-footer{font-size:11px;min-height:20px;padding:3px 8px}
+
+@container (max-width:900px){.drawer .card-header{margin-bottom:0;min-height:28px}.drawer .card-heading h2{font-size:12px}.drawer .card-speed{display:none}.drawer .transfer-lines,.drawer .transfer-counts{display:none}.drawer .total-progress{margin-top:3px}.drawer .queue{order:1;flex:1;border-right:0}.drawer .queue-scroll{margin:0 8px}.drawer-heading .muted{display:inline}.drawer-heading .header-tools{gap:0}.drawer-heading>strong{font-size:13px}
+}
+
+.queue-table tbody td:first-child{display:table-cell}.workspace{--command-width:96px;--command-height:28px}.drawer-heading{height:36px;min-height:36px;padding:4px 11px;gap:8px}.drawer-heading>strong{line-height:20px}.drawer #cancel-all,.drawer .card-actions>button:not(.clear-button){width:var(--command-width);min-width:var(--command-width);height:var(--command-height);min-height:var(--command-height);padding:0 8px}.drawer .card-actions{gap:8px}.header-tools{gap:4px}.header-tools .toolbar-button{width:28px;min-width:28px;height:28px}.tool-separator{margin:0 8px}.card-header{align-items:center;margin-bottom:12px}.detail{padding:8px 11px}
+
+.context-menu{position:fixed;z-index:30;background:var(--paper);border:1px solid var(--line);padding:4px;min-width:160px}.context-menu button{display:flex;justify-content:flex-start;border-color:transparent;background:transparent;width:100%;gap:8px}.context-menu button:hover:not(:disabled){background:var(--select)}button,.drawer button,.keybar button,.menu button{height:28px;min-height:28px;max-height:28px}.menu{height:32px}.drawer-heading{height:36px;min-height:36px}.drawer-heading .header-tools{gap:4px}.drawer-heading .tool-separator{margin:0 4px}.drawer .drawer-body{display:grid;grid-template-columns:minmax(0,46%) minmax(0,1fr)}.drawer[data-flipped=true] .drawer-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,46%)}.drawer .detail{display:flex;flex-direction:column;order:0;padding:0 11px 8px;overflow:auto;border:0;border-right:1px solid var(--line)}.drawer .queue{order:1;border:0;padding:0 11px 0 8px}.drawer[data-flipped=true] .detail{order:1;border:0}.drawer[data-flipped=true] .queue{order:0;border-right:1px solid var(--line);padding:0 8px 0 11px}.drawer .card-header,.drawer .queue-heading{height:40px;min-height:40px;margin:0 0 8px;padding:0;display:flex;align-items:center;gap:8px;border:0}.drawer .queue-heading strong{font-size:14px;font-weight:600}.queue-heading .spacer{flex:1}.drawer .card-heading h2{font-size:14px}.drawer .card-speed{display:block}.drawer .transfer-lines{display:grid}.drawer .transfer-counts{display:flex}.drawer .queue-scroll{margin:0;min-height:36px}.card-actions{display:flex;gap:8px;flex-shrink:0}.detail>.card-actions{justify-content:flex-end;margin-top:auto;padding-top:12px}.drawer .card-actions>button:not(.clear-button){width:96px;min-width:96px}.drawer .queue-footer{min-height:20px;padding:3px 0;border:0;font-size:11px}.drawer[data-single=true] .drawer-body{grid-template-columns:minmax(0,1fr)}.drawer[data-single=true] .queue{display:none}.drawer[data-single=true] .detail{order:0;border:0}.drawer[data-single=true] #flip,.drawer[data-single=true] .tool-separator{display:none}progress{-webkit-appearance:none;appearance:none;border:1px solid var(--line);border-radius:2px;overflow:hidden;background:var(--face)}progress::-webkit-progress-bar{background:var(--face)}progress::-webkit-progress-value{background:var(--accent)}.drawer .file-meter{height:12px;margin:2px 0 5px}.drawer .total-progress progress{height:18px}
+
+@container(max-width:900px){.drawer .drawer-body{grid-template-columns:minmax(0,46%) minmax(0,1fr)}.drawer[data-flipped=true] .drawer-body{grid-template-columns:minmax(0,1fr) minmax(0,46%)}.drawer .card-heading h2,.drawer .queue-heading strong{font-size:12px}.drawer .transfer-lines{grid-template-columns:48px minmax(0,1fr);gap:3px 6px}.drawer .card-actions{gap:4px}.drawer .queue-footer{display:none}
+}
+
+
+.drawer .card-header,.drawer .queue-heading{height:48px;min-height:48px}.task-title-row{display:flex;align-items:center;gap:8px;min-height:28px}.task-title-row h2{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.drawer .queue-heading{align-items:flex-start;padding-top:2px}.queue-heading strong,.queue-heading .menu-hint{line-height:28px}.menu-hint{font-size:11px;color:var(--muted);white-space:nowrap}
+
+
+.status{display:flex;align-items:center;gap:0;height:36px;flex-shrink:0;padding:3px 8px;background:var(--face);border-top:1px solid var(--line);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.status-view{flex-shrink:0;padding-right:10px}
+.status-view:empty{display:none}
+.status-middle{display:flex;align-items:center;justify-content:center;gap:8px;flex:1;min-width:0;padding:0 10px}
+.status-view:not(:empty)+.status-middle{border-left:1px solid var(--line)}
+.status-transfer{display:flex;align-items:center;gap:8px;flex:0 1 auto;min-width:0;max-width:100%}
+.status .status-summary{display:flex;align-items:center;gap:8px;min-width:0;flex:0 1 auto;padding:0 8px;border-color:transparent;background:transparent}
+.status-identity{display:flex;align-items:center;gap:6px;min-width:0;flex:0 1 auto}
+.status .activity{font-weight:600;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
+.status-transfer[data-measure=true] .status-identity{flex-shrink:0}
+.status-overall{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.status-overall progress{width:66px;height:10px}
+.status-percent{flex-shrink:0}
+.status-metrics{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.status-metrics:not(:empty)::before{content:'*';color:var(--muted)}
+.status-metrics:empty{display:none}
+.status .rate,.status .files-rate{white-space:nowrap;flex-shrink:0}
+.rate+.files-rate::before{content:'*';margin-right:8px;color:var(--muted)}
+.status-controls{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.status-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.status-controls:empty{display:none}
+.status button.status-command{width:28px;min-width:28px;height:28px;padding:0;border-color:transparent;background:transparent}
+.status-command .button-text{display:none}
+.status button:hover:not(:disabled){background:var(--select);border-color:var(--line)}
+body[data-icons=off] .status button.status-command{width:auto;min-width:0;padding:0 6px}
+body[data-icons=off] .status-command .button-text{display:inline}
+.status .glyph{font-size:14px}
+.status .service{display:flex;align-items:center;gap:5px;flex-shrink:0;margin-left:auto;padding-left:8px;border-left:1px solid var(--line)}
+.status-other{display:flex;align-items:center;gap:6px;flex-shrink:0;padding-right:8px;border-right:1px solid var(--line)}
+.status-other progress{width:40px;height:10px}
+.drawer .batch-actions{display:flex;align-items:center}
+.drawer .total-progress{display:grid;grid-template-columns:48px minmax(0,1fr) 36px;gap:10px;align-items:center}
+.overall-label{font-size:12px;color:var(--muted)}
+.drawer .file-meter{height:10px}
+.drawer[data-single=true][data-flipped] .drawer-body{grid-template-columns:minmax(0,1fr)}
+.drawer .queue-heading{height:28px;min-height:28px;margin:0 0 4px;padding:0;align-items:center}
+.drawer .detail{padding-bottom:11px}
+.drawer .queue,.drawer[data-flipped=true] .queue{padding-bottom:11px}
+.detail-footer{margin-top:auto;padding-top:10px;display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+.detail-footer .card-actions{justify-content:flex-end}
+.drawer .report{margin:0;padding:8px;flex-shrink:0}
+.report-message{display:block;line-height:17px}
+.tile-report{margin-left:auto;flex-shrink:0;color:var(--muted);font-weight:600}
+.failure-list{flex:1;min-height:64px;overflow:auto;border:1px solid var(--line)}
+.failure-list table{table-layout:fixed}
+.failure-list th:first-child{width:60%}
+.failure-list td{text-align:left;user-select:text}
+.failure-list .empty{text-align:center;color:var(--muted);padding:16px}
+.report-heading{flex-shrink:0}
+.file-progress{grid-column:2;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center}
+.drawer .file-progress .file-meter{grid-column:auto;height:18px;margin:0}
+.file-percent{min-width:36px;text-align:right;color:var(--muted)}
+.file-counts{grid-column:2;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.card-icon>.glyph,.tile-icon>.glyph{font-size:28px;width:32px;height:32px}
+.performance{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0;margin-left:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.performance-rate{font-size:14px;font-weight:600}
+.performance-files{font-size:12px;color:var(--muted)}
+.drawer .total-progress{grid-template-columns:48px minmax(0,1fr) auto}
+.drawer .total-percent{width:auto;min-width:36px}
+.drawer .line-label,.drawer .overall-label,.drawer .file-percent,.drawer .total-percent{font-weight:600;color:var(--text)}
+@container (max-width:900px){.performance{margin-left:4px}.performance-rate{font-size:12px}.performance-files{display:none}}
+.drawer .drawer-heading{background:var(--face);border-bottom:1px solid var(--line);margin-bottom:6px}
+.workspace[data-transfers-maximized=true] .browse,.workspace[data-transfers-maximized=true]>.keybar,.workspace[data-transfers-maximized=true]>.status,.workspace[data-transfers-maximized=true] .grip{display:none}
+.workspace[data-transfers-maximized=true] .drawer{height:100%!important;max-height:none;flex:1}
+</style>
+<div class="lab">
+<h1>Approved transfer UI · locked</h1>
+<p>The current Rust transfer card and queue, inside the existing inspector pane. <strong>Flip</strong> swaps their sides. Background work never opens or switches the pane.</p>
+<p class="hint">Browser layout sketches for native Win32 controls, not a rendering specification. Sample data only. Drag the drawer’s top edge, select jobs, and keep typing in Find.</p>
+<div class="tools">
+<label>Window <select id="width"><option value="1440">Wide</option><option value="1140" selected>Normal</option><option value="780">Narrow</option></select></label>
+<label>Theme <select id="theme"><option value="light">Light</option><option value="dark">Dark</option><option value="contrast">High contrast sketch</option></select></label>
+<label><input id="show-icons" type="checkbox" checked> Show icons</label>
+<label>Scenario <select id="scenario"><option value="running">Copy + queue</option><option value="single">One operation</option><option value="export">Copy + Export (shared status)</option><option value="quick">Quick copy</option><option value="preparing">Preparing files</option><option value="unknown">Unknown total</option><option value="paused">Paused + other copy</option><option value="waiting">Waiting for a device</option><option value="cancelling">Cancelling</option><option value="errors">Completed with errors</option><option value="recovery">Interrupted recovery</option><option value="long">Long queue (40 jobs)</option></select></label>
+<button id="startquick">Paste</button><button id="finish">Finish</button><button id="drawer-demo">Details</button>
+</div>
+</div>
+<main class="workspace" id="workspace" style="max-width:1140px">
+<div class="title"><span>⌕</span><span>Gozler</span><span>—　□　×</span></div>
+<nav class="menu"><button id="filemenu">File</button><button>Edit</button><button>View</button><button>Help</button></nav>
+<div class="workarea"><div class="primary-area">
+<section class="browse" id="browse">
+<div class="searchline"><label for="find">Find</label><input id="find" placeholder="Keep working here while files copy" autocomplete="off"><span class="muted" id="find-result">12 items</span></div>
+<div class="panels" id="panels"></div>
+</section>
+<section class="drawer" id="drawer" aria-label="File transfers" hidden>
+<div class="grip" id="grip" role="separator" aria-label="Resize file operations" aria-orientation="horizontal" tabindex="0" title="Drag to resize. Arrow keys resize when this separator has focus."></div>
+<div class="drawer-heading">
+<span class="glyph optional" aria-hidden="true">&#xE8FD;</span><strong id="pane-heading">File transfers</strong>
+<span class="muted" id="drawer-count"></span><span class="spacer"></span>
+<div class="batch-actions" id="batch-actions"><button id="cancel-all" title="Cancel all transfers; ordinary Delete is unaffected." aria-label="Cancel all transfers"></button></div>
+<div class="header-tools" aria-label="Pane layout">
+<span class="tool-separator"></span>
+<button id="flip" class="toolbar-button" aria-label="Flip" title="Swap progress and queue sides"></button>
+<button id="maximize" class="toolbar-button" aria-label="Maximize" title="Maximize file transfers"></button>
+<button id="hide" class="toolbar-button" aria-label="Hide details" title="Hide details"></button>
+</div></div>
+<div class="drawer-body">
+<section class="detail" id="detail" aria-label="Selected operation" tabindex="-1"></section>
+<section class="queue" aria-label="Operations queue">
+<div class="queue-heading"><strong>Queue</strong><span class="spacer"></span><span class="menu-hint" title="Right-click an operation, or press Shift+F10">Right-click for actions</span></div>
+<div class="queue-scroll"><table class="queue-table"><thead><tr><th>Operation</th><th>State</th><th>Destination</th></tr></thead><tbody id="queue-rows"></tbody></table></div>
+
+</section></div>
+</section>
+</div></div>
+<div class="keybar"><button>F3 View</button><button>F4 Edit</button><button id="copy-command">F5 Copy</button><button>F6 Move</button><button>F7 New folder</button><button id="delete-command">F8 Delete</button></div>
+<footer class="status" id="status"></footer>
+</main>
+<p class="caption-note" id="variant-note"></p>
+<div class="state" id="state" aria-live="polite"></div>
+<div class="switcher" aria-label="Approved prototype"><span id="variant-label"></span></div>
+<div id="queue-menu" class="context-menu" role="menu" hidden></div>
+<script>
+const $=id=>document.getElementById(id),variant='B';
+let flipped=true,showIcons=true,dragId=null;
+let exporting=false;
+let jobs=[],selected=101,displayed=101,drawerOpen=false,drawerHeight=300,returnFocus=null,policy='Update changed files',reportOpen=false,lastAction='Scenario loaded';
+let normalDrawerHeight=300,drawerMaximized=false;
+const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const terminal=j=>['Complete','Cancelled','Failed'].includes(j.state), active=j=>!terminal(j)&&j.state!=='Interrupted';
+const running=j=>['Copying','Moving'].includes(j.state),orderable=j=>['Waiting','Paused'].includes(j.state);
+
+const G={copy:'\uE8C8',move:'\uE8DE',delete:'\uE74D',pause:'\uE769',resume:'\uE768',cancel:'\uE711',up:'\uE70E',down:'\uE70D',clear:'\uE75C',flip:'\uE8AB',maximize:'\uE922',restore:'\uE923',report:'\uE8A5',details:'\uE8FD',view:'\uE890',edit:'\uE70F',newFolder:'\uE8F4',paste:'\uE77F',accept:'\uE8FB'};
+function icon(key,optional=false){return '<span aria-hidden="true" class="glyph'+(optional?' optional':'')+'">'+G[key]+'</span>'}
+function button(label,key,attributes='',clear=false){return '<button '+attributes+(clear?' class="clear-button"':'')+' aria-label="'+label+'" title="'+label+'">'+icon(key,!clear)+'<span class="button-text">'+label+'</span></button>'}
+function kindIcon(j){return j.kind==='Move'?'move':'copy'}
+function neighbour(j,up){
+ if(!j||!orderable(j))return null;
+ const rows=jobs.filter(x=>orderable(x)||running(x));
+ return rows[rows.indexOf(j)+(up?-1:1)]||null;
+}
+
+
+function base(){return [{id:101,kind:'Copy',name:'Projects',state:'Copying',from:'C:\\Projects',to:'D:\\Backup\\Projects',file:'design\\drawings.zip',filePercent:62,fileSize:'620 MB / 1 GB',percent:35,totalBytes:18e9,files:'421 / 1,200 files',size:'6.3 / 18 GB',rate:'180 MB/s · 54 files/s',policy},{id:102,kind:'Copy',name:'Photos',state:'Waiting',from:'E:\\Photos',to:'D:\\Backup\\Photos',percent:0,totalBytes:42e9,files:'0 / 8,412 files',size:'0 / 42 GB',rate:'Waiting for device',policy},{id:103,kind:'Move',name:'Recordings',state:'Waiting',from:'E:\\Recordings',to:'D:\\Archive',percent:0,totalBytes:3.4e9,files:'0 / 28 files',size:'0 / 3.4 GB',rate:'Waiting for device',policy}]}
+function loadScenario(value){$('scenario').value=value;exporting=value==='export';jobs=base();selected=displayed=101;reportOpen=false;if(value==='quick'){jobs=[{...jobs[0],name:'notes.txt',file:'notes.txt',filePercent:0,fileSize:'0 / 4 KB',percent:0,totalBytes:4e3,files:'0 / 1 file',size:'0 / 4 KB',rate:'Calculating…'}]}
+ if(value==='single')jobs=[jobs[0]];
+ if(value==='unknown')Object.assign(jobs[0],{percent:null,files:'421 files copied',size:'6.3 GB copied'});
+ if(value==='preparing')Object.assign(jobs[0],{state:'Preparing files',percent:null,files:'Reading files…',size:'',rate:'Preparing files',file:''});
+ if(value==='paused'){jobs[0].state='Paused';jobs[0].rate='Paused';jobs[1].state='Copying';jobs[1].rate='95 MB/s · 38 files/s';jobs[1].percent=12}
+ if(value==='waiting'){jobs[0].state='Waiting';jobs[0].rate='Waiting for device'}
+ if(value==='cancelling'){jobs[0].state='Cancelling';jobs[0].rate='Releasing files…'}
+ if(value==='errors')Object.assign(jobs[0],{state:'Complete',percent:100,files:'1,198 copied · 2 failed',size:'17.9 GB copied',rate:'Finished',errors:true,failures:[['C:\\Projects\\locked.dwg','File is in use.'],['C:\\Projects\\private.pdf','Access denied.']]});
+ if(value==='recovery'){jobs=[{...jobs[0],state:'Interrupted',rate:'Continue is explicit',percent:35},{...jobs[1],state:'Interrupted',rate:'Continue is explicit'}]}
+ if(value==='long')for(let n=0;n<37;n++)jobs.push({...jobs[1],id:105+n,name:'Batch '+(n+1),to:'D:\\Backup\\Batch '+(n+1)});
+ lastAction='Scenario: '+value;render()}
+function panel(path,files){return '<section class="panel"><div class="path"><select aria-label="Drive"><option>'+path[0]+':</option></select><input aria-label="Folder" value="'+escape(path)+'"></div><div class="files"><table><thead><tr><th>Name</th><th>Size</th><th>Date modified</th></tr></thead><tbody>'+files.map((name,i)=>'<tr tabindex="0" class="'+(i===2?'selected':'')+'"><td>'+escape(name)+'</td><td>'+(i<5?'':(i+2)*121+' KB')+'</td><td>10/22/2026 8:14 AM</td></tr>').join('')+'</tbody></table></div><div class="panel-summary"><span>12 items · 18 GB</span><span>109 GB free</span></div></section>'}
+$('panels').innerHTML=panel('C:\\Projects',['..','Architecture','Design','Exports','Source','drawings.zip','notes.txt','proposal.pdf','schedule.xlsx','site-plan.pdf','survey.csv','todo.txt'])+panel('D:\\Backup',['..','Projects','Photos','Recordings','Archive','inventory.csv','notes.txt','readme.txt','report.pdf','schedule.xlsx','survey.csv','todo.txt']);
+
+function phase(j){
+ if(j.state==='Complete')return j.errors?'Completed with errors':j.kind==='Move'?'Moved':'Copied';
+ if(j.state==='Copying'&&j.kind==='Move')return 'Moving';
+ if(j.resumeAfter)return 'Waiting · resumes after '+(jobs.find(x=>x.id===j.resumeAfter)?.name||'priority work');
+ if(j.state==='Waiting')return 'Waiting for '+(j.to.match(/^[A-Za-z]:/)?.[0]||'destination');
+ return j.state;
+}
+function queuePercent(){
+ const queue=jobs.filter(j=>!['Cancelled','Interrupted'].includes(j.state));
+ if(!queue.length||queue.some(j=>j.percent===null))return null;
+ const total=queue.reduce((sum,j)=>sum+j.totalBytes,0);
+ return total?Math.round(queue.reduce((sum,j)=>sum+j.totalBytes*j.percent/100,0)/total*100):null;
+}
+function status(){
+ const focused=$('status').contains(document.activeElement)?document.activeElement.id:null;
+ document.body.dataset.otherJob=exporting;
+ const other=exporting?'<div class="status-other" role="group" aria-label="Export"><span>Export</span>'+button('Cancel','cancel','id="export-cancel" class="status-command"')+'</div>':'';
+ const j=jobs.find(x=>x.id===displayed)||jobs[0];
+ const failedKinds=[...new Set(jobs.filter(x=>x.state==='Complete'&&x.errors).map(x=>x.kind))].sort();
+ const text=j?(j.state==='Complete'&&j.errors?failedKinds.join(' & ')+': Completed with errors':running(j)?phase(j)+' '+j.name:j.kind+': '+phase(j)):'No file operations';
+ const isRunning=j&&running(j);
+ const rates=isRunning?j.rate.split(' · '):[];
+ const byteRate=rates.find(x=>!x.includes('files/s'))||'';
+ const fileRate=rates.find(x=>x.includes('files/s'))||'';
+ const canPause=j&&(running(j)||j.state==='Paused'),canCancel=j&&active(j)&&j.state!=='Cancelling';
+ const pause=j?.state==='Paused'?'Resume':'Pause';
+ const controls=(canPause?button(pause,j?.state==='Paused'?'resume':'pause','id="status-pause" class="status-command"'):'')+(canCancel?button('Cancel','cancel','id="status-cancel" class="status-command"'):'')+(j?.errors?button('Report','report','id="status-report" class="status-command"'):'');
+
+ const percent=queuePercent();
+ const overall=j?'<span class="status-overall" title="Overall progress · all queued transfers"><progress aria-label="Overall progress for all queued transfers" '+(percent===null?'':'value="'+percent+'" max="100"')+'></progress><span class="status-percent">'+(percent===null?'Total unknown':percent+'%')+'</span></span>':'';
+ const metrics='<span class="status-metrics">'+(byteRate?'<span class="rate">'+escape(byteRate)+'</span>':'')+(fileRate?'<span class="files-rate">'+escape(fileRate)+'</span>':'')+'</span>';
+ const toggle='<button id="status-details" class="status-summary" aria-expanded="'+drawerOpen+'" aria-controls="drawer" aria-label="'+(drawerOpen?'Hide':'Show')+' file transfers: '+escape(text)+' · '+(percent===null?'Total unknown':percent+'%')+(rates.length?' · '+escape(rates.join(' · ')):'')+'" title="'+(drawerOpen?'Hide':'Show')+' file transfers"><span class="status-identity">'+icon(j?kindIcon(j):'copy',true)+'<span class="activity">'+escape(text)+'</span></span>'+overall+metrics+'</button>';
+ const actions=controls?'<div class="status-actions"><div class="status-controls" role="group" aria-label="'+escape(j?j.kind+' '+j.name:'No operation')+'">'+controls+'</div></div>':'';
+ $('status').innerHTML='<span class="status-view" role="group" aria-label="View"></span><div class="status-middle">'+other+'<div class="status-transfer" role="group" aria-label="Displayed file operation">'+toggle+actions+'</div></div><span class="service" title="Service memory: 154 MB">'+icon('details',true)+'<span>Service 154 MB</span></span>';
+ if($('export-cancel')){$('export-cancel').title='Cancel Export; transfers continue';$('export-cancel').setAttribute('aria-label','Cancel Export');$('export-cancel').onclick=()=>{exporting=false;lastAction='Cancelled Export; transfers unchanged';render()}}
+ for(const [id,action,label] of [['status-pause','pause',pause],['status-cancel','cancel','Cancel']]){
+   const b=$(id);if(!b)continue;b.setAttribute('aria-label',label+' '+(j?j.kind+' '+j.name:'operation'));b.title=b.getAttribute('aria-label');b.onclick=()=>j&&jobAction(action,j.id);
+ }
+ if($('status-report')){$('status-report').title='Report for '+j.name;$('status-report').setAttribute('aria-label',$('status-report').title);$('status-report').onclick=()=>{selected=j.id;reportOpen=true;render();setDrawer(true)}}
+ fitStatus();
+ $('status-details').onclick=()=>setDrawer(!drawerOpen);
+ if(focused)$(focused)?.focus({preventScroll:true});
+}
+
+function fitStatus(){
+ const group=document.querySelector('.status-transfer');if(!group)return;
+ const middle=document.querySelector('.status-middle');
+ const metrics=group.querySelector('.status-metrics');metrics.hidden=false;
+ group.dataset.measure='true';
+ for(const field of group.querySelectorAll('.files-rate'))field.hidden=false;
+ const overflows=()=>group.scrollWidth>group.clientWidth+1||group.querySelector('.activity').scrollWidth>group.querySelector('.activity').clientWidth+1||group.getBoundingClientRect().right>middle.getBoundingClientRect().right-10;
+ for(const name of ['.files-rate']){
+   if(!overflows())break;
+   const field=group.querySelector(name);if(field)field.hidden=true;
+ }
+ metrics.hidden=[...metrics.children].every(x=>x.hidden);
+ delete group.dataset.measure;
+}
+new ResizeObserver(()=>{fitStatus();fitDrawer()}).observe($('workspace'));
+
+
+function taskActions(j){
+ const blocked=j.state==='Cancelling';
+ let actions;
+ if(j.state==='Interrupted')actions=button('Continue','resume','data-job="continue"')+button('Dismiss','cancel','data-job="dismiss"');
+ else if(terminal(j))actions=button('Report','report','data-job="report"')+button('Clear','clear','data-job="clear"',true);
+ else if(['Waiting','Preparing files'].includes(j.state))actions=button('Cancel','cancel','data-job="cancel"');
+ else actions=button(j.state==='Paused'?'Resume':'Pause',j.state==='Paused'?'resume':'pause','data-job="pause" '+(blocked?'disabled':''))+button('Cancel','cancel','data-job="cancel" '+(blocked?'disabled':''));
+
+ return actions;
+}
+function report(j){
+ const rows=j.failures||[];
+ const heading='<div class="card-header report-heading"><span class="card-icon">'+icon('report',true)+'</span><div class="card-heading"><h2>Report</h2><div class="card-speed" title="'+escape(j.kind+' '+j.name+' · '+j.files)+'">'+escape(j.kind+' '+j.name+' · '+j.files)+'</div></div></div>';
+ const list='<div class="failure-list"><table aria-label="Files not copied"><thead><tr><th>Item</th><th>Reason</th></tr></thead><tbody>'+rows.map(([path,reason])=>'<tr tabindex="0"><td title="'+escape(path)+'">'+escape(path)+'</td><td title="'+escape(reason)+'">'+escape(reason)+'</td></tr>').join('')+(!rows.length?'<tr><td class="empty" colspan="2">No failed entries.</td></tr>':'')+'</tbody></table></div>';
+ const actions='<div class="card-actions" role="group" aria-label="'+escape(j.kind+' '+j.name)+'">'+button('Close','cancel','data-job="close-report"')+button('Clear','clear','data-job="clear"',true)+'</div>';
+ return heading+list+'<div class="detail-footer">'+actions+(rows.length?'<div class="report" role="status"><span class="report-message">'+rows.length+' files couldn’t be copied.</span></div>':'')+'</div>';
+}
+function progress(j){
+ if(reportOpen)return report(j);
+ const actions='<div class="card-actions" role="group" aria-label="'+escape(j.kind+' '+j.name)+'">'+taskActions(j)+'</div>';
+ const hasFile=j.file&&['Copying','Moving','Paused','Cancelling'].includes(j.state);
+ const lines='<div class="transfer-lines">'+(hasFile?'<span class="line-label">File</span><span class="pathvalue" title="'+escape(j.file)+'">'+escape(j.file)+'</span><div class="file-progress"><progress class="file-meter" aria-label="Current file" '+(j.filePercent==null?'':'value="'+j.filePercent+'" max="100"')+'></progress><span class="file-percent">'+(j.filePercent==null?'Total unknown':j.filePercent+'%')+'</span></div><span class="file-counts">'+escape(j.fileSize||'Total unknown')+'</span>':'')+'<span class="line-label">From</span><span class="pathvalue" title="'+escape(j.from)+'">'+escape(j.from)+'</span>'+(j.to?'<span class="line-label">To</span><span class="pathvalue" title="'+escape(j.to)+'">'+escape(j.to)+'</span>':'')+'</div>';
+ const rates=running(j)?j.rate.split(' · ').filter(x=>x.includes('/s')):[];
+ const performance=rates.length?'<div class="performance" role="group" aria-label="'+escape(j.kind+' '+j.name)+' performance">'+rates.map(rate=>'<span class="'+(rate.includes('files/s')?'performance-files':'performance-rate')+'">'+escape(rate)+'</span>').join('')+'</div>':'';
+ const message=j.errors?'2 files couldn’t be copied. Open Report for details.':'';
+ const footer='<div class="detail-footer">'+actions+(message?'<div class="report" role="status"><span class="report-message">'+message+'</span></div>':'')+'</div>';
+ return '<div class="card-header"><span class="card-icon">'+icon(kindIcon(j),true)+'</span><div class="card-heading"><div class="task-title-row"><h2 title="'+escape(j.kind+' '+j.name)+'">'+escape(j.kind+' '+j.name)+'</h2></div><div class="card-speed">'+escape(phase(j))+'</div></div>'+performance+'</div>'+lines+'<div class="total-progress"><span class="overall-label">Overall</span><progress aria-label="Selected total" '+(j.percent===null?'':'value="'+j.percent+'" max="100"')+'></progress><span class="total-percent">'+(j.percent===null?'Total unknown':j.percent+'%')+'</span></div><div class="transfer-counts"><span>'+escape(j.files)+'</span><span>'+escape(j.size)+'</span></div>'+footer;
+}
+
+
+function render(){
+ const focusJob=document.activeElement?.getAttribute('data-job'),focusRow=document.activeElement?.dataset.id;
+ const j=jobs.find(x=>x.id===selected);
+ document.body.dataset.icons=showIcons?'on':'off';
+ if(!j&&jobs.length){selected=jobs[0].id;return render()}
+ $('drawer').dataset.single=jobs.length<=1;
+ $('drawer').dataset.variant=variant;$('drawer').dataset.flipped=flipped;fitDrawer();
+ $('variant-label').textContent='Locked B · actions below progress'+(flipped?' · progress right':' · progress left');
+ $('variant-note').textContent='Approved implementation reference. Select a queue row to inspect it; drag a queued job above running work to give it priority. Right-click or Shift+F10 offers Run now and other actions. Alt+Up/Down reorders; Delete cancels the selected operation. One operation uses the same task view without a duplicate list. Native Windows controls take precedence over exact browser styling.';
+ $('detail').innerHTML=j?progress(j):'<h2>Select an operation</h2>';
+ $('queue-rows').innerHTML=jobs.map(x=>'<tr tabindex="0" draggable="'+orderable(x)+'" data-id="'+x.id+'" aria-selected="'+(x.id===selected)+'" class="'+(x.id===selected?'selected':'')+'"><td><div class="tile-body"><span class="tile-icon">'+icon(kindIcon(x),true)+'</span><div class="tile-text"><div class="tile-title" title="'+escape(x.from+(x.to?' → '+x.to:''))+'">'+escape(x.kind+' '+x.name+(x.to?' → '+x.to:''))+'</div><div class="tile-detail">'+escape(phase(x)+' · '+x.files)+'</div></div>'+(x.errors?'<span class="tile-report" title="Double-click or press Enter to open Report">Report</span>':'')+'</div></td></tr>').join('');
+ $('queue-rows').querySelectorAll('tr').forEach(row=>{
+   row.onclick=()=>selectJob(Number(row.dataset.id),true);
+   row.ondblclick=()=>{selected=Number(row.dataset.id);if(jobs.find(x=>x.id===selected)?.errors)jobAction('report')};
+   row.oncontextmenu=e=>{e.preventDefault();selectJob(Number(row.dataset.id),false);showRowMenu(e.clientX,e.clientY)};
+   row.onkeydown=e=>{
+     if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){e.preventDefault();const box=row.getBoundingClientRect();selectJob(Number(row.dataset.id),false);showRowMenu(box.left+12,box.top+12);return}
+     if(e.key==='Enter'||e.key===' '){e.preventDefault();selectJob(Number(row.dataset.id),true);if(e.key==='Enter'&&jobs.find(x=>x.id===selected)?.errors)jobAction('report')}
+     if(e.key==='Delete'){e.preventDefault();selectJob(Number(row.dataset.id),false);jobAction(jobs.find(x=>x.id===selected)?.state==='Interrupted'?'dismiss':terminal(jobs.find(x=>x.id===selected))?'clear':'cancel')}
+     if(e.altKey&&(e.key==='ArrowUp'||e.key==='ArrowDown')){e.preventDefault();selected=Number(row.dataset.id);jobAction(e.key==='ArrowUp'?'up':'down')}
+     else if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();const i=jobs.findIndex(x=>x.id===Number(row.dataset.id));const next=jobs[i+(e.key==='ArrowUp'?-1:1)];if(next)selectJob(next.id,true)}
+   };
+   row.ondragstart=e=>{dragId=Number(row.dataset.id);selected=dragId;e.dataTransfer.setData('text/plain',String(dragId));e.dataTransfer.effectAllowed='move';lastAction='Dragging waiting operation #'+dragId;state()};
+   row.ondragover=e=>{if(dragId&&jobs.find(x=>x.id===Number(row.dataset.id))&&active(jobs.find(x=>x.id===Number(row.dataset.id)))&&Number(row.dataset.id)!==dragId){e.preventDefault();e.dataTransfer.dropEffect='move';clearMarks();row.classList.add(e.clientY<row.getBoundingClientRect().top+row.clientHeight/2?'drop-before':'drop-after')}};
+   row.ondrop=e=>{e.preventDefault();const target=Number(row.dataset.id),after=e.clientY>=row.getBoundingClientRect().top+row.clientHeight/2;dropJob(dragId,target,after)};
+   row.ondragend=()=>{dragId=null;clearMarks()};
+ });
+ const scroll=document.querySelector('.queue-scroll');
+ scroll.ondragover=e=>{if(e.target.closest('tr')||!dragId)return;const last=jobs.filter(x=>x.state==='Waiting'&&x.id!==dragId).at(-1);if(last){e.preventDefault();clearMarks();$('queue-rows').querySelector('[data-id="'+last.id+'"]')?.classList.add('drop-after')}};
+ scroll.ondrop=e=>{if(e.target.closest('tr'))return;e.preventDefault();const last=jobs.filter(x=>x.state==='Waiting'&&x.id!==dragId).at(-1);if(last)dropJob(dragId,last.id,true)};
+ $('drawer').querySelectorAll('[data-job]').forEach(b=>{
+   b.title=b.getAttribute('aria-label')+' '+j.kind+' '+j.name;
+   b.onclick=()=>jobAction(b.dataset.job);
+ });
+ const focusAction=focusJob==='report'&&reportOpen?'close-report':focusJob==='close-report'&&!reportOpen?'report':focusJob;
+ if(focusAction)$('drawer').querySelector('[data-job="'+focusAction+'"]:not(:disabled)')?.focus({preventScroll:true});
+ if(focusRow&&jobs.length>1)$('queue-rows').querySelector('[data-id="'+focusRow+'"]')?.focus({preventScroll:true});
+ if(focusRow&&jobs.length===1)$('detail').focus({preventScroll:true});
+ const transferCount=jobs.filter(x=>active(x)).length;
+ $('drawer-count').textContent=jobs.length+' '+(jobs.length===1?'job':'jobs');
+ $('cancel-all').innerHTML=icon('cancel',true)+'<span>Cancel all</span>';$('cancel-all').disabled=transferCount===0;$('batch-actions').hidden=transferCount<2;
+ $('flip').innerHTML=icon('flip');$('flip').disabled=jobs.length<2;$('flip').setAttribute('aria-pressed',String(flipped));
+ $('hide').innerHTML=icon('down');
+ status();state();
+}
+function selectJob(id,focus){selected=id;reportOpen=false;lastAction='Selected #'+id+'; file selection unchanged';render();if(focus)$('queue-rows').querySelector('[data-id="'+id+'"]')?.focus({preventScroll:true})}
+function showRowMenu(x,y){
+ const j=jobs.find(x=>x.id===selected);if(!j||j.state==='Cancelling')return;
+ let actions;
+ if(j.state==='Interrupted')actions=[['continue','Continue','resume'],['dismiss','Dismiss','cancel']];
+ else if(terminal(j))actions=[['report','Report','report'],['clear','Clear','clear']];
+ else if(j.state==='Waiting')actions=[['run','Run now','resume'],['cancel','Cancel','cancel'],['up','Move up','up'],['down','Move down','down']];
+ else if(j.state==='Preparing files')actions=[['cancel','Cancel','cancel']];
+ else actions=[...(j.state==='Paused'?[['run','Run now','resume']]:[]),['pause',j.state==='Paused'?'Resume':'Pause',j.state==='Paused'?'resume':'pause'],['cancel','Cancel','cancel']];
+ const menu=$('queue-menu');menu.innerHTML=actions.map(([action,label,glyph])=>button(label,glyph,'role="menuitem" data-action="'+action+'" '+((action==='up'&&!neighbour(j,true)||action==='down'&&!neighbour(j,false))?'disabled':''))).join('');
+ menu.style.left=x+'px';menu.style.top=y+'px';menu.hidden=false;menu.querySelectorAll('button').forEach(b=>b.onclick=()=>{menu.hidden=true;jobAction(b.dataset.action);const row=$('queue-rows').querySelector('[data-id="'+selected+'"]');(jobs.length>1&&row?row:$('detail')).focus({preventScroll:true})});
+ menu.style.left=Math.max(8,Math.min(x,innerWidth-menu.offsetWidth-8))+'px';menu.style.top=Math.max(8,Math.min(y,innerHeight-menu.offsetHeight-8))+'px';
+ menu.querySelector('button:not(:disabled)')?.focus({preventScroll:true});
+}
+$('queue-menu').onkeydown=e=>{
+ if(!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','Escape'].includes(e.key))return;
+ e.preventDefault();e.stopPropagation();
+ if(e.key==='Escape'){$('queue-menu').hidden=true;$('queue-rows').querySelector('[data-id="'+selected+'"]')?.focus({preventScroll:true});return}
+ const buttons=[...$('queue-menu').querySelectorAll('button:not(:disabled)')],i=buttons.indexOf(document.activeElement);
+ if(e.key==='Home'||e.key==='End')buttons[e.key==='Home'?0:buttons.length-1]?.focus();
+ else if(e.key==='ArrowUp'||e.key==='ArrowDown')buttons[(i+(e.key==='ArrowUp'?-1:1)+buttons.length)%buttons.length]?.focus();
+};
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('#queue-menu'))$('queue-menu').hidden=true});
+function clearMarks(){document.querySelectorAll('.drop-before,.drop-after').forEach(x=>x.classList.remove('drop-before','drop-after'))}
+
+function dropJob(id,targetId,after){
+ const item=jobs.find(x=>x.id===id),target=jobs.find(x=>x.id===targetId);
+ if(!item||!target||item===target||!orderable(item)||!active(target))return;
+ if(!after&&running(target))return runNow(id);
+ jobs=jobs.filter(x=>x.id!==id);jobs.splice(jobs.indexOf(target)+(after?1:0),0,item);selected=id;dragId=null;
+ lastAction='Dragged #'+id+(after?' after #':' before #')+targetId;render();$('queue-rows').querySelector('[data-id="'+id+'"]')?.scrollIntoView({block:'nearest'});
+}
+function sharesDrive(a,b){
+ const drives=j=>[j.from[0],j.to[0]];
+ return drives(a).some(x=>drives(b).includes(x));
+}
+function runNow(id){
+ const job=jobs.find(x=>x.id===id);if(!job||!orderable(job))return;
+ for(const current of jobs){
+   if(current!==job&&running(current)&&sharesDrive(current,job)){current.state='Waiting';current.resumeAfter=id;current.rate=''}
+ }
+ delete job.resumeAfter;job.state=job.kind==='Move'?'Moving':'Copying';job.rate='';
+ jobs=jobs.filter(x=>x!==job);jobs.unshift(job);selected=displayed=id;dragId=null;
+ lastAction='Run #'+id+' now; displaced work resumes after it';render();
+}
+function advance(finished){
+ for(const job of jobs)if(job.resumeAfter===finished){delete job.resumeAfter;job.state='Waiting';job.rate=''}
+ for(const job of jobs){
+   if(job.state==='Waiting'&&!job.resumeAfter&&!jobs.some(x=>running(x)&&sharesDrive(x,job))){
+     job.state=job.kind==='Move'?'Moving':'Copying';job.rate='';
+     if(displayed===finished)displayed=job.id;
+   }
+ }
+}
+
+function state(){let j=jobs.find(x=>x.id===selected);$('state').textContent='PROTOTYPE STATE  '+lastAction+'\nDrawer: '+(drawerOpen?'open':'closed')+' · height: '+drawerHeight+' px · maximized: '+drawerMaximized+' · normal height: '+normalDrawerHeight+' px · layout: '+variant+' · flipped: '+flipped+' · queue progress: '+queuePercent()+'% · icons: '+showIcons+' · selected: #'+selected+' · shown in status: #'+displayed+' · committed policy: '+policy+'\nJobs: '+jobs.map(j=>'#'+j.id+' '+j.kind+' '+j.state).join(' | ')+'\nFind text and file-panel selection survive drawer updates. Action target remains #'+(j?.id||'none')+' after completion.'}
+function setDrawer(open,restore=true){if(open&&!drawerOpen)returnFocus=document.activeElement;const inside=$('drawer').contains(document.activeElement);drawerOpen=open;$('drawer').hidden=!open;fitDrawer();if(!open&&restore&&inside){if(returnFocus?.isConnected&&!$('drawer').contains(returnFocus))returnFocus.focus({preventScroll:true});else $('find').focus({preventScroll:true})}status();state()}
+function cancelJob(id){const j=jobs.find(x=>x.id===id);if(j&&active(j)){delete j.resumeAfter;j.state='Cancelling';j.rate='Releasing files…';lastAction='Cancel #'+id+'; target stays selected';render()}}
+function cancelAll(){jobs.filter(j=>active(j)).forEach(j=>{j.state='Cancelling';delete j.resumeAfter;j.rate='Releasing files…'});lastAction='Cancel all: transfers only; Delete and Interrupted unchanged';render()}
+
+function jobAction(action,id=selected){
+ const j=jobs.find(x=>x.id===id);if(!j)return;
+ if(action==='cancel')return cancelJob(j.id);
+ if(action==='run')return runNow(j.id);
+ if(action==='pause'){
+   if(j.state==='Paused'){delete j.resumeAfter;j.state='Waiting';advance(null)}
+   else{j.state='Paused';delete j.resumeAfter}
+   j.rate='';
+ }
+ if(action==='up'||action==='down'){
+   const other=neighbour(j,action==='up');
+   if(other&&action==='up'&&running(other))return runNow(j.id);
+   if(other){const a=jobs.indexOf(j),b=jobs.indexOf(other);[jobs[a],jobs[b]]=[jobs[b],jobs[a]]}
+ }
+ if(action==='continue'){j.state='Waiting';j.rate='Waiting for device'}
+ if(action==='dismiss'||action==='clear')jobs=jobs.filter(x=>x.id!==j.id);
+ if(action==='report')reportOpen=true;
+ if(action==='close-report')reportOpen=false;
+ lastAction=action+' #'+j.id;render();
+ if(action==='up'||action==='down')$('queue-rows').querySelector('[data-id="'+j.id+'"]')?.scrollIntoView({block:'nearest'});
+}
+
+
+function updateUrl(){const url=new URL(location.href);url.searchParams.set('variant',variant);url.searchParams.set('flip',flipped?'1':'0');history.replaceState(null,'',url)}
+
+function fitDrawer(){
+ const expanded=drawerOpen&&drawerMaximized;
+ const changed=$('workspace').dataset.transfersMaximized!==String(expanded);
+ $('workspace').dataset.transfersMaximized=String(expanded);
+ const limit=Math.max(170,Math.min(500,$('browse').parentElement.clientHeight-200));
+ drawerHeight=expanded?$('browse').parentElement.clientHeight:Math.max(170,Math.min(limit,normalDrawerHeight));
+ $('drawer').style.height=drawerHeight+'px';
+ $('maximize').innerHTML=icon(drawerMaximized?'restore':'maximize');
+ $('maximize').setAttribute('aria-label',drawerMaximized?'Restore':'Maximize');
+ $('maximize').setAttribute('aria-pressed',String(drawerMaximized));
+ $('maximize').title=drawerMaximized?'Restore previous drawer size':'Maximize file transfers';
+ if(changed)fitStatus();
+}
+function rememberDrawer(){
+ try{localStorage.setItem('gozler.prototype.drawer',JSON.stringify({height:normalDrawerHeight,maximized:drawerMaximized}))}catch{}
+}
+function resizeDrawer(height,remember=true){
+ drawerMaximized=false;normalDrawerHeight=height;fitDrawer();normalDrawerHeight=drawerHeight;
+ if(remember)rememberDrawer();state();
+}
+function size(delta){resizeDrawer(drawerHeight+delta)}
+$('hide').onclick=()=>setDrawer(false);$('drawer-demo').onclick=()=>setDrawer(!drawerOpen);$('cancel-all').onclick=cancelAll;
+$('flip').onclick=()=>{flipped=!flipped;updateUrl();lastAction='Flipped sides; selected #'+selected+' unchanged';render()};
+$('maximize').onclick=()=>{drawerMaximized=!drawerMaximized;fitDrawer();rememberDrawer();lastAction=drawerMaximized?'Transfers fill the workspace below the menu':'Restored previous drawer size and file panels';state()};
+$('show-icons').onchange=e=>{showIcons=e.target.checked;render()};
+$('scenario').onchange=e=>loadScenario(e.target.value);$('width').onchange=e=>{$('workspace').style.maxWidth=e.target.value+'px';lastAction='Window width '+e.target.value;state()};$('theme').onchange=e=>document.body.dataset.theme=e.target.value;
+$('find').oninput=e=>{$('find-result').textContent=e.target.value?'Find: '+e.target.value:'12 items'};
+$('startquick').onclick=()=>{loadScenario('quick');$('scenario').value='quick';$('find').focus();lastAction='Paste accepted; focus stays in Find; drawer state unchanged';state()};
+$('finish').onclick=()=>{const j=jobs.find(x=>x.id===selected)||jobs[0];if(!j)return;if(j.state==='Cancelling')j.state='Cancelled';else{j.state='Complete';j.percent=100}j.rate='Finished';advance(j.id);lastAction='Finished #'+j.id+'; no automatic drawer or focus change';render()};
+$('copy-command').onclick=()=>{jobs.push({...base()[0],id:Math.max(...jobs.map(j=>j.id),100)+1,state:'Waiting',percent:0,files:'0 / 1,200 files',size:'0 / 18 GB',file:'',rate:'',policy});lastAction='Sample copy accepted with '+policy;render()};$('filemenu').onclick=()=>setDrawer(!drawerOpen);
+let drag=null;$('grip').onpointerdown=e=>{drag={y:e.clientY,height:drawerHeight};$('grip').setPointerCapture(e.pointerId)};$('grip').onpointermove=e=>{if(drag)resizeDrawer(drag.height+drag.y-e.clientY,false)};$('grip').onpointerup=()=>{drag=null;rememberDrawer()};$('grip').onlostpointercapture=()=>{drag=null};
+$('grip').onkeydown=e=>{if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();e.stopPropagation();size(e.key==='ArrowUp'?20:-20)}};
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('queue-menu').hidden){$('queue-menu').hidden=true;e.preventDefault();return}if(e.key==='Escape'&&drawerOpen&&$('drawer').contains(e.target)){e.preventDefault();setDrawer(false)}});
+const params=new URLSearchParams(location.search);
+if(params.has('flip'))flipped=params.get('flip')!=='0';
+if(params.get('icons')==='0'){showIcons=false;$('show-icons').checked=false}
+const keyIcons=['view','edit','copy','move','newFolder','delete'];
+document.querySelectorAll('.keybar button').forEach((b,i)=>b.innerHTML=icon(keyIcons[i],true)+'<span>'+b.textContent+'</span>');
+for(const [id,key] of [['startquick','paste'],['finish','accept'],['drawer-demo','details']])$(id).innerHTML=icon(key,true)+'<span>'+$(id).textContent+'</span>';
+if(['780','1140','1440'].includes(params.get('width'))){$('width').value=params.get('width');$('workspace').style.maxWidth=params.get('width')+'px'}
+try{const saved=JSON.parse(localStorage.getItem('gozler.prototype.drawer')||'null');if(Number.isFinite(saved?.height))normalDrawerHeight=saved.height;drawerMaximized=saved?.maximized===true}catch{}
+updateUrl();
+loadScenario(params.get('scene')||'running');
+if(params.get('drawer')==='1')setDrawer(true,false);
+</script>
+</html>

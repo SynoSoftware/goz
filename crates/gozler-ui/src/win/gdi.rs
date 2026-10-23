@@ -10,15 +10,15 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use windows::Win32::Foundation::{COLORREF, LRESULT, MAX_PATH, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLOR_3DLIGHT, COLOR_BTNFACE,
-    COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
-    COLOR_WINDOWTEXT, CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW,
-    DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_NOPREFIX,
-    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, FW_BOLD,
-    FW_SEMIBOLD, GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW,
-    GetSysColor, GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ,
-    LOGFONTW, ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode, SetTextColor,
-    TEXTMETRICW, TRANSPARENT,
+    ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLOR_3DLIGHT, COLOR_BTNTEXT,
+    COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+    CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET,
+    DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_NOPREFIX, DT_SINGLELINE,
+    DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, FW_BOLD, FW_SEMIBOLD,
+    GGI_MARK_NONEXISTING_GLYPHS, GdiFlush, GetDC, GetGlyphIndicesW, GetObjectW, GetSysColor,
+    GetSysColorBrush, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW,
+    ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode, SetTextColor, TEXTMETRICW,
+    TRANSPARENT,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
@@ -209,7 +209,7 @@ pub(crate) fn show_icons(shown: bool) {
 }
 
 /// Whether icons show beside text; see [`show_icons`].
-pub(super) fn icons_shown() -> bool {
+pub(crate) fn icons_shown() -> bool {
     ICONS_SHOWN.get()
 }
 
@@ -853,12 +853,6 @@ impl StaticColors {
     pub(crate) fn divider(self) -> LRESULT {
         // SAFETY: system brushes are never freed.
         LRESULT(unsafe { GetSysColorBrush(COLOR_3DLIGHT) }.0 as isize)
-    }
-
-    /// The muted text colour on the dialog colour, for a label of a window
-    /// whose background is the dialog colour.
-    pub(crate) fn muted_on_dialog(self) -> LRESULT {
-        self.on(muted_text(), COLOR_BTNFACE)
     }
 
     fn on_window(self, text: SYS_COLOR_INDEX) -> LRESULT {

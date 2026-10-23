@@ -23,12 +23,12 @@ pub(crate) enum Glyph {
     Cancel,
     /// A list with check marks: the Include page.
     CheckList,
+    ChromeMaximize,
+    ChromeRestore,
+    Switch,
     /// An arrow head pointing down: hides the inspector, which sits at the
     /// bottom.
     ChevronDown,
-    /// An arrow head pointing right: the File operations window's queue
-    /// while it is collapsed.
-    ChevronRight,
     /// An arrow head pointing up: shows the inspector from the bottom.
     ChevronUp,
     /// An arrow pointing right, out of a bar at the left: shows the filter
@@ -144,15 +144,17 @@ pub(crate) enum Glyph {
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 59] = [
+    pub(crate) const ALL: [Glyph; 61] = [
         Glyph::Accept,
         Glyph::Add,
         Glyph::BackToWindow,
         Glyph::BulletedList,
         Glyph::Cancel,
         Glyph::CheckList,
+        Glyph::ChromeMaximize,
+        Glyph::ChromeRestore,
+        Glyph::Switch,
         Glyph::ChevronDown,
-        Glyph::ChevronRight,
         Glyph::ChevronUp,
         Glyph::ClosePane,
         Glyph::CommandPrompt,
@@ -214,9 +216,11 @@ impl Glyph {
             Glyph::BackToWindow => '\u{E73F}',
             Glyph::BulletedList => '\u{E8FD}',
             Glyph::Cancel => '\u{E711}',
+            Glyph::ChromeMaximize => '\u{E922}',
+            Glyph::ChromeRestore => '\u{E923}',
+            Glyph::Switch => '\u{E8AB}',
             Glyph::CheckList => '\u{E9D5}',
             Glyph::ChevronDown => '\u{E70D}',
-            Glyph::ChevronRight => '\u{E76C}',
             Glyph::ChevronUp => '\u{E70E}',
             Glyph::ClosePane => '\u{E89F}',
             Glyph::CommandPrompt => '\u{E756}',

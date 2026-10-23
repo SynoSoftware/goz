@@ -179,6 +179,7 @@ impl Ring {
                     shared = self.changed.wait(shared).expect("no worker panics");
                 }
             };
+            let _active = walk.copying.pause.enter(walk.copying.cancel);
             match task {
                 Task::Close(job) => {
                     self.close(walk, *job);
@@ -546,8 +547,19 @@ impl Ring {
         error: u32,
     ) -> Option<Handed> {
         walk.copying.progress.remove_bytes(written);
-        if !walk.copying.closing.load(Ordering::Relaxed) {
-            let _ = walk.destination.delete_entry(&destination);
+        if !walk.copying.closing.load(Ordering::Relaxed)
+            && let Err(error) = walk.destination.delete_entry(&destination)
+        {
+            walk.listed
+                .lock()
+                .expect("no worker panics")
+                .push(crate::operation::Listed {
+                    path: crate::receive::plain(&join(
+                        &handed.file.target.verbatim,
+                        &handed.file.final_name,
+                    )),
+                    reason: Reason::CleanupFailed(error),
+                });
         }
         // The name leaves when the handles close, before the Windows engine
         // writes it again.
@@ -593,6 +605,7 @@ impl Ring {
     /// The loop, until the walk hands nothing more and every file is out.
     pub(super) fn run(&self, walk: &Walk, io: IoRing) {
         let _entered = walk.copying.io.enter();
+        let _active = walk.copying.pause.enter(walk.copying.cancel);
         let slots = self.plan.reads + self.plan.writes;
         let mut run = Loop {
             ring: self,

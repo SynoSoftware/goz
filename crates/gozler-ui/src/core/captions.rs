@@ -77,6 +77,7 @@ pub(crate) struct WindowCaptions {
     pub(crate) status: StatusCaptions,
     /// The status bar's Cancel, which stops the running job.
     pub(crate) status_cancel: String,
+    pub(crate) status_progress: [String; 2],
     pub(crate) status_widest: StatusWidest,
     /// `None` while Settings > General hides the memory group.
     pub(crate) memory_widest: Option<MemoryWidest>,
@@ -90,7 +91,7 @@ pub(crate) struct WindowCaptions {
     pub(crate) retry: String,
     /// The widest free space a status line shows, which the layout sizes
     /// the status line's right end for.
-    pub(crate) free_widest: String,
+    pub(crate) free_widest: Vec<String>,
 }
 
 /// What a [`CommandButton`] says: its caption, which for an icon is the name
@@ -127,11 +128,8 @@ pub(crate) struct StatusCaptions {
     /// What the view holds: the results and the selection.
     pub(crate) view: String,
     pub(crate) job: JobCaption,
-    /// The service and the index, and a newer release, as the Settings
-    /// dialog's right group shows them.
-    pub(crate) service: String,
-    /// The main window's right group, a status bar part for each: `service`
-    /// unless it is empty, then the search's totals, each after its icon.
+    /// The service and index state, followed by the search's totals, each
+    /// after its icon.
     pub(crate) right: Vec<ValuePart>,
     /// The main window's memory group; `None` while Settings > General
     /// hides it.
@@ -207,19 +205,21 @@ impl MemoryWidest {
 
 /// The status bar's middle group: the running job, or the last job's
 /// result.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct JobCaption {
     pub(crate) text: String,
+    pub(crate) transfer: Option<super::status_transfer::Caption>,
+    pub(crate) transfer_only: bool,
     pub(crate) progress: JobProgress,
-    /// Whether Cancel shows, because the job can stop now
-    /// ([`Model::can_cancel_job`]).
+    /// Whether the work shown here can stop now.
     pub(crate) cancel: bool,
 }
 
 /// The progress bar beside a job's text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum JobProgress {
     /// No bar: the job waits for the person, or it ended.
+    #[default]
     None,
     /// A bar that moves without measuring, because the job does not know
     /// how much is left.
@@ -1402,6 +1402,10 @@ impl WindowCaptions {
             inspector: InspectorCaptions::new(model, numbers),
             status: StatusCaptions::new(model, numbers),
             status_cancel: strings.text("button.cancel").to_owned(),
+            status_progress: [
+                strings.text("file_operations.progress_current").to_owned(),
+                strings.text("file_operations.progress_total").to_owned(),
+            ],
             status_widest: status_widest(strings, numbers),
             memory_widest: model
                 .choices()
@@ -1414,7 +1418,12 @@ impl WindowCaptions {
                 .to_vec(),
             key_bar: key_bar(strings),
             retry: strings.text("panel.retry").to_owned(),
-            free_widest: strings.format("panel.free", &[&text::bytes(strings, numbers, 999 << 30)]),
+            free_widest: (2..=5)
+                .flat_map(|unit| {
+                    [9.99, 99.9, 999.0].map(move |value| (value * 1024f64.powi(unit)) as u64)
+                })
+                .map(|bytes| strings.format("panel.free", &[&text::bytes(strings, numbers, bytes)]))
+                .collect(),
         }
     }
 }
@@ -1450,11 +1459,16 @@ impl StatusCaptions {
                 };
                 JobCaption {
                     text,
+                    transfer: model.transfer_caption(numbers),
+                    transfer_only: model.job() == Job::Operation
+                        && model
+                            .operation()
+                            .is_some_and(file_operations::StatusOperation::is_transfer),
                     progress,
                     cancel: model.can_cancel_job(),
                 }
             },
-            right: std::iter::once(ValuePart::plain(service.clone()))
+            right: std::iter::once(ValuePart::plain(service))
                 .filter(|part| !part.text.is_empty())
                 .chain(
                     status_list(model)
@@ -1462,7 +1476,6 @@ impl StatusCaptions {
                         .unwrap_or_default(),
                 )
                 .collect(),
-            service,
             memory: model
                 .choices()
                 .show_memory
@@ -1756,25 +1769,40 @@ fn attribute_word(letter: char) -> Option<&'static str> {
     })
 }
 
-/// The Settings dialog's status bar's left group: the dialog and its shown
-/// page, or the dialog alone while the search shows no page.
-pub(crate) fn settings_status_view(strings: &Strings, page: Option<SettingsPage>) -> String {
-    match page {
-        Some(page) => strings.format("settings.status_view", &[strings.text(page.label())]),
-        None => strings.text("settings.title").to_owned(),
+pub(crate) fn settings_status_view(strings: &Strings, changed: bool) -> &str {
+    if changed {
+        strings.text("settings.unsaved")
+    } else {
+        ""
     }
 }
 
-/// The Settings dialog's status bar's widest texts: the main window's, with
-/// the dialog's own left group.
-pub(crate) fn settings_status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusWidest {
-    let view = std::iter::once(None)
-        .chain(SettingsPage::ALL.map(Some))
-        .map(|page| settings_status_view(strings, page))
-        .collect();
+pub(crate) fn settings_job(
+    model: &Model,
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    follow_fix: bool,
+) -> JobCaption {
+    if !follow_fix {
+        return JobCaption::default();
+    }
+    let (text, progress) = fix_status(strings, numbers, model.fix());
+    JobCaption {
+        text,
+        progress,
+        cancel: model.fix().can_cancel(),
+        ..JobCaption::default()
+    }
+}
+
+/// Settings' work takes the space after its fixed unsaved-changes part.
+pub(crate) fn settings_status_widest(strings: &Strings) -> StatusWidest {
+    let view = vec![settings_status_view(strings, true).to_owned()];
     StatusWidest {
         view,
-        ..status_widest(strings, numbers)
+        running: Vec::new(),
+        done: Vec::new(),
+        panel_index: Vec::new(),
     }
 }
 
@@ -2139,7 +2167,25 @@ fn operation_status(model: &Model, numbers: &dyn Numbers) -> (String, JobProgres
     let Some(operation) = model.operation() else {
         return (String::new(), JobProgress::None);
     };
-    let (text, bar) = file_operations::status_line(model.strings(), numbers, operation);
+    if operation.is_transfer() {
+        return (String::new(), JobProgress::None);
+    }
+    let (mut text, bar) = file_operations::status_line(model.strings(), numbers, operation);
+    let backlog = model.operation_backlog(numbers, operation);
+    if !backlog.is_empty() {
+        if matches!(
+            operation,
+            file_operations::StatusOperation::Pending {
+                phase: file_operations::Pending::Interrupted,
+                ..
+            }
+        ) {
+            text = backlog;
+        } else {
+            text.push_str(model.strings().text("file_operations.separator"));
+            text.push_str(&backlog);
+        }
+    }
     let progress = match bar {
         None => JobProgress::None,
         Some(Bar::Moving) => JobProgress::Unmeasured,

@@ -6,24 +6,26 @@
 //! adds the NUL.
 
 use core::ffi::c_void;
-use core::mem::{size_of, zeroed};
+use core::mem::{ManuallyDrop, size_of, zeroed};
 use core::ptr;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GetLastError, NO_ERROR,
+    ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_PAUSED, GetLastError, NO_ERROR,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     COPY_FILE_COPY_SYMLINK, COPY_FILE_DIRECTORY, COPY_FILE_ENABLE_SPARSE_COPY,
     COPY_FILE_FAIL_IF_EXISTS, COPY_FILE_NO_BUFFERING, COPY_FILE_OPEN_AND_COPY_REPARSE_POINT,
-    COPYFILE2_CALLBACK_CHUNK_FINISHED, COPYFILE2_EXTENDED_PARAMETERS,
+    COPY_FILE_RESUME_FROM_PAUSE, COPYFILE2_CALLBACK_CHUNK_FINISHED, COPYFILE2_EXTENDED_PARAMETERS,
     COPYFILE2_EXTENDED_PARAMETERS_V2, COPYFILE2_MESSAGE, COPYFILE2_MESSAGE_ACTION,
-    COPYFILE2_PROGRESS_CANCEL, COPYFILE2_PROGRESS_CONTINUE, CopyFile2, CreateDirectoryExW,
-    CreateDirectoryW, GetCompressedFileSizeW, GetDiskFreeSpaceExW, GetFileAttributesExW,
-    GetFileExInfoStandard, INVALID_FILE_SIZE, MOVEFILE_REPLACE_EXISTING, MoveFileExW,
-    SetFileAttributesW, WIN32_FILE_ATTRIBUTE_DATA,
+    COPYFILE2_PROGRESS_CANCEL, COPYFILE2_PROGRESS_CONTINUE, COPYFILE2_PROGRESS_PAUSE, CopyFile2,
+    CreateDirectoryExW, CreateDirectoryW, GetCompressedFileSizeW, GetDiskFreeSpaceExW,
+    GetFileAttributesExW, GetFileExInfoStandard, INVALID_FILE_SIZE, MOVEFILE_REPLACE_EXISTING,
+    MoveFileExW, SetFileAttributesW, WIN32_FILE_ATTRIBUTE_DATA,
 };
 
+use crate::entry::{Access, Entry};
 use crate::error::{WinError, last_error};
+use crate::file_id::FileHandle;
 
 fn nul(path: &[u16]) -> Vec<u16> {
     path.iter().copied().chain(Some(0)).collect()
@@ -58,19 +60,44 @@ pub struct CopyOptions {
     /// only Windows build 22621 and later knows; `None` leaves the size to
     /// `CopyFile2`.
     pub io_desired_size: Option<u32>,
+    /// Resumes only the restart header left by an earlier paused call.
+    pub resume: bool,
 }
 
-/// Copies `from` to `to`, which must not exist. `progress` receives the
-/// bytes copied so far, alternate data streams included, after each chunk;
-/// it returns `false` to cancel, and the copy then fails with
-/// `ERROR_REQUEST_ABORTED` after `CopyFile2` deleted what it wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyAction {
+    Continue,
+    Cancel,
+    Pause,
+}
+
+pub enum CopyState {
+    Complete,
+    /// Owns the actual destination even if its name changes while paused.
+    Paused(Entry),
+}
+
+struct Progress<'a> {
+    callback: &'a mut dyn FnMut(u64) -> CopyAction,
+    destination: Option<Entry>,
+    capture_error: Option<WinError>,
+}
+
+/// Copies `from` to `to`, which must not exist unless `options.resume`
+/// names a previous paused copy. `progress` receives bytes copied so far,
+/// including alternate streams. Cancel returns `ERROR_REQUEST_ABORTED`
+/// after deleting partial output; Pause retains the destination after writing
+/// its restart header, or reports Complete if the copy already finished.
 pub fn copy_file(
     from: &[u16],
     to: &[u16],
     options: CopyOptions,
-    progress: &mut dyn FnMut(u64) -> bool,
-) -> Result<(), WinError> {
+    progress: &mut dyn FnMut(u64) -> CopyAction,
+) -> Result<CopyState, WinError> {
     let mut flags = COPY_FILE_FAIL_IF_EXISTS;
+    if options.resume {
+        flags |= COPY_FILE_RESUME_FROM_PAUSE;
+    }
     match options.source {
         CopySource::File => {}
         CopySource::SymbolicLink { folder } => {
@@ -93,7 +120,11 @@ pub fn copy_file(
         flags |= COPY_FILE_ENABLE_SPARSE_COPY;
     }
     let (from, to) = (nul(from), nul(to));
-    let mut progress = progress;
+    let mut progress = Progress {
+        callback: progress,
+        destination: None,
+        capture_error: None,
+    };
     // The version-2 parameters begin with the version-1 fields, and
     // `CopyFile2` reads the version from `dwSize`.
     let parameters = COPYFILE2_EXTENDED_PARAMETERS_V2 {
@@ -129,12 +160,20 @@ pub fn copy_file(
         } else {
             result
         };
+        if let Some(error) = progress.capture_error {
+            return Err(error);
+        }
+        if code == ERROR_REQUEST_PAUSED
+            && let Some(destination) = progress.destination
+        {
+            return Ok(CopyState::Paused(destination));
+        }
         return Err(WinError {
             code,
             context: "CopyFile2",
         });
     }
-    Ok(())
+    Ok(CopyState::Complete)
 }
 
 unsafe extern "system" fn on_progress(
@@ -142,18 +181,35 @@ unsafe extern "system" fn on_progress(
     context: *const c_void,
 ) -> COPYFILE2_MESSAGE_ACTION {
     // SAFETY: `CopyFile2` passes a valid message for the call's duration,
-    // and `context` is the `&mut &mut dyn FnMut` that `copy_file` passed,
+    // and `context` is the `Progress` that `copy_file` passed,
     // still borrowed by that call.
     unsafe {
         let message = &*message;
         if message.Type != COPYFILE2_CALLBACK_CHUNK_FINISHED {
             return COPYFILE2_PROGRESS_CONTINUE;
         }
-        let progress = &mut *context.cast::<&mut dyn FnMut(u64) -> bool>().cast_mut();
-        if progress(message.Info.ChunkFinished.uliTotalBytesTransferred) {
-            COPYFILE2_PROGRESS_CONTINUE
-        } else {
-            COPYFILE2_PROGRESS_CANCEL
+        let progress = &mut *context.cast::<Progress<'_>>().cast_mut();
+        match (progress.callback)(message.Info.ChunkFinished.uliTotalBytesTransferred) {
+            CopyAction::Continue => COPYFILE2_PROGRESS_CONTINUE,
+            CopyAction::Cancel => COPYFILE2_PROGRESS_CANCEL,
+            CopyAction::Pause => {
+                // Windows owns this handle through the callback. Reopening
+                // by identity shares delete, unlike duplicating its file object;
+                // ManuallyDrop leaves the borrowed handle for Windows to close.
+                let borrowed = ManuallyDrop::new(Entry(FileHandle(
+                    message.Info.ChunkFinished.hDestinationFile,
+                )));
+                match borrowed.reopen(Access::Inspect) {
+                    Ok(destination) => {
+                        progress.destination = Some(destination);
+                        COPYFILE2_PROGRESS_PAUSE
+                    }
+                    Err(error) => {
+                        progress.capture_error = Some(error);
+                        COPYFILE2_PROGRESS_CANCEL
+                    }
+                }
+            }
         }
     }
 }

@@ -1059,26 +1059,27 @@ fn pause_at_first_report<T: Send, S>(
     })
 }
 
-/// A paused copy holds between blocks or inside the copy function's
-/// callback, in the ring and in the Windows engine. Resumed, it finishes the
+/// A paused copy holds between blocks or after the Windows API returns
+/// its paused result. Resumed, it finishes the
 /// file; cancelled while paused, it leaves nothing at the final name.
 #[test]
 fn a_paused_copy_waits_until_resumed_or_cancelled() {
     let scratch = Scratch::new("pause");
     let size = 64 * 1024 * 1024;
     let source = scratch.write(r"src\big.bin", &vec![7u8; size]);
-    let windows = CopyPlan::new(
+    let mut windows = CopyPlan::new(
         VolumeClass::Ssd,
         &SpeedSettings::automatic(),
         Layout::TwoDisks,
     );
+    windows.large_from = None;
     let ring = CopyPlan::new(VolumeClass::Ssd, &ring_settings(), Layout::TwoDisks);
     for (case, plan) in [("windows", windows), ("ring", ring)] {
         for cancelled in [false, true] {
             let out = scratch.path(format!("out-{case}-{cancelled}"));
             fs::create_dir(&out).expect("a destination");
             let (cancel, progress) = (AtomicBool::new(false), Progress::default());
-            let (copied, bytes) = pause_at_first_report(
+            let (copied, (bytes, completed)) = pause_at_first_report(
                 &progress,
                 |pause| {
                     let copying = Copying {
@@ -1096,30 +1097,119 @@ fn a_paused_copy_waits_until_resumed_or_cancelled() {
                 },
                 |pause| {
                     let bytes = progress.bytes();
+                    let completed = progress.items();
                     if cancelled {
                         cancel.store(true, Ordering::Relaxed);
                         pause.wake();
                     } else {
                         pause.set(false);
                     }
-                    bytes
+                    (bytes, completed)
                 },
             );
             assert!(
-                bytes > 0 && bytes < size as u64,
+                bytes > 0 && (bytes < size as u64 || completed == 1),
                 "{case}: {bytes} at the pause"
             );
             assert_eq!(copied.ring.to_windows, 0, "{case}");
             let copy = out.join("big.bin");
-            if cancelled {
-                assert!(!copy.exists(), "{case}: a partial file");
+            if cancelled && completed == 0 {
+                assert!(
+                    !copy.exists(),
+                    "{case}: remaining file {:?}; failures {:?}",
+                    fs::metadata(&copy).map(|m| m.len()),
+                    copied.listed
+                );
             } else {
                 assert_eq!(copied.listed, [], "{case}");
+                assert_eq!(progress.bytes(), size as u64, "{case}: completed bytes");
                 assert_eq!(fs::metadata(&copy).expect("the copy").len(), size as u64);
                 assert!(fs::read(&copy).expect("the copy") == fs::read(&source).expect("source"));
             }
         }
     }
+}
+
+#[test]
+fn cancelling_a_native_pause_removes_its_output_after_the_name_is_replaced() {
+    let scratch = Scratch::new("pause-replaced");
+    let source = scratch.write("source.bin", &vec![7u8; 64 * 1024 * 1024]);
+    let destination = scratch.path("copied.bin");
+    let renamed = scratch.path("owned.bin");
+    let from = verbatim(&source.as_os_str().encode_wide().collect::<Vec<_>>());
+    let to = verbatim(&destination.as_os_str().encode_wide().collect::<Vec<_>>());
+    let options = gozler_winfs::CopyOptions {
+        source: gozler_winfs::CopySource::File,
+        unbuffered: false,
+        sparse: false,
+        io_desired_size: None,
+        resume: false,
+    };
+    match gozler_winfs::copy_file(&from, &to, options, &mut |_| {
+        gozler_winfs::CopyAction::Pause
+    })
+    .expect("the native copy pauses or completes")
+    {
+        gozler_winfs::CopyState::Paused(owned) => {
+            fs::rename(&destination, &renamed).expect("the paused output can be renamed");
+            fs::write(&destination, b"replacement").expect("its old name can be reused");
+            let deletion = owned
+                .reopen(Access::Delete)
+                .expect("open the retained output for deletion");
+            crate::delete::Disposition::default()
+                .delete_entry(&deletion)
+                .expect("delete the owned output");
+            drop((deletion, owned));
+            assert!(!renamed.exists());
+            assert_eq!(
+                fs::read(destination).expect("the replacement survives"),
+                b"replacement"
+            );
+        }
+        gozler_winfs::CopyState::Complete => {
+            assert_eq!(
+                fs::read(destination).expect("the finished copy"),
+                fs::read(source).expect("the source")
+            );
+        }
+    }
+}
+
+#[test]
+fn native_pause_preserves_output_and_resumes_a_paused_file() {
+    let scratch = Scratch::new("native-pause");
+    let source = scratch.write("source.bin", &vec![7; 64 * 1024 * 1024]);
+    let destination = scratch.path("copied.bin");
+    let from = verbatim(&source.as_os_str().encode_wide().collect::<Vec<_>>());
+    let to = verbatim(&destination.as_os_str().encode_wide().collect::<Vec<_>>());
+    let mut options = gozler_winfs::CopyOptions {
+        source: gozler_winfs::CopySource::File,
+        unbuffered: false,
+        sparse: false,
+        io_desired_size: None,
+        resume: false,
+    };
+    let mut paused_at = 0;
+    let result = gozler_winfs::copy_file(&from, &to, options, &mut |bytes| {
+        paused_at = bytes;
+        gozler_winfs::CopyAction::Pause
+    });
+    assert!(paused_at > 0 && paused_at <= 64 * 1024 * 1024);
+    assert!(destination.exists());
+    if let gozler_winfs::CopyState::Paused(destination) =
+        result.expect("the native copy pauses or completes")
+    {
+        drop(destination);
+        options.resume = true;
+        gozler_winfs::copy_file(&from, &to, options, &mut |_| {
+            gozler_winfs::CopyAction::Continue
+        })
+        .expect("the native copy resumes its existing output");
+    }
+    assert_eq!(
+        fs::read(destination).expect("the copy"),
+        fs::read(source).expect("the source")
+    );
 }
 
 /// A paused delete holds between entries. Cancelled while paused, it leaves
@@ -1689,7 +1779,13 @@ fn an_unfinished_operation_is_offered_again() {
         watched.wait(id, |state| matches!(state, State::Running { .. }));
         if cancelled {
             watched.queue.cancel(id);
-            watched.ended(id);
+            watched
+                .queue
+                .close()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("Exit flush finishes")
+                .expect("recovery saved");
+            assert!(saved::read(&scratch.saved()).is_empty());
         }
         drop(watched);
         let offered = saved::read(&scratch.saved()).len();
@@ -1697,6 +1793,85 @@ fn an_unfinished_operation_is_offered_again() {
         let _ = fs::remove_file(scratch.saved());
     }
     drop(handle);
+}
+
+/// Delete and late source intake must not turn a cancelled command into
+/// another copy, including when Exit immediately follows Cancel all.
+#[test]
+fn cancel_all_covers_intake_and_delete_cannot_revive_it() {
+    let scratch = Scratch::new("cancel-intake");
+    let source = scratch.file(r"src\a.txt");
+    let out = scratch.path("out");
+    fs::create_dir(&out).expect("destination");
+    let watched = Watched::new(&scratch.saved());
+    let request = Request::Copy {
+        sources: Vec::new(),
+        destination: Destination::Folder(out.clone()),
+    };
+    let id = watched.queue.accept(request, SpeedSettings::automatic());
+    watched.queue.cancel_all();
+    let (deleted, _) = watched.prepared(Request::Delete {
+        sources: vec![scratch.file("delete.txt")],
+    });
+    watched
+        .queue
+        .submit(deleted, None)
+        .expect("prepared delete");
+    assert_eq!(watched.ended(deleted).end, End::Complete);
+    assert!(!watched.queue.resolve(
+        id,
+        Request::Copy {
+            sources: vec![source],
+            destination: Destination::Folder(out.clone()),
+        }
+    ));
+    watched.queue.fail_intake(id);
+    assert_eq!(watched.ended(id).end, End::Cancelled);
+    drop(watched);
+    assert!(saved::read(&scratch.saved()).is_empty());
+    assert!(!out.join("a.txt").exists());
+}
+
+/// Recovery must be saved before the first mutation; a failed write cannot
+/// silently start a transfer which Exit would have no way to continue.
+#[test]
+fn an_unwritable_recovery_file_prevents_the_first_mutation() {
+    let scratch = Scratch::new("recovery-write");
+    let source = scratch.file(r"src\a.txt");
+    let out = scratch.path("out");
+    fs::create_dir(&out).expect("destination");
+    let watched = Watched::new(&scratch.path(r"missing\operations.json"));
+    let (id, _) = watched.prepared(Request::Copy {
+        sources: vec![source],
+        destination: Destination::Folder(out.clone()),
+    });
+    watched.queue.submit(id, None).expect("prepared copy");
+    assert!(matches!(
+        watched.ended(id).end,
+        End::Refused(Refusal::RecoveryUnavailable(_))
+    ));
+    assert!(!out.join("a.txt").exists());
+}
+
+#[test]
+fn a_missing_source_does_not_erase_a_successful_copys_count() {
+    let scratch = Scratch::new("missing-count");
+    let source = scratch.file(r"src\a.txt");
+    let missing = scratch.path(r"src\gone.txt");
+    let out = scratch.path("out");
+    fs::create_dir(&out).expect("destination");
+    let watched = Watched::new(&scratch.saved());
+    let outcome = watched.run(
+        Request::Copy {
+            sources: vec![missing.clone(), source],
+            destination: Destination::Folder(out.clone()),
+        },
+        None,
+    );
+    assert_eq!(fs::read(out.join("a.txt")).expect("copied"), b"gozler");
+    assert_eq!(outcome.completed, 1);
+    assert!(!outcome.succeeded);
+    assert_eq!(outcome.listed, [failed(&missing, ERROR_FILE_NOT_FOUND)]);
 }
 
 /// Each operation's folder is worked out on a queue thread, by prepare for

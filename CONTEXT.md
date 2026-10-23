@@ -266,6 +266,15 @@ opens the drive menu.
 The line under a panel's list: its counts at the left, and the free space of
 its drive at the right.
 
+**Status slot**:
+One of the status bar's three positions: Left, Center or Right. Each holds
+the status entries aligned at that position.
+_Avoid_: socket, group (for the position)
+
+**Status entry**:
+One piece of status information, such as a transfer, an export or a memory
+figure, within a status slot.
+
 **Search panel**:
 A panel that shows the results of a search in place of a folder. `Alt+F7` or
 `Ctrl+F` turns the active panel into one, and `Esc` or `Backspace` shows its
@@ -309,9 +318,9 @@ An entry that a waiting or running delete or move takes. It leaves the folder
 panels, and shows struck through in the search lists, at once, before the
 disk work ends.
 
-**File operations window**:
-The window that shows the running operation and the queue. It opens when an
-operation still runs 2 seconds after it starts.
+**Transfer pane**:
+The pane that shows copies, moves, their queue and reports in the window.
+_Avoid_: File operations window
 
 **Color token**:
 What a piece of text means, which decides its color wherever gozler shows it:

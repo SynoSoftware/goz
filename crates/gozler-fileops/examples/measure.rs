@@ -46,8 +46,8 @@ mod measure {
         RingBlock, SpeedSettings, State,
     };
     use gozler_winfs::{
-        CopyOptions, CopySource, Existing, copy_file, empty_standby_list, free_space, is_elevated,
-        own_process_cycles, process_cycles, rename, volume_storage,
+        CopyAction, CopyOptions, CopySource, Existing, copy_file, empty_standby_list, free_space,
+        is_elevated, own_process_cycles, process_cycles, rename, volume_storage,
     };
 
     const KIB: u64 = 1024;
@@ -531,8 +531,12 @@ mod measure {
             unbuffered,
             sparse: false,
             io_desired_size,
+            resume: false,
         };
-        copy_file(&long(from), &long(to), options, &mut |_| true).expect("CopyFile2");
+        copy_file(&long(from), &long(to), options, &mut |_| {
+            CopyAction::Continue
+        })
+        .expect("CopyFile2");
     }
 
     /// The small tree on 16 threads with `CopyFile2`, each file to its final

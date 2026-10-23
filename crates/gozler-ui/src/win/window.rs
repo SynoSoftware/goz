@@ -34,9 +34,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowThreadProcessId, HHOOK, HICON, HTCLIENT, IDC_ARROW, IDC_SIZENS, IMAGE_ICON,
     IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
-    MSGF_DIALOGBOX, MSGF_MESSAGEBOX, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW,
-    SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK,
-    SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON,
+    MSGF_DIALOGBOX, MSGF_MESSAGEBOX, PM_REMOVE, PeekMessageW, PostQuitMessage, PostThreadMessageW,
+    RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION,
+    SB_THUMBTRACK, SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON,
     SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW, SetCursor, SetTimer,
     SetWindowLongPtrW, SetWindowPlacement, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
@@ -46,8 +46,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_INITMENUPOPUP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE,
     WM_SYSCHAR, WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL,
-    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_EX_LEFT, WS_OVERLAPPEDWINDOW, WS_SYSMENU, WS_THICKFRAME,
+    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -203,11 +203,6 @@ impl MinMaxInfo<'_> {
             y: size.height.0,
         };
     }
-
-    /// Lets the person resize the window only up to `height`.
-    pub(crate) fn set_max_track_height(&mut self, height: Px) {
-        self.0.ptMaxTrackSize.y = height.0;
-    }
 }
 
 /// One window class's message handling.
@@ -221,7 +216,7 @@ pub(crate) trait WindowProc: 'static {
 pub(crate) enum Background {
     /// The window colour, as File Explorer's views have.
     Window,
-    /// The dialog colour, as the File operations window has.
+    /// The system dialog colour.
     Dialog,
 }
 
@@ -322,28 +317,26 @@ pub(crate) fn create_window<W: WindowProc>(
     Ok(Hwnd(hwnd))
 }
 
-/// Creates a hidden top-level window of the class `class`, owned by `state`,
-/// that `owner` owns: it stays in front of `owner`, minimizes with it and
-/// has no taskbar button of its own. It has a sizing border and a close
-/// button, and Windows places it.
-pub(crate) fn create_owned_window<W: WindowProc>(
+/// Creates hidden child content. The parent owns its placement and keyboard
+/// traversal; the child owns its Rc until WM_NCDESTROY.
+pub(crate) fn create_child_window<W: WindowProc>(
     class: &str,
     state: Rc<W>,
     owner: Hwnd,
 ) -> windows::core::Result<Hwnd> {
     let raw = Rc::into_raw(state);
-    // SAFETY: as in create_window; the owner is passed as the parent of a
-    // window without WS_CHILD, which makes it the owner.
+    // SAFETY: WM_NCCREATE stores the Rc and WM_NCDESTROY releases it, as in
+    // create_window. The live owner is the native parent of this child.
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_LEFT,
+            WS_EX_CONTROLPARENT,
             &HSTRING::from(class),
             PCWSTR::null(),
-            WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            WS_CHILD | WS_CLIPCHILDREN,
+            0,
+            0,
+            0,
+            0,
             Some(owner.0),
             None,
             GetModuleHandleW(PCWSTR::null()).ok().map(Into::into),
@@ -476,20 +469,11 @@ const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
 const CHAR: u32 = super::wake::WAKE + 7;
 
 thread_local! {
-    /// The window that [`set_modeless`] names, or none.
-    static MODELESS: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+
     /// The windows that [`own_keys`] names.
     static OWN_KEYS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
     /// Whether [`message_filter`] is routing a message.
     static FILTERING: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Names the top-level window besides the main one whose controls take Tab,
-/// the access keys, `Enter` and `Esc` as a dialog's do, such as the File
-/// operations window, or none. Its messages skip the main window's
-/// accelerators and keys, which would act on the main window's selection.
-pub(crate) fn set_modeless(window: Option<Hwnd>) {
-    MODELESS.set(window.map_or(HWND(std::ptr::null_mut()), |window| window.0));
 }
 
 /// Names `window`, a top-level window besides the main one, as one that
@@ -526,8 +510,7 @@ pub(super) fn offer_key(window: HWND, target: HWND, key: WPARAM, flags: LPARAM) 
 
 /// Gives `msg`, a message of the top-level window `root` besides the main
 /// one, to that window's keys: for a window that [`own_keys`] names, first
-/// as [`Message::KeyDown`], then to its `IsDialogMessageW`; for the window
-/// that [`set_modeless`] names, only to its `IsDialogMessageW`. Whether the
+/// as [`Message::KeyDown`], then to its `IsDialogMessageW`. Whether the
 /// window took the message. Any other window, such as a tooltip, takes none,
 /// and the caller lets the message go on.
 fn route_other(root: HWND, msg: &MSG) -> bool {
@@ -535,7 +518,7 @@ fn route_other(root: HWND, msg: &MSG) -> bool {
     if own_keys && msg.message == WM_KEYDOWN && offer_key(root, msg.hwnd, msg.wParam, msg.lParam) {
         return true;
     }
-    if !own_keys && (root.is_invalid() || root != MODELESS.get()) {
+    if !own_keys {
         return false;
     }
     // SAFETY: `msg` is a message that a loop read; a stale window only
@@ -552,8 +535,8 @@ fn route_other(root: HWND, msg: &MSG) -> bool {
 /// `IsDialogMessageW` for Tab, the access keys, `Enter` and `Esc` among the
 /// main window's controls (DESIGN.md: window rule 8). A key that
 /// `IsDialogMessageW` moves the focus with is reported to the main window,
-/// which no control notifies of it. A message for the window that
-/// [`set_modeless`] names, for a window that [`own_keys`] names, or for one
+/// which no control notifies of it. A message for a window that
+/// [`own_keys`] names, or for one
 /// of their controls, goes through `route_other`, and one for any other
 /// window, such as a tooltip, is only dispatched.
 ///
@@ -611,7 +594,9 @@ fn run_messages(
             if accelerators().translate(main, &msg) {
                 continue;
             }
-            if msg.message == WM_KEYDOWN && offer_key(main.0, msg.hwnd, msg.wParam, msg.lParam) {
+            if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
+                && offer_key(main.0, msg.hwnd, msg.wParam, msg.lParam)
+            {
                 continue;
             }
             // Before IsDialogMessageW, whose access keys would take Alt with
@@ -655,7 +640,7 @@ fn run_messages(
 /// boxes and message boxes call it with `MSGF_DIALOGBOX` or
 /// `MSGF_MESSAGEBOX` before they process a message. While the main window
 /// has one open, [`run_message_loop`] does not run, so without the hook the
-/// File operations window and the Viewers, which stay usable, would get no
+/// Viewers, which stay usable, would get no
 /// Tab, access keys, `Enter` or `Esc` (DESIGN.md: window rule 8).
 struct MessageFilter(Option<HHOOK>);
 
@@ -739,6 +724,20 @@ pub(crate) fn open_menu_bar(window: Hwnd) {
 pub(crate) fn quit() {
     // SAFETY: posts WM_QUIT to this thread's queue.
     unsafe { PostQuitMessage(0) };
+}
+
+/// Keeps the message loop alive until background shutdown finishes, without
+/// waiting on the window thread or using a window handle after destruction.
+pub(crate) fn quit_after(finish: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+    // SAFETY: the current thread owns the message loop which remains alive
+    // until this worker posts WM_QUIT to its existing queue.
+    let thread = unsafe { GetCurrentThreadId() };
+    std::thread::spawn(move || {
+        finish();
+        // SAFETY: WM_QUIT has no pointer parameters, and the loop has not
+        // been told to exit before the shutdown worker finishes.
+        let _ = unsafe { PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0)) };
+    })
 }
 
 /// Ends the message loop from inside any modal loop that runs on this

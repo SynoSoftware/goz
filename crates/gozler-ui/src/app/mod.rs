@@ -161,6 +161,7 @@ pub(crate) fn run() {
     );
     win::window::run_message_loop(hwnd, &|| window.accelerators());
     window.close_for_setup(hwnd);
+    window.finish_shutdown();
     win::drop_target::wait_for_sources();
     if window.resets_settings() {
         // The new window must find no first one.

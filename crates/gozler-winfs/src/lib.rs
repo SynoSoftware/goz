@@ -96,8 +96,8 @@ pub use journal::{
 
 #[cfg(windows)]
 pub use copy::{
-    CopyOptions, CopySource, Existing, allocated_size, copy_file, create_folder, free_space,
-    path_attributes, rename, set_path_attributes,
+    CopyAction, CopyOptions, CopySource, CopyState, Existing, allocated_size, copy_file,
+    create_folder, free_space, path_attributes, rename, set_path_attributes,
 };
 
 #[cfg(windows)]

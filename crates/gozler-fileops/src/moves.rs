@@ -35,6 +35,7 @@ pub(crate) fn move_by_rename(
     destination: &Target,
     moving: &Moving<'_>,
 ) -> Vec<Listed> {
+    let _active = moving.pause.enter(moving.cancel);
     let mut run = Run {
         moving,
         listed: Vec::new(),

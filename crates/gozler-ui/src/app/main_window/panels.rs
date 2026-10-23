@@ -169,9 +169,9 @@ impl PanelControls {
             message: Label::create_centred(parent, message)?,
             retry: Button::create(parent, retry)?,
             list: ListView::create(parent, list)?,
-            counts: Label::create_line(parent, counts)?,
+            counts: Label::create_heading(parent, counts)?,
             quick: Edit::create_echo(parent, quick)?,
-            free: Label::create_right_line(parent, free)?,
+            free: Label::create_right_heading(parent, free)?,
             folder: Label::create_right_path(parent, folder)?,
             kind: Cell::new(None),
         };
@@ -393,6 +393,16 @@ impl MainWindow {
     /// the list's message and Retry, placed for their text. A path box with
     /// the focus keeps what the person types.
     pub(super) fn show_panel(&self, side: Side) {
+        let panes = self.model.borrow().panes();
+        if panes.inspector
+            && panes.maximized
+            && panes.content == crate::core::layout::InspectorContent::Transfers
+        {
+            for hwnd in self.panel(side).hwnds() {
+                hwnd.set_visible(false);
+            }
+            return;
+        }
         self.show_panel_kind(side);
         let captions = PanelCaptions::new(&self.model.borrow(), side, &*self.numbers.borrow());
         let c = self.panel(side);

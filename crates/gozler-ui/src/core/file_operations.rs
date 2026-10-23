@@ -1,4 +1,4 @@
-//! The File operations window's decisions (DESIGN.md: File operations): which
+//! File operations' presentation decisions (DESIGN.md: File operations): which
 //! operation the card shows, every text of the card and of the queue list, and
 //! the speed, which the window works out from the counts it polls, because the
 //! engine reports counts only.
@@ -6,10 +6,14 @@
 //! The engine's queue owns the operations, their order and which ones wait;
 //! this module only words what the queue reports.
 
+pub(super) mod batch;
+mod layout;
+pub(crate) use layout::{CARD_ICON, Layout, Metrics, ROW_ICON};
+
 use super::captions::{Guard, Question, QuestionBody};
 use super::commands::{Mark, MenuNode};
 use super::glyph::Glyph;
-use super::layout::{Dpi, Px, Rect};
+use super::layout::Px;
 use super::panel::same_folder;
 use super::text::{Numbers, Strings, bytes, name_of, without_access_key};
 use gozler_fileops::{
@@ -83,28 +87,6 @@ impl Meter {
     }
 }
 
-/// The time left for `remaining` at `per_second`, as "32 min left", or
-/// `None` while nothing moves.
-pub(crate) fn time_left(strings: &Strings, remaining: u64, per_second: f64) -> Option<String> {
-    if per_second < 1.0 {
-        return None;
-    }
-    let seconds = (remaining as f64 / per_second).ceil() as u64;
-    let (hours, minutes) = (seconds / 3600, seconds % 3600 / 60);
-    Some(match (hours, minutes) {
-        (0, 0) => strings.format("file_operations.left_seconds", &[&seconds.to_string()]),
-        (0, _) => {
-            // Rounded up, so "1 min left" never shows for 90 seconds.
-            let minutes = seconds.div_ceil(60);
-            strings.format("file_operations.left_minutes", &[&minutes.to_string()])
-        }
-        (hours, minutes) => strings.format(
-            "file_operations.left_hours",
-            &[&hours.to_string(), &minutes.to_string()],
-        ),
-    })
-}
-
 /// A speed in bytes, as "5.10 MB/s".
 pub(crate) fn bytes_per_second(strings: &Strings, numbers: &dyn Numbers, speed: f64) -> String {
     strings.format(
@@ -113,33 +95,61 @@ pub(crate) fn bytes_per_second(strings: &Strings, numbers: &dyn Numbers, speed: 
     )
 }
 
-/// What the window shows: its title, the card of the running operation,
+/// What the window shows: its title, the selected operation's card,
 /// and the queue list's rows, in the queue's order.
 #[derive(Debug, PartialEq)]
 pub(crate) struct View {
     pub(crate) title: String,
-    /// `None` while no operation runs.
+    /// `None` when the selection is no longer available.
     pub(crate) card: Option<Card>,
-    /// What the card says while no operation runs: "Preparing…" while one
-    /// prepares, or that none runs.
+    /// What the card says when its selection is unavailable.
     pub(crate) idle: String,
     pub(crate) rows: Vec<Row>,
     /// The header over the list, such as "Queue · 3 waiting".
     pub(crate) queue: String,
+    pub(crate) report: Option<Report>,
 }
 
-/// The running operation the card shows: the first one the queue runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Detail {
+    Progress(OperationId),
+    Report(OperationId),
+}
+
+impl Detail {
+    pub(crate) fn id(self) -> OperationId {
+        match self {
+            Detail::Progress(id) | Detail::Report(id) => id,
+        }
+    }
+}
+
+/// The immutable result backing the virtual report list; formatting one
+/// requested row never copies or measures the other failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Report {
+    pub(crate) id: OperationId,
+    pub(crate) title: String,
+    pub(crate) summary: String,
+    pub(crate) outcome: Arc<Outcome>,
+}
+
+pub(crate) fn is_transfer(request: &Request) -> bool {
+    matches!(request, Request::Copy { .. } | Request::Move { .. })
+}
+
+/// The selected operation's progress, independently of the status target.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Card {
     pub(crate) id: OperationId,
     pub(crate) glyph: Glyph,
-    /// "Copy", or "Copy · paused".
+    /// The operation's command.
     pub(crate) title: String,
-    /// The time left and the speeds, "Calculating…" before the first
-    /// speed, or "Paused".
+    /// Its current phase; the rates have their own controls.
     pub(crate) status: String,
+    /// Stops bar animation for manual Pause and priority admission alike.
     pub(crate) paused: bool,
-    /// "Copying" before the current file.
+    /// The current file's label.
     pub(crate) doing: String,
     /// The current file relative to [`Card::from`]; while there is none,
     /// the one selected entry, or empty for more.
@@ -151,12 +161,16 @@ pub(crate) struct Card {
     pub(crate) to: Option<String>,
     /// The current file's bar; `None` for a delete and a move by rename,
     /// which move no data.
-    pub(crate) file_bar: Option<Measure>,
+    pub(crate) file_bar: Option<Bar>,
+    pub(crate) file_bytes: String,
     pub(crate) total_bar: Bar,
     /// "3,812 of 31,233 files", or "6,240 deleted".
     pub(crate) items: String,
     /// "1.11 GB of 9.27 GB", or empty when no bytes move.
     pub(crate) bytes: String,
+    pub(crate) phase: RowPhase,
+    pub(crate) rate: String,
+    pub(crate) files_rate: String,
 }
 
 /// `done` of `total`.
@@ -177,12 +191,12 @@ impl Measure {
     }
 }
 
-/// The whole operation's bar.
+/// Progress whose total may not yet be known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Bar {
     /// With its percentage beside it.
     Measured(Measure),
-    /// A delete, which never knows its total.
+    /// The total is unknown, or combines incomparable units.
     Moving,
 }
 
@@ -292,15 +306,19 @@ impl RowLine {
 /// queue's buttons offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowPhase {
-    /// Running beside the card's operation.
     Running {
+        /// The person's Pause, independently of priority admission.
         paused: bool,
     },
-    /// Only a waiting operation moves in the queue.
+    /// Accepted work that has not started or yielded to another transfer.
     Waiting,
     /// Preparing, or prepared and waiting for the person's answer.
     Starting,
     Interrupted,
+    Completed {
+        report: bool,
+    },
+    Cancelling,
 }
 
 /// What the person can do to a row's operation, from its menu, the queue's
@@ -314,10 +332,12 @@ pub(crate) enum QueueAction {
     MoveDown,
     Continue,
     Dismiss,
+    Report,
+    Clear,
 }
 
 impl QueueAction {
-    const ALL: [QueueAction; 7] = [
+    pub(crate) const ALL: [QueueAction; 9] = [
         QueueAction::Pause,
         QueueAction::Resume,
         QueueAction::Cancel,
@@ -325,6 +345,8 @@ impl QueueAction {
         QueueAction::MoveDown,
         QueueAction::Continue,
         QueueAction::Dismiss,
+        QueueAction::Report,
+        QueueAction::Clear,
     ];
 
     /// Its ID in the row's context menu, which is never 0.
@@ -351,6 +373,8 @@ impl QueueAction {
             QueueAction::MoveDown => "file_operations.menu_move_down",
             QueueAction::Continue => "file_operations.menu_continue",
             QueueAction::Dismiss => "file_operations.menu_dismiss",
+            QueueAction::Report => "file_operations.report",
+            QueueAction::Clear => "button.clear",
         }
     }
 
@@ -364,6 +388,8 @@ impl QueueAction {
             QueueAction::MoveDown => "file_operations.move_down",
             QueueAction::Continue => "file_operations.continue",
             QueueAction::Dismiss => "file_operations.dismiss",
+            QueueAction::Report => "file_operations.report",
+            QueueAction::Clear => "button.clear",
         }
     }
 
@@ -374,6 +400,8 @@ impl QueueAction {
             QueueAction::Cancel | QueueAction::Dismiss => Glyph::Cancel,
             QueueAction::MoveUp => Glyph::ChevronUp,
             QueueAction::MoveDown => Glyph::ChevronDown,
+            QueueAction::Report => Glyph::Document,
+            QueueAction::Clear => Glyph::EraseTool,
         }
     }
 }
@@ -389,6 +417,9 @@ impl RowPhase {
             RowPhase::Waiting => vec![vec![A::Cancel], vec![A::MoveUp, A::MoveDown]],
             RowPhase::Starting => vec![vec![A::Cancel]],
             RowPhase::Interrupted => vec![vec![A::Continue, A::Dismiss]],
+            RowPhase::Completed { report: true } => vec![vec![A::Report, A::Clear]],
+            RowPhase::Completed { report: false } => vec![vec![A::Clear]],
+            RowPhase::Cancelling => Vec::new(),
         }
     }
 
@@ -400,6 +431,8 @@ impl RowPhase {
             RowPhase::Running { paused: true } => (Some(A::Resume), A::Cancel),
             RowPhase::Waiting | RowPhase::Starting => (None, A::Cancel),
             RowPhase::Interrupted => (Some(A::Continue), A::Dismiss),
+            RowPhase::Completed { report } => (report.then_some(A::Report), A::Clear),
+            RowPhase::Cancelling => (None, A::Cancel),
         };
         RowButtons { run, end }
     }
@@ -414,20 +447,16 @@ pub(crate) struct RowButtons {
     pub(crate) end: QueueAction,
 }
 
-/// The waiting rows' operations, in the queue's order.
-fn waiting_ids(rows: &[Row]) -> impl Iterator<Item = OperationId> + '_ {
+fn movable_ids(rows: &[Row]) -> impl Iterator<Item = OperationId> + '_ {
     (rows.iter())
-        .filter(|row| row.phase == RowPhase::Waiting)
+        .filter(|row| matches!(row.phase, RowPhase::Waiting | RowPhase::Running { .. }))
         .map(|row| row.id)
 }
 
 /// Where a row dropped at `gap`, a place between the rows, lands: the gap
-/// before the first waiting row from there, which it goes before, or else
-/// the gap after the last waiting row, with `None` for the end of the
-/// waiting operations. The queue lists the running operations first and
-/// the waiting ones next, and moves only the waiting ones.
+/// before the next running or waiting operation, or the end of their order.
 pub(crate) fn landing(rows: &[Row], gap: usize) -> (usize, Option<OperationId>) {
-    let waiting = |row: &Row| row.phase == RowPhase::Waiting;
+    let waiting = |row: &Row| matches!(row.phase, RowPhase::Waiting | RowPhase::Running { .. });
     match (rows.iter().enumerate().skip(gap)).find(|(_, row)| waiting(row)) {
         Some((index, row)) => (index, Some(row.id)),
         None => {
@@ -437,20 +466,19 @@ pub(crate) fn landing(rows: &[Row], gap: usize) -> (usize, Option<OperationId>) 
     }
 }
 
-/// Whether the waiting row `id`, put before `before`, stays where it is:
-/// just before itself, or before the waiting row after it.
+/// Whether putting `id` before `before` leaves its order unchanged.
 pub(crate) fn stays_in_place(rows: &[Row], id: OperationId, before: Option<OperationId>) -> bool {
-    let next = waiting_ids(rows)
+    let next = movable_ids(rows)
         .skip_while(|waiting| *waiting != id)
         .nth(1);
     before == Some(id) || before == next
 }
 
-/// The place before which Move up or Move down puts the waiting row `id`,
-/// or `None` when it is first or last among the waiting rows already. The
+/// The place before which Move up or Move down puts `id`,
+/// or `None` when it is first or last already. The
 /// inner `None` is the end of the queue.
 pub(crate) fn move_step(rows: &[Row], id: OperationId, up: bool) -> Option<Option<OperationId>> {
-    let waiting: Vec<OperationId> = waiting_ids(rows).collect();
+    let waiting: Vec<OperationId> = movable_ids(rows).collect();
     let index = waiting.iter().position(|w| *w == id)?;
     if up {
         Some(Some(*waiting.get(index.checked_sub(1)?)?))
@@ -703,41 +731,55 @@ pub(crate) fn view(
     numbers: &dyn Numbers,
     operations: &[Operation],
     meters: &HashMap<OperationId, Meter>,
+    detail: Option<Detail>,
 ) -> View {
     let speed = |id| meters.get(&id).and_then(Meter::speed);
-    let card_id = operations
+    let transfers: Vec<_> = operations
         .iter()
-        .find(|operation| matches!(operation.state, State::Running(_)))
-        .map(|operation| operation.id);
-    let card = operations
-        .iter()
-        .find_map(|operation| match &operation.state {
-            State::Running(running) if Some(operation.id) == card_id => Some(card(
-                strings,
-                numbers,
-                operation,
-                running,
-                speed(operation.id),
-            )),
-            _ => None,
-        });
-    let rows: Vec<Row> = operations
-        .iter()
-        .filter(|operation| Some(operation.id) != card_id)
-        .filter_map(|operation| row(strings, numbers, operation, operations, speed(operation.id)))
+        .filter(|o| is_transfer(&o.request))
         .collect();
-    let title = match &card {
-        Some(card) => {
-            let done = match card.total_bar {
-                Bar::Measured(measure) => {
-                    strings.format("file_operations.percent", &[&measure.percent().to_string()])
-                }
-                Bar::Moving => card.items.clone(),
-            };
-            strings.format("file_operations.title_running", &[&done, &card.title])
-        }
-        None => strings.text("file_operations.title").to_owned(),
+    let selected = match detail {
+        Some(detail) => transfers.iter().copied().find(|o| o.id == detail.id()),
+        None => transfers
+            .iter()
+            .copied()
+            .find(|o| matches!(&o.state, State::Running(running) if running.is_active()))
+            .or_else(|| transfers.first().copied()),
     };
+    let rows: Vec<Row> = transfers
+        .iter()
+        .map(|operation| row(strings, numbers, operation, operations, speed(operation.id)))
+        .collect();
+    let card = selected
+        .map(|operation| card_for(strings, numbers, operation, operations, speed(operation.id)));
+    let report = selected.and_then(|operation| {
+        if detail != Some(Detail::Report(operation.id)) {
+            return None;
+        }
+        let State::Ended(outcome) = &operation.state else {
+            return None;
+        };
+        Some(Report {
+            id: operation.id,
+            title: operation_title(strings, numbers, &operation.request),
+            summary: match &outcome.end {
+                End::Complete | End::Cancelled => strings.count(
+                    "file_operations.failed",
+                    outcome.listed.len() as u64,
+                    numbers,
+                    &[],
+                ),
+                End::DiskFull(no_room) => joined_sentences([
+                    strings.text("file_operations.disk_full").to_owned(),
+                    no_room_text(strings, numbers, no_room),
+                ]),
+                End::Refused(refusal) => {
+                    refusal_text(strings, numbers, *refusal, &|code| code.to_string())
+                }
+            },
+            outcome: Arc::clone(outcome),
+        })
+    });
     let preparing =
         (operations.iter()).any(|operation| matches!(operation.state, State::Preparing));
     let idle = strings.text(if preparing {
@@ -747,28 +789,92 @@ pub(crate) fn view(
     });
     // A row that runs beside the card's operation or was interrupted does
     // not wait, and its own line says what it does.
-    let waiting = rows
-        .iter()
-        .filter(|row| matches!(row.phase, RowPhase::Waiting | RowPhase::Starting))
-        .count() as u64;
-    let queue = if waiting == 0 {
-        strings.text("file_operations.queue_none").to_owned()
-    } else {
-        strings.count("file_operations.queue", waiting, numbers, &[])
-    };
+    let queue = strings.count("file_operations.jobs", rows.len() as u64, numbers, &[]);
     View {
-        title,
+        title: strings.text("file_operations.transfers").to_owned(),
         card,
         idle: idle.to_owned(),
         queue,
         rows,
+        report,
+    }
+}
+
+fn card_for(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    operation: &Operation,
+    operations: &[Operation],
+    speed: Option<Speed>,
+) -> Card {
+    if let State::Running(running) = &operation.state {
+        return card(strings, numbers, operation, running, speed);
+    }
+    let ends = card_ends(strings, numbers, operation);
+    let row = row(strings, numbers, operation, operations, speed);
+    let phase = row.phase;
+    let total = match &operation.state {
+        State::Prepared(p) => p.total,
+        State::Waiting { total, .. } => *total,
+        _ => None,
+    };
+    let (total_bar, items, bytes_text) = match &operation.state {
+        State::Ended(outcome) => (
+            Bar::Measured(Measure { done: 1, total: 1 }),
+            strings.count("file_operations.done", outcome.completed, numbers, &[]),
+            bytes(strings, numbers, outcome.bytes),
+        ),
+        _ => (
+            total.map_or(Bar::Moving, |total| {
+                Bar::Measured(Measure {
+                    done: 0,
+                    total: if total.bytes > 0 {
+                        total.bytes
+                    } else {
+                        total.items
+                    },
+                })
+            }),
+            String::new(),
+            String::new(),
+        ),
+    };
+    Card {
+        id: operation.id,
+        glyph: glyph_of(&operation.request),
+        title: operation_title(strings, numbers, &operation.request),
+        status: match &operation.state {
+            State::Ended(outcome) => strings
+                .text(match outcome.end {
+                    End::Cancelled => "file_operations.cancelled",
+                    End::Refused(_) => "file_operations.not_started",
+                    _ if reports(outcome) => "file_operations.completed_errors",
+                    _ => "file_operations.completed",
+                })
+                .to_owned(),
+            _ => row.detail.whole(strings),
+        },
+        paused: false,
+        doing: strings.text("file_operations.file").to_owned(),
+        file: String::new(),
+        file_tip: String::new(),
+        from: ends.from,
+        to: ends.to,
+        file_bar: None,
+        file_bytes: String::new(),
+        total_bar,
+        items,
+        bytes: bytes_text,
+        phase,
+        rate: String::new(),
+        files_rate: String::new(),
     }
 }
 
 /// Whether a running operation's progress is in bytes: a copy or a move
 /// across volumes with data to move. A move by rename and a copy of empty
 /// files count their entries.
-fn moves_bytes(running: &Running) -> bool {
+pub(super) fn moves_bytes(running: &Running) -> bool {
     !running.renames && running.total.is_some_and(|total| total.bytes > 0)
 }
 
@@ -817,7 +923,11 @@ pub(crate) fn taskbar(operations: &[Operation]) -> Taskbar {
     }
     let measured: Vec<Measure> = running.iter().filter_map(|r| measure_of(r)).collect();
     if measured.is_empty() {
-        return Taskbar::Moving;
+        return if running.iter().any(|r| r.is_active()) {
+            Taskbar::Moving
+        } else {
+            Taskbar::None
+        };
     }
     // In thousandths of each operation, so a small copy beside a large
     // one still moves the bar.
@@ -830,7 +940,7 @@ pub(crate) fn taskbar(operations: &[Operation]) -> Taskbar {
         done,
         total: 1000 * measured.len() as u64,
     };
-    if running.iter().all(|r| r.paused) {
+    if running.iter().all(|r| !r.is_active()) {
         Taskbar::Paused(total)
     } else {
         Taskbar::Measured(total)
@@ -848,20 +958,8 @@ fn card(
     let ends = card_ends(strings, numbers, operation);
     let measure = measure_of(running);
     let moves_bytes = moves_bytes(running);
-    let mut title = strings.text(kind.name).to_owned();
-    if running.paused {
-        title = strings.format("file_operations.paused_title", &[&title]);
-    }
-    // The line always holds a text, as File Explorer's does, so the card
-    // never changes its shape when the first speed arrives.
-    let status = if running.paused {
-        strings.text("file_operations.paused").to_owned()
-    } else {
-        speed
-            .map(|speed| status(strings, numbers, running, measure, moves_bytes, speed))
-            .filter(|status| !status.is_empty())
-            .unwrap_or_else(|| strings.text("file_operations.calculating").to_owned())
-    };
+    let title = operation_title(strings, numbers, &operation.request);
+    let status = strings.text(held(running).unwrap_or(kind.doing)).to_owned();
     let (file, file_tip, file_bar) = match &running.current {
         Some(current) => {
             let source = text_of(&current.source);
@@ -870,10 +968,10 @@ fn card(
                 Some(destination) => format!("{source}\n→ {}", text_of(destination)),
                 None => source.clone(),
             };
-            let bar = moves_bytes.then_some(Measure {
+            let bar = moves_bytes.then_some(Bar::Measured(Measure {
                 done: current.done,
                 total: current.size,
-            });
+            }));
             (file, tip, bar)
         }
         // A delete and a move by rename report no current file, so the
@@ -892,11 +990,250 @@ fn card(
             (
                 relative_to(&one, &ends.from).to_owned(),
                 one,
-                moves_bytes.then_some(Measure { done: 0, total: 0 }),
+                moves_bytes.then_some(Bar::Moving),
             )
         }
     };
-    let (items, bytes_text) = match done_of(running) {
+    let (items, bytes_text) = counts(strings, numbers, &operation.request, running);
+    Card {
+        id: operation.id,
+        glyph: glyph_of(&operation.request),
+        title,
+        status,
+        paused: !running.is_active(),
+        doing: strings.text("file_operations.file").to_owned(),
+        file,
+        file_tip,
+        from: ends.from,
+        to: ends.to,
+        file_bytes: match file_bar {
+            Some(Bar::Measured(m)) => strings.format(
+                "file_operations.bytes_of",
+                &[
+                    &bytes(strings, numbers, m.done),
+                    &bytes(strings, numbers, m.total),
+                ],
+            ),
+            Some(Bar::Moving) => strings.text("file_operations.total_unknown").to_owned(),
+            None => String::new(),
+        },
+        file_bar,
+        total_bar: measure.map_or(Bar::Moving, Bar::Measured),
+        items,
+        bytes: bytes_text,
+        phase: RowPhase::Running {
+            paused: running.paused,
+        },
+        rate: speed
+            .filter(|_| running.is_active())
+            .map_or_else(String::new, |s| bytes_per_second(strings, numbers, s.bytes)),
+        files_rate: speed
+            .filter(|_| running.is_active())
+            .map_or_else(String::new, |s| items_per_second(strings, numbers, s)),
+    }
+}
+
+fn operation_title(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> String {
+    let sources = match request {
+        Request::Copy { sources, .. } | Request::Move { sources, .. } => sources.as_slice(),
+        _ => return strings.text(kind_of(request).name).to_owned(),
+    };
+    let name = match sources {
+        [one] => name_of(&text_of(one)).to_owned(),
+        _ => strings.count(
+            "file_operations.size_items",
+            sources.len() as u64,
+            numbers,
+            &[],
+        ),
+    };
+    strings.format(
+        "file_operations.running_label",
+        &[strings.text(kind_of(request).name), &name],
+    )
+}
+
+fn held(running: &Running) -> Option<&'static str> {
+    if running.paused {
+        Some("file_operations.paused")
+    } else if running.yielded {
+        Some("file_operations.waiting")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn transfer_caption(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    operation: &StatusOperation,
+    speed: Option<Speed>,
+    bar: Bar,
+    errors: u8,
+    report: Option<OperationId>,
+) -> super::status_transfer::Caption {
+    use super::captions::JobProgress;
+    use super::status_transfer::{Action, Caption};
+    let (kind, state, paused) = match operation {
+        StatusOperation::Running {
+            request, running, ..
+        } => (
+            kind_of(request).name,
+            held(running).unwrap_or(kind_of(request).doing),
+            Some(running.paused),
+        ),
+        StatusOperation::Pending { request, phase, .. } => (
+            kind_of(request).name,
+            match phase {
+                Pending::Preparing => "file_operations.preparing",
+                Pending::Waiting => "file_operations.waiting",
+                Pending::Cancelling => "file_operations.cancelling",
+                Pending::Interrupted => "file_operations.interrupted",
+            },
+            None,
+        ),
+        StatusOperation::Ended {
+            request, outcome, ..
+        } => (
+            kind_of(request).name,
+            if errors > 0 {
+                "file_operations.completed_errors"
+            } else if outcome.end == End::Cancelled {
+                "file_operations.cancelled"
+            } else {
+                "file_operations.completed"
+            },
+            None,
+        ),
+        StatusOperation::Summary { completion, .. } => (
+            match completion.kind {
+                Completed::Copy(_) => "file_operations.copy",
+                _ => "file_operations.move",
+            },
+            if errors > 0 {
+                "file_operations.completed_errors"
+            } else if completion.end == End::Cancelled {
+                "file_operations.cancelled"
+            } else {
+                "file_operations.completed"
+            },
+            None,
+        ),
+    };
+    let ended = matches!(
+        operation,
+        StatusOperation::Ended { .. } | StatusOperation::Summary { .. }
+    );
+    let kind = if ended && errors > 0 {
+        match errors {
+            1 => "file_operations.copy",
+            2 => "file_operations.move",
+            _ => "file_operations.copy_move",
+        }
+    } else {
+        kind
+    };
+    let active = matches!(operation, StatusOperation::Running {running,..} if running.is_active());
+    let (activity, status) = if active {
+        let StatusOperation::Running { request, .. } = operation else {
+            unreachable!("only a running operation can be unpaused")
+        };
+        let sources = match &**request {
+            Request::Copy { sources, .. } | Request::Move { sources, .. } => sources.as_slice(),
+            _ => &[],
+        };
+        let name = match sources {
+            [one] => name_of(&text_of(one)).to_owned(),
+            _ => strings.count(
+                "file_operations.size_items",
+                sources.len() as u64,
+                numbers,
+                &[],
+            ),
+        };
+        (
+            strings.format(
+                "file_operations.running_label",
+                &[strings.text(state), &name],
+            ),
+            name,
+        )
+    } else {
+        (
+            strings.format(
+                "file_operations.state_label",
+                &[strings.text(kind), strings.text(state)],
+            ),
+            strings.text(state).to_owned(),
+        )
+    };
+    let (progress, percent) = match bar {
+        _ if matches!(
+            operation,
+            StatusOperation::Pending {
+                phase: Pending::Interrupted,
+                ..
+            }
+        ) =>
+        {
+            (JobProgress::None, String::new())
+        }
+        Bar::Measured(m) => (
+            JobProgress::Measured {
+                done: m.done,
+                total: m.total,
+            },
+            strings.format("file_operations.percent", &[&m.percent().to_string()]),
+        ),
+        Bar::Moving => (
+            JobProgress::Unmeasured,
+            strings.text("file_operations.total_unknown").to_owned(),
+        ),
+    };
+    let action = |command: QueueAction| Action {
+        text: strings.text(command.caption()).to_owned(),
+        glyph: command.glyph(),
+        command,
+    };
+    let rate = speed.filter(|_| active);
+    Caption {
+        id: if ended {
+            report.unwrap_or_else(|| operation.id())
+        } else {
+            operation.id()
+        },
+        name: strings.text(kind).to_owned(),
+        status,
+        activity: activity.clone(),
+        glyph: Some(match kind {
+            "file_operations.copy" => Glyph::Copy,
+            _ => Glyph::MoveToFolder,
+        }),
+        progress,
+        paused: matches!(operation, StatusOperation::Running { running, .. } if !running.is_active()),
+        percent,
+        byte_rate: rate.map_or_else(String::new, |s| bytes_per_second(strings, numbers, s.bytes)),
+        file_rate: rate.map_or_else(String::new, |s| items_per_second(strings, numbers, s)),
+        pause: paused.map(|paused| {
+            action(if paused {
+                QueueAction::Resume
+            } else {
+                QueueAction::Pause
+            })
+        }),
+        cancel: operation.can_cancel().then(|| action(QueueAction::Cancel)),
+        report: (ended && report.is_some()).then(|| action(QueueAction::Report)),
+        summary_tip: activity,
+    }
+}
+
+fn counts(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    request: &Request,
+    running: &Running,
+) -> (String, String) {
+    match done_of(running) {
         Some((done, total)) => (
             strings.count(
                 "file_operations.items_of",
@@ -904,7 +1241,7 @@ fn card(
                 numbers,
                 &[&numbers.integer(done.items)],
             ),
-            if moves_bytes {
+            if moves_bytes(running) {
                 strings.format(
                     "file_operations.bytes_of",
                     &[
@@ -917,54 +1254,10 @@ fn card(
             },
         ),
         None => (
-            items_done(strings, numbers, &operation.request, running.items),
+            items_done(strings, numbers, request, running.items),
             String::new(),
         ),
-    };
-    Card {
-        id: operation.id,
-        glyph: glyph_of(&operation.request),
-        title,
-        status,
-        paused: running.paused,
-        doing: strings.text(kind.doing).to_owned(),
-        file,
-        file_tip,
-        from: ends.from,
-        to: ends.to,
-        file_bar,
-        total_bar: measure.map_or(Bar::Moving, Bar::Measured),
-        items,
-        bytes: bytes_text,
     }
-}
-
-/// The card's status line: the time left, the bytes per second and the
-/// items per second, as far as the operation measures them.
-fn status(
-    strings: &Strings,
-    numbers: &dyn Numbers,
-    running: &Running,
-    measure: Option<Measure>,
-    moves_bytes: bool,
-    speed: Speed,
-) -> String {
-    let left = measure.and_then(|measure| {
-        let remaining = measure.total.saturating_sub(measure.done);
-        let per_second = if moves_bytes {
-            speed.bytes
-        } else {
-            speed.items
-        };
-        time_left(strings, remaining, per_second)
-    });
-    let per_second = moves_bytes.then(|| bytes_per_second(strings, numbers, speed.bytes));
-    // The bytes per second say all about one file.
-    let items = running
-        .total
-        .is_none_or(|total| total.items > 1)
-        .then(|| items_per_second(strings, numbers, speed));
-    joined_parts(strings, left.into_iter().chain(per_second).chain(items))
 }
 
 /// A speed in entries, as "120 items/s".
@@ -992,7 +1285,7 @@ fn row(
     operation: &Operation,
     operations: &[Operation],
     speed: Option<Speed>,
-) -> Option<Row> {
+) -> Row {
     let ends = ends_of(strings, numbers, operation);
     let kind = kind_of(&operation.request);
     let (detail, phase) = match &operation.state {
@@ -1013,11 +1306,8 @@ fn row(
                 ),
                 None => items_done(strings, numbers, &operation.request, running.items),
             };
-            let detail = if running.paused {
-                joined_parts(
-                    strings,
-                    [strings.text("file_operations.paused").to_owned(), progress],
-                )
+            let detail = if let Some(state) = held(running) {
+                joined_parts(strings, [strings.text(state).to_owned(), progress])
             } else {
                 let rate = speed.map(|speed| {
                     if moves_bytes(running) {
@@ -1062,6 +1352,10 @@ fn row(
             RowLine::Plain(strings.text("file_operations.preparing").to_owned()),
             RowPhase::Starting,
         ),
+        State::Cancelling => (
+            RowLine::Plain(strings.text("file_operations.cancelling").to_owned()),
+            RowPhase::Cancelling,
+        ),
         State::Prepared(prepared) => {
             let size = match prepared.total {
                 Some(total) => size_of_total(strings, numbers, &operation.request, Some(total)),
@@ -1097,9 +1391,26 @@ fn row(
             };
             (RowLine::Plain(detail), RowPhase::Interrupted)
         }
-        State::Ended(_) => return None,
+        State::Ended(outcome) => (
+            RowLine::Plain(joined_parts(
+                strings,
+                reports(outcome)
+                    .then(|| strings.text("file_operations.report_available").to_owned())
+                    .into_iter()
+                    .chain([ended_line(
+                        strings,
+                        numbers,
+                        &operation.request,
+                        outcome,
+                        false,
+                    )]),
+            )),
+            RowPhase::Completed {
+                report: reports(outcome),
+            },
+        ),
     };
-    Some(Row {
+    Row {
         id: operation.id,
         glyph: glyph_of(&operation.request),
         title: RowLine::Paths {
@@ -1109,7 +1420,7 @@ fn row(
         },
         detail,
         phase,
-    })
+    }
 }
 
 /// A waiting operation's size, as gozlerd gave its total: "4,210 items,
@@ -1159,15 +1470,63 @@ fn items_done(strings: &Strings, numbers: &dyn Numbers, request: &Request, items
     strings.count(key, items, numbers, &[])
 }
 
-/// The operation that ended last, with its request and its outcome.
-pub(crate) type LastEnded = (OperationId, Arc<Request>, Arc<Outcome>);
+pub(crate) type LastEnded = (OperationId, Completion);
 
-/// The file operation the status bar's middle group shows in both modes:
-/// the newest running one, else the one that ended last, which stays until
-/// another starts, because after Hide it is the only sign that the
-/// operation finished (DESIGN.md: File operations).
+/// The status retains counts and at most two paths, independently of the
+/// selected entries and the report's potentially large failure list.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Completion {
+    kind: Completed,
+    end: End,
+    items: u64,
+    failed: u64,
+    pub(crate) numbered: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Completed {
+    Copy(PathBuf),
+    Move(PathBuf),
+    Rename { source: String, name: String },
+    Delete,
+    NewFolder(PathBuf),
+}
+
+impl Completion {
+    pub(crate) fn of(request: &Request, outcome: &Outcome, numbered: bool) -> Self {
+        let kind = match request {
+            _ if renamed(request).is_some() => {
+                let (source, name) = renamed(request).expect("the request is a rename");
+                Completed::Rename { source, name }
+            }
+            Request::Copy { destination, .. } => Completed::Copy(destination.path()),
+            Request::Move { destination, .. } => Completed::Move(destination.path()),
+            Request::Delete { .. } => Completed::Delete,
+            Request::NewFolder { path } => Completed::NewFolder(path.clone()),
+        };
+        Self {
+            kind,
+            end: outcome.end.clone(),
+            items: outcome.completed,
+            failed: outcome.listed.len() as u64,
+            numbered,
+        }
+    }
+}
+
+/// A status snapshot. Operations owns which live work or retained outcome
+/// remains visible; transfers retain only reports the person has not cleared.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum StatusOperation {
+    Summary {
+        id: OperationId,
+        completion: Completion,
+    },
+    Pending {
+        id: OperationId,
+        request: Arc<Request>,
+        phase: Pending,
+    },
     Running {
         id: OperationId,
         request: Arc<Request>,
@@ -1183,19 +1542,57 @@ pub(crate) enum StatusOperation {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pending {
+    Preparing,
+    Waiting,
+    Cancelling,
+    Interrupted,
+}
+
 impl StatusOperation {
     pub(crate) fn id(&self) -> OperationId {
         match self {
-            StatusOperation::Running { id, .. } | StatusOperation::Ended { id, .. } => *id,
+            StatusOperation::Summary { id, .. } => *id,
+            StatusOperation::Running { id, .. }
+            | StatusOperation::Ended { id, .. }
+            | StatusOperation::Pending { id, .. } => *id,
         }
+    }
+
+    pub(crate) fn can_cancel(&self) -> bool {
+        matches!(
+            self,
+            StatusOperation::Running { .. }
+                | StatusOperation::Pending {
+                    phase: Pending::Preparing | Pending::Waiting,
+                    ..
+                }
+        )
+    }
+
+    pub(crate) fn is_transfer(&self) -> bool {
+        let request = match self {
+            Self::Summary { completion, .. } => {
+                return matches!(
+                    completion.kind,
+                    Completed::Copy(_) | Completed::Move(_) | Completed::Rename { .. }
+                );
+            }
+            Self::Running { request, .. }
+            | Self::Ended { request, .. }
+            | Self::Pending { request, .. } => request,
+        };
+        matches!(**request, Request::Copy { .. } | Request::Move { .. })
     }
 
     /// The newest of the running `operations`, else the newest that ended
     /// and is not `reported`, such as one whose failures the window is about
     /// to report, else `ended`, the one reported last. A delete or a move
     /// stays in the queue after its report while a list keeps it, so only
-    /// `ended` tells which operation ended last. Each operation in
-    /// `numbered` was answered with Keep both.
+    /// `ended` tells which operation ended last. Dormant interrupted work is
+    /// shown only when no live work or completion remains. Each operation
+    /// in `numbered` was answered with Keep both.
     pub(crate) fn of(
         operations: &[Operation],
         ended: Option<&LastEnded>,
@@ -1203,15 +1600,11 @@ impl StatusOperation {
         numbered: &HashSet<OperationId>,
     ) -> Option<StatusOperation> {
         let newest = |running: bool| {
-            (operations.iter())
-                .filter(|operation| match &operation.state {
-                    State::Running(_) => running,
-                    State::Ended(outcome) => {
-                        !running && !reported.contains(&operation.id) && !did_nothing(outcome)
-                    }
-                    _ => false,
-                })
-                .max_by_key(|operation| operation.id)
+            (operations.iter()).find(|operation| match &operation.state {
+                State::Running(current) => running && current.is_active(),
+                State::Ended(_) => !running && !reported.contains(&operation.id),
+                _ => false,
+            })
         };
         let ended_status =
             |id, request: &Arc<Request>, outcome: &Arc<Outcome>| StatusOperation::Ended {
@@ -1220,20 +1613,65 @@ impl StatusOperation {
                 outcome: Arc::clone(outcome),
                 numbered: numbered.contains(&id),
             };
-        match newest(true).or_else(|| newest(false)) {
-            Some(operation) => match &operation.state {
-                State::Running(running) => Some(StatusOperation::Running {
+        let pending = || {
+            operations.iter().find(|operation| {
+                matches!(
+                    operation.state,
+                    State::Preparing
+                        | State::Prepared(_)
+                        | State::Waiting { .. }
+                        | State::Cancelling
+                )
+            })
+        };
+        let current = newest(true)
+            .or_else(|| {
+                operations.iter().find(|operation| {
+                    matches!(&operation.state, State::Running(running) if running.paused && !running.yielded)
+                })
+            })
+            .or_else(pending)
+            .or_else(|| {
+                operations
+                    .iter()
+                    .find(|op| matches!(op.state, State::Running(_)))
+            })
+            .or_else(|| newest(false));
+        if let Some(operation) = current {
+            return Some(match &operation.state {
+                State::Running(running) => StatusOperation::Running {
                     id: operation.id,
                     request: Arc::clone(&operation.request),
                     running: running.clone(),
-                }),
-                State::Ended(outcome) => {
-                    Some(ended_status(operation.id, &operation.request, outcome))
-                }
-                _ => None,
-            },
-            None => ended.map(|(id, request, outcome)| ended_status(*id, request, outcome)),
+                },
+                State::Ended(outcome) => ended_status(operation.id, &operation.request, outcome),
+                state => StatusOperation::Pending {
+                    id: operation.id,
+                    request: Arc::clone(&operation.request),
+                    phase: match state {
+                        State::Cancelling => Pending::Cancelling,
+                        State::Waiting { .. } => Pending::Waiting,
+                        State::Interrupted => Pending::Interrupted,
+                        _ => Pending::Preparing,
+                    },
+                },
+            });
         }
+        ended
+            .map(|(id, completion)| StatusOperation::Summary {
+                id: *id,
+                completion: completion.clone(),
+            })
+            .or_else(|| {
+                operations
+                    .iter()
+                    .find(|operation| matches!(operation.state, State::Interrupted))
+                    .map(|operation| StatusOperation::Pending {
+                        id: operation.id,
+                        request: Arc::clone(&operation.request),
+                        phase: Pending::Interrupted,
+                    })
+            })
     }
 }
 
@@ -1247,6 +1685,28 @@ pub(crate) fn status_line(
     operation: &StatusOperation,
 ) -> (String, Option<Bar>) {
     match operation {
+        StatusOperation::Summary { completion, .. } => {
+            (completion_line(strings, numbers, completion), None)
+        }
+        StatusOperation::Pending { request, phase, .. } => {
+            let key = match phase {
+                Pending::Preparing => "file_operations.preparing",
+                Pending::Waiting => "file_operations.waiting",
+                Pending::Cancelling => "file_operations.cancelling",
+                Pending::Interrupted => "file_operations.interrupted",
+            };
+            let text = joined_parts(
+                strings,
+                [
+                    doing_line(strings, numbers, request),
+                    strings.text(key).to_owned(),
+                ],
+            );
+            (
+                text,
+                (!matches!(phase, Pending::Interrupted)).then_some(Bar::Moving),
+            )
+        }
         StatusOperation::Running {
             request, running, ..
         } => {
@@ -1280,14 +1740,19 @@ fn running_line(
         }
         None => items_done(strings, numbers, request, running.items),
     };
-    let paused = running
-        .paused
-        .then(|| strings.text("file_operations.paused").to_owned());
+    let paused = held(running).map(|key| strings.text(key).to_owned());
     let text = joined_parts(
         strings,
-        [doing_line(strings, numbers, request), progress]
-            .into_iter()
-            .chain(paused),
+        [
+            if running.is_active() {
+                doing_line(strings, numbers, request)
+            } else {
+                operation_title(strings, numbers, request)
+            },
+            progress,
+        ]
+        .into_iter()
+        .chain(paused),
     );
     (text, measure.map_or(Bar::Moving, Bar::Measured))
 }
@@ -1337,6 +1802,7 @@ pub(crate) fn status_widest(
                 total: known,
                 renames: false,
                 paused: true,
+                yielded: false,
                 current: None,
             };
             running_line(strings, numbers, request, &running).0
@@ -1351,8 +1817,10 @@ pub(crate) fn status_widest(
         // its count is the same digits as the done count's.
         [(End::Complete, 0), (End::Complete, 1), (End::Cancelled, 1)].map(|(end, failed)| {
             let outcome = Outcome {
+                succeeded: end == End::Complete && failed == 0,
                 end,
                 items: total,
+                completed: total.saturating_sub(failed as u64),
                 bytes: 0,
                 listed: vec![skipped.clone(); failed],
                 ring: RingCounts::default(),
@@ -1402,13 +1870,6 @@ fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> St
     }
 }
 
-/// Whether the person cancelled the operation before it finished or failed
-/// any item, as Cancel at its conflict question does. It then shows no
-/// line and leaves the line of the operation that ended before it.
-pub(crate) fn did_nothing(outcome: &Outcome) -> bool {
-    matches!(outcome.end, End::Cancelled) && outcome.items == 0
-}
-
 /// What an ended operation did, with the count of the items it finished
 /// and, after them, how many failed or were skipped; `numbered` as
 /// [`StatusOperation::Ended`] has it.
@@ -1419,51 +1880,60 @@ fn ended_line(
     outcome: &Outcome,
     numbered: bool,
 ) -> String {
-    let cancelled = match outcome.end {
+    completion_line(
+        strings,
+        numbers,
+        &Completion::of(request, outcome, numbered),
+    )
+}
+
+fn completion_line(strings: &Strings, numbers: &dyn Numbers, completion: &Completion) -> String {
+    let cancelled = match completion.end {
         End::Complete => false,
         End::Cancelled => true,
-        End::DiskFull(_) | End::Refused(_) => return String::new(),
+        End::DiskFull(_) | End::Refused(_) => {
+            return strings.text("file_operations.could_not_finish").to_owned();
+        }
     };
-    let failed = (outcome.listed.iter())
-        .filter(|listed| matches!(listed.reason, Reason::Failed(_) | Reason::Skipped))
-        .count() as u64;
-    let done = outcome.items.saturating_sub(failed);
+    let failed = completion.failed;
+    let done = completion.items;
     let count = |key: &str, to: &[&str]| strings.count(key, done, numbers, to);
     // A rename and a new folder are one step, which succeeded or failed;
     // cancelled, it did nothing, as the person chose, so it shows no line.
-    if let Some((path, name)) = renamed(request) {
-        return match (cancelled, failed, numbered) {
+    if let Completed::Rename { source: path, name } = &completion.kind {
+        return match (cancelled, failed, completion.numbered) {
             (true, ..) => String::new(),
             (false, 0, false) => {
-                strings.format("file_operations.ended_rename", &[name_of(&path), &name])
+                strings.format("file_operations.ended_rename", &[name_of(path), name])
             }
             (false, 0, true) => {
-                strings.format("file_operations.ended_rename_numbered", &[name_of(&path)])
+                strings.format("file_operations.ended_rename_numbered", &[name_of(path)])
             }
-            (false, _, _) => strings.format("file_operations.rename_failed", &[name_of(&path)]),
+            (false, _, _) => strings.format("file_operations.rename_failed", &[name_of(path)]),
         };
     }
-    let line = match request {
-        Request::Copy { destination, .. } | Request::Move { destination, .. } => {
-            let moves = matches!(request, Request::Move { .. });
+    let line = match &completion.kind {
+        Completed::Copy(destination) | Completed::Move(destination) => {
+            let moves = matches!(completion.kind, Completed::Move(_));
             let key = match (moves, cancelled) {
                 (false, false) => "file_operations.ended_copy",
                 (false, true) => "file_operations.cancelled_copy",
                 (true, false) => "file_operations.ended_move",
                 (true, true) => "file_operations.cancelled_move",
             };
-            count(key, &[&text_of(&destination.path())])
+            count(key, &[&text_of(destination)])
         }
-        Request::Delete { .. } if cancelled => count("file_operations.cancelled_delete", &[]),
-        Request::Delete { .. } => count("file_operations.ended_delete", &[]),
-        Request::NewFolder { .. } if cancelled => return String::new(),
-        Request::NewFolder { path } => {
+        Completed::Delete if cancelled => count("file_operations.cancelled_delete", &[]),
+        Completed::Delete => count("file_operations.ended_delete", &[]),
+        Completed::NewFolder(_) if cancelled => return String::new(),
+        Completed::NewFolder(path) => {
             let key = match failed {
                 0 => "file_operations.ended_new_folder",
                 _ => "file_operations.new_folder_failed",
             };
             return strings.format(key, &[&text_of(path)]);
         }
+        Completed::Rename { .. } => unreachable!("renames returned their own line"),
     };
     let failed =
         (failed > 0).then(|| strings.count("file_operations.ended_failed", failed, numbers, &[]));
@@ -1624,7 +2094,7 @@ pub(crate) fn exit_question(
     let (mut running, mut waiting) = (0, 0);
     for operation in operations {
         match operation.state {
-            State::Running(_) => running += 1,
+            State::Running(_) | State::Cancelling => running += 1,
             State::Preparing | State::Prepared(_) | State::Waiting { .. } => waiting += 1,
             State::Ended(_) | State::Interrupted => {}
         }
@@ -1688,17 +2158,10 @@ pub(crate) fn failure(
         .listed
         .iter()
         .map(|listed| {
-            let reason = match listed.reason {
-                Reason::Failed(code) => windows_text(code),
-                Reason::Skipped => strings.text("file_operations.reason_skipped").to_owned(),
-                Reason::SourceKept => strings
-                    .text("file_operations.reason_source_kept")
-                    .to_owned(),
-                Reason::SourceChanged => strings
-                    .text("file_operations.reason_source_changed")
-                    .to_owned(),
-            };
-            [text_of(&listed.path), reason]
+            [
+                text_of(&listed.path),
+                reason_text(strings, listed.reason, windows_text),
+            ]
         })
         .collect();
     let count = rows.len() as u64;
@@ -1723,6 +2186,58 @@ pub(crate) fn failure(
         body,
         rows,
     })
+}
+
+impl Report {
+    pub(crate) fn summary(
+        &self,
+        strings: &Strings,
+        windows_text: &dyn Fn(u32) -> String,
+    ) -> String {
+        match &self.outcome.end {
+            End::Refused(Refusal::RecoveryUnavailable(code)) => strings.format(
+                "file_operations.recovery_unavailable",
+                &[&windows_text(*code)],
+            ),
+            End::Refused(Refusal::DestinationUnreadable(code)) => strings.format(
+                "file_operations.refused_unreadable",
+                &[&windows_text(*code)],
+            ),
+            _ => self.summary.clone(),
+        }
+    }
+
+    pub(crate) fn cell(
+        &self,
+        strings: &Strings,
+        row: usize,
+        column: usize,
+        windows_text: &dyn Fn(u32) -> String,
+    ) -> String {
+        let Some(listed) = self.outcome.listed.get(row) else {
+            return String::new();
+        };
+        match column {
+            0 => text_of(&listed.path),
+            1 => reason_text(strings, listed.reason, windows_text),
+            _ => String::new(),
+        }
+    }
+}
+
+fn reason_text(strings: &Strings, reason: Reason, windows_text: &dyn Fn(u32) -> String) -> String {
+    match reason {
+        Reason::Failed(code) | Reason::RecoveryFailed(code) | Reason::CleanupFailed(code) => {
+            windows_text(code)
+        }
+        Reason::Skipped => strings.text("file_operations.reason_skipped").to_owned(),
+        Reason::SourceKept => strings
+            .text("file_operations.reason_source_kept")
+            .to_owned(),
+        Reason::SourceChanged => strings
+            .text("file_operations.reason_source_changed")
+            .to_owned(),
+    }
 }
 
 /// Whether an operation that ended as `outcome` has a [`failure`] dialog:
@@ -1759,6 +2274,13 @@ fn refusal_text(
     windows_text: &dyn Fn(u32) -> String,
 ) -> String {
     match refusal {
+        Refusal::SourceUnavailable => strings
+            .text("file_operations.source_unavailable")
+            .to_owned(),
+        Refusal::RecoveryUnavailable(code) => strings.format(
+            "file_operations.recovery_unavailable",
+            &[&windows_text(code)],
+        ),
         Refusal::DestinationInsideSource => {
             strings.text("file_operations.refused_inside").to_owned()
         }
@@ -1773,213 +2295,6 @@ fn refusal_text(
                 &bytes(strings, numbers, free),
             ],
         ),
-    }
-}
-
-/// `dip` at `dpi`, rounded as the main window's layout rounds.
-fn px(dip: i32, dpi: Dpi) -> Px {
-    Px(dip).rescale(Dpi::new(96).expect("96 is not zero"), dpi)
-}
-
-/// The window's edges.
-const MARGIN: i32 = 11;
-/// Between related controls, such as the card's lines.
-const RELATED: i32 = 4;
-/// Between groups, such as the running operation and the queue's header.
-const GROUP: i32 = 11;
-/// An icon button: the card's Pause and Cancel, and the queue's buttons.
-const ICON_BUTTON: i32 = 28;
-/// The card's icon of the operation's kind.
-pub(crate) const CARD_ICON: i32 = 20;
-const FILE_BAR: i32 = 8;
-const TOTAL_BAR: i32 = 15;
-/// The queue list's icons, about as large as the card's, so they do not
-/// outweigh a tile's two lines of text.
-pub(crate) const ROW_ICON: i32 = 22;
-/// The queue list is this many rows tall and scrolls the rest, so nothing
-/// moves when operations come and go (DESIGN.md: Nothing moves by itself).
-const LIST_ROWS: i32 = 4;
-/// A row of the queue list: two lines and the tile's padding.
-const ROW_PADDING: i32 = 12;
-/// The narrowest window, which still shows a path's start and end.
-const MIN_WIDTH: i32 = 360;
-/// The window's width when it first opens.
-pub(crate) const OPEN_WIDTH: i32 = 480;
-
-/// What the layout measures: the fonts' line heights and the widths of the
-/// captions that a longer translation widens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Metrics {
-    pub(crate) dpi: Dpi,
-    /// A line of the message font.
-    pub(crate) line: Px,
-    /// A line of the card's title font.
-    pub(crate) title_line: Px,
-    /// The widest of "Copying" and its kind's words, "From" and "To".
-    pub(crate) label_width: Px,
-    /// The widest percentage, "100 %".
-    pub(crate) percent_width: Px,
-    /// Hide's width, which fits its icon and caption.
-    pub(crate) hide_width: Px,
-}
-
-/// Where every control of the window goes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Layout {
-    pub(crate) icon: Rect,
-    pub(crate) title: Rect,
-    pub(crate) status: Rect,
-    pub(crate) pause: Rect,
-    pub(crate) cancel: Rect,
-    pub(crate) doing: Rect,
-    pub(crate) file: Rect,
-    pub(crate) file_bar: Rect,
-    pub(crate) from_label: Rect,
-    pub(crate) from: Rect,
-    pub(crate) to_label: Rect,
-    pub(crate) to: Rect,
-    pub(crate) total_bar: Rect,
-    pub(crate) percent: Rect,
-    pub(crate) items: Rect,
-    pub(crate) bytes: Rect,
-    pub(crate) toggle: Rect,
-    pub(crate) queue: Rect,
-    pub(crate) resume: Rect,
-    pub(crate) up: Rect,
-    pub(crate) down: Rect,
-    pub(crate) queue_cancel: Rect,
-    /// Empty while the queue is collapsed.
-    pub(crate) list: Rect,
-    pub(crate) hint: Rect,
-    pub(crate) hide: Rect,
-}
-
-impl Layout {
-    /// Places the controls from the top of a client area `client_width`
-    /// wide: the list [`LIST_ROWS`] rows tall while `queue_open`, the hint's
-    /// line only while `hint_shown`, and Hide under them.
-    pub(crate) fn compute(
-        client_width: Px,
-        m: Metrics,
-        queue_open: bool,
-        hint_shown: bool,
-    ) -> Layout {
-        let d = |dip| px(dip, m.dpi);
-        let margin = d(MARGIN);
-        let width = client_width - margin - margin;
-        let button = d(ICON_BUTTON);
-        let line = m.line + d(2);
-        // Between the operation's three lines, and between the file line and
-        // its bar.
-        let tight = Px(d(RELATED).0 / 2);
-        let rect = |x: Px, y: Px, width: Px, height: Px| Rect {
-            x,
-            y,
-            width: width.max(Px(0)),
-            height,
-        };
-        let mut l = Layout::default();
-
-        // The running operation: its title row, the three lines, the bar and
-        // the counts, with a group's gap between them.
-        let mut y = margin;
-        let heading = m.title_line + m.line;
-        let row = button.max(heading);
-        let centred = |height: Px| y + Px((row - height).0 / 2);
-        // The icon's left edge lines up with the labels under it.
-        l.icon = rect(margin, centred(d(CARD_ICON)), d(CARD_ICON), d(CARD_ICON));
-        l.cancel = rect(margin + width - button, centred(button), button, button);
-        l.pause = rect(l.cancel.x - button, l.cancel.y, button, button);
-        let text_x = l.icon.right() + d(RELATED) + d(RELATED);
-        let text_width = l.pause.x - d(RELATED) - text_x;
-        l.title = rect(text_x, centred(heading), text_width, m.title_line);
-        l.status = rect(text_x, l.title.bottom(), text_width, m.line);
-        y = y + row + d(GROUP);
-        let value_x = margin + m.label_width + d(GROUP);
-        let value_width = margin + width - value_x;
-        l.doing = rect(margin, y, m.label_width, m.line);
-        l.file = rect(value_x, y, value_width, m.line);
-        y = y + m.line + tight;
-        l.file_bar = rect(value_x, y, value_width, d(FILE_BAR));
-        y = y + d(FILE_BAR) + tight;
-        l.from_label = rect(margin, y, m.label_width, m.line);
-        l.from = rect(value_x, y, value_width, m.line);
-        y = y + m.line + tight;
-        l.to_label = rect(margin, y, m.label_width, m.line);
-        l.to = rect(value_x, y, value_width, m.line);
-        y = y + m.line + d(GROUP);
-        let percent_x = margin + width - m.percent_width;
-        l.total_bar = rect(margin, y, percent_x - d(RELATED) - margin, d(TOTAL_BAR));
-        l.percent = rect(
-            percent_x,
-            y + Px((d(TOTAL_BAR) - m.line).0 / 2),
-            m.percent_width,
-            m.line,
-        );
-        y = y + d(TOTAL_BAR) + d(RELATED);
-        // The items under the bar's start, and the bytes ending under its
-        // end.
-        let half = Px(l.total_bar.width.0 / 2);
-        l.items = rect(margin, y, half, m.line);
-        l.bytes = rect(margin + half, y, l.total_bar.width - half, m.line);
-        y = y + m.line + d(GROUP);
-
-        // The queue's header: the toggle, the count, then its buttons.
-        l.toggle = rect(margin, y, button, button);
-        l.queue_cancel = rect(margin + width - button, y, button, button);
-        l.down = rect(l.queue_cancel.x - button, y, button, button);
-        l.up = rect(l.down.x - button, y, button, button);
-        l.resume = rect(l.up.x - button, y, button, button);
-        let queue_x = l.toggle.right() + d(RELATED);
-        l.queue = rect(
-            queue_x,
-            y + Px((button - line).0 / 2),
-            l.resume.x - d(RELATED) - queue_x,
-            line,
-        );
-        y = y + button;
-
-        // The list and its hint, which the hint's width also measures while
-        // it shows nothing, then Hide at the right.
-        if queue_open {
-            y = y + d(RELATED);
-            let list_height = Px(Layout::row_height(m).0 * LIST_ROWS) + d(4);
-            l.list = rect(margin, y, width, list_height);
-            y = l.list.bottom();
-        }
-        let hint_height = if queue_open && hint_shown {
-            line
-        } else {
-            Px(0)
-        };
-        l.hint = rect(margin, y + d(RELATED), width, hint_height);
-        if hint_height > Px(0) {
-            y = l.hint.bottom();
-        }
-        y = y + d(GROUP);
-        l.hide = rect(
-            margin + width - m.hide_width,
-            y,
-            m.hide_width,
-            m.line + d(8),
-        );
-        l
-    }
-
-    /// The window's client height, which ends a margin under Hide.
-    pub(crate) fn height(m: Metrics, queue_open: bool, hint_shown: bool) -> Px {
-        let layout = Layout::compute(px(OPEN_WIDTH, m.dpi), m, queue_open, hint_shown);
-        layout.hide.bottom() + px(MARGIN, m.dpi)
-    }
-
-    /// The narrowest client width.
-    pub(crate) fn min_width(m: Metrics) -> Px {
-        px(MIN_WIDTH, m.dpi)
-    }
-
-    /// A row of the queue list.
-    pub(crate) fn row_height(m: Metrics) -> Px {
-        Px(m.line.0 * 2).max(px(ROW_ICON, m.dpi)) + px(ROW_PADDING, m.dpi)
     }
 }
 
@@ -2003,6 +2318,8 @@ mod tests {
             outcome: Arc::new(Outcome {
                 end: End::Complete,
                 items: 3_311,
+                completed: 3_310,
+                succeeded: false,
                 bytes: 0,
                 listed: vec![Listed {
                     path: PathBuf::from(r"C:\f\a\x"),
@@ -2035,6 +2352,8 @@ mod tests {
                     free,
                 }),
                 items: 2,
+                completed: 2,
+                succeeded: false,
                 bytes: 0,
                 listed: Vec::new(),
                 ring: RingCounts::default(),
@@ -2078,8 +2397,10 @@ mod tests {
             id: OperationId::for_tests(1),
             request: move_to(folder),
             outcome: Arc::new(Outcome {
+                succeeded: end == End::Complete,
                 end,
                 items: 1,
+                completed: 1,
                 bytes: 0,
                 listed: Vec::new(),
                 ring: RingCounts::default(),
@@ -2114,6 +2435,8 @@ mod tests {
         let outcome = Arc::new(Outcome {
             end: End::Complete,
             items: 1,
+            completed: 1,
+            succeeded: true,
             bytes: 0,
             listed: Vec::new(),
             ring: RingCounts::default(),
@@ -2130,8 +2453,7 @@ mod tests {
         let last = |id| {
             (
                 OperationId::for_tests(id),
-                Arc::clone(&request),
-                Arc::clone(&outcome),
+                Completion::of(&request, &outcome, false),
             )
         };
         let shown = |queued_id, reported: &[u64], ended| {
@@ -2146,6 +2468,32 @@ mod tests {
         };
         assert_eq!(shown(2, &[], 1), Some(OperationId::for_tests(2)));
         assert_eq!(shown(7, &[7], 5), Some(OperationId::for_tests(5)));
+    }
+
+    /// A recovery-file error does not undo a successfully copied item.
+    #[test]
+    fn a_recovery_error_preserves_completed_item_counts() {
+        let request = Request::Delete {
+            sources: vec![r"C:\f\a".into()],
+        };
+        let outcome = Outcome::new(
+            End::Complete,
+            1,
+            0,
+            vec![Listed {
+                path: "operations.json".into(),
+                reason: Reason::RecoveryFailed(5),
+            }],
+            RingCounts::default(),
+        );
+        assert_eq!(
+            completion_line(
+                &english(),
+                &English,
+                &Completion::of(&request, &outcome, false)
+            ),
+            "Deleted 1 item · 1 failed or skipped"
+        );
     }
 
     #[test]
@@ -2172,26 +2520,6 @@ mod tests {
         assert_eq!(meter.speed().map(|speed| speed.items), Some(40.0));
     }
 
-    #[test]
-    fn the_time_left_rounds_up_to_the_unit_it_shows() {
-        let strings = english();
-        let left = |remaining, speed| time_left(&strings, remaining, speed);
-        let message = |key, values: &[&str]| Some(strings.format(key, values));
-        assert_eq!(
-            left(45, 1.0),
-            message("file_operations.left_seconds", &["45"])
-        );
-        assert_eq!(
-            left(90, 1.0),
-            message("file_operations.left_minutes", &["2"])
-        );
-        assert_eq!(
-            left(7_500, 1.0),
-            message("file_operations.left_hours", &["2", "5"])
-        );
-        assert_eq!(left(100, 0.0), None);
-    }
-
     /// The bytes done include the passed files' bytes, and neither count
     /// shows more than gozlerd's total, which a delete can outrun.
     #[test]
@@ -2206,6 +2534,7 @@ mod tests {
             }),
             renames: false,
             paused: false,
+            yielded: false,
             current: None,
         };
         let done = |running: Running| done_of(&running).map(|(of, _)| (of.items, of.bytes));
@@ -2276,12 +2605,8 @@ mod tests {
         assert!(conflict_question(&strings, &English, &request, &prepared, &folder).is_some());
     }
 
-    /// The queue moves only waiting operations, after the running ones and
-    /// before the interrupted ones, so a drop or Move up and Move down land
-    /// among the waiting rows, and a drop that leaves a row where it is
-    /// moves nothing.
     #[test]
-    fn a_moved_row_lands_among_the_waiting_rows() {
+    fn a_waiting_row_can_be_promoted_before_running_work() {
         let id = OperationId::for_tests;
         let row = |n, phase| Row {
             id: id(n),
@@ -2297,7 +2622,7 @@ mod tests {
             row(4, RowPhase::Waiting),
             row(5, RowPhase::Interrupted),
         ];
-        assert_eq!(landing(&rows, 0), (1, Some(id(2))));
+        assert_eq!(landing(&rows, 0), (0, Some(id(1))));
         assert_eq!(landing(&rows, 3), (3, Some(id(4))));
         assert_eq!(landing(&rows, 5), (4, None));
         assert!(stays_in_place(&rows, id(3), Some(id(3))));
@@ -2307,7 +2632,7 @@ mod tests {
         assert_eq!(move_step(&rows, id(3), true), Some(Some(id(2))));
         assert_eq!(move_step(&rows, id(3), false), Some(None));
         assert_eq!(move_step(&rows, id(2), false), Some(Some(id(4))));
-        assert_eq!(move_step(&rows, id(2), true), None);
+        assert_eq!(move_step(&rows, id(2), true), Some(Some(id(1))));
         assert_eq!(move_step(&rows, id(4), false), None);
     }
 

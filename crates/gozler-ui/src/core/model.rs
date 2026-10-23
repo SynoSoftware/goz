@@ -84,6 +84,7 @@ pub(crate) struct Model {
     pub(super) export: Export,
     fix: Fixer,
     operations: Operations,
+    inspector_content: super::layout::InspectorContent,
     /// The file operation the middle group shows.
     operation: Option<StatusOperation>,
     /// The jobs in the order they last started, the newest last.
@@ -410,6 +411,7 @@ impl Model {
             export: Export::Idle,
             fix: Fixer::Idle,
             operations: Operations::default(),
+            inspector_content: super::layout::InspectorContent::Selection,
             operation: None,
             started_jobs: Vec::new(),
             failure: None,
@@ -530,7 +532,6 @@ impl Model {
             queue,
             panels,
             dialogs: seen.dialogs,
-            window: seen.window,
             progress: self.poll_operations(snapshot),
             sources: seen.sources,
         }
@@ -540,8 +541,16 @@ impl Model {
     /// the window reads twice a second while an operation runs. Asks,
     /// reports and removals wait for the queue's wakes.
     pub(crate) fn poll_operations(&mut self, snapshot: &[Operation]) -> OperationProgress {
+        let prior_speed = self
+            .operation
+            .as_ref()
+            .and_then(|operation| self.operations.speed(operation.id()));
+        let counts_changed = self.operations.record(snapshot, Instant::now());
         let status = self.operations.status(snapshot);
-        let status_changed = status != self.operation;
+        let speed = status
+            .as_ref()
+            .and_then(|operation| self.operations.speed(operation.id()));
+        let status_changed = status != self.operation || counts_changed || speed != prior_speed;
         self.set_operation(status);
         OperationProgress {
             status_changed,
@@ -594,10 +603,61 @@ impl Model {
         steps
     }
 
-    /// The person hid the File operations window while the queue held
-    /// `snapshot`.
-    pub(crate) fn hide_operations(&mut self, snapshot: &[Operation]) {
-        self.operations.hide(snapshot);
+    pub(crate) fn operation_view(
+        &self,
+        numbers: &dyn Numbers,
+        snapshot: &[Operation],
+    ) -> file_operations::View {
+        self.operations.view(&self.strings, numbers, snapshot)
+    }
+
+    pub(crate) fn transfer_caption(
+        &self,
+        numbers: &dyn Numbers,
+    ) -> Option<super::status_transfer::Caption> {
+        let mut caption = self.operations.transfer_caption(&self.strings, numbers)?;
+        let key = if self.inspector_content == super::layout::InspectorContent::Transfers
+            && self.settings.window.inspector
+        {
+            "file_operations.hide_tip"
+        } else {
+            "file_operations.show_tip"
+        };
+        caption.summary_tip = self.strings.text(key).to_owned();
+        Some(caption)
+    }
+
+    pub(crate) fn open_transfer_selection(
+        &mut self,
+        select: Option<OperationId>,
+        snapshot: &[Operation],
+    ) {
+        self.operations.open_selection(select, snapshot);
+    }
+
+    pub(crate) fn collapse_inspector(&mut self) -> Accepted {
+        self.settings.window.inspector = false;
+        Accepted::only(Change::Panes)
+    }
+
+    pub(crate) fn operation_is_transfer(&self, id: OperationId, snapshot: &[Operation]) -> bool {
+        self.operations.is_transfer(id, snapshot)
+    }
+
+    pub(crate) fn select_operation(&mut self, detail: file_operations::Detail) {
+        self.operations.select(detail);
+    }
+
+    pub(crate) fn close_operation_report(&mut self) {
+        self.operations.close_report();
+    }
+
+    pub(crate) fn operation_backlog(
+        &self,
+        numbers: &dyn Numbers,
+        operation: &StatusOperation,
+    ) -> String {
+        self.operations.backlog(&self.strings, numbers, operation)
     }
 
     /// Removes from the queue the reported deletes and moves that no list
@@ -898,8 +958,13 @@ impl Model {
         let window = &self.settings.window;
         Panes {
             filters: window.filter_pane,
-            inspector: window.inspector,
+            inspector: window.inspector
+                && (self.mode() == Mode::Search
+                    || self.inspector_content == super::layout::InspectorContent::Transfers),
             inspector_height: window.inspector_height,
+            content: self.inspector_content,
+            maximized: window.inspector_maximized,
+            flipped: window.transfers_flipped,
         }
     }
 
@@ -1183,7 +1248,37 @@ impl Model {
     /// Shows or hides the inspector (DESIGN.md: C14).
     pub(crate) fn toggle_inspector(&mut self) -> Accepted {
         let window = &mut self.settings.window;
-        window.inspector = !window.inspector;
+        window.inspector = self.inspector_content != super::layout::InspectorContent::Selection
+            || !window.inspector;
+        self.inspector_content = super::layout::InspectorContent::Selection;
+        Accepted::only(Change::Panes)
+    }
+
+    pub(crate) fn show_transfers(&mut self) -> Accepted {
+        self.inspector_content = super::layout::InspectorContent::Transfers;
+        self.settings.window.inspector = true;
+        Accepted::only(Change::Panes)
+    }
+
+    pub(crate) fn toggle_transfers(&mut self) -> Accepted {
+        if self.inspector_content == super::layout::InspectorContent::Transfers
+            && self.settings.window.inspector
+        {
+            self.settings.window.inspector = false;
+        } else {
+            self.inspector_content = super::layout::InspectorContent::Transfers;
+            self.settings.window.inspector = true;
+        }
+        Accepted::only(Change::Panes)
+    }
+
+    pub(crate) fn maximize_inspector(&mut self) -> Accepted {
+        self.settings.window.inspector_maximized = !self.settings.window.inspector_maximized;
+        Accepted::only(Change::Panes)
+    }
+
+    pub(crate) fn flip_transfers(&mut self) -> Accepted {
+        self.settings.window.transfers_flipped = !self.settings.window.transfers_flipped;
         Accepted::only(Change::Panes)
     }
 
@@ -1620,7 +1715,10 @@ impl Model {
         let runs = |job: &Job| match job {
             Job::Export => self.exporting(),
             Job::Fix => self.fix.running(),
-            Job::Operation => matches!(self.operation, Some(StatusOperation::Running { .. })),
+            Job::Operation => self
+                .operation
+                .as_ref()
+                .is_some_and(StatusOperation::can_cancel),
         };
         let mut started = self.started_jobs.iter().rev();
         (started.clone().find(|job| runs(job)))
@@ -1656,7 +1754,10 @@ impl Model {
         match self.job() {
             Job::Export => self.exporting(),
             Job::Fix => self.fix.can_cancel(),
-            Job::Operation => matches!(self.operation, Some(StatusOperation::Running { .. })),
+            Job::Operation => self
+                .operation
+                .as_ref()
+                .is_some_and(StatusOperation::can_cancel),
         }
     }
 
@@ -1666,9 +1767,9 @@ impl Model {
             Job::Export => self.cancel_export(),
             Job::Fix => self.cancel_fix(),
             Job::Operation => match &self.operation {
-                Some(StatusOperation::Running { id, .. }) => Accepted {
+                Some(operation) if operation.can_cancel() => Accepted {
                     change: Change::Nothing,
-                    then: Some(Then::CancelOperation(*id)),
+                    then: Some(Then::CancelOperation(operation.id())),
                 },
                 _ => Accepted::only(Change::Nothing),
             },
@@ -3681,6 +3782,7 @@ pub(crate) mod tests {
                     total: None,
                     renames: false,
                     paused: false,
+                    yielded: false,
                     current: None,
                 },
             })
@@ -3691,6 +3793,10 @@ pub(crate) mod tests {
         assert_eq!(model.job(), Job::Export);
         model.set_operation(running(2));
         assert_eq!(model.job(), Job::Operation);
+        assert_eq!(
+            crate::core::captions::settings_job(&model, model.strings(), &English, true),
+            crate::core::captions::JobCaption::default(),
+        );
     }
 
     /// T9: the person must learn that the file was not written, and may

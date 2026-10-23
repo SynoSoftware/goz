@@ -135,6 +135,10 @@ pub(crate) enum ListNotify<'a> {
 }
 
 impl ListView {
+    pub(crate) fn info_tip<'a>(self, notification: &'a mut Notification) -> Option<InfoTip<'a>> {
+        InfoTip::of(self.hwnd(), notification)
+    }
+
     /// `notification` decoded, if this list sent it.
     pub(crate) fn notification<'a>(self, notification: Notification<'a>) -> Option<ListNotify<'a>> {
         let header = notification.header();
@@ -240,14 +244,7 @@ impl IconList {
     /// The request for a row's tooltip that `notification` holds, if this
     /// list sent it ([`IconList::show_info_tips`]).
     pub(crate) fn info_tip<'a>(self, notification: &'a mut Notification) -> Option<InfoTip<'a>> {
-        let header = notification.header();
-        if header.hwndFrom != self.hwnd().0 || header.code != LVN_GETINFOTIPW {
-            return None;
-        }
-        // SAFETY: a list view sends LVN_GETINFOTIPW with an NMLVGETINFOTIPW,
-        // valid for the notification's lifetime, which the borrow of
-        // `notification` keeps to one answer.
-        Some(InfoTip(unsafe { &mut *notification.header.cast() }))
+        InfoTip::of(self.hwnd(), notification)
     }
 }
 
@@ -278,7 +275,18 @@ impl StatusBar {
 /// `LVN_GETINFOTIPW`: the tooltip of the row under the pointer.
 pub(crate) struct InfoTip<'a>(pub(super) &'a mut NMLVGETINFOTIPW);
 
-impl InfoTip<'_> {
+impl<'a> InfoTip<'a> {
+    fn of(list: Hwnd, notification: &'a mut Notification) -> Option<Self> {
+        let header = notification.header();
+        if header.hwndFrom != list.0 || header.code != LVN_GETINFOTIPW {
+            return None;
+        }
+        // SAFETY: a list view sends LVN_GETINFOTIPW with an NMLVGETINFOTIPW,
+        // valid for the notification's lifetime, which the borrow of
+        // `notification` keeps to one answer.
+        Some(InfoTip(unsafe { &mut *notification.header.cast() }))
+    }
+
     pub(crate) fn row(&self) -> Option<usize> {
         usize::try_from(self.0.iItem).ok()
     }

@@ -22,8 +22,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use gozler_core::layout::FolderEntry;
 use gozler_winfs::{
-    Access, CopyOptions, CopySource, Entry, EntryStat, Existing, FileIdentity, Reparse, copy_file,
-    create_folder, free_space, open_entry, path_attributes, windows_build,
+    Access, CopyAction, CopyOptions, CopySource, CopyState, Entry, EntryStat, Existing,
+    FileIdentity, Reparse, copy_file, create_folder, free_space, open_entry, path_attributes,
+    windows_build,
 };
 
 use crate::conflicts::{Decision, Rule, Run, Wanted, decide, interrupted_replace};
@@ -155,6 +156,7 @@ pub(crate) fn copy(
             ring.close_input();
         }
     });
+    let _active = copying.pause.enter(copying.cancel);
     Copied {
         listed: walk.listed.into_inner().expect("no worker panics"),
         // Read when every file the copy gave up is deleted.
@@ -262,6 +264,7 @@ impl Walk<'_> {
         let _entered = self.copying.io.enter();
         let mut page = vec![0u64; LISTING_WORDS];
         while let Some(work) = self.pool.next(lane) {
+            let _active = self.copying.pause.enter(self.copying.cancel);
             self.copying.pause.wait(self.copying.cancel);
             match work {
                 Work::Selected(source, target, disposition) => {
@@ -831,32 +834,68 @@ impl Walk<'_> {
             if existing == Existing::Replace {
                 remove_replaced(self.copying.cancel, &self.destination, to)?;
             }
-            let options = CopyOptions {
+            let mut options = CopyOptions {
                 source,
                 unbuffered,
                 sparse: self.copying.target.sparse_copy
                     && file.attributes & FILE_ATTRIBUTE_SPARSE_FILE != 0,
                 io_desired_size: self.io_desired_size.filter(|_| unbuffered),
+                resume: false,
             };
             let current = progress.start_file(&file.path, Some(to.to_vec()), file.size);
             retry(self.copying.cancel, || {
-                if self.copying.moving {
+                if self.copying.moving && !options.resume {
                     let source = open_entry(&file.from, Access::Inspect, Reparse::Open);
                     before = Some(Snapshot::of(&source.map_err(|error| error.code)?)?);
                 }
-                let mut on_chunk = |copied: u64| {
-                    // The total also counts the alternate data streams.
-                    let copied = copied.min(file.size);
-                    progress.add_bytes(copied.saturating_sub(reported));
-                    reported = reported.max(copied);
-                    current.set_done(copied);
-                    // Pause holds the copy here, inside the callback.
-                    self.copying.pause.wait(self.copying.cancel);
-                    // A stopped `CopyFile2` deletes what it wrote, so at Exit
-                    // the copy goes on until the process ends (`Queue::close`).
-                    !self.cancelled() || self.copying.closing.load(Ordering::Relaxed)
-                };
-                copy_file(&file.from, to, options, &mut on_chunk).map_err(|error| error.code)
+                loop {
+                    let mut on_chunk = |copied: u64| {
+                        // The total also counts the alternate data streams.
+                        let copied = copied.min(file.size);
+                        progress.add_bytes(copied.saturating_sub(reported));
+                        reported = reported.max(copied);
+                        current.set_done(copied);
+                        // A stopped `CopyFile2` deletes what it wrote, so at Exit
+                        // the copy goes on until the process ends (`Queue::close`).
+                        if self.cancelled() && !self.copying.closing.load(Ordering::Relaxed) {
+                            CopyAction::Cancel
+                        } else if self.copying.pause.is_paused()
+                            && !self.copying.closing.load(Ordering::Relaxed)
+                        {
+                            CopyAction::Pause
+                        } else {
+                            CopyAction::Continue
+                        }
+                    };
+                    match copy_file(&file.from, to, options, &mut on_chunk) {
+                        Ok(CopyState::Paused(destination)) => {
+                            self.copying.pause.wait(self.copying.cancel);
+                            if self.cancelled() && !self.copying.closing.load(Ordering::Relaxed) {
+                                let removed = destination
+                                    .reopen(Access::delete(file.attributes))
+                                    .map_err(|error| error.code)
+                                    .and_then(|entry| self.destination.delete_entry(&entry));
+                                if let Err(error) = removed {
+                                    self.listed.lock().expect("no worker panics").push(Listed {
+                                        path: crate::receive::plain(to),
+                                        reason: Reason::CleanupFailed(error),
+                                    });
+                                }
+                                return Err(ERROR_REQUEST_ABORTED);
+                            }
+                            // The resumed call owns the output again.
+                            drop(destination);
+                            options.resume = true;
+                        }
+                        Ok(CopyState::Complete) => {
+                            progress.add_bytes(file.size.saturating_sub(reported));
+                            reported = file.size;
+                            current.set_done(file.size);
+                            return Ok(());
+                        }
+                        Err(error) => return Err(error.code),
+                    }
+                }
             })
         };
         let mut placing = file.placing();
@@ -876,7 +915,8 @@ impl Walk<'_> {
             }
             Placed::Failed(error) => error,
         };
-        // `CopyFile2` deleted what it wrote.
+        // Native cancellation or the paused copy's owned handle removes its
+        // output; a cleanup failure is reported separately.
         progress.remove_bytes(reported);
         match error {
             ERROR_REQUEST_ABORTED if self.cancelled() => {}

@@ -620,6 +620,10 @@ pub(crate) struct WindowState {
         deserialize_with = "inspector_height_or_default"
     )]
     pub(crate) inspector_height: Dip,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) inspector_maximized: bool,
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) transfers_flipped: bool,
     /// Whether the notification of the first hide to the notification area
     /// has shown, which it does once (DESIGN.md: Window lifetime).
     #[serde(default, deserialize_with = "or_default")]
@@ -661,6 +665,8 @@ impl Default for WindowState {
             filters: Filters::default(),
             inspector: on(),
             inspector_height: inspector_height(),
+            inspector_maximized: false,
+            transfers_flipped: true,
             tray_notice_shown: false,
             last_update_check: None,
             destination_folder: None,
@@ -1174,6 +1180,8 @@ mod tests {
                 },
                 inspector: false,
                 inspector_height: Dip(250),
+                inspector_maximized: false,
+                transfers_flipped: true,
                 tray_notice_shown: true,
                 last_update_check: Some(1_790_000_000),
                 destination_folder: Some(r"E:\Backup".into()),

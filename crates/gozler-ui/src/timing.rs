@@ -209,7 +209,7 @@ fn timing_progress_folder_per_operation() {
         }];
         time(
             &format!("operation row, 100,000 sources, folder {kind}"),
-            || file_operations::view(&strings, &numbers, &snapshot, &HashMap::new()),
+            || file_operations::view(&strings, &numbers, &snapshot, &HashMap::new(), None),
         );
     }
 }

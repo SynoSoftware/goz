@@ -193,12 +193,23 @@ const PROGRESS_HEIGHT: Dip = Dip(12);
 /// in an ellipsis instead of moving the parts (DESIGN.md: Look).
 pub(crate) const WIDEST_TOTAL: u64 = 9_999_999;
 
-/// Which panes the window shows, and the inspector's height.
+/// The mutually exclusive contents of the shared inspector.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum InspectorContent {
+    #[default]
+    Selection,
+    Transfers,
+}
+
+/// Which panes the window shows, and the inspector's requested size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Panes {
     pub(crate) filters: bool,
     pub(crate) inspector: bool,
     pub(crate) inspector_height: Dip,
+    pub(crate) content: InspectorContent,
+    pub(crate) maximized: bool,
+    pub(crate) flipped: bool,
 }
 
 impl Default for Panes {
@@ -209,6 +220,9 @@ impl Default for Panes {
             filters: true,
             inspector: true,
             inspector_height: Dip(132),
+            content: InspectorContent::Selection,
+            maximized: false,
+            flipped: true,
         }
     }
 }
@@ -450,7 +464,7 @@ impl CaptionWidths {
             drive: measure("W:").max(measure(r"\\")),
             look_in_label: measure(&captions.look_in_label),
             look_in: widest(&captions.look_in),
-            free: measure(&captions.free_widest),
+            free: widest(&captions.free_widest),
             key_bar: captions
                 .key_bar
                 .iter()
@@ -964,6 +978,7 @@ impl FilterLayout {
 /// window can measure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InspectorLayout {
+    pub(crate) area: Rect,
     /// The band between the list and the pane that the person drags.
     pub(crate) splitter: Rect,
     pub(crate) icon: Rect,
@@ -1083,6 +1098,7 @@ impl InspectorLayout {
         });
         let min_height = Self::min_height(dpi, font_height);
         InspectorLayout {
+            area,
             splitter: Rect {
                 y: area.y - px(GROUP),
                 height: px(GROUP),
@@ -1222,6 +1238,7 @@ pub(crate) const DIVIDERS: usize = 4;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Layout {
     pub(crate) body: Body,
+    inspector: Option<InspectorLayout>,
     /// The one-pixel lines between the panes or the panels, at most
     /// [`DIVIDERS`].
     pub(crate) dividers: Vec<Rect>,
@@ -1278,8 +1295,6 @@ pub(crate) struct SearchLayout {
     /// `None` while the pane is hidden.
     pub(crate) filters: Option<FilterLayout>,
     pub(crate) list: Rect,
-    /// `None` while the pane is hidden.
-    pub(crate) inspector: Option<InspectorLayout>,
 }
 
 impl Layout {
@@ -1296,14 +1311,45 @@ impl Layout {
         mode: Mode,
         panes: &Panes,
     ) -> Layout {
-        match mode {
+        let mut layout = match mode {
             Mode::Search => {
                 Layout::compute_search(client, dpi, font_height, status_height, captions, panes)
             }
             Mode::TwoPanels => {
-                Layout::compute_two_panels(client, dpi, font_height, status_height, captions)
+                Layout::compute_two_panels(client, dpi, font_height, status_height, captions, panes)
             }
+        };
+        if panes.inspector
+            && panes.content == InspectorContent::Transfers
+            && let Some(placed) = &layout.inspector
+        {
+            let area = if panes.maximized {
+                Rect {
+                    width: client.width,
+                    height: client.height,
+                    ..Rect::default()
+                }
+            } else {
+                Rect {
+                    x: Px(0),
+                    width: client.width,
+                    ..placed.area
+                }
+            };
+            let mut inspector =
+                InspectorLayout::compute(area, placed.max_height, dpi, font_height, captions);
+            inspector.min_height = Dip(300).to_px(dpi);
+            if panes.maximized {
+                inspector.splitter = Rect::default();
+            }
+            if let Body::Search(search) = &mut layout.body
+                && let Some(filters) = &mut search.filters
+            {
+                filters.pane.height = (inspector.splitter.y - filters.pane.y).max(Px(0));
+            }
+            layout.inspector = Some(inspector);
         }
+        layout
     }
 
     /// Search's controls, or `None` while Two panels shows.
@@ -1314,9 +1360,9 @@ impl Layout {
         }
     }
 
-    /// The inspector's controls, or `None` while it or Two panels hides it.
+    /// The shared inspector's controls, while its current content shows.
     pub(crate) fn inspector(&self) -> Option<&InspectorLayout> {
-        self.search()?.inspector.as_ref()
+        self.inspector.as_ref()
     }
 
     /// The two panels side by side from the menu bar to the key bar, with a
@@ -1329,9 +1375,11 @@ impl Layout {
         font_height: Px,
         status_height: Px,
         captions: &CaptionWidths,
+        panes: &Panes,
     ) -> Layout {
         let px = |dip: Dip| dip.to_px(dpi);
         let (margin, related) = (px(MARGIN), px(RELATED));
+        let show_inspector = panes.inspector && panes.content == InspectorContent::Transfers;
         let control_height = font_height + px(CONTROL_PADDING);
         let line_height = font_height + px(ROW_PADDING);
         let list_min_width = LIST_MIN_WIDTH.to_px(dpi);
@@ -1379,31 +1427,54 @@ impl Layout {
             + look_in_width
             + margin;
         let panel_min_width = list_min_width.max(search_row);
+        let inspector_min = if show_inspector {
+            Dip(300).to_px(dpi) + px(GROUP)
+        } else {
+            Px(0)
+        };
         let min_client = Size {
             width: (panel_min_width + Px(1) + panel_min_width)
                 .max(status.min_width(dpi))
                 .max(key_min),
-            height: path_row + list_min_height + status_line + key_row + status_height,
+            height: path_row
+                + list_min_height
+                + status_line
+                + key_row
+                + status_height
+                + inspector_min,
         };
         let width = client.width.max(min_client.width);
         let height = client.height.max(min_client.height);
-        // The right group keeps the room for its text and an active search
-        // panel's two totals glyphs.
+        // Panel totals already have their own lines above this bar.
         status.give_middle_the_rest(
-            captions.status.panel_index
-                + Px((icon_glyph_height(dpi) + glyph_gap(dpi)).0 * 2)
-                + px(STATUS_PART_PADDING),
+            captions.status.panel_index + px(STATUS_PART_PADDING),
             width,
             dpi,
         );
         let key_top = height - status_height - key_row;
+        let inspector = show_inspector.then(|| {
+            let room = key_top - path_row - list_min_height - status_line - px(GROUP);
+            let pane_height = panes
+                .inspector_height
+                .to_px(dpi)
+                .max(Dip(300).to_px(dpi))
+                .min(room);
+            let area = Rect {
+                x: margin,
+                y: key_top - pane_height,
+                width: width - margin - margin,
+                height: pane_height,
+            };
+            InspectorLayout::compute(area, room, dpi, font_height, captions)
+        });
+        let panel_bottom = inspector.as_ref().map_or(key_top, |i| i.splitter.y);
         let half = Px((width.0 - 1) / 2);
         let mut dividers = vec![
             Rect {
                 x: half,
                 y: Px(0),
                 width: Px(1),
-                height: key_top,
+                height: panel_bottom,
             },
             Rect {
                 x: Px(0),
@@ -1443,7 +1514,7 @@ impl Layout {
                 width: (look_in_label.x - related - path_x).max(Px(0)),
                 ..path
             };
-            let line_top = key_top - status_line;
+            let line_top = panel_bottom - status_line;
             let list = Rect {
                 x,
                 y: path_row,
@@ -1462,7 +1533,7 @@ impl Layout {
                 width: (panel_width - margin - inner).max(Px(0)),
                 height: line_height,
             };
-            let free_width = captions.free.min(Px(line.width.0 / 2));
+            let free_width = (captions.free + related).min(Px(line.width.0 / 2));
             let free = Rect {
                 x: line.right() - free_width,
                 width: free_width,
@@ -1512,6 +1583,7 @@ impl Layout {
             }
         });
         Layout {
+            inspector,
             body: Body::TwoPanels {
                 panels: Box::new([left, right]),
                 key_bar,
@@ -1600,6 +1672,11 @@ impl Layout {
             let room = bottom - top - list_min_height - group;
             (
                 px(panes.inspector_height)
+                    .max(if panes.content == InspectorContent::Transfers {
+                        px(Dip(300))
+                    } else {
+                        Px(0)
+                    })
                     .min(room)
                     .max(InspectorLayout::min_height(dpi, font_height)),
                 room,
@@ -1626,7 +1703,7 @@ impl Layout {
             InspectorLayout::compute(area, room, dpi, font_height, captions)
         });
 
-        let status = StatusLayout::compute(
+        let mut status = StatusLayout::compute(
             &captions.status,
             captions.status_cancel.width(dpi),
             dpi,
@@ -1636,8 +1713,13 @@ impl Layout {
                 width: client.width,
                 memory: captions.memory,
                 icons: captions.icons,
-                show_details: !panes.inspector,
+                show_details: !panes.inspector && panes.content != InspectorContent::Transfers,
             }),
+        );
+        status.give_middle_the_rest(
+            captions.status.panel_index + px(STATUS_PART_PADDING),
+            client.width,
+            dpi,
         );
         let body_width =
             left + if panes.inspector {
@@ -1646,7 +1728,12 @@ impl Layout {
                 px(LIST_MIN_WIDTH)
             } + margin;
         let inspector_min = if panes.inspector {
-            group + InspectorLayout::min_height(dpi, font_height)
+            group
+                + if panes.content == InspectorContent::Transfers {
+                    px(Dip(300))
+                } else {
+                    InspectorLayout::min_height(dpi, font_height)
+                }
         } else {
             Px(0)
         };
@@ -1661,6 +1748,7 @@ impl Layout {
                 + status_height,
         };
         Layout {
+            inspector,
             body: Body::Search(Box::new(SearchLayout {
                 show_filters,
                 search,
@@ -1669,7 +1757,6 @@ impl Layout {
                 match_mode,
                 filters,
                 list,
-                inspector,
             })),
             dividers,
             status,
@@ -1685,6 +1772,7 @@ pub(crate) struct StatusLayout {
     /// The widths of the left and middle groups; the right group takes the
     /// rest.
     pub(crate) groups: [Px; 2],
+    pub(crate) middle: Rect,
     /// The width of a running job's text, which ends before its progress
     /// bar.
     pub(crate) running_text: Px,
@@ -1692,6 +1780,7 @@ pub(crate) struct StatusLayout {
     /// right end.
     pub(crate) progress: Rect,
     pub(crate) cancel: Rect,
+    minimum_middle: Px,
     /// Show details, a square icon at the right end before the size grip,
     /// in a part of its own, while the inspector is hidden.
     pub(crate) show_details: Option<Rect>,
@@ -1791,6 +1880,66 @@ pub(crate) enum TextForm {
 }
 
 impl StatusLayout {
+    pub(crate) fn center_entries(&self, widths: &[Px], width: Px, dpi: Dpi) -> Vec<Rect> {
+        let gap = Dip(6).to_px(dpi);
+        let total = widths.iter().fold(Px(0), |sum, width| sum + *width)
+            + Px(gap.0 * widths.len().saturating_sub(1) as i32);
+        let mut x = Px((width.0 - total.0) / 2)
+            .max(self.middle.x)
+            .min((self.middle.right() - total).max(self.middle.x));
+        widths
+            .iter()
+            .map(|&width| {
+                let rect = Rect {
+                    x,
+                    width,
+                    ..self.middle
+                };
+                x = x + width + gap;
+                rect
+            })
+            .collect()
+    }
+
+    pub(crate) fn for_dialog(
+        widths: &StatusWidths,
+        cancel_width: Px,
+        dpi: Dpi,
+        font_height: Px,
+        height: Px,
+        width: Px,
+    ) -> Self {
+        let mut layout = Self::compute(widths, cancel_width, dpi, font_height, height, None);
+        let inset = STATUS_INSET.to_px(dpi);
+        let related = RELATED.to_px(dpi);
+        let view = layout.groups[0].min(Px(width.0 / 3));
+        layout.groups = [view, width - view];
+        layout.middle.x = view;
+        layout.middle.width = width - view;
+        layout.cancel.x = (width - inset - cancel_width).max(view);
+        layout.progress.x = (layout.cancel.x - related - layout.progress.width).max(view);
+        layout.running_text = (layout.progress.x - related - view - inset).max(Px(0));
+        layout
+    }
+
+    pub(crate) fn fit_groups(mut self, view: Px, right: Px, width: Px, dpi: Dpi) -> Self {
+        let end = if self.followed() {
+            self.end
+        } else {
+            SCROLL_BAR.to_px(dpi)
+        };
+        let view = view.min((width - end - self.minimum_middle).max(Px(0)));
+        let room = (width - end - view).max(Px(0));
+        let right = right.min((room - self.minimum_middle).max(Px(0)));
+        let shift = view - self.groups[0];
+        self.groups = [view, room - right];
+        self.middle.x = view;
+        self.middle.width = self.groups[1];
+        self.right = Some(right);
+        self.progress.x = self.progress.x + shift;
+        self.cancel.x = self.cancel.x + shift;
+        self
+    }
     /// The height of the status bar's drawing area, which fits Cancel;
     /// Windows adds the bar's borders.
     pub(crate) fn min_height(dpi: Dpi, font_height: Px) -> Px {
@@ -1811,11 +1960,18 @@ impl StatusLayout {
     ) -> StatusLayout {
         let px = |dip: Dip| dip.to_px(dpi);
         let related = px(RELATED);
-        let running = widths.running + related + px(PROGRESS_WIDTH) + related + cancel_width;
-        let groups = [
-            widths.view + px(STATUS_PART_PADDING),
-            running.max(widths.done) + px(STATUS_PART_PADDING),
-        ];
+        let running_text = if window_end.is_some() {
+            widths.running.min(px(Dip(220)))
+        } else {
+            widths.running
+        };
+        let running = running_text + related + px(PROGRESS_WIDTH) + related + cancel_width;
+        let minimum_middle = if window_end.is_some() {
+            running
+        } else {
+            running.max(widths.done)
+        } + px(STATUS_PART_PADDING);
+        let groups = [widths.view + px(STATUS_PART_PADDING), minimum_middle];
         let centred = |control: Px| Px((height.0 - control.0) / 2);
         let button_height = font_height + px(STATUS_BUTTON_PADDING);
         let cancel = Rect {
@@ -1824,8 +1980,9 @@ impl StatusLayout {
             width: cancel_width,
             height: button_height,
         };
+        let edge = cancel.x;
         let progress = Rect {
-            x: cancel.x - related - px(PROGRESS_WIDTH),
+            x: edge - related - px(PROGRESS_WIDTH),
             y: centred(px(PROGRESS_HEIGHT)),
             width: px(PROGRESS_WIDTH),
             height: px(PROGRESS_HEIGHT),
@@ -1848,10 +2005,17 @@ impl StatusLayout {
             .map(|memory| memory.service.x)
             .or(show_details.map(|show| show.x - px(STATUS_INSET)));
         StatusLayout {
+            middle: Rect {
+                x: groups[0],
+                y: centred(button_height),
+                width: groups[1],
+                height: button_height,
+            },
             groups,
-            running_text: widths.running,
+            running_text,
             progress,
             cancel,
+            minimum_middle,
             show_details,
             memory,
             right: window_end
@@ -1867,6 +2031,7 @@ impl StatusLayout {
     fn drop_view_group(&mut self) {
         let width = self.groups[0];
         self.groups[0] = Px(0);
+        self.middle.x = Px(0);
         self.cancel.x = self.cancel.x - width;
         self.progress.x = self.progress.x - width;
     }
@@ -1884,6 +2049,7 @@ impl StatusLayout {
         };
         let start = self.groups[0] + self.groups[1];
         self.groups[1] = self.groups[1].max(width - end - right - self.groups[0]);
+        self.middle.width = self.groups[1];
         if let Some(rest) = &mut self.right {
             *rest = (*rest - (self.groups[0] + self.groups[1] - start)).max(Px(0));
         }
@@ -1946,7 +2112,7 @@ impl StatusLayout {
     }
 
     fn min_width(&self, dpi: Dpi) -> Px {
-        self.groups[0] + self.groups[1] + STATUS_REST_MIN_WIDTH.to_px(dpi) + self.end
+        self.groups[0] + self.minimum_middle + STATUS_REST_MIN_WIDTH.to_px(dpi) + self.end
     }
 }
 
@@ -1955,6 +2121,52 @@ mod tests {
     use super::*;
     use crate::core::model::tests::model;
     use crate::core::text::tests::English;
+
+    #[test]
+    fn transfer_status_uses_the_space_before_the_right_objects() {
+        let dpi = Dpi::new(96).unwrap();
+        let captions = captions(dpi, 1.0, true);
+        let layout = Layout::compute(
+            Size {
+                width: Px(1600),
+                height: Px(900),
+            },
+            dpi,
+            Px(15),
+            Px(28),
+            &captions,
+            Mode::TwoPanels,
+            &Panes::default(),
+        );
+        let status = layout.status.fit_groups(Px(0), Px(0), Px(1600), dpi);
+        let parts = status.part_widths(&[]);
+        assert_eq!(
+            parts[0] + parts[1] + parts[2],
+            status.memory.unwrap().service.x
+        );
+        assert!(status.middle.width > Px(1000), "{:?}", status);
+    }
+
+    #[test]
+    fn a_decimal_free_space_label_fits_whole() {
+        assert!(captions(Dpi::new(96).unwrap(), 1.0, false).free >= Px(77));
+    }
+
+    #[test]
+    fn multiple_center_entries_are_one_centered_group() {
+        let dpi = Dpi::new(96).unwrap();
+        let (mut layout, _) = right_room();
+        layout.middle = Rect {
+            x: Px(0),
+            y: Px(3),
+            width: Px(1000),
+            height: Px(21),
+        };
+        let placed = layout.center_entries(&[Px(200), Px(300)], Px(1250), dpi);
+        assert_eq!(placed[0].x, Px(372));
+        assert_eq!(placed[1].x, Px(578));
+        assert_eq!(placed[1].right(), Px(878));
+    }
 
     /// The main window's right group of 800 px, and the width it has room
     /// for.
@@ -2093,6 +2305,47 @@ mod tests {
         a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
     }
 
+    /// Restoring the shared pane must preserve its requested height in either
+    /// browsing mode, while maximize covers the workspace below the menu.
+    #[test]
+    fn transfer_inspector_restores_the_same_height_in_both_modes() {
+        let dpi = Dpi::new(96).expect("96 is not zero");
+        let captions = captions(dpi, 1.0, false);
+        let client = Size {
+            width: Px(1400),
+            height: Px(900),
+        };
+        let mut panes = Panes {
+            content: InspectorContent::Transfers,
+            inspector_height: Dip(340),
+            ..Panes::default()
+        };
+        for mode in [Mode::Search, Mode::TwoPanels] {
+            let normal = Layout::compute(client, dpi, Px(16), Px(28), &captions, mode, &panes);
+            let inspector = normal.inspector().expect("the transfer pane is open");
+            assert_eq!(inspector.area.height, Px(340));
+            assert_eq!(inspector.area.width, Px(1400));
+            panes.maximized = true;
+            let full = Layout::compute(client, dpi, Px(16), Px(28), &captions, mode, &panes);
+            assert_eq!(
+                full.inspector().expect("the transfer pane is open").area,
+                Rect {
+                    width: client.width,
+                    height: client.height,
+                    ..Rect::default()
+                }
+            );
+            panes.maximized = false;
+            assert_eq!(
+                Layout::compute(client, dpi, Px(16), Px(28), &captions, mode, &panes)
+                    .inspector()
+                    .expect("the transfer pane is open")
+                    .area,
+                inspector.area
+            );
+        }
+    }
+
     /// Asserts that every control of `placed` lies in `client` above the
     /// status bar and overlaps no other.
     fn fits(placed: &[Rect], client: Size, status_height: Px, dpi: Dpi, stretch: f64) {
@@ -2166,7 +2419,7 @@ mod tests {
                         ];
                         assert!(layout.dividers.len() <= DIVIDERS);
                         controls.extend(&layout.dividers);
-                        if let Some(inspector) = &search.inspector {
+                        if let Some(inspector) = layout.inspector() {
                             controls.extend([
                                 inspector.icon,
                                 inspector.heading,
@@ -2257,14 +2510,16 @@ mod tests {
                         // about 5 px after the part's edge, its progress bar
                         // and Cancel fit the middle group side by side,
                         // inside the status bar.
-                        let text_end = view + Dip(5).to_px(dpi) + captions.status.running;
+                        let text_end = view + Dip(5).to_px(dpi) + status.running_text;
+                        let mut controls = [status.progress, status.cancel];
+                        controls.sort_by_key(|rect| rect.x);
                         assert!(
-                            text_end <= status.progress.x
-                                && status.progress.right() <= status.cancel.x
+                            text_end <= controls[0].x
+                                && controls.windows(2).all(|pair| pair[0].right() <= pair[1].x)
                                 && status.cancel.right() <= view + middle,
                             "{status:?} at {dpi:?}, stretch {stretch}"
                         );
-                        for control in [status.progress, status.cancel] {
+                        for control in controls {
                             assert!(
                                 control.y >= Px(0) && control.bottom() <= status_height,
                                 "{control:?} leaves the status bar at {dpi:?}"

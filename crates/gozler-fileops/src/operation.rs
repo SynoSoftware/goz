@@ -1,5 +1,6 @@
 //! What the window asks the queue for, and what it reads back.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -165,6 +166,7 @@ fn same_name(a: &str, b: &str) -> bool {
 #[derive(Debug, Clone)]
 pub enum State {
     Preparing,
+    Cancelling,
     /// Waiting for the person's answer.
     Prepared(Prepared),
     /// Submitted, and waiting for an operation that runs, or for one before
@@ -202,11 +204,18 @@ pub struct Running {
     /// It moves no bytes: a move whose every entry is renamed on one
     /// volume, or a rename.
     pub renames: bool,
-    /// Paused: it changes nothing until it is resumed, and still makes
-    /// other operations wait.
+    /// The person's Pause; Resume clears only this flag.
     pub paused: bool,
+    /// Priority admission holds the run until the queue readmits it.
+    pub yielded: bool,
     /// The file most recently started; `None` before the first.
     pub current: Option<Current>,
+}
+
+impl Running {
+    pub fn is_active(&self) -> bool {
+        !self.paused && !self.yielded
+    }
 }
 
 /// The file a running operation most recently started.
@@ -329,6 +338,10 @@ pub struct NoRoom {
 /// What an operation refuses at prepare, or a copy at its start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
+    #[error("the clipboard or dropped files are no longer available")]
+    SourceUnavailable,
+    #[error("the operation's recovery state cannot be saved: Windows error {0}")]
+    RecoveryUnavailable(u32),
     #[error("the destination is inside a selected folder")]
     DestinationInsideSource,
     /// No folder above the destination exists, as when its drive is gone.
@@ -351,6 +364,8 @@ pub struct Listed {
 pub enum Reason {
     /// With Windows' error code.
     Failed(u32),
+    RecoveryFailed(u32),
+    CleanupFailed(u32),
     /// A conflict that the choice skipped, or that nobody was asked about.
     Skipped,
     /// A continued move found the file already at the destination and kept
@@ -368,6 +383,11 @@ pub struct Outcome {
     /// Items done, as [`State::Running`] counts them; for a delete, a
     /// selected entry that no longer existed included.
     pub items: u64,
+    /// Successfully processed entries, computed before publishing the outcome
+    /// so presentation never scans a large report to count them.
+    pub completed: u64,
+    /// All source entries were processed, even if recovery cleanup failed.
+    pub succeeded: bool,
     pub bytes: u64,
     /// In the order they happened.
     pub listed: Vec<Listed>,
@@ -375,10 +395,33 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    pub fn new(end: End, items: u64, bytes: u64, listed: Vec<Listed>, ring: RingCounts) -> Outcome {
+        let failed = listed
+            .iter()
+            .filter(|entry| {
+                !matches!(
+                    entry.reason,
+                    Reason::RecoveryFailed(_) | Reason::CleanupFailed(_)
+                )
+            })
+            .count() as u64;
+        Outcome {
+            succeeded: end == End::Complete && failed == 0,
+            end,
+            items,
+            completed: items.saturating_sub(failed),
+            bytes,
+            listed,
+            ring,
+        }
+    }
+
     pub(crate) fn ended(end: End) -> Outcome {
         Outcome {
             end,
             items: 0,
+            completed: 0,
+            succeeded: false,
             bytes: 0,
             listed: Vec::new(),
             ring: RingCounts::default(),
@@ -436,29 +479,96 @@ impl CurrentFile {
 
 /// Pause and Resume of a running operation. Each engine waits in
 /// [`Pause::wait`] where it can stop without leaving work half done: the
-/// ring between blocks, `CopyFile2` in its progress callback, and the
+/// ring between blocks, `CopyFile2` after its native paused return, and the
 /// workers between entries.
 #[derive(Default)]
 pub(crate) struct Pause {
     /// Read on every block, chunk and entry; `state` decides.
     paused: AtomicBool,
-    state: Mutex<bool>,
+    state: Mutex<PauseState>,
     resumed: Condvar,
     /// The engine threads waiting now, which a test waits for.
     #[cfg(test)]
     pub(crate) waiting: std::sync::atomic::AtomicUsize,
 }
 
+#[derive(Default)]
+struct PauseState {
+    manual: bool,
+    yielded: bool,
+    active: HashMap<std::thread::ThreadId, bool>,
+}
+
+pub(crate) struct Activity<'a>(&'a Pause);
+
+impl Drop for Activity<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().expect("no engine thread panics");
+        state.active.remove(&std::thread::current().id());
+        self.0.resumed.notify_all();
+    }
+}
+
 impl Pause {
     pub(crate) fn set(&self, paused: bool) {
         let mut state = self.state.lock().expect("no engine thread panics");
-        *state = paused;
-        self.paused.store(paused, Ordering::Relaxed);
+        state.manual = paused;
+        self.paused
+            .store(state.manual || state.yielded, Ordering::Relaxed);
         self.resumed.notify_all();
+    }
+
+    pub(crate) fn yield_to_priority(&self, yielded: bool) {
+        let mut state = self.state.lock().expect("no engine thread panics");
+        state.yielded = yielded;
+        self.paused
+            .store(state.manual || state.yielded, Ordering::Relaxed);
+        self.resumed.notify_all();
+    }
+
+    /// Tracks a thread only while it can change files, excluding idle pool
+    /// and ring workers so priority admission can observe quiescence.
+    pub(crate) fn enter(&self, cancel: &AtomicBool) -> Activity<'_> {
+        let mut state = self.state.lock().expect("no engine thread panics");
+        #[cfg(test)]
+        let held = state.yielded || (state.manual && !cancel.load(Ordering::Relaxed));
+        #[cfg(test)]
+        if held {
+            self.waiting.fetch_add(1, Ordering::Relaxed);
+        }
+        while state.yielded || (state.manual && !cancel.load(Ordering::Relaxed)) {
+            state = self.resumed.wait(state).expect("no engine thread panics");
+        }
+        #[cfg(test)]
+        if held {
+            self.waiting.fetch_sub(1, Ordering::Relaxed);
+        }
+        let previous = state.active.insert(std::thread::current().id(), true);
+        assert!(previous.is_none(), "an engine thread enters its pause once");
+        Activity(self)
+    }
+
+    pub(crate) fn quiesce(&self) -> bool {
+        let mut state = self.state.lock().expect("no engine thread panics");
+        while state.yielded && state.active.values().any(|&active| active) {
+            state = self.resumed.wait(state).expect("no engine thread panics");
+        }
+        state.yielded
+    }
+
+    pub(crate) fn is_quiet(&self) -> bool {
+        let state = self.state.lock().expect("no engine thread panics");
+        state.yielded && !state.active.values().any(|&active| active)
     }
 
     pub(crate) fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Manual Pause and the priority gate, read under one lock.
+    pub(crate) fn snapshot(&self) -> (bool, bool) {
+        let state = self.state.lock().expect("no engine thread panics");
+        (state.manual, state.yielded)
     }
 
     /// Wakes every waiting engine thread, after `cancel` was set, so it sees
@@ -468,17 +578,25 @@ impl Pause {
         self.resumed.notify_all();
     }
 
-    /// Waits while the operation is paused, until it resumes or `cancel`
-    /// is set; the caller then checks `cancel` as it always does.
+    /// Cancellation bypasses manual Pause. A priority yield holds cleanup
+    /// too, until the queue readmits the operation's disk plan.
     pub(crate) fn wait(&self, cancel: &AtomicBool) {
         if !self.is_paused() {
             return;
         }
         let mut state = self.state.lock().expect("no engine thread panics");
+        let thread = std::thread::current().id();
+        if let Some(active) = state.active.get_mut(&thread) {
+            *active = false;
+            self.resumed.notify_all();
+        }
         #[cfg(test)]
         self.waiting.fetch_add(1, Ordering::Relaxed);
-        while *state && !cancel.load(Ordering::Relaxed) {
+        while state.yielded || (state.manual && !cancel.load(Ordering::Relaxed)) {
             state = self.resumed.wait(state).expect("no engine thread panics");
+        }
+        if let Some(active) = state.active.get_mut(&thread) {
+            *active = true;
         }
         #[cfg(test)]
         self.waiting.fetch_sub(1, Ordering::Relaxed);
@@ -568,6 +686,59 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_cannot_enter_a_device_while_its_grant_is_yielded() {
+        let pause = Pause::default();
+        let cancel = AtomicBool::new(true);
+        let readmitted = AtomicBool::new(false);
+        pause.yield_to_priority(true);
+        let observed = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let _active = pause.enter(&cancel);
+                readmitted.load(Ordering::Relaxed)
+            });
+            while pause.waiting.load(Ordering::Relaxed) == 0 && !worker.is_finished() {
+                std::thread::yield_now();
+            }
+            readmitted.store(true, Ordering::Relaxed);
+            pause.yield_to_priority(false);
+            worker.join().expect("cleanup is readmitted")
+        });
+        assert!(observed);
+    }
+
+    #[test]
+    fn priority_yield_waits_for_quiescence_and_preserves_manual_pause() {
+        let pause = Pause::default();
+        let cancel = AtomicBool::new(false);
+        let (entered, active) = std::sync::mpsc::channel();
+        let (release, ready) = std::sync::mpsc::channel();
+        let pause = &pause;
+        let cancel = &cancel;
+        let (was_active, was_quiet, stayed_paused) = std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let _active = pause.enter(cancel);
+                entered.send(()).expect("the test receives entry");
+                ready.recv().expect("the test releases the worker");
+                pause.wait(cancel);
+            });
+            active.recv().expect("the worker enters");
+            pause.yield_to_priority(true);
+            let was_active = !pause.is_quiet();
+            release.send(()).expect("the worker waits for release");
+            let was_quiet = pause.quiesce();
+            pause.set(true);
+            pause.yield_to_priority(false);
+            let stayed_paused = pause.is_paused();
+            pause.set(false);
+            worker.join().expect("the worker resumes");
+            (was_active, was_quiet, stayed_paused)
+        });
+        assert!(was_active);
+        assert!(was_quiet);
+        assert!(stayed_paused);
+    }
 
     #[test]
     fn the_sources_folder_holds_every_source() {

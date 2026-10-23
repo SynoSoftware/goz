@@ -4,8 +4,8 @@
 //! kind has its own steps, events and results, so a step of one never pairs
 //! with the other. `app::fix_thread` runs the fix on its own thread and
 //! reports each [`FixEvent`]; the model holds the one [`Fixer`], so the
-//! list's fix button, the Index page's and both status bars show the same
-//! fix.
+//! list's fix button, the Index page's and the status bar that owns its
+//! feedback follow that fix.
 
 use super::results::Fix;
 use super::update::Setup;

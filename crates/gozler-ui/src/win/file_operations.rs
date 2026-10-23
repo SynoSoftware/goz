@@ -1,15 +1,15 @@
-//! The Win32 parts of the File operations window that the other windows
+//! The Win32 parts of the transfer pane that the other controls
 //! lack (DESIGN.md: File operations): a path line that loses its middle, the
 //! queue list in tile view with the line where a dragged row goes, a progress
 //! bar's paused state, and the progress on the taskbar button.
 
 use super::controls::{ProgressBar, child, send, send_pointer};
-use super::gdi::{glyph_list, system_color};
+use super::gdi::{glyph_list, icons_shown, system_color};
 use super::notify::{InfoTip, Notification};
-use super::{Hwnd, to_rect, wide};
+use super::{Hwnd, wide};
 use crate::core::file_operations::Taskbar;
 use crate::core::glyph::Glyph;
-use crate::core::layout::{Px, Rect, Size};
+use crate::core::layout::Px;
 use std::cell::Cell;
 use windows::Win32::Foundation::{LRESULT, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{COLOR_WINDOWTEXT, MapWindowPoints};
@@ -18,39 +18,28 @@ use windows::Win32::UI::Controls::{
     EMF_CENTERED, LIST_VIEW_ITEM_STATE_FLAGS, LV_VIEW_TILE, LVCF_WIDTH, LVCOLUMNW, LVHITTESTINFO,
     LVIF_COLUMNS, LVIF_IMAGE, LVIF_TEXT, LVIM_AFTER, LVINSERTMARK, LVIR_BOUNDS, LVIR_ICON,
     LVIR_LABEL, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEITEM, LVM_ENSUREVISIBLE,
-    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETNEXTITEM, LVM_HITTEST, LVM_INSERTCOLUMNW,
+    LVM_GETIMAGELIST, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETITEMTEXTW,
+    LVM_GETITEMW, LVM_GETNEXTITEM, LVM_GETTILEVIEWINFO, LVM_HITTEST, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SCROLL, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETINSERTMARK,
     LVM_SETITEMSTATE, LVM_SETITEMW, LVM_SETTILEVIEWINFO, LVM_SETVIEW, LVN_BEGINDRAG,
     LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED,
     LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
-    LVSIL_NORMAL, LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE, NMLISTVIEW,
-    NMLVEMPTYMARKUP, NMLVKEYDOWN, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED, SetWindowTheme,
-    WC_LISTVIEWW,
+    LVSIL_NORMAL, LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE, NM_DBLCLK,
+    NMLISTVIEW, NMLVEMPTYMARKUP, NMLVKEYDOWN, PBM_GETSTATE, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED,
+    SetWindowTheme, WC_LISTVIEWW,
 };
-use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
 use windows::Win32::UI::Shell::{
     ITaskbarList3, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED, TaskbarList,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    IDC_ARROW, IDC_NO, LoadCursorW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor,
-    SetWindowPos, WINDOW_EX_STYLE, WS_EX_CLIENTEDGE, WS_TABSTOP,
+    IDC_ARROW, IDC_NO, LoadCursorW, SetCursor, WINDOW_EX_STYLE, WS_EX_CLIENTEDGE, WS_TABSTOP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
 /// The message the file operations' queue posts to the main window after
 /// an operation's state changed.
 pub(crate) const QUEUE_CHANGED: u32 = super::wake::WAKE + 5;
-
-/// The message the File operations window sends its owner when the person
-/// hides it.
-pub(crate) const HIDDEN: u32 = super::wake::WAKE + 8;
-
-/// Sends [`HIDDEN`] to `owner`, which handles it before this returns, so no
-/// later wake shows the window again before the owner knows.
-pub(crate) fn tell_hidden(owner: Hwnd) {
-    send(owner, HIDDEN, 0, 0);
-}
 
 /// One line of a path that loses its middle when it is too long
 /// (`SS_PATHELLIPSIS`), so its drive and its last part stay. It notifies its
@@ -83,47 +72,9 @@ impl PathLabel {
 /// Explorer's copy shows a paused copy.
 pub(crate) fn show_paused(bar: ProgressBar, paused: bool) {
     let state = if paused { PBST_PAUSED } else { PBST_NORMAL };
-    send(bar.hwnd(), PBM_SETSTATE, state as usize, 0);
-}
-
-/// The size of `window`, a top-level window without a menu bar, whose
-/// client area is `client`.
-pub(crate) fn window_size(window: Hwnd, client: Size) -> Size {
-    let mut rect = to_rect(Rect {
-        x: Px(0),
-        y: Px(0),
-        width: client.width,
-        height: client.height,
-    });
-    let (style, ex_style) = window.styles();
-    // SAFETY: `rect` is a local the call adjusts in place.
-    if unsafe { AdjustWindowRectExForDpi(&mut rect, style, false, ex_style, window.dpi().get()) }
-        .is_err()
-    {
-        return client;
+    if send(bar.hwnd(), PBM_GETSTATE, 0, 0) != state as isize {
+        send(bar.hwnd(), PBM_SETSTATE, state as usize, 0);
     }
-    Size {
-        width: Px(rect.right - rect.left),
-        height: Px(rect.bottom - rect.top),
-    }
-}
-
-/// Sizes `window`, a top-level window without a menu bar, so its client
-/// area is `client`, and keeps its position.
-pub(crate) fn set_client_size(window: Hwnd, client: Size) {
-    let size = window_size(window, client);
-    // SAFETY: plain values; a stale handle only fails.
-    let _ = unsafe {
-        SetWindowPos(
-            window.0,
-            None,
-            0,
-            0,
-            size.width.0,
-            size.height.0,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-    };
 }
 
 /// Shows the cursor of a drag: the arrow, or the "not allowed" cursor over
@@ -154,6 +105,7 @@ pub(crate) struct Tile<'a> {
 
 /// What the queue list told its parent.
 pub(crate) enum QueueNotify<'a> {
+    Activated,
     /// The selected row changed.
     SelectionChanged,
     /// The person started dragging a row with the left button.
@@ -225,6 +177,16 @@ impl QueueList {
     /// so the tiles stack in one column, with one line of detail under the
     /// title.
     pub(crate) fn set_tile_width(self, width: Px) {
+        let mut shown = LVTILEVIEWINFO {
+            cbSize: size_of::<LVTILEVIEWINFO>() as u32,
+            dwMask: LVTVIM_TILESIZE | LVTVIM_COLUMNS,
+            ..Default::default()
+        };
+        // SAFETY: `shown` is a local the call fills in.
+        unsafe { send_pointer(self.0, LVM_GETTILEVIEWINFO, 0, &raw mut shown) };
+        if shown.sizeTile.cx == width.0.max(1) && shown.cLines == 1 {
+            return;
+        }
         let info = LVTILEVIEWINFO {
             cbSize: size_of::<LVTILEVIEWINFO>() as u32,
             dwMask: LVTVIM_TILESIZE | LVTVIM_COLUMNS,
@@ -269,15 +231,19 @@ impl QueueList {
     /// the text colour of now, in their order; [`Tile::icon`] indexes them.
     /// An icon the font lacks shows no icon.
     pub(crate) fn set_icons(self, glyphs: &[Glyph], side: Px) {
-        let images = glyph_list(glyphs, side, system_color(COLOR_WINDOWTEXT)).unwrap_or_default();
+        let images = icons_shown()
+            .then(|| glyph_list(glyphs, side, system_color(COLOR_WINDOWTEXT)))
+            .flatten()
+            .unwrap_or_default();
         // The list shares the image list, which `glyph_list` keeps alive.
-        send(self.0, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, images.0);
+        if send(self.0, LVM_GETIMAGELIST, LVSIL_NORMAL as usize, 0) != images.0 {
+            send(self.0, LVM_SETIMAGELIST, LVSIL_NORMAL as usize, images.0);
+        }
     }
 
-    /// Shows `tiles` in their order, with the row `selected` selected and
-    /// focused. Rows are changed in place, so the list keeps its scroll
-    /// position.
-    pub(crate) fn set_tiles(self, tiles: &[Tile], selected: Option<usize>) {
+    /// Changes tiles in place, preserving scroll and selection unless the
+    /// core chose a different row or the rows changed identity or order.
+    pub(crate) fn set_tiles(self, tiles: &[Tile], selected: Option<usize>, apply_selection: bool) {
         let count = usize::try_from(send(self.0, LVM_GETITEMCOUNT, 0, 0)).unwrap_or(0);
         for index in (tiles.len()..count).rev() {
             send(self.0, LVM_DELETEITEM, index, 0);
@@ -294,14 +260,20 @@ impl QueueList {
                 puColumns: detail_column.as_ptr().cast_mut(),
                 ..Default::default()
             };
-            let message = if index < count {
-                LVM_SETITEMW
-            } else {
-                LVM_INSERTITEMW
-            };
-            // SAFETY: `item`, its text and its column list outlive the
-            // call, which copies them.
-            unsafe { send_pointer(self.0, message, 0, &raw const item) };
+            let existing = index < count;
+            if !existing || !self.same_tile(index, 0, tile.title, Some(tile.icon)) {
+                let message = if existing {
+                    LVM_SETITEMW
+                } else {
+                    LVM_INSERTITEMW
+                };
+                // SAFETY: `item`, its text and its column list outlive the
+                // call, which copies them.
+                unsafe { send_pointer(self.0, message, 0, &raw const item) };
+            }
+            if existing && self.same_tile(index, 1, tile.detail, None) {
+                continue;
+            }
             let mut detail = wide(tile.detail);
             item = LVITEMW {
                 mask: LVIF_TEXT,
@@ -313,24 +285,56 @@ impl QueueList {
             // SAFETY: as above.
             unsafe { send_pointer(self.0, LVM_SETITEMW, 0, &raw const item) };
         }
-        for index in 0..tiles.len() {
-            self.set_selected(index, Some(index) == selected);
+        if apply_selection {
+            for index in 0..tiles.len() {
+                self.set_selected(index, Some(index) == selected);
+            }
         }
     }
 
     fn set_selected(self, index: usize, selected: bool) {
         let mask = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+        let state = if selected {
+            mask
+        } else {
+            LIST_VIEW_ITEM_STATE_FLAGS(0)
+        };
+        if send(self.0, LVM_GETITEMSTATE, index, mask.0 as isize) == state.0 as isize {
+            return;
+        }
         let item = LVITEMW {
             stateMask: mask,
-            state: if selected {
-                mask
-            } else {
-                LIST_VIEW_ITEM_STATE_FLAGS(0)
-            },
+            state,
             ..Default::default()
         };
         // SAFETY: `item` outlives the call, which reads it.
         unsafe { send_pointer(self.0, LVM_SETITEMSTATE, index, &raw const item) };
+    }
+
+    fn same_tile(self, index: usize, column: i32, text: &str, icon: Option<usize>) -> bool {
+        let expected = wide(text);
+        let mut shown = vec![0u16; expected.len() + 1];
+        let mut item = LVITEMW {
+            iItem: index as i32,
+            iSubItem: column,
+            pszText: PWSTR(shown.as_mut_ptr()),
+            cchTextMax: shown.len() as i32,
+            ..Default::default()
+        };
+        // SAFETY: `item` and its buffer outlive the call, which writes at
+        // most `cchTextMax` characters.
+        let length = unsafe { send_pointer(self.0, LVM_GETITEMTEXTW, index, &raw mut item) };
+        if length < 0
+            || length as usize + 1 != expected.len()
+            || shown[..expected.len()] != expected
+        {
+            return false;
+        }
+        let Some(icon) = icon else { return true };
+        item.mask = LVIF_IMAGE;
+        // SAFETY: `item` is a local the call fills in.
+        let found = unsafe { send_pointer(self.0, LVM_GETITEMW, 0, &raw mut item) } != 0;
+        found && item.iImage == icon as i32
     }
 
     /// The selected row, if any.
@@ -477,6 +481,7 @@ impl QueueList {
                         QueueNotify::Other
                     }
                 }
+                NM_DBLCLK => QueueNotify::Activated,
                 LVN_GETEMPTYMARKUP => QueueNotify::EmptyText(EmptyText(&mut *pointer.cast())),
                 LVN_GETINFOTIPW => QueueNotify::InfoTip(InfoTip(&mut *pointer.cast())),
                 _ => QueueNotify::Other,

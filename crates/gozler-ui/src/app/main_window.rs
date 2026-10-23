@@ -12,12 +12,11 @@ use super::icons::Icons;
 use super::include::{Elevated, NotSaved, Saving};
 use super::requests::Requests;
 use super::settings::SettingsDialog;
-use super::status_bar::StatusBar;
+use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use super::viewer::Viewers;
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, FilterCaptions, IndexCaptions, Inspected, InspectorCaptions,
-    JobCaption, JobProgress, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart,
-    WindowCaptions,
+    JobCaption, ListCaption, MODIFIED_ROW, StatusCaptions, StatusWidest, ValuePart, WindowCaptions,
 };
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, folder_of};
 use crate::core::commands::{
@@ -28,7 +27,7 @@ use crate::core::commands::{
 use crate::core::dates::{DateFormat, Dates};
 use crate::core::drop_target::{Dragged, DropEffect, DropKeys, DropMenu, SourceEffects};
 use crate::core::fetch::{ChunkAsk, DaemonFailure, Fetch, List, Purpose, WriteFailure};
-use crate::core::file_operations::{delete_question, exit_question};
+use crate::core::file_operations::{QueueAction, delete_question, exit_question};
 use crate::core::fixer::{FixEvent, SetupEvent, SetupResult};
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId, IconId};
@@ -46,7 +45,7 @@ use crate::core::model::{
     SearchBoxEnter, Then,
 };
 use crate::core::open::{self, CommandLine};
-use crate::core::operations::{Answer, OperationDialog, OperationProgress, QueueStep, WindowStep};
+use crate::core::operations::{Answer, OperationDialog, OperationProgress, QueueStep};
 use crate::core::panel::{ChosenEntry, Side};
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
@@ -66,7 +65,7 @@ use crate::win::controls::{
 };
 use crate::win::dialog::{DialogEnd, DialogProc};
 use crate::win::drop_target::{self, DropData, DropHandler, DropRegistration, DropSource};
-use crate::win::file_operations::{HIDDEN, QUEUE_CHANGED};
+use crate::win::file_operations::QUEUE_CHANGED;
 use crate::win::folder::PanelThreads;
 use crate::win::gdi::{Font, ImageList, TextMeter};
 use crate::win::locale::WindowsNumbers;
@@ -134,9 +133,6 @@ mod timer {
     /// Reads a running file operation's counts, which change without a
     /// wake.
     pub(super) const OPERATIONS_POLL: usize = 16;
-    /// Opens the File operations window once an operation has run for a
-    /// while (`core::operations`).
-    pub(super) const OPERATIONS_OPEN: usize = 17;
     /// Names Search's search as running in the status bar once it has run
     /// this long.
     pub(super) const SEARCHING: usize = 18;
@@ -176,7 +172,7 @@ const SEARCHING_NAMED_MS: u32 = 300;
 const STATUS_POLL_MS: u32 = 2_000;
 const SELECTION_DELAY_MS: u32 = 150;
 const AGE_REFRESH_MS: u32 = 60_000;
-/// A row each tenth of a second, as the File operations window's queue
+/// A row each tenth of a second, as the transfer queue
 /// scrolls while a row is dragged past its edge.
 const DROP_SCROLL_MS: u32 = 100;
 const SAVE_DELAY_MS: u32 = 1_000;
@@ -805,6 +801,7 @@ struct Created {
 
 /// A Paste, from its command until its thread has read the clipboard.
 struct Pasting {
+    id: OperationId,
     /// The folder selected when Paste was chosen.
     destination: PathBuf,
     files: Receiver<Option<ClipboardFiles>>,
@@ -814,8 +811,7 @@ struct Pasting {
 #[derive(Clone, Copy)]
 struct OpenSettings {
     dialog: Hwnd,
-    /// `None` when Windows could not make the dialog's status bar.
-    status: Option<StatusBar>,
+    follow_fix: bool,
 }
 
 /// Which Gozler of the session a window is (DESIGN.md: Window lifetime).
@@ -880,6 +876,7 @@ pub(crate) struct MainWindow {
     /// While the person drags the splitter: the pointer's client `y` and the
     /// inspector's height when the drag started.
     splitter_drag: Cell<Option<(i32, Px)>>,
+    inspector_focus: Cell<Option<Hwnd>>,
     column_sizing: RefCell<ColumnSizing>,
     /// The person's command shortcuts, which Settings replaces; the message
     /// loop translates with the table of the moment.
@@ -911,7 +908,7 @@ pub(crate) struct MainWindow {
     /// Its answer, once it arrived, for the Settings dialog.
     include_saved: RefCell<Option<Result<(), NotSaved>>>,
     /// A Paste whose thread reads the clipboard.
-    pasting: RefCell<Option<Pasting>>,
+    pasting: RefCell<Vec<Pasting>>,
     /// The actions on Search's selected entries whose check has not
     /// arrived, in the order they were chosen.
     checking: RefCell<Vec<Checking>>,
@@ -919,7 +916,7 @@ pub(crate) struct MainWindow {
     /// selected once the click is handled (Settings > Search).
     select_search: Cell<bool>,
     update: Arc<Mutex<UpdateCheck>>,
-    /// The file operations' queue and the File operations window, which
+    /// The file operations' queue and the transfer pane, which
     /// only the first window has (DESIGN.md: Interrupted operations).
     file_operations: OnceCell<FileOperations>,
     /// The open Viewers (DESIGN.md: The Viewer).
@@ -942,6 +939,7 @@ pub(crate) struct MainWindow {
     modal_steps: RefCell<VecDeque<ModalStep>>,
     /// Whether a modal step runs, whose loop the later steps wait for.
     modal_running: Cell<bool>,
+    shutdown: RefCell<Option<std::thread::JoinHandle<()>>>,
 }
 
 /// A dialog, or another call with its own message loop, that a reply, a
@@ -976,6 +974,7 @@ enum ModalStep {
 
 /// A drop whose paths a thread reads from its source.
 struct Dropping {
+    id: OperationId,
     /// The folder the files were dropped on.
     destination: PathBuf,
     moves: bool,
@@ -1052,6 +1051,7 @@ impl MainWindow {
             status_memory: RefCell::new(None),
             tool_tips: RefCell::new(Vec::new()),
             splitter_drag: Cell::new(None),
+            inspector_focus: Cell::new(None),
             column_sizing: RefCell::default(),
             accelerators: RefCell::new(Rc::new(accelerators)),
             tray: RefCell::new(None),
@@ -1065,7 +1065,8 @@ impl MainWindow {
             total_commander: RefCell::new(None),
             include_saving: RefCell::new(None),
             include_saved: RefCell::new(None),
-            pasting: RefCell::new(None),
+            pasting: RefCell::new(Vec::new()),
+            shutdown: RefCell::new(None),
             checking: RefCell::new(Vec::new()),
             select_search: Cell::new(false),
             update: Arc::new(Mutex::new(UpdateCheck::default())),
@@ -1186,6 +1187,9 @@ impl MainWindow {
         created
             .controls
             .apply_glyphs(ToolHeights::new(dpi, font_height));
+        if let Some(operations) = self.file_operations.get() {
+            operations.apply_glyphs();
+        }
         self.update_status();
     }
 
@@ -1279,6 +1283,9 @@ impl MainWindow {
         }
         self.show_inspector(hwnd, captions.inspector.clone());
         controls.status.set_cancel_caption(&captions.status_cancel);
+        controls
+            .status
+            .set_progress_captions(&captions.status_progress);
         controls
             .status
             .set_show_details_caption(&captions.show_details.caption);
@@ -1439,6 +1446,9 @@ impl MainWindow {
     }
 
     fn show_inspector(&self, hwnd: Hwnd, captions: InspectorCaptions) {
+        if self.model.borrow().panes().content == crate::core::layout::InspectorContent::Transfers {
+            return;
+        }
         let inspector = &self.created().controls.inspector;
         inspector.heading.hwnd().set_text(&captions.heading);
         for (index, (label, value)) in inspector.fields.iter().enumerate() {
@@ -1507,7 +1517,12 @@ impl MainWindow {
     fn show_field_rows(&self) {
         let (rows, note, age) = {
             let layout = self.created().layout.borrow();
-            let placed = layout.as_ref().and_then(Layout::inspector);
+            let transfers = self.model.borrow().panes().content
+                == crate::core::layout::InspectorContent::Transfers;
+            let placed = layout
+                .as_ref()
+                .and_then(Layout::inspector)
+                .filter(|_| !transfers);
             let room = placed.map_or(0, |i| i.fields.len());
             let shown = self.inspector_shown.borrow();
             let rows = room.min(shown.0.fields.len());
@@ -1529,6 +1544,9 @@ impl MainWindow {
     /// Fits the inspector's texts to their lines in the shown layout
     /// ([`Self::inspector_fit`]), when they change apart from a layout.
     fn fit_inspector(&self) {
+        if self.model.borrow().panes().content == crate::core::layout::InspectorContent::Transfers {
+            return;
+        }
         let fit = (self.created().layout.borrow().as_ref())
             .and_then(Layout::inspector)
             .map(|placed| self.inspector_fit(placed));
@@ -1626,7 +1644,18 @@ impl MainWindow {
     fn show_status(&self, status: &StatusCaptions) {
         let controls = &self.created().controls;
         self.status_right.replace(status.right.clone());
-        let job_text = self.job_text(&status.job);
+        let mut job = status.job.clone();
+        let settings_fix = self.settings.get().is_some_and(|open| open.follow_fix)
+            && self.model.borrow().job() == Job::Fix;
+        if settings_fix {
+            job = JobCaption {
+                transfer: job.transfer,
+                transfer_only: true,
+                ..JobCaption::default()
+            };
+        }
+        let cancel = self.model.borrow().strings().text("button.cancel").to_owned();
+        controls.status.set_cancel_caption(&cancel);
         self.status_memory.replace(status.memory.clone());
         let layout = self
             .created()
@@ -1636,44 +1665,48 @@ impl MainWindow {
             .map(|layout| layout.status);
         // Cancel hides when the job ends, and a hidden control would keep
         // the focus but take no key.
-        if controls.status.show(status, &job_text, layout.as_ref()) {
+        let mut entries = vec![
+            (StatusSlot::Left, StatusEntry::Text(&status.view)),
+            (
+                StatusSlot::Right,
+                StatusEntry::Values {
+                    parts: &status.right,
+                    memory: status.memory.as_ref(),
+                },
+            ),
+        ];
+        if !job.transfer_only {
+            entries.push((StatusSlot::Center, StatusEntry::Work(&job)));
+        }
+        if let Some(transfer) = &job.transfer {
+            entries.push((StatusSlot::Center, StatusEntry::Transfer(transfer)));
+        }
+        if controls.status.render(&entries, layout.as_ref()) {
             self.home().focus();
         }
-        if let Some(OpenSettings {
-            dialog,
-            status: Some(bar),
-        }) = self.settings.get()
-            && bar.show_work(&status.job, &job_text, &status.service)
-            && let Some(pages) = win::dialog::item(dialog, ControlId::SettingsPages.id())
-        {
-            pages.focus();
-        }
     }
 
-    /// The middle group's text as the status bar shows it. The status bar
-    /// cuts a long text only at the group's end, past a running job's
-    /// progress bar and Cancel, so a running line that names a long path
-    /// loses the path's middle, and its last folder and its percent stay.
-    fn job_text(&self, job: &JobCaption) -> String {
-        let created = self.created();
-        let room = created
-            .layout
-            .borrow()
-            .as_ref()
-            .map(|l| l.status.running_text);
-        match room {
-            Some(room) if job.progress != JobProgress::None => {
-                TextMeter::new(&created.fonts.borrow().ui).compact_path(&job.text, room)
-            }
-            _ => job.text.clone(),
-        }
-    }
-
-    /// The Settings dialog has opened, with its status bar when Windows
-    /// made one, which shows the window's job and service at once.
-    pub(super) fn settings_opened(&self, dialog: Hwnd, status: Option<StatusBar>) {
-        self.settings.set(Some(OpenSettings { dialog, status }));
+    /// A running service fix follows the modal dialog, where its controls
+    /// stay reachable; an earlier fix's result does not enter a new dialog.
+    pub(super) fn settings_opened(&self, dialog: Hwnd) {
+        let follow_fix = self.model.borrow().fix().running();
+        self.settings.set(Some(OpenSettings { dialog, follow_fix }));
         self.update_status();
+    }
+
+    pub(super) fn settings_job(&self, strings: &Strings) -> JobCaption {
+        let follows = self.settings.get().is_some_and(|open| open.follow_fix);
+        captions::settings_job(
+            &self.model.borrow(),
+            strings,
+            &*self.numbers.borrow(),
+            follows,
+        )
+    }
+
+    pub(super) fn cancel_settings_fix(&self, hwnd: Hwnd) {
+        let accepted = self.model.borrow_mut().cancel_fix();
+        self.apply(hwnd, accepted);
     }
 
     /// Tells the open Settings dialog that a reply waits for it: Use Total
@@ -1691,12 +1724,12 @@ impl MainWindow {
         let model = self.model.borrow();
         let strings = model.strings();
         (
-            captions::settings_status_widest(strings, &*self.numbers.borrow()),
+            captions::settings_status_widest(strings),
             strings.text("button.cancel").to_owned(),
         )
     }
 
-    /// The status bar's Cancel, in the window or in Settings: stops the job
+    /// The main window's status bar's Cancel: stops the job
     /// that the bar shows, as File > Cancel does.
     pub(super) fn cancel_job(&self, hwnd: Hwnd) {
         self.run(hwnd, MenuItem::Run(CommandId::Cancel));
@@ -1729,6 +1762,10 @@ impl MainWindow {
                 }
             }
             Fix::Repair(_) | Fix::Update => {}
+        }
+        if let Some(mut open) = self.settings.get() {
+            open.follow_fix = true;
+            self.settings.set(Some(open));
         }
         let accepted = self.model.borrow_mut().start_fix(&fix);
         self.apply(hwnd, accepted);
@@ -1804,6 +1841,14 @@ impl MainWindow {
         }
     }
 
+    /// Setup can end the message loop before destroying the window, so its
+    /// caller also holds the process open for the recovery writer.
+    pub(super) fn finish_shutdown(&self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.join();
+        }
+    }
+
     /// The service's report, which the Index page's Show report shows.
     pub(super) fn service_report(&self) -> Option<String> {
         captions::service_report(&self.model.borrow())
@@ -1816,6 +1861,11 @@ impl MainWindow {
 
     /// Shows the list's message and its buttons, or hides them.
     fn show_message(&self, message: Option<&ListCaption>) {
+        let panes = self.model.borrow().panes();
+        let maximized = panes.inspector
+            && panes.maximized
+            && panes.content == crate::core::layout::InspectorContent::Transfers;
+        let message = message.filter(|_| !maximized);
         let controls = &self.created().controls;
         let (text, buttons) = match message {
             Some(message) => (message.text.as_str(), message.buttons.as_slice()),
@@ -1937,7 +1987,10 @@ impl MainWindow {
         let search = layout.search();
         let filters = search.and_then(|search| search.filters.as_ref());
         let show_filters = search.and_then(|search| search.show_filters);
+        let transfers = panes.content == crate::core::layout::InspectorContent::Transfers;
+        let maximized = panes.inspector && transfers && panes.maximized;
         let placed_inspector = layout.inspector();
+        let selection_inspector = placed_inspector.filter(|_| !transfers);
         let strip = [
             controls.search.hwnd(),
             controls.search_tools.hwnd(),
@@ -1989,13 +2042,13 @@ impl MainWindow {
         // The inspector's texts are fitted again only when it moved or its
         // size changed, because fitting them measures each text. Their
         // controls move in this batch with the others (DESIGN.md: Painting).
-        let mut inspector_fit = placed_inspector
+        let mut inspector_fit = selection_inspector
             .filter(|_| inspector_moved)
             .map(|placed| self.inspector_fit(placed));
         if let Some(fit) = &mut inspector_fit {
             moves.append(&mut fit.moves);
         }
-        if let Some(placed) = placed_inspector {
+        if let Some(placed) = selection_inspector {
             moves.push((inspector.icon.hwnd(), placed.icon));
             moves.push((inspector.hide.hwnd(), placed.hide));
             moves.push((inspector.copy_path.hwnd(), placed.copy_path));
@@ -2033,24 +2086,26 @@ impl MainWindow {
             self.update_locations();
         }
         for control in strip {
-            control.set_visible(search.is_some());
+            control.set_visible(search.is_some() && !maximized);
         }
         // A panel's path row and status line show as its kind says
         // (`show_panel`).
         for panel in &controls.panels {
             for control in [panel.drive.hwnd(), panel.list.hwnd()] {
-                control.set_visible(search.is_none());
+                control.set_visible(search.is_none() && !maximized);
             }
         }
         for button in controls.key_bar {
-            button.hwnd().set_visible(search.is_none());
+            button.hwnd().set_visible(search.is_none() && !maximized);
         }
-        let shown = filters.is_some();
+        let shown = filters.is_some() && !maximized;
         for control in [pane.title.hwnd(), pane.tools.hwnd(), pane.pane] {
             control.set_visible(shown);
         }
-        pane.show.hwnd().set_visible(show_filters.is_some());
-        let shown = placed_inspector.is_some();
+        pane.show
+            .hwnd()
+            .set_visible(show_filters.is_some() && !maximized);
+        let shown = selection_inspector.is_some();
         inspector.icon.hwnd().set_visible(shown);
         inspector.heading.hwnd().set_visible(shown);
         inspector.hide.hwnd().set_visible(shown);
@@ -2059,18 +2114,39 @@ impl MainWindow {
             button.hwnd().set_visible(shown);
         }
         for (index, divider) in controls.dividers.iter().enumerate() {
-            divider.hwnd().set_visible(index < layout.dividers.len());
+            divider
+                .hwnd()
+                .set_visible(index < layout.dividers.len() && !maximized);
         }
         let right = self.status_right.borrow().clone();
         let memory = self.status_memory.borrow().clone();
         controls
             .status
             .place_in_window(&layout.status, &right, memory.as_ref());
+        controls.status.set_visible(!maximized);
+        if let Some(operations) = self.file_operations.get() {
+            operations.place(
+                placed_inspector.filter(|_| transfers).map(|i| i.area),
+                panes.flipped,
+                maximized,
+            );
+        }
         let two_panels = search.is_none();
         created.layout.replace(Some(layout));
         // Each panel's message is placed for its text in its list.
         for side in Side::BOTH {
             self.show_panel(side);
+        }
+        if maximized {
+            for panel in &controls.panels {
+                for control in panel.hwnds() {
+                    control.set_visible(false);
+                }
+            }
+            controls.message.hwnd().set_visible(false);
+            for button in controls.message_buttons {
+                button.hwnd().set_visible(false);
+            }
         }
         if two_panels {
             // During a drag of the border only Name follows the width,
@@ -2088,6 +2164,7 @@ impl MainWindow {
             self.show_field_rows();
             self.show_inspector_fit(inspector_fit);
         }
+        self.update_status();
         self.update_message();
         hwnd.invalidate();
     }
@@ -2551,7 +2628,7 @@ impl MainWindow {
                 CommandId::Edit => return,
                 CommandId::Cut => return self.copy(hwnd, ClipboardFormat::CutFiles),
                 CommandId::Paste => return self.paste(),
-                CommandId::FileOperations => return self.show_operations(None, true),
+                CommandId::FileOperations => return self.show_operations(None),
                 CommandId::TwoPanels => {
                     let mut model = self.model.borrow_mut();
                     let other = match model.mode() {
@@ -2827,17 +2904,46 @@ impl MainWindow {
             Change::Filters => self.update_filters(),
             Change::Panes => {
                 let panes = self.model.borrow().panes();
-                // A hidden control keeps the focus but takes no key, so the
-                // focus moves to the search box, because the buttons that
-                // show and hide the panes are toolbar buttons, which take no
-                // focus.
+                let maximized = panes.inspector
+                    && panes.maximized
+                    && panes.content == crate::core::layout::InspectorContent::Transfers;
+                let was_maximized = created
+                    .layout
+                    .borrow()
+                    .as_ref()
+                    .and_then(Layout::inspector)
+                    .is_some_and(|placed| placed.splitter.height == Px(0));
                 let hidden_focus = Hwnd::focused().is_some_and(|focused| {
                     (!panes.filters && controls.filters.contains(focused))
-                        || (!panes.inspector && controls.inspector.contains(focused))
+                        || ((!panes.inspector
+                            || panes.content != crate::core::layout::InspectorContent::Selection)
+                            && controls.inspector.contains(focused))
+                        || ((!panes.inspector
+                            || panes.content != crate::core::layout::InspectorContent::Transfers)
+                            && self
+                                .file_operations
+                                .get()
+                                .is_some_and(|ops| ops.contains(focused)))
                 });
                 self.layout(hwnd);
-                if hidden_focus {
-                    controls.search.hwnd().focus();
+                if maximized {
+                    if Hwnd::focused().is_none_or(|focus| {
+                        !self
+                            .file_operations
+                            .get()
+                            .is_some_and(|ops| ops.contains(focus))
+                    }) && let Some(operations) = self.file_operations.get()
+                    {
+                        operations.focus();
+                    }
+                } else if !panes.inspector || was_maximized || hidden_focus {
+                    let previous = self.inspector_focus.take();
+                    if hidden_focus || was_maximized {
+                        previous
+                            .filter(|focus| focus.is_visible())
+                            .unwrap_or_else(|| self.home())
+                            .focus();
+                    }
                 }
                 self.update_status();
             }
@@ -3183,6 +3289,35 @@ impl MainWindow {
     /// A control's notification in `WM_COMMAND`.
     fn on_control(&self, hwnd: Hwnd, event: ControlEvent) {
         let controls = &self.created().controls;
+        if let Some(input) = controls.status.transfer_input(event) {
+            match input {
+                crate::core::status_transfer::Input::Toggle => {
+                    controls.status.restore_transfer_focus();
+                    self.remember_inspector_focus();
+                    if let Some(operations) = self.file_operations.get() {
+                        self.model
+                            .borrow_mut()
+                            .open_transfer_selection(None, &operations.snapshot());
+                    }
+                    let accepted = self.model.borrow_mut().toggle_transfers();
+                    self.apply(hwnd, accepted);
+                    self.refresh_operations();
+                }
+                crate::core::status_transfer::Input::Action(id, QueueAction::Report) => {
+                    self.show_operations(Some(id));
+                    self.model
+                        .borrow_mut()
+                        .select_operation(crate::core::file_operations::Detail::Report(id));
+                    self.refresh_operations();
+                }
+                crate::core::status_transfer::Input::Action(id, action) => {
+                    if let Some(operations) = self.file_operations.get() {
+                        operations.act(id, action);
+                    }
+                }
+            }
+            return;
+        }
         if controls
             .inspector
             .fields
@@ -3707,6 +3842,22 @@ impl MainWindow {
     /// A key that the control `target` gives a meaning (DESIGN.md:
     /// window rule 8). Returns whether the window took it.
     fn on_key(&self, hwnd: Hwnd, target: Hwnd, mut keystroke: Keystroke) -> bool {
+        if self
+            .file_operations
+            .get()
+            .is_some_and(|ops| ops.key(target, keystroke))
+        {
+            return true;
+        }
+        if keystroke.key == commands::Key::Tab
+            && (self
+                .file_operations
+                .get()
+                .is_some_and(|ops| ops.contains(target))
+                || self.created().controls.status.contains(target))
+        {
+            return false;
+        }
         // Shift+Space types a space in the quick search box, as Space does,
         // instead of selecting rows in the list.
         let space = Keystroke::plain(commands::Key::Space);
@@ -4128,9 +4279,8 @@ impl MainWindow {
         }
     }
 
-    /// Opens the file operations' queue, whose File operations window opens
-    /// the first time it shows, and starts following the clipboard for
-    /// Paste.
+    /// Opens the file operations' queue and starts following the clipboard
+    /// for Paste; the transfer pane is made only when explicitly opened.
     fn open_file_operations(&self, hwnd: Hwnd) {
         let strings = self.model.borrow().strings().clone();
         let saved = self.settings_file.with_file_name("operations.json");
@@ -4160,13 +4310,43 @@ impl MainWindow {
 
     /// Reads the queue after it changed, and runs what the model decides:
     /// the queue's steps first, then the lists', the dialogs, which wait
-    /// for [`Message::Deferred`], the File operations window's, and the
+    /// for [`Message::Deferred`], the transfer pane's, and the
     /// sources' last, because a drop's source can deliver messages while
     /// it is told.
     fn on_operations(&self, hwnd: Hwnd) {
         let Some(operations) = self.file_operations.get() else {
             return;
         };
+        use super::file_operations::PaneAction;
+        for action in operations.take_actions() {
+            match action {
+                PaneAction::Select(detail) => self.model.borrow_mut().select_operation(detail),
+                PaneAction::Command(id, QueueAction::Report) => self
+                    .model
+                    .borrow_mut()
+                    .select_operation(crate::core::file_operations::Detail::Report(id)),
+                PaneAction::Command(id, QueueAction::Clear) => {
+                    let steps = self.model.borrow_mut().operation_reported(id);
+                    self.run_queue_steps(steps);
+                }
+                PaneAction::Command(id, action) => operations.act(id, action),
+                PaneAction::Move(id, before) => operations.move_before(id, before),
+                PaneAction::CancelAll => operations.cancel_all(),
+                PaneAction::CloseReport => self.model.borrow_mut().close_operation_report(),
+                PaneAction::Collapse | PaneAction::Maximize | PaneAction::Flip => {
+                    let accepted = {
+                        let mut model = self.model.borrow_mut();
+                        match action {
+                            PaneAction::Collapse => model.collapse_inspector(),
+                            PaneAction::Maximize => model.maximize_inspector(),
+                            PaneAction::Flip => model.flip_transfers(),
+                            _ => unreachable!(),
+                        }
+                    };
+                    self.apply(hwnd, accepted);
+                }
+            }
+        }
         let taken = operations.taken();
         let snapshot = operations.snapshot();
         let steps = (self.model.borrow_mut()).accept_operations(&snapshot, &taken, Instant::now());
@@ -4178,18 +4358,7 @@ impl MainWindow {
         for dialog in steps.dialogs {
             self.defer(hwnd, ModalStep::Operation(dialog));
         }
-        hwnd.kill_timer(timer::OPERATIONS_OPEN);
-        match steps.window {
-            WindowStep::Hide => operations.hide(),
-            WindowStep::Show { select } => self.show_operations(select, false),
-            WindowStep::OpenAt(due) if !operations.is_shown() => {
-                let wait = due.saturating_duration_since(Instant::now()).as_millis();
-                let wait = u32::try_from(wait).unwrap_or(u32::MAX).max(1);
-                hwnd.set_timer(timer::OPERATIONS_OPEN, wait);
-                self.refresh_operations();
-            }
-            WindowStep::OpenAt(_) | WindowStep::Stay => self.refresh_operations(),
-        }
+        self.refresh_operations();
         self.show_progress(hwnd, steps.progress);
         for step in steps.sources {
             operations.tell_source(step);
@@ -4223,20 +4392,47 @@ impl MainWindow {
         self.run_queue_steps(steps);
     }
 
-    /// Shows the File operations window, with `select` selected, in front
-    /// with `front`.
-    fn show_operations(&self, select: Option<OperationId>, front: bool) {
+    /// Opens File operations explicitly, with `select` selected.
+    fn show_operations(&self, select: Option<OperationId>) {
+        self.remember_inspector_focus();
+        let accepted = {
+            let mut model = self.model.borrow_mut();
+            if let Some(operations) = self.file_operations.get() {
+                model.open_transfer_selection(select, &operations.snapshot());
+            }
+            model.show_transfers()
+        };
+        self.apply(self.created().controls.search.hwnd().parent(), accepted);
         if let Some(operations) = self.file_operations.get() {
-            let snapshot = operations.snapshot();
-            operations.show(&snapshot, select, front);
+            let view = self
+                .model
+                .borrow()
+                .operation_view(&*self.numbers.borrow(), &operations.snapshot());
+            operations.show(view);
         }
     }
 
-    /// Shows the queue in the File operations window, if it was made.
+    /// Refreshes the transfer pane without opening it.
     fn refresh_operations(&self) {
         if let Some(operations) = self.file_operations.get() {
-            let snapshot = operations.snapshot();
-            operations.refresh(&snapshot);
+            let view = self
+                .model
+                .borrow()
+                .operation_view(&*self.numbers.borrow(), &operations.snapshot());
+            operations.refresh(view);
+        }
+    }
+
+    fn remember_inspector_focus(&self) {
+        if self.inspector_focus.get().is_none()
+            && let Some(focus) = Hwnd::focused().filter(|focus| {
+                !self
+                    .file_operations
+                    .get()
+                    .is_some_and(|ops| ops.contains(*focus))
+            })
+        {
+            self.inspector_focus.set(Some(focus));
         }
     }
 
@@ -4264,16 +4460,11 @@ impl MainWindow {
         let snapshot = operations.snapshot();
         let progress = self.model.borrow_mut().poll_operations(&snapshot);
         self.show_progress(hwnd, progress);
-        operations.refresh(&snapshot);
-    }
-
-    /// The person hid the File operations window.
-    fn operations_hidden(&self, hwnd: Hwnd) {
-        if let Some(operations) = self.file_operations.get() {
-            let snapshot = operations.snapshot();
-            self.model.borrow_mut().hide_operations(&snapshot);
-            hwnd.kill_timer(timer::OPERATIONS_OPEN);
-        }
+        let shown = self
+            .model
+            .borrow()
+            .operation_view(&*self.numbers.borrow(), &snapshot);
+        operations.refresh(shown);
     }
 
     /// Asks an operation's conflict question, or shows what failed in it,
@@ -4295,6 +4486,19 @@ impl MainWindow {
                 self.run_queue_steps(step.into_iter().collect());
             }
             OperationDialog::Report(id) => {
+                let transfer = self.file_operations.get().is_some_and(|ops| {
+                    self.model
+                        .borrow()
+                        .operation_is_transfer(id, &ops.snapshot())
+                });
+                if transfer {
+                    self.show_operations(Some(id));
+                    self.model
+                        .borrow_mut()
+                        .select_operation(crate::core::file_operations::Detail::Report(id));
+                    self.refresh_operations();
+                    return;
+                }
                 let windows_text =
                     |code: u32| win::error_text(&io::Error::from_raw_os_error(code as i32));
                 let (failure, strings) = {
@@ -4311,7 +4515,7 @@ impl MainWindow {
                 self.run_queue_steps(steps);
             }
         }
-        // The status bar and the File operations window show the answer or
+        // The status bar and the transfer pane show the answer or
         // the report.
         hwnd.post(QUEUE_CHANGED);
     }
@@ -4326,8 +4530,12 @@ impl MainWindow {
         moves: bool,
         from: Option<FilesSource>,
     ) {
+        self.start_operation(Self::transfer_request(sources, destination, moves), from);
+    }
+
+    fn transfer_request(sources: Vec<PathBuf>, destination: PathBuf, moves: bool) -> Request {
         let destination = Destination::Folder(destination);
-        let request = if moves {
+        if moves {
             Request::Move {
                 sources,
                 destination,
@@ -4337,8 +4545,41 @@ impl MainWindow {
                 sources,
                 destination,
             }
+        }
+    }
+
+    fn accept_transfer(&self, destination: PathBuf, moves: bool) -> Option<OperationId> {
+        let operations = self.file_operations.get()?;
+        let settings = self.model.borrow().choices().speed.settings();
+        Some(operations.accept(
+            Self::transfer_request(Vec::new(), destination, moves),
+            settings,
+        ))
+    }
+
+    fn resolve_transfer(
+        &self,
+        id: OperationId,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        moves: bool,
+        from: Option<FilesSource>,
+    ) {
+        let Some(operations) = self.file_operations.get() else {
+            return;
         };
-        self.start_operation(request, from);
+        if sources.is_empty() {
+            operations.fail_intake(id);
+            return;
+        }
+        let kind = from.as_ref().map(FilesSource::kind);
+        if operations.resolve(
+            id,
+            Self::transfer_request(sources, destination, moves),
+            from,
+        ) {
+            self.model.borrow_mut().file_operation_started(id, kind);
+        }
     }
 
     /// The full paths of the entries a file command acts on, as Windows
@@ -4409,13 +4650,17 @@ impl MainWindow {
         let [destination] = folder.as_slice() else {
             return;
         };
+        let Some(id) = self.accept_transfer(destination.clone(), false) else {
+            return;
+        };
         let (sender, files) = channel();
         let waker = self.created().waker.clone();
         clipboard::read_files(move |read| waker.deliver(|| sender.send(read).is_ok()));
-        self.pasting.replace(Some(Pasting {
+        self.pasting.borrow_mut().push(Pasting {
+            id,
             destination: destination.clone(),
             files,
-        }));
+        });
     }
 
     /// Copies or moves the dropped files whose paths their threads have
@@ -4435,29 +4680,43 @@ impl MainWindow {
             read
         };
         for (dropped, paths) in read {
-            if !paths.is_empty() {
-                let source = dropped.source.map(FilesSource::Drop);
-                self.transfer_into(paths, dropped.destination, dropped.moves, source);
-            }
+            let source = dropped.source.map(FilesSource::Drop);
+            self.resolve_transfer(
+                dropped.id,
+                paths,
+                dropped.destination,
+                dropped.moves,
+                source,
+            );
         }
     }
 
     /// Paste's files, once their thread has read them from the clipboard.
     fn finish_paste(&self) {
-        let read =
-            (self.pasting.borrow().as_ref()).and_then(|pasting| pasting.files.try_recv().ok());
-        let Some(read) = read else {
-            return;
-        };
-        let Some(pasting) = self.pasting.take() else {
-            return;
-        };
-        let Some(files) = read else {
-            return;
-        };
-        let (sources, moves) = (files.paths.clone(), files.cut);
-        let from = Some(FilesSource::Paste(files));
-        self.transfer_into(sources, pasting.destination, moves, from);
+        let mut ready = Vec::new();
+        {
+            let mut pending = self.pasting.borrow_mut();
+            let mut index = 0;
+            while index < pending.len() {
+                match pending[index].files.try_recv() {
+                    Err(TryRecvError::Empty) => index += 1,
+                    result => ready.push((pending.remove(index), result.ok().flatten())),
+                }
+            }
+        }
+        for (pasting, files) in ready {
+            let (sources, moves) = files.as_ref().map_or_else(
+                || (Vec::new(), false),
+                |files| (files.paths.clone(), files.cut),
+            );
+            self.resolve_transfer(
+                pasting.id,
+                sources,
+                pasting.destination,
+                moves,
+                files.map(FilesSource::Paste),
+            );
+        }
     }
 
     /// Shows the rows that deletes and moves have taken, `taken`, struck
@@ -4884,6 +5143,7 @@ impl MainWindow {
         let dialog = SettingsDialog::new(self, hwnd, strings, values);
         self.open_dialog(hwnd, DialogId::Settings, &dialog);
         self.settings.set(None);
+        self.update_status();
         self.total_commander.replace(None);
         let accepted = self.model.borrow_mut().forget_total_commander();
         self.apply(hwnd, accepted);
@@ -4960,9 +5220,6 @@ impl MainWindow {
             if edited.choices.show_icons != last.choices.show_icons {
                 win::gdi::show_icons(edited.choices.show_icons);
                 self.apply_glyphs(hwnd.dpi());
-                if let Some(operations) = self.file_operations.get() {
-                    operations.apply_glyphs();
-                }
                 self.viewers.apply_glyphs();
                 // The menus, the button widths and the Kind list follow.
                 self.refresh_text(hwnd);
@@ -5480,11 +5737,16 @@ impl DropHandler for MainWindow {
         let Some(target) = drag.target else {
             return;
         };
+        let destination = PathBuf::from(OsString::from_wide(&wide_path(&target.folder)));
+        let Some(id) = self.accept_transfer(destination.clone(), effect == DropEffect::Move) else {
+            return;
+        };
         let (sender, files) = channel();
         let waker = self.created().waker.clone();
         data.read_files(move |paths| waker.deliver(|| sender.send(paths).is_ok()));
         self.dropping.borrow_mut().push(Dropping {
-            destination: PathBuf::from(OsString::from_wide(&wide_path(&target.folder))),
+            id,
+            destination,
             moves: effect == DropEffect::Move,
             files,
             source,
@@ -5694,11 +5956,6 @@ impl WindowProc for MainWindow {
                 self.poll_operations(hwnd);
                 Some(LRESULT(0))
             }
-            Message::Timer(timer::OPERATIONS_OPEN) => {
-                hwnd.kill_timer(timer::OPERATIONS_OPEN);
-                self.on_operations(hwnd);
-                Some(LRESULT(0))
-            }
             Message::Timer(_) => None,
             Message::Wake => {
                 self.on_wake(hwnd);
@@ -5902,15 +6159,29 @@ impl WindowProc for MainWindow {
                 }
                 self.drop_target.replace(None);
                 self.dropping.borrow_mut().clear();
-                if let Some(operations) = self.file_operations.get() {
-                    operations.close();
-                }
                 // No Viewer outlives the message loop.
                 self.viewers.close_all();
-                win::window::quit();
+                if let Some(operations) = self.file_operations.get() {
+                    let finished = operations.close();
+                    let error_log = self.settings_file.with_file_name("ui-error.log");
+                    let shutdown = win::window::quit_after(move || match finished.recv() {
+                        Ok(Ok(())) => {}
+                        result => super::write_log(
+                            &error_log,
+                            &format!(
+                                "File operation recovery state was not saved at Exit: {result:?}",
+                            ),
+                        ),
+                    });
+                    self.shutdown.replace(Some(shutdown));
+                } else {
+                    win::window::quit();
+                }
                 Some(LRESULT(0))
             }
             Message::Hotkey => {
+                let accepted = self.model.borrow_mut().show_mode(Mode::Search);
+                self.apply(hwnd, accepted);
                 self.show_window(hwnd);
                 Some(LRESULT(0))
             }
@@ -5959,10 +6230,6 @@ impl WindowProc for MainWindow {
             }
             Message::Other(QUEUE_CHANGED) => {
                 self.on_operations(hwnd);
-                Some(LRESULT(0))
-            }
-            Message::Other(HIDDEN) => {
-                self.operations_hidden(hwnd);
                 Some(LRESULT(0))
             }
             Message::Other(msg) if msg == self.taskbar_button_created => {

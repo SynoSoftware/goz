@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
@@ -21,7 +22,7 @@ use crate::moves::{Moving, move_by_rename};
 use crate::names::Names;
 use crate::operation::{
     Current, CurrentFile, End, Listed, Operation, OperationId, OrderRefused, Outcome, Pause,
-    Progress, Request, RingCounts, Running, SourcesFolder, State, Total, Wait,
+    Progress, Refusal, Request, RingCounts, Running, SourcesFolder, State, Total, Wait,
 };
 use crate::place::Target;
 use crate::prepare::{Ready, Transfer, Work, check_space, prepare};
@@ -30,7 +31,7 @@ use crate::saved::{self, Restored, Saved};
 use crate::settings::SpeedSettings;
 use crate::taken::Taken;
 use crate::totals::{Counting, Gozlerd, Index};
-use crate::waits::{Plan, reorder, waits};
+use crate::waits::{Plan, reorder, wait, waits};
 use crate::win32::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND};
 
 /// `ERROR_INVALID_NAME`: a new name that is empty or holds a separator,
@@ -86,6 +87,12 @@ struct Operations {
     /// The read that `taken` was built from, so an older rebuild that ends
     /// last does not replace a newer one.
     taken_from: u64,
+    priorities: Vec<Priority>,
+}
+
+struct Priority {
+    id: OperationId,
+    displaced: Vec<OperationId>,
 }
 
 struct Tracked {
@@ -107,9 +114,13 @@ struct Tracked {
     total: Option<Total>,
     /// [`Running::renames`], from submit on.
     renames: bool,
+    /// The priority pause is quiescent, so its disk plan may be released.
+    yielded: bool,
 }
 
 enum Phase {
+    Receiving,
+    Cancelling,
     Preparing,
     Prepared(Box<Ready>),
     Waiting {
@@ -207,17 +218,57 @@ impl Queue {
     /// Starts preparing `request` on a queue thread and returns its id at
     /// once.
     pub fn prepare(&self, request: Request, settings: SpeedSettings) -> OperationId {
+        let id = self.accept(request, settings);
+        Shared::prepare(&self.shared, id);
+        id
+    }
+
+    /// Accepts a command before asynchronous source intake. [`Queue::resolve`]
+    /// completes that same operation; cancellation also covers this interval.
+    pub fn accept(&self, request: Request, settings: SpeedSettings) -> OperationId {
         let id = {
             let mut operations = self.shared.lock();
             let id = OperationId(operations.next_id);
             operations.next_id += 1;
-            let operation = Tracked::new(Arc::new(request), settings, Phase::Preparing);
+            let operation = Tracked::new(Arc::new(request), settings, Phase::Receiving);
             operations.by_id.insert(id, operation);
             id
         };
-        Shared::prepare(&self.shared, id);
         (self.shared.wake)();
         id
+    }
+
+    /// Completes intake only while the accepted command still wants its reply.
+    pub fn resolve(&self, id: OperationId, request: Request) -> bool {
+        {
+            let mut operations = self.shared.lock();
+            let Some(operation) = operations.by_id.get_mut(&id) else {
+                return false;
+            };
+            if !matches!(operation.phase, Phase::Receiving) {
+                return false;
+            }
+            operation.request = Arc::new(request);
+        }
+        Shared::prepare(&self.shared, id);
+        true
+    }
+
+    /// Ends unavailable source intake without changing an already cancelled command.
+    pub fn fail_intake(&self, id: OperationId) {
+        {
+            let mut operations = self.shared.lock();
+            let Some(operation) = operations.by_id.get_mut(&id) else {
+                return;
+            };
+            if !matches!(operation.phase, Phase::Receiving) {
+                return;
+            }
+            operation.phase = Phase::Ended(Arc::new(Outcome::ended(End::Refused(
+                Refusal::SourceUnavailable,
+            ))));
+        }
+        (self.shared.wake)();
     }
 
     /// Starts a prepared operation as soon as no earlier one makes it wait.
@@ -244,26 +295,77 @@ impl Queue {
     /// running one stops within one `CopyFile2` chunk, or one delete and its
     /// retries, also while it is paused.
     pub fn cancel(&self, id: OperationId) {
-        let (starts, left) = {
+        self.cancel_matching(|other, operation| {
+            other == id && !matches!(operation.phase, Phase::Interrupted(_))
+        });
+    }
+
+    /// Cancels all accepted copies and moves in one transition, before any
+    /// completion can admit another one. Independent deletes keep running.
+    pub fn cancel_all(&self) {
+        self.cancel_matching(|_, operation| {
+            matches!(
+                *operation.request,
+                Request::Copy { .. } | Request::Move { .. }
+            ) && !matches!(operation.phase, Phase::Interrupted(_))
+        });
+    }
+
+    fn cancel_matching(&self, matches: impl Fn(OperationId, &Tracked) -> bool) {
+        let (starts, left, ids) = {
             let mut operations = self.shared.lock();
-            let Some(operation) = operations.by_id.get_mut(&id) else {
-                return;
-            };
-            operation.cancel.store(true, Ordering::Relaxed);
-            operation.pause.wake();
-            operation.io.cancel();
-            match operation.phase {
-                Phase::Preparing | Phase::Prepared(_) | Phase::Waiting { .. } => {
-                    let cancelled = Phase::Ended(Arc::new(Outcome::ended(End::Cancelled)));
-                    let left = std::mem::replace(&mut operation.phase, cancelled);
-                    (self.shared.schedule(&mut operations), left)
+            let mut left = Vec::new();
+            let mut ids = Vec::new();
+            for (&id, operation) in &mut operations.by_id {
+                if !matches(id, operation)
+                    || matches!(operation.phase, Phase::Ended(_) | Phase::Cancelling)
+                {
+                    continue;
                 }
-                Phase::Running { .. } | Phase::Ended(_) | Phase::Interrupted(_) => return,
+                operation.cancel.store(true, Ordering::Relaxed);
+                operation.pause.wake();
+                operation.io.cancel();
+                if !matches!(operation.phase, Phase::Running { .. }) {
+                    left.push(std::mem::replace(&mut operation.phase, Phase::Cancelling));
+                }
+                ids.push(id);
             }
+            (self.shared.schedule(&mut operations), left, ids)
         };
-        Shared::retake_later(&self.shared, left);
-        // A Continue cancelled before its run started ends too.
-        Shared::unsave_later(&self.shared, id);
+        {
+            let mut saved = self.shared.saved.lock().expect("no queue thread panics");
+            for id in &ids {
+                if saved.by_id.remove(id).is_some() {
+                    saved.written = false;
+                }
+            }
+        }
+        let shared = Arc::clone(&self.shared);
+        self.shared.spawn(move || {
+            drop(left);
+            let written = shared.write_saved();
+            {
+                let mut operations = shared.lock();
+                for id in ids {
+                    if let Some(operation) = operations.by_id.get_mut(&id)
+                        && matches!(operation.phase, Phase::Cancelling)
+                    {
+                        let mut outcome = Outcome::ended(End::Cancelled);
+                        if let Err(error) = &written {
+                            outcome.listed.push(Listed {
+                                path: shared.saved_path.clone(),
+                                reason: crate::operation::Reason::RecoveryFailed(
+                                    error.raw_os_error().unwrap_or(29) as u32,
+                                ),
+                            });
+                        }
+                        operation.phase = Phase::Ended(Arc::new(outcome));
+                    }
+                }
+            }
+            shared.retake();
+            (shared.wake)();
+        });
         self.shared.start(starts);
         (self.shared.wake)();
     }
@@ -313,7 +415,7 @@ impl Queue {
     /// Dismiss: removes an interrupted operation and its saved entry.
     pub fn dismiss(&self, id: OperationId) -> Result<(), NotInterrupted> {
         {
-            let mut operations = self.shared.lock();
+            let operations = self.shared.lock();
             let Some(Tracked {
                 phase: Phase::Interrupted(_),
                 ..
@@ -321,21 +423,20 @@ impl Queue {
             else {
                 return Err(NotInterrupted);
             };
-            operations.by_id.remove(&id);
         }
-        Shared::unsave_later(&self.shared, id);
-        (self.shared.wake)();
+        self.cancel_matching(|other, _| other == id);
         Ok(())
     }
 
-    /// Every operation: the running ones in start order, then the waiting
-    /// ones in run order, then the rest in the order they were prepared.
+    /// Every operation: running priority work first, then other running
+    /// work in start order, waiting work in run order, and prepared work.
     pub fn operations(&self) -> Vec<Operation> {
         let operations = self.shared.lock();
         let mut listed: Vec<((u8, u64), Operation)> = (operations.by_id.iter())
             .map(|(&id, operation)| {
                 let (place, state) = match &operation.phase {
-                    Phase::Preparing => ((2, id.0), State::Preparing),
+                    Phase::Receiving | Phase::Preparing => ((2, id.0), State::Preparing),
+                    Phase::Cancelling => ((2, id.0), State::Cancelling),
                     Phase::Prepared(ready) => ((2, id.0), State::Prepared(ready.prepared)),
                     Phase::Waiting { on, order, .. } => {
                         let (on, reason) = on.expect(
@@ -345,17 +446,30 @@ impl Queue {
                         ((1, *order), State::Waiting { on, reason, total })
                     }
                     Phase::Running { started, .. } => {
+                        let place = operations.priorities.iter().rev()
+                            .position(|priority| priority.id == id)
+                            .map_or(operations.priorities.len() as u64 + *started, |rank| rank as u64);
+                        if operation.cancel.load(Ordering::Relaxed) {
+                            return ((0, place), Operation {
+                                id,
+                                request: Arc::clone(&operation.request),
+                                folder: operation.folder.clone(),
+                                state: State::Cancelling,
+                            });
+                        }
                         let progress = &operation.progress;
+                        let (paused, yielded) = operation.pause.snapshot();
                         let running = Running {
                             items: progress.items(),
                             bytes: progress.bytes(),
                             passed: progress.passed(),
                             total: operation.total,
                             renames: operation.renames,
-                            paused: operation.pause.is_paused(),
+                            paused,
+                            yielded,
                             current: progress.current().map(|file| current(&file)),
                         };
-                        ((0, *started), State::Running(running))
+                        ((0, place), State::Running(running))
                     }
                     Phase::Ended(outcome) => ((2, id.0), State::Ended(Arc::clone(outcome))),
                     Phase::Interrupted(_) => ((2, id.0), State::Interrupted),
@@ -396,36 +510,66 @@ impl Queue {
         (self.shared.wake)();
     }
 
-    /// Moves the waiting operation `id` to run just before the waiting
-    /// operation `before`, or last, and starts what may then start. Refused
-    /// when it would pass an operation whose paths it overlaps (D14).
+    /// Moves `id` before `before`, or last. Passing executing transfers
+    /// yields their conflicting disk work until `id` ends; unrelated work
+    /// continues. Refused when it would pass overlapping paths (D14).
     pub fn move_waiting(
         &self,
         id: OperationId,
         before: Option<OperationId>,
     ) -> Result<(), OrderRefused> {
-        let starts = {
+        let (starts, yielded) = {
             let mut operations = self.shared.lock();
-            let order = operations.reordered(id, before)?;
-            let mut places: Vec<u64> = (order.iter())
-                .map(|id| match operations.by_id[id].phase {
-                    Phase::Waiting { order, .. } => order,
-                    _ => unreachable!("reordered lists waiting operations"),
-                })
-                .collect();
-            places.sort_unstable();
-            for (id, place) in order.into_iter().zip(places) {
-                if let Some(Tracked {
-                    phase: Phase::Waiting { order, .. },
-                    ..
-                }) = operations.by_id.get_mut(&id)
-                {
-                    *order = place;
+            if let Some(displaced) = operations.priority(id, before)? {
+                let first = operations.waiting().first().map(|&(id, _)| id);
+                let order = operations.reordered(id, first)?;
+                for (place, id) in order.into_iter().enumerate() {
+                    if let Phase::Waiting { order, .. } = &mut operations
+                        .by_id
+                        .get_mut(&id)
+                        .expect("listed as waiting")
+                        .phase
+                    {
+                        *order = place as u64;
+                    }
                 }
+                operations.priorities.push(Priority { id, displaced });
+                let starts = self.shared.schedule(&mut operations);
+                let yielded = operations
+                    .by_id
+                    .iter()
+                    .filter(|(id, _)| {
+                        operations
+                            .priorities
+                            .iter()
+                            .any(|priority| priority.displaced.contains(id))
+                    })
+                    .map(|(&id, operation)| (id, Arc::clone(&operation.pause)))
+                    .collect();
+                (starts, yielded)
+            } else {
+                let order = operations.reordered(id, before)?;
+                let mut places: Vec<u64> = (order.iter())
+                    .map(|id| match operations.by_id[id].phase {
+                        Phase::Waiting { order, .. } => order,
+                        _ => unreachable!("reordered lists waiting operations"),
+                    })
+                    .collect();
+                places.sort_unstable();
+                for (id, place) in order.into_iter().zip(places) {
+                    if let Some(Tracked {
+                        phase: Phase::Waiting { order, .. },
+                        ..
+                    }) = operations.by_id.get_mut(&id)
+                    {
+                        *order = place;
+                    }
+                }
+                (self.shared.schedule(&mut operations), Vec::new())
             }
-            self.shared.schedule(&mut operations)
         };
         self.shared.start(starts);
+        self.shared.quiesce(yielded);
         (self.shared.wake)();
         Ok(())
     }
@@ -436,7 +580,12 @@ impl Queue {
         id: OperationId,
         before: Option<OperationId>,
     ) -> Result<(), OrderRefused> {
-        self.shared.lock().reordered(id, before).map(drop)
+        let operations = self.shared.lock();
+        if operations.priority(id, before)?.is_some() {
+            Ok(())
+        } else {
+            operations.reordered(id, before).map(drop)
+        }
     }
 
     /// The taken entries, which the window leaves out of its lists. Take
@@ -454,16 +603,21 @@ impl Queue {
     /// `CopyFile2` deletes what it wrote when it is stopped, so a file the
     /// Windows engine is copying goes on until the process ends, which
     /// leaves it at its final name.
-    /// Every operation that runs is in the saved file when this returns:
-    /// its thread wrote it there before it changed a file, or this writes
-    /// it, which takes as long as that thread's write would.
-    pub fn close(&self) {
+    /// The caller keeps the process alive until the returned receiver reports
+    /// that recovery state was written, including explicit cancellations.
+    pub fn close(&self) -> Receiver<std::io::Result<()>> {
         self.shared.closing.store(true, Ordering::Relaxed);
         for operation in self.shared.lock().by_id.values() {
             operation.cancel.store(true, Ordering::Relaxed);
+            operation.pause.yield_to_priority(false);
             operation.pause.wake();
         }
-        self.shared.write_saved();
+        let shared = Arc::clone(&self.shared);
+        let (done, finished) = mpsc::channel();
+        self.shared.spawn(move || {
+            let _ = done.send(shared.write_saved());
+        });
+        finished
     }
 }
 
@@ -472,7 +626,7 @@ impl Queue {
 /// is copying is then finished, or lost where that cancel stops it.
 impl Drop for Queue {
     fn drop(&mut self) {
-        self.close();
+        let _ = self.close();
         for operation in self.shared.lock().by_id.values() {
             operation.io.cancel();
         }
@@ -494,6 +648,50 @@ impl Drop for Queue {
 }
 
 impl Operations {
+    fn priority(
+        &self,
+        id: OperationId,
+        before: Option<OperationId>,
+    ) -> Result<Option<Vec<OperationId>>, OrderRefused> {
+        let Some(before) = before.and_then(|before| self.by_id.get(&before)) else {
+            return Ok(None);
+        };
+        if !matches!(before.phase, Phase::Running { .. }) {
+            return Ok(None);
+        }
+        let transfer = |operation: &Tracked| {
+            matches!(
+                *operation.request,
+                Request::Copy { .. } | Request::Move { .. }
+            )
+        };
+        let operation = self.by_id.get(&id).ok_or(OrderRefused::NotWaiting)?;
+        let Phase::Waiting { plan, .. } = &operation.phase else {
+            return Err(OrderRefused::NotWaiting);
+        };
+        if !transfer(operation) || !transfer(before) {
+            return Err(OrderRefused::NotWaiting);
+        }
+        let mut displaced = Vec::new();
+        for (&other, operation) in &self.by_id {
+            if let Phase::Running { plan: earlier, .. } = &operation.phase {
+                match wait(plan, earlier) {
+                    Some(Wait::Paths) => {
+                        return Err(OrderRefused::Overlaps {
+                            other,
+                            side: crate::Side::After,
+                        });
+                    }
+                    Some(Wait::Disk) if transfer(operation) => displaced.push(other),
+                    _ => {}
+                }
+            }
+        }
+        let first = self.waiting().first().map(|&(id, _)| id);
+        self.reordered(id, first)?;
+        Ok(Some(displaced))
+    }
+
     /// The waiting operations in run order, with their plans.
     fn waiting(&self) -> Vec<(OperationId, &Plan)> {
         let mut waiting: Vec<(u64, OperationId, &Plan)> = (self.by_id.iter())
@@ -534,11 +732,41 @@ impl Tracked {
             submitted: false,
             total: None,
             renames: false,
+            yielded: false,
         }
     }
 }
 
 impl Shared {
+    fn quiesce(self: &Arc<Self>, yielded: Vec<(OperationId, Arc<Pause>)>) {
+        if yielded.is_empty() {
+            return;
+        }
+        let shared = Arc::clone(self);
+        self.spawn(move || {
+            let quiet: Vec<_> = yielded
+                .into_iter()
+                .filter(|(_, pause)| pause.quiesce())
+                .collect();
+            let starts = {
+                let mut operations = shared.lock();
+                for (id, pause) in quiet {
+                    if operations
+                        .priorities
+                        .iter()
+                        .any(|priority| priority.displaced.contains(&id))
+                        && pause.is_quiet()
+                        && let Some(operation) = operations.by_id.get_mut(&id)
+                    {
+                        operation.yielded = true;
+                    }
+                }
+                shared.schedule(&mut operations)
+            };
+            shared.start(starts);
+            (shared.wake)();
+        });
+    }
     fn lock(&self) -> MutexGuard<'_, Operations> {
         self.operations.lock().expect("no queue thread panics")
     }
@@ -562,8 +790,14 @@ impl Shared {
     /// Prepares the operation `id`, which is preparing, on its own thread.
     fn prepare(shared: &Arc<Shared>, id: OperationId) {
         let (request, settings, continuing, cancel, io) = {
-            let operations = shared.lock();
-            let operation = &operations.by_id[&id];
+            let mut operations = shared.lock();
+            let Some(operation) = operations.by_id.get_mut(&id) else {
+                return;
+            };
+            if !matches!(operation.phase, Phase::Receiving | Phase::Preparing) {
+                return;
+            }
+            operation.phase = Phase::Preparing;
             (
                 Arc::clone(&operation.request),
                 operation.settings,
@@ -600,12 +834,26 @@ impl Shared {
                 }
                 match prepared {
                     Err(refusal) => {
-                        let outcome = Outcome::ended(End::Refused(refusal));
-                        operation.phase = Phase::Ended(Arc::new(outcome));
+                        let mut outcome = Outcome::ended(End::Refused(refusal));
                         drop(operations);
-                        thread.retake();
                         // A refused Continue ends, as any operation does.
-                        thread.unsave(id);
+                        if let Err(error) = thread.unsave(id) {
+                            outcome.listed.push(Listed {
+                                path: thread.saved_path.clone(),
+                                reason: crate::operation::Reason::RecoveryFailed(
+                                    error.raw_os_error().unwrap_or(29) as u32,
+                                ),
+                            });
+                        }
+                        {
+                            let mut operations = thread.lock();
+                            if let Some(operation) = operations.by_id.get_mut(&id)
+                                && matches!(operation.phase, Phase::Preparing)
+                            {
+                                operation.phase = Phase::Ended(Arc::new(outcome));
+                            }
+                        }
+                        thread.retake();
                         (thread.wake)();
                         return;
                     }
@@ -672,17 +920,65 @@ impl Shared {
         if self.closing.load(Ordering::Relaxed) {
             return Vec::new();
         }
+        operations.priorities.retain(|priority| {
+            operations.by_id.get(&priority.id).is_some_and(|operation| {
+                matches!(
+                    operation.phase,
+                    Phase::Waiting { .. } | Phase::Running { .. }
+                )
+            })
+        });
+        for (&id, operation) in &mut operations.by_id {
+            let yielded = operations
+                .priorities
+                .iter()
+                .any(|priority| priority.displaced.contains(&id));
+            operation
+                .pause
+                .yield_to_priority(yielded || operation.yielded);
+        }
         let decided = {
             let running: Vec<(OperationId, &Plan)> = (operations.by_id.iter())
                 .filter_map(|(&id, operation)| match &operation.phase {
-                    Phase::Running { plan, .. } => Some((id, plan)),
+                    Phase::Running { plan, .. } if !operation.yielded => Some((id, plan)),
                     _ => None,
                 })
                 .collect();
-            let waiting = operations.waiting();
+            let mut waiting: Vec<_> = operations
+                .by_id
+                .iter()
+                .filter_map(|(&id, operation)| match &operation.phase {
+                    Phase::Running { plan, .. }
+                        if operation.yielded
+                            && !operations
+                                .priorities
+                                .iter()
+                                .any(|priority| priority.displaced.contains(&id)) =>
+                    {
+                        Some((id, plan))
+                    }
+                    _ => None,
+                })
+                .collect();
+            waiting.extend(operations.waiting());
             let on = waits(&running, &waiting);
-            (waiting.into_iter().map(|(id, _)| id))
+            waiting
+                .into_iter()
                 .zip(on)
+                .map(|((id, plan), blocker)| {
+                    let paths = operations.by_id.iter().find_map(|(&other, operation)| {
+                        if other != id
+                            && operation.yielded
+                            && let Phase::Running { plan: earlier, .. } = &operation.phase
+                            && wait(plan, earlier) == Some(Wait::Paths)
+                        {
+                            Some((other, Wait::Paths))
+                        } else {
+                            None
+                        }
+                    });
+                    (id, paths.or(blocker))
+                })
                 .collect::<Vec<_>>()
         };
         let mut starts = Vec::new();
@@ -693,6 +989,11 @@ impl Shared {
                 if let Phase::Waiting { on, .. } = &mut operation.phase {
                     *on = blocker;
                 }
+                continue;
+            }
+            if matches!(operation.phase, Phase::Running { .. }) {
+                operation.yielded = false;
+                operation.pause.yield_to_priority(false);
                 continue;
             }
             let Phase::Waiting { plan, start, .. } =
@@ -746,19 +1047,31 @@ impl Shared {
             }
             let shared = Arc::clone(self);
             self.spawn(move || {
-                shared.write_saved();
+                let saved = shared.write_saved();
                 let _entered = io.enter();
-                let outcome = run(
-                    *start,
-                    &settings,
-                    &cancel,
-                    &shared.closing,
-                    &pause,
-                    &progress,
-                    &io,
-                );
-                if !shared.closing.load(Ordering::Relaxed) {
-                    shared.unsave(id);
+                let mut outcome = match saved {
+                    Ok(()) => run(
+                        *start,
+                        &settings,
+                        &cancel,
+                        &shared.closing,
+                        &pause,
+                        &progress,
+                        &io,
+                    ),
+                    Err(error) => Outcome::ended(End::Refused(Refusal::RecoveryUnavailable(
+                        error.raw_os_error().unwrap_or(29) as u32,
+                    ))),
+                };
+                if !shared.closing.load(Ordering::Relaxed)
+                    && let Err(error) = shared.unsave(id)
+                {
+                    outcome.listed.push(Listed {
+                        path: shared.saved_path.clone(),
+                        reason: crate::operation::Reason::RecoveryFailed(
+                            error.raw_os_error().unwrap_or(29) as u32,
+                        ),
+                    });
                 }
                 let (starts, left) = {
                     let mut operations = shared.lock();
@@ -846,6 +1159,14 @@ impl Shared {
     /// Adds the operation `id` to the saved file's operations, which
     /// [`Shared::write_saved`] writes.
     fn record(&self, id: OperationId, saved: Saved) {
+        let live = self.lock();
+        if live
+            .by_id
+            .get(&id)
+            .is_none_or(|operation| operation.cancel.load(Ordering::Relaxed))
+        {
+            return;
+        }
         let mut operations = self.saved.lock().expect("no queue thread panics");
         operations.by_id.insert(id, Arc::new(saved));
         operations.written = false;
@@ -854,46 +1175,31 @@ impl Shared {
     /// Writes the saved file, unless it holds every saved operation. A
     /// change made while it writes marks the file unwritten again, and its
     /// own write follows this one.
-    fn write_saved(&self) {
+    fn write_saved(&self) -> std::io::Result<()> {
         let _writing = self.writing.lock().expect("no queue thread panics");
         let operations: Vec<Arc<Saved>> = {
             let mut operations = self.saved.lock().expect("no queue thread panics");
             if operations.written {
-                return;
+                return Ok(());
             }
             operations.written = true;
             operations.by_id.values().cloned().collect()
         };
-        // A file that cannot be written loses only the offer to continue.
-        let _ = saved::write(&self.saved_path, operations.iter().map(|saved| &**saved));
+        let written = saved::write(&self.saved_path, operations.iter().map(|saved| &**saved));
+        if written.is_err() {
+            self.saved.lock().expect("no queue thread panics").written = false;
+        }
+        written
     }
 
     /// Removes the operation `id` from the saved file, on a queue thread.
-    fn unsave(&self, id: OperationId) {
-        let removed = {
+    fn unsave(&self, id: OperationId) -> std::io::Result<()> {
+        {
             let mut operations = self.saved.lock().expect("no queue thread panics");
             let removed = operations.by_id.remove(&id).is_some();
             operations.written &= !removed;
-            removed
-        };
-        if removed {
-            self.write_saved();
         }
-    }
-
-    /// Removes the operation `id` from the saved file on the window's call,
-    /// and writes the file on a queue thread of its own.
-    fn unsave_later(shared: &Arc<Shared>, id: OperationId) {
-        let removed = {
-            let mut operations = shared.saved.lock().expect("no queue thread panics");
-            let removed = operations.by_id.remove(&id).is_some();
-            operations.written &= !removed;
-            removed
-        };
-        if removed {
-            let writer = Arc::clone(shared);
-            shared.spawn(move || writer.write_saved());
-        }
+        self.write_saved()
     }
 }
 
@@ -939,6 +1245,10 @@ fn run(
         choice,
         run,
     } = start;
+    if cancel.load(Ordering::Relaxed) {
+        return Outcome::ended(End::Cancelled);
+    }
+    progress.add_items(failures.len() as u64);
     let rule = Rule { choice, run };
     let mut disk_full = None;
     let mut ring = RingCounts::default();
@@ -957,13 +1267,7 @@ fn run(
                     ring = copied.ring;
                 }
                 Err(end) => {
-                    return Outcome {
-                        end,
-                        items: progress.items(),
-                        bytes: progress.bytes(),
-                        listed: failures,
-                        ring,
-                    };
+                    return Outcome::new(end, progress.items(), progress.bytes(), failures, ring);
                 }
             }
         }
@@ -997,13 +1301,7 @@ fn run(
     } else {
         End::Complete
     };
-    Outcome {
-        end,
-        items: progress.items(),
-        bytes: progress.bytes(),
-        listed: failures,
-        ring,
-    }
+    Outcome::new(end, progress.items(), progress.bytes(), failures, ring)
 }
 
 /// Runs a copy or a move. Returns what it did, or how it ended before it
@@ -1017,6 +1315,7 @@ fn run_transfer(
     progress: &Progress,
     io: &IoThreads,
 ) -> Result<Copied, End> {
+    let active = pause.enter(cancel);
     let Transfer {
         destination,
         name: new_name,
@@ -1040,6 +1339,9 @@ fn run_transfer(
     let mut made = false;
     let mut verbatim = destination.verbatim.clone();
     for name in &destination.missing {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(End::Cancelled);
+        }
         verbatim = join(&verbatim, name);
         made = match create_folder(&verbatim, None) {
             Ok(()) => true,
@@ -1064,6 +1366,7 @@ fn run_transfer(
     });
     let mut listed = Vec::new();
     for path in missing {
+        progress.add_items(1);
         // After a crash Continue meets exactly the entries that already
         // moved; on a first run the engine knows it moved nothing, so a
         // source gone meanwhile is never reported as moved.
@@ -1078,12 +1381,11 @@ fn run_transfer(
         let arrived =
             names.get(name).is_some() || (keep_both && (numbered(false) || numbered(true)));
         drop(names);
-        if moving && !matches!(rule.run, Run::First { .. }) && arrived {
-            progress.add_items(1);
-        } else {
+        if !(moving && !matches!(rule.run, Run::First { .. }) && arrived) {
             listed.push(failure(&path, ERROR_FILE_NOT_FOUND));
         }
     }
+    drop(active);
     if !renamed.is_empty() {
         let moves = Moving {
             rule,
@@ -1116,4 +1418,212 @@ fn run_transfer(
         done.ring = copied.ring;
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Shared {
+        Shared {
+            operations: Mutex::default(),
+            wake: Box::new(|| {}),
+            index: Box::new(Gozlerd),
+            saved_path: PathBuf::new(),
+            saved: Mutex::new(SavedOperations {
+                by_id: BTreeMap::new(),
+                written: true,
+            }),
+            writing: Mutex::default(),
+            closing: AtomicBool::new(false),
+            threads: Mutex::default(),
+        }
+    }
+
+    fn tracked(id: u64, running: bool) -> Tracked {
+        let plan = Plan {
+            moves_bytes: true,
+            disks: vec![(crate::volumes::Disk::Number(1), true)],
+            ..Plan::default()
+        };
+        let phase = if running {
+            Phase::Running { plan, started: id }
+        } else {
+            Phase::Waiting {
+                plan,
+                start: Box::new(Start {
+                    work: Work::NewFolder {
+                        path: Vec::new(),
+                        verbatim: Vec::new(),
+                    },
+                    failures: Vec::new(),
+                    choice: None,
+                    run: Run::First { started: None },
+                }),
+                order: id,
+                on: Some((OperationId(1), Wait::Disk)),
+            }
+        };
+        Tracked::new(
+            Arc::new(Request::Copy {
+                sources: Vec::new(),
+                destination: crate::Destination::Folder(PathBuf::new()),
+            }),
+            SpeedSettings::default(),
+            phase,
+        )
+    }
+
+    #[test]
+    fn priority_keeps_progress_and_returns_without_resuming_manual_pause() {
+        let shared = shared();
+        for manual in [false, true] {
+            let mut operations = Operations::default();
+            operations.by_id.insert(OperationId(1), tracked(1, true));
+            operations.by_id.insert(OperationId(2), tracked(2, false));
+            let mut unrelated = tracked(3, true);
+            if let Phase::Running { plan, .. } = &mut unrelated.phase {
+                plan.disks = vec![(crate::volumes::Disk::Number(2), true)];
+            }
+            operations.by_id.insert(OperationId(3), unrelated);
+            let first = &operations.by_id[&OperationId(1)];
+            first.progress.add_bytes(512);
+            first.pause.set(manual);
+            let displaced = operations
+                .priority(OperationId(2), Some(OperationId(1)))
+                .expect("disjoint paths may pass running disk work")
+                .expect("a priority move");
+            assert_eq!(displaced, [OperationId(1)]);
+            operations.priorities.push(Priority {
+                id: OperationId(2),
+                displaced,
+            });
+            assert!(shared.schedule(&mut operations).is_empty());
+            assert!(!operations.by_id[&OperationId(3)].pause.is_paused());
+            operations
+                .by_id
+                .get_mut(&OperationId(1))
+                .expect("the running job")
+                .yielded = true;
+            let starts = shared.schedule(&mut operations);
+            assert_eq!(
+                starts.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                [OperationId(2)]
+            );
+            operations
+                .by_id
+                .get_mut(&OperationId(2))
+                .expect("the priority job")
+                .phase = Phase::Ended(Arc::new(Outcome::ended(End::Complete)));
+            assert!(shared.schedule(&mut operations).is_empty());
+            let first = &operations.by_id[&OperationId(1)];
+            assert_eq!(first.progress.bytes(), 512);
+            assert_eq!(first.pause.is_paused(), manual);
+            assert!(!first.yielded);
+        }
+    }
+
+    #[test]
+    fn nested_priority_keeps_the_outer_yield_until_the_inner_job_ends() {
+        let shared = shared();
+        let mut operations = Operations::default();
+        for id in 1..=3 {
+            operations.by_id.insert(OperationId(id), tracked(id, true));
+        }
+        operations.priorities.push(Priority {
+            id: OperationId(2),
+            displaced: vec![OperationId(1)],
+        });
+        operations.priorities.push(Priority {
+            id: OperationId(3),
+            displaced: vec![OperationId(1), OperationId(2)],
+        });
+        shared.schedule(&mut operations);
+        operations
+            .by_id
+            .get_mut(&OperationId(2))
+            .expect("the cancelled outer job")
+            .phase = Phase::Ended(Arc::new(Outcome::ended(End::Cancelled)));
+        shared.schedule(&mut operations);
+        assert!(operations.by_id[&OperationId(1)].pause.is_paused());
+        operations
+            .by_id
+            .get_mut(&OperationId(3))
+            .expect("the inner job")
+            .phase = Phase::Ended(Arc::new(Outcome::ended(End::Complete)));
+        shared.schedule(&mut operations);
+        assert!(!operations.by_id[&OperationId(1)].pause.is_paused());
+    }
+
+    #[test]
+    fn cancelled_yielded_work_reacquires_every_device_before_cleanup() {
+        let shared = shared();
+        let mut operations = Operations::default();
+        let mut original = tracked(1, true);
+        if let Phase::Running { plan, .. } = &mut original.phase {
+            plan.disks.push((crate::volumes::Disk::Number(2), true));
+        }
+        original.yielded = true;
+        original.cancel.store(true, Ordering::Relaxed);
+        operations.by_id.insert(OperationId(1), original);
+        operations.by_id.insert(OperationId(2), tracked(2, true));
+        let mut other = tracked(3, true);
+        if let Phase::Running { plan, .. } = &mut other.phase {
+            plan.disks = vec![(crate::volumes::Disk::Number(2), true)];
+        }
+        operations.by_id.insert(OperationId(3), other);
+        operations.priorities.push(Priority {
+            id: OperationId(2),
+            displaced: vec![OperationId(1)],
+        });
+        shared.schedule(&mut operations);
+        operations
+            .by_id
+            .get_mut(&OperationId(2))
+            .expect("the priority job")
+            .phase = Phase::Ended(Arc::new(Outcome::ended(End::Complete)));
+        shared.schedule(&mut operations);
+        assert!(operations.by_id[&OperationId(1)].yielded);
+        assert!(operations.by_id[&OperationId(1)].pause.is_paused());
+        operations
+            .by_id
+            .get_mut(&OperationId(3))
+            .expect("the other disk's job")
+            .phase = Phase::Ended(Arc::new(Outcome::ended(End::Complete)));
+        shared.schedule(&mut operations);
+        assert!(!operations.by_id[&OperationId(1)].yielded);
+        assert!(!operations.by_id[&OperationId(1)].pause.is_paused());
+    }
+
+    #[test]
+    fn yielding_a_disk_does_not_release_paths_to_an_overlapping_delete() {
+        let shared = shared();
+        let mut operations = Operations::default();
+        let path = crate::identity::Identity::new(r"\\?\Volume{1}\output".encode_utf16().collect());
+        let mut original = tracked(1, true);
+        original.yielded = true;
+        if let Phase::Running { plan, .. } = &mut original.phase {
+            plan.writes.insert(&path);
+        }
+        let mut deleting = tracked(3, false);
+        deleting.request = Arc::new(Request::Delete {
+            sources: Vec::new(),
+        });
+        if let Phase::Waiting { plan, .. } = &mut deleting.phase {
+            plan.moves_bytes = false;
+            plan.writes.insert(&path);
+        }
+        operations.by_id.insert(OperationId(1), original);
+        operations.by_id.insert(OperationId(2), tracked(2, true));
+        operations.by_id.insert(OperationId(3), deleting);
+        operations.priorities.push(Priority {
+            id: OperationId(2),
+            displaced: vec![OperationId(1)],
+        });
+        assert!(shared.schedule(&mut operations).is_empty());
+        let Phase::Waiting { on, .. } = operations.by_id[&OperationId(3)].phase else {
+            panic!("the overlapping delete must wait");
+        };
+        assert_eq!(on, Some((OperationId(1), Wait::Paths)));
+    }
 }

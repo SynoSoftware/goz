@@ -9,9 +9,10 @@ use super::dialogs::ServiceReport;
 use super::include::{Elevated, NotSaved};
 use super::indexed_folders::IndexedFolders;
 use super::main_window::MainWindow;
-use super::status_bar::StatusBar;
+use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar};
 use crate::core::captions::{
-    self, ButtonIcon, DialogCaptions, DialogItem, IndexCaptions, SETTINGS_GROUPS, failure_text,
+    self, ButtonIcon, DialogCaptions, DialogItem, IndexCaptions, JobCaption, JobProgress,
+    SETTINGS_GROUPS, failure_text,
 };
 use crate::core::commands::{CommandId, Key, Keystroke};
 use crate::core::dates::DateFormat;
@@ -312,6 +313,7 @@ pub(super) struct SettingsDialog<'a> {
     /// The status bar's group widths and its font's height, which place it
     /// once the dialog's buttons have their width.
     status_widths: OnceCell<(StatusWidths, Px)>,
+    status_layout: Cell<Option<StatusLayout>>,
 }
 
 impl<'a> SettingsDialog<'a> {
@@ -343,6 +345,7 @@ impl<'a> SettingsDialog<'a> {
             highlight: OnceCell::new(),
             status: OnceCell::new(),
             status_widths: OnceCell::new(),
+            status_layout: Cell::new(None),
         }
     }
 
@@ -354,7 +357,7 @@ impl<'a> SettingsDialog<'a> {
     /// Adds the status bar below OK, Cancel and Apply and makes the dialog
     /// that much taller; `buttons_sized` places its groups and controls.
     /// The bar's font is the dialog's, which `fonts` keeps.
-    fn add_status_bar(&self, dialog: Hwnd, fonts: &mut Vec<Font>) -> Option<StatusBar> {
+    fn add_status_bar(&self, dialog: Hwnd, fonts: &mut Vec<Font>) -> Option<&StatusBar> {
         let (Ok(status), Ok(font)) = (StatusBar::for_dialog(dialog), Font::of(dialog)) else {
             return None;
         };
@@ -379,7 +382,7 @@ impl<'a> SettingsDialog<'a> {
         });
         let _ = self.status_widths.set((widths, font_height));
         let _ = self.status.set(status);
-        Some(status)
+        self.status.get()
     }
 
     /// Widens the page list to show its longest page name in the dialog's
@@ -1009,6 +1012,44 @@ impl<'a> SettingsDialog<'a> {
             }
             rebuild.set_enabled(answers && !saving);
         }
+        self.show_status(dialog);
+    }
+
+    fn show_status(&self, dialog: Hwnd) {
+        let Some(status) = self.status.get() else {
+            return;
+        };
+        let job = {
+            let saving = self.saving.borrow();
+            match saving.as_ref() {
+                Some(awaited) => {
+                    let key = match awaited {
+                        Awaited::Include(..) => "settings.saving",
+                        Awaited::Rebuild => "settings.rebuilding",
+                    };
+                    JobCaption {
+                        text: self.strings.text(key).to_owned(),
+                        progress: JobProgress::Unmeasured,
+                        ..JobCaption::default()
+                    }
+                }
+                None => self.main.settings_job(&self.strings),
+            }
+        };
+        let changed = self.draft.borrow().can_apply() && self.saving.borrow().is_none();
+        if status.render(
+            &[
+                (
+                    StatusSlot::Left,
+                    StatusEntry::Text(captions::settings_status_view(&self.strings, changed)),
+                ),
+                (StatusSlot::Center, StatusEntry::Work(&job)),
+            ],
+            self.status_layout.get().as_ref(),
+        ) && let Some(pages) = dialog::item(dialog, ControlId::SettingsPages.id())
+        {
+            pages.focus();
+        }
     }
 
     /// Makes `page`, unless it was made: its controls, their lists and
@@ -1251,9 +1292,7 @@ impl<'a> SettingsDialog<'a> {
         }
         let previous = self.shown.replace(page);
         self.fill_page_list(dialog);
-        if let Some(status) = self.status.get() {
-            status.show_view(&captions::settings_status_view(&self.strings, page));
-        }
+        self.show_status(dialog);
         if previous == page {
             return;
         }
@@ -1943,8 +1982,8 @@ impl DialogProc for SettingsDialog<'_> {
         if let Some(search) = Edit::of_dialog(dialog, ControlId::SettingsSearch.id()) {
             search.set_cue(self.strings.text("settings.search_cue"));
         }
-        let status = self.add_status_bar(dialog, &mut fonts);
-        self.main.settings_opened(dialog, status);
+        self.add_status_bar(dialog, &mut fonts);
+        self.main.settings_opened(dialog);
         self.show_page(dialog, Some(SettingsPage::General));
         if let Some(label) = self
             .page(SettingsPage::General)
@@ -1999,7 +2038,7 @@ impl DialogProc for SettingsDialog<'_> {
                 return true;
             }
             DialogMessage::Command { id } if is(id, ControlId::StatusCancel) => {
-                self.main.cancel_job(self.window);
+                self.main.cancel_settings_fix(self.window);
                 return true;
             }
             DialogMessage::Command { id } if is(id, ControlId::IndexUseLocal) => {
@@ -2054,6 +2093,7 @@ impl DialogProc for SettingsDialog<'_> {
             }
             DialogMessage::Timer { id: INDEX_TIMER } => {
                 self.refresh_index(dialog);
+                self.show_status(dialog);
                 return true;
             }
             DialogMessage::Timer { id: PREVIEW_TIMER } => {
@@ -2067,6 +2107,7 @@ impl DialogProc for SettingsDialog<'_> {
                 self.save_answered(dialog);
                 // A fix moved on, which the fix button follows.
                 self.refresh_index(dialog);
+                self.show_status(dialog);
                 return true;
             }
             DialogMessage::LinkActivated { id } if is(id, ControlId::ContextMenuTotalCommander) => {
@@ -2099,14 +2140,17 @@ impl DialogProc for SettingsDialog<'_> {
         };
         let dpi = dialog.dpi();
         let height = status.fit(StatusLayout::min_height(dpi, *font_height));
-        status.place(&StatusLayout::compute(
+        let layout = StatusLayout::for_dialog(
             widths,
             width,
             dpi,
             *font_height,
             height,
-            None,
-        ));
+            dialog.client_size().width,
+        );
+        self.status_layout.set(Some(layout));
+        status.place(&layout);
+        self.show_status(dialog);
     }
 
     /// Every caption the Service group's fix buttons can show, OK and

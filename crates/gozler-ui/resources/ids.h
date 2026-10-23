@@ -21,6 +21,8 @@
 // The controls in the status bar's middle group.
 #define IDC_STATUS_PROGRESS 70
 #define IDC_STATUS_CANCEL 71
+#define IDC_STATUS_RATE 3043
+#define IDC_STATUS_TEXT 3044
 // Show details, at the right end of the status bar while the inspector is
 // hidden.
 #define IDC_STATUS_SHOW_DETAILS 63
@@ -372,8 +374,7 @@
 #define IDC_SPEED_RING_GROUP_ICON 3239
 #define IDC_SPEED_DELETE_GROUP_ICON 3240
 
-// The File operations window, a window of its own beside the main one:
-// the card of the running operation, then the queue and Hide.
+// The shared inspector's transfer content.
 #define IDC_FILE_OPERATIONS_TITLE 3002
 #define IDC_FILE_OPERATIONS_STATUS 3003
 #define IDC_FILE_OPERATIONS_PAUSE 3004
@@ -389,17 +390,32 @@
 #define IDC_FILE_OPERATIONS_PERCENT 3014
 #define IDC_FILE_OPERATIONS_ITEMS 3015
 #define IDC_FILE_OPERATIONS_BYTES 3016
-#define IDC_FILE_OPERATIONS_TOGGLE 3017
 #define IDC_FILE_OPERATIONS_QUEUE 3018
-#define IDC_FILE_OPERATIONS_RESUME 3019
-#define IDC_FILE_OPERATIONS_MOVE_UP 3020
-#define IDC_FILE_OPERATIONS_MOVE_DOWN 3021
-#define IDC_FILE_OPERATIONS_QUEUE_CANCEL 3022
 #define IDC_FILE_OPERATIONS_LIST 3023
 #define IDC_FILE_OPERATIONS_HINT 3024
 #define IDC_FILE_OPERATIONS_HIDE 3025
 // The icon of the running operation's kind, at the card's left.
 #define IDC_FILE_OPERATIONS_ICON 3026
+
+#define IDC_FILE_OPERATIONS_HEADING 3027
+#define IDC_FILE_OPERATIONS_COUNT 3028
+#define IDC_FILE_OPERATIONS_ALL 3029
+#define IDC_FILE_OPERATIONS_FLIP 3030
+#define IDC_FILE_OPERATIONS_MAXIMIZE 3031
+#define IDC_FILE_OPERATIONS_RATE 3032
+#define IDC_FILE_OPERATIONS_FILES_RATE 3033
+#define IDC_FILE_OPERATIONS_FILE_PERCENT 3034
+#define IDC_FILE_OPERATIONS_FILE_BYTES 3035
+#define IDC_FILE_OPERATIONS_OVERALL 3036
+#define IDC_FILE_OPERATIONS_REPORT 3037
+#define IDC_FILE_OPERATIONS_SUMMARY 3038
+
+#define IDC_STATUS_TRANSFER_SUMMARY 3039
+#define IDC_STATUS_TRANSFER_PAUSE 3040
+#define IDC_STATUS_TRANSFER_CANCEL 3041
+#define IDC_STATUS_TRANSFER_REPORT 3042
+#define IDC_STATUS_TRANSFER_ACTIVITY 3045
+#define IDC_STATUS_TRANSFER_PROGRESS 3046
 
 // The Viewer, a window of its own for each file it shows: the message and
 // Retry, which lie above the area that shows the file, then the status bar.
