@@ -20,3 +20,7 @@ gozler-winfs = { path = "../gozler-winfs" }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "ssd_copy"
+harness = false

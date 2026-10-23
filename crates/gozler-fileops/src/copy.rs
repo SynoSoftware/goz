@@ -394,7 +394,7 @@ impl Walk<'_> {
             let Some(file) = decided.and_then(|file| self.hand_to_ring(file, None)) else {
                 return;
             };
-            if self.is_large(&file) && self.copying.plan.lane_beside {
+            if self.is_large(file.size) && self.copying.plan.lane_beside {
                 self.pool.push(Work::Large(None, file), Lane::Large);
             } else {
                 self.copy_file(&file, None);
@@ -452,6 +452,7 @@ impl Walk<'_> {
     /// Lists a source folder, creates or merges each subfolder at the
     /// destination and queues it, and hands its files on.
     fn list(&self, folder: Arc<Folder>, page: &mut [u64]) {
+        let mut large = Vec::new();
         let mut files = Vec::new();
         let mut subfolders = Vec::new();
         let listed_all = list(
@@ -462,6 +463,9 @@ impl Walk<'_> {
                 Ok(entry) if is_folder(entry.attributes, entry.reparse_tag.unwrap_or(0)) => {
                     subfolders.push(entry);
                 }
+                Ok(entry) if self.copying.plan.lane_beside && self.is_large(entry.size) => {
+                    large.push(entry);
+                }
                 Ok(entry) => files.push(entry),
                 Err(error) => self.fail(&folder.path, error, Some(&folder)),
             },
@@ -469,6 +473,9 @@ impl Walk<'_> {
         if let Err(error) = listed_all {
             self.fail(&folder.path, error, Some(&folder));
         }
+        // Feed the separate large-file lane while this worker opens and
+        // creates the subfolders, rather than leaving that lane idle.
+        self.dispatch_files(&folder, large);
         // A merged subfolder's names are read into the same page, so the
         // subfolders wait until this listing is read.
         for entry in subfolders {
@@ -477,6 +484,11 @@ impl Walk<'_> {
             }
             self.subfolder(&folder, entry, page);
         }
+        self.dispatch_files(&folder, files);
+        self.release(folder);
+    }
+
+    fn dispatch_files(&self, folder: &Arc<Folder>, files: Vec<FolderEntry>) {
         let mut small = Vec::new();
         for entry in files {
             if self.stopped() {
@@ -501,12 +513,12 @@ impl Walk<'_> {
                 &path,
                 &from,
                 disposition,
-                Some(&folder),
+                Some(folder),
             );
-            let Some(file) = decided.and_then(|file| self.hand_to_ring(file, Some(&folder))) else {
+            let Some(file) = decided.and_then(|file| self.hand_to_ring(file, Some(folder))) else {
                 continue;
             };
-            if self.is_large(&file) {
+            if self.is_large(file.size) {
                 folder.hold();
                 let lane = if self.copying.plan.lane_beside {
                     Lane::Large
@@ -514,18 +526,17 @@ impl Walk<'_> {
                     Lane::Workers
                 };
                 self.pool
-                    .push(Work::Large(Some(Arc::clone(&folder)), file), lane);
+                    .push(Work::Large(Some(Arc::clone(folder)), file), lane);
             } else {
                 small.push(file);
                 if small.len() == FILES_PER_ITEM {
-                    self.queue_files(&folder, std::mem::take(&mut small));
+                    self.queue_files(folder, std::mem::take(&mut small));
                 }
             }
         }
         if !small.is_empty() {
-            self.queue_files(&folder, small);
+            self.queue_files(folder, small);
         }
-        self.release(folder);
     }
 
     fn queue_files(&self, folder: &Arc<Folder>, files: Vec<File>) {
@@ -780,8 +791,8 @@ impl Walk<'_> {
         }
     }
 
-    fn is_large(&self, file: &File) -> bool {
-        (self.copying.plan.large_from).is_some_and(|limit| file.size >= limit)
+    fn is_large(&self, size: u64) -> bool {
+        (self.copying.plan.large_from).is_some_and(|limit| size >= limit)
     }
 
     /// Hands a decided file to the ring when the ring copies it, and
@@ -839,7 +850,7 @@ impl Walk<'_> {
                 folder: folder_link,
             }
         };
-        let unbuffered = self.is_large(file);
+        let unbuffered = self.is_large(file.size);
         let progress = self.copying.progress;
         let mut reported = 0u64;
         // For a move, the source as the copy found it, read by the path the

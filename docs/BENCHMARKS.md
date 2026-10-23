@@ -100,3 +100,210 @@ What the rows decide:
 - **D10, the final name:** Gozler's small-file copy now costs what `CopyFile2` costs straight to the final name, 95.5 M cycles per MB against 139.7 M in stage D, when it wrote under a temporary name and renamed. Writing to the final name removed the rename's cost and added none.
 - **D10, resume:** the compare read the two files at 1.11 GB/s (2.22 GB/s in total), against 0.41 GB/s for a copy by the Windows engine and 0.39 GB/s by the ring (medians of 4 runs). So a 50 GB file stopped at 49 GB resumes in about 47 s (49 GB compared, then 1 GB copied) against about 120 s to copy it again, and writes 1 GB instead of 49 GB. Computed from these rates; nothing near 50 GB was copied.
 - **D7:** the Windows engine had the shorter wall time in 3 of 4 runs of the large file (median 4.09 s against 4.29 s), so Automatic keeps it for large files between SSDs. A file a fifth of stage D's size carries each copy's fixed cost over fewer MB, so both engines cost more per MB than in stage D.
+
+### SSD overlap: small files beside one large file
+
+Run on 2026-10-23 with `pwsh ./build.ps1 -Bench ssd_copy`, through the real
+Queue and device admission, on the working-tree engine. The machine has
+8 logical processors, Toshiba KXG50ZNV512G NVMe storage, Windows build
+26200.9711, and about 110 GB free on C:. Sources and destination were on
+that same physical SSD, on NTFS; the storage query reported no seek penalty,
+NVMe command queueing and physical disk 0. No cloning was involved. Existing
+security settings were preserved: Defender reported antivirus enabled and
+real-time protection disabled. This differs from a test with synchronous
+antivirus scanning enabled.
+
+The disposable fixture contained 6,000 files of 1–64 KiB in 1,000 folders,
+199,612,667 bytes in total, plus one 1,600 MiB file. Each case ran three
+times, with case order rotated between rounds. Small source files were read
+before each case to warm the system cache. The large file used Automatic's
+unbuffered Windows engine. Preparation was outside timing. Timing began
+before submission, ended first when the Queue reported all work complete,
+and ended again after opening and flushing every destination file. Output
+file count and total byte count were checked in every sample. Fixtures were
+removed; [raw samples](research/ssd-copy-2026-10-23.csv) are retained.
+
+Each table value is its own column's median, not necessarily the same sample.
+The range is the minimum and maximum of time including the final flush.
+Class completion times mean Queue-reported completion, before the final
+flush; the mixed operation exposes no separate class completion event.
+Process cycles include the final flush, but exclude System and other
+processes. These wall-time results come from a shared interactive machine.
+
+| Case | Copy complete (s) | Including flush (s) | Flush-inclusive range (s) | Small complete (s) | Large complete (s) | CPU cycles (G) |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| Separate transfers, limit 1, small first, 16 small workers | 7.24 | 14.74 | 14.68–15.06 | 2.32 | 7.24 | 21.66 |
+| Separate transfers, limit 1, large first, 16 small workers | 6.76 | 16.83 | 15.30–17.23 | 6.76 | 4.53 | 20.63 |
+| One mixed transfer, existing large lane beside 16 small workers | 6.75 | 14.17 | 14.04–15.46 | — | — | 19.01 |
+| Separate transfers, limit 2, large beside 4 small workers | 6.29 | 13.43 | 12.16–14.56 | 6.29 | 5.55 | 17.87 |
+| Separate transfers, limit 2, large beside 8 small workers | 5.99 | 13.12 | 12.30–13.90 | 5.25 | 5.13 | 18.99 |
+| Separate transfers, limit 2, large beside 16 small workers | 5.59 | 12.46 | 9.22–13.36 | 5.30 | 5.48 | 20.90 |
+
+What this establishes:
+
+- Overlapping separate large-only and small-only transfers was useful in
+  this workload. With 16 small workers, median time including the final
+  flush fell 15.5% against small-first serialization. Every overlap sample
+  was below every small-first serialized sample, although overlap's range
+  was wide. Four and eight small workers also improved total time in each
+  corresponding round.
+- The improvement trades away small-file latency: the small transfer's
+  median reported completion increased from 2.32 s to 5.30 s with 16
+  workers. It does not make each class finish sooner.
+- The existing mixed operation's median was 3.9% below small-first
+  serialization, but its ranges overlap and one round was slower. This
+  does not establish a reliable gain for that case or explain why it
+  differed from the two-operation mixture.
+- Queue admission is not an exact account of device I/O: small buffered
+  copies can report completion while Windows still has writes pending.
+  Omitting the final flush would overstate the elapsed-time benefit.
+
+This is evidence to pursue SSD scheduling, not a new default or a universal
+rule to keep a large file active. It tests one available large file, not
+continuous replenishment, several large-file sizes, cold small-file reads,
+two physical SSDs, sustained cache exhaustion or antivirus scanning. The
+large file was known up front; no indexed candidate lookup was timed.
+The next experiment should isolate whether indexed lookahead starts useful
+large-file work earlier in a real selected tree, while sharing the Queue's
+existing ownership and retaining the disk walk for correctness.
+
+### SSD follow-up: repeatability and discovery
+
+Run on 2026-10-23 with `pwsh ./build.ps1 -Bench ssd_copy_followup`, using
+the same SSD, filesystem, fixture bytes and existing antivirus settings as
+the first overlap experiment. One untabulated mixed warm-up took 14.485 s
+including flush. Five rounds then rotated five cases so each case occupied
+each position once. [The 25 raw samples](research/ssd-copy-followup-2026-10-23.csv)
+also retain preparation and large-destination observation times.
+
+The three control cases retain the original source layout. Both mixed and
+separate-overlap controls receive the large file up front: recursive
+discovery cannot explain a difference between them. The new wide fixture
+puts the large file directly beside 1,000 immediate subfolders, each holding
+six small files. Hard links reuse the original source data, so this fixture
+has the same file count and byte sizes without another large-data write.
+The copied output still contains independent files.
+
+`wide-walk` selects that one root. `wide-listed` supplies its 1,001 children
+up front, with the same destination layout. This is a diagnostic for earlier
+knowledge, not an implementation of indexed promotion: it changes intake,
+the selected roots and preparation. Child enumeration and destination-root
+creation are included in its preparation time. Small-source warming remains
+outside timing. The combined column sums each sample's preparation and
+flush-inclusive copy times; it excludes harness setup and warming.
+
+The harness observes destination-file existence between snapshots, waiting
+up to 20 ms for a Queue wake between probes. It records the actual last-absent
+and first-present interval rather than assuming a 20 ms timing guarantee.
+This is a proxy for large-copy startup, not first data transfer or large-file
+completion. All compared cases use the same observation. Table values are
+independent column medians.
+
+| Case | Prepare (s) | Large first observed (s after submit) | Copy complete (s) | Including flush (s) | Flush-inclusive range (s) | Prepare + copy + flush (s) |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| Serial, small first, 16 workers | 0.008 | 2.211 | 6.78 | 13.46 | 13.20–17.23 | 13.47 |
+| One mixed transfer, 16 workers | 0.007 | 0.048 | 4.85 | 13.17 | 11.04–13.47 | 13.18 |
+| Two overlapping transfers, 16 small workers | 0.008 | 0.028 | 5.25 | 12.97 | 9.79–13.22 | 12.97 |
+| Wide folder, normal walk | 0.007 | 2.491 | 7.15 | 14.16 | 13.90–14.88 | 14.17 |
+| Wide folder, children supplied up front | 0.198 | 0.033 | 5.38 | 13.47 | 11.71–14.52 | 13.67 |
+
+The larger run narrows the first result. Overlap's median flush-inclusive
+advantage over serialization is 3.7%, rather than the first run's 15.5%.
+Separate overlap beats the mixed operation in only two of five paired
+rounds; their ranges overlap substantially. There is no reliable evidence
+here that splitting an already mixed workload into more operations helps.
+Shared locks and startup differences remain hypotheses, not diagnosed costs.
+
+The discovery delay is repeatable. Every wide-walk sample first observes
+the large file after 2.15–2.80 s; every upfront sample does so after
+0.024–0.044 s. `Walk::list` initializes all immediate subfolders before it
+dispatches direct files, even though its listing already returned those
+files. Upfront knowledge reduces median reported copy time by 1.78 s.
+Including preparation and the final flush, the median reduction is only
+0.50 s (3.5%), and the ranges overlap; two paired upfront cases are slower.
+Earlier startup is established more strongly than a durable-copy speedup.
+
+The simplest production experiment is to dispatch known direct large files
+earlier through the existing lane, while preserving destination-name and
+conflict-policy ownership. It should be tested before adding index hints for
+this particular delay. Indexed hints could instead prioritize a large file's
+not-yet-visited parent. [The source audit](research/ssd-copy-followup-audit.md)
+records the ownership obligations and unmeasured alternatives. No production
+ordering or admission default was changed by either experiment.
+
+### Indexed size lookup cost
+
+After the copy run, the installed `C:\Program Files\Gozler\gozler.exe`
+reported version 0.4.0. Fifteen read-only probes measured that installed
+client and its matching service, not the working-tree 0.5.0 copy benchmark.
+Each used `-timeout 5000 -n 1 -size --json -path` scoped to this repository,
+with `file:` and the byte range below as a `size:` filter. Five rounds
+rotated the three ranges. Timings include a new CLI process, pipe exchange
+and JSON output. Returned paths were not copied; live size checks happened
+after timing. [Raw lookup samples](research/ssd-copy-index-lookup-2026-10-23.csv)
+retain counts and sizes without paths.
+
+| Size band | Median lookup (ms) | Range (ms) | Matches | Returned |
+| --- | ---: | --- | ---: | ---: |
+| 32–128 MiB | 61.14 | 60.19–73.82 | 182 | 1 |
+| 128–512 MiB | 63.62 | 58.14–65.57 | 0 | 0 |
+| 512–2,048 MiB | 62.08 | 60.42–71.24 | 0 | 0 |
+
+The returned candidate's indexed and live size both measured 65,228,800
+bytes. Every reply reported complete volumes and no pending metadata.
+Exit 10 for the nonempty range means the requested limit omitted matches;
+the empty ranges exited 0. A sandbox pipe-access refusal was resolved by
+repeating the same read-only query outside the sandbox.
+
+The measured lookup cost is small compared with the wide-folder startup
+delay, which makes bounded background hints plausible. It does not measure
+integrated scheduling, permission and identity checks, destination setup,
+deduplication against the walk or a sustained speedup. Empty ranges also
+show why a policy must keep ordinary discovery working when no suitable
+candidate exists.
+
+### SSD early dispatch: before and after
+
+Run on 2026-10-23 with `pwsh ./build.ps1 -Bench ssd_copy_wide` once before
+and once after changing `Walk::list`. Each run used an untabulated mixed
+warm-up, then five rounds alternating which wide case ran first. The SSD,
+NTFS volume, fixture bytes, engines, worker counts, warming, observation and
+final flush procedure were the same as above. Warm-ups took 12.920 s before
+and 13.929 s after. Both runs checked 6,001 copied files and their total
+size in every sample and removed their disposable fixtures.
+[Before samples](research/ssd-copy-wide-before-2026-10-23.csv),
+[after samples](research/ssd-copy-wide-after-2026-10-23.csv).
+
+The change dispatches a folder's direct large files through the existing
+lane before opening and creating its subfolders, on plans whose large lane
+runs beside the workers. Destination names, conflict decisions, ring routing
+and folder lifetime accounting still use their existing owners. Hard-disk
+and share plans retain their ordering. No index query or admission change
+is involved. The children-supplied case is a control: its large file was
+already selected up front, and its six-file subfolders contain no large file.
+
+| Case | Large first observed (s) | Copy complete (s) | Including flush (s) | Flush-inclusive range (s) | Prepare + copy + flush (s) |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Normal walk, before | 2.363 | 7.40 | 14.32 | 11.51–14.70 | 14.32 |
+| Normal walk, after | 0.176 | 5.12 | 11.84 | 11.17–13.15 | 11.85 |
+| Children supplied, before | 0.038 | 5.66 | 13.03 | 11.22–13.89 | 13.18 |
+| Children supplied, after | 0.024 | 5.42 | 13.25 | 10.80–15.53 | 13.38 |
+
+For the normal walk, median reported completion fell 30.8%, and every after
+sample completed before the fastest before sample. Median time including
+the final flush fell 17.3%; four of five corresponding rounds improved,
+but ranges overlap. The control's median reported completion fell 4.1%,
+while its flush-inclusive median increased 1.6%. This supports retaining
+early dispatch for this startup delay; it does not establish a general
+17% SSD throughput gain. The process-cycle medians fell in both cases
+(walk 21.69 to 18.44 G; control 21.82 to 18.13 G), so attributing their
+reduction to this change would be unwarranted.
+
+Large-file existence was first observed at 0.162–0.180 s after submission
+in every changed normal-walk sample, versus 2.261–2.637 s before. This
+establishes earlier destination creation, not the time of its first byte
+or its individual completion. Separate small/large completion times remain
+unavailable for a mixed operation. The change is retained in the working
+tree; it neither finds a large file deeper in an unvisited subtree nor
+keeps the lane continuously occupied. Indexed hints still need their own
+integrated benchmark, as do other SSDs, sustained writes and antivirus modes.

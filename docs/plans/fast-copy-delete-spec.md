@@ -150,9 +150,11 @@ failure, never a copy that nothing waited for or counted.
    queues its subfolders as new work items, and hands its files on: up to
    256 files under the large-file limit as one item for the workers, and
    each large file to the one-at-a-time lane. Between volumes without a
-   seek penalty the lane runs beside the workers, as AngelCOPY's does; when
-   either volume has one, large files join the workers' queue, so one file
-   moves at a time, because a second stream makes a hard disk seek.
+   seek penalty the lane runs beside the workers, as AngelCOPY's does. The
+   worker hands direct large files to that lane before it opens and creates
+   the subfolders, so folder setup does not leave the large lane idle. When
+   either volume has a seek penalty, large files join the workers' queue,
+   so one file moves at a time, because a second stream makes a hard disk seek.
    Copying starts while the walk still runs, and memory holds only the
    folders in flight. A name-surrogate entry is copied as a link and not
    entered (D21).

@@ -903,6 +903,60 @@ fn every_method_copies_a_whole_tree() {
     }
 }
 
+#[test]
+fn early_large_files_and_subfolders_keep_their_own_output() {
+    let scratch = Scratch::new("early-large-names");
+    let tree = scratch.path("tree");
+    scratch.write(r"tree\large.bin", &vec![7u8; 64 * 1024]);
+    scratch.write(r"tree\large (2).bin\inside.txt", b"child");
+    scratch.write(r"out\tree\large.bin", b"original");
+    let out = scratch.path("out");
+    let mut plan = CopyPlan::new(
+        VolumeClass::Ssd,
+        &SpeedSettings::automatic(),
+        Layout::OneDisk,
+    );
+    plan.large_from = Some(32 * 1024);
+    assert_eq!(
+        copy_directly(
+            &[tree],
+            &out,
+            plan,
+            first_run(Some(Policy::KeepBoth)),
+            false
+        ),
+        [],
+    );
+    let copied = out.join("tree");
+    assert_eq!(
+        fs::read(copied.join("large.bin")).expect("original"),
+        b"original"
+    );
+    let entries: Vec<_> = fs::read_dir(&copied)
+        .expect("list the copied folder")
+        .map(|entry| entry.expect("a copied entry").path())
+        .collect();
+    assert_eq!(entries.len(), 3);
+    let large = entries
+        .iter()
+        .find(|path| {
+            path.is_file() && path.file_name().expect("an entry has a name") != "large.bin"
+        })
+        .expect("the large file keeps a separate name");
+    assert_eq!(
+        fs::read(large).expect("copied large file"),
+        vec![7u8; 64 * 1024]
+    );
+    let folder = entries
+        .iter()
+        .find(|path| path.is_dir())
+        .expect("the subfolder keeps a separate name");
+    assert_eq!(
+        fs::read(folder.join("inside.txt")).expect("copied child"),
+        b"child"
+    );
+}
+
 /// Each choice onto a file at the destination, and a file onto a folder
 /// of its name: Skip and Keep both never replace the person's file, and
 /// Replace never takes a folder.
