@@ -62,6 +62,14 @@ owner has run it, and file an issue for each item that fails.
   about 22 MB at most, the window stays responsive, and afterwards shows
   whether the clipboard's memory still counts in the window's private bytes.
 - Drag a marquee over rows in the list: it selects them.
+- In a large scattered selection, request a command or context menu in the
+  left panel, then activate the right panel while capture finishes. The command
+  still acts on the left. Select all and Clear selection during row remapping
+  take effect after its native update, rather than being overwritten.
+- In a large folder or search panel, type quick-search text rapidly, including
+  a character that matches nothing, then use Up, Down and Backspace. Escape or
+  a newer mouse selection must prevent an older answer from moving the focus
+  or reopening quick search.
 - The labels the window shares with File Explorer, such as "Open file
   location" and "Copy as path", match File Explorer's wording.
 
@@ -110,6 +118,15 @@ owner has run it, and file an issue for each item that fails.
   Explorer's.
 
 ## The copy, move and delete engine
+
+- Open a waiting transfer's context menu, including by right-clicking a row
+  that was not selected. Move up and Move down update while the native menu
+  stays open; choosing one moves that row only when Queue still allows it.
+- With a large restored transfer queue, resize or change DPI during population,
+  scroll after it finishes, and reorder a waiting operation. Rows retain their
+  operation identity; only the queue list waits during a structural replacement,
+  and card Cancel remains usable. A large nontransfer failure report opens
+  without populating every native row; its visible paths and tooltips agree.
 
 These need a second disk, a share, a USB drive, OneDrive or an elevated run.
 `crates/gozler-fileops/examples/measure.rs` runs the measurements, elevated,

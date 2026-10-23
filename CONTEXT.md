@@ -346,9 +346,14 @@ A transfer temporarily stopped for higher-priority work, which returns
 automatically when that work releases its devices.
 
 **Taken entry**:
-An entry that a waiting or running delete or move takes. It leaves the folder
-panels, and shows struck through in the search lists, at once, before the
-disk work ends.
+An entry that a delete or move takes. It leaves the folder panels, and shows
+struck through in the search lists, at once, before the disk work ends. After
+the operation ends, a list keeps treating the entry as taken until it replaces
+its older view of the disk.
+
+**Kept operation**:
+An ended delete or move whose entries a list still treats as taken while it
+shows its older view of the disk.
 
 **Transfer pane**:
 The pane that shows copies, moves, synchronizations, their queue and reports

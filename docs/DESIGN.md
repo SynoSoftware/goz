@@ -234,10 +234,61 @@ The window builds its own `SearchRequest` in `core::query`, not through `build_s
 | A folder's size | `gozlerd`'s index (see "Sizes and dates") |
 | Help > Search syntax | `gozler_core::escompat::search_syntax`, from the tables that `gozler --help` reads |
 | Whether a volume's results are complete | `VolumePhase::is_complete` |
-| The owner check, the version handshake, the service's state, and the check that a scope folder exists | `gozler-client`. `app` runs the folder check and passes the result to `Model::start_search`, so `core`'s tests decide a missing folder without a disk. `core`'s only filesystem calls load and save the settings file (`core::settings`). |
+| The owner check, the version handshake, the service's state, and the check that a scope folder exists | `gozler-client`. The UI work owner checks Location in the background when it changes and on F5. Searches use its last observation, so typing never reads the folder. `core` parses settings and builds changed-key intent; `app::work` reads the file before the window exists and writes it on its persistence worker. |
 | Results pages, and CSV, TSV and TXT output with its date format | `gozler_core::proto` and `gozler_core::output` |
 
 `gozler-client`'s error keeps every distinction that `gozler-cli`'s exit codes need. The window collapses them into the failures of "Daemon failures", and shows `Communication` as a lost connection, because both mean that the pipe failed after the service was found.
+
+The UI work owner (`core::work`, `win::work`, `app::work`) admits one executing
+task and one pending replacement per purpose. Cancellation retains the executing
+slot until the native call actually returns. Location checks and the fresh Use
+local binary check use this owner. Settings opens after its background registry
+read; reads and sign-in writes are serialized. Apply acknowledges choices after
+shortcut preflight, and a registry answer updates only its submitted field,
+preserving newer edits. Include starts after that answer and any failure dialog.
+An accepted registry write can finish after the UI closes. Settings reads volume
+labels in the background by mount prefix, including before first show, and uses
+cached answers on refresh. Its timer does not cancel an unchanged active label
+read. About's repository link, Open Services and each list/action retain their
+own shell STA and message pump between invocations; returning from URI activation or Properties
+is not its lifetime boundary. Panel Enter follows the same route. Accepted open
+commands stay with their invocation. Setup has a protected slot and unwinds
+modal loops only after activation succeeds; it never waits for the installer.
+These calls pass no main HWND to their worker. Queue retains execution and
+recovery. Results carry task identities, and a deferred action rechecks its
+identity before it runs. Persistence finishes its executing write and combines
+pending changed keys, including removals and a value changed back to its prior
+value. These paths close delivery before HWND destruction and never join their
+workers on the window thread. Other UI workers are being migrated under
+`docs/plans/window-architecture.md`.
+
+CPU passes use the same work owner with a callback that receives no blocking
+capability. `core::work::pass` runs at most 1,000 source items inline and defers a
+larger input; its answer follows the same task identity and delivery rules.
+Superseded shell/clipboard payloads and replaced taken-path snapshots use this
+boundary for disposal, coalescing ownership without walking their contents on
+UI. Cached result chunks are immutable shared rows built by their producer;
+selection replies partition their selected and cached rows before delivery.
+Replacing or rejecting a large cache transfers its disposal to that owner,
+including a search panel's nested caches when it changes views. Preparing and
+applying other large collections are still being migrated. Selected files and
+positions also share backing. The common pass materializes cached selections,
+filters gone/taken entries and calculates a search panel's selected bytes.
+Commands remain unavailable during filtering; native highlights stay until an
+accepted answer determines which rows to clear. Selection identity and exact
+Taken/kept snapshots guard acceptance. Each list calculates its kept operations
+from the fetched-row evidence captured at each completion, even if scrolling
+evicts those rows meanwhile. It accepts the previous kept set before dispatching
+the next batch, and Queue release waits for all pending lists.
+Native deselection also waits for that bookkeeping; conservative hidden rows
+used for painting never clear highlights while their status is unresolved.
+Inspector/status totals are calculated with the accepted selection and read
+directly on refresh, with no second pass over its files.
+Search Copy captures shared selected rows. Its existing native task serializes
+and allocates the clipboard data before publishing it, so both preparation and
+publication leave UI. Busy retries keep that exact prepared block. The command
+captures the clipboard sequence before encoding, so another program's newer
+copy is protected even while preparation runs.
 
 ### Requests
 
@@ -354,7 +405,22 @@ The selection is a set of files, fixed when the person makes it. Every action on
 
 ### Copy
 
-Copy, Copy name, Copy folder and Copy path read the selection's files. `ClipboardData` in `core` knows each format's exact size before it writes a byte: for `CF_HDROP`, the `DROPFILES` header with `fWide` set and the double-NUL path list, and for the other three, the text. `win::clipboard` allocates one `GMEM_MOVEABLE` block of that size, which `SetClipboardData` requires, and `core` writes into it once, so a copy holds no second buffer. After a successful `SetClipboardData` Windows owns the block; after a failure the window frees it. When another program holds the clipboard, the window tries again five times over 100 ms, then shows its message.
+Copy, Copy name, Copy folder and Copy path read the selection's files.
+`ClipboardData` in `core` knows each format's exact size before it writes a
+byte: for `CF_HDROP`, the `DROPFILES` header with `fWide` set and the double-NUL
+path list, and for the other three, the text. `win::clipboard` allocates one
+`GMEM_MOVEABLE` block of that size, which `SetClipboardData` requires, and `core`
+writes into it once, so a copy holds no second buffer. After a successful
+`SetClipboardData` Windows owns the block; after a failure its owner frees it.
+One bounded task publishes on its own native message-only window. Both opening
+and clearing the previous owner happen off UI. A busy clipboard keeps the same
+prepared allocation for up to five attempts, with a 20 ms timer between them.
+Supersession and the sequence are checked while the clipboard is held, before
+clearing it; an unrelated newer copy wins. Once clearing begins, publication
+finishes its formats and closes even if cancellation arrives. File copies keep
+their preferred Copy or Move effect. The formats are eager and survive the
+worker's owner window; no delayed rendering is installed. Native failures and
+busy exhaustion return through a current-identity checked error on UI.
 
 - **Copy puts files on the clipboard as File Explorer's Copy does,** `CF_HDROP` with `Preferred DropEffect` set to copy, and Cut as File Explorer's Cut does, with it set to move. Cut rows are not dimmed, because any program can change the clipboard at any time.
 - **Paste moves files with Gozler's engine.** On one selected folder row, Paste moves the files that were cut, in Gozler or in File Explorer, and copies the files that were copied, with the engine and its saved policy (see "File operations"). The window listens for clipboard changes (`AddClipboardFormatListener`), so Paste is enabled while the clipboard holds files. Paste reads the clipboard on a thread of its own, which keeps the data until the paste is submitted or dropped, because the program that holds the clipboard answers each call as slowly as it does.
@@ -800,6 +866,22 @@ The window also does what a Windows user expects without being told: Shift+F10 a
 
 The keys are the file format, so renaming a key needs a migration.
 
+The read/merge/write runs on one persistence worker. It reads the latest file
+at each attempt and keeps unrelated keys saved by another window. Queuing a
+save advances this window's attempted baseline even on failure, preserving the
+retry-on-next-change rule. Failures are logged on the worker before delivery,
+so closing the UI cannot discard a deferred error without a record.
+
+Settings/recovery finalization starts after the window is destroyed and never
+joins its writer on the UI thread. Essential writes can retain the invisible
+process until they finish. Completion has its own signal, since
+setup may already have posted WM_QUIT. At Windows session end, the destroyed
+window's thread dispatches messages for at most two seconds, preserves an
+earlier quit for outer loops, then returns. Windows may terminate the writer
+afterward, so the newest state cannot be guaranteed at sign-out; atomic file
+replacement keeps the last valid file. The window-architecture plan tracks the
+remaining joins of other workers during destruction.
+
 ### Language
 
 The window's text is translated, and the person changes the language while the window runs.
@@ -913,6 +995,19 @@ Two panels is the window's second mode: a file manager that works like Norton Co
 - **No disk call holds the window or Exit.** The threads that read a folder, watch it, read the drive labels and the free space, and read for a Viewer can block for a minute on a network share that stopped answering. They are ended with `CancelSynchronousIo`, as the engine's are, are not joined at Exit, and wake the window only while it is open (window rule 5).
 - **A panel remembers** its folder, its sort and its last folders in `ui.json`, and the window remembers which panel was active. The first time, the left panel shows Documents and the right panel Downloads, the two folders a person copies between most, or `C:\` when Windows names neither. At start, a folder that no longer exists is replaced by the nearest folder above it that exists; the reading thread finds it, so a saved folder on a network share never delays the start.
 
+Structural panel calculations use the common work owner. The panel keeps an
+immutable accepted row snapshot while a large listing, watcher batch, taken-file
+filter or size/order calculation runs. Its private candidate owns the changes;
+current selection, focus and visibility can be remapped before publication
+without replaying the disk change. Rows and their place publish together. File
+commands wait for a current answer, while selection and focus remain usable.
+Pending structural events are bounded; overflow requests a fresh listing, and
+only a complete listing started after every omitted end can release retained
+operations. The awaited command's end acknowledgment survives a discarded row
+candidate. Known folder sizes share the previous snapshot until the reading
+thread has applied them, then release it before watching. Counts and command
+input preparation still have separate migration work in the architecture plan.
+
 What the list area shows:
 
 | State | List area | Status line |
@@ -946,7 +1041,7 @@ Going to a parent folder focuses the folder that the panel came from, as Norton 
 
 A panel keeps its focused row and its selected entries by Search's rule: the arrow keys move the selection with the focus, as in File Explorer, so the focused row is filled as Search's is (**Owner decision**: one rule for both lists, because a focus outline alone was hard to see). `Insert` and `Space` add rows, as Norton Commander's marks do, and a plain arrow key then selects only the row it moves to.
 
-- **The list view already keeps both:** the focused row is its `LVIS_FOCUSED` row, and the selected entries are its `LVIS_SELECTED` rows. So Narrator reads the selection, and `Ctrl`+click, `Shift`+click and `Ctrl+A` keep Windows' own behavior. The list owns which rows are selected, as in Search (see "The selection"). The window reads the selected rows once for each action of the person, and an entry that the list selects with its row carries a mark that stays with it when a change moves the rows.
+- **The list view already keeps both:** the focused row is its `LVIS_FOCUSED` row, and the selected entries are its `LVIS_SELECTED` rows. So Narrator reads the selection, and `Ctrl`+click, `Shift`+click and `Ctrl+A` keep Windows' own behavior. The list owns which rows are selected, as in Search (see "The selection"). The window reads the selected rows once for each action of the person. When a change moves rows, the panel captures their stored names and selects the same exact names among the new visible rows; selection does not mutate the entries.
 - **The arrow keys are the list's own.** `Up`, `Down`, `PgUp`, `PgDn`, `Home` and `End` select the row they move to and clear the others, `Shift` with them selects from the anchor, and `Ctrl` with them moves only the focus, as in Search. The window takes only `Up` and `Down`, and only while the quick search box is open.
 - **The list view draws the rows** in File Explorer's look (**Owner decision**: no custom drawing for little gain). Selected rows are filled, and the focused row has an outline while its list has the focus, so a focused selected row is an outline on the fill. When the panel shows another folder with nothing selected, its focused row is selected too. The focused row is only an outline after `Insert`, `Space` or `Ctrl` with an arrow key, which move the focus without selecting, after `Esc` cleared the selection, and on `..`, which cannot be selected. The list's own drawing follows the theme and high contrast. Before the list draws a row, the window sets only its font and color (`NM_CUSTOMDRAW`, item prepaint): hidden and system entries in gray, and a taken result of a search panel struck through, in gray.
 - **Commands act on the selected entries,** or on the focused row when nothing is selected, as in Norton Commander. No command acts on `..`, and `..` cannot be selected.
@@ -1172,6 +1267,12 @@ The memory group follows the right group while Settings > General shows it, as i
 
 These rules apply to both modes. Search reaches them through Copy to folder…, Move to folder…, Delete, Cut, Paste and a drop on a folder row (see "Commands", "Copy" and "Dragging"); Two panels through `F5`, `F6`, `F7` and `F8`. The engine, `gozler-fileops`, does the disk work, in the window's process with the person's own permissions, never in gozlerd, because a pipe request to a service that runs as SYSTEM would let any local user delete any file. `docs/plans/fast-copy-delete-spec.md` holds the engine's design.
 
+The UI work owner constructs the engine Queue in the background. Commands
+become available only after its saved operations have been read and adopted,
+so no new operation can replace recovery state before restoration finishes.
+Closing during restoration adds no command or persistence wait. Queue keeps
+its own scheduler and process-exit lifetime.
+
 - **Copy and Move ask first.** Both modes use the dialog of "Copy and Move", titled "Copy to folder" or "Move to folder". Browse opens the standard Windows folder picker. Search opens at the last folder chosen there.
 - **Delete asks:** "Permanently delete 12 items?" and below it "They won't go to the Recycle Bin."; for one entry it names it, "Permanently delete "report.pdf"?", and below it "It won't go to the Recycle Bin." Delete and Cancel, with Cancel as the default. Gozler never uses the Recycle Bin (owner ruling).
 - **Copy and Move capture one policy before preparing.** Update changed files, the default, skips equal size and last-write time and replaces every other same-name file, including a newer destination. Update newer files replaces only a strictly older destination, even when equal dates have different sizes. Keep both uses the first free numbered name. Skip existing files keeps the destination. Missing names are written, same-name folders merge, and file/folder mismatches fail. The dialog explains that the default also replaces newer destination files. Both modes put the same combo below the destination edit, with a single-line explanation. The dialog widens to fit the localized explanation. There are no later conflict questions, including for a file that appears after preparation.
@@ -1245,7 +1346,7 @@ These rules come from TinyTorrent2's removal redesign (SynoSoftware/TinyTorrent2
 - **A command replies when the person's choice is recorded.** The disk work runs on worker threads, and transfer progress shows in the shared pane. Listing a slow folder, such as a network share, also runs off the window's thread; the panel says "Reading…" until it arrives.
 - **Prepare runs off the window's thread too.** The transfer pane shows "Preparing…", and submission follows when prepare is done. Prepare's thread first works out the folder that holds the operation's sources, which the window names as From and in the operation's row (`SourcesFolder`), because reading every source on the window's thread took 56 to 96 ms for 100,000 sources, three to six frames; the queue does the same on a thread of its own for each interrupted operation when it opens. Until then the row names how many sources there are, such as "Copy 4,210 items → D:\Backup".
 - **An entry that a delete or a move takes leaves the folder panels and shows struck through in the search lists at once,** before the disk work ends. A row never carries a "being deleted" flag.
-- **A folder panel's rows** are the folder listing minus the sources of the deletes and moves that prepare, wait or run, and of those that ended until the panel has read its folder again (the engine's taken entries). When an operation ends whose destination is the panel's folder or a path in it, such as a new name or a created folder, or a delete or a move whose source is in the panel's folder, is that folder or holds it, the panel reads its folder once more, because the change notifications and the operation's end arrive in no fixed order, and a folder that cannot be watched gets none. The first complete listing that the panel started after the end, of this folder or of another one the person went to, releases the operation: it takes nothing more from the panel. So an entry that a delete could not remove, a cancelled move's leftovers and a file copied back to a path it was moved from all show, and a deleted row never shows again for a moment. A moment counter orders the ends and the starts of the readings. An entry that a delete or a move hides loses its selection mark, so a delete that fails does not select the entry again later.
+- **A folder panel's rows** are the folder listing minus the sources of the deletes and moves that prepare, wait or run, and of those that ended until the panel has read its folder again (the engine's taken entries). When an operation ends whose destination is the panel's folder or a path in it, such as a new name or a created folder, or a delete or a move whose source is in the panel's folder, is that folder or holds it, the panel reads its folder once more, because the change notifications and the operation's end arrive in no fixed order, and a folder that cannot be watched gets none. The first complete listing that the panel started after the end, of this folder or of another one the person went to, releases the operation: it takes nothing more from the panel. So an entry that a delete could not remove, a cancelled move's leftovers and a file copied back to a path it was moved from all show, and a deleted row never shows again for a moment. A moment counter orders the ends and the starts of the readings. An entry that a delete or a move hides loses its selection, so a delete that fails does not select the entry again later.
 - **Each search list keeps the ended operations it shows struck through,** and releases them on its own next search, or when a search panel leaves its search and drops its rows. So one list's new search never makes another list's struck-through rows show deleted files as present again. Search's list and each search panel are separate lists. The queue lets go of an ended operation when no list keeps it.
 - **A search list shows a taken row struck through, in gray,** with the text and icon it had, so the person sees what the delete or move took, and the selection leaves taken rows out. The list keeps gozlerd's count and positions, because gozlerd renumbers its results when its journal tail applies the delete, and a list that removed rows itself would then map positions to the wrong files. The struck-through rows go when the person searches again, or when their chunk is fetched again after gozlerd has applied the delete.
 - **A rename uses Move's transfer presentation.** New folder remains outside the transfer list; the panel shows the change when the disk has it.
