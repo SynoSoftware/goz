@@ -134,6 +134,19 @@ pub enum EsColumn {
     Attributes,
 }
 
+/// Progress of a volume's private build, separate from its published index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IndexProgress {
+    Scanning {
+        entries: u64,
+        /// Estimated MFT position, not a percentage of files or elapsed time.
+        percent: Option<u8>,
+    },
+    Preparing {
+        entries: u64,
+    },
+}
+
 /// Lifecycle phase of one indexed volume, reported over IPC.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase")]

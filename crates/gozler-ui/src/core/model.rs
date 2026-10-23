@@ -1686,13 +1686,21 @@ impl Model {
 
     /// Whether the window must ask for status every 2 seconds: the service
     /// is not running, not ready or lost, a volume in scope is indexing,
-    /// Settings shows its Index page, or the status bar shows memory while
+    /// Settings shows its Index page, or the window shows indexing or memory while
     /// the window is `on_screen`, not minimized or hidden. A refused
     /// request, a failed owner check, an older service and an offline or
     /// failed volume end only by the person's action, so they start no
     /// poll.
     pub(crate) fn polls_status(&self, on_screen: bool) -> bool {
         self.failure.as_ref().is_some_and(DaemonFailure::recovers)
+            || (on_screen
+                && self.failure.is_none()
+                && self.volumes().iter().any(|volume| {
+                    matches!(
+                        volume.phase,
+                        VolumePhase::Bootstrapping | VolumePhase::Rescanning
+                    )
+                }))
             || List::ALL
                 .into_iter()
                 .any(|list| self.indexing_in_scope(list))
@@ -2652,6 +2660,65 @@ pub(crate) mod tests {
         Model::new(english(), Settings::default())
     }
 
+    #[test]
+    fn indexing_progress_keeps_polling_outside_search_scope_and_clears_when_ready() {
+        use gozler_core::types::IndexProgress;
+        let mut model = model();
+        model.settings.choices.show_memory = false;
+        let ask = model.status_needed().expect("no status request runs");
+        let mut reply = status(&ask, VolumePhase::Bootstrapping);
+        if let Outcome::Status(status, ..) = &mut reply.outcome {
+            status.volumes[0].progress = Some(IndexProgress::Scanning {
+                entries: 12000,
+                percent: Some(62),
+            });
+            let mut second = status.volumes[0].clone();
+            second.guid = "second".into();
+            second.mounts = vec![r"D:\".into()];
+            second.progress = Some(IndexProgress::Scanning {
+                entries: 4300,
+                percent: None,
+            });
+            status.volumes.push(second);
+        }
+        model.accept(reply);
+        assert!(
+            model.polls_status(true),
+            "indexing is visible before any search"
+        );
+        assert_eq!(
+            captions::StatusCaptions::new(&model, &English).indexing,
+            ["Indexing C:\\ · 62%", "Indexing D:\\ · 4,300 entries found"]
+        );
+        let status = model.status.as_mut().expect("the reply supplied status");
+        status.volumes[0].progress = Some(IndexProgress::Preparing { entries: 15000 });
+        status.volumes[1].phase = VolumePhase::Live;
+        assert_eq!(
+            captions::StatusCaptions::new(&model, &English).indexing,
+            ["Preparing C:\\ index"]
+        );
+        model.failure = Some(DaemonFailure::Refused {
+            detail: "refused".into(),
+        });
+        assert!(
+            captions::StatusCaptions::new(&model, &English)
+                .indexing
+                .is_empty()
+        );
+        assert!(
+            !model.polls_status(true),
+            "stale indexing status cannot restart a refused request"
+        );
+        model.failure = None;
+        model.status.as_mut().expect("status remains").volumes[0].phase = VolumePhase::Live;
+        assert!(
+            captions::StatusCaptions::new(&model, &English)
+                .indexing
+                .is_empty()
+        );
+        assert!(!model.polls_status(true));
+    }
+
     /// Types `text` and starts its search; returns the first chunk's fetch.
     pub(crate) fn search(model: &mut Model, text: &str) -> Fetch {
         model.set_typed_search(List::Search, text.to_owned());
@@ -2833,6 +2900,7 @@ pub(crate) mod tests {
                         guid: r"\\?\Volume{c}\".into(),
                         mounts: vec![r"C:\".into()],
                         phase,
+                        progress: None,
                         entries: 0,
                         generation: 0,
                         metadata_pending: false,

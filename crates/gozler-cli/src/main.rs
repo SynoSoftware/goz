@@ -337,6 +337,7 @@ mod win {
                 guid: String::new(),
                 mounts: vec!["C:\\".to_string()],
                 phase,
+                progress: None,
                 entries: 0,
                 generation: 0,
                 metadata_pending,

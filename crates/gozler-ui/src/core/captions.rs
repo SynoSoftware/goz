@@ -39,7 +39,7 @@ use super::text::{self, Numbers, SizeFormat, Strings};
 use gozler_client::NotRunning;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::{Malformed, QueryError};
-use gozler_core::types::VolumePhase;
+use gozler_core::types::{IndexProgress, VolumePhase};
 use std::path::PathBuf;
 
 /// The main window's captions, in the language and regional format of the
@@ -128,6 +128,7 @@ pub(crate) struct StatusCaptions {
     /// What the view holds: the results and the selection.
     pub(crate) view: String,
     pub(crate) job: JobCaption,
+    pub(crate) indexing: Vec<String>,
     /// The service and index state, followed by the search's totals, each
     /// after its icon.
     pub(crate) right: Vec<ValuePart>,
@@ -1252,10 +1253,36 @@ impl IndexCaptions {
                 VolumePhase::Offline => "settings_index.offline",
                 VolumePhase::Failed { .. } => "settings_index.failed",
             };
+            let mut state = strings.text(state).to_owned();
+            let mut entries = volume.entries;
+            if matches!(
+                volume.phase,
+                VolumePhase::Bootstrapping | VolumePhase::Rescanning
+            ) {
+                match volume.progress {
+                    Some(IndexProgress::Scanning {
+                        entries: found,
+                        percent,
+                    }) => {
+                        entries = found;
+                        if let Some(percent) = percent {
+                            state = strings.format(
+                                "status.progress_percent",
+                                &[&state, &numbers.integer(u64::from(percent))],
+                            );
+                        }
+                    }
+                    Some(IndexProgress::Preparing { entries: found }) => {
+                        entries = found;
+                        state = strings.text("operation.preparing").to_owned();
+                    }
+                    None => {}
+                }
+            }
             [
                 name(volume.mounted().display_prefix()),
-                strings.text(state).to_owned(),
-                numbers.integer(volume.entries),
+                state,
+                numbers.integer(entries),
             ]
         });
         // A drive the Include settings leave out has no entries.
@@ -1521,6 +1548,14 @@ impl StatusCaptions {
                         .unwrap_or_default(),
                 )
                 .collect(),
+            indexing: match model.service() {
+                (Some(status), None) => status
+                    .volumes
+                    .iter()
+                    .filter_map(|volume| indexing_progress(model.strings(), numbers, volume))
+                    .collect(),
+                _ => Vec::new(),
+            },
             memory: model
                 .choices()
                 .show_memory
@@ -2470,6 +2505,37 @@ pub(crate) fn reset_all_question(strings: &Strings) -> Question {
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::CancelFirst,
     }
+}
+
+fn indexing_progress(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    volume: &gozler_core::proto::VolumeStatus,
+) -> Option<String> {
+    if !matches!(
+        volume.phase,
+        VolumePhase::Bootstrapping | VolumePhase::Rescanning
+    ) {
+        return None;
+    }
+    let prefix = volume.mounted().display_prefix();
+    let activity = strings.format("status.indexing", &[prefix]);
+    Some(match volume.progress {
+        Some(IndexProgress::Scanning {
+            percent: Some(percent),
+            ..
+        }) => strings.format(
+            "status.progress_percent",
+            &[&activity, &numbers.integer(u64::from(percent))],
+        ),
+        Some(IndexProgress::Scanning { entries, .. }) => {
+            strings.count("status.indexing_found", entries, numbers, &[prefix])
+        }
+        Some(IndexProgress::Preparing { .. }) => {
+            strings.format("status.index_preparing", &[prefix])
+        }
+        None => activity,
+    })
 }
 
 /// The status bar's right group: the service's failure while the list

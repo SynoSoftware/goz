@@ -43,7 +43,7 @@ use gozler_core::include::VolumeRules;
 use gozler_core::index::settle::SharedIndex;
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::scope::VolumeMounts;
-use gozler_core::types::VolumePhase;
+use gozler_core::types::{IndexProgress, VolumePhase};
 use parking_lot::{
     MappedRwLockReadGuard, MappedRwLockWriteGuard, Mutex, RwLock, RwLockReadGuard,
     RwLockUpgradableReadGuard, RwLockWriteGuard,
@@ -58,11 +58,16 @@ pub(crate) struct VolumeState {
     pub mounts: Vec<String>,
     pub filesystem: Filesystem,
     indexed: RwLock<Indexed>,
-    phase: RwLock<VolumePhase>,
+    phase: RwLock<Phase>,
     /// The Include rules a build of the volume applies, and what the index
     /// owes since the last build began or the tail last took it. Never held
     /// with another lock.
     rules: Mutex<Rules>,
+}
+
+struct Phase {
+    value: VolumePhase,
+    progress: Option<IndexProgress>,
 }
 
 struct Rules {
@@ -104,6 +109,7 @@ pub(crate) struct Indexed {
 pub(crate) struct VolumeRead<'a> {
     indexed: RwLockReadGuard<'a, Indexed>,
     phase: VolumePhase,
+    pub progress: Option<IndexProgress>,
 }
 
 impl VolumeRead<'_> {
@@ -134,6 +140,10 @@ pub(crate) struct Building<'a> {
 }
 
 impl Building<'_> {
+    pub(crate) fn report(&self, progress: IndexProgress) {
+        self.state.phase.write().progress = Some(progress);
+    }
+
     /// Whether this is the volume's first build rather than a rebuild.
     pub(crate) fn is_first(&self) -> bool {
         self.first
@@ -177,7 +187,10 @@ impl VolumeState {
                 journal_max_bytes: None,
                 built: false,
             }),
-            phase: RwLock::new(VolumePhase::Bootstrapping),
+            phase: RwLock::new(Phase {
+                value: VolumePhase::Bootstrapping,
+                progress: None,
+            }),
             rules: Mutex::new(Rules {
                 rules,
                 next: Owed::Nothing,
@@ -250,8 +263,12 @@ impl VolumeState {
     /// describe each other (see the module doc).
     pub(crate) fn read(&self) -> VolumeRead<'_> {
         let indexed = self.indexed.read();
-        let phase = self.phase();
-        VolumeRead { indexed, phase }
+        let phase = self.phase.read();
+        VolumeRead {
+            indexed,
+            phase: phase.value.clone(),
+            progress: phase.progress,
+        }
     }
 
     /// The index alone, for the tail and the supervisor. A reply to a client
@@ -268,7 +285,7 @@ impl VolumeState {
     }
 
     pub(crate) fn phase(&self) -> VolumePhase {
-        self.phase.read().clone()
+        self.phase.read().value.clone()
     }
 
     /// Compacts the name arenas or merges the name ranks, blocking queries
@@ -358,18 +375,26 @@ impl VolumeState {
     /// a caller, so the phase stays and the refusal is logged.
     fn apply(&self, event: Event<'_>) {
         let mut phase = self.phase.write();
-        let to = next(&phase, &event);
+        let to = next(&phase.value, &event);
         if to.is_none() {
             tracing::error!(
                 volume = %self.mount_prefix(),
-                phase = ?*phase,
+                phase = ?phase.value,
                 ?event,
                 "refused a phase change the volume's phase table does not allow"
             );
         }
-        debug_assert!(to.is_some(), "{:?} refused {event:?}", *phase);
+        debug_assert!(to.is_some(), "{:?} refused {event:?}", phase.value);
         if let Some(to) = to {
-            *phase = to;
+            phase.value = to;
+            if matches!(event, Event::BuildStarted { .. })
+                || !matches!(
+                    phase.value,
+                    VolumePhase::Bootstrapping | VolumePhase::Rescanning
+                )
+            {
+                phase.progress = None;
+            }
         }
     }
 
@@ -380,7 +405,10 @@ impl VolumeState {
             mounts: vec![mount.to_string()],
             filesystem: Filesystem::Ntfs,
             indexed: RwLock::new(indexed),
-            phase: RwLock::new(phase),
+            phase: RwLock::new(Phase {
+                value: phase,
+                progress: None,
+            }),
             rules: Mutex::new(Rules {
                 rules: Arc::new(gozler_core::include::IndexSettings::default().rules_for("")),
                 next: Owed::Nothing,
@@ -559,10 +587,42 @@ mod tests {
     use super::{Indexed, Owed, VolumeState};
     use crate::bootstrap::{BuiltIndex, Filesystem, JournalSetup};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-    use gozler_core::types::{Frn, VolumePhase};
+    use gozler_core::types::{Frn, IndexProgress, VolumePhase};
     use gozler_core::usn::record::{ParsedUsnRecord, USN_REASON_FILE_CREATE};
     use gozler_winfs::JournalInfo;
     use std::sync::Arc;
+
+    #[test]
+    fn indexing_progress_belongs_to_the_build_not_the_published_index() {
+        let state = VolumeState::new(
+            "volume".into(),
+            vec![r"C:\".into()],
+            Filesystem::Ntfs,
+            Arc::new(gozler_core::include::IndexSettings::default().rules_for("")),
+        );
+        let building = state.begin_build();
+        building.report(IndexProgress::Scanning {
+            entries: 12000,
+            percent: Some(62),
+        });
+        let read = state.read();
+        assert_eq!(read.index().len(), 2);
+        assert_eq!(
+            read.progress,
+            Some(IndexProgress::Scanning {
+                entries: 12000,
+                percent: Some(62)
+            })
+        );
+        drop(read);
+        building.finish(built(1, false), &JournalSetup::Refused);
+        assert_eq!(state.read().progress, None);
+        let building = state.begin_build();
+        assert_eq!(state.read().progress, None);
+        building.report(IndexProgress::Preparing { entries: 2 });
+        state.apply(super::Event::Failed("read failed".into()));
+        assert_eq!(state.read().progress, None);
+    }
 
     /// A finished build of an index holding the root and `files` files.
     fn built(files: u128, metadata_pending: bool) -> BuiltIndex {

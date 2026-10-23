@@ -584,6 +584,7 @@ fn build_status(volumes: &VolumeSet, include: &Include) -> DaemonStatus {
                 guid: v.guid.clone(),
                 mounts: v.mounts.clone(),
                 phase: read.phase().clone(),
+                progress: read.progress,
                 entries: index.len() as u64,
                 generation: index.generation(),
                 metadata_pending: read.metadata_pending(),

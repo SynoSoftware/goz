@@ -23,6 +23,7 @@
 #define IDC_STATUS_CANCEL 71
 #define IDC_STATUS_RATE 3043
 #define IDC_STATUS_TEXT 3044
+#define IDC_STATUS_ACTIVITY 3047
 // Show details, at the right end of the status bar while the inspector is
 // hidden.
 #define IDC_STATUS_SHOW_DETAILS 63

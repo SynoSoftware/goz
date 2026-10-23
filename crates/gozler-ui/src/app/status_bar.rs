@@ -1,5 +1,5 @@
 //! The status bar (DESIGN.md: Status bar): what the view holds on the
-//! left, the running job or the last job's result in the middle, and the
+//! left, jobs and index builds in the middle, and the
 //! service on the right. The main window and the Settings dialog each have
 //! one; Settings shows only its changes and its own work. It owns the native
 //! job controls and, in the main window, the transfer summary, memory group
@@ -31,6 +31,7 @@ const SERVICE_MEMORY: usize = 0;
 const APP_MEMORY: usize = 1;
 const FILES_TOTAL: usize = 2;
 const JOB_TEXT: usize = 3;
+const ACTIVITY_TEXT: usize = 4;
 
 #[derive(Clone, Copy)]
 pub(super) enum Slot {
@@ -52,6 +53,7 @@ pub(super) enum Entry<'a> {
 pub(super) struct StatusBar {
     bar: controls::StatusBar,
     text: Label,
+    activity: Label,
     progress: ProgressBar,
     cancel: Button,
     /// The main window's Show details, a toolbar of its one icon.
@@ -93,14 +95,16 @@ impl StatusBar {
         let status = StatusBar {
             bar,
             text: Label::create_line(bar.hwnd(), ControlId::StatusText.id())?,
+            activity: Label::create_line(bar.hwnd(), ControlId::StatusActivity.id())?,
             progress: ProgressBar::create(bar.hwnd(), ControlId::StatusProgress.id())?,
             cancel: Button::create(bar.hwnd(), ControlId::StatusCancel.id())?,
             show_details: None,
-            part_tips: Some(Tooltip::create_areas(bar.hwnd(), 4)?),
+            part_tips: Some(Tooltip::create_areas(bar.hwnd(), 5)?),
             transfer: None,
             split: Cell::new(None),
         };
         status.progress.hwnd().set_visible(false);
+        status.activity.hwnd().set_visible(false);
         status.cancel.hwnd().set_visible(false);
         Ok(status)
     }
@@ -119,10 +123,15 @@ impl StatusBar {
 
     /// The controls that show text in their parent's font.
     pub(super) fn text_controls(&self) -> Vec<Hwnd> {
-        [self.bar.hwnd(), self.text.hwnd(), self.cancel.hwnd()]
-            .into_iter()
-            .chain(self.transfer.into_iter().flat_map(Transfer::text_controls))
-            .collect()
+        [
+            self.bar.hwnd(),
+            self.text.hwnd(),
+            self.activity.hwnd(),
+            self.cancel.hwnd(),
+        ]
+        .into_iter()
+        .chain(self.transfer.into_iter().flat_map(Transfer::text_controls))
+        .collect()
     }
 
     pub(super) fn set_progress_captions(&self, captions: &[String; 2]) {
@@ -206,6 +215,7 @@ impl StatusBar {
         layout: Option<&StatusLayout>,
     ) -> bool {
         let mut view = Vec::new();
+        let mut activity = Vec::new();
         let mut work = None;
         let mut transfer_caption = None;
         let mut right = Vec::new();
@@ -213,6 +223,7 @@ impl StatusBar {
         for (slot, entry) in contents {
             match (slot, entry) {
                 (Slot::Left, Entry::Text(text)) => view.push(*text),
+                (Slot::Center, Entry::Text(text)) => activity.push(*text),
                 (Slot::Center, Entry::Work(caption)) => {
                     assert!(
                         work.replace(*caption).is_none(),
@@ -244,6 +255,9 @@ impl StatusBar {
             }
         }
         self.show_view(&view.join(" · "));
+        let activity = activity.join(" · ");
+        self.activity.hwnd().set_text(&activity);
+        self.activity.hwnd().set_visible(!activity.is_empty());
         let empty = JobCaption::default();
         let job = work.unwrap_or(&empty);
         let job_text = if job.progress != JobProgress::None {
@@ -262,8 +276,12 @@ impl StatusBar {
         if let Some(transfer) = self.transfer {
             if let (Some(caption), Some(layout)) = (transfer_caption, layout) {
                 let layout = self.show_window_end(layout, &right, memory);
-                let transfer_rect = self.place_center(&layout, job, job_text, Some(caption));
-                let only = job_text.is_empty() && job.progress == JobProgress::None && !job.cancel;
+                let transfer_rect =
+                    self.place_center(&layout, job, job_text, &activity, Some(caption));
+                let only = activity.is_empty()
+                    && job_text.is_empty()
+                    && job.progress == JobProgress::None
+                    && !job.cancel;
                 let lost = self.show_job(job, job_text);
                 let start = transfer_rect.map_or(layout.middle.right(), |rect| rect.x);
                 self.split.set((!only).then_some(start));
@@ -274,13 +292,13 @@ impl StatusBar {
             let lost = transfer.hide();
             if let Some(layout) = layout {
                 let layout = self.show_window_end(layout, &right, memory);
-                self.place_center(&layout, job, job_text, None);
+                self.place_center(&layout, job, job_text, &activity, None);
             }
             return self.show_job(job, job_text) || lost;
         }
         if let Some(layout) = layout {
             self.place(layout);
-            self.place_center(layout, job, job_text, None);
+            self.place_center(layout, job, job_text, &activity, None);
         }
         self.show_job(job, job_text)
     }
@@ -290,6 +308,7 @@ impl StatusBar {
         layout: &StatusLayout,
         job: &JobCaption,
         text: &str,
+        activity: &str,
         transfer: Option<&crate::core::status_transfer::Caption>,
     ) -> Option<Rect> {
         let font = Font::of(self.bar.hwnd()).ok()?;
@@ -315,6 +334,14 @@ impl StatusBar {
             } else {
                 Px(0)
             };
+        let activity_wanted = if activity.is_empty() {
+            Px(0)
+        } else {
+            meter.plain_width(activity) + padding
+        };
+        let activity_reserved = activity_wanted
+            .min(Px(150).rescale(base, dpi))
+            .min((layout.middle.width - job_width - gap).max(Px(0)));
         let transfer_width = transfer
             .zip(self.transfer)
             .map_or(Px(0), |(caption, control)| {
@@ -323,18 +350,46 @@ impl StatusBar {
                     Rect {
                         width: (layout.middle.width
                             - job_width
+                            - activity_reserved
+                            - if activity_reserved > Px(0) {
+                                gap
+                            } else {
+                                Px(0)
+                            }
                             - if job_width > Px(0) { gap } else { Px(0) })
                         .max(Px(0)),
                         ..layout.middle
                     },
                 )
             });
-        let widths: Vec<_> = [job_width, transfer_width]
+        let gaps = usize::from(job_width > Px(0)) + usize::from(transfer_width > Px(0));
+        let activity_width = activity_wanted.min(
+            (layout.middle.width - job_width - transfer_width - Px(gap.0 * gaps as i32)).max(Px(0)),
+        );
+        let widths: Vec<_> = [activity_width, job_width, transfer_width]
             .into_iter()
             .filter(|width| *width > Px(0))
             .collect();
         let placed = layout.center_entries(&widths, self.bar.hwnd().client_size().width, dpi);
         let mut placed = placed.into_iter();
+        let activity_rect = if activity_width > Px(0) {
+            let area = placed
+                .next()
+                .expect("the visible activity has an entry width");
+            Rect {
+                y: area.y + Px((area.height - meter.height()).0 / 2),
+                height: meter.height(),
+                ..area
+            }
+        } else {
+            Rect::default()
+        };
+        win::move_children(&[(self.activity.hwnd(), activity_rect)]);
+        self.activity.hwnd().set_visible(activity_width > Px(0));
+        if let Some(tips) = self.part_tips {
+            tips.place_area(ACTIVITY_TEXT, activity_rect);
+            tips.set_area(ACTIVITY_TEXT, activity);
+        }
         if job_width == Px(0)
             && let Some(tips) = self.part_tips
         {

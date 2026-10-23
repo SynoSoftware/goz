@@ -193,6 +193,7 @@ mod tests {
             guid: String::new(),
             mounts: mounts(&[mount]),
             phase,
+            progress: None,
             entries: 0,
             generation: 0,
             metadata_pending,

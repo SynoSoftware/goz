@@ -2,9 +2,8 @@
 //!
 //! Plain serde data: JSON on the wire, no I/O anywhere. Both enums are
 //! internally tagged (`"t"`) so a reader can dispatch on one field, and every
-//! struct tolerates unknown JSON fields (serde default), so a new field with a
-//! default needs no version bump. A request an older daemon cannot serve, such
-//! as a new kind of term in a [`ParsedQuery`], raises [`PROTO_VERSION`].
+//! struct tolerates unknown JSON fields. A payload change raises
+//! [`PROTO_VERSION`], because the daemon serves only its own version.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +11,7 @@ use crate::attributes::Attributes;
 use crate::include::IndexSettings;
 use crate::query::{MatchSums, ParsedQuery, RowsSpec, SearchTotals};
 use crate::scope::VolumeMounts;
-use crate::types::{SortSpec, VolumePhase};
+use crate::types::{IndexProgress, SortSpec, VolumePhase};
 
 /// Protocol version spoken by this build.
 ///
@@ -20,7 +19,7 @@ use crate::types::{SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 13;
+pub const PROTO_VERSION: u16 = 14;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -449,6 +448,7 @@ pub struct VolumeStatus {
     /// Mount points (drive letters / folder mounts) of the volume.
     pub mounts: Vec<String>,
     pub phase: VolumePhase,
+    pub progress: Option<IndexProgress>,
     /// Number of indexed entries on the volume.
     pub entries: u64,
     /// Index generation for the volume.
@@ -638,6 +638,10 @@ mod tests {
                 guid: format!(r"\\?\Volume{{0000000{i}-aaaa-bbbb-cccc-ddddeeeeffff}}\"),
                 mounts: vec![format!(r"{}:\", char::from(b'C' + i as u8))],
                 phase,
+                progress: Some(IndexProgress::Scanning {
+                    entries: 400,
+                    percent: Some(62),
+                }),
                 entries: 1_000_000 + i as u64,
                 generation: i as u64,
                 metadata_pending: i % 2 == 0,

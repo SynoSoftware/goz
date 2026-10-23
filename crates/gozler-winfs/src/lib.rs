@@ -83,7 +83,7 @@ pub use elevation::{enable_volume_privileges, is_elevated};
 
 #[cfg(windows)]
 pub use volume::{
-    ERROR_ACCESS_DENIED, VolumeHandle, VolumeInfo, enumerate_volumes, open_volume,
+    ERROR_ACCESS_DENIED, VolumeHandle, VolumeInfo, enumerate_volumes, mft_records, open_volume,
     volume_total_bytes,
 };
 

@@ -7,22 +7,47 @@
 use core::ptr;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_INVALID_DATA, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE, FindFirstVolumeW,
     FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW,
     GetVolumePathNamesForVolumeNameW, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
 
 use crate::error::{WinError, last_error};
 use crate::file_id::FileHandle;
+use crate::ioctl::ioctl_out;
 use crate::util::{from_wide_nul, to_wide_nul};
 
 pub use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 
 /// `GetDriveType` return value for a fixed disk (winbase.h `DRIVE_FIXED`).
 const DRIVE_FIXED: u32 = 3;
+
+/// The MFT's current record capacity, including unused records, for scan progress.
+pub fn mft_records(volume: &VolumeHandle) -> Result<u64, WinError> {
+    let mut data = NTFS_VOLUME_DATA_BUFFER::default();
+    let bytes =
+        ioctl_out(volume.as_handle(), FSCTL_GET_NTFS_VOLUME_DATA, &mut data).map_err(|code| {
+            WinError {
+                code,
+                context: "FSCTL_GET_NTFS_VOLUME_DATA",
+            }
+        })?;
+    if bytes < size_of::<NTFS_VOLUME_DATA_BUFFER>() as u32
+        || data.BytesPerFileRecordSegment == 0
+        || data.MftValidDataLength <= 0
+    {
+        return Err(WinError {
+            code: ERROR_INVALID_DATA,
+            context: "invalid NTFS volume data",
+        });
+    }
+    Ok(data.MftValidDataLength as u64 / u64::from(data.BytesPerFileRecordSegment))
+}
 
 /// One classified volume.
 #[derive(Debug, Clone)]

@@ -18,12 +18,13 @@ use gozler_core::index::{IdWidth, VolumeIndex};
 use gozler_core::layout::{
     LayoutFile, RECOMMENDED_LAYOUT_FLAGS, walk_layout_buffer, walk_listing_buffer,
 };
-use gozler_core::types::Frn;
+use gozler_core::types::{Frn, IndexProgress};
 use gozler_core::usn::walk_enum_buffer;
 use gozler_winfs::{
     ERROR_ACCESS_DENIED, JournalInfo, JournalQuery, JournalRecords, VolumeHandle, VolumeInfo,
-    WinError, create_usn_journal, enum_usn_data, enumerate_volumes, file_links, open_folder,
-    query_file_layout, query_usn_journal, root_folder_id, stat_file, volume_total_bytes,
+    WinError, create_usn_journal, enum_usn_data, enumerate_volumes, file_links, mft_records,
+    open_folder, query_file_layout, query_usn_journal, root_folder_id, stat_file,
+    volume_total_bytes,
 };
 
 /// Floor for the USN journal: large enough that routine churn does not wrap it
@@ -235,7 +236,7 @@ fn bootstrap_volume(
     // volume directly, so an unavailable journal is not fatal here.
     let journal = ensure_journal(&handle, &vol.guid_path);
     // First-time bootstrap passes no stop flag, so the rebuild can never abort.
-    let built = build_index(&handle, &vol.guid_path, filesystem, rules, None)?
+    let built = build_index(&handle, &vol.guid_path, filesystem, rules, None, |_| {})?
         .expect("build_index cannot abort without a stop flag");
 
     Ok(BootstrappedVolume {
@@ -277,6 +278,46 @@ enum LayoutPass {
     Cancelled,
 }
 
+struct MftProgress {
+    total: Option<u64>,
+    position: u64,
+    previous: u64,
+    ordered: bool,
+}
+
+impl MftProgress {
+    fn new(total: Option<u64>) -> Self {
+        Self {
+            total: total.filter(|&total| total != 0),
+            position: 0,
+            previous: 0,
+            ordered: true,
+        }
+    }
+
+    fn advance(&mut self, reference: u64) {
+        // NTFS uses the high 16 bits for the reuse sequence;
+        // only the low 48 identify the MFT record position.
+        let position = reference & 0x0000_ffff_ffff_ffff;
+        // FILE_LAYOUT does not promise ordering. Withdraw the estimate if the
+        // driver returns records out of order instead of claiming coverage.
+        self.ordered &= position >= self.previous;
+        self.previous = position;
+        self.position = self.position.max(position);
+    }
+
+    fn snapshot(&self, index: &VolumeIndex) -> IndexProgress {
+        let percent = self
+            .total
+            .filter(|_| self.ordered)
+            .map(|total| ((u128::from(self.position) * 100 / u128::from(total)).min(99)) as u8);
+        IndexProgress::Scanning {
+            entries: index.len() as u64,
+            percent,
+        }
+    }
+}
+
 /// Builds a fresh [`VolumeIndex`] for an already-open volume handle, with its
 /// storage optimized for publishing and its names ranked. Shared by
 /// first-time bootstrap and the live tail's rescan (after a USN journal
@@ -302,6 +343,7 @@ pub(crate) fn build_index(
     filesystem: Filesystem,
     rules: &Arc<VolumeRules>,
     stop: Option<&AtomicBool>,
+    report: impl Fn(IndexProgress),
 ) -> Result<Option<BuiltIndex>> {
     let cancelled = || stop.is_some_and(|s| s.load(Ordering::Relaxed));
     // Read from the volume on every filesystem: NTFS gives record 5, and
@@ -313,6 +355,10 @@ pub(crate) fn build_index(
     let read_start = Instant::now();
     let (read_secs, enum_secs) = match filesystem {
         Filesystem::Refs => {
+            report(IndexProgress::Scanning {
+                entries: 0,
+                percent: None,
+            });
             let walked = settle::walk_folders(
                 &mut Disk::new(handle, guid_path),
                 &[root],
@@ -321,6 +367,10 @@ pub(crate) fn build_index(
                     for f in &files {
                         index.insert_listed(f);
                     }
+                    report(IndexProgress::Scanning {
+                        entries: index.len() as u64,
+                        percent: None,
+                    });
                 },
             )?;
             if walked == settle::Walk::Cancelled {
@@ -329,16 +379,34 @@ pub(crate) fn build_index(
             (read_start.elapsed().as_secs_f64(), None)
         }
         Filesystem::Ntfs => {
+            let mut progress = MftProgress::new(mft_records(handle).ok());
+            report(progress.snapshot(&index));
             let mut buf = vec![0u8; IO_BUFFER_BYTES];
-            let pass = layout_pass(&mut index, &mut buf, cancelled, |restart, buf| {
-                query_file_layout(handle, RECOMMENDED_LAYOUT_FLAGS, restart, buf)
-            })?;
+            let pass = layout_pass(
+                &mut index,
+                &mut buf,
+                cancelled,
+                &mut progress,
+                &report,
+                |restart, buf| query_file_layout(handle, RECOMMENDED_LAYOUT_FLAGS, restart, buf),
+            )?;
             let read_secs = read_start.elapsed().as_secs_f64();
             let enum_secs = match pass {
                 LayoutPass::Complete => None,
                 LayoutPass::Cancelled => return Ok(None),
                 LayoutPass::Stopped => {
-                    let Some(secs) = enumerate_mft(handle, &mut index, &mut buf, cancelled)? else {
+                    // The fallback starts at record zero but retains coverage
+                    // already read by FILE_LAYOUT, so progress never retreats.
+                    progress.previous = 0;
+                    let Some(secs) = enumerate_mft(
+                        handle,
+                        &mut index,
+                        &mut buf,
+                        cancelled,
+                        &mut progress,
+                        &report,
+                    )?
+                    else {
                         return Ok(None);
                     };
                     Some(secs)
@@ -348,6 +416,9 @@ pub(crate) fn build_index(
         }
     };
 
+    report(IndexProgress::Preparing {
+        entries: index.len() as u64,
+    });
     finish_index(&mut index, rules);
     if enum_secs.is_some() {
         index.record_size_pass_stopped();
@@ -367,6 +438,8 @@ fn enumerate_mft(
     index: &mut VolumeIndex,
     buf: &mut [u8],
     cancelled: impl Fn() -> bool,
+    progress: &mut MftProgress,
+    report: impl Fn(IndexProgress),
 ) -> Result<Option<f64>> {
     let started = Instant::now();
     let mut next_frn: u64 = 0;
@@ -388,6 +461,8 @@ fn enumerate_mft(
             break;
         }
         next_frn = walk.next_start_frn;
+        progress.advance(next_frn);
+        report(progress.snapshot(index));
     }
     Ok(Some(started.elapsed().as_secs_f64()))
 }
@@ -497,6 +572,8 @@ fn layout_pass(
     index: &mut VolumeIndex,
     buf: &mut [u8],
     cancelled: impl Fn() -> bool,
+    progress: &mut MftProgress,
+    report: impl Fn(IndexProgress),
     mut read_page: impl FnMut(bool, &mut [u8]) -> Result<Option<usize>, WinError>,
 ) -> Result<LayoutPass> {
     let mut restart = true;
@@ -510,7 +587,9 @@ fn layout_pass(
                     walk_layout_buffer(&buf[..bytes]).context("parsing FILE_LAYOUT buffer")?;
                 for f in &files {
                     index.insert_layout(f);
+                    progress.advance(f.frn.0 as u64);
                 }
+                report(progress.snapshot(index));
                 restart = false;
             }
             Ok(None) => return Ok(LayoutPass::Complete),
@@ -664,6 +743,60 @@ mod tests {
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
 
+    #[test]
+    fn indexing_progress_uses_mft_positions_and_withdraws_unordered_estimates() {
+        use std::cell::Cell;
+        // One FILE_LAYOUT header (16 bytes) and file entry (40 bytes), with
+        // sequence 7 and record position 620 in its file reference.
+        let mut page = [0u8; 56];
+        page[..8].copy_from_slice(&[1, 0, 0, 0, 16, 0, 0, 0]);
+        page[16..20].copy_from_slice(&1u32.to_le_bytes());
+        page[32..40].copy_from_slice(&((7u64 << 48) | 620).to_le_bytes());
+        let mut index = VolumeIndex::new(gozler_core::index::NTFS_ROOT_FRN);
+        let mut progress = MftProgress::new(Some(1000));
+        let seen = Cell::new(None);
+        layout_pass(
+            &mut index,
+            &mut vec![0; page.len()],
+            || false,
+            &mut progress,
+            |value| seen.set(Some(value)),
+            |restart, buf| {
+                if !restart {
+                    return Ok(None);
+                }
+                buf.copy_from_slice(&page);
+                Ok(Some(page.len()))
+            },
+        )
+        .expect("the fixture is a valid layout page");
+        assert!(matches!(
+            seen.get(),
+            Some(IndexProgress::Scanning {
+                percent: Some(62),
+                ..
+            })
+        ));
+        progress.advance(2000);
+        assert!(matches!(
+            progress.snapshot(&index),
+            IndexProgress::Scanning {
+                percent: Some(99),
+                ..
+            }
+        ));
+        progress.advance(100);
+        assert!(matches!(
+            progress.snapshot(&index),
+            IndexProgress::Scanning { percent: None, .. }
+        ));
+        let unknown = MftProgress::new(Some(0));
+        assert!(matches!(
+            unknown.snapshot(&index),
+            IndexProgress::Scanning { percent: None, .. }
+        ));
+    }
+
     /// Windows' hidden recovery partition is a fixed NTFS volume with no
     /// drive letter; indexed, it showed in the window's Location list and
     /// in results as `\\?\Volume{…}\` paths that nothing can open.
@@ -699,8 +832,15 @@ mod tests {
     fn layout_pass_reports_a_failed_read_as_stopped() {
         let pass = |result: Result<Option<usize>, WinError>| {
             let mut index = VolumeIndex::new(gozler_core::index::NTFS_ROOT_FRN);
-            layout_pass(&mut index, &mut [0u8; 16], || false, |_, _| result.clone())
-                .expect("no page is parsed")
+            layout_pass(
+                &mut index,
+                &mut [0u8; 16],
+                || false,
+                &mut MftProgress::new(None),
+                |_| {},
+                |_, _| result.clone(),
+            )
+            .expect("no page is parsed")
         };
         let failed = Err(WinError {
             code: 1, // ERROR_INVALID_FUNCTION: the volume refuses the query

@@ -548,17 +548,23 @@ fn rescan(
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full read.
     let rules = state.rules();
-    let built =
-        match bootstrap::build_index(handle, &state.guid, state.filesystem, &rules, Some(stop)) {
-            Ok(Some(built)) => built,
-            // Aborted by shutdown: leave the old index in place and stop cleanly;
-            // this is NOT a failure, so do not mark the volume Failed.
-            Ok(None) => return None,
-            Err(e) => {
-                mark_failed(state, reason, &format!("rescan rebuild failed: {e:#}"));
-                return None;
-            }
-        };
+    let built = match bootstrap::build_index(
+        handle,
+        &state.guid,
+        state.filesystem,
+        &rules,
+        Some(stop),
+        |progress| building.report(progress),
+    ) {
+        Ok(Some(built)) => built,
+        // Aborted by shutdown: leave the old index in place and stop cleanly;
+        // this is NOT a failure, so do not mark the volume Failed.
+        Ok(None) => return None,
+        Err(e) => {
+            mark_failed(state, reason, &format!("rescan rebuild failed: {e:#}"));
+            return None;
+        }
+    };
 
     let entries = built.index.len();
     building.finish(built, &journal);

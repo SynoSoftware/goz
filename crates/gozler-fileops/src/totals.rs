@@ -174,6 +174,7 @@ mod tests {
             guid: guid.to_string(),
             mounts: mounts.iter().map(ToString::to_string).collect(),
             phase: VolumePhase::Live,
+            progress: None,
             entries: 0,
             generation: 0,
             metadata_pending: false,

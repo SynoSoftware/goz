@@ -1686,6 +1686,12 @@ impl MainWindow {
         if !job.transfer_only {
             entries.push((StatusSlot::Center, StatusEntry::Work(&job)));
         }
+        entries.extend(
+            status
+                .indexing
+                .iter()
+                .map(|text| (StatusSlot::Center, StatusEntry::Text(text))),
+        );
         if let Some(transfer) = &job.transfer {
             entries.push((StatusSlot::Center, StatusEntry::Transfer(transfer)));
         }

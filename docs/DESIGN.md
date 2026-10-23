@@ -399,6 +399,23 @@ The status bar has three groups, as TinyTorrent2's has: what the view holds on t
 
 The right group shows the service's failure when the list keeps its rows or another message, so the window still says that the service stopped (`T10`); "C:\ is indexing — results may be incomplete." or the word for an offline or failed volume while a volume in scope is not complete; and "Some sizes and dates on D:\ are unknown." when `metadata_pending` is set and the search tests a size or a date. When "Check for updates" finds a newer release, it says "Gozler 0.4.0 is available. Click to update." A click runs Update (see "Service fixes").
 
+Index builds publish their progress in the same status replies as the volume
+phase, separately from the entry count of the published index. Each active
+drive has a text entry in the main status bar's center slot, alongside other
+work. NTFS shows an estimated scan percentage from the MFT record position
+and the MFT's size at the start of the scan. Sequence bits are excluded from
+the position; unused records are part of the scan, not files still to find.
+The estimate stays below 100% until the scan ends. If the MFT size cannot be
+read or records arrive out of order, the entry shows names found instead,
+as the ReFS folder walk does. The final processing reads "Preparing C:\ index"
+and the entry disappears when the volume is ready or fails. These updates
+use the existing two-second status poll while the window is on screen,
+including drives outside the search's scope. Drives and service shows the
+same progress and the build's current entry count. Each volume keeps its
+existing worker; reporting adds no scan or thread, and no work on the window's
+thread. At narrow widths the native label shortens the center entries and
+its tooltip shows the whole text.
+
 ### Window lifetime
 
 - **One window per user session, unless the person allows more.** `main` creates the named mutex `Local\gozler.ui`, and the `Local\` namespace is already one per session. A second start finds the first window by its class name, calls `AllowSetForegroundWindow` for its process, posts it a registered message and exits; the first window comes forward, restored when it was minimized and still maximized when it was maximized, with the search box focused and its text selected (`MainWindow::show_window`, `C24`); in Two panels, the active panel's list is focused. A second start with `--location <folder>` also sets Location, through `WM_COPYDATA`. A start with `--location`, the first or a second, shows Search, because Location is Search's filter.
